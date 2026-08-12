@@ -2,7 +2,6 @@
 let
   cfg = config.services.tgw-nix-input-observer-launcher;
   command = "/run/current-system/sw/bin/tgw-nix-input-observer-launcher";
-  sudoRule = "codex ALL=(root) NOPASSWD: ${command} \"\"";
   descriptor = ''
     schema=tgw-nix-input-observer-launcher/v2
     uid=${toString cfg.uid}
@@ -14,8 +13,9 @@ let
     python_sha256=${cfg.pythonSha256}
     ip_sha256=${cfg.ipSha256}
     observer_sha256=${cfg.observerSha256}
-    sudo_rule_sha256=${builtins.hashString "sha256" sudoRule}
-    observer_cgroup=0::/tgw-nix-input-observer.slice
+    request_sha256=${cfg.requestSha256}
+    transport_config_sha256=${cfg.transportConfigSha256}
+    observer_cgroup=0::/tgw-nix-input-observer.slice/tgw-nix-input-observer@
   '';
 in {
   options.services.tgw-nix-input-observer-launcher = {
@@ -29,30 +29,47 @@ in {
     pythonSha256 = lib.mkOption { type = lib.types.strMatching "sha256:[0-9a-f]{64}"; };
     ipSha256 = lib.mkOption { type = lib.types.strMatching "sha256:[0-9a-f]{64}"; };
     observerSha256 = lib.mkOption { type = lib.types.strMatching "sha256:[0-9a-f]{64}"; };
+    requestSha256 = lib.mkOption { type = lib.types.strMatching "sha256:[0-9a-f]{64}"; description = "The sole immutable prepared observer request accepted by this generation."; };
+    transportConfigSha256 = lib.mkOption { type = lib.types.strMatching "sha256:[0-9a-f]{64}"; description = "Digest of the reviewed socket/service/slice transport configuration."; };
   };
   config = lib.mkIf cfg.enable {
     environment.etc."tgw/nix-input-observer-launcher.conf" = { text = descriptor; mode = "0400"; user = "root"; group = "root"; };
     environment.systemPackages = [ cfg.package ];
-    security.sudo.extraConfig = sudoRule;
     systemd.slices."tgw-nix-input-observer".sliceConfig = {
       Description = "Fixed cgroup for bounded TGW Nix input observation";
       CPUQuota = "100%";
       MemoryMax = "1G";
       TasksMax = 64;
     };
-    systemd.services.tgw-nix-input-observer-boundary = {
-      description = "Lifecycle anchor for the fixed TGW Nix observer cgroup";
-      wantedBy = [ "multi-user.target" ];
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = "${pkgs.coreutils}/bin/true";
-        RemainAfterExit = true;
-        Slice = "tgw-nix-input-observer.slice";
-        NoNewPrivileges = true;
-        CapabilityBoundingSet = "";
+    systemd.sockets.tgw-nix-input-observer = {
+      description = "Closed local TGW Nix observer transport";
+      wantedBy = [ "sockets.target" ];
+      socketConfig = {
+        ListenStream = "/run/tgw/nix-input-observer.sock";
+        SocketUser = "codex";
+        SocketGroup = "codex";
+        SocketMode = "0600";
+        Accept = true;
+        MaxConnections = 1;
+        RemoveOnStop = true;
       };
     };
-    # Module disable removes its descriptor and sole empty-argv sudo rule.
-    # It creates no profile, scratch directory, socket, or long-running service.
+    systemd.services."tgw-nix-input-observer@" = {
+      description = "One-shot fixed TGW Nix observer %i";
+      serviceConfig = {
+        Type = "simple";
+        ExecStart = command;
+        StandardInput = "socket";
+        StandardOutput = "socket";
+        StandardError = "journal";
+        Slice = "tgw-nix-input-observer.slice";
+        User = "root";
+        Group = "root";
+        RuntimeMaxSec = 180;
+        OOMPolicy = "stop";
+      };
+    };
+    # Module disable removes the descriptor, socket, template service, and slice.
+    # No profile or scratch state is written by the observer transport.
   };
 }

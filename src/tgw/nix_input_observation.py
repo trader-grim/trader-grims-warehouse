@@ -20,14 +20,14 @@ SCHEMA = "tgw-nix-input-observation/v2"
 MAGIC = b"TGWNIXO1"
 PREFIX = struct.Struct("!8sIQQQ32s32s32s")
 PYTHON = "/run/current-system/sw/bin/python3"
-SUDO = "/run/current-system/sw/bin/sudo"
 LAUNCHER = "/run/current-system/sw/bin/tgw-nix-input-observer-launcher"
+OBSERVER_SOCKET = "/run/tgw/nix-input-observer.sock"
 UNSHARE = "/run/current-system/sw/bin/unshare"
 IP = "/run/current-system/sw/bin/ip"
 NIX = "/run/current-system/sw/bin/nix"
 NIX_STORE = "/run/current-system/sw/bin/nix-store"
 GIT = "/run/current-system/sw/bin/git"
-TOOLS = {"sudo": SUDO, "launcher": LAUNCHER, "unshare": UNSHARE, "ip": IP, "python": PYTHON, "nix": NIX, "nix_store": NIX_STORE, "git": GIT}
+TOOLS = {"launcher": LAUNCHER, "ip": IP, "python": PYTHON, "nix": NIX, "nix_store": NIX_STORE, "git": GIT}
 NODE = "nixpkgs"
 REV = "ac62194c3917d5f474c1a844b6fd6da2db95077d"
 LOCK_NAR = "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w="
@@ -67,12 +67,7 @@ def _canonical(value: Any) -> bytes:
 def helper_command(*, known_tool_sha256: dict[str, str]) -> list[str]:
     if set(known_tool_sha256) != set(TOOLS) or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", value) for value in known_tool_sha256.values()):
         raise NixInputObservationError("exact observer tool identities are required")
-    return [
-        SUDO,
-        "-n",
-        "--",
-        LAUNCHER,
-    ]
+    return [OBSERVER_SOCKET]
 
 
 def packet(helper_source: bytes, request: dict[str, Any], archive: Path) -> bytes:
@@ -185,7 +180,17 @@ def observe_archive(
 ) -> dict[str, Any]:
     """Invoke exactly one standalone helper; it owns extraction and every Nix step."""
     if (
-        set(request) != {"source_archive_sha256", "observer_source_sha256", "source_commit", "source_tree", "flake_lock_sha256", "module_sha256", "launcher_descriptor_sha256", "sudo_rule_sha256"}
+        set(request)
+        != {
+            "source_archive_sha256",
+            "observer_source_sha256",
+            "source_commit",
+            "source_tree",
+            "flake_lock_sha256",
+            "module_sha256",
+            "launcher_descriptor_sha256",
+            "transport_config_sha256",
+        }
         or request.get("source_archive_sha256") != "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest()
         or request.get("observer_source_sha256") != "sha256:" + hashlib.sha256(helper_source).hexdigest()
         or not isinstance(request.get("source_commit"), str)
@@ -198,32 +203,30 @@ def observe_archive(
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", request["module_sha256"])
         or not isinstance(request.get("launcher_descriptor_sha256"), str)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", request["launcher_descriptor_sha256"])
-        or not isinstance(request.get("sudo_rule_sha256"), str)
-        or not re.fullmatch(r"sha256:[0-9a-f]{64}", request["sudo_rule_sha256"])
+        or not isinstance(request.get("transport_config_sha256"), str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", request["transport_config_sha256"])
         or set(known_tool_sha256) != set(TOOLS)
         or any(not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value) for value in known_tool_sha256.values())
     ):
         raise NixInputObservationError("observer immutable archive request is invalid")
-    tool_fds = {}
-    try:
-        if run is subprocess.run:
-            for name, path in TOOLS.items():
-                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-                metadata = os.fstat(fd)
-                if not os.path.isfile(f"/proc/self/fd/{fd}") or "sha256:" + hashlib.sha256(os.read(fd, metadata.st_size)).hexdigest() != known_tool_sha256[name]:
-                    raise NixInputObservationError("held tool identity mismatch")
-                os.lseek(fd, 0, os.SEEK_SET)
-                tool_fds[name] = fd
-            stable_paths = {name: f"/proc/{os.getpid()}/fd/{fd}" for name, fd in tool_fds.items()}
-        else:
-            stable_paths = dict(TOOLS)
-        command = helper_command(known_tool_sha256=known_tool_sha256)
-        command[0] = stable_paths["sudo"]
-        bound_request = {**request, "tool_sha256": known_tool_sha256, "tool_paths": stable_paths}
-        completed = run(command, input=packet(helper_source, bound_request, archive), capture_output=True, timeout=180, check=False, pass_fds=tuple(tool_fds.values()))
-    finally:
-        for fd in tool_fds.values():
-            os.close(fd)
+    stable_paths = dict(TOOLS)
+    command = helper_command(known_tool_sha256=known_tool_sha256)
+    bound_request = {**request, "tool_sha256": known_tool_sha256, "tool_paths": stable_paths}
+    wire = packet(helper_source, bound_request, archive)
+    if run is subprocess.run:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as transport:
+            transport.settimeout(180)
+            transport.connect(OBSERVER_SOCKET)
+            transport.sendall(wire)
+            transport.shutdown(socket.SHUT_WR)
+            stdout = bytearray()
+            while chunk := transport.recv(65536):
+                stdout.extend(chunk)
+                if len(stdout) > 2 * 1024 * 1024:
+                    raise NixInputObservationError("standalone zero-fetch observer output exceeded its bound")
+        completed = subprocess.CompletedProcess(command, 0 if b'"schema":"tgw-nix-input-observation/v2"' in stdout else 1, bytes(stdout), b"")
+    else:
+        completed = run(command, input=wire, capture_output=True, timeout=180, check=False, pass_fds=())
     if len(completed.stdout) > 2 * 1024 * 1024:
         raise NixInputObservationError("standalone zero-fetch observer output exceeded its bound")
     try:
@@ -365,7 +368,7 @@ def standalone_main() -> int:
             or bootstrap_helper_hash != request.get("observer_source_sha256")
             or bootstrap_tool_hash != "sha256:" + hashlib.sha256(_canonical(request.get("tool_sha256"))).hexdigest()
             or os.environ.get("TGW_OBSERVER_DESCRIPTOR_SHA256") != request.get("launcher_descriptor_sha256")
-            or os.environ.get("TGW_OBSERVER_SUDO_RULE_SHA256") != request.get("sudo_rule_sha256")
+            or os.environ.get("TGW_OBSERVER_TRANSPORT_CONFIG_SHA256") != request.get("transport_config_sha256")
         ):
             raise NixInputObservationError("bootstrap/helper identity cross-check failed")
         expected = {
@@ -376,7 +379,7 @@ def standalone_main() -> int:
             "flake_lock_sha256",
             "module_sha256",
             "launcher_descriptor_sha256",
-            "sudo_rule_sha256",
+            "transport_config_sha256",
             "tool_sha256",
             "tool_paths",
         }
@@ -393,7 +396,7 @@ def standalone_main() -> int:
             or not re.fullmatch(r"[0-9a-f]{40}", request["source_tree"])
             or any(
                 not re.fullmatch(r"sha256:[0-9a-f]{64}", request[key])
-                for key in ("source_archive_sha256", "observer_source_sha256", "flake_lock_sha256", "module_sha256", "launcher_descriptor_sha256", "sudo_rule_sha256")
+                for key in ("source_archive_sha256", "observer_source_sha256", "flake_lock_sha256", "module_sha256", "launcher_descriptor_sha256", "transport_config_sha256")
             )
         ):
             raise NixInputObservationError("REQUEST_VALIDATION_FAILED")

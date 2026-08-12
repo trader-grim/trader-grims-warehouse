@@ -1,17 +1,17 @@
 from pathlib import Path
 
 
-def test_nix_module_has_one_exact_no_argument_sudo_rule_and_rollback():
+def test_nix_module_has_closed_socket_service_and_rollback():
     source = Path("nix/nix-input-observer-launcher.nix").read_text()
-    assert 'sudoRule = "codex ALL=(root) NOPASSWD: ${command} \\"\\""' in source
-    assert "security.sudo.extraConfig = sudoRule" in source
+    assert "security.sudo" not in source and "NOPASSWD" not in source
+    assert "systemd.sockets.tgw-nix-input-observer" in source
+    assert 'SocketMode = "0600"' in source and "MaxConnections = 1" in source
+    assert 'StandardInput = "socket"' in source and 'StandardOutput = "socket"' in source
     assert 'environment.etc."tgw/nix-input-observer-launcher.conf"' in source
     assert 'mode = "0400"; user = "root"; group = "root"' in source
-    assert "mkIf cfg.enable" in source
-    assert "systemd.services.tgw-nix-input-observer-boundary" in source
-    assert 'wantedBy = [ "multi-user.target" ]' in source
+    assert 'systemd.services."tgw-nix-input-observer@"' in source
     assert 'Slice = "tgw-nix-input-observer.slice"' in source
-    assert "NOPASSWD: ALL" not in source
+    assert "mkIf cfg.enable" in source
 
 
 def test_launcher_descriptor_has_no_command_or_environment_override():
@@ -36,6 +36,7 @@ def test_native_launcher_is_the_only_privileged_implementation():
         "PR_SET_NO_NEW_PRIVS",
         'fopen("/proc/self/status"',
         '"CapBnd:\\t0000000000000000"',
+        "verify_prepared_request(&cfg)",
     ):
         assert required in source
     assert "system(" not in source and "popen(" not in source

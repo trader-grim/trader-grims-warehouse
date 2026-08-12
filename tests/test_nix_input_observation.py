@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from tgw.nix_input_observation import LAUNCHER, LOCK_NAR, PREFIX, REV, SUDO, NixInputObservationError, observe_archive
+from tgw.nix_input_observation import OBSERVER_SOCKET, LOCK_NAR, PREFIX, REV, NixInputObservationError, observe_archive
 from tgw.nix_input_observation import TOOLS as TOOL_PATHS
 
 DIGEST = "a" * 64
-TOOLS = {name: "sha256:" + DIGEST for name in ("sudo", "launcher", "unshare", "ip", "python", "nix", "nix_store", "git")}
+TOOLS = {name: "sha256:" + DIGEST for name in ("launcher", "ip", "python", "nix", "nix_store", "git")}
 
 
 def request(archive, helper=b"# fixed standalone helper"):
@@ -21,7 +21,7 @@ def request(archive, helper=b"# fixed standalone helper"):
         "flake_lock_sha256": "sha256:" + "d" * 64,
         "module_sha256": "sha256:" + "e" * 64,
         "launcher_descriptor_sha256": "sha256:" + "f" * 64,
-        "sudo_rule_sha256": "sha256:" + "1" * 64,
+        "transport_config_sha256": "sha256:" + "1" * 64,
         "observer_source_sha256": "sha256:" + hashlib.sha256(helper).hexdigest(),
     }
 
@@ -30,7 +30,7 @@ def launcher_env(bound):
     return {
         **os.environ,
         "TGW_OBSERVER_DESCRIPTOR_SHA256": bound["launcher_descriptor_sha256"],
-        "TGW_OBSERVER_SUDO_RULE_SHA256": bound["sudo_rule_sha256"],
+        "TGW_OBSERVER_TRANSPORT_CONFIG_SHA256": bound["transport_config_sha256"],
     }
 
 
@@ -98,7 +98,7 @@ def test_one_helper_owns_archive_namespace_and_all_nix_steps(tmp_path):
     result = observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=b"# fixed standalone helper", run=run)
     assert result["namespace"]["held_for_entire_run"] is True and len(calls) == 1
     command, kwargs = calls[0]
-    assert command == [SUDO, "-n", "--", LAUNCHER]
+    assert command == [OBSERVER_SOCKET]
     assert kwargs["timeout"] == 180 and kwargs["capture_output"] is True
     assert b"exact archive" in kwargs["input"]
 

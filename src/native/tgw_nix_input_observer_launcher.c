@@ -13,16 +13,20 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define DESCRIPTOR "/etc/tgw/nix-input-observer-launcher.conf"
+#ifndef TGW_LAUNCHER_DESCRIPTOR
+#define TGW_LAUNCHER_DESCRIPTOR "/etc/tgw/nix-input-observer-launcher.conf"
+#endif
+#define DESCRIPTOR TGW_LAUNCHER_DESCRIPTOR
 #define MAX_DESCRIPTOR 16384
 
 struct config {
   uid_t uid; gid_t gid;
   char python[4096], ip[4096], observer[4096], cgroup[4096];
-  char launcher_sha256[72], python_sha256[72], ip_sha256[72], observer_sha256[72], descriptor_sha256[72], sudo_rule_sha256[72];
+  char launcher_sha256[72], python_sha256[72], ip_sha256[72], observer_sha256[72], request_sha256[72], descriptor_sha256[72], transport_config_sha256[72];
 };
 
 static void die(const char *message) { dprintf(2, "tgw-observer-launcher: %s\n", message); _exit(125); }
@@ -61,6 +65,14 @@ static void sha256_fd(int fd, char out[72]) {
   out[71]=0;
 }
 
+#ifdef TGW_LAUNCHER_DIGEST_TEST
+int main(int argc, char **argv) {
+  if(argc!=2) return 2;
+  int fd=open(argv[1],O_RDONLY|O_NOFOLLOW|O_CLOEXEC); char digest[72];
+  if(fd<0) return 3; sha256_fd(fd,digest); close(fd); puts(digest); return 0;
+}
+#else
+
 static void parse_descriptor(struct config *cfg) {
   int fd = held_regular(DESCRIPTOR);
   sha256_fd(fd, cfg->descriptor_sha256);
@@ -69,7 +81,7 @@ static void parse_descriptor(struct config *cfg) {
   if (n <= 0 || n > MAX_DESCRIPTOR) die("descriptor size invalid");
   raw[n] = 0; close(fd);
   char *save = NULL, *line = strtok_r(raw, "\n", &save), value[4096];
-  const char *keys[] = {"schema", "uid", "gid", "python", "ip", "observer", "launcher_sha256", "python_sha256", "ip_sha256", "observer_sha256", "sudo_rule_sha256", "observer_cgroup"};
+  const char *keys[] = {"schema", "uid", "gid", "python", "ip", "observer", "launcher_sha256", "python_sha256", "ip_sha256", "observer_sha256", "request_sha256", "transport_config_sha256", "observer_cgroup"};
   for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
     if (!line) die("descriptor truncated");
     copy_value(value, sizeof(value), line, keys[i]);
@@ -83,7 +95,8 @@ static void parse_descriptor(struct config *cfg) {
     else if (i == 7) strcpy(cfg->python_sha256, value);
     else if (i == 8) strcpy(cfg->ip_sha256, value);
     else if (i == 9) strcpy(cfg->observer_sha256, value);
-    else if (i == 10) strcpy(cfg->sudo_rule_sha256, value);
+    else if (i == 10) strcpy(cfg->request_sha256, value);
+    else if (i == 11) strcpy(cfg->transport_config_sha256, value);
     else strcpy(cfg->cgroup, value);
     line = strtok_r(NULL, "\n", &save);
   }
@@ -127,7 +140,16 @@ static void verify_fixed_cgroup(const struct config *cfg) {
   FILE *cg=fopen("/proc/self/cgroup","re"); char actual[4096];
   if(!cg || !fgets(actual,sizeof(actual),cg)) die("cgroup unavailable");
   fclose(cg); actual[strcspn(actual,"\n")]=0;
-  if(strcmp(actual,cfg->cgroup)) die("cgroup identity mismatch");
+  size_t prefix=strlen(cfg->cgroup);
+  if(strncmp(actual,cfg->cgroup,prefix) || !strstr(actual+prefix,".service") || strstr(actual,"..")) die("cgroup identity mismatch");
+}
+
+static void verify_prepared_request(const struct config *cfg) {
+  unsigned char prefix[68]; ssize_t n=recv(STDIN_FILENO,prefix,sizeof(prefix),MSG_PEEK|MSG_WAITALL);
+  if(n!=(ssize_t)sizeof(prefix) || memcmp(prefix,"TGWNIXO1",8)) die("prepared request prefix unavailable");
+  char digest[72]; strcpy(digest,"sha256:");
+  for(size_t i=0;i<32;i++) snprintf(digest+7+i*2,72-(7+i*2),"%02x",prefix[36+i]);
+  digest[71]=0; if(strcmp(digest,cfg->request_sha256)) die("prepared request identity mismatch");
 }
 
 int main(int argc, char **argv) {
@@ -142,6 +164,7 @@ int main(int argc, char **argv) {
   sha256_fd(ipfd,digest); if(strcmp(digest,cfg.ip_sha256)) die("ip digest mismatch");
   sha256_fd(observerfd,digest); if(strcmp(digest,cfg.observer_sha256)) die("observer digest mismatch");
   verify_fixed_cgroup(&cfg);
+  verify_prepared_request(&cfg);
   if (unshare(CLONE_NEWNET)) die("CLONE_NEWNET failed");
   char state[32]; FILE *lo=fopen("/sys/class/net/lo/operstate","re");
   if(!lo || !fgets(state,sizeof(state),lo) || strcmp(state,"down\n")) die("loopback not down");
@@ -163,7 +186,8 @@ int main(int argc, char **argv) {
   char *args[]={python,"-I",observer,NULL};
   char descriptor_env[160], rule_env[160];
   snprintf(descriptor_env,sizeof(descriptor_env),"TGW_OBSERVER_DESCRIPTOR_SHA256=%s",cfg.descriptor_sha256);
-  snprintf(rule_env,sizeof(rule_env),"TGW_OBSERVER_SUDO_RULE_SHA256=%s",cfg.sudo_rule_sha256);
+  snprintf(rule_env,sizeof(rule_env),"TGW_OBSERVER_TRANSPORT_CONFIG_SHA256=%s",cfg.transport_config_sha256);
   char *env[]={"HOME=/var/empty","NIX_REMOTE=local","PATH=/run/current-system/sw/bin",descriptor_env,rule_env,NULL};
   execve(python,args,env); die("observer exec failed");
 }
+#endif
