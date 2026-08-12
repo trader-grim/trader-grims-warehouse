@@ -40,6 +40,7 @@ class EffectKind(str, Enum):
     DEPENDENCY_RESUBMIT = "dependency-resubmit"
     AUTHORITY_CANARY = "authority-canary"
     APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT = "approval-platform-bootstrap-deployment"
+    NIXOS_REVIEWED_EVALUATION = "nixos-reviewed-evaluation"
 
 
 @dataclass(frozen=True)

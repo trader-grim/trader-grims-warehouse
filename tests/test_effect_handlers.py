@@ -10,6 +10,46 @@ TREE = "b" * 40
 DIGEST = "c" * 64
 
 
+def _evaluation_parameters():
+    return {
+        "target_host": "tgw-prod", "flake_repository_id": "tgw-flake",
+        "artifact_ref": f"artifact:sha256:{DIGEST}", "source_commit": SHA,
+        "source_tree": TREE, "source_archive_sha256": DIGEST, "flake_lock_sha256": DIGEST,
+        "module_path": "nix/review-egress.nix", "module_sha256": DIGEST,
+        "scratch_id": "nixos-review:operation-1", "system": "x86_64-linux",
+        "evaluation_target": "review-egress-systemd-units",
+        "unit_set": "tgw-review-egress@.service,tgw-review-egress-attest@.service,tgw-review-egress-namespace@.service",
+        "output_schema": "tgw-nixos-reviewed-evaluation-receipt/v1",
+        "nix_network_policy": "offline-no-substituters", "minimum_systemd_version": "257",
+        "max_duration_seconds": "300", "max_output_bytes": "1048576",
+        "activate": "false", "profile_write": "false", "home_db_write": "false",
+        "operation_id": "nixos-review:operation-1",
+    }
+
+
+def _evaluation_result(parameters):
+    return {
+        "schema": "tgw-nixos-reviewed-evaluation-receipt/v1", "outcome": "verified",
+        "source_commit": parameters["source_commit"], "source_tree": parameters["source_tree"],
+        "source_archive_sha256": parameters["source_archive_sha256"],
+        "flake_lock_sha256": parameters["flake_lock_sha256"], "module_sha256": parameters["module_sha256"],
+        "scratch_id": parameters["scratch_id"], "cleanup": "removed", "activate": False,
+        "profile_write": False, "home_db_write": False, "system": "x86_64-linux",
+        "evaluation_target": "review-egress-systemd-units",
+        "evaluated_config_drv": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-review-units.drv",
+        "evaluated_closure_sha256": DIGEST, "eval_log_sha256": DIGEST,
+        "build_log_sha256": DIGEST, "systemd_verify_output_sha256": DIGEST,
+        "receipt_sha256": DIGEST, "systemd_verify_exit": 0, "systemd_version": 257,
+        "nix_version": "2.28.5",
+        "unit_sha256": {
+            "tgw-review-egress@.service": DIGEST,
+            "tgw-review-egress-attest@.service": DIGEST,
+            "tgw-review-egress-namespace@.service": DIGEST,
+        },
+        "evidence": ["nixos-evaluation:sha256:" + DIGEST],
+    }
+
+
 def _registry(**changes):
     providers = {
         "release_install": Mock(return_value={"evidence": ["release:selected"]}),
@@ -19,6 +59,7 @@ def _registry(**changes):
         "dependency_resubmit": Mock(return_value={"evidence": ["queue:accepted"]}),
         "bootstrap_install": Mock(return_value={"evidence": ["nixos:switched", "probes:passed"]}),
         "bootstrap_rollback": Mock(return_value={"receipt": "nixos:rollback"}),
+        "nixos_reviewed_evaluation": Mock(side_effect=_evaluation_result),
     }
     providers.update(changes)
     return TypedEffectHandlerRegistry(**providers), providers
@@ -57,6 +98,7 @@ def _registry(**changes):
             "controller_receipt": "controller:passed", "network_attestation_receipt": "network:passed",
             "probe_receipt": "probes:passed", "operation_id": "bootstrap:review-transport-1",
         }),
+        ("nixos-reviewed-evaluation", _evaluation_parameters()),
     ],
 )
 def test_registered_effects_consume_exact_authority_then_invoke_only_their_handler(kind, parameters):
@@ -224,3 +266,53 @@ def test_bootstrap_provider_failure_rolls_back_only_registered_prior_closure():
     assert receipt.outcome is EffectOutcome.ROLLED_BACK
     assert receipt.rollback_receipt == "nixos:prior-closure-restored"
     rollback.assert_called_once()
+
+
+@pytest.mark.parametrize("change", [
+    {"target_host": "other"}, {"artifact_ref": "/home/db/tgw-flake"},
+    {"evaluation_target": "nixosConfigurations.tgw-prod.config.system.build.toplevel"},
+    {"nix_network_policy": "online"}, {"activate": "true"}, {"profile_write": "true"},
+    {"home_db_write": "true"}, {"module_path": "../../etc/passwd"},
+    {"max_duration_seconds": "901"}, {"max_output_bytes": "16777217"},
+    {"command": "nixos-rebuild switch"},
+])
+def test_reviewed_nixos_evaluation_rejects_broadening_before_authority(change):
+    registry, providers = _registry()
+    consume = Mock()
+    value = {**_evaluation_parameters(), **change}
+    with pytest.raises(ValueError):
+        effect = TypedEffect.parse({"kind": "nixos-reviewed-evaluation", "generation": "eval-1", "parameters": value})
+        AuthorityEffectController(registry, consume).execute(request_id="eval", effect=effect)
+    consume.assert_not_called()
+    providers["nixos_reviewed_evaluation"].assert_not_called()
+
+
+@pytest.mark.parametrize("change", [
+    {"cleanup": "present"}, {"activate": True}, {"profile_write": True},
+    {"home_db_write": True}, {"systemd_verify_exit": 1}, {"unit_sha256": {}},
+    {"source_tree": "d" * 40}, {"evaluated_config_drv": "/tmp/fake.drv"},
+])
+def test_reviewed_nixos_evaluation_fails_closed_on_unsafe_or_unbound_receipt(change):
+    provider = Mock(side_effect=lambda parameters: {**_evaluation_result(parameters), **change})
+    registry, _ = _registry(nixos_reviewed_evaluation=provider)
+    consume = Mock(return_value={"receipt_id": "authority:eval"})
+    effect = TypedEffect.parse({"kind": "nixos-reviewed-evaluation", "generation": "eval-1", "parameters": _evaluation_parameters()})
+
+    receipt = AuthorityEffectController(registry, consume).execute(request_id="eval", effect=effect)
+
+    assert receipt.outcome is EffectOutcome.FAILED
+    assert not receipt.evidence
+
+
+def test_reviewed_nixos_evaluation_emits_only_validated_immutable_evidence():
+    registry, providers = _registry()
+    effect = TypedEffect.parse({"kind": "nixos-reviewed-evaluation", "generation": "eval-1", "parameters": _evaluation_parameters()})
+
+    receipt = AuthorityEffectController(registry, Mock(return_value={"receipt_id": "authority:eval"})).execute(request_id="eval", effect=effect)
+
+    assert receipt.outcome is EffectOutcome.SUCCEEDED
+    assert receipt.handler_id == "nixos-reviewed-evaluation@1"
+    assert receipt.evidence == ("nixos-evaluation:sha256:" + DIGEST,)
+    passed = providers["nixos_reviewed_evaluation"].call_args.args[0]
+    assert passed["generation"] == "eval-1"
+    assert "command" not in passed and "path" not in passed

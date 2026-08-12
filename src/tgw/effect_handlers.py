@@ -19,6 +19,13 @@ from tgw.plan_authority import EffectKind, TypedEffect
 _SHA1 = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
 _IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$")
+_NIX_STORE_PATH = re.compile(r"^/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+$")
+
+_REVIEW_EVAL_UNITS = (
+    "tgw-review-egress@.service",
+    "tgw-review-egress-attest@.service",
+    "tgw-review-egress-namespace@.service",
+)
 
 
 class EffectHandlerError(RuntimeError):
@@ -106,6 +113,7 @@ class TypedEffectHandlerRegistry:
         dependency_resubmit: Callable[[Mapping[str, str]], Mapping[str, Any]],
         bootstrap_install: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         bootstrap_rollback: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
+        nixos_reviewed_evaluation: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
     ) -> None:
         self._providers = {
             EffectKind.CODING_RELEASE: ("immutable-release-installer@1", release_install, release_rollback),
@@ -118,11 +126,70 @@ class TypedEffectHandlerRegistry:
                 bootstrap_install or self._unavailable_bootstrap,
                 bootstrap_rollback or self._unavailable_bootstrap,
             ),
+            EffectKind.NIXOS_REVIEWED_EVALUATION: (
+                "nixos-reviewed-evaluation@1",
+                self._reviewed_evaluation_provider(nixos_reviewed_evaluation or self._unavailable_evaluation),
+                None,
+            ),
         }
 
     @staticmethod
     def _unavailable_bootstrap(parameters: Mapping[str, str]) -> Mapping[str, Any]:
         raise EffectHandlerError("bootstrap deployment provider is not mounted")
+
+    @staticmethod
+    def _unavailable_evaluation(parameters: Mapping[str, str]) -> Mapping[str, Any]:
+        raise EffectHandlerError("reviewed Nix evaluation provider is not mounted")
+
+    @staticmethod
+    def _reviewed_evaluation_provider(provider: Callable[[Mapping[str, str]], Mapping[str, Any]]) -> Callable[[Mapping[str, str]], Mapping[str, Any]]:
+        """Validate immutable provider output before it becomes authority evidence."""
+        def invoke(parameters: Mapping[str, str]) -> Mapping[str, Any]:
+            result = provider(parameters)
+            exact = {
+                "schema": "tgw-nixos-reviewed-evaluation-receipt/v1",
+                "outcome": "verified",
+                "source_commit": parameters["source_commit"],
+                "source_tree": parameters["source_tree"],
+                "source_archive_sha256": parameters["source_archive_sha256"],
+                "flake_lock_sha256": parameters["flake_lock_sha256"],
+                "module_sha256": parameters["module_sha256"],
+                "scratch_id": parameters["scratch_id"],
+                "cleanup": "removed",
+                "activate": False,
+                "profile_write": False,
+                "home_db_write": False,
+                "system": "x86_64-linux",
+                "evaluation_target": "review-egress-systemd-units",
+            }
+            if not isinstance(result, Mapping) or any(result.get(key) != value for key, value in exact.items()):
+                raise EffectHandlerError("reviewed Nix evaluation receipt identity or safety invariant mismatch")
+            digest_keys = (
+                "evaluated_closure_sha256", "eval_log_sha256", "build_log_sha256",
+                "systemd_verify_output_sha256", "receipt_sha256",
+            )
+            if any(not isinstance(result.get(key), str) or not _SHA256.fullmatch(result[key]) for key in digest_keys):
+                raise EffectHandlerError("reviewed Nix evaluation receipt digest is invalid")
+            if not isinstance(result.get("evaluated_config_drv"), str) or not _NIX_STORE_PATH.fullmatch(result["evaluated_config_drv"]):
+                raise EffectHandlerError("reviewed Nix evaluation derivation identity is invalid")
+            if result.get("systemd_verify_exit") != 0:
+                raise EffectHandlerError("generated systemd units did not verify")
+            if not isinstance(result.get("nix_version"), str) or not result["nix_version"]:
+                raise EffectHandlerError("Nix version evidence is absent")
+            try:
+                systemd_version = int(result.get("systemd_version"))
+            except (TypeError, ValueError) as exc:
+                raise EffectHandlerError("systemd version evidence is invalid") from exc
+            if systemd_version < int(parameters["minimum_systemd_version"]):
+                raise EffectHandlerError("systemd verifier is older than the admitted minimum")
+            units = result.get("unit_sha256")
+            if not isinstance(units, Mapping) or set(units) != set(_REVIEW_EVAL_UNITS) or any(not isinstance(value, str) or not _SHA256.fullmatch(value) for value in units.values()):
+                raise EffectHandlerError("reviewed Nix evaluation unit hashes are incomplete")
+            evidence = result.get("evidence")
+            if not isinstance(evidence, (list, tuple)) or not evidence or any(not isinstance(item, str) or not _IDENTITY.fullmatch(item) for item in evidence):
+                raise EffectHandlerError("reviewed Nix evaluation immutable evidence is absent")
+            return result
+        return invoke
 
     def prepare(self, effect: TypedEffect) -> tuple[str, dict[str, str], Callable[..., Mapping[str, Any]], Callable[..., Mapping[str, Any]] | None]:
         if effect.kind is EffectKind.CODING_RELEASE:
@@ -163,7 +230,7 @@ class TypedEffectHandlerRegistry:
             parameters = _required(effect.parameters, {"canary_id", "purpose"})
             if parameters["purpose"] != "verify-plan-authority-roundtrip":
                 raise ValueError("authority canary purpose is outside the harmless registered bound")
-        else:
+        elif effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT:
             parameters = _required_strings(effect.parameters, {
                 "target_host", "flake_repository_id", "flake_commit", "flake_tree",
                 "expected_current_system", "successor_system", "credential_ref", "credential_sha256",
@@ -191,6 +258,45 @@ class TypedEffectHandlerRegistry:
             }
             if any(not _IDENTITY.fullmatch(parameters[key]) for key in identity_fields):
                 raise ValueError("bootstrap symbolic identity is invalid")
+        else:
+            parameters = _required_strings(effect.parameters, {
+                "target_host", "flake_repository_id", "artifact_ref", "source_commit",
+                "source_tree", "source_archive_sha256", "flake_lock_sha256", "module_path",
+                "module_sha256", "scratch_id", "system", "evaluation_target", "unit_set",
+                "output_schema", "nix_network_policy", "minimum_systemd_version",
+                "max_duration_seconds", "max_output_bytes", "activate", "profile_write",
+                "home_db_write", "operation_id",
+            })
+            fixed = {
+                "target_host": "tgw-prod", "flake_repository_id": "tgw-flake",
+                "module_path": "nix/review-egress.nix", "system": "x86_64-linux",
+                "evaluation_target": "review-egress-systemd-units",
+                "unit_set": ",".join(_REVIEW_EVAL_UNITS),
+                "output_schema": "tgw-nixos-reviewed-evaluation-receipt/v1",
+                "nix_network_policy": "offline-no-substituters",
+                "activate": "false", "profile_write": "false", "home_db_write": "false",
+            }
+            if any(parameters[key] != value for key, value in fixed.items()):
+                raise ValueError("reviewed Nix evaluation target or safety invariant is outside the registered bound")
+            if not _SHA1.fullmatch(parameters["source_commit"]) or not _SHA1.fullmatch(parameters["source_tree"]):
+                raise ValueError("reviewed Nix source identity is invalid")
+            for key in ("source_archive_sha256", "flake_lock_sha256", "module_sha256"):
+                if not _SHA256.fullmatch(parameters[key]):
+                    raise ValueError("reviewed Nix source digest is invalid")
+            if parameters["artifact_ref"] != f"artifact:sha256:{parameters['source_archive_sha256'].removeprefix('sha256:')}":
+                raise ValueError("reviewed Nix artifact reference is not content-addressed")
+            if not parameters["scratch_id"].startswith("nixos-review:") or not _IDENTITY.fullmatch(parameters["scratch_id"]):
+                raise ValueError("reviewed Nix scratch identity is invalid")
+            if not _IDENTITY.fullmatch(parameters["operation_id"]):
+                raise ValueError("reviewed Nix operation identity is invalid")
+            try:
+                minimum_systemd = int(parameters["minimum_systemd_version"])
+                max_duration = int(parameters["max_duration_seconds"])
+                max_output = int(parameters["max_output_bytes"])
+            except ValueError as exc:
+                raise ValueError("reviewed Nix bounds must be decimal integers") from exc
+            if minimum_systemd < 257 or not 1 <= max_duration <= 900 or not 1024 <= max_output <= 16 * 1024 * 1024:
+                raise ValueError("reviewed Nix resource or verifier bound is outside the registered range")
         handler_id, handler, rollback = self._providers[effect.kind]
         parameters["generation"] = effect.generation
         return handler_id, parameters, handler, rollback
