@@ -1,0 +1,72 @@
+{
+  "schema": "tgw-candidate-full-suite-receipt/v1",
+  "candidate": {
+    "commit": "5d7f6c2ec59d833bea9f68d3064ebb01c44bd42e",
+    "tree": "2f157b4a12e0a9858be16a117ca2053f198299d7",
+    "worktree": "detached-clean",
+    "worktree_status": "clean"
+  },
+  "environment": {
+    "os": "Linux 6.12.96+deb13-amd64 x86_64 GNU/Linux",
+    "python": "3.13.5",
+    "pytest": "9.1.1",
+    "dependency_environment": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv",
+    "candidate_import_root": "PYTHONPATH=src"
+  },
+  "command": "PYTHONPATH=src /opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest -q --tb=short",
+  "result": {
+    "status": "HOLD",
+    "exit_code": 1,
+    "passed": 3219,
+    "skipped": 4,
+    "failed": 26,
+    "elapsed": "50.18s"
+  },
+  "failures": [
+    {"node": "tests/test_check_announce_script_run.py::TestRealScriptsDirIsClean::test_real_scripts_dir_passes", "cluster": "SCRIPT_ANNOUNCEMENT_CONTRACT", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_check_announce_script_run.py::TestRealScriptsDirIsClean::test_stripping_and_restoring_the_announce_call_is_detected", "cluster": "SCRIPT_ANNOUNCEMENT_CONTRACT", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_ebay_draft_nonjson_truncation.py::test_nonjson_error_message_carries_2000_chars_not_200", "cluster": "STALE_PROCEDURAL_PIPELINE_TESTS", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_ebay_draft_nonjson_truncation.py::test_nonjson_error_message_capped_at_2000_chars_of_raw", "cluster": "STALE_PROCEDURAL_PIPELINE_TESTS", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_ebay_publish_condition_fallback.py::test_condition_fallback_writes_corrected_condition_back_to_draft_listing", "cluster": "PREMATURE_PUBLISH_RECEIPT_RETURN", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_ebay_publish_condition_fallback.py::test_condition_fallback_uses_category_specific_label_when_available", "cluster": "PREMATURE_PUBLISH_RECEIPT_RETURN", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_ebay_publish_condition_fallback.py::test_condition_fallback_label_lookup_failure_falls_back_safely", "cluster": "PREMATURE_PUBLISH_RECEIPT_RETURN", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_ebay_publish_post_publish_sync.py::test_fresh_publish_enqueues_post_publish_sync", "cluster": "PREMATURE_PUBLISH_RECEIPT_RETURN", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_invariant_c12_field_set_accessors.py::test_no_new_direct_field_set_access_outside_accessors", "cluster": "STALE_LINE_BOUND_INVARIANT", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_invariant_c12_field_set_accessors.py::test_allowlist_has_no_stale_entries", "cluster": "STALE_LINE_BOUND_INVARIANT", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_invariants_pricing.py::test_priced_item_enqueues_stage", "cluster": "STALE_PROCEDURAL_PIPELINE_TESTS", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_invariants_publish_idempotency.py::test_publish_writes_listing_and_freezes_schedule", "cluster": "PREMATURE_PUBLISH_RECEIPT_RETURN", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_invariants_publish_idempotency.py::test_replayed_job_after_publish_is_noop", "cluster": "PREMATURE_PUBLISH_RECEIPT_RETURN", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_invariants_publish_idempotency.py::test_default_publish_mints_no_schedule", "cluster": "PREMATURE_PUBLISH_RECEIPT_RETURN", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_invariants_publish_idempotency.py::test_publish_history_records_actual_price_not_launch", "cluster": "PREMATURE_PUBLISH_RECEIPT_RETURN", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_offline_sync_stamp.py::TestStampPlacement::test_btrfs_layout_stamp_inside_data", "cluster": "HOST_LOG_PERMISSION", "classification": "ENVIRONMENT_HARNESS", "candidate_introduced": false},
+    {"node": "tests/test_offline_sync_stamp.py::TestStampPlacement::test_legacy_layout_stamp_at_mount_root", "cluster": "HOST_LOG_PERMISSION", "classification": "ENVIRONMENT_HARNESS", "candidate_introduced": false},
+    {"node": "tests/test_operator_origin.py::test_pipeline_workers_propagate_origin[tgw.workers.ebay_draft]", "cluster": "STALE_PROCEDURAL_PIPELINE_TESTS", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_pp_workflow_001_fixture.py::test_fixture_full_cycle", "cluster": "DETACHED_WORKTREE_GIT_DISCOVERY", "classification": "ENVIRONMENT_HARNESS", "candidate_introduced": false},
+    {"node": "tests/test_scheduler.py::test_one_eligible_treatment_enqueues_one_job", "cluster": "SCHEDULER_ENTITY_BINDING", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_scheduler.py::test_re_enqueue_idempotent_returns_none", "cluster": "SCHEDULER_ENTITY_BINDING", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_scheduler.py::test_re_enqueue_non_duplicate_error_raises", "cluster": "SCHEDULER_ENTITY_BINDING", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_scheduler.py::test_deterministic_first_eligible_dispatched", "cluster": "SCHEDULER_ENTITY_BINDING", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_scheduler.py::test_treatment_identity_used_as_queue_name_and_handler_family", "cluster": "SCHEDULER_ENTITY_BINDING", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false},
+    {"node": "tests/test_scheduler.py::test_entity_type_and_entity_id_forwarded", "cluster": "POSTGRES_PEER_AUTH", "classification": "ENVIRONMENT_HARNESS", "candidate_introduced": false},
+    {"node": "tests/test_scheduler.py::test_payload_contains_all_expected_fields", "cluster": "SCHEDULER_ENTITY_BINDING", "classification": "BASELINE_CODE_INTEGRATION", "candidate_introduced": false}
+  ],
+  "failure_clusters": [
+    {"id": "PREMATURE_PUBLISH_RECEIPT_RETURN", "count": 8, "kind": "code", "remediation": "Return the condition-derived receipt only after inventory persistence, history, and post-publish sync."},
+    {"id": "SCHEDULER_ENTITY_BINDING", "count": 6, "kind": "code", "remediation": "Bind enqueue entity_id to the explicit argument or immutable snapshot object identity and retain a patchable queue seam."},
+    {"id": "STALE_PROCEDURAL_PIPELINE_TESTS", "count": 4, "kind": "integration", "remediation": "Align tests with worker receipt return and evaluator-owned sequencing; do not restore worker-owned next-step enqueue."},
+    {"id": "STALE_LINE_BOUND_INVARIANT", "count": 2, "kind": "integration", "remediation": "Refresh exact sanctioned access locations without broadening the allowlist."},
+    {"id": "SCRIPT_ANNOUNCEMENT_CONTRACT", "count": 2, "kind": "code", "remediation": "Make new executable scripts participate in the script-run announcement contract."},
+    {"id": "HOST_LOG_PERMISSION", "count": 2, "kind": "environment", "remediation": "Run under the declared writable log fixture or make the fixture bind a writable log target."},
+    {"id": "DETACHED_WORKTREE_GIT_DISCOVERY", "count": 1, "kind": "environment", "remediation": "Provide safe-directory-aware Git discovery in the isolated fixture."},
+    {"id": "POSTGRES_PEER_AUTH", "count": 1, "kind": "environment", "remediation": "Run the integration case with its declared database fixture or patch seam."}
+  ],
+  "bounded_remediation": [
+    "Reconcile reachable descendant 542fc5d by semantics for the publish, scheduler, and condition-derived pipeline clusters.",
+    "Repair script announcement conformance independently; do not waive the checker.",
+    "Keep host permission, Git ownership, and database authentication failures distinct from code failures and rerun in a declared environment."
+  ],
+  "full_suite_passed": false,
+  "review_complete": false,
+  "dispatchable": false,
+  "installed": false
+}
