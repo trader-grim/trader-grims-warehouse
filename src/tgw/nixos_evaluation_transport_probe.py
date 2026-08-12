@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from tgw.nixos_reviewed_evaluation import REMOTE_HOST, REMOTE_PYTHON, REMOTE_USER, SSH_EXECUTABLE
+from tgw.nixos_reviewed_evaluation import REMOTE_HOST, REMOTE_PYTHON, REMOTE_USER, SSH_EXECUTABLE, serialize_remote_argv
 
 SCHEMA = "tgw-nixos-reviewed-evaluation-transport-probe/v1"
 REMOTE_PROGRAM = (
@@ -76,6 +76,7 @@ def run_transport_probe(*, known_hosts: Path, request_hash: str, ssh_sha256: str
             raise TransportProbeError("transport probe local identity mismatch")
         sealed_fd = _sealed(hosts_bytes)
         os.lseek(ssh_fd, 0, os.SEEK_SET)
+        remote_command = serialize_remote_argv(["sudo", "-n", "--", REMOTE_PYTHON, "-I", "-c", REMOTE_PROGRAM])
         command = [
             f"/proc/self/fd/{ssh_fd}",
             "-F",
@@ -86,13 +87,7 @@ def run_transport_probe(*, known_hosts: Path, request_hash: str, ssh_sha256: str
             f"-oUserKnownHostsFile=/proc/{os.getpid()}/fd/{sealed_fd}",
             "--",
             f"{REMOTE_USER}@{REMOTE_HOST}",
-            "sudo",
-            "-n",
-            "--",
-            REMOTE_PYTHON,
-            "-I",
-            "-c",
-            REMOTE_PROGRAM,
+            remote_command,
         ]
         completed = subprocess.run(command, input=request_hash.encode(), capture_output=True, timeout=30, check=False, pass_fds=(ssh_fd, sealed_fd))
     finally:

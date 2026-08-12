@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -58,7 +59,9 @@ def test_fixed_probe_reuses_exact_transport_and_frames_only_request_hash(tmp_pat
     )
     assert result == receipt()
     argv, kwargs = calls[0]
-    assert "codex@100.107.99.66" in argv and ["sudo", "-n", "--", "/run/current-system/sw/bin/python3", "-I", "-c", REMOTE_PROGRAM] == argv[-7:]
+    expected = shlex.join(["sudo", "-n", "--", "/run/current-system/sw/bin/python3", "-I", "-c", REMOTE_PROGRAM])
+    assert "codex@100.107.99.66" in argv and argv[-1] == expected
+    assert shlex.split(argv[-1])[-1] == REMOTE_PROGRAM
     assert kwargs["input"] == REQUEST.encode() and len(kwargs["input"]) == 71
     assert not any(token in REMOTE_PROGRAM for token in ("/var/tmp", "nix-store", "nix build", "tarfile", "subprocess", 'open("/'))
 

@@ -4,6 +4,7 @@ import os
 import socket
 import struct
 import subprocess
+import sys
 import tarfile
 import time
 from hashlib import sha256
@@ -25,6 +26,7 @@ from tgw.nixos_reviewed_evaluation import (
     create_failure_receipt,
     execute_packet,
     main,
+    serialize_remote_argv,
     validate_bootstrap_failure_receipt,
     validate_failure_receipt,
 )
@@ -622,6 +624,68 @@ def test_real_openssh_reads_sealed_parent_memfd_and_rejects_wrong_key(tmp_path):
         wrong_public = (tmp_path / "wrong.pub").read_text().split()
         rejected_key = connect(f"[127.0.0.1]:{port} {wrong_public[0]} {wrong_public[1]}\n".encode())
         assert "REMOTE HOST IDENTIFICATION HAS CHANGED" in rejected_key.stderr or "Host key verification failed" in rejected_key.stderr
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
+def test_real_sshd_preserves_shell_quoted_python_program_and_metacharacters(tmp_path):
+    sshd = Path("/usr/sbin/sshd")
+    if not sshd.is_file():
+        pytest.skip("local OpenSSH server is unavailable")
+    host_key, client_key = tmp_path / "host_key", tmp_path / "client_key"
+    for key in (host_key, client_key):
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    authorized = tmp_path / "authorized_keys"
+    authorized.write_text(client_key.with_suffix(".pub").read_text())
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    config = tmp_path / "sshd_config"
+    config.write_text(
+        f"Port {port}\nListenAddress 127.0.0.1\nHostKey {host_key}\nPidFile {tmp_path / 'sshd.pid'}\n"
+        f"AuthorizedKeysFile {authorized}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\n"
+        "KbdInteractiveAuthentication no\nPubkeyAuthentication yes\nPermitRootLogin no\n"
+    )
+    server = subprocess.Popen([str(sshd), "-D", "-e", "-f", str(config)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            with socket.socket() as client:
+                if client.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            time.sleep(0.05)
+        public = host_key.with_suffix(".pub").read_text().split()
+        hosts_fd = _sealed_memfd("quoted-command-host", f"[127.0.0.1]:{port} {public[0]} {public[1]}\n".encode())
+        marker = tmp_path / "must-not-exist"
+        program = "import sys;print(sys.stdin.read());print('literal ; $(touch " + str(marker) + ")')"
+        remote = serialize_remote_argv([sys.executable, "-I", "-c", program])
+        try:
+            result = subprocess.run(
+                [
+                    SSH_EXECUTABLE,
+                    "-F",
+                    "/dev/null",
+                    "-oBatchMode=yes",
+                    "-oStrictHostKeyChecking=yes",
+                    f"-oUserKnownHostsFile=/proc/{os.getpid()}/fd/{hosts_fd}",
+                    "-i",
+                    str(client_key),
+                    "-p",
+                    str(port),
+                    "127.0.0.1",
+                    remote,
+                ],
+                input="frame",
+                text=True,
+                capture_output=True,
+                timeout=5,
+                pass_fds=(hosts_fd,),
+            )
+        finally:
+            os.close(hosts_fd)
+        assert result.returncode == 0 and "frame" in result.stdout and "literal ; $(touch" in result.stdout
+        assert not marker.exists()
     finally:
         server.terminate()
         server.wait(timeout=5)

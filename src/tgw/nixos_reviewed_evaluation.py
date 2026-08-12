@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import selectors
+import shlex
 import shutil
 import stat
 import struct
@@ -273,6 +274,13 @@ def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
+def serialize_remote_argv(argv: list[str]) -> str:
+    """Serialize fixed argv once for OpenSSH's mandatory remote login shell."""
+    if not argv or any("\x00" in token or "\n" in token or "\r" in token for token in argv):
+        raise EvaluationError("remote argv contains an unsafe token")
+    return shlex.join(argv)
+
+
 class ImmutableFailureReceiptStore:
     """Controller-owned, content-addressed receipt store with atomic exclusive writes."""
 
@@ -482,6 +490,7 @@ class SshReviewedEvaluationProvider:
                 raise EvaluationError("known-hosts is not the one admitted host key")
             sealed_hosts_fd = _sealed_memfd("tgw-known-hosts", hosts_bytes)
             os.lseek(ssh_fd, 0, os.SEEK_SET)
+            remote_command = serialize_remote_argv(["sudo", "-n", "--", REMOTE_PYTHON, "-I", "-c", BOOTSTRAP])
             command = [
                 f"/proc/self/fd/{ssh_fd}",
                 "-F",
@@ -492,13 +501,7 @@ class SshReviewedEvaluationProvider:
                 f"-oUserKnownHostsFile=/proc/{os.getpid()}/fd/{sealed_hosts_fd}",
                 "--",
                 f"{REMOTE_USER}@{REMOTE_HOST}",
-                "sudo",
-                "-n",
-                "--",
-                REMOTE_PYTHON,
-                "-I",
-                "-c",
-                BOOTSTRAP,
+                remote_command,
             ]
             header = _packet_header(parameters, provider_source, self.request_hash)
             pass_fds = (ssh_fd, sealed_hosts_fd)
