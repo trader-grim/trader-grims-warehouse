@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from tgw.candidate_manifest import create_luet_conformance_receipt
+from tgw.logging import announce_script_run
 from tgw.plan_luet import conform
 
 
@@ -18,6 +19,11 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--candidate", required=True)
     args = parser.parse_args()
+    announce_script_run(
+        "run_luet_conformance.py",
+        "run the pinned Luet adapter and emit a candidate-bound conformance receipt",
+        candidate=args.candidate,
+    )
     graph = json.loads(args.graph.read_text())
     commit = subprocess.check_output(["git", "rev-parse", f"{args.candidate}^{{commit}}"], cwd=args.repo, text=True).strip()
     tree = subprocess.check_output(["git", "rev-parse", f"{commit}^{{tree}}"], cwd=args.repo, text=True).strip()

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from tgw.candidate_manifest import MigrationSafetyReceipt, build_candidate_manifest
+from tgw.logging import announce_script_run
 
 
 def main() -> int:
@@ -21,6 +22,12 @@ def main() -> int:
     parser.add_argument("--graph", type=Path)
     parser.add_argument("--luet-conformance-receipt", type=Path)
     args = parser.parse_args()
+    announce_script_run(
+        "build_candidate_manifest.py",
+        "build an immutable, hash-bound integrated candidate manifest",
+        candidate=args.commit,
+        plan_commit=args.plan_commit,
+    )
     focused = json.loads(args.focused_receipt.read_text())
     migration = MigrationSafetyReceipt(**json.loads(args.migration_receipt.read_text())) if args.migration_receipt else None
     graph = json.loads(args.graph.read_text()) if args.graph else None

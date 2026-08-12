@@ -9,6 +9,7 @@ from pathlib import Path
 
 import yaml
 
+from tgw.logging import announce_script_run
 from tgw.plan_catalog import compose_catalog, load_provider_catalog
 from tgw.plan_luet import conform
 from tgw.plan_solver import solve, validate_for_dispatch
@@ -31,6 +32,11 @@ def main() -> int:
     parser.add_argument("--luet", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    announce_script_run(
+        "solve_governed_platform.py",
+        "resolve the governed platform graph with native and pinned Luet providers",
+        plan_root=str(args.plan_root),
+    )
     root = args.plan_root.resolve()
     commit = plan_commit(root)
     execution = yaml.safe_load(
