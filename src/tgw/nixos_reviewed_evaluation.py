@@ -194,12 +194,12 @@ def validate_bootstrap_failure_receipt(value: Any, *, request_hash: str, provide
     return dict(value)
 
 
-def _effect_hash(parameters: Mapping[str, str]) -> str:
-    effect = {"kind": "nixos-reviewed-evaluation", "generation": parameters["generation"], "parameters": {key: value for key, value in parameters.items() if key != "generation"}}
+def _effect_hash(effect: Mapping[str, Any]) -> str:
     return "effect:sha256:" + sha256(_canonical(effect)).hexdigest()
 
 
-def validate_failure_receipt(value: Any, parameters: Mapping[str, str], *, request_hash: str) -> dict[str, Any]:
+def validate_failure_receipt(value: Any, effect: Mapping[str, Any], *, request_hash: str) -> dict[str, Any]:
+    parameters = effect["parameters"]
     if not isinstance(value, dict) or len(_canonical(value)) > 8192:
         raise EvaluationError("remote failure receipt is absent or oversized")
     required = {
@@ -236,8 +236,8 @@ def validate_failure_receipt(value: Any, parameters: Mapping[str, str], *, reque
         raise EvaluationError("remote failure receipt schema is invalid")
     if (
         value["request_hash"] != request_hash
-        or value["effect_hash"] != _effect_hash(parameters)
-        or value["generation"] != parameters["generation"]
+        or value["effect_hash"] != _effect_hash(effect)
+        or value["generation"] != effect["generation"]
         or value["provider_sha256"] != parameters["provider_sha256"]
     ):
         raise EvaluationError("remote failure receipt binding mismatch")
@@ -363,8 +363,8 @@ def _sealed_memfd(name: str, content: bytes) -> int:
     return fd
 
 
-def _packet_header(parameters: Mapping[str, str], provider_source: bytes, request_hash: str) -> bytes:
-    request = _canonical(dict(parameters))
+def _packet_header(effect: Mapping[str, Any], provider_source: bytes, request_hash: str) -> bytes:
+    request = _canonical(dict(effect))
     if len(request) > 64 * 1024:
         raise EvaluationError("evaluation request is oversized")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", request_hash):
@@ -372,8 +372,14 @@ def _packet_header(parameters: Mapping[str, str], provider_source: bytes, reques
     return struct.pack("!Q", len(provider_source)) + provider_source + sha256(provider_source).hexdigest().encode() + request_hash.encode() + struct.pack("!Q", len(request)) + request
 
 
-def _validate_remote_parameters(value: Any) -> dict[str, str]:
+def _validate_remote_effect(value: Any) -> tuple[dict[str, Any], dict[str, str]]:
     """Standalone mirror of the closed effect boundary; imports no TGW package."""
+    if not isinstance(value, dict) or set(value) != {"kind", "generation", "parameters"}:
+        raise EvaluationError("remote evaluation effect is not the exact typed envelope")
+    if value["kind"] != "nixos-reviewed-evaluation" or not isinstance(value["generation"], str) or not value["generation"]:
+        raise EvaluationError("remote evaluation effect identity is invalid")
+    effect_generation = value["generation"]
+    parameters = value["parameters"]
     keys = {
         "target_host",
         "flake_repository_id",
@@ -409,10 +415,10 @@ def _validate_remote_parameters(value: Any) -> dict[str, str]:
         "profile_write",
         "home_db_write",
         "operation_id",
-        "generation",
     }
-    if not isinstance(value, dict) or set(value) != keys or any(not isinstance(item, str) or not item for item in value.values()):
+    if not isinstance(parameters, dict) or set(parameters) != keys or any(not isinstance(item, str) or not item for item in parameters.values()):
         raise EvaluationError("remote evaluation parameters are not the exact typed object")
+    value = parameters
     fixed = {
         "target_host": "tgw-prod",
         "flake_repository_id": "tgw-flake",
@@ -443,7 +449,7 @@ def _validate_remote_parameters(value: Any) -> dict[str, str]:
     systemd, duration, output, archive, unpacked, files = bounds
     if systemd < 257 or not 1 <= duration <= 900 or not 1024 <= output <= 16 * 1024**2 or not 1024 <= archive <= 128 * 1024**2 or not archive <= unpacked <= 512 * 1024**2 or not 1 <= files <= 100_000:
         raise EvaluationError("remote resource bound is invalid")
-    return dict(value)
+    return {"kind": "nixos-reviewed-evaluation", "generation": str(effect_generation), "parameters": dict(value)}, dict(value)
 
 
 class SshReviewedEvaluationProvider:
@@ -464,7 +470,8 @@ class SshReviewedEvaluationProvider:
         self.failure_store = failure_store
         self.invoke = invoke
 
-    def __call__(self, parameters: Mapping[str, str]) -> Mapping[str, Any]:
+    def __call__(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
+        canonical_effect, parameters = _validate_remote_effect(effect)
         archive = self.resolve_artifact(parameters["artifact_ref"])
         if not archive.is_file() or _digest_file(archive) != "sha256:" + parameters["source_archive_sha256"].removeprefix("sha256:"):
             raise EvaluationError("resolved source artifact digest mismatch")
@@ -504,7 +511,7 @@ class SshReviewedEvaluationProvider:
                 f"{REMOTE_USER}@{REMOTE_HOST}",
                 remote_command,
             ]
-            header = _packet_header(parameters, provider_source, self.request_hash)
+            header = _packet_header(canonical_effect, provider_source, self.request_hash)
             pass_fds = (ssh_fd, sealed_hosts_fd)
             if self.invoke is None:
                 completed = self._invoke_streaming(command, header, archive, timeout=int(parameters["max_duration_seconds"]) + 30, max_output=int(parameters["max_output_bytes"]), pass_fds=pass_fds)
@@ -521,7 +528,7 @@ class SshReviewedEvaluationProvider:
                 if isinstance(untrusted, dict) and untrusted.get("schema") == BOOTSTRAP_FAILURE_SCHEMA:
                     failure = validate_bootstrap_failure_receipt(untrusted, request_hash=self.request_hash, provider_sha256=parameters["provider_sha256"])
                 else:
-                    failure = validate_failure_receipt(untrusted, parameters, request_hash=self.request_hash)
+                    failure = validate_failure_receipt(untrusted, canonical_effect, request_hash=self.request_hash)
             except (json.JSONDecodeError, UnicodeDecodeError, EvaluationError) as exc:
                 raise EvaluationError("remote reviewed evaluation failed without a valid failure receipt") from exc
             receipt_ref = None
@@ -713,12 +720,12 @@ def execute_packet(
     request_raw = stream.read(request_size)
     if len(request_raw) != request_size:
         raise EvaluationError("evaluation request is truncated")
-    bound = _validate_remote_parameters(json.loads(request_raw))
+    effect, bound = _validate_remote_effect(json.loads(request_raw))
     _FAILURE_CONTEXT.update(
         {
             "request_hash": globals().get("_BOOTSTRAP_REQUEST_HASH", "unknown"),
-            "effect_hash": _effect_hash(bound),
-            "generation": bound["generation"],
+            "effect_hash": _effect_hash(effect),
+            "generation": effect["generation"],
             "provider_sha256": bound["provider_sha256"],
             "stage": "provider-identity",
         }

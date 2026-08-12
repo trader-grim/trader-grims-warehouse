@@ -12,46 +12,77 @@ DIGEST = "c" * 64
 
 def _evaluation_parameters():
     return {
-        "target_host": "tgw-prod", "flake_repository_id": "tgw-flake",
-        "artifact_ref": f"artifact:sha256:{DIGEST}", "source_commit": SHA,
-        "source_tree": TREE, "source_archive_sha256": DIGEST, "flake_lock_sha256": DIGEST,
+        "target_host": "tgw-prod",
+        "flake_repository_id": "tgw-flake",
+        "artifact_ref": f"artifact:sha256:{DIGEST}",
+        "source_commit": SHA,
+        "source_tree": TREE,
+        "source_archive_sha256": DIGEST,
+        "flake_lock_sha256": DIGEST,
         "archive_root": "trader-grims-warehouse",
-        "module_path": "nix/review-egress.nix", "module_sha256": DIGEST,
+        "module_path": "nix/review-egress.nix",
+        "module_sha256": DIGEST,
         "provider_sha256": DIGEST,
-        "ssh_sha256": DIGEST, "known_hosts_sha256": DIGEST,
-        "remote_python_sha256": DIGEST, "git_sha256": DIGEST, "nix_sha256": DIGEST, "nix_store_sha256": DIGEST, "systemd_analyze_sha256": DIGEST,
-        "scratch_id": "nixos-review:operation-1", "system": "x86_64-linux",
+        "ssh_sha256": DIGEST,
+        "known_hosts_sha256": DIGEST,
+        "remote_python_sha256": DIGEST,
+        "git_sha256": DIGEST,
+        "nix_sha256": DIGEST,
+        "nix_store_sha256": DIGEST,
+        "systemd_analyze_sha256": DIGEST,
+        "scratch_id": "nixos-review:operation-1",
+        "system": "x86_64-linux",
         "evaluation_target": "review-egress-systemd-units",
         "unit_set": "tgw-review-egress@.service,tgw-review-egress-attest@.service,tgw-review-egress-namespace@.service",
         "output_schema": "tgw-nixos-reviewed-evaluation-receipt/v1",
-        "nix_network_policy": "offline-no-substituters", "minimum_systemd_version": "257",
-        "max_duration_seconds": "300", "max_output_bytes": "1048576",
-        "max_archive_bytes": "1048576", "max_unpacked_bytes": "4194304", "max_files": "1000",
-        "activate": "false", "profile_write": "false", "home_db_write": "false",
+        "nix_network_policy": "offline-no-substituters",
+        "minimum_systemd_version": "257",
+        "max_duration_seconds": "300",
+        "max_output_bytes": "1048576",
+        "max_archive_bytes": "1048576",
+        "max_unpacked_bytes": "4194304",
+        "max_files": "1000",
+        "activate": "false",
+        "profile_write": "false",
+        "home_db_write": "false",
         "operation_id": "nixos-review:operation-1",
     }
 
 
 def _evaluation_result(parameters):
+    assert set(parameters) == {"kind", "generation", "parameters"}
+    parameters = parameters["parameters"]
     result = {
-        "schema": "tgw-nixos-reviewed-evaluation-receipt/v1", "outcome": "verified",
-        "source_commit": parameters["source_commit"], "source_tree": parameters["source_tree"],
+        "schema": "tgw-nixos-reviewed-evaluation-receipt/v1",
+        "outcome": "verified",
+        "source_commit": parameters["source_commit"],
+        "source_tree": parameters["source_tree"],
         "source_archive_sha256": parameters["source_archive_sha256"],
-        "flake_lock_sha256": parameters["flake_lock_sha256"], "module_sha256": parameters["module_sha256"],
+        "flake_lock_sha256": parameters["flake_lock_sha256"],
+        "module_sha256": parameters["module_sha256"],
         "provider_sha256": parameters["provider_sha256"],
-        "ssh_sha256": parameters["ssh_sha256"], "known_hosts_sha256": parameters["known_hosts_sha256"],
+        "ssh_sha256": parameters["ssh_sha256"],
+        "known_hosts_sha256": parameters["known_hosts_sha256"],
         "executable_sha256": {"remote_python": DIGEST, "git": DIGEST, "nix": DIGEST, "nix_store": DIGEST, "systemd_analyze": DIGEST},
-        "scratch_id": parameters["scratch_id"], "cleanup": "removed", "activate": False,
+        "scratch_id": parameters["scratch_id"],
+        "cleanup": "removed",
+        "activate": False,
         "scratch_root": {"path": "/var/tmp/tgw-reviewed-evaluation", "created_by_attempt": True, "final_state": "removed"},
-        "profile_write": False, "home_db_write": False, "system": "x86_64-linux",
+        "profile_write": False,
+        "home_db_write": False,
+        "system": "x86_64-linux",
         "evaluation_target": "review-egress-systemd-units",
         "evaluated_config_drv": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-review-units.drv",
-        "closure_path_count": 1, "eval_log_sha256": DIGEST,
-        "build_log_sha256": DIGEST, "systemd_verify_output_sha256": DIGEST,
-        "systemd_verify_exit": 0, "systemd_version": 257,
+        "closure_path_count": 1,
+        "eval_log_sha256": DIGEST,
+        "build_log_sha256": DIGEST,
+        "systemd_verify_output_sha256": DIGEST,
+        "systemd_verify_exit": 0,
+        "systemd_version": 257,
         "nix_version": "2.28.5",
         "executables": {
-            "git": "/run/current-system/sw/bin/git", "nix": "/run/current-system/sw/bin/nix",
+            "git": "/run/current-system/sw/bin/git",
+            "nix": "/run/current-system/sw/bin/nix",
             "nix_store": "/run/current-system/sw/bin/nix-store",
             "systemd_analyze": "/run/current-system/sw/bin/systemd-analyze",
         },
@@ -108,18 +139,29 @@ def _registry(**changes):
         ("flake-switch-record-only", {"host_role": "production", "commit": SHA, "execution_receipt": "manual:1"}),
         ("dependency-resubmit", {"dependency_id": "W03", "queue_id": "coding", "failed_generation": "generation-1"}),
         ("authority-canary", {"canary_id": "canary:w10-1", "purpose": "verify-plan-authority-roundtrip"}),
-        ("approval-platform-bootstrap-deployment", {
-            "target_host": "tgw-prod", "flake_repository_id": "tgw-flake",
-            "flake_commit": SHA, "flake_tree": TREE,
-            "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old",
-            "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
-            "credential_ref": "credential:tgw-review:codex", "credential_sha256": DIGEST,
-            "broker_source_sha256": DIGEST, "namespace_source_sha256": DIGEST,
-            "nix_module_sha256": DIGEST, "egress_contract_sha256": DIGEST,
-            "install_contract_sha256": DIGEST, "review_receipt": "review:passed",
-            "controller_receipt": "controller:passed", "network_attestation_receipt": "network:passed",
-            "probe_receipt": "probes:passed", "operation_id": "bootstrap:review-transport-1",
-        }),
+        (
+            "approval-platform-bootstrap-deployment",
+            {
+                "target_host": "tgw-prod",
+                "flake_repository_id": "tgw-flake",
+                "flake_commit": SHA,
+                "flake_tree": TREE,
+                "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old",
+                "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
+                "credential_ref": "credential:tgw-review:codex",
+                "credential_sha256": DIGEST,
+                "broker_source_sha256": DIGEST,
+                "namespace_source_sha256": DIGEST,
+                "nix_module_sha256": DIGEST,
+                "egress_contract_sha256": DIGEST,
+                "install_contract_sha256": DIGEST,
+                "review_receipt": "review:passed",
+                "controller_receipt": "controller:passed",
+                "network_attestation_receipt": "network:passed",
+                "probe_receipt": "probes:passed",
+                "operation_id": "bootstrap:review-transport-1",
+            },
+        ),
         ("nixos-reviewed-evaluation", _evaluation_parameters()),
     ],
 )
@@ -227,20 +269,26 @@ def test_authority_rejection_prevents_handler_invocation():
 def test_authority_canary_is_internal_receipt_only_and_cannot_broaden_purpose():
     registry, providers = _registry()
     consume = Mock(return_value={"receipt_id": "authority:canary"})
-    effect = TypedEffect.parse({
-        "kind": "authority-canary", "generation": "w10-canary-1",
-        "parameters": {"canary_id": "canary:w10-1", "purpose": "verify-plan-authority-roundtrip"},
-    })
+    effect = TypedEffect.parse(
+        {
+            "kind": "authority-canary",
+            "generation": "w10-canary-1",
+            "parameters": {"canary_id": "canary:w10-1", "purpose": "verify-plan-authority-roundtrip"},
+        }
+    )
     receipt = AuthorityEffectController(registry, consume).execute(request_id="request:canary", effect=effect)
     assert receipt.outcome is EffectOutcome.SUCCEEDED
     assert receipt.handler_id == "authority-canary-receipt-only@1"
     assert receipt.evidence[0].startswith("authority-canary:sha256:")
     assert all(provider.call_count == 0 for provider in providers.values())
 
-    broadened = TypedEffect.parse({
-        "kind": "authority-canary", "generation": "w10-canary-2",
-        "parameters": {"canary_id": "canary:w10-2", "purpose": "deploy-platform"},
-    })
+    broadened = TypedEffect.parse(
+        {
+            "kind": "authority-canary",
+            "generation": "w10-canary-2",
+            "parameters": {"canary_id": "canary:w10-2", "purpose": "deploy-platform"},
+        }
+    )
     with pytest.raises(ValueError, match="harmless registered bound"):
         AuthorityEffectController(registry, consume).execute(request_id="request:bad", effect=broadened)
     assert consume.call_count == 1
@@ -249,19 +297,40 @@ def test_authority_canary_is_internal_receipt_only_and_cannot_broaden_purpose():
 def test_bootstrap_effect_rejects_host_path_command_digest_and_cas_broadening_before_consumption():
     registry, _ = _registry()
     consume = Mock()
-    base = next(parameters for kind, parameters in [
-        ("approval-platform-bootstrap-deployment", {
-            "target_host": "tgw-prod", "flake_repository_id": "tgw-flake", "flake_commit": SHA, "flake_tree": TREE,
-            "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old", "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
-            "credential_ref": "credential:tgw-review:codex", "credential_sha256": DIGEST, "broker_source_sha256": DIGEST,
-            "namespace_source_sha256": DIGEST, "nix_module_sha256": DIGEST, "egress_contract_sha256": DIGEST, "install_contract_sha256": DIGEST,
-            "review_receipt": "review:passed", "controller_receipt": "controller:passed", "network_attestation_receipt": "network:passed",
-            "probe_receipt": "probes:passed", "operation_id": "bootstrap:review-transport-1",
-        })
-    ] if kind)
+    base = next(
+        parameters
+        for kind, parameters in [
+            (
+                "approval-platform-bootstrap-deployment",
+                {
+                    "target_host": "tgw-prod",
+                    "flake_repository_id": "tgw-flake",
+                    "flake_commit": SHA,
+                    "flake_tree": TREE,
+                    "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old",
+                    "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
+                    "credential_ref": "credential:tgw-review:codex",
+                    "credential_sha256": DIGEST,
+                    "broker_source_sha256": DIGEST,
+                    "namespace_source_sha256": DIGEST,
+                    "nix_module_sha256": DIGEST,
+                    "egress_contract_sha256": DIGEST,
+                    "install_contract_sha256": DIGEST,
+                    "review_receipt": "review:passed",
+                    "controller_receipt": "controller:passed",
+                    "network_attestation_receipt": "network:passed",
+                    "probe_receipt": "probes:passed",
+                    "operation_id": "bootstrap:review-transport-1",
+                },
+            )
+        ]
+        if kind
+    )
     changes = (
-        {"target_host": "other"}, {"credential_ref": "/home/codex/.codex/auth.json"},
-        {"credential_sha256": "unbound"}, {"successor_system": base["expected_current_system"]},
+        {"target_host": "other"},
+        {"credential_ref": "/home/codex/.codex/auth.json"},
+        {"credential_sha256": "unbound"},
+        {"successor_system": base["expected_current_system"]},
         {"command": "nixos-rebuild switch"},
     )
     for change in changes:
@@ -276,12 +345,24 @@ def test_bootstrap_provider_failure_rolls_back_only_registered_prior_closure():
     rollback = Mock(return_value={"receipt": "nixos:prior-closure-restored"})
     registry, _ = _registry(bootstrap_install=install, bootstrap_rollback=rollback)
     parameters = {
-        "target_host": "tgw-prod", "flake_repository_id": "tgw-flake", "flake_commit": SHA, "flake_tree": TREE,
-        "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old", "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
-        "credential_ref": "credential:tgw-review:codex", "credential_sha256": DIGEST, "broker_source_sha256": DIGEST,
-        "namespace_source_sha256": DIGEST, "nix_module_sha256": DIGEST, "egress_contract_sha256": DIGEST, "install_contract_sha256": DIGEST,
-        "review_receipt": "review:passed", "controller_receipt": "controller:passed", "network_attestation_receipt": "network:passed",
-        "probe_receipt": "probes:passed", "operation_id": "bootstrap:review-transport-1",
+        "target_host": "tgw-prod",
+        "flake_repository_id": "tgw-flake",
+        "flake_commit": SHA,
+        "flake_tree": TREE,
+        "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old",
+        "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
+        "credential_ref": "credential:tgw-review:codex",
+        "credential_sha256": DIGEST,
+        "broker_source_sha256": DIGEST,
+        "namespace_source_sha256": DIGEST,
+        "nix_module_sha256": DIGEST,
+        "egress_contract_sha256": DIGEST,
+        "install_contract_sha256": DIGEST,
+        "review_receipt": "review:passed",
+        "controller_receipt": "controller:passed",
+        "network_attestation_receipt": "network:passed",
+        "probe_receipt": "probes:passed",
+        "operation_id": "bootstrap:review-transport-1",
     }
     effect = TypedEffect.parse({"kind": "approval-platform-bootstrap-deployment", "generation": "nixos-review-transport-1", "parameters": parameters})
     receipt = AuthorityEffectController(registry, Mock(return_value={"receipt_id": "bootstrap:consumed"})).execute(request_id="bootstrap", effect=effect)
@@ -290,15 +371,24 @@ def test_bootstrap_provider_failure_rolls_back_only_registered_prior_closure():
     rollback.assert_called_once()
 
 
-@pytest.mark.parametrize("change", [
-    {"target_host": "other"}, {"artifact_ref": "/home/db/tgw-flake"},
-    {"evaluation_target": "nixosConfigurations.tgw-prod.config.system.build.toplevel"},
-    {"nix_network_policy": "online"}, {"activate": "true"}, {"profile_write": "true"},
-    {"home_db_write": "true"}, {"module_path": "../../etc/passwd"},
-    {"max_duration_seconds": "901"}, {"max_output_bytes": "16777217"},
-    {"command": "nixos-rebuild switch"},
-    {"scratch_id": "other:run"}, {"operation_id": "bad identity with spaces"},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"target_host": "other"},
+        {"artifact_ref": "/home/db/tgw-flake"},
+        {"evaluation_target": "nixosConfigurations.tgw-prod.config.system.build.toplevel"},
+        {"nix_network_policy": "online"},
+        {"activate": "true"},
+        {"profile_write": "true"},
+        {"home_db_write": "true"},
+        {"module_path": "../../etc/passwd"},
+        {"max_duration_seconds": "901"},
+        {"max_output_bytes": "16777217"},
+        {"command": "nixos-rebuild switch"},
+        {"scratch_id": "other:run"},
+        {"operation_id": "bad identity with spaces"},
+    ],
+)
 def test_reviewed_nixos_evaluation_rejects_broadening_before_authority(change):
     registry, providers = _registry()
     consume = Mock()
@@ -310,11 +400,20 @@ def test_reviewed_nixos_evaluation_rejects_broadening_before_authority(change):
     providers["nixos_reviewed_evaluation"].assert_not_called()
 
 
-@pytest.mark.parametrize("change", [
-    {"cleanup": "present"}, {"activate": True}, {"profile_write": True},
-    {"home_db_write": True}, {"systemd_verify_exit": 1}, {"unit_sha256": {}},
-    {"source_tree": "d" * 40}, {"evaluated_config_drv": "/tmp/fake.drv"}, {"closure_path_count": 0},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"cleanup": "present"},
+        {"activate": True},
+        {"profile_write": True},
+        {"home_db_write": True},
+        {"systemd_verify_exit": 1},
+        {"unit_sha256": {}},
+        {"source_tree": "d" * 40},
+        {"evaluated_config_drv": "/tmp/fake.drv"},
+        {"closure_path_count": 0},
+    ],
+)
 def test_reviewed_nixos_evaluation_fails_closed_on_unsafe_or_unbound_receipt(change):
     provider = Mock(side_effect=lambda parameters: {**_evaluation_result(parameters), **change})
     registry, _ = _registry(nixos_reviewed_evaluation=provider)
@@ -338,4 +437,6 @@ def test_reviewed_nixos_evaluation_emits_only_validated_immutable_evidence():
     assert receipt.evidence[0].startswith("nixos-evaluation:sha256:")
     passed = providers["nixos_reviewed_evaluation"].call_args.args[0]
     assert passed["generation"] == "eval-1"
-    assert "command" not in passed and "path" not in passed
+    assert passed["kind"] == "nixos-reviewed-evaluation"
+    assert "generation" not in passed["parameters"]
+    assert "command" not in passed["parameters"] and "path" not in passed["parameters"]

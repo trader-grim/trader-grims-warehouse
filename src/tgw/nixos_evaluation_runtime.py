@@ -65,7 +65,12 @@ def preflight_reviewed_evaluation(parameters: Mapping[str, str]) -> dict[str, An
     }
 
 
-def compose_reviewed_evaluation_provider(parameters: Mapping[str, str], *, invoke=None) -> tuple[SshReviewedEvaluationProvider, Mapping[str, Any]]:
+def compose_reviewed_evaluation_provider(effect: Mapping[str, Any], *, invoke=None) -> tuple[SshReviewedEvaluationProvider, Mapping[str, Any]]:
+    if effect.get("kind") != "nixos-reviewed-evaluation" or not isinstance(effect.get("generation"), str) or not isinstance(effect.get("parameters"), Mapping):
+        raise RuntimeCompositionError("exact typed evaluation effect envelope is required")
+    parameters = effect["parameters"]
+    if "generation" in parameters:
+        raise RuntimeCompositionError("effect generation must not be duplicated in parameters")
     preflight = preflight_reviewed_evaluation(parameters)
     failure_store = ImmutableFailureReceiptStore(FAILURE_RECEIPT_ROOT)
     provider = SshReviewedEvaluationProvider(

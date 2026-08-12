@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Mapping
 
-from tgw.nixos_reviewed_evaluation import _validate_remote_parameters
+from tgw.nixos_reviewed_evaluation import _validate_remote_effect
 from tgw.plan_authority import EffectKind, TypedEffect
 
 _SHA1 = re.compile(r"^[0-9a-f]{40}$")
@@ -145,13 +145,16 @@ class TypedEffectHandlerRegistry:
     @staticmethod
     def _reviewed_evaluation_provider(provider: Callable[[Mapping[str, str]], Mapping[str, Any]]) -> Callable[[Mapping[str, str]], Mapping[str, Any]]:
         """Validate immutable provider output before it becomes authority evidence."""
+
         def invoke(parameters: Mapping[str, str]) -> Mapping[str, Any]:
-            result = provider(parameters)
+            generation = parameters["generation"]
+            bound = {key: value for key, value in parameters.items() if key != "generation"}
+            result = provider({"kind": "nixos-reviewed-evaluation", "generation": generation, "parameters": bound})
             exact = {
                 "schema": "tgw-nixos-reviewed-evaluation-receipt/v1",
                 "outcome": "verified",
-                "source_commit": parameters["source_commit"],
-                "source_tree": parameters["source_tree"],
+                "source_commit": bound["source_commit"],
+                "source_tree": bound["source_tree"],
                 "source_archive_sha256": parameters["source_archive_sha256"],
                 "flake_lock_sha256": parameters["flake_lock_sha256"],
                 "module_sha256": parameters["module_sha256"],
@@ -192,8 +195,11 @@ class TypedEffectHandlerRegistry:
             if result.get("executable_sha256") != expected_digests:
                 raise EffectHandlerError("reviewed Nix evaluation executable digest mismatch")
             digest_keys = (
-                "closure_manifest_sha256", "eval_log_sha256", "build_log_sha256",
-                "systemd_verify_output_sha256", "receipt_sha256",
+                "closure_manifest_sha256",
+                "eval_log_sha256",
+                "build_log_sha256",
+                "systemd_verify_output_sha256",
+                "receipt_sha256",
             )
             if any(not isinstance(result.get(key), str) or not _SHA256.fullmatch(result[key]) for key in digest_keys):
                 raise EffectHandlerError("reviewed Nix evaluation receipt digest is invalid")
@@ -207,9 +213,12 @@ class TypedEffectHandlerRegistry:
             paths = []
             for item in manifest:
                 valid_entry = (
-                    isinstance(item, Mapping) and set(item) == {"path", "nar_sha256"}
-                    and isinstance(item["path"], str) and store_path.fullmatch(item["path"])
-                    and isinstance(item["nar_sha256"], str) and _SHA256.fullmatch(item["nar_sha256"])
+                    isinstance(item, Mapping)
+                    and set(item) == {"path", "nar_sha256"}
+                    and isinstance(item["path"], str)
+                    and store_path.fullmatch(item["path"])
+                    and isinstance(item["nar_sha256"], str)
+                    and _SHA256.fullmatch(item["nar_sha256"])
                 )
                 if not valid_entry:
                     raise EffectHandlerError("reviewed Nix evaluation closure entry is invalid")
@@ -240,6 +249,7 @@ class TypedEffectHandlerRegistry:
             if result["receipt_sha256"] != receipt_hash or tuple(evidence) != ("nixos-evaluation:" + receipt_hash,):
                 raise EffectHandlerError("reviewed Nix evaluation receipt self-hash mismatch")
             return result
+
         return invoke
 
     def prepare(self, effect: TypedEffect) -> tuple[str, dict[str, str], Callable[..., Mapping[str, Any]], Callable[..., Mapping[str, Any]] | None]:
@@ -282,13 +292,29 @@ class TypedEffectHandlerRegistry:
             if parameters["purpose"] != "verify-plan-authority-roundtrip":
                 raise ValueError("authority canary purpose is outside the harmless registered bound")
         elif effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT:
-            parameters = _required_strings(effect.parameters, {
-                "target_host", "flake_repository_id", "flake_commit", "flake_tree",
-                "expected_current_system", "successor_system", "credential_ref", "credential_sha256",
-                "broker_source_sha256", "namespace_source_sha256", "nix_module_sha256",
-                "egress_contract_sha256", "install_contract_sha256", "review_receipt",
-                "controller_receipt", "network_attestation_receipt", "probe_receipt", "operation_id",
-            })
+            parameters = _required_strings(
+                effect.parameters,
+                {
+                    "target_host",
+                    "flake_repository_id",
+                    "flake_commit",
+                    "flake_tree",
+                    "expected_current_system",
+                    "successor_system",
+                    "credential_ref",
+                    "credential_sha256",
+                    "broker_source_sha256",
+                    "namespace_source_sha256",
+                    "nix_module_sha256",
+                    "egress_contract_sha256",
+                    "install_contract_sha256",
+                    "review_receipt",
+                    "controller_receipt",
+                    "network_attestation_receipt",
+                    "probe_receipt",
+                    "operation_id",
+                },
+            )
             if parameters["target_host"] != "tgw-prod" or parameters["flake_repository_id"] != "tgw-flake":
                 raise ValueError("bootstrap deployment target is outside the registered production bound")
             if not _SHA1.fullmatch(parameters["flake_commit"]) or not _SHA1.fullmatch(parameters["flake_tree"]):
@@ -304,42 +330,88 @@ class TypedEffectHandlerRegistry:
             if not parameters["credential_ref"].startswith("credential:tgw-review:"):
                 raise ValueError("bootstrap credential must use the dedicated symbolic review identity")
             identity_fields = {
-                "target_host", "flake_repository_id", "credential_ref", "review_receipt",
-                "controller_receipt", "network_attestation_receipt", "probe_receipt", "operation_id",
+                "target_host",
+                "flake_repository_id",
+                "credential_ref",
+                "review_receipt",
+                "controller_receipt",
+                "network_attestation_receipt",
+                "probe_receipt",
+                "operation_id",
             }
             if any(not _IDENTITY.fullmatch(parameters[key]) for key in identity_fields):
                 raise ValueError("bootstrap symbolic identity is invalid")
         else:
-            parameters = _required_strings(effect.parameters, {
-                "target_host", "flake_repository_id", "artifact_ref", "source_commit",
-                "source_tree", "source_archive_sha256", "flake_lock_sha256", "archive_root", "module_path",
-                "module_sha256", "provider_sha256", "ssh_sha256", "known_hosts_sha256", "remote_python_sha256",
-                "git_sha256", "nix_sha256", "nix_store_sha256", "systemd_analyze_sha256", "scratch_id", "system", "evaluation_target", "unit_set",
-                "output_schema", "nix_network_policy", "minimum_systemd_version",
-                "max_duration_seconds", "max_output_bytes", "max_archive_bytes", "max_unpacked_bytes", "max_files", "activate", "profile_write",
-                "home_db_write", "operation_id",
-            })
-            canonical = _validate_remote_parameters({**parameters, "generation": effect.generation})
-            canonical.pop("generation")
-            parameters = canonical
+            parameters = _required_strings(
+                effect.parameters,
+                {
+                    "target_host",
+                    "flake_repository_id",
+                    "artifact_ref",
+                    "source_commit",
+                    "source_tree",
+                    "source_archive_sha256",
+                    "flake_lock_sha256",
+                    "archive_root",
+                    "module_path",
+                    "module_sha256",
+                    "provider_sha256",
+                    "ssh_sha256",
+                    "known_hosts_sha256",
+                    "remote_python_sha256",
+                    "git_sha256",
+                    "nix_sha256",
+                    "nix_store_sha256",
+                    "systemd_analyze_sha256",
+                    "scratch_id",
+                    "system",
+                    "evaluation_target",
+                    "unit_set",
+                    "output_schema",
+                    "nix_network_policy",
+                    "minimum_systemd_version",
+                    "max_duration_seconds",
+                    "max_output_bytes",
+                    "max_archive_bytes",
+                    "max_unpacked_bytes",
+                    "max_files",
+                    "activate",
+                    "profile_write",
+                    "home_db_write",
+                    "operation_id",
+                },
+            )
+            _, parameters = _validate_remote_effect({"kind": "nixos-reviewed-evaluation", "generation": effect.generation, "parameters": parameters})
             fixed = {
-                "target_host": "tgw-prod", "flake_repository_id": "tgw-flake",
+                "target_host": "tgw-prod",
+                "flake_repository_id": "tgw-flake",
                 "archive_root": "trader-grims-warehouse",
-                "module_path": "nix/review-egress.nix", "system": "x86_64-linux",
+                "module_path": "nix/review-egress.nix",
+                "system": "x86_64-linux",
                 "evaluation_target": "review-egress-systemd-units",
                 "unit_set": ",".join(_REVIEW_EVAL_UNITS),
                 "output_schema": "tgw-nixos-reviewed-evaluation-receipt/v1",
                 "nix_network_policy": "offline-no-substituters",
-                "activate": "false", "profile_write": "false", "home_db_write": "false",
+                "activate": "false",
+                "profile_write": "false",
+                "home_db_write": "false",
             }
             if any(parameters[key] != value for key, value in fixed.items()):
                 raise ValueError("reviewed Nix evaluation target or safety invariant is outside the registered bound")
             if not _SHA1.fullmatch(parameters["source_commit"]) or not _SHA1.fullmatch(parameters["source_tree"]):
                 raise ValueError("reviewed Nix source identity is invalid")
             digest_keys = (
-                "source_archive_sha256", "flake_lock_sha256", "module_sha256", "provider_sha256",
-                "ssh_sha256", "known_hosts_sha256", "remote_python_sha256", "git_sha256",
-                "nix_sha256", "nix_store_sha256", "systemd_analyze_sha256",
+                "source_archive_sha256",
+                "flake_lock_sha256",
+                "module_sha256",
+                "provider_sha256",
+                "ssh_sha256",
+                "known_hosts_sha256",
+                "remote_python_sha256",
+                "git_sha256",
+                "nix_sha256",
+                "nix_store_sha256",
+                "systemd_analyze_sha256",
             )
             for key in digest_keys:
                 if not _SHA256.fullmatch(parameters[key]):
@@ -360,7 +432,8 @@ class TypedEffectHandlerRegistry:
             except ValueError as exc:
                 raise ValueError("reviewed Nix bounds must be decimal integers") from exc
             invalid_bounds = (
-                minimum_systemd < 257 or not 1 <= max_duration <= 900
+                minimum_systemd < 257
+                or not 1 <= max_duration <= 900
                 or not 1024 <= max_output <= 16 * 1024 * 1024
                 or not 1024 <= max_archive <= 128 * 1024 * 1024
                 or not max_archive <= max_unpacked <= 512 * 1024 * 1024

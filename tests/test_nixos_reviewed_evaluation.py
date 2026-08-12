@@ -32,6 +32,7 @@ from tgw.nixos_reviewed_evaluation import (
     validate_bootstrap_failure_receipt,
     validate_failure_receipt,
 )
+from tgw.plan_authority import TypedEffect
 
 COMMIT = "a" * 40
 TREE = "b" * 40
@@ -74,8 +75,30 @@ def parameters(archive_digest=DIGEST):
         "profile_write": "false",
         "home_db_write": "false",
         "operation_id": "nixos-review:test",
-        "generation": "eval-1",
     }
+
+
+def effect(request=None):
+    return {"kind": "nixos-reviewed-evaluation", "generation": "eval-1", "parameters": request or parameters()}
+
+
+def test_real_prepared_effect_envelope_matches_authority_and_remote_parser():
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    prepared = json.loads(Path("agent-services/candidates/nixos-reviewed-evaluation-9ac61da-PREPARED.json").read_text())["effect"]
+    authority = TypedEffect.parse(prepared)
+    remote, bound = provider_module._validate_remote_effect(prepared)
+    assert remote == prepared and bound == prepared["parameters"]
+    assert authority.effect_hash == provider_module._effect_hash(remote)
+    assert "generation" not in bound
+
+    duplicated = json.loads(json.dumps(prepared))
+    duplicated["parameters"]["generation"] = duplicated["generation"]
+    with pytest.raises(EvaluationError, match="exact typed object"):
+        provider_module._validate_remote_effect(duplicated)
+    mismatched = {**prepared, "generation": ""}
+    with pytest.raises(EvaluationError, match="identity"):
+        provider_module._validate_remote_effect(mismatched)
 
 
 def make_archive(path: Path, *, commit=COMMIT):
@@ -91,7 +114,7 @@ def make_archive(path: Path, *, commit=COMMIT):
 
 
 def packet(request, archive):
-    raw = json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+    raw = json.dumps(effect(request), sort_keys=True, separators=(",", ":")).encode()
     return io.BytesIO(struct.pack("!Q", len(raw)) + raw + archive.read_bytes())
 
 
@@ -114,7 +137,7 @@ def test_controller_provider_uses_only_fixed_ssh_helper_and_content_bound_input(
     request["known_hosts_sha256"] = "sha256:" + sha256(known_hosts.read_bytes()).hexdigest()
     provider = SshReviewedEvaluationProvider(lambda identity: archive, known_hosts=known_hosts, request_hash="sha256:" + "d" * 64, invoke=invoke)
 
-    assert provider(request) == {"schema": "receipt"}
+    assert provider(effect(request)) == {"schema": "receipt"}
     assert SSH_EXECUTABLE == "/usr/bin/ssh"
     assert "-F" in commands[0] and "/dev/null" in commands[0]
     assert "codex@100.107.99.66" in commands[0] and "tgw-prod" not in commands[0]
@@ -125,8 +148,8 @@ def test_failure_receipt_all_stages_are_exact_and_self_hashed(stage):
     request = parameters()
     context = {
         "request_hash": "sha256:" + "d" * 64,
-        "effect_hash": __import__("tgw.nixos_reviewed_evaluation", fromlist=["_effect_hash"])._effect_hash(request),
-        "generation": request["generation"],
+        "effect_hash": __import__("tgw.nixos_reviewed_evaluation", fromlist=["_effect_hash"])._effect_hash(effect(request)),
+        "generation": effect(request)["generation"],
         "provider_sha256": request["provider_sha256"],
         "scratch_root_created": True,
         "run_created": True,
@@ -143,7 +166,7 @@ def test_failure_receipt_all_stages_are_exact_and_self_hashed(stage):
         stdout=b"private output",
         stderr=b"private error",
     )
-    assert validate_failure_receipt(receipt, request, request_hash=context["request_hash"]) == receipt
+    assert validate_failure_receipt(receipt, effect(request), request_hash=context["request_hash"]) == receipt
     encoded = json.dumps(receipt)
     assert "private output" not in encoded and "private error" not in encoded
 
@@ -152,8 +175,8 @@ def test_failure_receipt_cleanup_ambiguity_and_fabrication_are_rejected():
     request = parameters()
     context = {
         "request_hash": "sha256:" + "d" * 64,
-        "effect_hash": __import__("tgw.nixos_reviewed_evaluation", fromlist=["_effect_hash"])._effect_hash(request),
-        "generation": request["generation"],
+        "effect_hash": __import__("tgw.nixos_reviewed_evaluation", fromlist=["_effect_hash"])._effect_hash(effect(request)),
+        "generation": effect(request)["generation"],
         "provider_sha256": request["provider_sha256"],
     }
     receipt = create_failure_receipt(
@@ -164,16 +187,16 @@ def test_failure_receipt_cleanup_ambiguity_and_fabrication_are_rejected():
         cleanup_result="failed",
     )
     assert receipt["outcome"] == "AMBIGUOUS"
-    validate_failure_receipt(receipt, request, request_hash=context["request_hash"])
+    validate_failure_receipt(receipt, effect(request), request_hash=context["request_hash"])
     for mutation in ({"outcome": "FAILED"}, {"stage": "shell"}, {"raw_stderr": "secret"}):
         forged = dict(receipt)
         forged.update(mutation)
         with pytest.raises(EvaluationError):
-            validate_failure_receipt(forged, request, request_hash=context["request_hash"])
+            validate_failure_receipt(forged, effect(request), request_hash=context["request_hash"])
     oversized = dict(receipt)
     oversized["stdout_bytes"] = int(request["max_output_bytes"]) + 1
     with pytest.raises(EvaluationError, match="diagnostic digest"):
-        validate_failure_receipt(oversized, request, request_hash=context["request_hash"])
+        validate_failure_receipt(oversized, effect(request), request_hash=context["request_hash"])
 
 
 @pytest.mark.parametrize("stage", sorted(FAILURE_STAGES))
@@ -189,8 +212,8 @@ def test_controller_persists_only_validated_remote_failure(tmp_path, stage):
     request_hash = "sha256:" + "d" * 64
     context = {
         "request_hash": request_hash,
-        "effect_hash": __import__("tgw.nixos_reviewed_evaluation", fromlist=["_effect_hash"])._effect_hash(request),
-        "generation": request["generation"],
+        "effect_hash": __import__("tgw.nixos_reviewed_evaluation", fromlist=["_effect_hash"])._effect_hash(effect(request)),
+        "generation": effect(request)["generation"],
         "provider_sha256": request["provider_sha256"],
         "cleanup_attempted": True,
     }
@@ -213,7 +236,7 @@ def test_controller_persists_only_validated_remote_failure(tmp_path, stage):
         invoke=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, json.dumps(failure).encode(), b"raw secret"),
     )
     with pytest.raises(RemoteEvaluationFailure) as captured:
-        provider(request)
+        provider(effect(request))
     assert captured.value.receipt_ref["artifact_ref"].startswith("artifact:sha256:")
     assert json.loads(Path(captured.value.receipt_ref["path"]).read_text()) == failure
 
@@ -258,8 +281,8 @@ def test_main_control_channel_preserves_original_failure_stage(stage, monkeypatc
     provider_module._FAILURE_CONTEXT = {
         "stage": stage,
         "request_hash": "sha256:" + "d" * 64,
-        "effect_hash": provider_module._effect_hash(request),
-        "generation": request["generation"],
+        "effect_hash": provider_module._effect_hash(effect(request)),
+        "generation": effect(request)["generation"],
         "provider_sha256": request["provider_sha256"],
         "cleanup_attempted": True,
         "cleanup_result": "removed",
@@ -286,7 +309,7 @@ def test_controller_provider_rejects_artifact_mismatch_before_ssh(tmp_path):
     archive.write_bytes(b"wrong")
     called = []
     with pytest.raises(EvaluationError, match="digest mismatch"):
-        SshReviewedEvaluationProvider(lambda _: archive, known_hosts=tmp_path / "missing", invoke=lambda *a, **k: called.append(a))(parameters())
+        SshReviewedEvaluationProvider(lambda _: archive, known_hosts=tmp_path / "missing", invoke=lambda *a, **k: called.append(a))(effect(parameters()))
     assert not called
 
 
@@ -484,7 +507,7 @@ def test_controller_rejects_archive_size_before_transport(tmp_path):
     request = parameters(digest)
     request["max_archive_bytes"] = "1024"
     with pytest.raises(EvaluationError, match="exceeds"):
-        SshReviewedEvaluationProvider(lambda _: archive, known_hosts=tmp_path / "unused")(request)
+        SshReviewedEvaluationProvider(lambda _: archive, known_hosts=tmp_path / "unused")(effect(request))
 
 
 def test_remote_helper_creates_and_rolls_back_exact_scratch_root(tmp_path, monkeypatch):
@@ -539,7 +562,7 @@ def test_controller_rejects_nonexact_known_host_grammar(tmp_path, line):
     request["ssh_sha256"] = "sha256:" + sha256(Path(SSH_EXECUTABLE).read_bytes()).hexdigest()
     request["known_hosts_sha256"] = "sha256:" + sha256(known_hosts.read_bytes()).hexdigest()
     with pytest.raises(EvaluationError, match="one admitted host key"):
-        SshReviewedEvaluationProvider(lambda _: archive, known_hosts=known_hosts, invoke=lambda *a, **k: None)(request)
+        SshReviewedEvaluationProvider(lambda _: archive, known_hosts=known_hosts, invoke=lambda *a, **k: None)(effect(request))
 
 
 @pytest.mark.parametrize("kind", ["duplicate", "special", "wrong_root"])
