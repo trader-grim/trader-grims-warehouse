@@ -78,9 +78,9 @@ def test_runtime_and_credential_digests_expiry_and_audit_receipt(tmp_path):
         runtime_sha256="sha256:" + hashlib.sha256(b"runtime").hexdigest(),
         credential_sha256="sha256:" + hashlib.sha256(b"credential").hexdigest(),
     )
-    policy.verify_runtime(runtime, credential)
+    policy.verify_runtime(runtime)
     receipt = audit_receipt(policy, [{"host": "chatgpt.com", "outcome": "completed"}])
     assert receipt["receipt_hash"].startswith("sha256:")
     assert json.dumps(receipt, sort_keys=True)
     with pytest.raises(BrokerError, match="expired"):
-        _policy(expires_unix=1).verify_runtime(runtime, credential)
+        _policy(expires_unix=1).verify_runtime(runtime)

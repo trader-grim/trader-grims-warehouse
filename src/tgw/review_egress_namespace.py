@@ -8,6 +8,7 @@ the sole ExecStartPre/ExecStopPost privilege boundary.
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import re
 import subprocess
@@ -95,21 +96,56 @@ def execute(action: str, topology: Topology, *, broker_uid: int, worker_uid: int
     return receipts
 
 
+def kernel_attestation(
+    *, run_id: str, policy_hash: str, topology: Topology, ruleset: str,
+    broker_process_identity: str, negative_probes: dict[str, bool], issued_unix: int,
+    expires_unix: int, nonce: str, trust_key: bytes,
+) -> dict:
+    required_probes = {"direct_public_443_denied", "dns_denied", "private_denied", "link_local_denied", "metadata_denied", "broker_only_reachable"}
+    if topology.run_id != run_id or set(negative_probes) != required_probes or any(value is not True for value in negative_probes.values()):
+        raise NamespaceError("kernel attestation probes or run topology are incomplete")
+    if not trust_key or expires_unix <= issued_unix or not broker_process_identity or not ruleset or not nonce:
+        raise NamespaceError("kernel attestation evidence is incomplete")
+    unsigned = {
+        "schema": "tgw-review-egress-kernel-attestation/v1", "run_id": run_id,
+        "policy_hash": policy_hash, "namespace": topology.namespace,
+        "ruleset_sha256": "sha256:" + sha256(ruleset.encode()).hexdigest(),
+        "broker_process_sha256": "sha256:" + sha256(broker_process_identity.encode()).hexdigest(),
+        "negative_probes": negative_probes, "issued_unix": issued_unix,
+        "expires_unix": expires_unix, "nonce": nonce,
+        "broker_bind": {"host": topology.host_address.split("/")[0], "port": topology.broker_port},
+    }
+    return {**unsigned, "mac": "hmac-sha256:" + hmac.new(trust_key, json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(), sha256).hexdigest()}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("prepare", "verify", "teardown"))
+    parser.add_argument("action", choices=("prepare", "verify", "attest", "teardown"))
     parser.add_argument("run_id")
     parser.add_argument("--broker-uid", type=int, required=True)
     parser.add_argument("--worker-uid", type=int, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
+    parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--trust-key", type=Path)
     args = parser.parse_args()
     topology = Topology.for_run(args.run_id)
-    receipt = {
+    if args.action == "attest":
+        if args.evidence is None or args.trust_key is None:
+            raise SystemExit("attestation requires privileged evidence and trust key")
+        evidence = json.loads(args.evidence.read_text(encoding="utf-8"))
+        receipt = kernel_attestation(
+            run_id=args.run_id, policy_hash=evidence["policy_hash"], topology=topology,
+            ruleset=evidence["ruleset"], broker_process_identity=evidence["broker_process_identity"],
+            negative_probes=evidence["negative_probes"], issued_unix=evidence["issued_unix"],
+            expires_unix=evidence["expires_unix"], nonce=evidence["nonce"], trust_key=args.trust_key.read_bytes(),
+        )
+    else:
+        receipt = {
         "schema": "tgw-review-egress-namespace-receipt/v1",
         "action": args.action,
         "topology": topology.__dict__,
         "commands": execute(args.action, topology, broker_uid=args.broker_uid, worker_uid=args.worker_uid),
-    }
+        }
     with args.receipt.open("x", encoding="utf-8") as output:
         output.write(json.dumps(receipt, sort_keys=True) + "\n")
     return 0

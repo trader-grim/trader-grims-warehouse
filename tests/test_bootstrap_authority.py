@@ -8,18 +8,15 @@ from tgw.bootstrap_authority import BootstrapGrant, BootstrapSessionAuthority
 
 def _grant(**changes):
     effect = {
-        "kind": "coding-release",
+        "kind": "approval-platform-bootstrap-deployment",
         "generation": "platform-bb5c67d",
         "parameters": {
-            "candidate_commit": "b" * 40,
-            "candidate_tree": "c" * 40,
-            "archive_sha256": "d" * 64,
-            "artifact_ref": "candidate:bb5c67d",
-            "root_id": "production-releases",
-            "expected_current": "platform-a",
-            "operation_id": "bootstrap-platform-bb5c67d",
-            "review_receipt": "review:passed",
-            "controller_receipt": "controller:passed",
+            "target_host": "tgw-prod", "flake_repository_id": "tgw-flake", "flake_commit": "b" * 40, "flake_tree": "c" * 40,
+            "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old", "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
+            "credential_ref": "credential:tgw-review:codex", "credential_sha256": "d" * 64, "broker_source_sha256": "d" * 64,
+            "namespace_source_sha256": "d" * 64, "nix_module_sha256": "d" * 64, "egress_contract_sha256": "d" * 64,
+            "install_contract_sha256": "d" * 64, "review_receipt": "review:passed", "controller_receipt": "controller:passed",
+            "network_attestation_receipt": "network:passed", "probe_receipt": "probes:passed", "operation_id": "bootstrap:review-transport-1",
         },
     }
     value = {
@@ -82,3 +79,11 @@ def test_stale_plan_and_expired_or_broadened_grants_fail_closed(tmp_path):
     with pytest.raises(ValueError, match="exactly one"):
         _grant(deployment_uses=2)
 
+
+def test_bootstrap_grant_rejects_legacy_coding_release_even_if_target_looks_related():
+    legacy = {
+        "kind": "coding-release", "generation": "g",
+        "parameters": {"root_id": "production-releases", "candidate_commit": "b" * 40},
+    }
+    with pytest.raises(ValueError, match="exact platform bootstrap"):
+        _grant(effect=legacy)

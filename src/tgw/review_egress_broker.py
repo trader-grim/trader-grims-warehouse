@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import hmac
 import ipaddress
 import json
 import socket
@@ -74,13 +75,37 @@ class ReviewEgressPolicy:
         value = {**self.__dict__, "allowed_hosts": sorted(self.allowed_hosts)}
         return "sha256:" + hashlib.sha256(_canonical(value)).hexdigest()
 
-    def verify_runtime(self, runtime: Path, credential: Path, now: float | None = None) -> None:
+    def verify_runtime(self, runtime: Path, now: float | None = None) -> None:
         if (now or time.time()) >= self.expires_unix:
             raise BrokerError("review egress policy is expired")
         if file_sha256(runtime) != self.runtime_sha256:
             raise BrokerError("review runtime digest mismatch")
-        if file_sha256(credential) != self.credential_sha256:
-            raise BrokerError("review credential digest mismatch")
+        # Credential digest is established by the privileged provisioner and
+        # checked by the provider launcher. The network-capable broker must
+        # never receive or read bearer credentials.
+
+
+def verify_network_attestation(value: Mapping[str, Any], policy: ReviewEgressPolicy, trust_key: bytes, *, now: int | None = None) -> Mapping[str, Any]:
+    required = {"schema", "run_id", "policy_hash", "namespace", "ruleset_sha256", "broker_process_sha256", "negative_probes", "issued_unix", "expires_unix", "nonce", "broker_bind", "mac"}
+    if set(value) != required:
+        raise BrokerError("network attestation fields are invalid")
+    unsigned = dict(value)
+    claimed = unsigned.pop("mac")
+    expected = "hmac-sha256:" + hmac.new(trust_key, _canonical(unsigned), hashlib.sha256).hexdigest()
+    current = int(time.time()) if now is None else now
+    if not hmac.compare_digest(str(claimed), expected):
+        raise BrokerError("network attestation MAC is invalid")
+    if value["schema"] != "tgw-review-egress-kernel-attestation/v1" or value["run_id"] != policy.run_id or value["policy_hash"] != policy.policy_hash:
+        raise BrokerError("network attestation binding mismatch")
+    if not isinstance(value["issued_unix"], int) or not isinstance(value["expires_unix"], int) or not (value["issued_unix"] <= current < value["expires_unix"] <= policy.expires_unix):
+        raise BrokerError("network attestation is expired or future-issued")
+    probes = value["negative_probes"]
+    required_probes = {"direct_public_443_denied", "dns_denied", "private_denied", "link_local_denied", "metadata_denied", "broker_only_reachable"}
+    if not isinstance(probes, Mapping) or set(probes) != required_probes or any(result is not True for result in probes.values()):
+        raise BrokerError("network negative probes are incomplete")
+    if not all(isinstance(value[key], str) and value[key] for key in ("namespace", "ruleset_sha256", "broker_process_sha256", "nonce")):
+        raise BrokerError("network kernel identity is incomplete")
+    return value
 
 
 def resolve_public(host: str, *, resolver=socket.getaddrinfo) -> tuple[int, tuple[Any, ...], str]:
@@ -125,31 +150,31 @@ def tls_client_hello_sni(data: bytes) -> str:
     record_len = int.from_bytes(data[3:5], "big")
     if len(data) < 5 + record_len or data[5] != 1:
         raise BrokerError("TLS ClientHello is incomplete")
-    body = memoryview(data)[9:5 + record_len]
+    body = memoryview(data)[9 : 5 + record_len]
     pos = 2 + 32
     if pos >= len(body):
         raise BrokerError("invalid ClientHello")
     pos += 1 + body[pos]
     if pos + 2 > len(body):
         raise BrokerError("invalid ClientHello")
-    pos += 2 + int.from_bytes(body[pos:pos + 2], "big")
+    pos += 2 + int.from_bytes(body[pos : pos + 2], "big")
     if pos >= len(body):
         raise BrokerError("invalid ClientHello")
     pos += 1 + body[pos]
     if pos + 2 > len(body):
         raise BrokerError("ClientHello has no extensions")
-    end = pos + 2 + int.from_bytes(body[pos:pos + 2], "big")
+    end = pos + 2 + int.from_bytes(body[pos : pos + 2], "big")
     pos += 2
     while pos + 4 <= end and end <= len(body):
-        kind = int.from_bytes(body[pos:pos + 2], "big")
-        size = int.from_bytes(body[pos + 2:pos + 4], "big")
+        kind = int.from_bytes(body[pos : pos + 2], "big")
+        size = int.from_bytes(body[pos + 2 : pos + 4], "big")
         pos += 4
-        extension = body[pos:pos + size]
+        extension = body[pos : pos + size]
         pos += size
         if kind == 0 and len(extension) >= 5:
             name_len = int.from_bytes(extension[3:5], "big")
             try:
-                return bytes(extension[5:5 + name_len]).decode("ascii").lower()
+                return bytes(extension[5 : 5 + name_len]).decode("ascii").lower()
             except UnicodeDecodeError as exc:
                 raise BrokerError("SNI is not ASCII") from exc
     raise BrokerError("TLS ClientHello has no SNI")
@@ -231,20 +256,29 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="tgw-review-egress-broker")
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--verify-runtime", type=Path, required=True)
-    parser.add_argument("--credential", type=Path, required=True)
     parser.add_argument("--network-attestation", type=Path, required=True)
+    parser.add_argument("--attestation-key", type=Path, required=True)
+    parser.add_argument("--ready", type=Path, required=True)
     parser.add_argument("--receipt", type=Path)
     args = parser.parse_args()
     policy = load_policy(args.policy)
-    policy.verify_runtime(args.verify_runtime, args.credential)
+    policy.verify_runtime(args.verify_runtime)
     attestation = json.loads(args.network_attestation.read_text(encoding="utf-8"))
-    if attestation.get("schema") != "tgw-review-egress-network-attestation/v1" or attestation.get("policy_hash") != policy.policy_hash or attestation.get("direct_egress_denied") is not True:
-        raise SystemExit("review egress network namespace is not attested")
+    verify_network_attestation(attestation, policy, args.attestation_key.read_bytes())
     bind = attestation.get("broker_bind")
     if not isinstance(bind, Mapping) or bind.get("host") in {None, "0.0.0.0", "::"} or not isinstance(bind.get("port"), int):
         raise SystemExit("attested broker bind is invalid")
+    ready = {
+        "schema": "tgw-review-egress-ready/v1",
+        "run_id": policy.run_id,
+        "policy_hash": policy.policy_hash,
+        "attestation_mac": attestation["mac"],
+        "broker_process_sha256": attestation["broker_process_sha256"],
+        "broker_bind": bind,
+    }
+    with args.ready.open("x", encoding="utf-8") as output:
+        output.write(json.dumps(ready, sort_keys=True) + "\n")
     if args.receipt is None:
-        print(json.dumps({"status": "READY", "policy_hash": policy.policy_hash}, sort_keys=True))
         return 0
     asyncio.run(serve(policy, str(bind["host"]), int(bind["port"]), args.receipt))
     return 0

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -16,6 +17,9 @@ def run_with_broker(
     broker_argv: Sequence[str],
     provider: Callable[[], Any],
     receipt_path: Path,
+    ready_path: Path,
+    expected_run_id: str,
+    expected_policy_hash: str,
     *,
     spawn: Callable[..., subprocess.Popen] = subprocess.Popen,
     stop_timeout: float = 10,
@@ -23,9 +27,32 @@ def run_with_broker(
     """Start exact broker argv, run provider, terminate, then read receipt."""
     if not broker_argv or not all(isinstance(item, str) and item for item in broker_argv):
         raise BrokerSupervisorError("broker argv is invalid")
-    if receipt_path.exists() or not receipt_path.parent.is_dir():
+    if receipt_path.exists() or ready_path.exists() or not receipt_path.parent.is_dir():
         raise BrokerSupervisorError("broker receipt sink must be absent in a provisioned directory")
     process = spawn(list(broker_argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    deadline = time.monotonic() + stop_timeout
+    ready = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise BrokerSupervisorError("broker exited before authenticated readiness")
+        if ready_path.is_file():
+            try:
+                ready = json.loads(ready_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise BrokerSupervisorError("broker readiness is invalid JSON") from exc
+            break
+        time.sleep(0.01)
+    if (
+        not isinstance(ready, Mapping)
+        or set(ready) != {"schema", "run_id", "policy_hash", "attestation_mac", "broker_process_sha256", "broker_bind"}
+        or ready["schema"] != "tgw-review-egress-ready/v1"
+        or ready["run_id"] != expected_run_id
+        or ready["policy_hash"] != expected_policy_hash
+        or not str(ready["attestation_mac"]).startswith("hmac-sha256:")
+        or not str(ready["broker_process_sha256"]).startswith("sha256:")
+    ):
+        process.terminate()
+        raise BrokerSupervisorError("broker readiness is absent or not bound to the run policy")
     provider_result = None
     provider_error = None
     try:

@@ -15,7 +15,7 @@ from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
 
 from tgw.review_broker_supervisor import run_with_broker
-from tgw.review_egress_broker import ReviewEgressPolicy
+from tgw.review_egress_broker import ReviewEgressPolicy, file_sha256
 
 
 class ReviewRunnerError(ValueError):
@@ -222,7 +222,9 @@ def run_review(
         if network_egress:
             try:
                 policy = ReviewEgressPolicy.parse(egress_policy or {})
-                policy.verify_runtime(Path(provider_argv[0]).resolve(), credential_file or Path(""))
+                policy.verify_runtime(Path(provider_argv[0]).resolve())
+                if credential_file is None or file_sha256(credential_file) != policy.credential_sha256:
+                    raise ValueError("review credential digest mismatch")
             except (ValueError, OSError) as exc:
                 raise ReviewRunnerError(f"review egress policy is invalid: {exc}") from exc
             attestation = network_attestation or {}
@@ -263,7 +265,11 @@ def run_review(
         if network_egress and broker_argv is not None:
             if egress_receipt is not None or egress_receipt_path is None:
                 raise ReviewRunnerError("live broker requires one absent final receipt path, not a preloaded receipt")
-            completed, egress_receipt = run_with_broker(broker_argv, invoke_provider, egress_receipt_path)
+            completed, egress_receipt = run_with_broker(
+                broker_argv, invoke_provider, egress_receipt_path,
+                ready_path=egress_receipt_path.with_name("ready.json"),
+                expected_run_id=policy.run_id, expected_policy_hash=policy.policy_hash,
+            )
         else:
             completed = invoke_provider()
         if completed.returncode:

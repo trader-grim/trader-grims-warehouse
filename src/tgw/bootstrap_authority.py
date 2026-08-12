@@ -57,9 +57,9 @@ class BootstrapGrant:
             raise ValueError("bootstrap expiry must be timezone-aware")
         if value["deployment_uses"] != 1:
             raise ValueError("bootstrap authority permits exactly one deployment")
-        if effect.kind.value != "coding-release":
-            raise ValueError("bootstrap authority permits only the typed coding release")
-        if effect.parameters.get("root_id") != value["root_id"] or effect.parameters.get("candidate_commit") != value["candidate_commit"]:
+        if effect.kind.value != "approval-platform-bootstrap-deployment":
+            raise ValueError("bootstrap authority permits only the exact platform bootstrap deployment")
+        if effect.parameters.get("target_host") != value["target_host"] or effect.parameters.get("flake_commit") != value["candidate_commit"]:
             raise ValueError("bootstrap target or candidate does not match its effect")
         payload = dict(value)
         payload["effect_hash"] = effect.effect_hash
