@@ -52,7 +52,8 @@ def held_metadata(path: Path) -> dict[str, Any]:
         "path": str(path), "sha256": "sha256:" + digest.hexdigest(), "size": observed.st_size,
         "dev": observed.st_dev, "inode": observed.st_ino, "uid": observed.st_uid,
         "gid": observed.st_gid, "mode": f"{stat.S_IMODE(observed.st_mode):04o}",
-        "nlink": observed.st_nlink,
+        "nlink": observed.st_nlink, "mtime_ns": observed.st_mtime_ns,
+        "ctime_ns": observed.st_ctime_ns,
     }
 
 
@@ -101,16 +102,54 @@ def verify(repo: Path, store: Path) -> dict[str, Any]:
     for gate_id, ref in catalog["gate_records"].items():
         record = verify_ref(repo, ref)
         assert record["gate_id"] == gate_id and record["rc"] == 0
+        assert record["schema"] == "tgw-freeze-execution-record/v2"
         assert record["semantic"]["status"] == "PASS"
         assert record["source"] == {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "status": "CLEAN_DETACHED"}
         assert record["environment"]["clear_inherited"] is True
-        assert isinstance(record["argv"], list) and record["argv"][0] == record["executable"]["path"]
-        assert record["cwd"].startswith("/") and all(isinstance(arg, str) for arg in record["argv"])
+        executable = record["executable"]
+        assert executable["component_safe_open"] is True and executable["unchanged"] is True
+        assert executable["before"] == executable["after"]
+        assert record["logical_replay_argv"][0] == executable["logical_path"]
+        assert record["actual_execve_argv"][0] == executable["actual_fd_path"]
+        expected_procfd = (
+            f"/proc/{record['descriptor_execution']['parent_pid']}/fd/"
+            f"{record['descriptor_execution']['executable_fd']}"
+        )
+        assert executable["actual_fd_path"] == expected_procfd
+        assert record["descriptor_execution"]["executable_fd"] in record["descriptor_execution"]["pass_fds"]
+        observed_executable = held_metadata(Path(executable["logical_path"]))
+        for key, expected in executable["before"].items():
+            assert observed_executable[key] == expected
+        assert record["cwd"].startswith("/")
+        assert all(isinstance(arg, str) for arg in record["logical_replay_argv"])
+        assert all(isinstance(arg, str) for arg in record["actual_execve_argv"])
         assert record["started_at"].endswith("Z") and record["ended_at"].endswith("Z")
+        for item in record["inputs"]:
+            assert item["unchanged"] is True
+            assert item["before"] == item["after"] == item["named_after"]
+            assert item["held_fd"] in record["descriptor_execution"]["pass_fds"]
+            observed_input = held_metadata(Path(item["logical_path"]))
+            for key, expected in item["before"].items():
+                assert observed_input[key] == expected
+        for item in record["generated_artifacts"]:
+            assert item["unchanged"] is True
+            assert item["before"] == item["after"] == item["named_after"]
+            assert item["before"]["sha256"] == item["sha256"]
+            assert item["before"]["size"] == item["bytes"]
+            observed_generated = held_metadata(Path(item["source_path"]))
+            for key, expected in item["before"].items():
+                assert observed_generated[key] == expected
         for channel in ("stdout", "stderr"):
             artifact = store / record[channel]["sha256"].removeprefix("sha256:")
             assert artifact.stat().st_size == record[channel]["bytes"]
             assert sha(artifact.read_bytes()) == record[channel]["sha256"]
+
+    full = verify_ref(repo, catalog["gate_records"]["full_pytest_junit"])
+    junit = full["semantic"]["junit"]
+    assert {key: junit[key] for key in ("tests", "passed", "skipped", "failures", "errors")} == {
+        "tests": 3730, "passed": 3725, "skipped": 5, "failures": 0, "errors": 0,
+    }
+    assert full["semantic"]["stdout_junit_cross_check"] is True
 
     source_root = repo if (repo / ".git").exists() else Path("/tmp/tgw-freeze-f3cefe5-source")
     for name, value in catalog["a3_source_identities"].items():
@@ -121,6 +160,7 @@ def verify(repo: Path, store: Path) -> dict[str, Any]:
         "26a9114312aefe6a11340a1108704d3997034083",
         "98b815c125f75e35b91ba8f92b22c653171464fc",
         "d11e1c00960ed151a4e04d213110e61bf7dd83d6",
+        "a33bba3d0c3a7ff9cd151d05057043367dfbfc7c",
     ]
     return {"status": "PASS", "artifact_count": len(on_disk),
             "gate_count": len(catalog["gate_records"]), "candidate_identity": claimed_identity}

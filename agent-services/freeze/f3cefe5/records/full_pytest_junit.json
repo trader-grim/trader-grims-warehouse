@@ -1,12 +1,19 @@
 {
-  "argv": [
-    "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest",
+  "actual_execve_argv": [
+    "/proc/2637415/fd/3",
     "-q",
     "--junitxml=/tmp/tgw-freeze-f3cefe5-gates/full-junit.xml"
   ],
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
-  "duration_ns": 101906810582,
-  "ended_at": "2026-08-12T23:26:55.228191Z",
+  "descriptor_execution": {
+    "executable_fd": 3,
+    "parent_pid": 2637415,
+    "pass_fds": [
+      3
+    ]
+  },
+  "duration_ns": 102438334952,
+  "ended_at": "2026-08-12T23:45:25.722309Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -21,49 +28,113 @@
     }
   },
   "executable": {
-    "dev": 39,
-    "gid": 983,
-    "inode": 6648890,
-    "mode": "0775",
-    "nlink": 1,
-    "path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest",
-    "sha256": "sha256:4183e6b1b6247763e4adeb2abea2324040e591fa8196c267f46200cf8cc4da02",
-    "size": 358,
-    "uid": 1000
+    "actual_fd_path": "/proc/2637415/fd/3",
+    "after": {
+      "ctime_ns": 1786230571967034482,
+      "dev": 39,
+      "gid": 983,
+      "inode": 6648890,
+      "mode": "0775",
+      "mtime_ns": 1785259085949021152,
+      "nlink": 1,
+      "sha256": "sha256:4183e6b1b6247763e4adeb2abea2324040e591fa8196c267f46200cf8cc4da02",
+      "size": 358,
+      "uid": 1000
+    },
+    "before": {
+      "ctime_ns": 1786230571967034482,
+      "dev": 39,
+      "gid": 983,
+      "inode": 6648890,
+      "mode": "0775",
+      "mtime_ns": 1785259085949021152,
+      "nlink": 1,
+      "sha256": "sha256:4183e6b1b6247763e4adeb2abea2324040e591fa8196c267f46200cf8cc4da02",
+      "size": 358,
+      "uid": 1000
+    },
+    "component_safe_open": true,
+    "held_fd": 3,
+    "logical_path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest",
+    "unchanged": true
   },
   "gate_id": "full_pytest_junit",
   "generated_artifacts": [
     {
+      "after": {
+        "ctime_ns": 1786578324664218782,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5534810,
+        "mode": "0664",
+        "mtime_ns": 1786578324664218782,
+        "nlink": 1,
+        "sha256": "sha256:8a6155aa3edf13c0ef7b60eb1b0556010bc9ce27c7643ae867359e595b60c0a1",
+        "size": 460393,
+        "uid": 1004
+      },
+      "before": {
+        "ctime_ns": 1786578324664218782,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5534810,
+        "mode": "0664",
+        "mtime_ns": 1786578324664218782,
+        "nlink": 1,
+        "sha256": "sha256:8a6155aa3edf13c0ef7b60eb1b0556010bc9ce27c7643ae867359e595b60c0a1",
+        "size": 460393,
+        "uid": 1004
+      },
       "bytes": 460393,
-      "ref": "artifact:sha256:f51489ca7967d0f305b15f862ae7a4c8b9b550d8509c6dc410145ba6fc9f5632",
+      "named_after": {
+        "ctime_ns": 1786578324664218782,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5534810,
+        "mode": "0664",
+        "mtime_ns": 1786578324664218782,
+        "nlink": 1,
+        "sha256": "sha256:8a6155aa3edf13c0ef7b60eb1b0556010bc9ce27c7643ae867359e595b60c0a1",
+        "size": 460393,
+        "uid": 1004
+      },
+      "ref": "artifact:sha256:8a6155aa3edf13c0ef7b60eb1b0556010bc9ce27c7643ae867359e595b60c0a1",
       "role": "full-junit.xml",
-      "sha256": "sha256:f51489ca7967d0f305b15f862ae7a4c8b9b550d8509c6dc410145ba6fc9f5632",
-      "source_path": "/tmp/tgw-freeze-f3cefe5-gates/full-junit.xml"
+      "sha256": "sha256:8a6155aa3edf13c0ef7b60eb1b0556010bc9ce27c7643ae867359e595b60c0a1",
+      "source_path": "/tmp/tgw-freeze-f3cefe5-gates/full-junit.xml",
+      "unchanged": true
     }
   ],
-  "held_executable_via_proc_fd": true,
+  "input_trees": [],
   "inputs": [],
+  "logical_replay_argv": [
+    "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest",
+    "-q",
+    "--junitxml=/tmp/tgw-freeze-f3cefe5-gates/full-junit.xml"
+  ],
   "rc": 0,
-  "schema": "tgw-freeze-execution-record/v1",
+  "schema": "tgw-freeze-execution-record/v2",
   "semantic": {
     "junit": {
-      "errors": null,
-      "failures": null,
-      "skipped": null,
-      "tests": null,
-      "time": null
+      "errors": 0,
+      "failures": 0,
+      "passed": 3725,
+      "skipped": 5,
+      "tests": 3730,
+      "time": 101.081
     },
     "passed": 3725,
-    "reported_seconds": 100.8,
+    "reported_seconds": 101.32,
     "skipped": 5,
-    "status": "PASS"
+    "status": "PASS",
+    "stdout_junit_cross_check": true
   },
   "source": {
     "commit": "f3cefe544a9f81422b57707c4289f2974c6dca51",
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:25:13.321340Z",
+  "started_at": "2026-08-12T23:43:43.283942Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -71,9 +142,9 @@
   },
   "stdout": {
     "bytes": 4204,
-    "ref": "artifact:sha256:6c20023d56dc25f072621520950de2694a4d936416830e0e6dbbde81059dfbd8",
-    "sha256": "sha256:6c20023d56dc25f072621520950de2694a4d936416830e0e6dbbde81059dfbd8"
+    "ref": "artifact:sha256:c1ebf3ec3f509ddc042ec3c23020db21675d5974f2f2a2629d07c99c110d01f4",
+    "sha256": "sha256:c1ebf3ec3f509ddc042ec3c23020db21675d5974f2f2a2629d07c99c110d01f4"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:17d6f5c3fb67fc6ea826d9a757d435a07c8223769368bcde79df91ae5fae3ef8"
+  "unsigned_sha256": "sha256:ff93b28f9881b25223c4aa17c6b00ae77d23617bae602caeb9363a717e0fa787"
 }

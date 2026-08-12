@@ -221,6 +221,7 @@ def main() -> int:
             "26a9114312aefe6a11340a1108704d3997034083",
             "98b815c125f75e35b91ba8f92b22c653171464fc",
             "d11e1c00960ed151a4e04d213110e61bf7dd83d6",
+            "a33bba3d0c3a7ff9cd151d05057043367dfbfc7c",
         ], "prior_manifests_are_raw_inputs_only": True},
         "descriptor_path": "agent-services/candidates/platform-bootstrap-prerequisite-f3cefe5-CLOSED-NOT-EXECUTABLE.json",
         "status": "PREPARED_NOT_EXECUTABLE", "dispatchable": False,

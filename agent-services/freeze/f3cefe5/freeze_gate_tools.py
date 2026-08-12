@@ -13,15 +13,14 @@ from pathlib import Path
 
 import yaml
 
+from tgw.candidate_manifest import create_luet_conformance_receipt
 from tgw.plan_catalog import compose_catalog, load_provider_catalog
-from tgw.plan_luet import _unique_closure, _write_tree
-from tgw.plan_solver import CapabilityGraph, validate_for_dispatch
+from tgw.plan_luet import _unique_closure, _write_tree, conform
+from tgw.plan_solver import CapabilityGraph, solve, validate_for_dispatch
 
 
-def _graph(plan_root: Path, catalog: Path, commit: str) -> dict:
-    execution = yaml.safe_load(
-        (plan_root / "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml").read_text()
-    )
+def _graph(execution_path: Path, catalog: Path, commit: str) -> dict:
+    execution = yaml.safe_load(execution_path.read_text())
     return compose_catalog(
         execution, load_provider_catalog(catalog), plan_commit=commit
     )
@@ -32,7 +31,7 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
 
     graph = commands.add_parser("generate-graph")
-    graph.add_argument("--plan-root", type=Path, required=True)
+    graph.add_argument("--execution", type=Path, required=True)
     graph.add_argument("--plan-commit", required=True)
     graph.add_argument("--catalog", type=Path, required=True)
     graph.add_argument("--output", type=Path, required=True)
@@ -45,9 +44,21 @@ def main() -> int:
     verify.add_argument("--solution", type=Path, required=True)
     verify.add_argument("--plan-commit", required=True)
 
+    solution = commands.add_parser("generate-solution")
+    solution.add_argument("--graph", type=Path, required=True)
+    solution.add_argument("--luet", type=Path, required=True)
+    solution.add_argument("--output", type=Path, required=True)
+
+    receipt = commands.add_parser("derive-luet-receipt")
+    receipt.add_argument("--graph", type=Path, required=True)
+    receipt.add_argument("--luet", type=Path, required=True)
+    receipt.add_argument("--luet-sha256", required=True)
+    receipt.add_argument("--source-commit", required=True)
+    receipt.add_argument("--source-tree", required=True)
+
     args = parser.parse_args()
     if args.command == "generate-graph":
-        value = _graph(args.plan_root, args.catalog, args.plan_commit)
+        value = _graph(args.execution, args.catalog, args.plan_commit)
         args.output.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
         return 0
     if args.command == "generate-luet-tree":
@@ -64,6 +75,32 @@ def main() -> int:
         solution = json.loads(args.solution.read_text())
         validate_for_dispatch(solution, current_plan_commit=args.plan_commit)
         print(json.dumps({"solution_hash": solution["solution_hash"], "status": "PASS"}, sort_keys=True))
+        return 0
+    if args.command == "generate-solution":
+        graph_data = json.loads(args.graph.read_text())
+        conformance = conform(
+            graph_data, luet_binary=args.luet,
+            expected_plan_commit=graph_data["plan_commit"],
+        )
+        value = solve(
+            graph_data, expected_plan_commit=graph_data["plan_commit"],
+            conformance_result=conformance,
+        )
+        validate_for_dispatch(value, current_plan_commit=graph_data["plan_commit"])
+        args.output.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+        return 0
+    if args.command == "derive-luet-receipt":
+        graph_data = json.loads(args.graph.read_text())
+        result = conform(
+            graph_data, luet_binary=args.luet,
+            expected_plan_commit=graph_data["plan_commit"],
+        )
+        value = create_luet_conformance_receipt(
+            result, graph=graph_data, plan_commit=graph_data["plan_commit"],
+            source_commit=args.source_commit, source_tree=args.source_tree,
+            binary_sha256=args.luet_sha256,
+        )
+        print(json.dumps(value, indent=2, sort_keys=True))
         return 0
     raise AssertionError(args.command)
 

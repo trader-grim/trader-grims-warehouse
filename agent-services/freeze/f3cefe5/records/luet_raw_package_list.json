@@ -1,7 +1,7 @@
 {
-  "argv": [
-    "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-    "/opt/TGW/evidence/codex/sha256/c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+  "actual_execve_argv": [
+    "/proc/2637415/fd/3",
+    "/proc/2637415/fd/4",
     "tree",
     "pkglist",
     "--tree",
@@ -13,8 +13,36 @@
     "json"
   ],
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
-  "duration_ns": 33852479,
-  "ended_at": "2026-08-12T23:27:15.245560Z",
+  "descriptor_execution": {
+    "executable_fd": 3,
+    "parent_pid": 2637415,
+    "pass_fds": [
+      3,
+      4,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25
+    ]
+  },
+  "duration_ns": 42209043,
+  "ended_at": "2026-08-12T23:45:47.001571Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -29,34 +57,1285 @@
     }
   },
   "executable": {
-    "dev": 2050,
-    "gid": 0,
-    "inode": 2238373,
-    "mode": "0755",
-    "nlink": 1,
-    "path": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-    "sha256": "sha256:438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0",
-    "size": 225672,
-    "uid": 0
+    "actual_fd_path": "/proc/2637415/fd/3",
+    "after": {
+      "ctime_ns": 1785206632593263800,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2238373,
+      "mode": "0755",
+      "mtime_ns": 1777320562000000000,
+      "nlink": 1,
+      "sha256": "sha256:438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0",
+      "size": 225672,
+      "uid": 0
+    },
+    "before": {
+      "ctime_ns": 1785206632593263800,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2238373,
+      "mode": "0755",
+      "mtime_ns": 1777320562000000000,
+      "nlink": 1,
+      "sha256": "sha256:438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0",
+      "size": 225672,
+      "uid": 0
+    },
+    "component_safe_open": true,
+    "held_fd": 3,
+    "logical_path": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    "unchanged": true
   },
   "gate_id": "luet_raw_package_list",
   "generated_artifacts": [],
-  "held_executable_via_proc_fd": true,
-  "inputs": [
+  "input_trees": [
     {
-      "dev": 39,
-      "gid": 0,
-      "inode": 7565322,
-      "mode": "0444",
-      "nlink": 1,
-      "path": "/opt/TGW/evidence/codex/sha256/c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
-      "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
-      "size": 48513496,
-      "uid": 0
+      "entries": [
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744274,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "size": 1,
+            "uid": 1004
+          },
+          "path": "tgw-provider/build-governed-execution-e774c20d2664/1.0/build.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744273,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:f17ebcfc3201f47f0439254a90622f020285c30887b788e1d9ff11cae9e8bc32",
+            "size": 371,
+            "uid": 1004
+          },
+          "path": "tgw-provider/build-governed-execution-e774c20d2664/1.0/definition.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744278,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "size": 1,
+            "uid": 1004
+          },
+          "path": "tgw-provider/build-harness-role-lanes-6d26b3b40b48/1.0/build.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744277,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:fe3fde95df9c18e4b2bab9b12971a4f67bdd760b2501b80d02405752a968edaf",
+            "size": 274,
+            "uid": 1004
+          },
+          "path": "tgw-provider/build-harness-role-lanes-6d26b3b40b48/1.0/definition.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744282,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "size": 1,
+            "uid": 1004
+          },
+          "path": "tgw-provider/build-operator-authority-b7a02e5364cd/1.0/build.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744281,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:5d5aa5298eba8b944b2e2dd52d4cbb5349d6601efd73b318225e4931f0baeb14",
+            "size": 190,
+            "uid": 1004
+          },
+          "path": "tgw-provider/build-operator-authority-b7a02e5364cd/1.0/definition.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744286,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "size": 1,
+            "uid": 1004
+          },
+          "path": "tgw-provider/build-operator-surface-19a8282bce54/1.0/build.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744285,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:e45255af59c761b32d1a3ff7ae26d050bbce01ac80d0c286f39f7fb24ab94d6d",
+            "size": 186,
+            "uid": 1004
+          },
+          "path": "tgw-provider/build-operator-surface-19a8282bce54/1.0/definition.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744290,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "size": 1,
+            "uid": 1004
+          },
+          "path": "tgw-provider/build-workflow-convergence-d49c3defa8cd/1.0/build.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744289,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:78250e2852234d52f5ee741a1d4cd40b55eee9e78d7c0f6a0c8f1c62d8078e6f",
+            "size": 88,
+            "uid": 1004
+          },
+          "path": "tgw-provider/build-workflow-convergence-d49c3defa8cd/1.0/definition.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744294,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "size": 1,
+            "uid": 1004
+          },
+          "path": "tgw-provider/canonical-plan-graph-ef5a07e9b4b9/1.0/build.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744293,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:b2b8c733478ed7241ac84739d747b87f8fdc43b473ed918203ca900e9bd17674",
+            "size": 82,
+            "uid": 1004
+          },
+          "path": "tgw-provider/canonical-plan-graph-ef5a07e9b4b9/1.0/definition.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744298,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "size": 1,
+            "uid": 1004
+          },
+          "path": "tgw-provider/native-exact-resolver-f299f288d714/1.0/build.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744297,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:d2bd68d5e2639261720f885ae001de68b86b687543ef0e5d3496c434d94de4f5",
+            "size": 181,
+            "uid": 1004
+          },
+          "path": "tgw-provider/native-exact-resolver-f299f288d714/1.0/definition.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744302,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "size": 1,
+            "uid": 1004
+          },
+          "path": "tgw-provider/recovered-promptcraft-61cc52ddd5f8/1.0/build.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744301,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:bdcad3136f10f4cf3c6e0d787bafbfa14edd49644e80442a2291534dfa64c434",
+            "size": 83,
+            "uid": 1004
+          },
+          "path": "tgw-provider/recovered-promptcraft-61cc52ddd5f8/1.0/definition.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744306,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "size": 1,
+            "uid": 1004
+          },
+          "path": "tgw-provider/shared-tgw-plan-skill-45e674fc5827/1.0/build.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744305,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:2f886437e35958de36e386dfc5e587dbb75bd851c1f0dd26d79eed5064faf7ca",
+            "size": 181,
+            "uid": 1004
+          },
+          "path": "tgw-provider/shared-tgw-plan-skill-45e674fc5827/1.0/definition.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744311,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "size": 1,
+            "uid": 1004
+          },
+          "path": "tgw-target/closure/1.0/build.yaml"
+        },
+        {
+          "before": {
+            "ctime_ns": 1786578346615996629,
+            "dev": 35,
+            "gid": 1004,
+            "inode": 5744310,
+            "mode": "0664",
+            "mtime_ns": 1786578346615996629,
+            "nlink": 1,
+            "sha256": "sha256:85f6d5fb0f95a84a96f481d63a1901cb58bf02c745425af77173ade37d0431d2",
+            "size": 879,
+            "uid": 1004
+          },
+          "path": "tgw-target/closure/1.0/definition.yaml"
+        }
+      ],
+      "path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree"
     }
   ],
+  "inputs": [
+    {
+      "actual_fd_path": "/proc/2637415/fd/4",
+      "after": {
+        "ctime_ns": 1786576287569188807,
+        "dev": 39,
+        "gid": 0,
+        "inode": 7565322,
+        "mode": "0444",
+        "mtime_ns": 1786576287405190428,
+        "nlink": 1,
+        "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+        "size": 48513496,
+        "uid": 0
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786576287569188807,
+        "dev": 39,
+        "gid": 0,
+        "inode": 7565322,
+        "mode": "0444",
+        "mtime_ns": 1786576287405190428,
+        "nlink": 1,
+        "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+        "size": 48513496,
+        "uid": 0
+      },
+      "held_fd": 4,
+      "logical_path": "/opt/TGW/evidence/codex/sha256/c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+      "named_after": {
+        "ctime_ns": 1786576287569188807,
+        "dev": 39,
+        "gid": 0,
+        "inode": 7565322,
+        "mode": "0444",
+        "mtime_ns": 1786576287405190428,
+        "nlink": 1,
+        "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+        "size": 48513496,
+        "uid": 0
+      },
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/6",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744274,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744274,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "held_fd": 6,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/build-governed-execution-e774c20d2664/1.0/build.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744274,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/7",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744273,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:f17ebcfc3201f47f0439254a90622f020285c30887b788e1d9ff11cae9e8bc32",
+        "size": 371,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744273,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:f17ebcfc3201f47f0439254a90622f020285c30887b788e1d9ff11cae9e8bc32",
+        "size": 371,
+        "uid": 1004
+      },
+      "held_fd": 7,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/build-governed-execution-e774c20d2664/1.0/definition.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744273,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:f17ebcfc3201f47f0439254a90622f020285c30887b788e1d9ff11cae9e8bc32",
+        "size": 371,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/8",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744278,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744278,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "held_fd": 8,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/build-harness-role-lanes-6d26b3b40b48/1.0/build.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744278,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/9",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744277,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:fe3fde95df9c18e4b2bab9b12971a4f67bdd760b2501b80d02405752a968edaf",
+        "size": 274,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744277,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:fe3fde95df9c18e4b2bab9b12971a4f67bdd760b2501b80d02405752a968edaf",
+        "size": 274,
+        "uid": 1004
+      },
+      "held_fd": 9,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/build-harness-role-lanes-6d26b3b40b48/1.0/definition.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744277,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:fe3fde95df9c18e4b2bab9b12971a4f67bdd760b2501b80d02405752a968edaf",
+        "size": 274,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/10",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744282,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744282,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "held_fd": 10,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/build-operator-authority-b7a02e5364cd/1.0/build.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744282,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/11",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744281,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:5d5aa5298eba8b944b2e2dd52d4cbb5349d6601efd73b318225e4931f0baeb14",
+        "size": 190,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744281,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:5d5aa5298eba8b944b2e2dd52d4cbb5349d6601efd73b318225e4931f0baeb14",
+        "size": 190,
+        "uid": 1004
+      },
+      "held_fd": 11,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/build-operator-authority-b7a02e5364cd/1.0/definition.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744281,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:5d5aa5298eba8b944b2e2dd52d4cbb5349d6601efd73b318225e4931f0baeb14",
+        "size": 190,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/12",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744286,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744286,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "held_fd": 12,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/build-operator-surface-19a8282bce54/1.0/build.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744286,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/13",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744285,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:e45255af59c761b32d1a3ff7ae26d050bbce01ac80d0c286f39f7fb24ab94d6d",
+        "size": 186,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744285,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:e45255af59c761b32d1a3ff7ae26d050bbce01ac80d0c286f39f7fb24ab94d6d",
+        "size": 186,
+        "uid": 1004
+      },
+      "held_fd": 13,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/build-operator-surface-19a8282bce54/1.0/definition.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744285,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:e45255af59c761b32d1a3ff7ae26d050bbce01ac80d0c286f39f7fb24ab94d6d",
+        "size": 186,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/14",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744290,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744290,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "held_fd": 14,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/build-workflow-convergence-d49c3defa8cd/1.0/build.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744290,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/15",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744289,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:78250e2852234d52f5ee741a1d4cd40b55eee9e78d7c0f6a0c8f1c62d8078e6f",
+        "size": 88,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744289,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:78250e2852234d52f5ee741a1d4cd40b55eee9e78d7c0f6a0c8f1c62d8078e6f",
+        "size": 88,
+        "uid": 1004
+      },
+      "held_fd": 15,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/build-workflow-convergence-d49c3defa8cd/1.0/definition.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744289,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:78250e2852234d52f5ee741a1d4cd40b55eee9e78d7c0f6a0c8f1c62d8078e6f",
+        "size": 88,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/16",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744294,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744294,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "held_fd": 16,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/canonical-plan-graph-ef5a07e9b4b9/1.0/build.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744294,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/17",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744293,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:b2b8c733478ed7241ac84739d747b87f8fdc43b473ed918203ca900e9bd17674",
+        "size": 82,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744293,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:b2b8c733478ed7241ac84739d747b87f8fdc43b473ed918203ca900e9bd17674",
+        "size": 82,
+        "uid": 1004
+      },
+      "held_fd": 17,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/canonical-plan-graph-ef5a07e9b4b9/1.0/definition.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744293,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:b2b8c733478ed7241ac84739d747b87f8fdc43b473ed918203ca900e9bd17674",
+        "size": 82,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/18",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744298,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744298,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "held_fd": 18,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/native-exact-resolver-f299f288d714/1.0/build.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744298,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/19",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744297,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:d2bd68d5e2639261720f885ae001de68b86b687543ef0e5d3496c434d94de4f5",
+        "size": 181,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744297,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:d2bd68d5e2639261720f885ae001de68b86b687543ef0e5d3496c434d94de4f5",
+        "size": 181,
+        "uid": 1004
+      },
+      "held_fd": 19,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/native-exact-resolver-f299f288d714/1.0/definition.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744297,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:d2bd68d5e2639261720f885ae001de68b86b687543ef0e5d3496c434d94de4f5",
+        "size": 181,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/20",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744302,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744302,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "held_fd": 20,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/recovered-promptcraft-61cc52ddd5f8/1.0/build.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744302,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/21",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744301,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:bdcad3136f10f4cf3c6e0d787bafbfa14edd49644e80442a2291534dfa64c434",
+        "size": 83,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744301,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:bdcad3136f10f4cf3c6e0d787bafbfa14edd49644e80442a2291534dfa64c434",
+        "size": 83,
+        "uid": 1004
+      },
+      "held_fd": 21,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/recovered-promptcraft-61cc52ddd5f8/1.0/definition.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744301,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:bdcad3136f10f4cf3c6e0d787bafbfa14edd49644e80442a2291534dfa64c434",
+        "size": 83,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/22",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744306,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744306,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "held_fd": 22,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/shared-tgw-plan-skill-45e674fc5827/1.0/build.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744306,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/23",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744305,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:2f886437e35958de36e386dfc5e587dbb75bd851c1f0dd26d79eed5064faf7ca",
+        "size": 181,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744305,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:2f886437e35958de36e386dfc5e587dbb75bd851c1f0dd26d79eed5064faf7ca",
+        "size": 181,
+        "uid": 1004
+      },
+      "held_fd": 23,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-provider/shared-tgw-plan-skill-45e674fc5827/1.0/definition.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744305,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:2f886437e35958de36e386dfc5e587dbb75bd851c1f0dd26d79eed5064faf7ca",
+        "size": 181,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/24",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744311,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744311,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "held_fd": 24,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-target/closure/1.0/build.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744311,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size": 1,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/25",
+      "after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744310,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:85f6d5fb0f95a84a96f481d63a1901cb58bf02c745425af77173ade37d0431d2",
+        "size": 879,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744310,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:85f6d5fb0f95a84a96f481d63a1901cb58bf02c745425af77173ade37d0431d2",
+        "size": 879,
+        "uid": 1004
+      },
+      "held_fd": 25,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree/tgw-target/closure/1.0/definition.yaml",
+      "named_after": {
+        "ctime_ns": 1786578346615996629,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744310,
+        "mode": "0664",
+        "mtime_ns": 1786578346615996629,
+        "nlink": 1,
+        "sha256": "sha256:85f6d5fb0f95a84a96f481d63a1901cb58bf02c745425af77173ade37d0431d2",
+        "size": 879,
+        "uid": 1004
+      },
+      "tree": "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+      "unchanged": true
+    }
+  ],
+  "logical_replay_argv": [
+    "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    "/opt/TGW/evidence/codex/sha256/c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+    "tree",
+    "pkglist",
+    "--tree",
+    "/tmp/tgw-freeze-f3cefe5-gates/luet-tree",
+    "--deps",
+    "--matches",
+    "^tgw-target/closure$",
+    "--output",
+    "json"
+  ],
   "rc": 0,
-  "schema": "tgw-freeze-execution-record/v1",
+  "schema": "tgw-freeze-execution-record/v2",
   "semantic": {
     "package_count": 9,
     "raw_cli": true,
@@ -67,7 +1346,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:27:15.211682Z",
+  "started_at": "2026-08-12T23:45:46.959338Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -79,5 +1358,5 @@
     "sha256": "sha256:0e68619a387c24c779525e6e3fb35e93aeb9d43475bf3d4ddd299571f1d47cba"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:d715310912b2defd8450a424c50acd97e193fef3558816bea9d80847c5eb2d0b"
+  "unsigned_sha256": "sha256:6af28876e096fceede7b7c803f84ac5dfbb80d133fda01334ddcb0c4b6c83492"
 }

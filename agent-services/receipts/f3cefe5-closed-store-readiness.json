@@ -1,5 +1,5 @@
 {
-  "artifact_count": 36,
+  "artifact_count": 42,
   "artifact_root": {
     "dev": 39,
     "gid": 0,
@@ -13,13 +13,28 @@
     {
       "dev": 39,
       "gid": 0,
+      "inode": 7565517,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/07c9a63a6b89f43fd09fc19a1472c660c721c58760c59509e90d7e79cae1bdd5",
+      "ref": "artifact:sha256:07c9a63a6b89f43fd09fc19a1472c660c721c58760c59509e90d7e79cae1bdd5",
+      "roles": [
+        "native_asan_ubsan_build_negative:generated:native-sanitizer-negative"
+      ],
+      "sha256": "sha256:07c9a63a6b89f43fd09fc19a1472c660c721c58760c59509e90d7e79cae1bdd5",
+      "size": 237968,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
       "inode": 7565368,
       "mode": "0444",
       "nlink": 1,
       "path": "/opt/TGW/evidence/codex/sha256/0cb01c661eba4ff2e5469bf144460aba48ca4c2bdd4e43ae11d5050764dc5fd9",
       "ref": "artifact:sha256:0cb01c661eba4ff2e5469bf144460aba48ca4c2bdd4e43ae11d5050764dc5fd9",
       "roles": [
-        "native_asan_ubsan_build_negative:generated:native-sanitizer-negative"
+        "preserved_prior_raw_input"
       ],
       "sha256": "sha256:0cb01c661eba4ff2e5469bf144460aba48ca4c2bdd4e43ae11d5050764dc5fd9",
       "size": 238000,
@@ -38,6 +53,21 @@
       ],
       "sha256": "sha256:0e68619a387c24c779525e6e3fb35e93aeb9d43475bf3d4ddd299571f1d47cba",
       "size": 1843,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565515,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/17aa782d18d947154e7b51c4995d9600293853fbb32222773b8e41f471eea1e9",
+      "ref": "artifact:sha256:17aa782d18d947154e7b51c4995d9600293853fbb32222773b8e41f471eea1e9",
+      "roles": [
+        "native_gcc_werror:generated:native-werror"
+      ],
+      "sha256": "sha256:17aa782d18d947154e7b51c4995d9600293853fbb32222773b8e41f471eea1e9",
+      "size": 41552,
       "uid": 0
     },
     {
@@ -139,7 +169,7 @@
       "path": "/opt/TGW/evidence/codex/sha256/49a0c89a32626d8fc65661b1cc5c9ca6dcb25488aa820deed066b9ebf44b6550",
       "ref": "artifact:sha256:49a0c89a32626d8fc65661b1cc5c9ca6dcb25488aa820deed066b9ebf44b6550",
       "roles": [
-        "native_asan_ubsan_build_positive:generated:native-sanitizer-positive"
+        "preserved_prior_raw_input"
       ],
       "sha256": "sha256:49a0c89a32626d8fc65661b1cc5c9ca6dcb25488aa820deed066b9ebf44b6550",
       "size": 238000,
@@ -158,6 +188,21 @@
       ],
       "sha256": "sha256:49c79058b04a2b3c97be4765e794a1a615c771b76a57982f3f7c5953a1c175a3",
       "size": 460392,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565514,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/5a405da592d44ff997d304aaeabf9a71cdb451333b6fd0eb15f8f9a68d063117",
+      "ref": "artifact:sha256:5a405da592d44ff997d304aaeabf9a71cdb451333b6fd0eb15f8f9a68d063117",
+      "roles": [
+        "focused_pytest:stdout"
+      ],
+      "sha256": "sha256:5a405da592d44ff997d304aaeabf9a71cdb451333b6fd0eb15f8f9a68d063117",
+      "size": 272,
       "uid": 0
     },
     {
@@ -184,7 +229,7 @@
       "path": "/opt/TGW/evidence/codex/sha256/67d186982e6a966a657855f61098f6dd496217e9daaa74770b51d88695bcd712",
       "ref": "artifact:sha256:67d186982e6a966a657855f61098f6dd496217e9daaa74770b51d88695bcd712",
       "roles": [
-        "native_gcc_werror:generated:native-werror"
+        "preserved_prior_raw_input"
       ],
       "sha256": "sha256:67d186982e6a966a657855f61098f6dd496217e9daaa74770b51d88695bcd712",
       "size": 41592,
@@ -199,7 +244,7 @@
       "path": "/opt/TGW/evidence/codex/sha256/6c20023d56dc25f072621520950de2694a4d936416830e0e6dbbde81059dfbd8",
       "ref": "artifact:sha256:6c20023d56dc25f072621520950de2694a4d936416830e0e6dbbde81059dfbd8",
       "roles": [
-        "full_pytest_junit:stdout"
+        "preserved_prior_raw_input"
       ],
       "sha256": "sha256:6c20023d56dc25f072621520950de2694a4d936416830e0e6dbbde81059dfbd8",
       "size": 4204,
@@ -298,16 +343,46 @@
     {
       "dev": 39,
       "gid": 0,
+      "inode": 7565512,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/8a6155aa3edf13c0ef7b60eb1b0556010bc9ce27c7643ae867359e595b60c0a1",
+      "ref": "artifact:sha256:8a6155aa3edf13c0ef7b60eb1b0556010bc9ce27c7643ae867359e595b60c0a1",
+      "roles": [
+        "full_pytest_junit:generated:full-junit.xml"
+      ],
+      "sha256": "sha256:8a6155aa3edf13c0ef7b60eb1b0556010bc9ce27c7643ae867359e595b60c0a1",
+      "size": 460393,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
       "inode": 7565280,
       "mode": "0444",
       "nlink": 1,
       "path": "/opt/TGW/evidence/codex/sha256/8fb3d9740891d65e21c72cdb9459850222c39288095831a2a6e64220bd87ed71",
       "ref": "artifact:sha256:8fb3d9740891d65e21c72cdb9459850222c39288095831a2a6e64220bd87ed71",
       "roles": [
-        "preserved_prior_raw_input"
+        "luet_derived_tgw_receipt:stdout"
       ],
       "sha256": "sha256:8fb3d9740891d65e21c72cdb9459850222c39288095831a2a6e64220bd87ed71",
       "size": 1068,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565516,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/b28b061e8219860e5d4ce2c156aaabe40fe32eb3055e8e9670eb387fb6900456",
+      "ref": "artifact:sha256:b28b061e8219860e5d4ce2c156aaabe40fe32eb3055e8e9670eb387fb6900456",
+      "roles": [
+        "native_asan_ubsan_build_positive:generated:native-sanitizer-positive"
+      ],
+      "sha256": "sha256:b28b061e8219860e5d4ce2c156aaabe40fe32eb3055e8e9670eb387fb6900456",
+      "size": 237968,
       "uid": 0
     },
     {
@@ -334,7 +409,7 @@
       "path": "/opt/TGW/evidence/codex/sha256/b59a6a90ffcd2644af828232492816648d025d2f78810cf1d3bf1567209ebad5",
       "ref": "artifact:sha256:b59a6a90ffcd2644af828232492816648d025d2f78810cf1d3bf1567209ebad5",
       "roles": [
-        "luet_derived_tgw_receipt:stdout"
+        "preserved_prior_raw_input"
       ],
       "sha256": "sha256:b59a6a90ffcd2644af828232492816648d025d2f78810cf1d3bf1567209ebad5",
       "size": 1068,
@@ -383,6 +458,21 @@
       ],
       "sha256": "sha256:bedcb9a901c0e7c033fe2bbef5fe81c75bd9bad9305c5501b3ca7d26abb2b4ab",
       "size": 272,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565513,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/c1ebf3ec3f509ddc042ec3c23020db21675d5974f2f2a2629d07c99c110d01f4",
+      "ref": "artifact:sha256:c1ebf3ec3f509ddc042ec3c23020db21675d5974f2f2a2629d07c99c110d01f4",
+      "roles": [
+        "full_pytest_junit:stdout"
+      ],
+      "sha256": "sha256:c1ebf3ec3f509ddc042ec3c23020db21675d5974f2f2a2629d07c99c110d01f4",
+      "size": 4204,
       "uid": 0
     },
     {
@@ -439,7 +529,7 @@
       "path": "/opt/TGW/evidence/codex/sha256/db7017390c9fcb98942d6baed92a92b91fa46d419f533bdf6d4067f86faf7f35",
       "ref": "artifact:sha256:db7017390c9fcb98942d6baed92a92b91fa46d419f533bdf6d4067f86faf7f35",
       "roles": [
-        "focused_pytest:stdout"
+        "preserved_prior_raw_input"
       ],
       "sha256": "sha256:db7017390c9fcb98942d6baed92a92b91fa46d419f533bdf6d4067f86faf7f35",
       "size": 272,
@@ -569,7 +659,7 @@
       "path": "/opt/TGW/evidence/codex/sha256/f51489ca7967d0f305b15f862ae7a4c8b9b550d8509c6dc410145ba6fc9f5632",
       "ref": "artifact:sha256:f51489ca7967d0f305b15f862ae7a4c8b9b550d8509c6dc410145ba6fc9f5632",
       "roles": [
-        "full_pytest_junit:generated:full-junit.xml"
+        "preserved_prior_raw_input"
       ],
       "sha256": "sha256:f51489ca7967d0f305b15f862ae7a4c8b9b550d8509c6dc410145ba6fc9f5632",
       "size": 460393,
@@ -587,5 +677,5 @@
   "schema": "tgw-protected-store-readiness/v2",
   "status": "PASS",
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in parent document",
-  "unsigned_sha256": "sha256:3f9527892b60f35290fda4432c4046e205141be5d37f47e59a8c124c2bbd751a"
+  "unsigned_sha256": "sha256:89eb8b354615fbfe18f356c9098e916b5fbaedc8c8136826e8f1af3d42796cad"
 }

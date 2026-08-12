@@ -1,19 +1,29 @@
 {
-  "argv": [
-    "/usr/bin/python3.13",
-    "/tmp/tgw-freeze-f3cefe5-source/scripts/solve_governed_platform.py",
-    "--plan-root",
-    "/tmp/tgw-freeze-plan-fb9fee3",
-    "--catalog",
-    "/tmp/tgw-freeze-f3cefe5-source/agent-services/catalogs/governed-execution-platform-v1.json",
+  "actual_execve_argv": [
+    "/proc/2637415/fd/4",
+    "/proc/2637415/fd/5",
+    "generate-solution",
+    "--graph",
+    "/proc/2637415/fd/8",
     "--luet",
-    "/tmp/tgw-freeze-f3cefe5-gates/luet-protected-exec",
+    "/proc/2637415/fd/6",
     "--output",
     "/tmp/tgw-freeze-f3cefe5-gates/plan-solution.json"
   ],
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
-  "duration_ns": 187325648,
-  "ended_at": "2026-08-12T23:27:15.715080Z",
+  "descriptor_execution": {
+    "executable_fd": 4,
+    "parent_pid": 2637415,
+    "pass_fds": [
+      4,
+      5,
+      6,
+      3,
+      8
+    ]
+  },
+  "duration_ns": 157112921,
+  "ended_at": "2026-08-12T23:45:47.888874Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -28,86 +38,271 @@
     }
   },
   "executable": {
-    "dev": 2050,
-    "gid": 0,
-    "inode": 2098567,
-    "mode": "0755",
-    "nlink": 1,
-    "path": "/usr/bin/python3.13",
-    "sha256": "sha256:17b78e0a93175e86f9ac03141924fd7a7f0c0c52e66b34bfa0de20ffef989df1",
-    "size": 6812336,
-    "uid": 0
+    "actual_fd_path": "/proc/2637415/fd/4",
+    "after": {
+      "ctime_ns": 1785206623509726712,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2098567,
+      "mode": "0755",
+      "mtime_ns": 1784147140000000000,
+      "nlink": 1,
+      "sha256": "sha256:17b78e0a93175e86f9ac03141924fd7a7f0c0c52e66b34bfa0de20ffef989df1",
+      "size": 6812336,
+      "uid": 0
+    },
+    "before": {
+      "ctime_ns": 1785206623509726712,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2098567,
+      "mode": "0755",
+      "mtime_ns": 1784147140000000000,
+      "nlink": 1,
+      "sha256": "sha256:17b78e0a93175e86f9ac03141924fd7a7f0c0c52e66b34bfa0de20ffef989df1",
+      "size": 6812336,
+      "uid": 0
+    },
+    "component_safe_open": true,
+    "held_fd": 4,
+    "logical_path": "/usr/bin/python3.13",
+    "unchanged": true
   },
   "gate_id": "plan_solution_generation",
   "generated_artifacts": [
     {
+      "after": {
+        "ctime_ns": 1786578347875983879,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5540147,
+        "mode": "0664",
+        "mtime_ns": 1786578347875983879,
+        "nlink": 1,
+        "sha256": "sha256:ddaa9573c90ee6fc0612d8ea5f01613e8f7fe722cf320504b1e3f297a8c466d4",
+        "size": 5972,
+        "uid": 1004
+      },
+      "before": {
+        "ctime_ns": 1786578347875983879,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5540147,
+        "mode": "0664",
+        "mtime_ns": 1786578347875983879,
+        "nlink": 1,
+        "sha256": "sha256:ddaa9573c90ee6fc0612d8ea5f01613e8f7fe722cf320504b1e3f297a8c466d4",
+        "size": 5972,
+        "uid": 1004
+      },
       "bytes": 5972,
+      "named_after": {
+        "ctime_ns": 1786578347875983879,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5540147,
+        "mode": "0664",
+        "mtime_ns": 1786578347875983879,
+        "nlink": 1,
+        "sha256": "sha256:ddaa9573c90ee6fc0612d8ea5f01613e8f7fe722cf320504b1e3f297a8c466d4",
+        "size": 5972,
+        "uid": 1004
+      },
       "ref": "artifact:sha256:ddaa9573c90ee6fc0612d8ea5f01613e8f7fe722cf320504b1e3f297a8c466d4",
       "role": "plan-solution.json",
       "sha256": "sha256:ddaa9573c90ee6fc0612d8ea5f01613e8f7fe722cf320504b1e3f297a8c466d4",
-      "source_path": "/tmp/tgw-freeze-f3cefe5-gates/plan-solution.json"
+      "source_path": "/tmp/tgw-freeze-f3cefe5-gates/plan-solution.json",
+      "unchanged": true
     }
   ],
-  "held_executable_via_proc_fd": true,
+  "input_trees": [],
   "inputs": [
     {
-      "dev": 35,
-      "gid": 1004,
-      "inode": 5497276,
-      "mode": "0664",
-      "nlink": 1,
-      "path": "/tmp/tgw-freeze-f3cefe5-source/scripts/solve_governed_platform.py",
-      "sha256": "sha256:b65bb9f3df4c2e2aa57b44c71f2d53b49a21aef793b16c7c9f1b21d5c7c53680",
-      "size": 2022,
-      "uid": 1004
+      "actual_fd_path": "/proc/2637415/fd/5",
+      "after": {
+        "ctime_ns": 1786578058306923876,
+        "dev": 39,
+        "gid": 983,
+        "inode": 7565313,
+        "mode": "0664",
+        "mtime_ns": 1786578058306923876,
+        "nlink": 1,
+        "sha256": "sha256:f032e57cdb0c8a7e13532b73ab11640bc7b8ef2b0c68138ab0a742e669b73fd5",
+        "size": 4465,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578058306923876,
+        "dev": 39,
+        "gid": 983,
+        "inode": 7565313,
+        "mode": "0664",
+        "mtime_ns": 1786578058306923876,
+        "nlink": 1,
+        "sha256": "sha256:f032e57cdb0c8a7e13532b73ab11640bc7b8ef2b0c68138ab0a742e669b73fd5",
+        "size": 4465,
+        "uid": 1004
+      },
+      "held_fd": 5,
+      "logical_path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/agent-services/freeze/f3cefe5/freeze_gate_tools.py",
+      "named_after": {
+        "ctime_ns": 1786578058306923876,
+        "dev": 39,
+        "gid": 983,
+        "inode": 7565313,
+        "mode": "0664",
+        "mtime_ns": 1786578058306923876,
+        "nlink": 1,
+        "sha256": "sha256:f032e57cdb0c8a7e13532b73ab11640bc7b8ef2b0c68138ab0a742e669b73fd5",
+        "size": 4465,
+        "uid": 1004
+      },
+      "unchanged": true
     },
     {
-      "dev": 35,
-      "gid": 1004,
-      "inode": 5621629,
-      "mode": "0555",
-      "nlink": 1,
-      "path": "/tmp/tgw-freeze-f3cefe5-gates/luet-protected-exec",
-      "sha256": "sha256:ffc5970a97a9927ce921d9bfd7829e452c0c413c7700f45a904aac04253c8ca4",
-      "size": 144,
-      "uid": 1004
+      "actual_fd_path": "/proc/2637415/fd/6",
+      "after": {
+        "ctime_ns": 1786578345756005331,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5621629,
+        "mode": "0555",
+        "mtime_ns": 1786578345756005331,
+        "nlink": 1,
+        "sha256": "sha256:ffc5970a97a9927ce921d9bfd7829e452c0c413c7700f45a904aac04253c8ca4",
+        "size": 144,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578345756005331,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5621629,
+        "mode": "0555",
+        "mtime_ns": 1786578345756005331,
+        "nlink": 1,
+        "sha256": "sha256:ffc5970a97a9927ce921d9bfd7829e452c0c413c7700f45a904aac04253c8ca4",
+        "size": 144,
+        "uid": 1004
+      },
+      "held_fd": 6,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/luet-protected-exec",
+      "named_after": {
+        "ctime_ns": 1786578345756005331,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5621629,
+        "mode": "0555",
+        "mtime_ns": 1786578345756005331,
+        "nlink": 1,
+        "sha256": "sha256:ffc5970a97a9927ce921d9bfd7829e452c0c413c7700f45a904aac04253c8ca4",
+        "size": 144,
+        "uid": 1004
+      },
+      "unchanged": true
     },
     {
-      "dev": 39,
-      "gid": 0,
-      "inode": 7565322,
-      "mode": "0444",
-      "nlink": 1,
-      "path": "/opt/TGW/evidence/codex/sha256/c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
-      "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
-      "size": 48513496,
-      "uid": 0
+      "actual_fd_path": "/proc/2637415/fd/3",
+      "after": {
+        "ctime_ns": 1786576287569188807,
+        "dev": 39,
+        "gid": 0,
+        "inode": 7565322,
+        "mode": "0444",
+        "mtime_ns": 1786576287405190428,
+        "nlink": 1,
+        "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+        "size": 48513496,
+        "uid": 0
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786576287569188807,
+        "dev": 39,
+        "gid": 0,
+        "inode": 7565322,
+        "mode": "0444",
+        "mtime_ns": 1786576287405190428,
+        "nlink": 1,
+        "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+        "size": 48513496,
+        "uid": 0
+      },
+      "held_fd": 3,
+      "logical_path": "/opt/TGW/evidence/codex/sha256/c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+      "named_after": {
+        "ctime_ns": 1786576287569188807,
+        "dev": 39,
+        "gid": 0,
+        "inode": 7565322,
+        "mode": "0444",
+        "mtime_ns": 1786576287405190428,
+        "nlink": 1,
+        "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+        "size": 48513496,
+        "uid": 0
+      },
+      "unchanged": true
     },
     {
-      "dev": 35,
-      "gid": 1004,
-      "inode": 5540047,
-      "mode": "0664",
-      "nlink": 1,
-      "path": "/tmp/tgw-freeze-f3cefe5-gates/plan-graph.json",
-      "sha256": "sha256:b90d3eebcfe3fa901ebb0f26519133e826ec01115468064ef59973226fc07ad9",
-      "size": 4920,
-      "uid": 1004
-    },
-    {
-      "dev": 35,
-      "gid": 1004,
-      "inode": 5496703,
-      "mode": "0664",
-      "nlink": 1,
-      "path": "/tmp/tgw-freeze-f3cefe5-source/agent-services/catalogs/governed-execution-platform-v1.json",
-      "sha256": "sha256:eacf4d6537a120c8d80d0779bb385f485dbd62df3121132430e4a85914f0265c",
-      "size": 2750,
-      "uid": 1004
+      "actual_fd_path": "/proc/2637415/fd/8",
+      "after": {
+        "ctime_ns": 1786578345604006869,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5540047,
+        "mode": "0664",
+        "mtime_ns": 1786578345604006869,
+        "nlink": 1,
+        "sha256": "sha256:b90d3eebcfe3fa901ebb0f26519133e826ec01115468064ef59973226fc07ad9",
+        "size": 4920,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578345604006869,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5540047,
+        "mode": "0664",
+        "mtime_ns": 1786578345604006869,
+        "nlink": 1,
+        "sha256": "sha256:b90d3eebcfe3fa901ebb0f26519133e826ec01115468064ef59973226fc07ad9",
+        "size": 4920,
+        "uid": 1004
+      },
+      "held_fd": 8,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/plan-graph.json",
+      "named_after": {
+        "ctime_ns": 1786578345604006869,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5540047,
+        "mode": "0664",
+        "mtime_ns": 1786578345604006869,
+        "nlink": 1,
+        "sha256": "sha256:b90d3eebcfe3fa901ebb0f26519133e826ec01115468064ef59973226fc07ad9",
+        "size": 4920,
+        "uid": 1004
+      },
+      "unchanged": true
     }
   ],
+  "logical_replay_argv": [
+    "/usr/bin/python3.13",
+    "/opt/TGW/tgw-lib/src/trader-grims-warehouse/agent-services/freeze/f3cefe5/freeze_gate_tools.py",
+    "generate-solution",
+    "--graph",
+    "/tmp/tgw-freeze-f3cefe5-gates/plan-graph.json",
+    "--luet",
+    "/tmp/tgw-freeze-f3cefe5-gates/luet-protected-exec",
+    "--output",
+    "/tmp/tgw-freeze-f3cefe5-gates/plan-solution.json"
+  ],
   "rc": 0,
-  "schema": "tgw-freeze-execution-record/v1",
+  "schema": "tgw-freeze-execution-record/v2",
   "semantic": {
     "closure_hash": "sha256:bc0c53b2574fc359c629bd213e078fdd2824e5e1c4a98c0c7a347de869d9e6f8",
     "solution_hash": "sha256:d28650c26c6a3d26d6c943597ccb7abd7c6670b1703d9ce941ac5ed7a2d73a4d",
@@ -118,7 +313,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:27:15.527723Z",
+  "started_at": "2026-08-12T23:45:47.731735Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -130,5 +325,5 @@
     "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:684f8a237c766c2cfe60f423148f1bddf0c0d91be317f9a66632ccf4c1af0374"
+  "unsigned_sha256": "sha256:b44dae228607f8a7d751e77a44f98289942138abd73ecead2e609bacfccb31cf"
 }

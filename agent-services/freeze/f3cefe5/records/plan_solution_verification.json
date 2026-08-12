@@ -1,16 +1,25 @@
 {
-  "argv": [
-    "/usr/bin/python3.13",
-    "/opt/TGW/tgw-lib/src/trader-grims-warehouse/agent-services/freeze/f3cefe5/freeze_gate_tools.py",
+  "actual_execve_argv": [
+    "/proc/2637415/fd/4",
+    "/proc/2637415/fd/5",
     "verify-solution",
     "--solution",
-    "/tmp/tgw-freeze-f3cefe5-gates/plan-solution.json",
+    "/proc/2637415/fd/6",
     "--plan-commit",
     "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
   ],
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
-  "duration_ns": 107356064,
-  "ended_at": "2026-08-12T23:27:16.144824Z",
+  "descriptor_execution": {
+    "executable_fd": 4,
+    "parent_pid": 2637415,
+    "pass_fds": [
+      4,
+      5,
+      6
+    ]
+  },
+  "duration_ns": 118161123,
+  "ended_at": "2026-08-12T23:45:48.585726Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -25,45 +34,138 @@
     }
   },
   "executable": {
-    "dev": 2050,
-    "gid": 0,
-    "inode": 2098567,
-    "mode": "0755",
-    "nlink": 1,
-    "path": "/usr/bin/python3.13",
-    "sha256": "sha256:17b78e0a93175e86f9ac03141924fd7a7f0c0c52e66b34bfa0de20ffef989df1",
-    "size": 6812336,
-    "uid": 0
+    "actual_fd_path": "/proc/2637415/fd/4",
+    "after": {
+      "ctime_ns": 1785206623509726712,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2098567,
+      "mode": "0755",
+      "mtime_ns": 1784147140000000000,
+      "nlink": 1,
+      "sha256": "sha256:17b78e0a93175e86f9ac03141924fd7a7f0c0c52e66b34bfa0de20ffef989df1",
+      "size": 6812336,
+      "uid": 0
+    },
+    "before": {
+      "ctime_ns": 1785206623509726712,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2098567,
+      "mode": "0755",
+      "mtime_ns": 1784147140000000000,
+      "nlink": 1,
+      "sha256": "sha256:17b78e0a93175e86f9ac03141924fd7a7f0c0c52e66b34bfa0de20ffef989df1",
+      "size": 6812336,
+      "uid": 0
+    },
+    "component_safe_open": true,
+    "held_fd": 4,
+    "logical_path": "/usr/bin/python3.13",
+    "unchanged": true
   },
   "gate_id": "plan_solution_verification",
   "generated_artifacts": [],
-  "held_executable_via_proc_fd": true,
+  "input_trees": [],
   "inputs": [
     {
-      "dev": 39,
-      "gid": 983,
-      "inode": 7565313,
-      "mode": "0664",
-      "nlink": 1,
-      "path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/agent-services/freeze/f3cefe5/freeze_gate_tools.py",
-      "sha256": "sha256:0f270383cf27736ad93d731aad74f9b17d859c37e9a46f384059f5570a233c6a",
-      "size": 2685,
-      "uid": 1004
+      "actual_fd_path": "/proc/2637415/fd/5",
+      "after": {
+        "ctime_ns": 1786578058306923876,
+        "dev": 39,
+        "gid": 983,
+        "inode": 7565313,
+        "mode": "0664",
+        "mtime_ns": 1786578058306923876,
+        "nlink": 1,
+        "sha256": "sha256:f032e57cdb0c8a7e13532b73ab11640bc7b8ef2b0c68138ab0a742e669b73fd5",
+        "size": 4465,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578058306923876,
+        "dev": 39,
+        "gid": 983,
+        "inode": 7565313,
+        "mode": "0664",
+        "mtime_ns": 1786578058306923876,
+        "nlink": 1,
+        "sha256": "sha256:f032e57cdb0c8a7e13532b73ab11640bc7b8ef2b0c68138ab0a742e669b73fd5",
+        "size": 4465,
+        "uid": 1004
+      },
+      "held_fd": 5,
+      "logical_path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/agent-services/freeze/f3cefe5/freeze_gate_tools.py",
+      "named_after": {
+        "ctime_ns": 1786578058306923876,
+        "dev": 39,
+        "gid": 983,
+        "inode": 7565313,
+        "mode": "0664",
+        "mtime_ns": 1786578058306923876,
+        "nlink": 1,
+        "sha256": "sha256:f032e57cdb0c8a7e13532b73ab11640bc7b8ef2b0c68138ab0a742e669b73fd5",
+        "size": 4465,
+        "uid": 1004
+      },
+      "unchanged": true
     },
     {
-      "dev": 35,
-      "gid": 1004,
-      "inode": 5540147,
-      "mode": "0664",
-      "nlink": 1,
-      "path": "/tmp/tgw-freeze-f3cefe5-gates/plan-solution.json",
-      "sha256": "sha256:ddaa9573c90ee6fc0612d8ea5f01613e8f7fe722cf320504b1e3f297a8c466d4",
-      "size": 5972,
-      "uid": 1004
+      "actual_fd_path": "/proc/2637415/fd/6",
+      "after": {
+        "ctime_ns": 1786578347875983879,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5540147,
+        "mode": "0664",
+        "mtime_ns": 1786578347875983879,
+        "nlink": 1,
+        "sha256": "sha256:ddaa9573c90ee6fc0612d8ea5f01613e8f7fe722cf320504b1e3f297a8c466d4",
+        "size": 5972,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578347875983879,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5540147,
+        "mode": "0664",
+        "mtime_ns": 1786578347875983879,
+        "nlink": 1,
+        "sha256": "sha256:ddaa9573c90ee6fc0612d8ea5f01613e8f7fe722cf320504b1e3f297a8c466d4",
+        "size": 5972,
+        "uid": 1004
+      },
+      "held_fd": 6,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/plan-solution.json",
+      "named_after": {
+        "ctime_ns": 1786578347875983879,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5540147,
+        "mode": "0664",
+        "mtime_ns": 1786578347875983879,
+        "nlink": 1,
+        "sha256": "sha256:ddaa9573c90ee6fc0612d8ea5f01613e8f7fe722cf320504b1e3f297a8c466d4",
+        "size": 5972,
+        "uid": 1004
+      },
+      "unchanged": true
     }
   ],
+  "logical_replay_argv": [
+    "/usr/bin/python3.13",
+    "/opt/TGW/tgw-lib/src/trader-grims-warehouse/agent-services/freeze/f3cefe5/freeze_gate_tools.py",
+    "verify-solution",
+    "--solution",
+    "/tmp/tgw-freeze-f3cefe5-gates/plan-solution.json",
+    "--plan-commit",
+    "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
+  ],
   "rc": 0,
-  "schema": "tgw-freeze-execution-record/v1",
+  "schema": "tgw-freeze-execution-record/v2",
   "semantic": {
     "solution_hash": "sha256:d28650c26c6a3d26d6c943597ccb7abd7c6670b1703d9ce941ac5ed7a2d73a4d",
     "status": "PASS"
@@ -73,7 +175,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:27:16.037435Z",
+  "started_at": "2026-08-12T23:45:48.467539Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -85,5 +187,5 @@
     "sha256": "sha256:cc8b7fbdce6d1debceae7a6d2a11192de500bcd870a6ce08abee50a53db0f3d3"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:6d56ec40594ef10bc00cf592e1f8c32a60f72d55922f8a5e07d3a246af89a2a4"
+  "unsigned_sha256": "sha256:742defa433b9f7e4161341d0ea765efe831a16860a033cb32b665d9d9611b856"
 }

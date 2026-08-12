@@ -1,6 +1,6 @@
 {
-  "argv": [
-    "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest",
+  "actual_execve_argv": [
+    "/proc/2637415/fd/3",
     "-q",
     "tests/test_platform_bootstrap.py",
     "tests/test_bootstrap_authority.py",
@@ -9,8 +9,15 @@
     "tests/test_nixos_observer_render_evaluation.py"
   ],
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
-  "duration_ns": 16760320703,
-  "ended_at": "2026-08-12T23:27:12.185386Z",
+  "descriptor_execution": {
+    "executable_fd": 3,
+    "parent_pid": 2637415,
+    "pass_fds": [
+      3
+    ]
+  },
+  "duration_ns": 16900461379,
+  "ended_at": "2026-08-12T23:45:42.785733Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -25,25 +32,54 @@
     }
   },
   "executable": {
-    "dev": 39,
-    "gid": 983,
-    "inode": 6648890,
-    "mode": "0775",
-    "nlink": 1,
-    "path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest",
-    "sha256": "sha256:4183e6b1b6247763e4adeb2abea2324040e591fa8196c267f46200cf8cc4da02",
-    "size": 358,
-    "uid": 1000
+    "actual_fd_path": "/proc/2637415/fd/3",
+    "after": {
+      "ctime_ns": 1786230571967034482,
+      "dev": 39,
+      "gid": 983,
+      "inode": 6648890,
+      "mode": "0775",
+      "mtime_ns": 1785259085949021152,
+      "nlink": 1,
+      "sha256": "sha256:4183e6b1b6247763e4adeb2abea2324040e591fa8196c267f46200cf8cc4da02",
+      "size": 358,
+      "uid": 1000
+    },
+    "before": {
+      "ctime_ns": 1786230571967034482,
+      "dev": 39,
+      "gid": 983,
+      "inode": 6648890,
+      "mode": "0775",
+      "mtime_ns": 1785259085949021152,
+      "nlink": 1,
+      "sha256": "sha256:4183e6b1b6247763e4adeb2abea2324040e591fa8196c267f46200cf8cc4da02",
+      "size": 358,
+      "uid": 1000
+    },
+    "component_safe_open": true,
+    "held_fd": 3,
+    "logical_path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest",
+    "unchanged": true
   },
   "gate_id": "focused_pytest",
   "generated_artifacts": [],
-  "held_executable_via_proc_fd": true,
+  "input_trees": [],
   "inputs": [],
+  "logical_replay_argv": [
+    "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest",
+    "-q",
+    "tests/test_platform_bootstrap.py",
+    "tests/test_bootstrap_authority.py",
+    "tests/test_effect_handlers.py",
+    "tests/test_deployment_runtime.py",
+    "tests/test_nixos_observer_render_evaluation.py"
+  ],
   "rc": 0,
-  "schema": "tgw-freeze-execution-record/v1",
+  "schema": "tgw-freeze-execution-record/v2",
   "semantic": {
     "passed": 148,
-    "reported_seconds": 16.31,
+    "reported_seconds": 16.43,
     "skipped": 1,
     "status": "PASS"
   },
@@ -52,7 +88,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:26:55.425040Z",
+  "started_at": "2026-08-12T23:45:25.885238Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -60,9 +96,9 @@
   },
   "stdout": {
     "bytes": 272,
-    "ref": "artifact:sha256:db7017390c9fcb98942d6baed92a92b91fa46d419f533bdf6d4067f86faf7f35",
-    "sha256": "sha256:db7017390c9fcb98942d6baed92a92b91fa46d419f533bdf6d4067f86faf7f35"
+    "ref": "artifact:sha256:5a405da592d44ff997d304aaeabf9a71cdb451333b6fd0eb15f8f9a68d063117",
+    "sha256": "sha256:5a405da592d44ff997d304aaeabf9a71cdb451333b6fd0eb15f8f9a68d063117"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:92b0945045b012807f84fd4b35e6c5dfef41481e9a936edc3cb58d906ad96d45"
+  "unsigned_sha256": "sha256:df9e06625a424f6049868e09b702951d3b79fe81a48edf206a6c03cbf586677a"
 }

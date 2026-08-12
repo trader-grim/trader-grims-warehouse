@@ -1,12 +1,20 @@
 {
-  "argv": [
-    "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-    "/opt/TGW/evidence/codex/sha256/c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+  "actual_execve_argv": [
+    "/proc/2637415/fd/3",
+    "/proc/2637415/fd/4",
     "--version"
   ],
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
-  "duration_ns": 23391612,
-  "ended_at": "2026-08-12T23:27:14.734160Z",
+  "descriptor_execution": {
+    "executable_fd": 3,
+    "parent_pid": 2637415,
+    "pass_fds": [
+      3,
+      4
+    ]
+  },
+  "duration_ns": 23700592,
+  "ended_at": "2026-08-12T23:45:45.994976Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -21,34 +29,91 @@
     }
   },
   "executable": {
-    "dev": 2050,
-    "gid": 0,
-    "inode": 2238373,
-    "mode": "0755",
-    "nlink": 1,
-    "path": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-    "sha256": "sha256:438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0",
-    "size": 225672,
-    "uid": 0
+    "actual_fd_path": "/proc/2637415/fd/3",
+    "after": {
+      "ctime_ns": 1785206632593263800,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2238373,
+      "mode": "0755",
+      "mtime_ns": 1777320562000000000,
+      "nlink": 1,
+      "sha256": "sha256:438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0",
+      "size": 225672,
+      "uid": 0
+    },
+    "before": {
+      "ctime_ns": 1785206632593263800,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2238373,
+      "mode": "0755",
+      "mtime_ns": 1777320562000000000,
+      "nlink": 1,
+      "sha256": "sha256:438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0",
+      "size": 225672,
+      "uid": 0
+    },
+    "component_safe_open": true,
+    "held_fd": 3,
+    "logical_path": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    "unchanged": true
   },
   "gate_id": "luet_version",
   "generated_artifacts": [],
-  "held_executable_via_proc_fd": true,
+  "input_trees": [],
   "inputs": [
     {
-      "dev": 39,
-      "gid": 0,
-      "inode": 7565322,
-      "mode": "0444",
-      "nlink": 1,
-      "path": "/opt/TGW/evidence/codex/sha256/c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
-      "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
-      "size": 48513496,
-      "uid": 0
+      "actual_fd_path": "/proc/2637415/fd/4",
+      "after": {
+        "ctime_ns": 1786576287569188807,
+        "dev": 39,
+        "gid": 0,
+        "inode": 7565322,
+        "mode": "0444",
+        "mtime_ns": 1786576287405190428,
+        "nlink": 1,
+        "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+        "size": 48513496,
+        "uid": 0
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786576287569188807,
+        "dev": 39,
+        "gid": 0,
+        "inode": 7565322,
+        "mode": "0444",
+        "mtime_ns": 1786576287405190428,
+        "nlink": 1,
+        "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+        "size": 48513496,
+        "uid": 0
+      },
+      "held_fd": 4,
+      "logical_path": "/opt/TGW/evidence/codex/sha256/c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+      "named_after": {
+        "ctime_ns": 1786576287569188807,
+        "dev": 39,
+        "gid": 0,
+        "inode": 7565322,
+        "mode": "0444",
+        "mtime_ns": 1786576287405190428,
+        "nlink": 1,
+        "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+        "size": 48513496,
+        "uid": 0
+      },
+      "unchanged": true
     }
   ],
+  "logical_replay_argv": [
+    "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    "/opt/TGW/evidence/codex/sha256/c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+    "--version"
+  ],
   "rc": 0,
-  "schema": "tgw-freeze-execution-record/v1",
+  "schema": "tgw-freeze-execution-record/v2",
   "semantic": {
     "status": "PASS",
     "version": "luet version 0.9.26-g"
@@ -58,7 +123,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:27:14.710745Z",
+  "started_at": "2026-08-12T23:45:45.971249Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -70,5 +135,5 @@
     "sha256": "sha256:44bed564c44e6343c5dd19abfd140864f5c536b7441f060e9742640dc82a8749"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:c88bca8be82b1f0e12be925d9c44a729460509106a0a08da9c9a93c10d855e89"
+  "unsigned_sha256": "sha256:a899524eb7f829e7a9aa9a873060b825c51cd6cf2338f8c0df38bafa19677bc6"
 }

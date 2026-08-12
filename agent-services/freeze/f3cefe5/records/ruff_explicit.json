@@ -1,6 +1,6 @@
 {
-  "argv": [
-    "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/ruff",
+  "actual_execve_argv": [
+    "/proc/2637415/fd/3",
     "check",
     "src/tgw/nix_observer_render_helper.py",
     "src/tgw/nix_observer_render_remote.py",
@@ -16,8 +16,15 @@
     "tests/test_nixos_observer_render_evaluation.py"
   ],
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
-  "duration_ns": 13985437,
-  "ended_at": "2026-08-12T23:27:12.412890Z",
+  "descriptor_execution": {
+    "executable_fd": 3,
+    "parent_pid": 2637415,
+    "pass_fds": [
+      3
+    ]
+  },
+  "duration_ns": 12175955,
+  "ended_at": "2026-08-12T23:45:43.028104Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -32,22 +39,58 @@
     }
   },
   "executable": {
-    "dev": 39,
-    "gid": 983,
-    "inode": 6651285,
-    "mode": "0775",
-    "nlink": 1,
-    "path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/ruff",
-    "sha256": "sha256:096c13aa6293c464c9e187e622f993e91cdb75bbc795e9d8ae629645dc336182",
-    "size": 27835968,
-    "uid": 1000
+    "actual_fd_path": "/proc/2637415/fd/3",
+    "after": {
+      "ctime_ns": 1786230571967034482,
+      "dev": 39,
+      "gid": 983,
+      "inode": 6651285,
+      "mode": "0775",
+      "mtime_ns": 1785259086029020324,
+      "nlink": 1,
+      "sha256": "sha256:096c13aa6293c464c9e187e622f993e91cdb75bbc795e9d8ae629645dc336182",
+      "size": 27835968,
+      "uid": 1000
+    },
+    "before": {
+      "ctime_ns": 1786230571967034482,
+      "dev": 39,
+      "gid": 983,
+      "inode": 6651285,
+      "mode": "0775",
+      "mtime_ns": 1785259086029020324,
+      "nlink": 1,
+      "sha256": "sha256:096c13aa6293c464c9e187e622f993e91cdb75bbc795e9d8ae629645dc336182",
+      "size": 27835968,
+      "uid": 1000
+    },
+    "component_safe_open": true,
+    "held_fd": 3,
+    "logical_path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/ruff",
+    "unchanged": true
   },
   "gate_id": "ruff_explicit",
   "generated_artifacts": [],
-  "held_executable_via_proc_fd": true,
+  "input_trees": [],
   "inputs": [],
+  "logical_replay_argv": [
+    "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/ruff",
+    "check",
+    "src/tgw/nix_observer_render_helper.py",
+    "src/tgw/nix_observer_render_remote.py",
+    "src/tgw/nixos_observer_render_evaluation.py",
+    "src/tgw/platform_bootstrap.py",
+    "src/tgw/bootstrap_authority.py",
+    "src/tgw/deployment_runtime.py",
+    "src/tgw/effect_handlers.py",
+    "tests/test_platform_bootstrap.py",
+    "tests/test_bootstrap_authority.py",
+    "tests/test_effect_handlers.py",
+    "tests/test_deployment_runtime.py",
+    "tests/test_nixos_observer_render_evaluation.py"
+  ],
   "rc": 0,
-  "schema": "tgw-freeze-execution-record/v1",
+  "schema": "tgw-freeze-execution-record/v2",
   "semantic": {
     "checked_paths": [
       "src/tgw/nix_observer_render_helper.py",
@@ -70,7 +113,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:27:12.398868Z",
+  "started_at": "2026-08-12T23:45:43.015894Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -82,5 +125,5 @@
     "sha256": "sha256:82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:3f2978d8fa23749b648f7c171a8104ebf23b37adb5239ddadb0d4c96f96afb44"
+  "unsigned_sha256": "sha256:245489a79f32ca35b84faea7753a327719d1e6262822bfb4b9cfdbd7c8d7a6df"
 }

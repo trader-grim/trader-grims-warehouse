@@ -1,21 +1,34 @@
 {
-  "argv": [
-    "/usr/bin/x86_64-linux-gnu-gcc-14",
+  "actual_execve_argv": [
+    "/proc/2637415/fd/4",
     "-Wall",
     "-Wextra",
     "-Werror",
     "-DTGW_RENDER_TEST_BUILD",
     "-fsanitize=address,undefined",
     "-fno-omit-frame-pointer",
+    "-x",
+    "c",
     "-DTGW_RENDER_WRAPPER_CONFIG=\"/tmp/tgw-freeze-f3cefe5-gates/native-negative.conf\"",
     "-o",
     "/tmp/tgw-freeze-f3cefe5-gates/native-sanitizer-negative",
-    "/tmp/tgw-freeze-f3cefe5-source/src/native/tgw_nix_observer_render_transport.c",
+    "/proc/2637415/fd/5",
+    "-x",
+    "none",
     "-lcrypto"
   ],
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
-  "duration_ns": 424300514,
-  "ended_at": "2026-08-12T23:27:14.107888Z",
+  "descriptor_execution": {
+    "executable_fd": 4,
+    "parent_pid": 2637415,
+    "pass_fds": [
+      4,
+      5,
+      6
+    ]
+  },
+  "duration_ns": 432032536,
+  "ended_at": "2026-08-12T23:45:45.022161Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -30,30 +43,192 @@
     }
   },
   "executable": {
-    "dev": 2050,
-    "gid": 0,
-    "inode": 2099060,
-    "mode": "0755",
-    "nlink": 1,
-    "path": "/usr/bin/x86_64-linux-gnu-gcc-14",
-    "sha256": "sha256:a23ecab8ff08f09ad8c80602c2c5df7f49e09c25905cb8975902e101bf72635f",
-    "size": 1162264,
-    "uid": 0
+    "actual_fd_path": "/proc/2637415/fd/4",
+    "after": {
+      "ctime_ns": 1785206623981702377,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2099060,
+      "mode": "0755",
+      "mtime_ns": 1742003262000000000,
+      "nlink": 1,
+      "sha256": "sha256:a23ecab8ff08f09ad8c80602c2c5df7f49e09c25905cb8975902e101bf72635f",
+      "size": 1162264,
+      "uid": 0
+    },
+    "before": {
+      "ctime_ns": 1785206623981702377,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2099060,
+      "mode": "0755",
+      "mtime_ns": 1742003262000000000,
+      "nlink": 1,
+      "sha256": "sha256:a23ecab8ff08f09ad8c80602c2c5df7f49e09c25905cb8975902e101bf72635f",
+      "size": 1162264,
+      "uid": 0
+    },
+    "component_safe_open": true,
+    "held_fd": 4,
+    "logical_path": "/usr/bin/x86_64-linux-gnu-gcc-14",
+    "unchanged": true
   },
   "gate_id": "native_asan_ubsan_build_negative",
   "generated_artifacts": [
     {
-      "bytes": 238000,
-      "ref": "artifact:sha256:0cb01c661eba4ff2e5469bf144460aba48ca4c2bdd4e43ae11d5050764dc5fd9",
+      "after": {
+        "ctime_ns": 1786578345016012819,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744256,
+        "mode": "0775",
+        "mtime_ns": 1786578345016012819,
+        "nlink": 1,
+        "sha256": "sha256:07c9a63a6b89f43fd09fc19a1472c660c721c58760c59509e90d7e79cae1bdd5",
+        "size": 237968,
+        "uid": 1004
+      },
+      "before": {
+        "ctime_ns": 1786578345016012819,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744256,
+        "mode": "0775",
+        "mtime_ns": 1786578345016012819,
+        "nlink": 1,
+        "sha256": "sha256:07c9a63a6b89f43fd09fc19a1472c660c721c58760c59509e90d7e79cae1bdd5",
+        "size": 237968,
+        "uid": 1004
+      },
+      "bytes": 237968,
+      "named_after": {
+        "ctime_ns": 1786578345016012819,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5744256,
+        "mode": "0775",
+        "mtime_ns": 1786578345016012819,
+        "nlink": 1,
+        "sha256": "sha256:07c9a63a6b89f43fd09fc19a1472c660c721c58760c59509e90d7e79cae1bdd5",
+        "size": 237968,
+        "uid": 1004
+      },
+      "ref": "artifact:sha256:07c9a63a6b89f43fd09fc19a1472c660c721c58760c59509e90d7e79cae1bdd5",
       "role": "native-sanitizer-negative",
-      "sha256": "sha256:0cb01c661eba4ff2e5469bf144460aba48ca4c2bdd4e43ae11d5050764dc5fd9",
-      "source_path": "/tmp/tgw-freeze-f3cefe5-gates/native-sanitizer-negative"
+      "sha256": "sha256:07c9a63a6b89f43fd09fc19a1472c660c721c58760c59509e90d7e79cae1bdd5",
+      "source_path": "/tmp/tgw-freeze-f3cefe5-gates/native-sanitizer-negative",
+      "unchanged": true
     }
   ],
-  "held_executable_via_proc_fd": true,
-  "inputs": [],
+  "input_trees": [],
+  "inputs": [
+    {
+      "actual_fd_path": "/proc/2637415/fd/5",
+      "after": {
+        "ctime_ns": 1786576304245023984,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5497290,
+        "mode": "0664",
+        "mtime_ns": 1786576304245023984,
+        "nlink": 1,
+        "sha256": "sha256:a730315f7f5963473e66492d80d6b3d8baaa1eac6a6be497d508cb16b2902dd8",
+        "size": 31341,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786576304245023984,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5497290,
+        "mode": "0664",
+        "mtime_ns": 1786576304245023984,
+        "nlink": 1,
+        "sha256": "sha256:a730315f7f5963473e66492d80d6b3d8baaa1eac6a6be497d508cb16b2902dd8",
+        "size": 31341,
+        "uid": 1004
+      },
+      "held_fd": 5,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-source/src/native/tgw_nix_observer_render_transport.c",
+      "named_after": {
+        "ctime_ns": 1786576304245023984,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5497290,
+        "mode": "0664",
+        "mtime_ns": 1786576304245023984,
+        "nlink": 1,
+        "sha256": "sha256:a730315f7f5963473e66492d80d6b3d8baaa1eac6a6be497d508cb16b2902dd8",
+        "size": 31341,
+        "uid": 1004
+      },
+      "unchanged": true
+    },
+    {
+      "actual_fd_path": "/proc/2637415/fd/6",
+      "after": {
+        "ctime_ns": 1786578344012022978,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5540024,
+        "mode": "0444",
+        "mtime_ns": 1786578344012022978,
+        "nlink": 1,
+        "sha256": "sha256:ecf17ef3a5b25d3ce488541d9bad3613d62b6539435401c3cdd1fc013b90d491",
+        "size": 25478,
+        "uid": 1004
+      },
+      "argv_substituted_when_exact": true,
+      "before": {
+        "ctime_ns": 1786578344012022978,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5540024,
+        "mode": "0444",
+        "mtime_ns": 1786578344012022978,
+        "nlink": 1,
+        "sha256": "sha256:ecf17ef3a5b25d3ce488541d9bad3613d62b6539435401c3cdd1fc013b90d491",
+        "size": 25478,
+        "uid": 1004
+      },
+      "held_fd": 6,
+      "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/native-negative.conf",
+      "named_after": {
+        "ctime_ns": 1786578344012022978,
+        "dev": 35,
+        "gid": 1004,
+        "inode": 5540024,
+        "mode": "0444",
+        "mtime_ns": 1786578344012022978,
+        "nlink": 1,
+        "sha256": "sha256:ecf17ef3a5b25d3ce488541d9bad3613d62b6539435401c3cdd1fc013b90d491",
+        "size": 25478,
+        "uid": 1004
+      },
+      "unchanged": true
+    }
+  ],
+  "logical_replay_argv": [
+    "/usr/bin/x86_64-linux-gnu-gcc-14",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-DTGW_RENDER_TEST_BUILD",
+    "-fsanitize=address,undefined",
+    "-fno-omit-frame-pointer",
+    "-x",
+    "c",
+    "-DTGW_RENDER_WRAPPER_CONFIG=\"/tmp/tgw-freeze-f3cefe5-gates/native-negative.conf\"",
+    "-o",
+    "/tmp/tgw-freeze-f3cefe5-gates/native-sanitizer-negative",
+    "/tmp/tgw-freeze-f3cefe5-source/src/native/tgw_nix_observer_render_transport.c",
+    "-x",
+    "none",
+    "-lcrypto"
+  ],
   "rc": 0,
-  "schema": "tgw-freeze-execution-record/v1",
+  "schema": "tgw-freeze-execution-record/v2",
   "semantic": {
     "status": "PASS",
     "stderr_empty": true,
@@ -64,7 +239,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:27:13.683553Z",
+  "started_at": "2026-08-12T23:45:44.590103Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -76,5 +251,5 @@
     "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:3de30429770467093c273ffda543acefd40d403acd7b33e8a3ad35e9757561b8"
+  "unsigned_sha256": "sha256:6ea647eaf6df894d58c1057a61b36cd16cfd6c80aa60f5d65ee9f311fd1bdf79"
 }

@@ -1,6 +1,6 @@
 {
-  "argv": [
-    "/usr/bin/python3.13",
+  "actual_execve_argv": [
+    "/proc/2637415/fd/4",
     "-m",
     "py_compile",
     "/tmp/tgw-freeze-f3cefe5-source/src/tgw/nix_observer_render_helper.py",
@@ -12,8 +12,15 @@
     "/tmp/tgw-freeze-f3cefe5-source/src/tgw/effect_handlers.py"
   ],
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
-  "duration_ns": 105523942,
-  "ended_at": "2026-08-12T23:27:12.613516Z",
+  "descriptor_execution": {
+    "executable_fd": 4,
+    "parent_pid": 2637415,
+    "pass_fds": [
+      4
+    ]
+  },
+  "duration_ns": 110001967,
+  "ended_at": "2026-08-12T23:45:43.387136Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -28,22 +35,54 @@
     }
   },
   "executable": {
-    "dev": 2050,
-    "gid": 0,
-    "inode": 2098567,
-    "mode": "0755",
-    "nlink": 1,
-    "path": "/usr/bin/python3.13",
-    "sha256": "sha256:17b78e0a93175e86f9ac03141924fd7a7f0c0c52e66b34bfa0de20ffef989df1",
-    "size": 6812336,
-    "uid": 0
+    "actual_fd_path": "/proc/2637415/fd/4",
+    "after": {
+      "ctime_ns": 1785206623509726712,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2098567,
+      "mode": "0755",
+      "mtime_ns": 1784147140000000000,
+      "nlink": 1,
+      "sha256": "sha256:17b78e0a93175e86f9ac03141924fd7a7f0c0c52e66b34bfa0de20ffef989df1",
+      "size": 6812336,
+      "uid": 0
+    },
+    "before": {
+      "ctime_ns": 1785206623509726712,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2098567,
+      "mode": "0755",
+      "mtime_ns": 1784147140000000000,
+      "nlink": 1,
+      "sha256": "sha256:17b78e0a93175e86f9ac03141924fd7a7f0c0c52e66b34bfa0de20ffef989df1",
+      "size": 6812336,
+      "uid": 0
+    },
+    "component_safe_open": true,
+    "held_fd": 4,
+    "logical_path": "/usr/bin/python3.13",
+    "unchanged": true
   },
   "gate_id": "py_compile_explicit",
   "generated_artifacts": [],
-  "held_executable_via_proc_fd": true,
+  "input_trees": [],
   "inputs": [],
+  "logical_replay_argv": [
+    "/usr/bin/python3.13",
+    "-m",
+    "py_compile",
+    "/tmp/tgw-freeze-f3cefe5-source/src/tgw/nix_observer_render_helper.py",
+    "/tmp/tgw-freeze-f3cefe5-source/src/tgw/nix_observer_render_remote.py",
+    "/tmp/tgw-freeze-f3cefe5-source/src/tgw/nixos_observer_render_evaluation.py",
+    "/tmp/tgw-freeze-f3cefe5-source/src/tgw/platform_bootstrap.py",
+    "/tmp/tgw-freeze-f3cefe5-source/src/tgw/bootstrap_authority.py",
+    "/tmp/tgw-freeze-f3cefe5-source/src/tgw/deployment_runtime.py",
+    "/tmp/tgw-freeze-f3cefe5-source/src/tgw/effect_handlers.py"
+  ],
   "rc": 0,
-  "schema": "tgw-freeze-execution-record/v1",
+  "schema": "tgw-freeze-execution-record/v2",
   "semantic": {
     "status": "PASS",
     "stderr_empty": true,
@@ -54,7 +93,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:27:12.507960Z",
+  "started_at": "2026-08-12T23:45:43.277104Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -66,5 +105,5 @@
     "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:53334dd14788da3ae8527adbb2f4fe6d1ca5659bea48bb1905d910894ba1084c"
+  "unsigned_sha256": "sha256:ff3ac667f1ad93cd02b51b804a9d7b43cc137f46f601f1e73d42b064d21fe2f2"
 }
