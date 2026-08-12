@@ -20,7 +20,7 @@ def request():
         "observer_source_sha256": "sha256:" + "3" * 64,
         "provider_sha256": "sha256:" + "4" * 64,
         "host_identity_receipt_sha256": "sha256:" + "5" * 64,
-        "input_closure_manifest_sha256": "sha256:" + "6" * 64,
+        "systemd_analyze_sha256": "sha256:" + "6" * 64,
         "target": "nix-input-observer-rendered-artifacts",
         "system": "x86_64-linux",
         "network_policy": "offline-no-substituters",
@@ -30,10 +30,21 @@ def request():
         "home_db_write": False,
         "expected_outputs": list(OUTPUTS),
         "expected_metadata_status": "NON_DEPLOYABLE_RENDER_FIXTURE",
-        "input_closure_manifest": [{"node": "nixpkgs", "path": "/nix/store/x", "nar_sha256": "sha256:" + "7" * 64}],
+        "input_closure_manifest": [
+            {
+                "node": "nixpkgs",
+                "rev": "ac62194c3917d5f474c1a844b6fd6da2db95077d",
+                "lock_nar_hash": "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w=",
+                "store_path": "/nix/store/11111111111111111111111111111111-source",
+                "nar_sha256": "sha256:" + "7" * 64,
+            }
+        ],
+        "input_closure_path_count": 1,
+        "systemd_analyze_version": "systemd 257 (257.10)",
         "max_duration_seconds": 900,
         "max_output_bytes": 16 * 1024 * 1024,
     }
+    value["input_closure_manifest_sha256"] = "sha256:" + hashlib.sha256(canonical(value["input_closure_manifest"])).hexdigest()
     value["request_sha256"] = "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
     return value
 

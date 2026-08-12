@@ -34,6 +34,7 @@ DIGEST_FIELDS = {
     "observer_source_sha256",
     "provider_sha256",
     "host_identity_receipt_sha256",
+    "systemd_analyze_sha256",
     "input_closure_manifest_sha256",
 }
 
@@ -64,6 +65,8 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
         "expected_outputs",
         "expected_metadata_status",
         "input_closure_manifest",
+        "input_closure_path_count",
+        "systemd_analyze_version",
         "max_duration_seconds",
         "max_output_bytes",
         "request_sha256",
@@ -88,8 +91,23 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
         raise RenderEvaluationError("render Git identity invalid")
     if request["artifact_ref"] != "artifact:" + request["archive_sha256"]:
         raise RenderEvaluationError("render artifact reference mismatch")
-    if not isinstance(request["input_closure_manifest"], list) or len(request["input_closure_manifest"]) != 1:
+    manifest = request["input_closure_manifest"]
+    if not isinstance(manifest, list) or len(manifest) != 1 or request["input_closure_path_count"] != 1:
         raise RenderEvaluationError("render input closure is not exact")
+    entry = manifest[0]
+    if (
+        not isinstance(entry, dict)
+        or set(entry) != {"node", "rev", "lock_nar_hash", "store_path", "nar_sha256"}
+        or entry["node"] != "nixpkgs"
+        or entry["rev"] != "ac62194c3917d5f474c1a844b6fd6da2db95077d"
+        or entry["lock_nar_hash"] != "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w="
+        or not re.fullmatch(r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+", entry["store_path"])
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", entry["nar_sha256"])
+        or request["input_closure_manifest_sha256"] != "sha256:" + hashlib.sha256(canonical(manifest)).hexdigest()
+    ):
+        raise RenderEvaluationError("render input closure binding mismatch")
+    if request["systemd_analyze_version"] != "systemd 257 (257.10)":
+        raise RenderEvaluationError("render verifier version mismatch")
     if not isinstance(request["max_duration_seconds"], int) or not 1 <= request["max_duration_seconds"] <= 900:
         raise RenderEvaluationError("render timeout invalid")
     if not isinstance(request["max_output_bytes"], int) or not 1 <= request["max_output_bytes"] <= 16 * 1024 * 1024:
@@ -98,7 +116,19 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
 
 
 def validate_result(value: Mapping[str, object], *, request: Mapping[str, object]) -> dict[str, object]:
-    fields = {"schema", "request_sha256", "outcome", "metadata_status", "files", "systemd_verify", "cleanup", "forbidden_effects", "receipt_sha256"}
+    fields = {
+        "schema",
+        "request_sha256",
+        "outcome",
+        "metadata_status",
+        "files",
+        "output_root",
+        "output_manifest_sha256",
+        "systemd_verify",
+        "cleanup",
+        "effects",
+        "receipt_sha256",
+    }
     if not isinstance(value, Mapping) or set(value) != fields:
         raise RenderEvaluationError("render receipt schema is not closed")
     result = dict(value)
@@ -109,9 +139,22 @@ def validate_result(value: Mapping[str, object], *, request: Mapping[str, object
         raise RenderEvaluationError("render receipt binding mismatch")
     if result["metadata_status"] != "NON_DEPLOYABLE_RENDER_FIXTURE" or result["cleanup"] != "removed":
         raise RenderEvaluationError("render receipt status mismatch")
-    if result["forbidden_effects"] != {"activation": False, "profile_write": False, "home_db_write": False, "network": False}:
+    if result["effects"] != {"build": True, "activation": False, "deployment": False, "profile_write": False, "home_db_write": False, "live_flake_write": False, "network": False}:
         raise RenderEvaluationError("render receipt forbidden-effect evidence mismatch")
-    if result["systemd_verify"] != {"exit_code": 0, "units": list(OUTPUTS[9:12])}:
+    verify = result["systemd_verify"]
+    if (
+        not isinstance(verify, dict)
+        or set(verify)
+        != {"executable_sha256", "version", "argv", "exit_code", "stdout_bytes", "stdout_sha256", "stderr_bytes", "stderr_sha256", "units_sha256", "observed_at", "host_identity_receipt_sha256"}
+        or verify["executable_sha256"] != request["systemd_analyze_sha256"]
+        or verify["version"] != request["systemd_analyze_version"]
+        or verify["argv"] != ["systemd-analyze", "verify", *OUTPUTS[9:12]]
+        or verify["exit_code"] != 0
+        or verify["host_identity_receipt_sha256"] != request["host_identity_receipt_sha256"]
+        or not isinstance(verify["observed_at"], str)
+        or any(not isinstance(verify[key], int) or not 0 <= verify[key] <= request["max_output_bytes"] for key in ("stdout_bytes", "stderr_bytes"))
+        or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", verify[key]) for key in ("stdout_sha256", "stderr_sha256", "units_sha256"))
+    ):
         raise RenderEvaluationError("render systemd verification mismatch")
     files = result["files"]
     if (
@@ -120,4 +163,8 @@ def validate_result(value: Mapping[str, object], *, request: Mapping[str, object
         or any(set(item) != {"path", "sha256"} or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["sha256"]) for item in files)
     ):
         raise RenderEvaluationError("render output manifest mismatch")
+    if not isinstance(result["output_root"], str) or not re.fullmatch(r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+", result["output_root"]):
+        raise RenderEvaluationError("render output root invalid")
+    if result["output_manifest_sha256"] != "sha256:" + hashlib.sha256(canonical(files)).hexdigest():
+        raise RenderEvaluationError("render output manifest hash mismatch")
     return dict(value)
