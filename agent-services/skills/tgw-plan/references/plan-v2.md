@@ -4,6 +4,9 @@ The normative specification is
 `/opt/TGW/library/plans/plan/SPEC-plan-capability-graph-v2.md` at the exact Plan commit.
 Read it completely. This file is routing guidance, not a substitute authority.
 
+Bind execution to an immutable approved Git ref. The repository branch may advance
+when receipts or later drafts are committed; that does not revise approved intent.
+
 ## Required projections
 
 - Capability catalog: stable capabilities, versions, providers, alternatives,

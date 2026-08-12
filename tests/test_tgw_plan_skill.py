@@ -1,4 +1,7 @@
 import importlib.util
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -24,3 +27,38 @@ def test_adapter_digest_is_content_bound(tmp_path: Path):
     assert module.digest(canonical) == module.digest(adapter)
     (adapter / "SKILL.md").write_text("different\n")
     assert module.digest(canonical) != module.digest(adapter)
+
+
+def test_plan_binding_separates_approved_ref_from_evidence_head(tmp_path: Path):
+    root = tmp_path / "plans"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "fixture@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Fixture"], cwd=root, check=True)
+    for relative in (
+        "plan/SPEC-plan-capability-graph-v2.md",
+        "plan/PLAN-governed-execution-platform-build.md",
+    ):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("approved\n")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "approved"], cwd=root, check=True)
+    approved = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True, text=True,
+        stdout=subprocess.PIPE,
+    ).stdout.strip()
+    subprocess.run(["git", "update-ref", "refs/tgw/approved/test", approved], cwd=root, check=True)
+    (root / "receipt").write_text("later evidence\n")
+    subprocess.run(["git", "add", "receipt"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "evidence"], cwd=root, check=True)
+
+    script = Path(__file__).parents[1] / "agent-services/skills/tgw-plan/scripts/verify_plan_root.py"
+    result = subprocess.run(
+        [sys.executable, str(script), str(root), "refs/tgw/approved/test"],
+        check=True, text=True, stdout=subprocess.PIPE,
+    )
+    binding = json.loads(result.stdout)
+    assert binding["approved_commit"] == approved
+    assert binding["head_commit"] != approved
+    assert binding["clean"] is True
