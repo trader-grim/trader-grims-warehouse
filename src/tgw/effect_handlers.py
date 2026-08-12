@@ -14,6 +14,15 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Mapping
 
+from tgw.nix_observer_render_evaluation import validate_request as validate_render_request
+from tgw.nixos_observer_render_evaluation import (
+    EFFECT_KIND as OBSERVER_RENDER_EFFECT_KIND,
+)
+from tgw.nixos_observer_render_evaluation import (
+    RemoteRenderFailure,
+    TerminalPersistenceError,
+    validate_handler_success,
+)
 from tgw.nixos_reviewed_evaluation import _validate_remote_effect
 from tgw.plan_authority import EffectKind, TypedEffect
 
@@ -115,6 +124,7 @@ class TypedEffectHandlerRegistry:
         bootstrap_install: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         bootstrap_rollback: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         nixos_reviewed_evaluation: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
+        nixos_observer_render_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> None:
         self._providers = {
             EffectKind.CODING_RELEASE: ("immutable-release-installer@1", release_install, release_rollback),
@@ -132,6 +142,11 @@ class TypedEffectHandlerRegistry:
                 self._reviewed_evaluation_provider(nixos_reviewed_evaluation or self._unavailable_evaluation),
                 None,
             ),
+            EffectKind.NIXOS_OBSERVER_RENDER_EVALUATION: (
+                "nixos-observer-render-evaluation@1",
+                self._observer_render_provider(nixos_observer_render_evaluation or self._unavailable_render_evaluation),
+                None,
+            ),
         }
 
     @staticmethod
@@ -141,6 +156,33 @@ class TypedEffectHandlerRegistry:
     @staticmethod
     def _unavailable_evaluation(parameters: Mapping[str, str]) -> Mapping[str, Any]:
         raise EffectHandlerError("reviewed Nix evaluation provider is not mounted")
+
+    @staticmethod
+    def _unavailable_render_evaluation(parameters: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise EffectHandlerError("observer render evaluation provider is not mounted")
+
+    @staticmethod
+    def _observer_render_provider(provider: Callable[[Mapping[str, Any]], Mapping[str, Any]]) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
+        """Accept only the exact A2 success terminal and immutable receipt identity."""
+
+        def invoke(parameters: Mapping[str, Any]) -> Mapping[str, Any]:
+            generation = parameters["generation"]
+            request = {key: value for key, value in parameters.items() if key != "generation"}
+            try:
+                result = provider({"kind": OBSERVER_RENDER_EFFECT_KIND, "generation": generation, "parameters": request})
+            except TerminalPersistenceError as exc:
+                raise AmbiguousEffect(str(exc)) from exc
+            except RemoteRenderFailure as exc:
+                if exc.terminal.get("outcome") == "AMBIGUOUS":
+                    raise AmbiguousEffect(str(exc)) from exc
+                raise
+            terminal = validate_handler_success(result, request=request)
+            return {
+                "evidence": ["nixos-observer-render:" + terminal["receipt_sha256"]],
+                "terminal": terminal,
+            }
+
+        return invoke
 
     @staticmethod
     def _reviewed_evaluation_provider(provider: Callable[[Mapping[str, str]], Mapping[str, Any]]) -> Callable[[Mapping[str, str]], Mapping[str, Any]]:
@@ -270,7 +312,7 @@ class TypedEffectHandlerRegistry:
 
         return invoke
 
-    def prepare(self, effect: TypedEffect) -> tuple[str, dict[str, str], Callable[..., Mapping[str, Any]], Callable[..., Mapping[str, Any]] | None]:
+    def prepare(self, effect: TypedEffect) -> tuple[str, dict[str, Any], Callable[..., Mapping[str, Any]], Callable[..., Mapping[str, Any]] | None]:
         if effect.kind is EffectKind.CODING_RELEASE:
             parameters = _required(
                 effect.parameters,
@@ -359,7 +401,7 @@ class TypedEffectHandlerRegistry:
             }
             if any(not _IDENTITY.fullmatch(parameters[key]) for key in identity_fields):
                 raise ValueError("bootstrap symbolic identity is invalid")
-        else:
+        elif effect.kind is EffectKind.NIXOS_REVIEWED_EVALUATION:
             parameters = _required_strings(
                 effect.parameters,
                 {
@@ -462,6 +504,12 @@ class TypedEffectHandlerRegistry:
             )
             if invalid_bounds:
                 raise ValueError("reviewed Nix resource or verifier bound is outside the registered range")
+        elif effect.kind is EffectKind.NIXOS_OBSERVER_RENDER_EVALUATION:
+            parameters = validate_render_request(effect.parameters)
+            if any(parameters[key] is not False for key in ("activate", "profile_write", "home_db_write")):
+                raise ValueError("observer render contains a forbidden activation or write effect")
+        else:  # pragma: no cover - EffectKind is closed above
+            raise ValueError("effect kind has no registered parameter validator")
         handler_id, handler, rollback = self._providers[effect.kind]
         parameters["generation"] = effect.generation
         return handler_id, parameters, handler, rollback

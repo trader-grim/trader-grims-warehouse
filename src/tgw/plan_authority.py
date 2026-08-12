@@ -41,6 +41,7 @@ class EffectKind(str, Enum):
     AUTHORITY_CANARY = "authority-canary"
     APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT = "approval-platform-bootstrap-deployment"
     NIXOS_REVIEWED_EVALUATION = "nixos-reviewed-evaluation"
+    NIXOS_OBSERVER_RENDER_EVALUATION = "nixos-observer-render-evaluation"
 
 
 @dataclass(frozen=True)

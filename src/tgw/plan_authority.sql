@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS plan_authority_requests (
     closure_hash text NOT NULL,
     graph_id text NOT NULL,
     object_generation text NOT NULL,
-    effect_kind text NOT NULL CHECK (effect_kind IN ('coding-release','bounded-flake-push','flake-switch-record-only','dependency-resubmit')),
+    effect_kind text NOT NULL,
     effect_generation text NOT NULL,
     effect_hash text NOT NULL,
     effect_parameters jsonb NOT NULL,
@@ -15,6 +15,20 @@ CREATE TABLE IF NOT EXISTS plan_authority_requests (
     expires_at timestamptz NOT NULL,
     requested_at timestamptz NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE plan_authority_requests
+    DROP CONSTRAINT IF EXISTS plan_authority_requests_effect_kind_check;
+ALTER TABLE plan_authority_requests
+    ADD CONSTRAINT plan_authority_requests_effect_kind_check CHECK (effect_kind IN (
+        'coding-release',
+        'bounded-flake-push',
+        'flake-switch-record-only',
+        'dependency-resubmit',
+        'authority-canary',
+        'approval-platform-bootstrap-deployment',
+        'nixos-reviewed-evaluation',
+        'nixos-observer-render-evaluation'
+    ));
 
 CREATE TABLE IF NOT EXISTS plan_authority_decisions (
     decision_id text PRIMARY KEY,
