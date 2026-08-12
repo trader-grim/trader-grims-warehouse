@@ -22,8 +22,8 @@ def git(root: Path, *args: str) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: verify_plan_root.py PLAN_ROOT")
+    if len(sys.argv) not in {2, 3}:
+        raise SystemExit("usage: verify_plan_root.py PLAN_ROOT [APPROVED_REF]")
     root = Path(sys.argv[1]).resolve()
     top = Path(git(root, "rev-parse", "--show-toplevel").strip()).resolve()
     if top != root:
@@ -35,10 +35,14 @@ def main() -> int:
     missing = [name for name in required if not (root / name).is_file()]
     if missing:
         raise SystemExit(f"missing canonical Plan files: {', '.join(missing)}")
+    approved_ref = sys.argv[2] if len(sys.argv) == 3 else "HEAD"
+    approved_commit = git(root, "rev-parse", "--verify", approved_ref).strip()
     payload = {
         "schema": "tgw-plan-repository-binding/v1",
         "root": str(root),
-        "commit": git(root, "rev-parse", "HEAD").strip(),
+        "head_commit": git(root, "rev-parse", "HEAD").strip(),
+        "approved_ref": approved_ref,
+        "approved_commit": approved_commit,
         "branch": git(root, "branch", "--show-current").strip() or None,
         "clean": not bool(git(root, "status", "--porcelain=v1")),
     }
