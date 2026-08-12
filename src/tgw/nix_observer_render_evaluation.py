@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 
 SCHEMA = "tgw-nix-observer-render-evaluation-request/v1"
 RESULT_SCHEMA = "tgw-nix-observer-render-evaluation-receipt/v1"
@@ -115,7 +116,7 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
     return dict(value)
 
 
-def validate_result(value: Mapping[str, object], *, request: Mapping[str, object]) -> dict[str, object]:
+def validate_result(value: Mapping[str, object], *, request: Mapping[str, object], now: datetime | None = None) -> dict[str, object]:
     fields = {
         "schema",
         "request_sha256",
@@ -123,6 +124,8 @@ def validate_result(value: Mapping[str, object], *, request: Mapping[str, object
         "metadata_status",
         "files",
         "output_root",
+        "evaluated_drv",
+        "drv_output",
         "output_manifest_sha256",
         "systemd_verify",
         "cleanup",
@@ -160,11 +163,25 @@ def validate_result(value: Mapping[str, object], *, request: Mapping[str, object
     if (
         not isinstance(files, list)
         or [item.get("path") for item in files] != list(OUTPUTS)
-        or any(set(item) != {"path", "sha256"} or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["sha256"]) for item in files)
+        or any(set(item) != {"path", "sha256", "size"} or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["sha256"]) or not isinstance(item["size"], int) or item["size"] < 0 for item in files)
     ):
         raise RenderEvaluationError("render output manifest mismatch")
     if not isinstance(result["output_root"], str) or not re.fullmatch(r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+", result["output_root"]):
         raise RenderEvaluationError("render output root invalid")
+    if not isinstance(result["evaluated_drv"], str) or not re.fullmatch(r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+\.drv", result["evaluated_drv"]):
+        raise RenderEvaluationError("render derivation identity invalid")
+    if result["drv_output"] != {"drv": result["evaluated_drv"], "output": result["output_root"]}:
+        raise RenderEvaluationError("render derivation output binding mismatch")
     if result["output_manifest_sha256"] != "sha256:" + hashlib.sha256(canonical(files)).hexdigest():
         raise RenderEvaluationError("render output manifest hash mismatch")
+    units = [item for item in files if item["path"] in OUTPUTS[9:12]]
+    if verify["units_sha256"] != "sha256:" + hashlib.sha256(canonical(units)).hexdigest():
+        raise RenderEvaluationError("render unit aggregate mismatch")
+    try:
+        observed = datetime.strptime(verify["observed_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError) as exc:
+        raise RenderEvaluationError("render observation timestamp invalid") from exc
+    current = now or datetime.now(timezone.utc)
+    if observed > current + timedelta(minutes=1) or current - observed > timedelta(hours=1):
+        raise RenderEvaluationError("render observation timestamp stale")
     return dict(value)

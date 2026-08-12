@@ -1,8 +1,10 @@
 import hashlib
+from copy import deepcopy
+from datetime import datetime, timezone
 
 import pytest
 
-from tgw.nix_observer_render_evaluation import OUTPUTS, SCHEMA, RenderEvaluationError, canonical, validate_request
+from tgw.nix_observer_render_evaluation import OUTPUTS, RESULT_SCHEMA, SCHEMA, RenderEvaluationError, canonical, validate_request, validate_result
 
 
 def request():
@@ -62,3 +64,86 @@ def test_render_request_mutations_fail_closed(field, value):
     item["request_sha256"] = "sha256:" + hashlib.sha256(canonical(unsigned)).hexdigest()
     with pytest.raises(RenderEvaluationError):
         validate_request(item)
+
+
+NOW = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+
+
+def result(req=None):
+    req = req or request()
+    files = [{"path": path, "sha256": "sha256:" + hashlib.sha256(path.encode()).hexdigest(), "size": index + 1} for index, path in enumerate(OUTPUTS)]
+    units = [item for item in files if item["path"] in OUTPUTS[9:12]]
+    value = {
+        "schema": RESULT_SCHEMA,
+        "request_sha256": req["request_sha256"],
+        "outcome": "VERIFIED",
+        "metadata_status": "NON_DEPLOYABLE_RENDER_FIXTURE",
+        "files": files,
+        "output_root": "/nix/store/22222222222222222222222222222222-render",
+        "evaluated_drv": "/nix/store/33333333333333333333333333333333-render.drv",
+        "drv_output": {"drv": "/nix/store/33333333333333333333333333333333-render.drv", "output": "/nix/store/22222222222222222222222222222222-render"},
+        "output_manifest_sha256": "sha256:" + hashlib.sha256(canonical(files)).hexdigest(),
+        "systemd_verify": {
+            "executable_sha256": req["systemd_analyze_sha256"],
+            "version": req["systemd_analyze_version"],
+            "argv": ["systemd-analyze", "verify", *OUTPUTS[9:12]],
+            "exit_code": 0,
+            "stdout_bytes": 0,
+            "stdout_sha256": "sha256:" + "0" * 64,
+            "stderr_bytes": 0,
+            "stderr_sha256": "sha256:" + "0" * 64,
+            "units_sha256": "sha256:" + hashlib.sha256(canonical(units)).hexdigest(),
+            "observed_at": "2026-08-12T12:00:00Z",
+            "host_identity_receipt_sha256": req["host_identity_receipt_sha256"],
+        },
+        "cleanup": "removed",
+        "effects": {"build": True, "activation": False, "deployment": False, "profile_write": False, "home_db_write": False, "live_flake_write": False, "network": False},
+    }
+    value["receipt_sha256"] = "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
+    return value
+
+
+def rehash(value):
+    value = deepcopy(value)
+    value.pop("receipt_sha256", None)
+    value["receipt_sha256"] = "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
+    return value
+
+
+def test_complete_valid_result():
+    req = request()
+    assert validate_result(result(req), request=req, now=NOW)["outcome"] == "VERIFIED"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda x: x.update(receipt_sha256="sha256:" + "0" * 64),
+        lambda x: x.update(request_sha256="sha256:" + "0" * 64),
+        lambda x: x.update(metadata_status="DEPLOYABLE"),
+        lambda x: x.update(cleanup="retained"),
+        lambda x: x.update(output_root="/tmp/out"),
+        lambda x: x.update(evaluated_drv="/nix/store/33333333333333333333333333333333-render"),
+        lambda x: x["drv_output"].update(output="/nix/store/44444444444444444444444444444444-other"),
+        lambda x: x["files"].reverse(),
+        lambda x: x["files"][0].update(sha256="bad"),
+        lambda x: x.update(output_manifest_sha256="sha256:" + "0" * 64),
+        lambda x: x["systemd_verify"].update(units_sha256="sha256:" + "0" * 64),
+        lambda x: x["systemd_verify"].update(argv=["systemd-analyze", "verify"]),
+        lambda x: x["systemd_verify"].update(exit_code=1),
+        lambda x: x["systemd_verify"].update(stdout_bytes=20_000_000),
+        lambda x: x["systemd_verify"].update(executable_sha256="sha256:" + "0" * 64),
+        lambda x: x["systemd_verify"].update(host_identity_receipt_sha256="sha256:" + "0" * 64),
+        lambda x: x["systemd_verify"].update(observed_at="2020-01-01T00:00:00Z"),
+        lambda x: x["effects"].update(network=True),
+        lambda x: x["effects"].update(build=False),
+    ],
+)
+def test_result_mutations_fail_closed(mutate):
+    req = request()
+    value = result(req)
+    mutate(value)
+    if value["receipt_sha256"] != "sha256:" + "0" * 64:
+        value = rehash(value)
+    with pytest.raises(RenderEvaluationError):
+        validate_result(value, request=req, now=NOW)
