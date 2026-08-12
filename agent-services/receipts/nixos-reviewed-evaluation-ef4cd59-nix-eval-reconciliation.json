@@ -1,0 +1,43 @@
+{
+  "attempt": {
+    "artifact_sha256": "sha256:651a6dc5221f7f258b461295cd424d17f545410bc0052b393e407c18511c778c",
+    "diagnostic_code": "SUBPROCESS_FAILED",
+    "effect_hash": "effect:sha256:ca0467e3be9bc53da54930dbfb3b52436cd1979e4f9e5fe4b3336257d88f06e0",
+    "outcome": "FAILED",
+    "receipt_sha256": "sha256:f5a098e32f15fb347fb77fba0ade7a29a059264074ed58c036ade31509baddbc",
+    "request_hash": "sha256:316a75010db690946e2566a82ab049882ee2c9a76632c7ed2bcd7c742f5e7406",
+    "return_code": 1,
+    "stage": "nix-eval",
+    "subprocess_step": "nix-eval"
+  },
+  "classification": "VALIDATED_FAILED_CLEANED_NO_FORBIDDEN_EFFECT",
+  "offline_risk": {
+    "fact": "flake.lock pins tgw-flake and its transitive inputs, including SSH Git sources, but the evaluation archive does not contain their Nix store closure.",
+    "implication": "With offline/no-substituters, a correct evaluation-only attribute remains executable only when every locked input is already present in the evaluator store or is admitted as a separately content-addressed input closure.",
+    "status": "NOT_YET_PROVEN_PRESENT"
+  },
+  "post_observation": {
+    "cleanup_result": "removed",
+    "current_system": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "failure_artifact_mode": "0400",
+    "failure_artifact_owner_uid": 1004,
+    "failure_artifact_size": 1057,
+    "scratch_root": "ABSENT",
+    "system_profile": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194"
+  },
+  "recommendation": {
+    "closed_attribute": "Expose a dedicated x86_64-linux review-egress-systemd-units derivation/check that imports nix/review-egress.nix into a minimal NixOS evaluation, enables it with exact symbolic non-secret settings, and copies only the three generated unit files plus verifier inputs to its output.",
+    "evaluator": "Evaluate and build only that exact attribute, not nixosConfigurations.tgw-prod or a full system closure; continue systemd-analyze verification and exact unit hashes over its output.",
+    "input_closure": "Before execution, prove every flake.lock input is locally available by exact store/NAR identity, or extend the typed request with a bounded content-addressed input-closure artifact and verify/import it without substituters. Never fall back to network or the live flake checkout.",
+    "tests": "Add a real flake-output test proving the exact attribute exists, imports the module, contains exactly the admitted unit set, and fails when any locked input is unavailable under offline flags."
+  },
+  "root_cause": {
+    "flake_output": "The frozen flake exports only devShells = tgw-flake.devShells.",
+    "missing_integration": "nix/review-egress.nix is not imported by the frozen flake or any exported configuration.",
+    "requested_attribute": ".#nixosConfigurations.tgw-prod.config.system.build.toplevel.drvPath",
+    "result": "The requested nixosConfigurations.tgw-prod attribute cannot exist in the exact frozen source, so nix eval deterministically exits nonzero before build."
+  },
+  "schema": "tgw-nixos-reviewed-evaluation-nix-eval-reconciliation/v1",
+  "self_hash": "sha256:5de6cf984e2863a751e2e131b0b5b4248690ebdb1bfa368daa6560af2dd27236",
+  "source_commit": "ef4cd59a3017c3e3a4837d2934abd812c746abcf"
+}
