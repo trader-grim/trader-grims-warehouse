@@ -19,6 +19,8 @@ from tgw.nixos_observer_render_evaluation import (
     EFFECT_KIND as OBSERVER_RENDER_EFFECT_KIND,
 )
 from tgw.nixos_observer_render_evaluation import (
+    CompositionHold,
+    RemoteAttemptAmbiguous,
     RemoteRenderFailure,
     TerminalPersistenceError,
     validate_handler_success,
@@ -50,9 +52,14 @@ class AmbiguousEffect(EffectHandlerError):
     pass
 
 
+class HeldEffect(EffectHandlerError):
+    pass
+
+
 class EffectOutcome(str, Enum):
     SUCCEEDED = "succeeded"
     RETRY = "retry"
+    HOLD = "hold"
     AMBIGUOUS = "ambiguous"
     ROLLED_BACK = "rolled_back"
     FAILED = "failed"
@@ -163,23 +170,31 @@ class TypedEffectHandlerRegistry:
 
     @staticmethod
     def _observer_render_provider(provider: Callable[[Mapping[str, Any]], Mapping[str, Any]]) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
-        """Accept only the exact A2 success terminal and immutable receipt identity."""
+        """Accept only evidence rebound to the mounted immutable composition."""
 
         def invoke(parameters: Mapping[str, Any]) -> Mapping[str, Any]:
             generation = parameters["generation"]
             request = {key: value for key, value in parameters.items() if key != "generation"}
+            composition = getattr(provider, "composition", None)
+            if composition is None:
+                raise HeldEffect("observer render provider has no immutable composition binding")
             try:
                 result = provider({"kind": OBSERVER_RENDER_EFFECT_KIND, "generation": generation, "parameters": request})
-            except TerminalPersistenceError as exc:
+            except CompositionHold as exc:
+                raise HeldEffect(str(exc)) from exc
+            except (RemoteAttemptAmbiguous, TerminalPersistenceError) as exc:
                 raise AmbiguousEffect(str(exc)) from exc
             except RemoteRenderFailure as exc:
                 if exc.terminal.get("outcome") == "AMBIGUOUS":
                     raise AmbiguousEffect(str(exc)) from exc
                 raise
-            terminal = validate_handler_success(result, request=request)
+            try:
+                validated = validate_handler_success(result, request=request, composition=composition)
+            except Exception as exc:
+                raise AmbiguousEffect("post-launch observer render evidence failed exact validation") from exc
             return {
-                "evidence": ["nixos-observer-render:" + terminal["receipt_sha256"]],
-                "terminal": terminal,
+                "evidence": ["nixos-observer-render:" + validated["receipt_sha256"]],
+                "terminal": validated["terminal"],
             }
 
         return invoke
@@ -532,6 +547,8 @@ class AuthorityEffectController:
             return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.SUCCEEDED, evidence)
         except RetryableEffect as exc:
             return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.RETRY, (), detail=str(exc))
+        except HeldEffect as exc:
+            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.HOLD, (), detail=str(exc))
         except AmbiguousEffect as exc:
             return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, (), detail=str(exc))
         except Exception as exc:
