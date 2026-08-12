@@ -17,6 +17,8 @@ def test_nix_module_has_closed_socket_service_and_rollback():
     assert "transportConfigSha256 = lib.mkOption" not in source
     assert 'systemd.slices."tgw-nix-input-observer".sliceConfig = sliceConfig' in source
     assert "wantedBy = socketWantedBy" in source and "inherit socketConfig" in source and "inherit serviceConfig" in source
+    assert 'command = "${cfg.package}/bin/tgw-nix-input-observer-launcher"' in source
+    assert "/run/current-system/sw/bin/tgw-nix-input-observer-launcher" not in source
 
 
 def test_launcher_descriptor_has_no_command_or_environment_override():

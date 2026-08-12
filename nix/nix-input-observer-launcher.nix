@@ -1,7 +1,7 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.services.tgw-nix-input-observer-launcher;
-  command = "/run/current-system/sw/bin/tgw-nix-input-observer-launcher";
+  command = "${cfg.package}/bin/tgw-nix-input-observer-launcher";
   sliceConfig = {
     Description = "Fixed cgroup for bounded TGW Nix input observation";
     CPUQuota = "100%";

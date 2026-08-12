@@ -300,6 +300,18 @@ def test_provider_cleanup_uncertainty_overrides_success(tmp_path, monkeypatch):
     assert (next(scratch.iterdir()) / "hostile").exists()
 
 
+def test_provider_cleans_materialized_units_after_verifier_failure(tmp_path, monkeypatch):
+    def mutate(argv, _kwargs, _scratch, _root, _drv):
+        if len(argv) > 1 and argv[1] == "verify":
+            assert all(Path(path).name == expected.removeprefix("units/") for path, expected in zip(argv[2:], OUTPUTS[9:12], strict=True))
+            return subprocess.CompletedProcess(argv, 1, b"", b"bounded failure")
+
+    kwargs, _, scratch, _ = provider_case(tmp_path, monkeypatch, run_mutation=mutate)
+    with pytest.raises(RenderEvaluationError, match="verification failed"):
+        produce_result(**kwargs)
+    assert not list(scratch.iterdir())
+
+
 def test_provider_rejects_materialized_unit_path_swap(tmp_path, monkeypatch):
     swapped = False
 
@@ -338,10 +350,17 @@ def test_real_systemd_analyze_accepts_canonical_materialized_unit_names(tmp_path
     verifier = shutil.which("systemd-analyze")
     if verifier is None:
         pytest.skip("systemd-analyze unavailable")
+    launcher = tmp_path / "immutable-launcher"
+    launcher.write_text("#!/bin/sh\nexit 0\n")
+    launcher.chmod(0o555)
     units = {
-        OUTPUTS[9]: "[Unit]\nDescription=TGW observer slice\n",
-        OUTPUTS[10]: "[Unit]\nDescription=TGW observer socket\n[Socket]\nListenStream=%t/tgw-observer-test.sock\nAccept=yes\n",
-        OUTPUTS[11]: "[Unit]\nDescription=TGW observer service\n[Service]\nExecStart=/bin/true\n",
+        OUTPUTS[9]: "[Unit]\nDescription=Fixed cgroup for bounded TGW Nix input observation\n[Slice]\nCPUQuota=100%\nMemoryMax=1G\nTasksMax=64\n",
+        OUTPUTS[10]: "[Unit]\nDescription=Closed local TGW Nix observer transport\n[Socket]\nListenStream=%t/tgw-observer-test.sock\nSocketMode=0600\nAccept=yes\nMaxConnections=1\nRemoveOnStop=yes\n",
+        OUTPUTS[11]: (
+            "[Unit]\nDescription=One-shot fixed TGW Nix observer %i\n[Service]\nType=simple\n"
+            f"ExecStart={launcher}\nStandardInput=socket\nStandardOutput=socket\nStandardError=journal\n"
+            "Slice=tgw-nix-input-observer.slice\nUser=root\nGroup=root\nRuntimeMaxSec=180\nOOMPolicy=stop\n"
+        ),
     }
     paths = []
     for name, body in units.items():
@@ -353,3 +372,6 @@ def test_real_systemd_analyze_accepts_canonical_materialized_unit_names(tmp_path
     assert len(version.stdout.splitlines()) > 1
     verified = subprocess.run([verifier, "verify", *paths], capture_output=True, check=False, timeout=30)
     assert verified.returncode == 0, verified.stderr.decode(errors="replace")
+    launcher.unlink()
+    missing = subprocess.run([verifier, "verify", *paths], capture_output=True, check=False, timeout=30)
+    assert missing.returncode != 0
