@@ -154,6 +154,7 @@ class TypedEffectHandlerRegistry:
                 "source_archive_sha256": parameters["source_archive_sha256"],
                 "flake_lock_sha256": parameters["flake_lock_sha256"],
                 "module_sha256": parameters["module_sha256"],
+                "provider_sha256": parameters["provider_sha256"],
                 "scratch_id": parameters["scratch_id"],
                 "cleanup": "removed",
                 "activate": False,
@@ -164,6 +165,13 @@ class TypedEffectHandlerRegistry:
             }
             if not isinstance(result, Mapping) or any(result.get(key) != value for key, value in exact.items()):
                 raise EffectHandlerError("reviewed Nix evaluation receipt identity or safety invariant mismatch")
+            expected_executables = {
+                "git": "/run/current-system/sw/bin/git",
+                "nix": "/run/current-system/sw/bin/nix",
+                "systemd_analyze": "/run/current-system/sw/bin/systemd-analyze",
+            }
+            if result.get("executables") != expected_executables:
+                raise EffectHandlerError("reviewed Nix evaluation executable provenance mismatch")
             digest_keys = (
                 "evaluated_closure_sha256", "eval_log_sha256", "build_log_sha256",
                 "systemd_verify_output_sha256", "receipt_sha256",
@@ -188,6 +196,10 @@ class TypedEffectHandlerRegistry:
             evidence = result.get("evidence")
             if not isinstance(evidence, (list, tuple)) or not evidence or any(not isinstance(item, str) or not _IDENTITY.fullmatch(item) for item in evidence):
                 raise EffectHandlerError("reviewed Nix evaluation immutable evidence is absent")
+            receipt_payload = {key: value for key, value in result.items() if key not in {"receipt_sha256", "evidence"}}
+            receipt_hash = "sha256:" + hashlib.sha256(_canonical(receipt_payload)).hexdigest()
+            if result["receipt_sha256"] != receipt_hash or tuple(evidence) != ("nixos-evaluation:" + receipt_hash,):
+                raise EffectHandlerError("reviewed Nix evaluation receipt self-hash mismatch")
             return result
         return invoke
 
@@ -262,7 +274,7 @@ class TypedEffectHandlerRegistry:
             parameters = _required_strings(effect.parameters, {
                 "target_host", "flake_repository_id", "artifact_ref", "source_commit",
                 "source_tree", "source_archive_sha256", "flake_lock_sha256", "module_path",
-                "module_sha256", "scratch_id", "system", "evaluation_target", "unit_set",
+                "module_sha256", "provider_sha256", "scratch_id", "system", "evaluation_target", "unit_set",
                 "output_schema", "nix_network_policy", "minimum_systemd_version",
                 "max_duration_seconds", "max_output_bytes", "activate", "profile_write",
                 "home_db_write", "operation_id",
@@ -280,7 +292,7 @@ class TypedEffectHandlerRegistry:
                 raise ValueError("reviewed Nix evaluation target or safety invariant is outside the registered bound")
             if not _SHA1.fullmatch(parameters["source_commit"]) or not _SHA1.fullmatch(parameters["source_tree"]):
                 raise ValueError("reviewed Nix source identity is invalid")
-            for key in ("source_archive_sha256", "flake_lock_sha256", "module_sha256"):
+            for key in ("source_archive_sha256", "flake_lock_sha256", "module_sha256", "provider_sha256"):
                 if not _SHA256.fullmatch(parameters[key]):
                     raise ValueError("reviewed Nix source digest is invalid")
             if parameters["artifact_ref"] != f"artifact:sha256:{parameters['source_archive_sha256'].removeprefix('sha256:')}":
