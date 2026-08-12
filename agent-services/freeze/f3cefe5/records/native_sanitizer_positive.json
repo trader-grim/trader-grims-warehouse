@@ -1,0 +1,87 @@
+{
+  "argv": [
+    "/tmp/tgw-freeze-f3cefe5-gates/native-sanitizer-positive"
+  ],
+  "cwd": "/tmp/tgw-freeze-f3cefe5-source",
+  "duration_ns": 12278801,
+  "ended_at": "2026-08-12T23:27:14.230946Z",
+  "environment": {
+    "clear_inherited": true,
+    "values": {
+      "ASAN_OPTIONS": "detect_leaks=1:abort_on_error=1",
+      "HOME": "/tmp/tgw-freeze-f3cefe5-gates/home",
+      "LC_ALL": "C.UTF-8",
+      "NO_COLOR": "1",
+      "PATH": "/usr/bin:/bin",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONHASHSEED": "0",
+      "PYTHONPATH": "/tmp/tgw-freeze-f3cefe5-source/src",
+      "TGW_RENDER_TEST_PARSE_ONLY": "1",
+      "TMPDIR": "/tmp/tgw-freeze-f3cefe5-gates/tmp",
+      "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1"
+    }
+  },
+  "executable": {
+    "dev": 35,
+    "gid": 1004,
+    "inode": 5703221,
+    "mode": "0775",
+    "nlink": 1,
+    "path": "/tmp/tgw-freeze-f3cefe5-gates/native-sanitizer-positive",
+    "sha256": "sha256:49a0c89a32626d8fc65661b1cc5c9ca6dcb25488aa820deed066b9ebf44b6550",
+    "size": 238000,
+    "uid": 1004
+  },
+  "gate_id": "native_sanitizer_positive",
+  "generated_artifacts": [],
+  "held_executable_via_proc_fd": true,
+  "inputs": [
+    {
+      "dev": 35,
+      "gid": 1004,
+      "inode": 5540023,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/tmp/tgw-freeze-f3cefe5-gates/native-positive.conf",
+      "sha256": "sha256:72c7e1598efc1d9b5414a3da5d8743882945a333a017c311d5a1fdf1a9f70b7d",
+      "size": 25472,
+      "uid": 1004
+    },
+    {
+      "dev": 35,
+      "gid": 1004,
+      "inode": 5497290,
+      "mode": "0664",
+      "nlink": 1,
+      "path": "/tmp/tgw-freeze-f3cefe5-source/src/native/tgw_nix_observer_render_transport.c",
+      "sha256": "sha256:a730315f7f5963473e66492d80d6b3d8baaa1eac6a6be497d508cb16b2902dd8",
+      "size": 31341,
+      "uid": 1004
+    }
+  ],
+  "rc": 0,
+  "schema": "tgw-freeze-execution-record/v1",
+  "semantic": {
+    "status": "PASS",
+    "stderr_empty": true,
+    "stdout_empty": true
+  },
+  "source": {
+    "commit": "f3cefe544a9f81422b57707c4289f2974c6dca51",
+    "status": "CLEAN_DETACHED",
+    "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
+  },
+  "started_at": "2026-08-12T23:27:14.218645Z",
+  "stderr": {
+    "bytes": 0,
+    "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stdout": {
+    "bytes": 0,
+    "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
+  "unsigned_sha256": "sha256:afcc506630b57aa714a2ef6c92292d51476a61c71bc1d2342bb845da00fa485f"
+}

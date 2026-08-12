@@ -1,0 +1,134 @@
+{
+  "candidate": {
+    "candidate_identity": "candidate:sha256:ab2dce66e60d04196add46a7b6c0f8b740ab503ac2e0c0463a07e0f44e3040a2",
+    "file_sha256": "sha256:d7e098bd7607de91bdaf8f38286959ba807181e5c5714ceb4d1b5f37a849c568",
+    "path": "agent-services/candidates/integrated-f3cefe5-CLOSED-FREEZE.json"
+  },
+  "dispatchable": false,
+  "evidence": {
+    "catalog": {
+      "file_sha256": "sha256:d1747f4ab77ae037265941664a12b871458b5ca78c5c84fda814cc9735fad27f",
+      "path": "agent-services/catalogs/f3cefe5-closed-freeze-evidence.json",
+      "unsigned_sha256": "sha256:22389c39c08a9a1adaaa3d8e1fcb91f9b9ff2496b7160002eb325b3547371a6a"
+    },
+    "independent_verifier": "agent-services/freeze/f3cefe5/verify_freeze_evidence.py",
+    "literal_replay_test": "agent-services/freeze/f3cefe5/test_freeze_evidence.py",
+    "source_audit": {
+      "file_sha256": "sha256:fe21adf896f717cd475fd22738284857ec245bfdd38467220a786ed3b058c089",
+      "path": "agent-services/receipts/source-audit-f3cefe5-closed-freeze.json",
+      "unsigned_sha256": "sha256:4417e54811dca7e22ea7094ff7c1ea1576a4b10a8a125786cf113fb3e66170bc"
+    },
+    "store_readiness": {
+      "file_sha256": "sha256:09a43ea4955a0665d670b8e8b28fdf9b19fe005184017ea94d8fd5ef0e4b13da",
+      "path": "agent-services/receipts/f3cefe5-closed-store-readiness.json",
+      "unsigned_sha256": "sha256:3f9527892b60f35290fda4432c4046e205141be5d37f47e59a8c124c2bbd751a"
+    }
+  },
+  "grant": null,
+  "installed": false,
+  "known_source_identities": {
+    "authority": {
+      "path": "src/tgw/bootstrap_authority.py",
+      "sha256": "sha256:0827d8edb8885667ce5584ff6b873236b7068c3eab1eed463104d489d6f51a33",
+      "size": 21879
+    },
+    "controller": {
+      "path": "src/tgw/nixos_observer_render_evaluation.py",
+      "sha256": "sha256:ff9401ab9273203bb9a3b30c5328fe1b340b8246fbfa17845dcb3f576941adb3",
+      "size": 86260
+    },
+    "deployment_runtime": {
+      "path": "src/tgw/deployment_runtime.py",
+      "sha256": "sha256:b232829594d4fe5fd148e9b7cf7c825407bdd394bb2b8659defc8525e241e788",
+      "size": 3443
+    },
+    "effect_handlers": {
+      "path": "src/tgw/effect_handlers.py",
+      "sha256": "sha256:58571a1fc82ab61de918460a32f9610a78dee0cd9a3c2cd2c7936ebdebd43e56",
+      "size": 34282
+    },
+    "flake": {
+      "path": "flake.nix",
+      "sha256": "sha256:a214e0ad62014556603f8cf484c45fbd9205e25bfd9d1667b620cb037309c259",
+      "size": 7650
+    },
+    "helper": {
+      "path": "src/tgw/nix_observer_render_helper.py",
+      "sha256": "sha256:bfbd824429a1449f50166b71417c010c48b60f3d579e6050fb082d8d41724eb9",
+      "size": 112714
+    },
+    "module": {
+      "path": "nix/a3-platform-bootstrap.nix",
+      "sha256": "sha256:5fc75b67452f1e43bf8b7c14e31e96672875762e700bd21bc65649e8cba447f6",
+      "size": 4742
+    },
+    "native_transport_c": {
+      "path": "src/native/tgw_nix_observer_render_transport.c",
+      "sha256": "sha256:a730315f7f5963473e66492d80d6b3d8baaa1eac6a6be497d508cb16b2902dd8",
+      "size": 31341
+    },
+    "package": {
+      "path": "nix/a3-platform-bootstrap-package.nix",
+      "sha256": "sha256:81da0876fa9e98255e8e75a8a794cf410a58291e1d304ef2772e3751584a20e5",
+      "size": 880
+    },
+    "platform_bootstrap": {
+      "path": "src/tgw/platform_bootstrap.py",
+      "sha256": "sha256:f49f0fecec1d09023427ad5c0a15d335ff6f894f82f79c0fa1aceedde89bc142",
+      "size": 38052
+    },
+    "remote_bootstrap": {
+      "path": "src/tgw/nix_observer_render_remote.py",
+      "sha256": "sha256:36214b1ab1fd617c41bf5b45acab353f25c68b2a5417721f385ed98bf2c36980",
+      "size": 2201
+    }
+  },
+  "plan": {
+    "closure_hash": "sha256:bc0c53b2574fc359c629bd213e078fdd2824e5e1c4a98c0c7a347de869d9e6f8",
+    "commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+    "solution_hash": "sha256:d28650c26c6a3d26d6c943597ccb7abd7c6670b1703d9ce941ac5ed7a2d73a4d"
+  },
+  "request": null,
+  "schema": "tgw-platform-bootstrap-prerequisite-descriptor/v2",
+  "secret_bytes_present": false,
+  "source": {
+    "archive_ref": "artifact:sha256:72f3ed988e1fdc132d6da19d6332321389d41e22c114a7b4fa14e95755c5889f",
+    "archive_sha256": "sha256:72f3ed988e1fdc132d6da19d6332321389d41e22c114a7b4fa14e95755c5889f",
+    "archive_size": 9594880,
+    "commit": "f3cefe544a9f81422b57707c4289f2974c6dca51",
+    "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
+  },
+  "status": "PREPARED_NOT_EXECUTABLE",
+  "unresolved_external_prerequisites": [
+    {
+      "id": "reviewed-tgw-flake-successor-closure",
+      "required": "exact immutable build and closure membership records"
+    },
+    {
+      "id": "fresh-current-host-cas",
+      "required": "fresh expected-current host generation/profile observation"
+    },
+    {
+      "id": "attestation-private-key",
+      "required": "external root-owned 0400 reference/digest and exact public crossmatch"
+    },
+    {
+      "id": "ssh-private-key",
+      "required": "external root-owned 0400 reference/digest and authorized public crossmatch"
+    },
+    {
+      "id": "tgw-prod-nix-build",
+      "required": "live flake import/build and exact successor closure"
+    },
+    {
+      "id": "installed-sshd-effective-policy",
+      "required": "sshd -T -C user=... singleton authentication values"
+    },
+    {
+      "id": "installed-root-native-netns",
+      "required": "root/native/netns/prerequisite/health/probe evidence"
+    }
+  ],
+  "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in parent document",
+  "unsigned_sha256": "sha256:3297833b26817bb118881bc841404faa8685687b4c6eef2bca300ccc87670727"
+}

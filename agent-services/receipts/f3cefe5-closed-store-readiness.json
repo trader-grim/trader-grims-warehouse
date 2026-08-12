@@ -1,0 +1,591 @@
+{
+  "artifact_count": 36,
+  "artifact_root": {
+    "dev": 39,
+    "gid": 0,
+    "inode": 7565270,
+    "mode": "0755",
+    "nlink": 1,
+    "path": "/opt/TGW/evidence/codex/sha256",
+    "uid": 0
+  },
+  "artifacts": [
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565368,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/0cb01c661eba4ff2e5469bf144460aba48ca4c2bdd4e43ae11d5050764dc5fd9",
+      "ref": "artifact:sha256:0cb01c661eba4ff2e5469bf144460aba48ca4c2bdd4e43ae11d5050764dc5fd9",
+      "roles": [
+        "native_asan_ubsan_build_negative:generated:native-sanitizer-negative"
+      ],
+      "sha256": "sha256:0cb01c661eba4ff2e5469bf144460aba48ca4c2bdd4e43ae11d5050764dc5fd9",
+      "size": 238000,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565377,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/0e68619a387c24c779525e6e3fb35e93aeb9d43475bf3d4ddd299571f1d47cba",
+      "ref": "artifact:sha256:0e68619a387c24c779525e6e3fb35e93aeb9d43475bf3d4ddd299571f1d47cba",
+      "roles": [
+        "luet_raw_package_list:stdout"
+      ],
+      "sha256": "sha256:0e68619a387c24c779525e6e3fb35e93aeb9d43475bf3d4ddd299571f1d47cba",
+      "size": 1843,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565371,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/2008812214af5ee3bda3ca1bd3a06bdb67bf42a0d246a181ab0382c0dc6666f9",
+      "ref": "artifact:sha256:2008812214af5ee3bda3ca1bd3a06bdb67bf42a0d246a181ab0382c0dc6666f9",
+      "roles": [
+        "native_sanitizer_negative:stdout"
+      ],
+      "sha256": "sha256:2008812214af5ee3bda3ca1bd3a06bdb67bf42a0d246a181ab0382c0dc6666f9",
+      "size": 82,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565356,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/2081540010c16b1f96535485584489f6468eeee1b8388f1ad04f45d48990b711",
+      "ref": "artifact:sha256:2081540010c16b1f96535485584489f6468eeee1b8388f1ad04f45d48990b711",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:2081540010c16b1f96535485584489f6468eeee1b8388f1ad04f45d48990b711",
+      "size": 460393,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565424,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/252eed5039541d2c10d27e911fdb5bda21b191fdebf3815b75556a1a43a1273f",
+      "ref": "artifact:sha256:252eed5039541d2c10d27e911fdb5bda21b191fdebf3815b75556a1a43a1273f",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:252eed5039541d2c10d27e911fdb5bda21b191fdebf3815b75556a1a43a1273f",
+      "size": 272,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565399,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/2666c388950c75d9eaf2699cd42a3189e16a924cad60f98abfba74d6411b45fe",
+      "ref": "artifact:sha256:2666c388950c75d9eaf2699cd42a3189e16a924cad60f98abfba74d6411b45fe",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:2666c388950c75d9eaf2699cd42a3189e16a924cad60f98abfba74d6411b45fe",
+      "size": 272,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565274,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/3b3175c78d9742327034200c4c95a4300d8e47f5195414b7f573848757f04c0f",
+      "ref": "artifact:sha256:3b3175c78d9742327034200c4c95a4300d8e47f5195414b7f573848757f04c0f",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:3b3175c78d9742327034200c4c95a4300d8e47f5195414b7f573848757f04c0f",
+      "size": 207,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565281,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/44bed564c44e6343c5dd19abfd140864f5c536b7441f060e9742640dc82a8749",
+      "ref": "artifact:sha256:44bed564c44e6343c5dd19abfd140864f5c536b7441f060e9742640dc82a8749",
+      "roles": [
+        "luet_version:stdout"
+      ],
+      "sha256": "sha256:44bed564c44e6343c5dd19abfd140864f5c536b7441f060e9742640dc82a8749",
+      "size": 23,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565366,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/49a0c89a32626d8fc65661b1cc5c9ca6dcb25488aa820deed066b9ebf44b6550",
+      "ref": "artifact:sha256:49a0c89a32626d8fc65661b1cc5c9ca6dcb25488aa820deed066b9ebf44b6550",
+      "roles": [
+        "native_asan_ubsan_build_positive:generated:native-sanitizer-positive"
+      ],
+      "sha256": "sha256:49a0c89a32626d8fc65661b1cc5c9ca6dcb25488aa820deed066b9ebf44b6550",
+      "size": 238000,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565398,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/49c79058b04a2b3c97be4765e794a1a615c771b76a57982f3f7c5953a1c175a3",
+      "ref": "artifact:sha256:49c79058b04a2b3c97be4765e794a1a615c771b76a57982f3f7c5953a1c175a3",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:49c79058b04a2b3c97be4765e794a1a615c771b76a57982f3f7c5953a1c175a3",
+      "size": 460392,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565272,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/644d83617e843caa2c1a91e0fb27f2b20ff9ccccfaae32e3c16c8da116e51be7",
+      "ref": "artifact:sha256:644d83617e843caa2c1a91e0fb27f2b20ff9ccccfaae32e3c16c8da116e51be7",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:644d83617e843caa2c1a91e0fb27f2b20ff9ccccfaae32e3c16c8da116e51be7",
+      "size": 4802,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565364,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/67d186982e6a966a657855f61098f6dd496217e9daaa74770b51d88695bcd712",
+      "ref": "artifact:sha256:67d186982e6a966a657855f61098f6dd496217e9daaa74770b51d88695bcd712",
+      "roles": [
+        "native_gcc_werror:generated:native-werror"
+      ],
+      "sha256": "sha256:67d186982e6a966a657855f61098f6dd496217e9daaa74770b51d88695bcd712",
+      "size": 41592,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565425,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/6c20023d56dc25f072621520950de2694a4d936416830e0e6dbbde81059dfbd8",
+      "ref": "artifact:sha256:6c20023d56dc25f072621520950de2694a4d936416830e0e6dbbde81059dfbd8",
+      "roles": [
+        "full_pytest_junit:stdout"
+      ],
+      "sha256": "sha256:6c20023d56dc25f072621520950de2694a4d936416830e0e6dbbde81059dfbd8",
+      "size": 4204,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565423,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/709ac08f19bcb02c3031a0f315ebfe4f31ef4987968127a61dccb2520253a7db",
+      "ref": "artifact:sha256:709ac08f19bcb02c3031a0f315ebfe4f31ef4987968127a61dccb2520253a7db",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:709ac08f19bcb02c3031a0f315ebfe4f31ef4987968127a61dccb2520253a7db",
+      "size": 460392,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565386,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/72f3ed988e1fdc132d6da19d6332321389d41e22c114a7b4fa14e95755c5889f",
+      "ref": "artifact:sha256:72f3ed988e1fdc132d6da19d6332321389d41e22c114a7b4fa14e95755c5889f",
+      "roles": [
+        "immutable_source_archive"
+      ],
+      "sha256": "sha256:72f3ed988e1fdc132d6da19d6332321389d41e22c114a7b4fa14e95755c5889f",
+      "size": 9594880,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565275,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/78d352a17e7b75a7a5278a66b4bf6431c2d3a236535426430b7d697a591b6ae9",
+      "ref": "artifact:sha256:78d352a17e7b75a7a5278a66b4bf6431c2d3a236535426430b7d697a591b6ae9",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:78d352a17e7b75a7a5278a66b4bf6431c2d3a236535426430b7d697a591b6ae9",
+      "size": 1031,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565271,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/798702ee48a418619d8b4887beeaf8fd072209b8d9ee5584cdcb56961beb2f00",
+      "ref": "artifact:sha256:798702ee48a418619d8b4887beeaf8fd072209b8d9ee5584cdcb56961beb2f00",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:798702ee48a418619d8b4887beeaf8fd072209b8d9ee5584cdcb56961beb2f00",
+      "size": 460372,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565276,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+      "ref": "artifact:sha256:82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+      "roles": [
+        "ruff_explicit:stdout"
+      ],
+      "sha256": "sha256:82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+      "size": 19,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565355,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/85abd0dddf03906cf33771789bbaba68c04d617405682acde823fc8dc4c1e009",
+      "ref": "artifact:sha256:85abd0dddf03906cf33771789bbaba68c04d617405682acde823fc8dc4c1e009",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:85abd0dddf03906cf33771789bbaba68c04d617405682acde823fc8dc4c1e009",
+      "size": 4204,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565280,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/8fb3d9740891d65e21c72cdb9459850222c39288095831a2a6e64220bd87ed71",
+      "ref": "artifact:sha256:8fb3d9740891d65e21c72cdb9459850222c39288095831a2a6e64220bd87ed71",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:8fb3d9740891d65e21c72cdb9459850222c39288095831a2a6e64220bd87ed71",
+      "size": 1068,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565388,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/b4f9560ffc5a3ad2bdd48ada1702191ba1d4aa12b28bf49420769b8fb43482e8",
+      "ref": "artifact:sha256:b4f9560ffc5a3ad2bdd48ada1702191ba1d4aa12b28bf49420769b8fb43482e8",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:b4f9560ffc5a3ad2bdd48ada1702191ba1d4aa12b28bf49420769b8fb43482e8",
+      "size": 4204,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565400,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/b59a6a90ffcd2644af828232492816648d025d2f78810cf1d3bf1567209ebad5",
+      "ref": "artifact:sha256:b59a6a90ffcd2644af828232492816648d025d2f78810cf1d3bf1567209ebad5",
+      "roles": [
+        "luet_derived_tgw_receipt:stdout"
+      ],
+      "sha256": "sha256:b59a6a90ffcd2644af828232492816648d025d2f78810cf1d3bf1567209ebad5",
+      "size": 1068,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565422,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/b6478af814938647d562f8512d8a4e5bd6e588c2a81168178d29069ae1d14cc8",
+      "ref": "artifact:sha256:b6478af814938647d562f8512d8a4e5bd6e588c2a81168178d29069ae1d14cc8",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:b6478af814938647d562f8512d8a4e5bd6e588c2a81168178d29069ae1d14cc8",
+      "size": 4203,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565373,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/b90d3eebcfe3fa901ebb0f26519133e826ec01115468064ef59973226fc07ad9",
+      "ref": "artifact:sha256:b90d3eebcfe3fa901ebb0f26519133e826ec01115468064ef59973226fc07ad9",
+      "roles": [
+        "plan_graph_generation:generated:plan-graph.json"
+      ],
+      "sha256": "sha256:b90d3eebcfe3fa901ebb0f26519133e826ec01115468064ef59973226fc07ad9",
+      "size": 4920,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565390,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/bedcb9a901c0e7c033fe2bbef5fe81c75bd9bad9305c5501b3ca7d26abb2b4ab",
+      "ref": "artifact:sha256:bedcb9a901c0e7c033fe2bbef5fe81c75bd9bad9305c5501b3ca7d26abb2b4ab",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:bedcb9a901c0e7c033fe2bbef5fe81c75bd9bad9305c5501b3ca7d26abb2b4ab",
+      "size": 272,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565322,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+      "ref": "artifact:sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+      "roles": [
+        "pinned_luet_0.9.26_binary"
+      ],
+      "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+      "size": 48513496,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565380,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/cc8b7fbdce6d1debceae7a6d2a11192de500bcd870a6ce08abee50a53db0f3d3",
+      "ref": "artifact:sha256:cc8b7fbdce6d1debceae7a6d2a11192de500bcd870a6ce08abee50a53db0f3d3",
+      "roles": [
+        "plan_solution_verification:stdout"
+      ],
+      "sha256": "sha256:cc8b7fbdce6d1debceae7a6d2a11192de500bcd870a6ce08abee50a53db0f3d3",
+      "size": 111,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565277,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/d2768bbc25d1ba6f01efa04a64c6cc242a63d50d2e52787412cc9889fd4c9aaf",
+      "ref": "artifact:sha256:d2768bbc25d1ba6f01efa04a64c6cc242a63d50d2e52787412cc9889fd4c9aaf",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:d2768bbc25d1ba6f01efa04a64c6cc242a63d50d2e52787412cc9889fd4c9aaf",
+      "size": 43,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565427,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/db7017390c9fcb98942d6baed92a92b91fa46d419f533bdf6d4067f86faf7f35",
+      "ref": "artifact:sha256:db7017390c9fcb98942d6baed92a92b91fa46d419f533bdf6d4067f86faf7f35",
+      "roles": [
+        "focused_pytest:stdout"
+      ],
+      "sha256": "sha256:db7017390c9fcb98942d6baed92a92b91fa46d419f533bdf6d4067f86faf7f35",
+      "size": 272,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565279,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/ddaa9573c90ee6fc0612d8ea5f01613e8f7fe722cf320504b1e3f297a8c466d4",
+      "ref": "artifact:sha256:ddaa9573c90ee6fc0612d8ea5f01613e8f7fe722cf320504b1e3f297a8c466d4",
+      "roles": [
+        "plan_solution_generation:generated:plan-solution.json"
+      ],
+      "sha256": "sha256:ddaa9573c90ee6fc0612d8ea5f01613e8f7fe722cf320504b1e3f297a8c466d4",
+      "size": 5972,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565273,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "roles": [
+        "focused_pytest:stderr",
+        "full_pytest_junit:stderr",
+        "git_diff_check:stdout",
+        "git_diff_check:stderr",
+        "luet_derived_tgw_receipt:stderr",
+        "luet_raw_package_list:stderr",
+        "luet_version:stderr",
+        "native_asan_ubsan_build_negative:stdout",
+        "native_asan_ubsan_build_negative:stderr",
+        "native_asan_ubsan_build_positive:stdout",
+        "native_asan_ubsan_build_positive:stderr",
+        "native_gcc_werror:stdout",
+        "native_gcc_werror:stderr",
+        "native_sanitizer_negative:stderr",
+        "native_sanitizer_positive:stdout",
+        "native_sanitizer_positive:stderr",
+        "plan_graph_generation:stdout",
+        "plan_graph_generation:stderr",
+        "plan_luet_tree_generation:stdout",
+        "plan_luet_tree_generation:stderr",
+        "plan_solution_generation:stdout",
+        "plan_solution_generation:stderr",
+        "plan_solution_verification:stderr",
+        "py_compile_explicit:stdout",
+        "py_compile_explicit:stderr",
+        "ruff_explicit:stderr"
+      ],
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565389,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/e98300fb66ace309b32fa70132c76486178f64f453713dcc974858d358f67bad",
+      "ref": "artifact:sha256:e98300fb66ace309b32fa70132c76486178f64f453713dcc974858d358f67bad",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:e98300fb66ace309b32fa70132c76486178f64f453713dcc974858d358f67bad",
+      "size": 460392,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565359,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/ec41e78d0b71cd27ed23510a860e1ee7ad4491ddce919d02a96fc4aa805e6ad8",
+      "ref": "artifact:sha256:ec41e78d0b71cd27ed23510a860e1ee7ad4491ddce919d02a96fc4aa805e6ad8",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:ec41e78d0b71cd27ed23510a860e1ee7ad4491ddce919d02a96fc4aa805e6ad8",
+      "size": 272,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565278,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/ed77420475178e77b7edab0b4be2ed033c4bef212385527f399659e3987642f8",
+      "ref": "artifact:sha256:ed77420475178e77b7edab0b4be2ed033c4bef212385527f399659e3987642f8",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:ed77420475178e77b7edab0b4be2ed033c4bef212385527f399659e3987642f8",
+      "size": 3695,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565397,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/f023386a0c5187b7e8f4634f9e6f6acf672ac0103f11c232d0f552d30e544abc",
+      "ref": "artifact:sha256:f023386a0c5187b7e8f4634f9e6f6acf672ac0103f11c232d0f552d30e544abc",
+      "roles": [
+        "preserved_prior_raw_input"
+      ],
+      "sha256": "sha256:f023386a0c5187b7e8f4634f9e6f6acf672ac0103f11c232d0f552d30e544abc",
+      "size": 4204,
+      "uid": 0
+    },
+    {
+      "dev": 39,
+      "gid": 0,
+      "inode": 7565426,
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/opt/TGW/evidence/codex/sha256/f51489ca7967d0f305b15f862ae7a4c8b9b550d8509c6dc410145ba6fc9f5632",
+      "ref": "artifact:sha256:f51489ca7967d0f305b15f862ae7a4c8b9b550d8509c6dc410145ba6fc9f5632",
+      "roles": [
+        "full_pytest_junit:generated:full-junit.xml"
+      ],
+      "sha256": "sha256:f51489ca7967d0f305b15f862ae7a4c8b9b550d8509c6dc410145ba6fc9f5632",
+      "size": 460393,
+      "uid": 0
+    }
+  ],
+  "policy": {
+    "filename": "lowercase_sha256",
+    "mode": "0444",
+    "nlink": 1,
+    "overwrite": false,
+    "owner_gid": 0,
+    "owner_uid": 0
+  },
+  "schema": "tgw-protected-store-readiness/v2",
+  "status": "PASS",
+  "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in parent document",
+  "unsigned_sha256": "sha256:3f9527892b60f35290fda4432c4046e205141be5d37f47e59a8c124c2bbd751a"
+}

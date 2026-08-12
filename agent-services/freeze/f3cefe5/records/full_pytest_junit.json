@@ -1,0 +1,79 @@
+{
+  "argv": [
+    "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest",
+    "-q",
+    "--junitxml=/tmp/tgw-freeze-f3cefe5-gates/full-junit.xml"
+  ],
+  "cwd": "/tmp/tgw-freeze-f3cefe5-source",
+  "duration_ns": 101906810582,
+  "ended_at": "2026-08-12T23:26:55.228191Z",
+  "environment": {
+    "clear_inherited": true,
+    "values": {
+      "HOME": "/tmp/tgw-freeze-f3cefe5-gates/home",
+      "LC_ALL": "C.UTF-8",
+      "NO_COLOR": "1",
+      "PATH": "/usr/bin:/bin",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONHASHSEED": "0",
+      "PYTHONPATH": "/tmp/tgw-freeze-f3cefe5-source/src",
+      "TMPDIR": "/tmp/tgw-freeze-f3cefe5-gates/tmp"
+    }
+  },
+  "executable": {
+    "dev": 39,
+    "gid": 983,
+    "inode": 6648890,
+    "mode": "0775",
+    "nlink": 1,
+    "path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest",
+    "sha256": "sha256:4183e6b1b6247763e4adeb2abea2324040e591fa8196c267f46200cf8cc4da02",
+    "size": 358,
+    "uid": 1000
+  },
+  "gate_id": "full_pytest_junit",
+  "generated_artifacts": [
+    {
+      "bytes": 460393,
+      "ref": "artifact:sha256:f51489ca7967d0f305b15f862ae7a4c8b9b550d8509c6dc410145ba6fc9f5632",
+      "role": "full-junit.xml",
+      "sha256": "sha256:f51489ca7967d0f305b15f862ae7a4c8b9b550d8509c6dc410145ba6fc9f5632",
+      "source_path": "/tmp/tgw-freeze-f3cefe5-gates/full-junit.xml"
+    }
+  ],
+  "held_executable_via_proc_fd": true,
+  "inputs": [],
+  "rc": 0,
+  "schema": "tgw-freeze-execution-record/v1",
+  "semantic": {
+    "junit": {
+      "errors": null,
+      "failures": null,
+      "skipped": null,
+      "tests": null,
+      "time": null
+    },
+    "passed": 3725,
+    "reported_seconds": 100.8,
+    "skipped": 5,
+    "status": "PASS"
+  },
+  "source": {
+    "commit": "f3cefe544a9f81422b57707c4289f2974c6dca51",
+    "status": "CLEAN_DETACHED",
+    "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
+  },
+  "started_at": "2026-08-12T23:25:13.321340Z",
+  "stderr": {
+    "bytes": 0,
+    "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stdout": {
+    "bytes": 4204,
+    "ref": "artifact:sha256:6c20023d56dc25f072621520950de2694a4d936416830e0e6dbbde81059dfbd8",
+    "sha256": "sha256:6c20023d56dc25f072621520950de2694a4d936416830e0e6dbbde81059dfbd8"
+  },
+  "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
+  "unsigned_sha256": "sha256:17d6f5c3fb67fc6ea826d9a757d435a07c8223769368bcde79df91ae5fae3ef8"
+}

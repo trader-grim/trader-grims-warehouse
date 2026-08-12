@@ -1,0 +1,112 @@
+{
+  "argv": [
+    "/usr/bin/python3.13",
+    "/opt/TGW/tgw-lib/src/trader-grims-warehouse/agent-services/freeze/f3cefe5/freeze_gate_tools.py",
+    "generate-graph",
+    "--plan-root",
+    "/tmp/tgw-freeze-plan-fb9fee3",
+    "--plan-commit",
+    "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+    "--catalog",
+    "/tmp/tgw-freeze-f3cefe5-source/agent-services/catalogs/governed-execution-platform-v1.json",
+    "--output",
+    "/tmp/tgw-freeze-f3cefe5-gates/plan-graph.json"
+  ],
+  "cwd": "/tmp/tgw-freeze-f3cefe5-source",
+  "duration_ns": 124518524,
+  "ended_at": "2026-08-12T23:27:14.599223Z",
+  "environment": {
+    "clear_inherited": true,
+    "values": {
+      "HOME": "/tmp/tgw-freeze-f3cefe5-gates/home",
+      "LC_ALL": "C.UTF-8",
+      "NO_COLOR": "1",
+      "PATH": "/usr/bin:/bin",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONHASHSEED": "0",
+      "PYTHONPATH": "/tmp/tgw-freeze-f3cefe5-source/src",
+      "TMPDIR": "/tmp/tgw-freeze-f3cefe5-gates/tmp"
+    }
+  },
+  "executable": {
+    "dev": 2050,
+    "gid": 0,
+    "inode": 2098567,
+    "mode": "0755",
+    "nlink": 1,
+    "path": "/usr/bin/python3.13",
+    "sha256": "sha256:17b78e0a93175e86f9ac03141924fd7a7f0c0c52e66b34bfa0de20ffef989df1",
+    "size": 6812336,
+    "uid": 0
+  },
+  "gate_id": "plan_graph_generation",
+  "generated_artifacts": [
+    {
+      "bytes": 4920,
+      "ref": "artifact:sha256:b90d3eebcfe3fa901ebb0f26519133e826ec01115468064ef59973226fc07ad9",
+      "role": "plan-graph.json",
+      "sha256": "sha256:b90d3eebcfe3fa901ebb0f26519133e826ec01115468064ef59973226fc07ad9",
+      "source_path": "/tmp/tgw-freeze-f3cefe5-gates/plan-graph.json"
+    }
+  ],
+  "held_executable_via_proc_fd": true,
+  "inputs": [
+    {
+      "dev": 39,
+      "gid": 983,
+      "inode": 7565313,
+      "mode": "0664",
+      "nlink": 1,
+      "path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/agent-services/freeze/f3cefe5/freeze_gate_tools.py",
+      "sha256": "sha256:0f270383cf27736ad93d731aad74f9b17d859c37e9a46f384059f5570a233c6a",
+      "size": 2685,
+      "uid": 1004
+    },
+    {
+      "dev": 35,
+      "gid": 1004,
+      "inode": 5498871,
+      "mode": "0664",
+      "nlink": 1,
+      "path": "/tmp/tgw-freeze-plan-fb9fee3/plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml",
+      "sha256": "sha256:182cec4d0cb029a3116dc99f3ca974910218a2d0a1b4d0b550f505b63c8f0be8",
+      "size": 10321,
+      "uid": 1004
+    },
+    {
+      "dev": 35,
+      "gid": 1004,
+      "inode": 5496703,
+      "mode": "0664",
+      "nlink": 1,
+      "path": "/tmp/tgw-freeze-f3cefe5-source/agent-services/catalogs/governed-execution-platform-v1.json",
+      "sha256": "sha256:eacf4d6537a120c8d80d0779bb385f485dbd62df3121132430e4a85914f0265c",
+      "size": 2750,
+      "uid": 1004
+    }
+  ],
+  "rc": 0,
+  "schema": "tgw-freeze-execution-record/v1",
+  "semantic": {
+    "plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+    "status": "PASS"
+  },
+  "source": {
+    "commit": "f3cefe544a9f81422b57707c4289f2974c6dca51",
+    "status": "CLEAN_DETACHED",
+    "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
+  },
+  "started_at": "2026-08-12T23:27:14.474670Z",
+  "stderr": {
+    "bytes": 0,
+    "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stdout": {
+    "bytes": 0,
+    "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
+  "unsigned_sha256": "sha256:a038efa56ac15223cf963caa8bcd8ab9ef2c2d23966ac056f4289e45eb2ce8ee"
+}

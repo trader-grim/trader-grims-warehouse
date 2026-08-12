@@ -1,0 +1,80 @@
+{
+  "argv": [
+    "/usr/bin/x86_64-linux-gnu-gcc-14",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-DTGW_RENDER_TEST_BUILD",
+    "-fsanitize=address,undefined",
+    "-fno-omit-frame-pointer",
+    "-DTGW_RENDER_WRAPPER_CONFIG=\"/tmp/tgw-freeze-f3cefe5-gates/native-positive.conf\"",
+    "-o",
+    "/tmp/tgw-freeze-f3cefe5-gates/native-sanitizer-positive",
+    "/tmp/tgw-freeze-f3cefe5-source/src/native/tgw_nix_observer_render_transport.c",
+    "-lcrypto"
+  ],
+  "cwd": "/tmp/tgw-freeze-f3cefe5-source",
+  "duration_ns": 419468400,
+  "ended_at": "2026-08-12T23:27:13.567053Z",
+  "environment": {
+    "clear_inherited": true,
+    "values": {
+      "HOME": "/tmp/tgw-freeze-f3cefe5-gates/home",
+      "LC_ALL": "C.UTF-8",
+      "NO_COLOR": "1",
+      "PATH": "/usr/bin:/bin",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONHASHSEED": "0",
+      "PYTHONPATH": "/tmp/tgw-freeze-f3cefe5-source/src",
+      "TMPDIR": "/tmp/tgw-freeze-f3cefe5-gates/tmp"
+    }
+  },
+  "executable": {
+    "dev": 2050,
+    "gid": 0,
+    "inode": 2099060,
+    "mode": "0755",
+    "nlink": 1,
+    "path": "/usr/bin/x86_64-linux-gnu-gcc-14",
+    "sha256": "sha256:a23ecab8ff08f09ad8c80602c2c5df7f49e09c25905cb8975902e101bf72635f",
+    "size": 1162264,
+    "uid": 0
+  },
+  "gate_id": "native_asan_ubsan_build_positive",
+  "generated_artifacts": [
+    {
+      "bytes": 238000,
+      "ref": "artifact:sha256:49a0c89a32626d8fc65661b1cc5c9ca6dcb25488aa820deed066b9ebf44b6550",
+      "role": "native-sanitizer-positive",
+      "sha256": "sha256:49a0c89a32626d8fc65661b1cc5c9ca6dcb25488aa820deed066b9ebf44b6550",
+      "source_path": "/tmp/tgw-freeze-f3cefe5-gates/native-sanitizer-positive"
+    }
+  ],
+  "held_executable_via_proc_fd": true,
+  "inputs": [],
+  "rc": 0,
+  "schema": "tgw-freeze-execution-record/v1",
+  "semantic": {
+    "status": "PASS",
+    "stderr_empty": true,
+    "stdout_empty": true
+  },
+  "source": {
+    "commit": "f3cefe544a9f81422b57707c4289f2974c6dca51",
+    "status": "CLEAN_DETACHED",
+    "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
+  },
+  "started_at": "2026-08-12T23:27:13.147556Z",
+  "stderr": {
+    "bytes": 0,
+    "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stdout": {
+    "bytes": 0,
+    "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
+  "unsigned_sha256": "sha256:94a1418e28a30ca3daa94308bf2a3a32ff5cc1d9f55a6acbdc055482e7dc8c11"
+}
