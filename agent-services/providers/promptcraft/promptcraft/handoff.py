@@ -194,7 +194,18 @@ def verify_for_launcher(
     receipt = handoff.get("receipt")
     if not isinstance(receipt, Mapping) or receipt.get("schema") != RECEIPT_SCHEMA:
         raise HandoffError("invalid Promptcraft receipt")
+    required_receipt = {
+        "schema", "card_hash", "resource_hashes", "profile",
+        "rendered_instruction_hash", "receiver_identity", "intent_guard_hash",
+        "result", "receipt_hash",
+    }
+    if set(receipt) != required_receipt:
+        raise HandoffError("Promptcraft receipt fields are invalid")
     _verify_hash(receipt, "receipt_hash")
+    if receipt["result"] != "READY":
+        raise HandoffError("Promptcraft receipt is not READY")
+    if not isinstance(receipt["receiver_identity"], str) or not receipt["receiver_identity"]:
+        raise HandoffError("Promptcraft receiver identity is invalid")
     if receipt["card_hash"] != card.hash:
         raise HandoffError("receipt card hash mismatch")
     expected_resources = {
