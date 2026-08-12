@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,7 +21,74 @@ FAILURE_ROOT = Path("/opt/TGW/tgw-lib/actors/codex/nix-observer-render-failures"
 
 
 class RenderRuntimeError(ValueError):
-    pass
+    def __init__(self, message: str, *, receipt: Mapping[str, object] | None = None):
+        super().__init__(message)
+        self.receipt = receipt
+
+
+FAILURE_SCHEMA = "tgw-nix-observer-render-evaluation-failure/v1"
+FAILURE_STAGES = {"request", "archive", "source", "input-closure", "nix-eval", "nix-build", "output", "systemd-verify", "cleanup", "internal"}
+FAILURE_CODES = {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED", "SUBPROCESS_FAILED", "CLEANUP_FAILED", "INTERNAL_ERROR"}
+FAILURE_EFFECTS = {"build_attempted", "activation", "deployment", "profile_write", "home_db_write", "live_flake_write", "network"}
+
+
+def validate_failure(value: Mapping[str, object], *, request: Mapping[str, object]) -> dict[str, object]:
+    fields = {
+        "schema",
+        "request_sha256",
+        "source_commit",
+        "source_tree",
+        "archive_sha256",
+        "provider_sha256",
+        "host_identity_receipt_sha256",
+        "outcome",
+        "stage",
+        "diagnostic_code",
+        "cleanup",
+        "effects",
+        "return_code",
+        "stdout_bytes",
+        "stdout_sha256",
+        "stderr_bytes",
+        "stderr_sha256",
+        "receipt_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise RenderRuntimeError("render failure schema is not closed")
+    result = dict(value)
+    claimed = result.pop("receipt_sha256")
+    encoded = json.dumps(result, sort_keys=True, separators=(",", ":")).encode()
+    if len(encoded) > 8192 or claimed != "sha256:" + hashlib.sha256(encoded).hexdigest():
+        raise RenderRuntimeError("render failure self-hash or size mismatch")
+    for field in ("request_sha256", "source_commit", "source_tree", "archive_sha256", "provider_sha256", "host_identity_receipt_sha256"):
+        if result[field] != request[field]:
+            raise RenderRuntimeError("render failure identity binding mismatch")
+    if result["schema"] != FAILURE_SCHEMA or result["stage"] not in FAILURE_STAGES or result["diagnostic_code"] not in FAILURE_CODES:
+        raise RenderRuntimeError("render failure classification invalid")
+    if result["outcome"] == "FAILED":
+        if result["cleanup"] != "removed":
+            raise RenderRuntimeError("FAILED requires verified cleanup")
+    elif result["outcome"] == "AMBIGUOUS":
+        if result["cleanup"] not in {"failed", "unknown"}:
+            raise RenderRuntimeError("AMBIGUOUS requires cleanup uncertainty")
+    else:
+        raise RenderRuntimeError("render failure outcome invalid")
+    effects = result["effects"]
+    if (
+        not isinstance(effects, dict)
+        or set(effects) != FAILURE_EFFECTS
+        or not isinstance(effects["build_attempted"], bool)
+        or any(effects[key] is not False for key in FAILURE_EFFECTS - {"build_attempted"})
+    ):
+        raise RenderRuntimeError("render failure effects invalid")
+    if result["return_code"] is not None and (not isinstance(result["return_code"], int) or not -255 <= result["return_code"] <= 255):
+        raise RenderRuntimeError("render failure return code invalid")
+    for prefix in ("stdout", "stderr"):
+        if not isinstance(result[prefix + "_bytes"], int) or not 0 <= result[prefix + "_bytes"] <= request["max_output_bytes"]:
+            raise RenderRuntimeError("render failure diagnostic bound invalid")
+        if not isinstance(result[prefix + "_sha256"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", result[prefix + "_sha256"]):
+            raise RenderRuntimeError("render failure diagnostic hash invalid")
+    return dict(value)
 
 
 class RenderTransport(Protocol):
@@ -69,17 +137,13 @@ class ClosedRenderProvider:
             untrusted = self.transport(request=validated, archive_fd=archive_fd, known_hosts_fd=hosts_fd)
             if untrusted.get("schema") == "tgw-nix-observer-render-evaluation-receipt/v1":
                 return validate_result(untrusted, request=validated)
-            if untrusted.get("schema") != "tgw-nix-observer-render-evaluation-failure/v1":
+            if untrusted.get("schema") != FAILURE_SCHEMA:
                 raise RenderRuntimeError("render transport returned an unknown terminal schema")
-            failure = dict(untrusted)
-            if failure.get("request_sha256") != validated["request_sha256"] or failure.get("outcome") not in {"FAILED", "AMBIGUOUS"}:
-                raise RenderRuntimeError("render failure receipt binding mismatch")
-            unsigned = dict(failure)
-            claimed = unsigned.pop("receipt_sha256", None)
-            encoded = json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
-            if claimed != "sha256:" + hashlib.sha256(encoded).hexdigest():
-                raise RenderRuntimeError("render failure receipt self-hash mismatch")
-            reference = self.failure_store.persist(failure)
+            failure = validate_failure(untrusted, request=validated)
+            try:
+                reference = self.failure_store.persist(failure)
+            except (OSError, ValueError) as exc:
+                raise RenderRuntimeError("validated failure persistence is ambiguous", receipt=failure) from exc
             raise RenderRuntimeError("render evaluation terminated " + str(failure["outcome"]) + " at " + str(reference["artifact_ref"]))
         finally:
             for fd in (archive_fd, hosts_fd):

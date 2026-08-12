@@ -74,7 +74,26 @@ def test_failure_is_bound_and_persisted(tmp_path, monkeypatch):
     archive, hosts = artifacts(tmp_path, req)
     monkeypatch.setattr(module, "SOURCE_REF", req["artifact_ref"])
     store = Store()
-    failure = {"schema": "tgw-nix-observer-render-evaluation-failure/v1", "request_sha256": req["request_sha256"], "outcome": "FAILED", "stage": "nix-build"}
+    empty = "sha256:" + __import__("hashlib").sha256(b"").hexdigest()
+    failure = {
+        "schema": module.FAILURE_SCHEMA,
+        "request_sha256": req["request_sha256"],
+        "source_commit": req["source_commit"],
+        "source_tree": req["source_tree"],
+        "archive_sha256": req["archive_sha256"],
+        "provider_sha256": req["provider_sha256"],
+        "host_identity_receipt_sha256": req["host_identity_receipt_sha256"],
+        "outcome": "FAILED",
+        "stage": "nix-build",
+        "diagnostic_code": "SUBPROCESS_FAILED",
+        "cleanup": "removed",
+        "effects": {"build_attempted": True, "activation": False, "deployment": False, "profile_write": False, "home_db_write": False, "live_flake_write": False, "network": False},
+        "return_code": 1,
+        "stdout_bytes": 0,
+        "stdout_sha256": empty,
+        "stderr_bytes": 0,
+        "stderr_sha256": empty,
+    }
     failure["receipt_sha256"] = "sha256:" + __import__("hashlib").sha256(canonical(failure)).hexdigest()
     monkeypatch.setattr(module, "_held", lambda path, **kwargs: (__import__("os").open(path, __import__("os").O_RDONLY), {}))
     with pytest.raises(RenderRuntimeError, match="terminated FAILED"):
