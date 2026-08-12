@@ -15,10 +15,12 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import selectors
 import shlex
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -38,6 +40,7 @@ from tgw import nix_observer_render_remote as remote_bootstrap
 from tgw.nix_observer_render_evaluation import validate_request, validate_result
 
 EFFECT_KIND = "nixos-observer-render-evaluation"
+PLAN_APPROVED_COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
 AUDITED_A2_COMMIT = "45ccc1f5643c6c81bba836dcdbd3cb46392c4679"
 HELPER_SHA256 = "sha256:bfbd824429a1449f50166b71417c010c48b60f3d579e6050fb082d8d41724eb9"
 REMOTE_WRAPPER_PATH = "/run/current-system/sw/bin/tgw-nix-observer-render-wrapper"
@@ -50,10 +53,15 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _SHA1 = re.compile(r"[0-9a-f]{40}")
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}")
 _NETNS = re.compile(r"net:\[[1-9][0-9]*\]")
-_COMPOSITION_SCHEMA = "tgw-nixos-observer-render-composition/v2"
-_ATTEMPT_SCHEMA = "tgw-nixos-observer-render-attempt/v1"
-_WRAPPER_SCHEMA = "tgw-nixos-observer-render-wrapper-envelope/v1"
-_HANDLER_SCHEMA = "tgw-nixos-observer-render-handler-result/v1"
+_COMPOSITION_SCHEMA = "tgw-nixos-observer-render-composition/v3"
+_ATTEMPT_SCHEMA = "tgw-nixos-observer-render-attempt/v2"
+_WRAPPER_SCHEMA = "tgw-nixos-observer-render-wrapper-envelope/v2"
+_HANDLER_SCHEMA = "tgw-nixos-observer-render-handler-result/v2"
+_LAUNCH_MAGIC = b"TGWCTX01"
+_LAUNCH_VERSION = 1
+_LAUNCH = struct.Struct("!8sI40s40s40s32s16s192s")
+_NONCE = re.compile(r"[0-9a-f]{64}")
+_ATTEMPT_ID = re.compile(r"[0-9a-f]{32}")
 
 
 class RenderTransportError(ValueError):
@@ -65,29 +73,83 @@ class CompositionHold(RenderTransportError):
 
 
 class RemoteRenderFailure(RenderTransportError):
-    def __init__(self, terminal: Mapping[str, Any], terminal_ref: Mapping[str, Any], attempt_ref: Mapping[str, Any]):
+    def __init__(
+        self,
+        terminal: Mapping[str, Any],
+        terminal_ref: Mapping[str, Any],
+        attempt_ref: Mapping[str, Any],
+        transport_ref: Mapping[str, Any],
+    ):
         super().__init__(f"remote observer render terminated {terminal['outcome']}")
         self.terminal = dict(terminal)
         self.terminal_ref = dict(terminal_ref)
         self.attempt_ref = dict(attempt_ref)
+        self.transport_ref = dict(transport_ref)
 
 
 class RemoteAttemptAmbiguous(RenderTransportError):
-    def __init__(self, reason: str, attempt_receipt: Mapping[str, Any], attempt_ref: Mapping[str, Any]):
+    def __init__(
+        self,
+        reason: str,
+        attempt_receipt: Mapping[str, Any],
+        attempt_ref: Mapping[str, Any],
+        *,
+        transport_ref: Mapping[str, Any] | None = None,
+        terminal_ref: Mapping[str, Any] | None = None,
+        launch_binding: LaunchBinding | None = None,
+    ):
         super().__init__(f"remote observer render is AMBIGUOUS: {reason}")
         self.attempt_receipt = dict(attempt_receipt)
         self.attempt_ref = dict(attempt_ref)
         self.reconciliation = dict(attempt_receipt["reconciliation"])
+        self.transport_ref = dict(transport_ref or {})
+        self.terminal_ref = dict(terminal_ref or {})
+        self.launch_binding = launch_binding
 
 
 class TerminalPersistenceError(RemoteAttemptAmbiguous):
-    def __init__(self, terminal: Mapping[str, Any], attempt_receipt: Mapping[str, Any], attempt_ref: Mapping[str, Any]):
-        super().__init__("validated terminal could not be persisted", attempt_receipt, attempt_ref)
+    def __init__(
+        self,
+        terminal: Mapping[str, Any],
+        attempt_receipt: Mapping[str, Any],
+        attempt_ref: Mapping[str, Any],
+        *,
+        transport_ref: Mapping[str, Any],
+        terminal_ref: Mapping[str, Any],
+        launch_binding: LaunchBinding,
+    ):
+        super().__init__(
+            "validated terminal could not be persisted",
+            attempt_receipt,
+            attempt_ref,
+            transport_ref=transport_ref,
+            terminal_ref=terminal_ref,
+            launch_binding=launch_binding,
+        )
         self.terminal = dict(terminal)
 
 
 class ReceiptStore(Protocol):
     def persist(self, value: Mapping[str, Any]) -> Mapping[str, Any]: ...
+
+
+class AttemptStore(Protocol):
+    def begin(self, value: Mapping[str, Any]) -> Mapping[str, Any]: ...
+
+
+class ReplayStore(Protocol):
+    def claim(self, value: Mapping[str, Any]) -> Mapping[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class LaunchBinding:
+    plan_commit: str
+    source_commit: str
+    source_tree: str
+    request_sha256: str
+    effect_generation: str
+    composition_sha256: str
+    attempt_id: str
 
 
 def canonical(value: Any) -> bytes:
@@ -341,13 +403,18 @@ def _validate_wrapper_prerequisite(value: Mapping[str, Any], composition: Mappin
         not isinstance(value, Mapping)
         or set(value) != fields
         or not _self_hashed(value)
-        or value["schema"] != "tgw-nixos-observer-render-wrapper-prerequisite/v1"
+        or value["schema"] != "tgw-nixos-observer-render-wrapper-prerequisite/v2"
         or value["status"] != "INSTALLED"
         or value["wrapper"] != expected_wrapper
         or value["remote_bootstrap"]
         != {"path": components["remote_bootstrap_remote_path"], "sha256": components["remote_bootstrap"]["sha256"]}
         or value["helper"] != {"path": components["helper_remote_path"], "sha256": HELPER_SHA256}
-        or value["python"] != {"path": wrapper["remote_python_path"], "sha256": wrapper["remote_python_sha256"]}
+        or value["python"]
+        != {
+            "path": wrapper["remote_python_path"],
+            "exe_path": wrapper["remote_python_exe_path"],
+            "sha256": wrapper["remote_python_sha256"],
+        }
         or value["ip"] != {"path": wrapper["remote_ip_path"], "sha256": wrapper["remote_ip_sha256"]}
         or value["sudo"] != {"path": REMOTE_SUDO_PATH, "sha256": wrapper["remote_sudo_sha256"]}
         or value["sudoers"] != expected_sudoers
@@ -389,6 +456,7 @@ def load_composition(
         raise CompositionHold("render composition is malformed") from exc
     fields = {
         "schema",
+        "plan_commit",
         "audited_a2_commit",
         "request_sha256",
         "request",
@@ -401,7 +469,11 @@ def load_composition(
     }
     if not isinstance(value, dict) or canonical(value) != raw or set(value) != fields or not _self_hashed(value):
         raise CompositionHold("render composition schema or self-hash is invalid")
-    if value["schema"] != _COMPOSITION_SCHEMA or value["audited_a2_commit"] != AUDITED_A2_COMMIT:
+    if (
+        value["schema"] != _COMPOSITION_SCHEMA
+        or value["plan_commit"] != PLAN_APPROVED_COMMIT
+        or value["audited_a2_commit"] != AUDITED_A2_COMMIT
+    ):
         raise CompositionHold("render composition does not bind the audited A2 base")
     if not _DIGEST.fullmatch(str(value["request_sha256"])):
         raise CompositionHold("render composition request binding is invalid")
@@ -469,6 +541,7 @@ def load_composition(
         "remote_uid",
         "remote_gid",
         "remote_python_path",
+        "remote_python_exe_path",
         "remote_python_sha256",
         "remote_ip_path",
         "remote_ip_sha256",
@@ -486,6 +559,8 @@ def load_composition(
         or wrapper["remote_gid"] <= 0
         or not isinstance(wrapper["remote_python_path"], str)
         or not wrapper["remote_python_path"].startswith("/")
+        or not isinstance(wrapper["remote_python_exe_path"], str)
+        or not wrapper["remote_python_exe_path"].startswith("/")
         or not _DIGEST.fullmatch(str(wrapper["remote_python_sha256"]))
         or not isinstance(wrapper["remote_ip_path"], str)
         or not wrapper["remote_ip_path"].startswith("/")
@@ -505,7 +580,11 @@ def load_composition(
         raise CompositionHold("wrapper prerequisite receipt is not canonical")
     _validate_wrapper_prerequisite(prerequisite, value)
     roots = value["receipt_roots"]
-    if not isinstance(roots, Mapping) or set(roots) != {"attempts", "terminals"} or any(not isinstance(item, str) or not item.startswith("/") for item in roots.values()):
+    if (
+        not isinstance(roots, Mapping)
+        or set(roots) != {"attempts", "terminals", "transports", "replays"}
+        or any(not isinstance(item, str) or not item.startswith("/") for item in roots.values())
+    ):
         raise CompositionHold("local receipt roots are not exact")
     return composition
 
@@ -528,6 +607,52 @@ def _sealed_memfd(content: bytes, name: str) -> int:
         os.close(fd)
         raise RenderTransportError(f"{name} descriptor did not seal")
     return fd
+
+
+def native_wrapper_config(
+    *,
+    uid: int,
+    gid: int,
+    python: str,
+    python_exe: str,
+    python_sha256: str,
+    ip: str,
+    ip_sha256: str,
+    bootstrap: str,
+    bootstrap_sha256: str,
+    helper_path: str,
+    helper_sha256: str,
+    wrapper_sha256: str,
+    request_sha256: str,
+    prerequisite_receipt_sha256: str,
+    signing_key: str,
+    public_key_sha256: str,
+    max_output_bytes: int,
+) -> bytes:
+    """Render the native parser's closed config from the A2 wire authority."""
+    values: list[tuple[str, str]] = [
+        ("schema", "tgw-nixos-observer-render-wrapper/v2"),
+        ("uid", str(uid)),
+        ("gid", str(gid)),
+        ("python", python),
+        ("python_sha256", python_sha256),
+        ("ip", ip),
+        ("ip_sha256", ip_sha256),
+        ("bootstrap", bootstrap),
+        ("bootstrap_sha256", bootstrap_sha256),
+        ("helper", helper_path),
+        ("helper_sha256", helper_sha256),
+        ("wrapper_sha256", wrapper_sha256),
+        ("request_sha256", request_sha256),
+        ("prerequisite_receipt_sha256", prerequisite_receipt_sha256),
+        ("signing_key", signing_key),
+        ("public_key_sha256", public_key_sha256),
+        ("packet_magic_hex", helper.MAGIC.hex()),
+        ("packet_version", str(helper.VERSION)),
+        ("max_output_bytes", str(max_output_bytes)),
+        ("python_exe", python_exe),
+    ]
+    return "".join(f"{key}={value}\n" for key, value in values).encode("ascii")
 
 
 class ImmutableTerminalReceiptStore:
@@ -570,13 +695,14 @@ class ImmutableTerminalReceiptStore:
         os.close(self._directory_fd)
         os.close(self._parent_fd)
 
-    def persist(self, value: Mapping[str, Any]) -> dict[str, Any]:
+    def _persist_named(self, value: Mapping[str, Any], *, name: str, reject_existing: bool) -> dict[str, Any]:
         content = canonical(dict(value))
         digest = sha256(content).hexdigest()
-        name = digest + ".json"
         try:
             fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=self._directory_fd)
         except FileExistsError:
+            if reject_existing:
+                raise RenderTransportError("durable replay or generation claim already exists")
             metadata = os.stat(name, dir_fd=self._directory_fd, follow_symlinks=False)
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o400 or metadata.st_size != len(content):
                 raise RenderTransportError("existing immutable receipt is unsafe")
@@ -597,6 +723,34 @@ class ImmutableTerminalReceiptStore:
             "sha256": "sha256:" + digest,
             "size": len(content),
         }
+
+    def persist(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        content = canonical(dict(value))
+        return self._persist_named(value, name=sha256(content).hexdigest() + ".json", reject_existing=False)
+
+
+class ImmutableAttemptReceiptStore(ImmutableTerminalReceiptStore):
+    """Reject a second launch for the same composition/request/generation."""
+
+    def begin(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        key = canonical(
+            {
+                "composition_sha256": value.get("composition_sha256"),
+                "generation": value.get("generation"),
+                "request_sha256": value.get("request_sha256"),
+            }
+        )
+        return self._persist_named(value, name="generation-" + sha256(key).hexdigest() + ".json", reject_existing=True)
+
+
+class ImmutableReplayReceiptStore(ImmutableTerminalReceiptStore):
+    """Durably consume each root-generated signed nonce exactly once."""
+
+    def claim(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        nonce = value.get("nonce")
+        if not isinstance(nonce, str) or not _NONCE.fullmatch(nonce):
+            raise RenderTransportError("signed wrapper nonce is invalid")
+        return self._persist_named(value, name="nonce-" + nonce + ".json", reject_existing=True)
 
 
 def _validate_effect(value: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -645,10 +799,45 @@ def _build_packet_header(
     return prefix + helper_source + request_raw + tool_raw, helper.parse_prefix(prefix)
 
 
-def _attempt_receipt(composition: RenderComposition, request: Mapping[str, Any], generation: str) -> dict[str, Any]:
+def _launch_binding(composition: RenderComposition, request: Mapping[str, Any], generation: str, attempt_id: str) -> LaunchBinding:
+    if not _ATTEMPT_ID.fullmatch(attempt_id):
+        raise RenderTransportError("render attempt identity is invalid")
+    return LaunchBinding(
+        plan_commit=PLAN_APPROVED_COMMIT,
+        source_commit=request["source_commit"],
+        source_tree=request["source_tree"],
+        request_sha256=request["request_sha256"],
+        effect_generation=generation,
+        composition_sha256=composition.receipt_sha256,
+        attempt_id=attempt_id,
+    )
+
+
+def _launch_trailer(binding: LaunchBinding) -> bytes:
+    generation = binding.effect_generation.encode("ascii")
+    if not 1 <= len(generation) <= 191 or not _IDENTITY.fullmatch(binding.effect_generation):
+        raise RenderTransportError("render effect generation cannot be serialized")
+    return _LAUNCH.pack(
+        _LAUNCH_MAGIC,
+        _LAUNCH_VERSION,
+        binding.plan_commit.encode("ascii"),
+        binding.source_commit.encode("ascii"),
+        binding.source_tree.encode("ascii"),
+        bytes.fromhex(binding.composition_sha256.removeprefix("sha256:")),
+        bytes.fromhex(binding.attempt_id),
+        generation.ljust(192, b"\0"),
+    )
+
+
+def _attempt_receipt(
+    composition: RenderComposition, request: Mapping[str, Any], generation: str, attempt_id: str | None = None
+) -> dict[str, Any]:
+    attempt_id = attempt_id or secrets.token_hex(16)
     value = {
         "schema": _ATTEMPT_SCHEMA,
         "outcome": "LAUNCHED_UNRECONCILED",
+        "attempt_id": attempt_id,
+        "plan_commit": PLAN_APPROVED_COMMIT,
         "generation": generation,
         "request_sha256": request["request_sha256"],
         "composition_sha256": composition.receipt_sha256,
@@ -689,6 +878,7 @@ class TransportExchange:
     tool_descriptor: Mapping[str, Any]
     attempt_receipt: Mapping[str, Any]
     attempt_ref: Mapping[str, Any]
+    launch_binding: LaunchBinding
 
 
 class SshObserverRenderTransport:
@@ -697,17 +887,19 @@ class SshObserverRenderTransport:
     def __init__(
         self,
         composition: RenderComposition,
-        attempt_store: ReceiptStore,
+        attempt_store: AttemptStore,
         *,
         tool_authority: helper.ToolAuthority = helper.PRODUCTION_GIT_AUTHORITY,
         invoke: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
         _use_sudo: bool = True,
+        _attempt_id_factory: Callable[[], str] | None = None,
     ):
         self.composition = composition
         self.attempt_store = attempt_store
         self.tool_authority = tool_authority
         self.invoke = invoke
         self._use_sudo = _use_sudo
+        self._attempt_id_factory = _attempt_id_factory or (lambda: secrets.token_hex(16))
 
     def __call__(self, request: Mapping[str, Any], *, generation: str) -> TransportExchange:
         request = self.composition.validate_request(request)
@@ -738,6 +930,8 @@ class SshObserverRenderTransport:
                 raise CompositionHold("known-hosts does not contain the one exact host key")
             if not identity_raw.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----\n"):
                 raise CompositionHold("dedicated SSH identity format is invalid")
+            attempt_id = self._attempt_id_factory()
+            launch_binding = _launch_binding(self.composition, request, generation, attempt_id)
             tool_descriptor = _tool_descriptor(request, self.tool_authority)
             packet_header, binding = _build_packet_header(
                 request=request,
@@ -778,9 +972,14 @@ class SshObserverRenderTransport:
             if ssh["remote_port"] != 22:
                 command.extend(["-p", str(ssh["remote_port"])])
             command.extend(["--", f"{ssh['remote_user']}@{ssh['remote_host']}", remote_command])
-            attempt_receipt = _attempt_receipt(self.composition, request, generation)
+            attempt_receipt = _attempt_receipt(self.composition, request, generation, attempt_id)
             try:
-                attempt_ref = self.attempt_store.persist(attempt_receipt)
+                begin = getattr(self.attempt_store, "begin", None)
+                if begin is None and self.composition.test_mode:
+                    begin = getattr(self.attempt_store, "persist")
+                if begin is None:
+                    raise RenderTransportError("attempt store does not provide durable generation claims")
+                attempt_ref = begin(attempt_receipt)
             except (OSError, RenderTransportError) as exc:
                 raise RenderTransportError("immutable attempt receipt was not ready before launch") from exc
             timeout = int(request["max_duration_seconds"]) + 30
@@ -792,6 +991,7 @@ class SshObserverRenderTransport:
                         command,
                         packet_header,
                         archive_fd,
+                        launch_trailer=_launch_trailer(launch_binding),
                         timeout=timeout,
                         max_output=maximum,
                         pass_fds=pass_fds,
@@ -799,7 +999,7 @@ class SshObserverRenderTransport:
                 else:
                     completed = self.invoke(
                         command,
-                        input=packet_header + archive_raw,
+                        input=packet_header + archive_raw + _launch_trailer(launch_binding),
                         capture_output=True,
                         timeout=timeout,
                         check=False,
@@ -807,10 +1007,26 @@ class SshObserverRenderTransport:
                         env={"LC_ALL": "C"},
                     )
             except BaseException as exc:
-                raise RemoteAttemptAmbiguous("transport did not return a terminal receipt", attempt_receipt, attempt_ref) from exc
+                raise RemoteAttemptAmbiguous(
+                    "transport did not return a terminal receipt",
+                    attempt_receipt,
+                    attempt_ref,
+                    launch_binding=launch_binding,
+                ) from exc
             if len(completed.stdout) > maximum:
-                raise RemoteAttemptAmbiguous("remote receipt exceeded its bound", attempt_receipt, attempt_ref)
-            return TransportExchange(tuple(command), completed.returncode, completed.stdout, binding, tool_descriptor, attempt_receipt, attempt_ref)
+                raise RemoteAttemptAmbiguous(
+                    "remote receipt exceeded its bound", attempt_receipt, attempt_ref, launch_binding=launch_binding
+                )
+            return TransportExchange(
+                tuple(command),
+                completed.returncode,
+                completed.stdout,
+                binding,
+                tool_descriptor,
+                attempt_receipt,
+                attempt_ref,
+                launch_binding,
+            )
         finally:
             for fd in (sealed_identity_fd, sealed_hosts_fd, archive_fd, helper_fd, identity_fd, hosts_fd, ssh_fd):
                 if fd >= 0:
@@ -825,6 +1041,7 @@ class SshObserverRenderTransport:
         packet_header: bytes,
         archive_fd: int,
         *,
+        launch_trailer: bytes,
         timeout: int,
         max_output: int,
         pass_fds: tuple[int, ...],
@@ -835,6 +1052,7 @@ class SshObserverRenderTransport:
             os.lseek(archive_fd, 0, os.SEEK_SET)
             with os.fdopen(os.dup(archive_fd), "rb") as source:
                 shutil.copyfileobj(source, packet, length=1024 * 1024)
+            packet.write(launch_trailer)
             after = os.fstat(archive_fd)
             if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
                 after.st_dev,
@@ -894,7 +1112,17 @@ def _attestation_payload(value: Mapping[str, Any]) -> bytes:
     child = value["child"]
     fields = [
         value["schema"],
+        value["plan_commit"],
+        value["source_commit"],
+        value["source_tree"],
         value["request_sha256"],
+        value["effect_generation"],
+        value["composition_sha256"],
+        value["attempt_id"],
+        value["nonce"],
+        str(value["issued_at"]),
+        str(value["expires_at"]),
+        "1" if value["test_build"] else "0",
         value["helper_sha256"],
         value["remote_bootstrap_sha256"],
         value["remote_python_sha256"],
@@ -906,6 +1134,9 @@ def _attestation_payload(value: Mapping[str, Any]) -> bytes:
         "1" if namespace["changed"] else "0",
         _digest_bytes(canonical(namespace["pre"])),
         _digest_bytes(canonical(namespace["post"])),
+        str(child["pid"]),
+        str(child["starttime"]),
+        child["exe"],
         str(child["uid"]),
         str(child["gid"]),
         str(child["returncode"]),
@@ -915,10 +1146,27 @@ def _attestation_payload(value: Mapping[str, Any]) -> bytes:
     return b"\0".join(item.encode("ascii") for item in fields)
 
 
-def validate_wrapper_envelope(value: Any, *, composition: RenderComposition) -> tuple[dict[str, Any], bytes]:
+def validate_wrapper_envelope(
+    value: Any,
+    *,
+    composition: RenderComposition,
+    expected: LaunchBinding,
+    now: int | None = None,
+    allow_test_build: bool = False,
+) -> tuple[dict[str, Any], bytes]:
     fields = {
         "schema",
+        "plan_commit",
+        "source_commit",
+        "source_tree",
         "request_sha256",
+        "effect_generation",
+        "composition_sha256",
+        "attempt_id",
+        "nonce",
+        "issued_at",
+        "expires_at",
+        "test_build",
         "helper_sha256",
         "remote_bootstrap_sha256",
         "remote_python_sha256",
@@ -935,7 +1183,19 @@ def validate_wrapper_envelope(value: Any, *, composition: RenderComposition) -> 
     child = value["child"]
     attestation = value["attestation"]
     if (
-        value["request_sha256"] != composition.value["request_sha256"]
+        value["plan_commit"] != expected.plan_commit
+        or value["source_commit"] != expected.source_commit
+        or value["source_tree"] != expected.source_tree
+        or value["request_sha256"] != expected.request_sha256
+        or value["effect_generation"] != expected.effect_generation
+        or value["composition_sha256"] != expected.composition_sha256
+        or value["attempt_id"] != expected.attempt_id
+        or not _NONCE.fullmatch(str(value["nonce"]))
+        or type(value["issued_at"]) is not int
+        or type(value["expires_at"]) is not int
+        or value["expires_at"] - value["issued_at"] != 300
+        or type(value["test_build"]) is not bool
+        or value["test_build"] is not allow_test_build
         or value["helper_sha256"] != HELPER_SHA256
         or value["remote_bootstrap_sha256"] != composition.components["remote_bootstrap"]["sha256"]
         or value["remote_python_sha256"] != composition.wrapper["remote_python_sha256"]
@@ -952,7 +1212,12 @@ def validate_wrapper_envelope(value: Any, *, composition: RenderComposition) -> 
         or not _probe_is_exact(namespace["pre"])
         or not _probe_is_exact(namespace["post"])
         or not isinstance(child, dict)
-        or set(child) != {"uid", "gid", "returncode", "terminal_bytes", "terminal_sha256", "terminal_b64"}
+        or set(child) != {"pid", "starttime", "exe", "uid", "gid", "returncode", "terminal_bytes", "terminal_sha256", "terminal_b64"}
+        or type(child["pid"]) is not int
+        or child["pid"] <= 1
+        or type(child["starttime"]) is not int
+        or child["starttime"] <= 0
+        or child["exe"] != composition.wrapper["remote_python_exe_path"]
         or child["uid"] != composition.wrapper["remote_uid"]
         or child["gid"] != composition.wrapper["remote_gid"]
         or type(child["returncode"]) is not int
@@ -966,6 +1231,9 @@ def validate_wrapper_envelope(value: Any, *, composition: RenderComposition) -> 
         or attestation["public_key_sha256"] != composition.wrapper["attestation_public_key"]["sha256"]
     ):
         raise RenderTransportError("wrapper envelope binding or namespace evidence is invalid")
+    observed_now = int(time.time()) if now is None else now
+    if value["issued_at"] > observed_now + 5 or value["expires_at"] <= observed_now or observed_now - value["issued_at"] > 300:
+        raise RenderTransportError("wrapper envelope lifetime is invalid")
     try:
         terminal_raw = base64.b64decode(child["terminal_b64"], validate=True)
         signature = base64.b64decode(attestation["signature"], validate=True)
@@ -1015,18 +1283,73 @@ def _binding_from_composition(composition: RenderComposition, request: Mapping[s
     )
 
 
+def _validate_persisted_ref(value: Mapping[str, Any], reference: Any, *, root: Path, label: str) -> dict[str, Any]:
+    raw = canonical(dict(value))
+    digest = _digest_bytes(raw)
+    if (
+        not isinstance(reference, Mapping)
+        or set(reference) != {"artifact_ref", "path", "sha256", "size"}
+        or reference["artifact_ref"] != "artifact:" + digest
+        or reference["sha256"] != digest
+        or reference["size"] != len(raw)
+        or Path(str(reference["path"])).parent != root
+    ):
+        raise RenderTransportError(f"{label} immutable reference is invalid")
+    try:
+        fd = os.open(str(reference["path"]), os.O_RDONLY | os.O_NOFOLLOW)
+        persisted, metadata = _read_held(fd, maximum=max(len(raw), 1), label=label)
+    except (OSError, RenderTransportError) as exc:
+        raise RenderTransportError(f"{label} immutable artifact is unavailable") from exc
+    finally:
+        if "fd" in locals():
+            os.close(fd)
+    if persisted != raw or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o400:
+        raise RenderTransportError(f"{label} immutable artifact differs")
+    return dict(value)
+
+
+def _replay_receipt(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    value = {
+        "schema": "tgw-nixos-observer-render-replay-claim/v1",
+        "attempt_id": envelope["attempt_id"],
+        "nonce": envelope["nonce"],
+        "generation": envelope["effect_generation"],
+        "composition_sha256": envelope["composition_sha256"],
+        "request_sha256": envelope["request_sha256"],
+        "issued_at": envelope["issued_at"],
+        "expires_at": envelope["expires_at"],
+    }
+    value["receipt_sha256"] = _digest_bytes(canonical(value))
+    return value
+
+
 def _validate_attempt(value: Any, reference: Any, *, composition: RenderComposition, request: Mapping[str, Any], generation: str) -> dict[str, Any]:
-    expected = _attempt_receipt(composition, request, generation)
+    if not isinstance(value, Mapping) or not _ATTEMPT_ID.fullmatch(str(value.get("attempt_id"))):
+        raise RenderTransportError("immutable launch-attempt identity is invalid")
+    expected = _attempt_receipt(composition, request, generation, str(value["attempt_id"]))
     raw = canonical(expected)
     digest = _digest_bytes(raw)
+    key = canonical(
+        {
+            "composition_sha256": composition.receipt_sha256,
+            "generation": generation,
+            "request_sha256": request["request_sha256"],
+        }
+    )
     expected_ref = {
         "artifact_ref": "artifact:" + digest,
-        "path": str(Path(composition.value["receipt_roots"]["attempts"]) / (digest.removeprefix("sha256:") + ".json")),
+        "path": str(Path(composition.value["receipt_roots"]["attempts"]) / ("generation-" + sha256(key).hexdigest() + ".json")),
         "sha256": digest,
         "size": len(raw),
     }
     if value != expected or reference != expected_ref:
         raise RenderTransportError("immutable launch-attempt receipt binding is invalid")
+    _validate_persisted_ref(
+        expected,
+        reference,
+        root=Path(composition.value["receipt_roots"]["attempts"]),
+        label="launch-attempt receipt",
+    )
     return expected
 
 
@@ -1041,6 +1364,9 @@ def validate_handler_success(value: Mapping[str, Any], *, request: Mapping[str, 
         "attempt_receipt",
         "attempt_ref",
         "transport_receipt",
+        "transport_ref",
+        "replay_receipt",
+        "replay_ref",
         "terminal",
         "terminal_ref",
         "receipt_sha256",
@@ -1049,8 +1375,26 @@ def validate_handler_success(value: Mapping[str, Any], *, request: Mapping[str, 
         raise RenderTransportError("render handler result is not exact")
     if value["composition_sha256"] != composition.receipt_sha256 or not isinstance(value["generation"], str) or not _IDENTITY.fullmatch(value["generation"]):
         raise RenderTransportError("render handler composition binding is invalid")
-    _validate_attempt(value["attempt_receipt"], value["attempt_ref"], composition=composition, request=request, generation=value["generation"])
-    envelope, terminal_raw = validate_wrapper_envelope(value["transport_receipt"], composition=composition)
+    attempt = _validate_attempt(
+        value["attempt_receipt"], value["attempt_ref"], composition=composition, request=request, generation=value["generation"]
+    )
+    launch = _launch_binding(composition, request, value["generation"], attempt["attempt_id"])
+    envelope, terminal_raw = validate_wrapper_envelope(value["transport_receipt"], composition=composition, expected=launch)
+    _validate_persisted_ref(
+        envelope,
+        value["transport_ref"],
+        root=Path(composition.value["receipt_roots"]["transports"]),
+        label="signed outer transport receipt",
+    )
+    replay = _replay_receipt(envelope)
+    if value["replay_receipt"] != replay:
+        raise RenderTransportError("durable replay claim differs from signed envelope")
+    _validate_persisted_ref(
+        replay,
+        value["replay_ref"],
+        root=Path(composition.value["receipt_roots"]["replays"]),
+        label="signed nonce replay claim",
+    )
     try:
         decoded = json.loads(terminal_raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1073,6 +1417,12 @@ def validate_handler_success(value: Mapping[str, Any], *, request: Mapping[str, 
         or value["terminal_ref"] != expected_terminal_ref
     ):
         raise RenderTransportError("handler terminal persistence or exit binding is invalid")
+    _validate_persisted_ref(
+        terminal,
+        value["terminal_ref"],
+        root=Path(composition.value["receipt_roots"]["terminals"]),
+        label="validated terminal receipt",
+    )
     return dict(value)
 
 
@@ -1083,32 +1433,117 @@ class ObserverRenderController:
         terminal_store: ReceiptStore,
         *,
         composition: RenderComposition,
+        transport_store: ReceiptStore | None = None,
+        replay_store: ReplayStore | None = None,
         authority: helper.A2Authority = helper.PRODUCTION_A2_AUTHORITY,
     ):
         self.transport = transport
         self.terminal_store = terminal_store
+        self.transport_store = transport_store or terminal_store
+        self.replay_store = replay_store or (terminal_store if composition.test_mode else None)
         self.composition = composition
         self.authority = authority
 
-    @staticmethod
-    def _ambiguous(reason: str, exchange: TransportExchange) -> NoReturn:
-        raise RemoteAttemptAmbiguous(reason, exchange.attempt_receipt, exchange.attempt_ref)
+    def _persist_evidence(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        stores = (self.transport_store, self.terminal_store, getattr(self.transport, "attempt_store", None))
+        last: BaseException | None = None
+        for store in stores:
+            persist = getattr(store, "persist", None)
+            if persist is None:
+                continue
+            try:
+                return persist(value)
+            except (OSError, RenderTransportError) as exc:
+                last = exc
+        raise RenderTransportError("no immutable evidence store accepted the observation") from last
+
+    def _ambiguous(
+        self,
+        reason: str,
+        exchange: TransportExchange,
+        *,
+        transport_ref: Mapping[str, Any] | None = None,
+        terminal_raw: bytes | None = None,
+    ) -> NoReturn:
+        if transport_ref is None:
+            observation = {
+                "schema": "tgw-nixos-observer-render-transport-observation/v1",
+                "outcome": "UNAVAILABLE_OR_INVALID",
+                "reason": reason,
+                "attempt_id": exchange.launch_binding.attempt_id,
+                "generation": exchange.launch_binding.effect_generation,
+                "composition_sha256": exchange.launch_binding.composition_sha256,
+                "returncode": exchange.returncode,
+                "raw_bytes": len(exchange.stdout),
+                "raw_sha256": _digest_bytes(exchange.stdout),
+            }
+            observation["receipt_sha256"] = _digest_bytes(canonical(observation))
+            transport_ref = self._persist_evidence(observation)
+        terminal_observation = {
+            "schema": "tgw-nixos-observer-render-terminal-observation/v1",
+            "outcome": "UNAVAILABLE_OR_INVALID",
+            "reason": reason,
+            "attempt_id": exchange.launch_binding.attempt_id,
+            "generation": exchange.launch_binding.effect_generation,
+            "composition_sha256": exchange.launch_binding.composition_sha256,
+            "raw_bytes": len(terminal_raw or b""),
+            "raw_sha256": _digest_bytes(terminal_raw or b""),
+            "transport_ref": dict(transport_ref),
+        }
+        terminal_observation["receipt_sha256"] = _digest_bytes(canonical(terminal_observation))
+        terminal_ref = self._persist_evidence(terminal_observation)
+        raise RemoteAttemptAmbiguous(
+            reason,
+            exchange.attempt_receipt,
+            exchange.attempt_ref,
+            transport_ref=transport_ref,
+            terminal_ref=terminal_ref,
+            launch_binding=exchange.launch_binding,
+        )
 
     def __call__(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         normalized, request = _validate_effect(effect)
         request = self.composition.validate_request(request)
-        exchange = self.transport(request, generation=normalized["generation"])
+        try:
+            exchange = self.transport(request, generation=normalized["generation"])
+        except RemoteAttemptAmbiguous as exc:
+            if exc.launch_binding is None:
+                raise
+            synthetic = TransportExchange(
+                (),
+                255,
+                b"",
+                _binding_from_composition(self.composition, request)[0],
+                _binding_from_composition(self.composition, request)[1],
+                exc.attempt_receipt,
+                exc.attempt_ref,
+                exc.launch_binding,
+            )
+            self._ambiguous(str(exc), synthetic)
         try:
             outer_untrusted = json.loads(exchange.stdout)
-            transport_receipt, terminal_raw = validate_wrapper_envelope(outer_untrusted, composition=self.composition)
+            transport_receipt, terminal_raw = validate_wrapper_envelope(
+                outer_untrusted, composition=self.composition, expected=exchange.launch_binding
+            )
         except (UnicodeDecodeError, json.JSONDecodeError, RenderTransportError):
             self._ambiguous("wrapper receipt was empty, malformed, or lost", exchange)
+        try:
+            transport_ref = self._persist_evidence(transport_receipt)
+        except (OSError, RenderTransportError):
+            self._ambiguous("signed wrapper receipt could not be persisted", exchange, terminal_raw=terminal_raw)
+        replay_receipt = _replay_receipt(transport_receipt)
+        if self.replay_store is None:
+            self._ambiguous("durable anti-replay store is unavailable", exchange, transport_ref=transport_ref, terminal_raw=terminal_raw)
+        try:
+            replay_ref = self.replay_store.claim(replay_receipt)
+        except (OSError, RenderTransportError):
+            self._ambiguous("signed wrapper nonce was replayed or could not be claimed", exchange, transport_ref=transport_ref, terminal_raw=terminal_raw)
         if exchange.returncode != transport_receipt["child"]["returncode"]:
-            self._ambiguous("SSH and signed child exit status disagree", exchange)
+            self._ambiguous("SSH and signed child exit status disagree", exchange, transport_ref=transport_ref, terminal_raw=terminal_raw)
         try:
             untrusted = json.loads(terminal_raw)
         except (UnicodeDecodeError, json.JSONDecodeError):
-            self._ambiguous("signed child terminal is malformed", exchange)
+            self._ambiguous("signed child terminal is malformed", exchange, transport_ref=transport_ref, terminal_raw=terminal_raw)
         try:
             if not isinstance(untrusted, dict):
                 raise RenderTransportError("remote render terminal is not an object")
@@ -1127,15 +1562,35 @@ class ObserverRenderController:
             else:
                 raise RenderTransportError("remote render terminal schema is unknown")
         except RenderTransportError:
-            self._ambiguous("signed remote terminal failed exact validation", exchange)
+            self._ambiguous("signed remote terminal failed exact validation", exchange, transport_ref=transport_ref, terminal_raw=terminal_raw)
         if transport_receipt["child"]["returncode"] != expected_returncode:
-            self._ambiguous("signed terminal and child exit status disagree", exchange)
+            self._ambiguous("signed terminal and child exit status disagree", exchange, transport_ref=transport_ref, terminal_raw=terminal_raw)
         try:
             terminal_ref = self.terminal_store.persist(terminal)
         except (OSError, RenderTransportError) as exc:
-            raise TerminalPersistenceError(terminal, exchange.attempt_receipt, exchange.attempt_ref) from exc
+            observation = {
+                "schema": "tgw-nixos-observer-render-terminal-observation/v1",
+                "outcome": "PERSISTENCE_FAILED",
+                "reason": "validated terminal could not be persisted",
+                "attempt_id": exchange.launch_binding.attempt_id,
+                "generation": exchange.launch_binding.effect_generation,
+                "composition_sha256": exchange.launch_binding.composition_sha256,
+                "raw_bytes": len(canonical(terminal)),
+                "raw_sha256": _digest_bytes(canonical(terminal)),
+                "transport_ref": dict(transport_ref),
+            }
+            observation["receipt_sha256"] = _digest_bytes(canonical(observation))
+            fallback_ref = self._persist_evidence(observation)
+            raise TerminalPersistenceError(
+                terminal,
+                exchange.attempt_receipt,
+                exchange.attempt_ref,
+                transport_ref=transport_ref,
+                terminal_ref=fallback_ref,
+                launch_binding=exchange.launch_binding,
+            ) from exc
         if terminal["schema"] != helper.SUCCESS_SCHEMA:
-            raise RemoteRenderFailure(terminal, terminal_ref, exchange.attempt_ref)
+            raise RemoteRenderFailure(terminal, terminal_ref, exchange.attempt_ref, transport_ref)
         result = {
             "schema": _HANDLER_SCHEMA,
             "generation": normalized["generation"],
@@ -1143,6 +1598,9 @@ class ObserverRenderController:
             "attempt_receipt": dict(exchange.attempt_receipt),
             "attempt_ref": dict(exchange.attempt_ref),
             "transport_receipt": transport_receipt,
+            "transport_ref": dict(transport_ref),
+            "replay_receipt": replay_receipt,
+            "replay_ref": dict(replay_ref),
             "terminal": terminal,
             "terminal_ref": dict(terminal_ref),
         }
@@ -1156,10 +1614,18 @@ def compose_production_controller(
     invoke: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
 ) -> tuple[ObserverRenderController, dict[str, Any]]:
     composition = load_composition(composition_path)
-    attempt_store = ImmutableTerminalReceiptStore(Path(composition.value["receipt_roots"]["attempts"]))
+    attempt_store = ImmutableAttemptReceiptStore(Path(composition.value["receipt_roots"]["attempts"]))
     terminal_store = ImmutableTerminalReceiptStore(Path(composition.value["receipt_roots"]["terminals"]))
+    transport_store = ImmutableTerminalReceiptStore(Path(composition.value["receipt_roots"]["transports"]))
+    replay_store = ImmutableReplayReceiptStore(Path(composition.value["receipt_roots"]["replays"]))
     transport = SshObserverRenderTransport(composition, attempt_store, invoke=invoke)
-    controller = ObserverRenderController(transport, terminal_store, composition=composition)
+    controller = ObserverRenderController(
+        transport,
+        terminal_store,
+        composition=composition,
+        transport_store=transport_store,
+        replay_store=replay_store,
+    )
     return controller, {
         "schema": _COMPOSITION_SCHEMA,
         "receipt_sha256": composition.receipt_sha256,
@@ -1171,6 +1637,8 @@ def compose_production_controller(
         "wrapper_sha256": composition.wrapper["sha256"],
         "attempt_store": attempt_store.readiness,
         "terminal_store": terminal_store.readiness,
+        "transport_store": transport_store.readiness,
+        "replay_store": replay_store.readiness,
         "activation": False,
         "profile_write": False,
         "deployment": False,
@@ -1213,15 +1681,39 @@ def main(
                         "schema": _ATTEMPT_SCHEMA,
                         "outcome": "AMBIGUOUS",
                         "attempt_ref": exc.attempt_ref,
+                        "transport_ref": exc.transport_ref,
+                        "terminal_ref": exc.terminal_ref,
                         "terminal": exc.terminal,
                     }
                 )
             )
             return 2
-        sink.write(canonical(exc.terminal))
+        sink.write(
+            canonical(
+                {
+                    "schema": _ATTEMPT_SCHEMA,
+                    "outcome": "FAILED",
+                    "attempt_ref": exc.attempt_ref,
+                    "transport_ref": exc.transport_ref,
+                    "terminal_ref": exc.terminal_ref,
+                    "terminal": exc.terminal,
+                }
+            )
+        )
         return 1
     except RemoteAttemptAmbiguous as exc:
-        sink.write(canonical({"schema": _ATTEMPT_SCHEMA, "outcome": "AMBIGUOUS", "attempt_ref": exc.attempt_ref, "reconciliation": exc.reconciliation}))
+        sink.write(
+            canonical(
+                {
+                    "schema": _ATTEMPT_SCHEMA,
+                    "outcome": "AMBIGUOUS",
+                    "attempt_ref": exc.attempt_ref,
+                    "transport_ref": exc.transport_ref,
+                    "terminal_ref": exc.terminal_ref,
+                    "reconciliation": exc.reconciliation,
+                }
+            )
+        )
         return 2
     except Exception as exc:
         error.write(f"render evaluation refused: {exc}\n")

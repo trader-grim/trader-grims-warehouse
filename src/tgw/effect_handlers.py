@@ -41,7 +41,9 @@ _REVIEW_EVAL_UNITS = (
 
 
 class EffectHandlerError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, evidence: tuple[str, ...] = ()):
+        super().__init__(message)
+        self.evidence = evidence
 
 
 class RetryableEffect(EffectHandlerError):
@@ -181,19 +183,43 @@ class TypedEffectHandlerRegistry:
             try:
                 result = provider({"kind": OBSERVER_RENDER_EFFECT_KIND, "generation": generation, "parameters": request})
             except CompositionHold as exc:
-                raise HeldEffect(str(exc)) from exc
+                raise HeldEffect(str(exc), evidence=("nixos-observer-render-composition:" + composition.receipt_sha256,)) from exc
             except (RemoteAttemptAmbiguous, TerminalPersistenceError) as exc:
-                raise AmbiguousEffect(str(exc)) from exc
+                refs = (exc.attempt_ref, exc.transport_ref, exc.terminal_ref)
+                evidence = tuple(
+                    f"nixos-observer-render-{label}:{ref['sha256']}"
+                    for label, ref in zip(("attempt", "transport", "terminal"), refs, strict=True)
+                    if ref.get("sha256")
+                )
+                if len(evidence) != 3:
+                    raise EffectHandlerError("observer render ambiguity lacks durable three-part evidence") from exc
+                raise AmbiguousEffect(str(exc), evidence=evidence) from exc
             except RemoteRenderFailure as exc:
                 if exc.terminal.get("outcome") == "AMBIGUOUS":
-                    raise AmbiguousEffect(str(exc)) from exc
-                raise
+                    outcome = AmbiguousEffect
+                else:
+                    outcome = EffectHandlerError
+                refs = (exc.attempt_ref, exc.transport_ref, exc.terminal_ref)
+                evidence = tuple(
+                    f"nixos-observer-render-{label}:{ref['sha256']}"
+                    for label, ref in zip(("attempt", "transport", "terminal"), refs, strict=True)
+                )
+                raise outcome(str(exc), evidence=evidence) from exc
             try:
                 validated = validate_handler_success(result, request=request, composition=composition)
             except Exception as exc:
-                raise AmbiguousEffect("post-launch observer render evidence failed exact validation") from exc
+                raise AmbiguousEffect(
+                    "post-launch observer render evidence failed exact validation",
+                    evidence=("nixos-observer-render-composition:" + composition.receipt_sha256,),
+                ) from exc
             return {
-                "evidence": ["nixos-observer-render:" + validated["receipt_sha256"]],
+                "evidence": [
+                    "nixos-observer-render:" + validated["receipt_sha256"],
+                    "nixos-observer-render-attempt:" + validated["attempt_ref"]["sha256"],
+                    "nixos-observer-render-transport:" + validated["transport_ref"]["sha256"],
+                    "nixos-observer-render-terminal:" + validated["terminal_ref"]["sha256"],
+                    "nixos-observer-render-replay:" + validated["replay_ref"]["sha256"],
+                ],
                 "terminal": validated["terminal"],
             }
 
@@ -546,11 +572,11 @@ class AuthorityEffectController:
             evidence = tuple(sorted(str(item) for item in result.get("evidence", ())))
             return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.SUCCEEDED, evidence)
         except RetryableEffect as exc:
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.RETRY, (), detail=str(exc))
+            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.RETRY, exc.evidence, detail=str(exc))
         except HeldEffect as exc:
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.HOLD, (), detail=str(exc))
+            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.HOLD, exc.evidence, detail=str(exc))
         except AmbiguousEffect as exc:
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, (), detail=str(exc))
+            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc))
         except Exception as exc:
             if rollback is not None:
                 try:
@@ -559,7 +585,8 @@ class AuthorityEffectController:
                     return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.ROLLED_BACK, (), rollback_receipt=rollback_receipt, detail=str(exc))
                 except Exception as rollback_exc:
                     return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.FAILED, (), detail=f"effect={exc}; rollback={rollback_exc}")
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.FAILED, (), detail=str(exc))
+            evidence = exc.evidence if isinstance(exc, EffectHandlerError) else ()
+            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.FAILED, evidence, detail=str(exc))
 
     @staticmethod
     def _receipt(

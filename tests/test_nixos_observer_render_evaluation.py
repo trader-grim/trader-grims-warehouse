@@ -6,8 +6,6 @@ import fcntl
 import io
 import json
 import os
-import pwd
-import socket
 import stat
 import subprocess
 import sys
@@ -26,14 +24,16 @@ from tgw import nix_observer_render_helper as helper
 from tgw import nix_observer_render_remote as remote_bootstrap
 from tgw.effect_handlers import AuthorityEffectController, EffectOutcome, TypedEffectHandlerRegistry
 from tgw.nixos_observer_render_evaluation import (
-    ATTEMPT_RECEIPT_ROOT,
     AUDITED_A2_COMMIT,
     EFFECT_KIND,
     HELPER_SHA256,
+    PLAN_APPROVED_COMMIT,
     PRODUCTION_COMPOSITION_PATH,
     REMOTE_SUDO_PATH,
     REMOTE_WRAPPER_PATH,
     CompositionHold,
+    ImmutableAttemptReceiptStore,
+    ImmutableReplayReceiptStore,
     ImmutableTerminalReceiptStore,
     ObserverRenderController,
     RemoteAttemptAmbiguous,
@@ -44,12 +44,19 @@ from tgw.nixos_observer_render_evaluation import (
     TerminalPersistenceError,
     _attempt_receipt,
     _attestation_payload,
+    _build_packet_header,
     _digest_bytes,
+    _launch_binding,
+    _launch_trailer,
+    _replay_receipt,
+    _tool_descriptor,
     canonical,
     load_composition,
     main,
+    native_wrapper_config,
     serialize_remote_argv,
     validate_handler_success,
+    validate_wrapper_envelope,
 )
 from tgw.plan_authority import TypedEffect
 
@@ -186,12 +193,12 @@ def _composition(
     source["freeze_receipt"] = _identity(freeze_path)
     prerequisite = _self_hash(
         {
-            "schema": "tgw-nixos-observer-render-wrapper-prerequisite/v1",
+            "schema": "tgw-nixos-observer-render-wrapper-prerequisite/v2",
             "status": "INSTALLED",
             "wrapper": {"path": REMOTE_WRAPPER_PATH, "sha256": wrapper_sha, "owner_uid": 0, "mode": 0o555, "no_argv": True},
             "remote_bootstrap": {"path": components["remote_bootstrap_remote_path"], "sha256": components["remote_bootstrap"]["sha256"]},
             "helper": {"path": components["helper_remote_path"], "sha256": HELPER_SHA256},
-            "python": {"path": "/run/current-system/sw/bin/python3", "sha256": remote_python_sha},
+            "python": {"path": "/run/current-system/sw/bin/python3", "exe_path": "/run/current-system/sw/bin/python3", "sha256": remote_python_sha},
             "ip": {"path": "/run/current-system/sw/bin/ip", "sha256": remote_ip_sha},
             "sudo": {"path": REMOTE_SUDO_PATH, "sha256": remote_sudo_sha},
             "sudoers": {"user": user, "runas": "root", "command": REMOTE_WRAPPER_PATH, "arguments": [], "nopasswd": True, "sha256": sudoers_sha},
@@ -203,7 +210,8 @@ def _composition(
     prerequisite_path = tmp_path / "wrapper-prerequisite.json"
     _write_immutable(prerequisite_path, canonical(prerequisite))
     value = {
-        "schema": "tgw-nixos-observer-render-composition/v2",
+        "schema": "tgw-nixos-observer-render-composition/v3",
+        "plan_commit": PLAN_APPROVED_COMMIT,
         "audited_a2_commit": AUDITED_A2_COMMIT,
         "request_sha256": case["request"]["request_sha256"],
         "request": {"artifact": _identity(request_path), "request_sha256": case["request"]["request_sha256"]},
@@ -226,12 +234,18 @@ def _composition(
             "remote_uid": os.getuid(),
             "remote_gid": os.getgid(),
             "remote_python_path": "/run/current-system/sw/bin/python3",
+            "remote_python_exe_path": "/run/current-system/sw/bin/python3",
             "remote_python_sha256": remote_python_sha,
             "remote_ip_path": "/run/current-system/sw/bin/ip",
             "remote_ip_sha256": remote_ip_sha,
             "remote_sudo_sha256": remote_sudo_sha,
         },
-        "receipt_roots": {"attempts": str(tmp_path / "attempts"), "terminals": str(tmp_path / "terminals")},
+        "receipt_roots": {
+            "attempts": str(tmp_path / "attempts"),
+            "terminals": str(tmp_path / "terminals"),
+            "transports": str(tmp_path / "transports"),
+            "replays": str(tmp_path / "replays"),
+        },
     }
     _self_hash(value)
     descriptor_path = tmp_path / "composition.json"
@@ -251,8 +265,19 @@ class MemoryStore:
         raw = canonical(value)
         return {"artifact_ref": "artifact:" + _digest_bytes(raw), "sha256": _digest_bytes(raw), "size": len(raw)}
 
+    begin = persist
+    claim = persist
 
-def _envelope(composition: RenderComposition, terminal_raw: bytes, returncode: int, private_key: Ed25519PrivateKey):
+
+def _envelope(
+    composition: RenderComposition,
+    terminal_raw: bytes,
+    returncode: int,
+    private_key: Ed25519PrivateKey,
+    *,
+    generation: str = "render-a3-1",
+    attempt_id: str = "1" * 32,
+):
     probe = {
         "schema": "tgw-render-netns-negative-probe/v1",
         "links": ["lo"],
@@ -262,8 +287,18 @@ def _envelope(composition: RenderComposition, terminal_raw: bytes, returncode: i
         "direct_probe": "ENETUNREACH",
     }
     value = {
-        "schema": "tgw-nixos-observer-render-wrapper-envelope/v1",
+        "schema": "tgw-nixos-observer-render-wrapper-envelope/v2",
+        "plan_commit": PLAN_APPROVED_COMMIT,
+        "source_commit": composition.source["commit"],
+        "source_tree": composition.source["tree"],
         "request_sha256": composition.value["request_sha256"],
+        "effect_generation": generation,
+        "composition_sha256": composition.receipt_sha256,
+        "attempt_id": attempt_id,
+        "nonce": "2" * 64,
+        "issued_at": int(time.time()),
+        "expires_at": int(time.time()) + 300,
+        "test_build": False,
         "helper_sha256": HELPER_SHA256,
         "remote_bootstrap_sha256": composition.components["remote_bootstrap"]["sha256"],
         "remote_python_sha256": composition.wrapper["remote_python_sha256"],
@@ -279,6 +314,9 @@ def _envelope(composition: RenderComposition, terminal_raw: bytes, returncode: i
             "post": probe,
         },
         "child": {
+            "pid": 12345,
+            "starttime": 987654,
+            "exe": composition.wrapper["remote_python_exe_path"],
             "uid": composition.wrapper["remote_uid"],
             "gid": composition.wrapper["remote_gid"],
             "returncode": returncode,
@@ -318,6 +356,7 @@ def _transport(tmp_path: Path, case, composition, private_key, *, terminal=None)
         tool_authority=_fixtures().LOCAL_TOOL_AUTHORITY,
         invoke=invoke,
         _use_sudo=True,
+        _attempt_id_factory=lambda: "1" * 32,
     )
     return transport, attempts, seen
 
@@ -399,7 +438,8 @@ def test_transport_uses_dedicated_auth_sealed_host_key_fixed_no_argv_wrapper_and
     transport, attempts, seen = _transport(tmp_path, case, composition, private)
     exchange = transport(case["request"], generation="render-a3-1")
 
-    assert seen["kwargs"]["input"] == case["wire"]
+    assert seen["kwargs"]["input"].startswith(case["wire"])
+    assert len(seen["kwargs"]["input"]) == len(case["wire"]) + 372
     assert seen["kwargs"]["env"] == {"LC_ALL": "C"}
     command = seen["command"]
     assert command.count("--") == 1
@@ -463,7 +503,9 @@ def test_controller_accepts_signed_pre_and_post_probe_evidence_then_persists(tmp
     assert result["terminal"]["schema"] == helper.SUCCESS_SCHEMA
     assert result["transport_receipt"]["namespace"]["pre"] == result["transport_receipt"]["namespace"]["post"]
     assert result["transport_receipt"]["namespace"]["pre"]["direct_probe"] == "ENETUNREACH"
-    assert store.values == [result["terminal"]]
+    assert store.values[-1] == result["terminal"]
+    assert result["transport_ref"]["sha256"]
+    assert result["replay_ref"]["sha256"]
 
 
 def test_signed_namespace_or_wrapper_identity_attack_is_ambiguous_not_failed(tmp_path):
@@ -480,6 +522,51 @@ def test_signed_namespace_or_wrapper_identity_attack_is_ambiguous_not_failed(tmp
         controller(_effect(case))
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("plan_commit", "0" * 40),
+        ("source_commit", "1" * 40),
+        ("source_tree", "2" * 40),
+        ("request_sha256", "sha256:" + "3" * 64),
+        ("effect_generation", "render-other-generation"),
+        ("composition_sha256", "sha256:" + "4" * 64),
+        ("attempt_id", "5" * 32),
+    ],
+)
+def test_even_validly_resigned_launch_binding_must_match_exact_attempt(field, replacement, tmp_path):
+    case = _case(tmp_path / "case")
+    private = Ed25519PrivateKey.generate()
+    composition, _ = _composition(tmp_path / "composition", case, private)
+    launch = _launch_binding(composition, case["request"], "render-a3-1", "1" * 32)
+    envelope = _envelope(composition, canonical({"schema": "test/v1"}), 1, private)
+    envelope[field] = replacement
+    envelope["attestation"]["signature"] = base64.b64encode(private.sign(_attestation_payload(envelope))).decode()
+    with pytest.raises(RenderTransportError):
+        validate_wrapper_envelope(envelope, composition=composition, expected=launch)
+
+
+def test_signed_wrapper_lifetime_and_child_process_identity_are_exact(tmp_path):
+    case = _case(tmp_path / "case")
+    private = Ed25519PrivateKey.generate()
+    composition, _ = _composition(tmp_path / "composition", case, private)
+    launch = _launch_binding(composition, case["request"], "render-a3-1", "1" * 32)
+    for mutation in ("expired", "pid", "starttime", "exe"):
+        envelope = _envelope(composition, canonical({"schema": "test/v1"}), 1, private)
+        if mutation == "expired":
+            envelope["issued_at"] -= 600
+            envelope["expires_at"] -= 600
+        elif mutation == "pid":
+            envelope["child"]["pid"] = 1
+        elif mutation == "starttime":
+            envelope["child"]["starttime"] = 0
+        else:
+            envelope["child"]["exe"] = "/tmp/not-python"
+        envelope["attestation"]["signature"] = base64.b64encode(private.sign(_attestation_payload(envelope))).decode()
+        with pytest.raises(RenderTransportError):
+            validate_wrapper_envelope(envelope, composition=composition, expected=launch)
+
+
 def test_only_validated_remote_failure_becomes_failed(tmp_path):
     case = _case(tmp_path / "case", mode="nix-failure")
     private = Ed25519PrivateKey.generate()
@@ -492,7 +579,9 @@ def test_only_validated_remote_failure_becomes_failed(tmp_path):
         controller(_effect(case))
     assert raised.value.terminal["schema"] == helper.A2_FAILURE_SCHEMA
     assert raised.value.terminal["outcome"] == "FAILED"
-    assert store.values == [raised.value.terminal]
+    assert store.values[-1] == raised.value.terminal
+    assert raised.value.transport_ref["sha256"]
+    assert raised.value.terminal_ref["sha256"]
 
 
 def test_terminal_persistence_loss_remains_ambiguous_and_keeps_attempt_binding(tmp_path):
@@ -500,11 +589,20 @@ def test_terminal_persistence_loss_remains_ambiguous_and_keeps_attempt_binding(t
     private = Ed25519PrivateKey.generate()
     composition, _ = _composition(tmp_path / "composition", case, private)
     transport, attempts, _ = _transport(tmp_path, case, composition, private)
-    controller = ObserverRenderController(transport, MemoryStore(OSError("disk")), composition=composition, authority=case["authority"])
+    controller = ObserverRenderController(
+        transport,
+        MemoryStore(OSError("disk")),
+        composition=composition,
+        transport_store=MemoryStore(),
+        replay_store=MemoryStore(),
+        authority=case["authority"],
+    )
     with pytest.raises(TerminalPersistenceError) as raised:
         controller(_effect(case))
     assert raised.value.terminal["schema"] == helper.SUCCESS_SCHEMA
     assert raised.value.attempt_receipt == attempts.values[0]
+    assert raised.value.transport_ref["sha256"]
+    assert raised.value.terminal_ref["sha256"]
 
 
 def test_immutable_receipt_store_is_exclusive_and_content_addressed(tmp_path):
@@ -517,6 +615,42 @@ def test_immutable_receipt_store_is_exclusive_and_content_addressed(tmp_path):
     assert path.read_bytes() == canonical(value)
     assert stat.S_IMODE(path.stat().st_mode) == 0o400
     store.close()
+
+
+def test_replay_and_same_generation_relaunch_are_durably_refused_but_new_generation_is_distinct(tmp_path):
+    case = _case(tmp_path / "case")
+    private = Ed25519PrivateKey.generate()
+    composition, _ = _composition(tmp_path / "composition", case, private)
+    attempts = ImmutableAttemptReceiptStore(tmp_path / "attempt-claims")
+    first = _attempt_receipt(composition, case["request"], "render-generation-1", "1" * 32)
+    attempts.begin(first)
+    with pytest.raises(RenderTransportError, match="already exists"):
+        attempts.begin(_attempt_receipt(composition, case["request"], "render-generation-1", "2" * 32))
+    second = _attempt_receipt(composition, case["request"], "render-generation-2", "2" * 32)
+    assert attempts.begin(second)["sha256"]
+
+    launch_one = _launch_binding(composition, case["request"], "render-generation-1", "1" * 32)
+    terminal = canonical({"schema": "signed-test-terminal/v1"})
+    envelope = _envelope(
+        composition,
+        terminal,
+        1,
+        private,
+        generation="render-generation-1",
+        attempt_id="1" * 32,
+    )
+    validate_wrapper_envelope(envelope, composition=composition, expected=launch_one)
+    with pytest.raises(RenderTransportError):
+        validate_wrapper_envelope(
+            envelope,
+            composition=composition,
+            expected=_launch_binding(composition, case["request"], "render-generation-2", "2" * 32),
+        )
+    replay = ImmutableReplayReceiptStore(tmp_path / "replay-claims")
+    claim = _replay_receipt(envelope)
+    replay.claim(claim)
+    with pytest.raises(RenderTransportError, match="already exists"):
+        replay.claim(dict(claim, generation="render-generation-2"))
 
 
 def _production_success(tmp_path: Path):
@@ -559,7 +693,8 @@ def _production_success(tmp_path: Path):
         "helper_remote_path": "/nix/store/2-helper.py",
     }
     value = {
-        "schema": "tgw-nixos-observer-render-composition/v2",
+        "schema": "tgw-nixos-observer-render-composition/v3",
+        "plan_commit": PLAN_APPROVED_COMMIT,
         "audited_a2_commit": AUDITED_A2_COMMIT,
         "request_sha256": request["request_sha256"],
         "request": {},
@@ -588,12 +723,18 @@ def _production_success(tmp_path: Path):
             "remote_uid": os.getuid(),
             "remote_gid": os.getgid(),
             "remote_python_path": "/run/current-system/sw/bin/python3",
+            "remote_python_exe_path": "/run/current-system/sw/bin/python3",
             "remote_python_sha256": "sha256:" + "d" * 64,
             "remote_ip_path": "/run/current-system/sw/bin/ip",
             "remote_ip_sha256": "sha256:" + "e" * 64,
             "remote_sudo_sha256": "sha256:" + "f" * 64,
         },
-        "receipt_roots": {"attempts": str(ATTEMPT_RECEIPT_ROOT), "terminals": "/tmp/test"},
+        "receipt_roots": {
+            "attempts": str(tmp_path / "attempts"),
+            "terminals": str(tmp_path / "terminals"),
+            "transports": str(tmp_path / "transports"),
+            "replays": str(tmp_path / "replays"),
+        },
     }
     _self_hash(value)
     composition = RenderComposition(value, request, True)
@@ -652,30 +793,36 @@ def _production_success(tmp_path: Path):
     }
     terminal["receipt_sha256"] = _digest_bytes(helper.canonical(terminal))
     terminal_raw = canonical(terminal)
-    transport_receipt = _envelope(composition, terminal_raw, 0, private)
     attempt = _attempt_receipt(composition, request, "render-a3-handler")
-    attempt_raw = canonical(attempt)
-    attempt_digest = _digest_bytes(attempt_raw)
-    terminal_digest = _digest_bytes(terminal_raw)
+    transport_receipt = _envelope(
+        composition,
+        terminal_raw,
+        0,
+        private,
+        generation="render-a3-handler",
+        attempt_id=attempt["attempt_id"],
+    )
+    attempt_store = ImmutableAttemptReceiptStore(Path(value["receipt_roots"]["attempts"]))
+    terminal_store = ImmutableTerminalReceiptStore(Path(value["receipt_roots"]["terminals"]))
+    transport_store = ImmutableTerminalReceiptStore(Path(value["receipt_roots"]["transports"]))
+    replay_store = ImmutableReplayReceiptStore(Path(value["receipt_roots"]["replays"]))
+    attempt_ref = attempt_store.begin(attempt)
+    terminal_ref = terminal_store.persist(terminal)
+    transport_ref = transport_store.persist(transport_receipt)
+    replay_receipt = _replay_receipt(transport_receipt)
+    replay_ref = replay_store.claim(replay_receipt)
     result = {
-        "schema": "tgw-nixos-observer-render-handler-result/v1",
+        "schema": "tgw-nixos-observer-render-handler-result/v2",
         "generation": "render-a3-handler",
         "composition_sha256": composition.receipt_sha256,
         "attempt_receipt": attempt,
-        "attempt_ref": {
-            "artifact_ref": "artifact:" + attempt_digest,
-            "path": str(Path(value["receipt_roots"]["attempts"]) / (attempt_digest.removeprefix("sha256:") + ".json")),
-            "sha256": attempt_digest,
-            "size": len(attempt_raw),
-        },
+        "attempt_ref": attempt_ref,
         "transport_receipt": transport_receipt,
+        "transport_ref": transport_ref,
+        "replay_receipt": replay_receipt,
+        "replay_ref": replay_ref,
         "terminal": terminal,
-        "terminal_ref": {
-            "artifact_ref": "artifact:" + terminal_digest,
-            "path": str(Path(value["receipt_roots"]["terminals"]) / (terminal_digest.removeprefix("sha256:") + ".json")),
-            "sha256": terminal_digest,
-            "size": len(terminal_raw),
-        },
+        "terminal_ref": terminal_ref,
     }
     _self_hash(result)
     return request, composition, result
@@ -719,13 +866,20 @@ def test_typed_handler_emits_outer_bound_receipt_and_classifies_ambiguity_hold_a
     controller = AuthorityEffectController(registry, Mock(return_value={"receipt_id": "authority:a3"}))
     receipt = controller.execute(request_id="request:a3", effect=effect)
     assert receipt.outcome is EffectOutcome.SUCCEEDED
-    assert receipt.evidence == ("nixos-observer-render:" + result["receipt_sha256"],)
+    assert "nixos-observer-render:" + result["receipt_sha256"] in receipt.evidence
+    assert len(receipt.evidence) == 5
 
     attempt = result["attempt_receipt"]
     attempt_ref = result["attempt_ref"]
 
     def ambiguous(_effect):
-        raise RemoteAttemptAmbiguous("lost", attempt, attempt_ref)
+        raise RemoteAttemptAmbiguous(
+            "lost",
+            attempt,
+            attempt_ref,
+            transport_ref=result["transport_ref"],
+            terminal_ref=result["terminal_ref"],
+        )
 
     ambiguous.composition = composition
     registry._providers[effect.kind] = ("nixos-observer-render-evaluation@1", registry._observer_render_provider(ambiguous), None)
@@ -751,7 +905,7 @@ def test_typed_handler_emits_outer_bound_receipt_and_classifies_ambiguity_hold_a
 
     def failed(_effect):
         terminal = {"schema": helper.A2_FAILURE_SCHEMA, "outcome": "FAILED"}
-        raise RemoteRenderFailure(terminal, {"sha256": "sha256:" + "1" * 64}, attempt_ref)
+        raise RemoteRenderFailure(terminal, result["terminal_ref"], attempt_ref, result["transport_ref"])
 
     failed.composition = composition
     registry._providers[effect.kind] = ("nixos-observer-render-evaluation@1", registry._observer_render_provider(failed), None)
@@ -769,161 +923,215 @@ def test_remote_bootstrap_and_native_wrapper_are_fixed_no_argument_contracts(tmp
     assert "drop_identity(&cfg)" in native
     assert native.index("unshare(CLONE_NEWNET)") < native.index("drop_identity(&cfg)")
     assert "EVP_DigestSign" in native
+    assert "TGWNIXO1" not in native
+    assert "packet_magic_hex" in native and "packet_version" in native
     assert "-c" not in native
     binary = tmp_path / "wrapper"
     subprocess.run(["gcc", "-Wall", "-Wextra", "-Werror", "-o", str(binary), "src/native/tgw_nix_observer_render_transport.c", "-lcrypto"], check=True)
 
 
-def _free_port() -> int:
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        return listener.getsockname()[1]
+def _native_config(
+    *,
+    wrapper: Path,
+    python: Path,
+    ip: Path,
+    bootstrap: Path,
+    helper_path: Path,
+    signing_key: Path,
+    public_raw: bytes,
+    request_sha256: str,
+    maximum_path: str | None = None,
+) -> str:
+    path = maximum_path or str(python)
+    return native_wrapper_config(
+        uid=os.getuid(),
+        gid=os.getgid(),
+        python=path,
+        python_exe=str(python),
+        python_sha256=_digest_bytes(python.read_bytes()),
+        ip=maximum_path or str(ip),
+        ip_sha256=_digest_bytes(ip.read_bytes()),
+        bootstrap=maximum_path or str(bootstrap),
+        bootstrap_sha256=_digest_bytes(bootstrap.read_bytes()),
+        helper_path=maximum_path or str(helper_path),
+        helper_sha256=_digest_bytes(helper_path.read_bytes()),
+        wrapper_sha256=_digest_bytes(wrapper.read_bytes()),
+        request_sha256=request_sha256,
+        prerequisite_receipt_sha256="sha256:" + "9" * 64,
+        signing_key=maximum_path or str(signing_key),
+        public_key_sha256=_digest_bytes(public_raw),
+        max_output_bytes=16 * 1024 * 1024,
+    ).decode()
 
 
-def _wait_port(port: int, process: subprocess.Popen, timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise RuntimeError("ephemeral sshd exited")
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                return
-        except OSError:
-            time.sleep(0.05)
-    raise RuntimeError("ephemeral sshd did not listen")
+def _compile_native_wrapper(binary: Path, config: Path, *, sanitizer: bool = False, test_build: bool = True) -> None:
+    command = [
+        "gcc",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        f'-DTGW_RENDER_WRAPPER_CONFIG="{config}"',
+    ]
+    if test_build:
+        command.append("-DTGW_RENDER_TEST_BUILD")
+    if sanitizer:
+        command.extend(["-fsanitize=address,undefined", "-fno-omit-frame-pointer"])
+    command.extend(["-o", str(binary), "src/native/tgw_nix_observer_render_transport.c", "-lcrypto"])
+    subprocess.run(command, check=True)
+    binary.chmod(0o555)
 
 
-def _fixture_wrapper(path: Path, case, composition: RenderComposition, private: Ed25519PrivateKey) -> None:
-    fixtures = _fixtures()
-    preamble = (
-        "_TEST_ONLY_TOOL_AUTHORITY="
-        + fixtures._authority_literal()
-        + "\n_TEST_ONLY_A2_AUTHORITY="
-        + fixtures._a2_authority_literal(case["authority"])
-        + "\n_TEST_ONLY_SCRATCH_ROOT="
-        + repr(str(case["scratch"]))
-        + "\n"
+def test_native_config_parser_under_sanitizers_accepts_maximum_and_rejects_malformed(tmp_path):
+    config = tmp_path / "wrapper.conf"
+    binary = tmp_path / "wrapper"
+    _compile_native_wrapper(binary, config, sanitizer=True)
+    private = Ed25519PrivateKey.generate()
+    key = tmp_path / "signing.pem"
+    key.write_bytes(private.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    key.chmod(0o600)
+    key.chmod(0o600)
+    public = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    python = Path(sys.executable).resolve()
+    ip = Path("/usr/bin/true").resolve()
+    bootstrap = tmp_path / "remote.py"
+    bootstrap.write_text(
+        "import sys\n"
+        "sys.stdin.buffer.read()\n"
+        "sys.stdout.buffer.write(b'{\"schema\":\"tgw-native-wrapper-child-test/v1\"}')\n"
+        "raise SystemExit(1)\n"
     )
-    private_raw = private.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
-    probe = {
-        "schema": "tgw-render-netns-negative-probe/v1",
-        "links": ["lo"],
-        "loopback_state": "down",
-        "ipv4_route_count": 0,
-        "ipv6_route_count": 0,
-        "direct_probe": "ENETUNREACH",
+    bootstrap.chmod(0o644)
+    helper_path = tmp_path / "helper.py"
+    helper_path.write_bytes(Path(helper.__file__).read_bytes())
+    helper_path.chmod(0o644)
+    maximal = "/" + "a" * 4094
+    valid = _native_config(
+        wrapper=binary,
+        python=python,
+        ip=ip,
+        bootstrap=bootstrap,
+        helper_path=helper_path,
+        signing_key=key,
+        public_raw=public,
+        request_sha256="sha256:" + "1" * 64,
+        maximum_path=maximal,
+    )
+    config.write_text(valid)
+    config.chmod(0o644)
+    environment = {"TGW_RENDER_TEST_PARSE_ONLY": "1", "ASAN_OPTIONS": "detect_leaks=1:abort_on_error=1"}
+    assert subprocess.run([binary], env=environment, capture_output=True, check=False).returncode == 0
+    malformed = {
+        "duplicate": valid + "uid=1\n",
+        "unknown": valid + "ambient_command=/bin/sh\n",
+        "missing": "\n".join(line for line in valid.splitlines() if not line.startswith("gid=")) + "\n",
+        "digest": valid.replace("sha256:" + "1" * 64, "sha256:" + "G" * 64, 1),
+        "path": valid.replace(maximal, "relative/path", 1),
     }
-    source = f"""#!{sys.executable}
-import base64,hashlib,json,subprocess,sys
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-if len(sys.argv)!=1: raise SystemExit(125)
-packet=sys.stdin.buffer.read()
-child=subprocess.run([sys.executable,'-I','-c',{(preamble + helper.BOOTSTRAP)!r}],input=packet,capture_output=True,check=False)
-probe={probe!r}
-value={{'schema':'tgw-nixos-observer-render-wrapper-envelope/v1','request_sha256':{composition.value['request_sha256']!r},'helper_sha256':{HELPER_SHA256!r},'remote_bootstrap_sha256':{composition.components['remote_bootstrap']['sha256']!r},'remote_python_sha256':{composition.wrapper['remote_python_sha256']!r},'remote_ip_sha256':{composition.wrapper['remote_ip_sha256']!r},'wrapper_sha256':{composition.wrapper['sha256']!r},'wrapper_prerequisite_receipt_sha256':{composition.wrapper['prerequisite_receipt']['sha256']!r},'namespace':{{'schema':'tgw-render-network-namespace-evidence/v1','before':'net:[301]','after':'net:[302]','changed':True,'pre':probe,'post':probe}},'child':{{'uid':{composition.wrapper['remote_uid']},'gid':{composition.wrapper['remote_gid']},'returncode':child.returncode,'terminal_bytes':len(child.stdout),'terminal_sha256':'sha256:'+hashlib.sha256(child.stdout).hexdigest(),'terminal_b64':base64.b64encode(child.stdout).decode()}},'attestation':{{'algorithm':'ed25519','public_key_sha256':{composition.wrapper['attestation_public_key']['sha256']!r},'signature':''}}}}
-def canon(v): return json.dumps(v,sort_keys=True,separators=(',',':')).encode()
-n=value['namespace']; c=value['child']
-fields=[value['schema'],value['request_sha256'],value['helper_sha256'],value['remote_bootstrap_sha256'],
- value['remote_python_sha256'],value['remote_ip_sha256'],value['wrapper_sha256'],
- value['wrapper_prerequisite_receipt_sha256'],n['before'],n['after'],'1',
- 'sha256:'+hashlib.sha256(canon(n['pre'])).hexdigest(),
- 'sha256:'+hashlib.sha256(canon(n['post'])).hexdigest(),str(c['uid']),str(c['gid']),
- str(c['returncode']),str(c['terminal_bytes']),c['terminal_sha256']]
-value['attestation']['signature']=base64.b64encode(Ed25519PrivateKey.from_private_bytes({private_raw!r}).sign(b'\\0'.join(item.encode('ascii') for item in fields))).decode()
-sys.stdout.buffer.write(canon(value)); raise SystemExit(child.returncode)
-"""
-    path.write_text(source)
-    path.chmod(0o555)
+    for raw in malformed.values():
+        config.write_text(raw)
+        config.chmod(0o644)
+        completed = subprocess.run([binary], env=environment, capture_output=True, check=False)
+        assert completed.returncode == 125
+        assert b"configuration" in completed.stderr
 
 
-@pytest.mark.skipif(not Path("/usr/sbin/sshd").is_file(), reason="OpenSSH server unavailable")
-def test_real_ephemeral_sshd_exercises_exact_auth_host_key_wrapper_and_full_a2_packet(tmp_path):
+def test_compiled_native_wrapper_accepts_actual_packet_rejects_wrong_magic_and_signs_exact_launch(tmp_path):
     case = _case(tmp_path / "case")
     private = Ed25519PrivateKey.generate()
-    user = pwd.getpwuid(os.getuid()).pw_name
-    client_key = tmp_path / "client"
-    host_key = tmp_path / "host"
-    for key in (client_key, host_key):
-        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
-    client_key.chmod(0o600)
-    authorized = tmp_path / "authorized_keys"
-    authorized.write_bytes(client_key.with_suffix(".pub").read_bytes())
-    port = _free_port()
-    host_public = host_key.with_suffix(".pub").read_text().split()
-    known_hosts = tmp_path / "known_hosts"
-    known_hosts.write_text(f"[127.0.0.1]:{port} {host_public[0]} {host_public[1]}\n")
-    known_hosts.chmod(0o600)
-    composition, _ = _composition(
-        tmp_path / "composition",
-        case,
-        private,
-        host="127.0.0.1",
-        port=port,
-        user=user,
-        identity_file=client_key,
-        known_hosts=known_hosts,
+    composition, _ = _composition(tmp_path / "composition", case, private)
+    config = tmp_path / "wrapper.conf"
+    binary = tmp_path / "wrapper"
+    _compile_native_wrapper(binary, config, sanitizer=True)
+    key = tmp_path / "signing.pem"
+    key.write_bytes(private.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    key.chmod(0o600)
+    public = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    python = Path(sys.executable).resolve()
+    ip = Path("/usr/bin/true").resolve()
+    bootstrap = tmp_path / "remote.py"
+    bootstrap.write_text(
+        "import sys\n"
+        "sys.stdin.buffer.read()\n"
+        "sys.stdout.buffer.write(b'{\"schema\":\"tgw-native-wrapper-child-test/v1\"}')\n"
+        "raise SystemExit(1)\n"
     )
-    wrapper = tmp_path / "fixed-wrapper"
-    changed = copy.deepcopy(composition.value)
-    changed["wrapper"]["path"] = str(wrapper)
-    composition = RenderComposition(changed, composition.request, True)
-    _fixture_wrapper(wrapper, case, composition, private)
-    config = tmp_path / "sshd_config"
+    bootstrap.chmod(0o644)
+    helper_path = tmp_path / "helper.py"
+    helper_path.write_bytes(Path(helper.__file__).read_bytes())
+    helper_path.chmod(0o644)
     config.write_text(
-        "\n".join(
-            [
-                f"Port {port}",
-                "ListenAddress 127.0.0.1",
-                f"HostKey {host_key}",
-                f"AuthorizedKeysFile {authorized}",
-                f"PidFile {tmp_path / 'sshd.pid'}",
-                "StrictModes no",
-                "PasswordAuthentication no",
-                "KbdInteractiveAuthentication no",
-                "UsePAM no",
-                f"AllowUsers {user}",
-                "LogLevel ERROR",
-            ]
+        _native_config(
+            wrapper=binary,
+            python=python,
+            ip=ip,
+            bootstrap=bootstrap,
+            helper_path=helper_path,
+            signing_key=key,
+            public_raw=public,
+            request_sha256=case["request"]["request_sha256"],
         )
-        + "\n"
     )
-    daemon = subprocess.Popen(["/usr/sbin/sshd", "-D", "-e", "-f", str(config)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    try:
-        try:
-            _wait_port(port, daemon)
-        except RuntimeError:
-            detail = daemon.stderr.read().decode(errors="replace") if daemon.stderr else ""
-            pytest.skip("ephemeral sshd cannot run in this test namespace: " + detail)
-        attempts = MemoryStore()
-        transport = SshObserverRenderTransport(composition, attempts, tool_authority=_fixtures().LOCAL_TOOL_AUTHORITY, _use_sudo=False)
-        controller = ObserverRenderController(transport, MemoryStore(), composition=composition, authority=case["authority"])
-        result = controller(_effect(case, generation="render-a3-sshd"))
-        assert result["terminal"]["schema"] == helper.SUCCESS_SCHEMA
-        assert result["transport_receipt"]["namespace"]["post"]["direct_probe"] == "ENETUNREACH"
-        assert attempts.values[0]["wrapper_sha256"] == composition.wrapper["sha256"]
+    config.chmod(0o644)
+    changed = copy.deepcopy(composition.value)
+    changed["components"]["remote_bootstrap"]["sha256"] = _digest_bytes(bootstrap.read_bytes())
+    changed["components"]["remote_bootstrap"]["size"] = bootstrap.stat().st_size
+    changed["wrapper"].update(
+        sha256=_digest_bytes(binary.read_bytes()),
+        remote_python_path=str(python),
+        remote_python_exe_path=str(python),
+        remote_python_sha256=_digest_bytes(python.read_bytes()),
+        remote_ip_path=str(ip),
+        remote_ip_sha256=_digest_bytes(ip.read_bytes()),
+    )
+    changed["wrapper"]["prerequisite_receipt"]["sha256"] = "sha256:" + "9" * 64
+    changed.pop("receipt_sha256")
+    _self_hash(changed)
+    composition = RenderComposition(changed, composition.request, True)
+    generation = "render-native-parity-1"
+    attempt_id = "3" * 32
+    launch = _launch_binding(composition, case["request"], generation, attempt_id)
+    descriptor = _tool_descriptor(case["request"], _fixtures().LOCAL_TOOL_AUTHORITY)
+    archive = case["scratch"].parent / "source.tar"
+    helper_raw = helper_path.read_bytes()
+    header, _ = _build_packet_header(
+        request=case["request"],
+        helper_source=helper_raw,
+        archive_size=archive.stat().st_size,
+        archive_sha256=case["request"]["archive_sha256"],
+        tool_descriptor=descriptor,
+    )
+    packet = header + archive.read_bytes() + _launch_trailer(launch)
+    completed = subprocess.run([binary], input=packet, env={"TGW_RENDER_TEST_SYSCALLS": "1"}, capture_output=True, check=False)
+    assert completed.returncode in {0, 1, 2, 3}
+    envelope, terminal = validate_wrapper_envelope(
+        json.loads(completed.stdout), composition=composition, expected=launch, allow_test_build=True
+    )
+    assert terminal
+    assert envelope["attempt_id"] == attempt_id
+    assert envelope["effect_generation"] == generation
+    assert envelope["child"]["pid"] > 1
+    assert envelope["child"]["starttime"] > 0
+    attacked = bytearray(packet)
+    attacked[0] ^= 1
+    refused = subprocess.run([binary], input=attacked, env={"TGW_RENDER_TEST_SYSCALLS": "1"}, capture_output=True, check=False)
+    assert refused.returncode == 125
+    assert b"prepared packet magic invalid" in refused.stderr
 
-        wrong_key = tmp_path / "wrong-client"
-        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(wrong_key)], check=True)
-        wrong_key.chmod(0o600)
-        wrong_value = copy.deepcopy(composition.value)
-        wrong_value["ssh"]["identity_file"] = _identity(wrong_key)
-        wrong_composition = RenderComposition(wrong_value, composition.request, True)
-        wrong_transport = SshObserverRenderTransport(
-            wrong_composition,
-            MemoryStore(),
-            tool_authority=_fixtures().LOCAL_TOOL_AUTHORITY,
-            _use_sudo=False,
-        )
-        wrong_controller = ObserverRenderController(wrong_transport, MemoryStore(), composition=wrong_composition, authority=case["authority"])
-        with pytest.raises(RemoteAttemptAmbiguous):
-            wrong_controller(_effect(case, generation="render-a3-wrong-auth"))
-    finally:
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait()
+
+@pytest.mark.skipif(
+    os.geteuid() != 0 or os.environ.get("TGW_RUN_PRIVILEGED_RENDER_NETNS") != "1",
+    reason="set TGW_RUN_PRIVILEGED_RENDER_NETNS=1 under root to exercise the real namespace gate",
+)
+def test_privileged_gate_proves_actual_fresh_netns_has_only_down_loopback_and_no_routes():
+    script = (
+        "set -eu\n"
+        "test \"$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf '%f\\n')\" = lo\n"
+        "test \"$(cat /sys/class/net/lo/operstate)\" = down\n"
+        "test -z \"$(/usr/sbin/ip route show)\"\n"
+        "test -z \"$(/usr/sbin/ip -6 route show)\"\n"
+    )
+    completed = subprocess.run(["/usr/bin/unshare", "--net", "/bin/sh", "-c", script], capture_output=True, check=False)
+    assert completed.returncode == 0, completed.stderr.decode(errors="replace")
 
 
 def test_cli_reports_hold_without_launch_and_remains_stdin_only(tmp_path):
