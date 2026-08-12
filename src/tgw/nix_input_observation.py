@@ -48,7 +48,10 @@ if hashlib.sha256(helper).digest()!=hh or hashlib.sha256(payload).digest()!=rh: 
 try: q=json.loads(payload)
 except Exception: fail('BAD_PAYLOAD_JSON',rh,hh,th)
 if hashlib.sha256(json.dumps(q['tool_sha256'],sort_keys=True,separators=(',',':')).encode()).digest()!=th: fail('TOOL_HASH_MISMATCH',rh,hh,th)
-rest=sys.stdin.buffer.read(); sys.stdin=io.TextIOWrapper(io.BytesIO(struct.pack('!Q',plen)+payload+rest)); exec(compile(helper,'<tgw-nix-input-observer>','exec'),{'__name__':'__main__'})"""
+rest=sys.stdin.buffer.read(); sys.stdin=io.TextIOWrapper(io.BytesIO(struct.pack('!Q',plen)+payload+rest))
+g={'__name__':'__main__','_BOOTSTRAP_REQUEST_SHA256':'sha256:'+rh.hex()}
+g.update({'_BOOTSTRAP_HELPER_SHA256':'sha256:'+hh.hex(),'_BOOTSTRAP_TOOL_MANIFEST_SHA256':'sha256:'+th.hex()})
+exec(compile(helper,'<tgw-nix-input-observer>','exec'),g)"""
 
 
 class NixInputObservationError(ValueError):
@@ -329,18 +332,34 @@ def standalone_main() -> int:
     request: dict[str, Any] = {}
     stage = "request"
     cleanup_result = "unknown"
-    frame: dict[str, Any] = {}
     try:
+
+        def enter(value: str) -> None:
+            nonlocal stage
+            stage = value
+            hook = globals().get("_OBSERVER_STAGE_HOOK")
+            if hook is not None:
+                hook(value)
+
         netns_start = os.stat("/proc/self/ns/net").st_ino
         raw_size = struct.unpack("!Q", sys.stdin.buffer.read(8))[0]
         if not 1 <= raw_size <= 64 * 1024:
             raise NixInputObservationError("bootstrap payload size is invalid")
         raw = sys.stdin.buffer.read(raw_size)
         request = json.loads(raw)
+        bootstrap_request_hash = globals().get("_BOOTSTRAP_REQUEST_SHA256", "unknown")
+        bootstrap_helper_hash = globals().get("_BOOTSTRAP_HELPER_SHA256", "unknown")
+        bootstrap_tool_hash = globals().get("_BOOTSTRAP_TOOL_MANIFEST_SHA256", "unknown")
+        if (
+            bootstrap_request_hash != "sha256:" + hashlib.sha256(_canonical(request)).hexdigest()
+            or bootstrap_helper_hash != request.get("observer_source_sha256")
+            or bootstrap_tool_hash != "sha256:" + hashlib.sha256(_canonical(request.get("tool_sha256"))).hexdigest()
+        ):
+            raise NixInputObservationError("bootstrap/helper identity cross-check failed")
         expected = {"source_archive_sha256", "observer_source_sha256", "source_commit", "source_tree", "flake_lock_sha256", "module_sha256", "tool_sha256", "tool_paths"}
         if set(request) != expected or not all(isinstance(request[key], (str, dict)) for key in expected):
             raise NixInputObservationError("request schema mismatch")
-        stage = "archive"
+        enter("archive")
         archive = scratch / "source.tar"
         archive.write_bytes(sys.stdin.buffer.read())
         if "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest() != request["source_archive_sha256"]:
@@ -353,7 +372,7 @@ def standalone_main() -> int:
         if tools != request["tool_sha256"]:
             raise NixInputObservationError("tool identity mismatch")
         tree = _strict_extract(archive, scratch / "extract", request)
-        stage = "namespace"
+        enter("namespace")
         links = json.loads(_run([IP, "-json", "link", "show"], tree))
         routes = json.loads(_run([IP, "-json", "route", "show"], tree))
         if routes or len(links) != 1 or links[0].get("ifname") != "lo" or links[0].get("operstate") not in {"DOWN", "UNKNOWN"} or "UP" in links[0].get("flags", []):
@@ -361,7 +380,7 @@ def standalone_main() -> int:
         link_hash = "sha256:" + hashlib.sha256(_canonical(links)).hexdigest()
         route_hash = "sha256:" + hashlib.sha256(_canonical(routes)).hexdigest()
         probes_before = _all_probes()
-        stage = "nix"
+        enter("nix")
         base = [NIX, "--offline", "--option", "substituters", "", "--option", "allow-import-from-derivation", "false", "--option", "pure-eval", "true", "--no-write-lock-file"]
         metadata = json.loads(_run(base + ["flake", "metadata", "--json", "path:."], tree))
         locked = metadata["locks"]["nodes"]
@@ -409,7 +428,7 @@ def standalone_main() -> int:
         failure_exc = exc
     finally:
         try:
-            shutil.rmtree(scratch)
+            globals().get("_OBSERVER_CLEANUP", shutil.rmtree)(scratch)
             cleanup_result = "removed" if not scratch.exists() else "ambiguous"
         except Exception:
             cleanup_result = "ambiguous"
@@ -424,9 +443,9 @@ def standalone_main() -> int:
     if "failure_exc" in locals():
         failure = {
             "schema": "tgw-nix-input-observation-bootstrap-failure/v1" if stage == "request" else "tgw-nix-input-observation-failure/v1",
-            "request_sha256": frame.get("request_sha256", "unknown"),
-            "helper_sha256": frame.get("helper_sha256", "unknown"),
-            "tool_manifest_sha256": frame.get("tool_manifest_sha256", "unknown"),
+            "request_sha256": globals().get("_BOOTSTRAP_REQUEST_SHA256", "unknown"),
+            "helper_sha256": globals().get("_BOOTSTRAP_HELPER_SHA256", "unknown"),
+            "tool_manifest_sha256": globals().get("_BOOTSTRAP_TOOL_MANIFEST_SHA256", "unknown"),
             "stage": stage,
             "code": type(failure_exc).__name__,
             "outcome": "AMBIGUOUS" if cleanup_result == "ambiguous" else "FAILED",

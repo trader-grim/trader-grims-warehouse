@@ -180,3 +180,24 @@ d['receipt_sha256']='sha256:'+hashlib.sha256(canon(d)).hexdigest(); print(canon(
 
     with pytest.raises(NixInputObservationError, match="validated failure"):
         observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=helper, run=run)
+
+
+@pytest.mark.parametrize("cleanup", ["removed", "ambiguous"])
+def test_bootstrap_real_standalone_main_builds_bound_failure(tmp_path, cleanup):
+    from tgw import nix_input_observation as module
+
+    archive = tmp_path / "source.tar"
+    archive.write_bytes(b"tail")
+    source = Path(module.__file__).read_text()
+    injection = "\ndef _injected(stage):\n    if stage == 'archive': raise NixInputObservationError('injected')\n_OBSERVER_STAGE_HOOK=_injected\n"
+    if cleanup == "ambiguous":
+        injection += "def _bad_cleanup(path): raise OSError('injected cleanup')\n_OBSERVER_CLEANUP=_bad_cleanup\n"
+    source = source.replace('if __name__ == "__main__":', injection + '\nif __name__ == "__main__":')
+    helper = source.encode()
+    req = request(archive, helper)
+
+    def run(command, **kwargs):
+        return subprocess.run([__import__("sys").executable, "-I", "-c", module.BOOTSTRAP], input=kwargs["input"], capture_output=True, check=False)
+
+    with pytest.raises(NixInputObservationError, match="validated failure"):
+        observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=helper, run=run)
