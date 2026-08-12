@@ -33,6 +33,7 @@ SUDO_PATH = "/run/wrappers/bin/sudo"
 SUDO_COMMAND = f"{SUDO_PATH} -n -- {WRAPPER_PATH}"
 AUTHORIZED_KEY_PREFIX = f'restrict,command="{SUDO_COMMAND}" ssh-ed25519 '
 LIVE_FLAKE_GATE = "EXTERNAL_TGW_PROD_FLAKE_IMPORT_BUILD_REQUIRED"
+LIVE_SSHD_GATE = "EXTERNAL_TGW_PROD_SSHD_T_USER_CODEX_REQUIRED"
 
 _SHA1 = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
@@ -120,6 +121,7 @@ def validate_platform_bootstrap_manifest(value: Any) -> dict[str, Any]:
         "probe_receipt",
         "retirement_condition",
         "live_flake_gate",
+        "live_sshd_gate",
         "manifest_sha256",
     }
     if not isinstance(value, Mapping) or set(value) != fields or value.get("schema") != MANIFEST_SCHEMA:
@@ -133,6 +135,7 @@ def validate_platform_bootstrap_manifest(value: Any) -> dict[str, Any]:
         or value["flake_repository_id"] != FLAKE_REPOSITORY
         or value["retirement_condition"] != RETIREMENT_CONDITION
         or value["live_flake_gate"] != LIVE_FLAKE_GATE
+        or value["live_sshd_gate"] != LIVE_SSHD_GATE
     ):
         raise ValueError("platform-bootstrap Plan, solution, target, or retirement binding is invalid")
     if not _SHA1.fullmatch(str(value["flake_commit"])) or not _SHA1.fullmatch(str(value["flake_tree"])):

@@ -31,6 +31,7 @@ in {
       }
       {
         assertion = config.services.openssh.authorizedKeysFiles == [ soleAuthorizedKeysFile ]
+          && config.services.openssh.extraConfig == ""
           && config.services.openssh.settings.AuthorizedKeysCommand == "none"
           && config.services.openssh.settings.TrustedUserCAKeys == "none"
           && config.services.openssh.settings.AuthorizedPrincipalsCommand == "none"
@@ -55,6 +56,8 @@ in {
       keyFiles = [ ];
     };
     services.openssh.authorizedKeysFiles = [ soleAuthorizedKeysFile ];
+    # No opaque Match block may override the typed final SSH settings below.
+    services.openssh.extraConfig = lib.mkForce "";
     services.openssh.settings = {
       AuthorizedKeysCommand = "none";
       TrustedUserCAKeys = "none";

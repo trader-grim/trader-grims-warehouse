@@ -81,6 +81,7 @@ def _manifest() -> dict:
         "probe_receipt": "probe:sha256:" + "4" * 64,
         "retirement_condition": RETIREMENT_CONDITION,
         "live_flake_gate": "EXTERNAL_TGW_PROD_FLAKE_IMPORT_BUILD_REQUIRED",
+        "live_sshd_gate": "EXTERNAL_TGW_PROD_SSHD_T_USER_CODEX_REQUIRED",
     }
     value["request_binding"] = platform_bootstrap_request_binding(value)
     value["manifest_sha256"] = digest(value)
@@ -802,7 +803,8 @@ def test_nix_leaf_is_disabled_by_default_and_contains_only_fixed_public_material
     assert "remoteAuthorizedKeys.keys == [ cfg.sshAuthorizedPublicKey ]" in module
     assert "remoteAuthorizedKeys.keyFiles == [ ]" in module
     assert "authorizedKeysFiles = [ soleAuthorizedKeysFile ]" in module
-    assert "lib.mkForce" not in module
+    assert 'extraConfig = lib.mkForce ""' in module
+    assert 'config.services.openssh.extraConfig == ""' in module
     for closed_source in (
         'AuthorizedKeysCommand = "none"',
         'TrustedUserCAKeys = "none"',
@@ -817,6 +819,7 @@ def test_nix_leaf_is_disabled_by_default_and_contains_only_fixed_public_material
     assert 'restrict,command="/run/wrappers/bin/sudo -n -- /run/current-system/sw/bin/tgw-nix-observer-render-wrapper" ssh-ed25519' in module
     assert '!(lib.hasInfix "\\n" cfg.sshAuthorizedPublicKey)' in module
     assert "EXTERNAL_TGW_PROD_FLAKE_IMPORT_BUILD_REQUIRED" == _manifest()["live_flake_gate"]
+    assert "EXTERNAL_TGW_PROD_SSHD_T_USER_CODEX_REQUIRED" == _manifest()["live_sshd_gate"]
     assert "attestationPublicKey" in module
     assert "PRIVATE KEY" not in package
     assert "cleanSource" not in package
@@ -834,3 +837,18 @@ def test_nix_final_authorization_assertions_reject_extra_key_or_keyfile_merge():
     assert final_assertion([expected], [])
     assert not final_assertion([expected, "attacker-key"], [])
     assert not final_assertion([expected], ["/etc/ssh/extra_authorized_keys"])
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "Match User codex\n  AuthorizedKeysFile /tmp/extra",
+        "Match User codex\n  AuthorizedKeysCommand /tmp/injected",
+        "Match User codex\n  AuthenticationMethods any",
+    ],
+)
+def test_nix_final_extra_config_force_rejects_match_user_auth_broadening(override):
+    module = Path("nix/a3-platform-bootstrap.nix").read_text()
+    assert override
+    assert 'services.openssh.extraConfig = lib.mkForce "";' in module
+    assert 'config.services.openssh.extraConfig == ""' in module

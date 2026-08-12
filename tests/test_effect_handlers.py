@@ -66,6 +66,7 @@ def _bootstrap_parameters():
         "probe_receipt": "probe:sha256:" + "4" * 64,
         "retirement_condition": RETIREMENT_CONDITION,
         "live_flake_gate": "EXTERNAL_TGW_PROD_FLAKE_IMPORT_BUILD_REQUIRED",
+        "live_sshd_gate": "EXTERNAL_TGW_PROD_SSHD_T_USER_CODEX_REQUIRED",
     }
     manifest["request_binding"] = platform_bootstrap_request_binding(manifest)
     manifest["manifest_sha256"] = digest(manifest)
