@@ -89,7 +89,7 @@ EXPECTED_TOOLS = {
     "tgw_health", "tgw_enqueue", "tgw_get_todo", "tgw_add_suggest",
     "tgw_dead_letter", "tgw_hint_trail", "tgw_catalog_verify",
     "tgw_mailbox_send", "tgw_get_plan_brief", "tgw_clip_deliver",
-    "tgw_simple_llm_jobs",
+    "tgw_simple_llm_jobs", "tgw_get_plan_graph",
 }
 
 
@@ -97,7 +97,7 @@ def test_exactly_ten_tools_present():
     present = {n for n in dir(mcp_server)
               if n.startswith("tgw_") and callable(getattr(mcp_server, n))}
     assert present == EXPECTED_TOOLS
-    assert len(present) == 15
+    assert len(present) == 16
 
 
 # ---------------------------------------------------------------------------
