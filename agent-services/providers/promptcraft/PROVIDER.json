@@ -6,7 +6,8 @@
   "kind": "local-stdio-mcp-and-library",
   "entrypoints": {
     "cli": "bin/promptcraft",
-    "mcp": "bin/promptcraft-mcp"
+    "mcp": "bin/promptcraft-mcp",
+    "card_handoff": "bin/promptcraft-handoff"
   },
   "network": false,
   "effects": "read-only",

@@ -19,6 +19,26 @@ It exists because a failed prompt/harness combination does not establish a model
 
 Promptcraft does not invoke a model, use the network, read arbitrary files through MCP, mutate TGW, or grant authority. The connected host model performs the qualitative drafting; Promptcraft supplies the compiler, profiles, and non-negotiable gate.
 
+## Execution-card handoff
+
+`bin/promptcraft-handoff` is the mechanical adapter between a compact
+`tgw-execution-card/v1` and a launcher. It verifies the immutable card, renders
+only receiver-native strategy plus exact resource pointers and preserved authority,
+exclusions, and acceptance, then emits `tgw-promptcraft-receipt/v1` inside a
+hash-bound `tgw-launcher-handoff/v1`. The launcher verifies that object and its
+lease before accepting a minimal invocation. Editing or manually transcribing any
+card, instruction, resource hash, profile, or receipt fails closed.
+
+```bash
+./agent-services/providers/promptcraft/bin/promptcraft-handoff craft \
+  --receiver-identity receiver-run-8 < card.json > handoff.json
+./agent-services/providers/promptcraft/bin/promptcraft-handoff verify \
+  < handoff.json > invocation.json
+```
+
+The card's `selected_provider` is a qualified role-provider identity, not a fixed
+product assignment. The receiver profile controls presentation only.
+
 ## MCP tools and approval workflows
 
 ### Intent translation and approval — primary use
