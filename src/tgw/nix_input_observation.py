@@ -187,10 +187,16 @@ def observe_archive(
         set(request) != {"source_archive_sha256", "observer_source_sha256", "source_commit", "source_tree", "flake_lock_sha256", "module_sha256"}
         or request.get("source_archive_sha256") != "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest()
         or request.get("observer_source_sha256") != "sha256:" + hashlib.sha256(helper_source).hexdigest()
-        or request.get("source_commit") is None
-        or request.get("source_tree") is None
-        or request.get("flake_lock_sha256") is None
-        or request.get("module_sha256") is None
+        or not isinstance(request.get("source_commit"), str)
+        or not re.fullmatch(r"[0-9a-f]{40}", request["source_commit"])
+        or not isinstance(request.get("source_tree"), str)
+        or not re.fullmatch(r"[0-9a-f]{40}", request["source_tree"])
+        or not isinstance(request.get("flake_lock_sha256"), str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", request["flake_lock_sha256"])
+        or not isinstance(request.get("module_sha256"), str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", request["module_sha256"])
+        or set(known_tool_sha256) != set(TOOLS)
+        or any(not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value) for value in known_tool_sha256.values())
     ):
         raise NixInputObservationError("observer immutable archive request is invalid")
     tool_fds = {}
@@ -243,7 +249,7 @@ def observe_archive(
             )
         elif unsigned.get("schema") == "tgw-nix-input-observation-failure/v1":
             stages = {"request", "archive", "namespace", "nix", "cleanup"}
-            codes = {"NixInputObservationError", "JSONDecodeError", "TarError", "OSError", "UnicodeDecodeError"}
+            codes = {"REQUEST_VALIDATION_FAILED", "NixInputObservationError", "JSONDecodeError", "TarError", "OSError", "UnicodeDecodeError"}
             cleanup = unsigned.get("cleanup")
             valid = (
                 common
@@ -251,7 +257,7 @@ def observe_archive(
                 and unsigned.get("code") in codes
                 and cleanup in {"removed", "ambiguous"}
                 and unsigned.get("outcome") == ("FAILED" if cleanup == "removed" else "AMBIGUOUS")
-                and (unsigned.get("netns_inode") is None if unsigned.get("stage") == "request" else isinstance(unsigned.get("netns_inode"), int) and unsigned["netns_inode"] > 0)
+                and (unsigned.get("netns_inode") is None if unsigned.get("stage") in {"request", "archive"} else isinstance(unsigned.get("netns_inode"), int) and unsigned["netns_inode"] > 0)
             )
         else:
             valid = False
@@ -357,8 +363,20 @@ def standalone_main() -> int:
         ):
             raise NixInputObservationError("bootstrap/helper identity cross-check failed")
         expected = {"source_archive_sha256", "observer_source_sha256", "source_commit", "source_tree", "flake_lock_sha256", "module_sha256", "tool_sha256", "tool_paths"}
-        if set(request) != expected or not all(isinstance(request[key], (str, dict)) for key in expected):
-            raise NixInputObservationError("request schema mismatch")
+        if (
+            set(request) != expected
+            or not all(isinstance(request[key], str) for key in expected - {"tool_sha256", "tool_paths"})
+            or not isinstance(request["tool_sha256"], dict)
+            or not isinstance(request["tool_paths"], dict)
+            or set(request["tool_sha256"]) != set(TOOLS)
+            or set(request["tool_paths"]) != set(TOOLS)
+            or any(not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value) for value in request["tool_sha256"].values())
+            or any(not isinstance(value, str) or not value.startswith("/") for value in request["tool_paths"].values())
+            or not re.fullmatch(r"[0-9a-f]{40}", request["source_commit"])
+            or not re.fullmatch(r"[0-9a-f]{40}", request["source_tree"])
+            or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", request[key]) for key in ("source_archive_sha256", "observer_source_sha256", "flake_lock_sha256", "module_sha256"))
+        ):
+            raise NixInputObservationError("REQUEST_VALIDATION_FAILED")
         enter("archive")
         archive = scratch / "source.tar"
         archive.write_bytes(sys.stdin.buffer.read())
@@ -442,15 +460,15 @@ def standalone_main() -> int:
         stage = "cleanup"
     if "failure_exc" in locals():
         failure = {
-            "schema": "tgw-nix-input-observation-bootstrap-failure/v1" if stage == "request" else "tgw-nix-input-observation-failure/v1",
+            "schema": "tgw-nix-input-observation-failure/v1",
             "request_sha256": globals().get("_BOOTSTRAP_REQUEST_SHA256", "unknown"),
             "helper_sha256": globals().get("_BOOTSTRAP_HELPER_SHA256", "unknown"),
             "tool_manifest_sha256": globals().get("_BOOTSTRAP_TOOL_MANIFEST_SHA256", "unknown"),
             "stage": stage,
-            "code": type(failure_exc).__name__,
+            "code": "REQUEST_VALIDATION_FAILED" if stage == "request" else type(failure_exc).__name__,
             "outcome": "AMBIGUOUS" if cleanup_result == "ambiguous" else "FAILED",
             "cleanup": cleanup_result,
-            "netns_inode": None if stage == "request" else os.stat("/proc/self/ns/net").st_ino,
+            "netns_inode": None if stage in {"request", "archive"} else os.stat("/proc/self/ns/net").st_ino,
         }
         failure["receipt_sha256"] = "sha256:" + hashlib.sha256(_canonical(failure)).hexdigest()
         sys.stdout.write(json.dumps(failure, sort_keys=True, separators=(",", ":")))

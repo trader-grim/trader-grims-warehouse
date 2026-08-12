@@ -201,3 +201,46 @@ def test_bootstrap_real_standalone_main_builds_bound_failure(tmp_path, cleanup):
 
     with pytest.raises(NixInputObservationError, match="validated failure"):
         observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=helper, run=run)
+
+
+def test_bootstrap_real_standalone_rejects_malformed_typed_request_as_helper_failure(tmp_path):
+    from tgw import nix_input_observation as module
+
+    archive = tmp_path / "source.tar"
+    archive.write_bytes(b"tail")
+    helper = Path(module.__file__).read_bytes()
+    malformed = request(archive, helper)
+    malformed["source_tree"] = 7
+    bound = {**malformed, "tool_sha256": TOOLS, "tool_paths": TOOL_PATHS}
+    completed = subprocess.run(
+        [__import__("sys").executable, "-I", "-c", module.BOOTSTRAP],
+        input=module.packet(helper, bound, archive),
+        capture_output=True,
+        check=False,
+    )
+    failure = json.loads(completed.stdout)
+    unsigned = dict(failure)
+    claimed = unsigned.pop("receipt_sha256")
+    assert completed.returncode == 1
+    assert unsigned == {
+        "schema": "tgw-nix-input-observation-failure/v1",
+        "request_sha256": "sha256:" + hashlib.sha256(json.dumps(bound, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "helper_sha256": malformed["observer_source_sha256"],
+        "tool_manifest_sha256": "sha256:" + hashlib.sha256(json.dumps(TOOLS, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "stage": "request",
+        "code": "REQUEST_VALIDATION_FAILED",
+        "outcome": "FAILED",
+        "cleanup": "removed",
+        "netns_inode": None,
+    }
+    assert claimed == "sha256:" + hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+@pytest.mark.parametrize("field,value", [("source_commit", 4), ("source_tree", "x" * 40), ("module_sha256", "sha256:no")])
+def test_controller_preflight_rejects_malformed_typed_request(tmp_path, field, value):
+    archive = tmp_path / "source.tar"
+    archive.write_bytes(b"tail")
+    req = request(archive, b"helper")
+    req[field] = value
+    with pytest.raises(NixInputObservationError, match="archive request"):
+        observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=b"helper", run=lambda *a, **k: None)
