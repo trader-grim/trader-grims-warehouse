@@ -37,6 +37,32 @@ class StalePlanCommit(PlanResolutionError):
     """A solution is not bound to the currently registered Plan commit."""
 
 
+@dataclass(frozen=True)
+class ConformanceResult:
+    """Independent resolver's claim about the canonical native closure."""
+
+    provider_id: str = "luet-adapter@1"
+    available: bool = False
+    closure_hash: str | None = None
+
+    @classmethod
+    def parse(cls, value: "ConformanceResult | Mapping[str, Any] | None") -> "ConformanceResult":
+        if value is None:
+            return cls()
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise PlanResolutionError("conformance_result must be a mapping")
+        result = cls(
+            provider_id=str(value.get("provider_id", "luet-adapter@1")),
+            available=bool(value.get("available", False)),
+            closure_hash=str(value["closure_hash"]) if value.get("closure_hash") is not None else None,
+        )
+        if result.available and not result.closure_hash:
+            raise PlanResolutionError("available conformance provider must return closure_hash")
+        return result
+
+
 def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
@@ -256,19 +282,25 @@ class ExactCapabilitySolver:
 
     provider_id = "tgw-native-exact@1"
 
-    def solve(self, graph: CapabilityGraph) -> dict[str, Any]:
+    def solve(
+        self,
+        graph: CapabilityGraph,
+        *,
+        conformance_result: ConformanceResult | Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        conformance = ConformanceResult.parse(conformance_result)
         solutions: list[_Candidate] = []
         failures: list[dict[str, Any]] = []
         self._expand(graph, graph.target.requires, _Candidate(), (), solutions, failures)
         if not solutions:
-            return self._artifact(graph, None, failures)
+            return self._artifact(graph, None, failures, conformance)
         # Preference is considered only after complete closures exist.  Stable IDs
         # provide a total ordering independent of input/YAML order.
         winner = sorted(
             solutions,
             key=lambda candidate: (-sum(p.preference for p in candidate.selected.values()), tuple(sorted(candidate.selected))),
         )[0]
-        return self._artifact(graph, winner, failures)
+        return self._artifact(graph, winner, failures, conformance)
 
     def _expand(
         self,
@@ -356,7 +388,13 @@ class ExactCapabilitySolver:
                 return f"{selected.id} conflicts with {sorted(hit)[0]}"
         return None
 
-    def _artifact(self, graph: CapabilityGraph, winner: _Candidate | None, failures: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    def _artifact(
+        self,
+        graph: CapabilityGraph,
+        winner: _Candidate | None,
+        failures: Iterable[Mapping[str, Any]],
+        conformance: ConformanceResult,
+    ) -> dict[str, Any]:
         selected = sorted(winner.selected.values(), key=lambda p: p.id) if winner else []
         observations = {(o.capability, o.provider): o for o in graph.observations}
         minimum = STATE_RANK[graph.target.minimum_state]
@@ -400,24 +438,46 @@ class ExactCapabilitySolver:
             for provider in graph.providers:
                 if provider.id not in selected_ids and provider.provides & winner.provided:
                     rejected.append({"provider": provider.id, "reason": provider.blocked_reason or "lower-ranked-or-incompatible-complete-alternative"})
+        closure = {
+            "plan_commit": graph.plan_commit,
+            "root": {"id": graph.target.id, "profile": graph.target.profile, "minimum_state": graph.target.minimum_state},
+            "complete": winner is not None,
+            "selected_providers": [p.id for p in selected],
+            "selected_capabilities": sorted(winner.provided) if winner else [],
+            "selected_alternatives": sorted(winner.choices, key=lambda item: _canonical(item)) if winner else [],
+            "satisfied_installed": satisfied,
+            "work_units": sorted(work_units, key=lambda item: item["id"]),
+            "phase_order": self._phase_order(selected),
+        }
+        closure_hash = _hash(closure)
+        conformance_verified = bool(winner is not None and conformance.available and conformance.closure_hash == closure_hash)
+        if winner is not None and conformance.available and not conformance_verified:
+            unresolved.append(
+                {
+                    "code": "CONTRADICTORY_RESOLUTION",
+                    "native_closure_hash": closure_hash,
+                    "provider": conformance.provider_id,
+                    "provider_closure_hash": conformance.closure_hash,
+                }
+            )
         artifact: dict[str, Any] = {
             "schema": SOLUTION_SCHEMA,
             "resolver": self.provider_id,
             "conformance_providers": [
                 {"id": self.provider_id, "available": True, "result": "selected"},
-                {"id": "luet-adapter@1", "available": False, "result": "UNAVAILABLE", "agreement": "not-claimed"},
+                {
+                    "id": conformance.provider_id,
+                    "available": conformance.available,
+                    "result": "agreement" if conformance_verified else ("disagreement" if conformance.available else "UNAVAILABLE"),
+                    "agreement": "verified" if conformance_verified else "not-claimed",
+                    "closure_hash": conformance.closure_hash,
+                },
             ],
-            "plan_commit": graph.plan_commit,
-            "root": {"id": graph.target.id, "profile": graph.target.profile, "minimum_state": graph.target.minimum_state},
-            "complete": winner is not None,
-            "dispatchable": winner is not None,
-            "selected_providers": [p.id for p in selected],
-            "selected_capabilities": sorted(winner.provided) if winner else [],
-            "selected_alternatives": sorted(winner.choices, key=lambda item: _canonical(item)) if winner else [],
+            **closure,
+            "closure_hash": closure_hash,
+            "conformance_verified": conformance_verified,
+            "dispatchable": conformance_verified and not unresolved,
             "rejected_alternatives": rejected,
-            "satisfied_installed": satisfied,
-            "work_units": sorted(work_units, key=lambda item: item["id"]),
-            "phase_order": self._phase_order(selected),
             "unresolved": unresolved,
             "reusable_receipts": sorted({e for item in satisfied for e in item["evidence"]}),
             "invalidated_receipts": [],
@@ -462,11 +522,19 @@ def validate_for_dispatch(solution: Mapping[str, Any], *, current_plan_commit: s
     claimed = unsigned.pop("solution_hash", None)
     if claimed != _hash(unsigned):
         raise PlanResolutionError("solution hash mismatch")
-    if not solution.get("complete") or not solution.get("dispatchable") or solution.get("unresolved"):
+    if not solution.get("complete") or not solution.get("conformance_verified") or not solution.get("dispatchable") or solution.get("unresolved"):
         raise PlanResolutionError("solution is incomplete and cannot dispatch")
 
 
-def solve(graph: Mapping[str, Any], *, expected_plan_commit: str | None = None) -> dict[str, Any]:
+def solve(
+    graph: Mapping[str, Any],
+    *,
+    expected_plan_commit: str | None = None,
+    conformance_result: ConformanceResult | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Parse and solve one exact machine graph."""
 
-    return ExactCapabilitySolver().solve(CapabilityGraph.from_mapping(graph, expected_plan_commit=expected_plan_commit))
+    return ExactCapabilitySolver().solve(
+        CapabilityGraph.from_mapping(graph, expected_plan_commit=expected_plan_commit),
+        conformance_result=conformance_result,
+    )
