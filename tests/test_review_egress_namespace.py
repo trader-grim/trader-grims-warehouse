@@ -89,35 +89,51 @@ def test_privileged_kernel_attestation_derives_live_evidence_and_is_asymmetrical
     public_bytes = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
 
     def invoke(argv, **kwargs):
+        if argv[0] == "systemctl":
+            return subprocess.CompletedProcess(argv, 0, "123\n", "")
         positive = str(topology.broker_port) in argv
-        return subprocess.CompletedProcess(argv, 0 if positive or "nc" not in argv else 1, "live-kernel-readback", "")
+        if "nc" in argv:
+            return subprocess.CompletedProcess(argv, 0 if positive else 1, "", "")
+        output = " ".join(
+            (
+                topology.namespace,
+                topology.peer_address.split("/")[0],
+                topology.host_if,
+                topology.host_address.split("/")[0],
+                "973",
+                str(topology.broker_port),
+                f"tgw_review_{topology.run_id}",
+                "123",
+                "972",
+                f"tgw-review-egress@{topology.run_id}.service",
+                "a" * 64,
+                "uid:972",
+                "ino:9",
+            )
+        )
+        return subprocess.CompletedProcess(argv, 0, output, "")
 
     attestation = collect_kernel_attestation(
         run_id=topology.run_id,
         policy_hash=policy.policy_hash,
         topology=topology,
-        broker_pid=123,
-        issued_unix=100,
-        expires_unix=150,
-        nonce="run-unique-nonce",
         private_key=private_bytes,
+        expected_runtime_sha256="sha256:" + "a" * 64,
         invoke=invoke,
+        now=lambda: 100,
     )
     assert verify_network_attestation(attestation, policy, public_bytes, now=120)["namespace"] == topology.namespace
     tampered = dict(attestation, namespace="other")
     with pytest.raises(Exception, match="signature"):
         verify_network_attestation(tampered, policy, public_bytes, now=120)
     with pytest.raises(Exception, match="expired"):
-        verify_network_attestation(attestation, policy, public_bytes, now=151)
+        verify_network_attestation(attestation, policy, public_bytes, now=161)
     with pytest.raises(NamespaceError):
         collect_kernel_attestation(
             run_id=topology.run_id,
             policy_hash=policy.policy_hash,
             topology=topology,
-            broker_pid=123,
-            issued_unix=100,
-            expires_unix=150,
-            nonce="n",
             private_key=private_bytes,
+            expected_runtime_sha256="sha256:" + "a" * 64,
             invoke=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", "failed"),
         )

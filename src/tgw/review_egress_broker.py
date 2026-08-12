@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import os
 import socket
 import time
 from dataclasses import dataclass
@@ -263,11 +264,38 @@ async def handle_tunnel(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         await writer.wait_closed()
 
 
-async def serve(policy: ReviewEgressPolicy, bind_host: str, bind_port: int, receipt_path: Path) -> None:
+async def serve(policy: ReviewEgressPolicy, bind_host: str, bind_port: int, receipt_path: Path, attestation_path: Path, public_key: bytes, ready_path: Path) -> None:
     sessions: list[dict[str, Any]] = []
-    server = await asyncio.start_server(lambda r, w: handle_tunnel(r, w, policy, sessions), bind_host, bind_port)
+    gated = True
+
+    async def handler(reader, writer):
+        if gated:
+            writer.close()
+            await writer.wait_closed()
+            return
+        await handle_tunnel(reader, writer, policy, sessions)
+
+    server = await asyncio.start_server(handler, bind_host, bind_port)
     try:
         async with server:
+            deadline = time.monotonic() + 60
+            while not attestation_path.is_file() and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+            if not attestation_path.is_file():
+                raise BrokerError("privileged attestation did not arrive")
+            attestation = json.loads(attestation_path.read_text())
+            verify_network_attestation(attestation, policy, public_key)
+            ready = {
+                "schema": "tgw-review-egress-ready/v1",
+                "run_id": policy.run_id,
+                "policy_hash": policy.policy_hash,
+                "attestation_signature": attestation["signature"],
+                "broker_process": "|".join(attestation["kernel_evidence"][key] for key in ("broker_process", "broker_starttime", "broker_exe", "broker_socket")),
+                "broker_bind": {"host": bind_host, "port": bind_port},
+            }
+            with ready_path.open("x") as output:
+                json.dump(ready, output, sort_keys=True)
+            gated = False
             await server.serve_forever()
     finally:
         with receipt_path.open("xb") as receipt:
@@ -289,24 +317,11 @@ def main() -> int:
     args = parser.parse_args()
     policy = load_policy(args.policy)
     policy.verify_runtime(args.verify_runtime)
-    attestation = json.loads(args.network_attestation.read_text(encoding="utf-8"))
-    verify_network_attestation(attestation, policy, args.attestation_public_key.read_bytes())
-    bind = attestation.get("broker_bind")
-    if not isinstance(bind, Mapping) or bind.get("host") in {None, "0.0.0.0", "::"} or not isinstance(bind.get("port"), int):
-        raise SystemExit("attested broker bind is invalid")
-    ready = {
-        "schema": "tgw-review-egress-ready/v1",
-        "run_id": policy.run_id,
-        "policy_hash": policy.policy_hash,
-        "attestation_signature": attestation["signature"],
-        "broker_process": "|".join(attestation["kernel_evidence"][key] for key in ("broker_process", "broker_starttime", "broker_exe", "broker_socket")),
-        "broker_bind": bind,
-    }
-    with args.ready.open("x", encoding="utf-8") as output:
-        output.write(json.dumps(ready, sort_keys=True) + "\n")
     if args.receipt is None:
-        return 0
-    asyncio.run(serve(policy, str(bind["host"]), int(bind["port"]), args.receipt))
+        raise SystemExit("receipt required")
+    host = os.environ.get("TGW_REVIEW_BROKER_BIND", "169.254.1.1")
+    port = int(os.environ.get("TGW_REVIEW_BROKER_PORT", "18443"))
+    asyncio.run(serve(policy, host, port, args.receipt, args.network_attestation, args.attestation_public_key.read_bytes(), args.ready))
     return 0
 
 

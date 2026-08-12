@@ -18,6 +18,7 @@ in {
       description = "TGW exact-bound review egress broker %i";
       requires = [ "tgw-review-egress-namespace@%i.service" ];
       after = [ "tgw-review-egress-namespace@%i.service" ];
+      wants = [ "tgw-review-egress-attest@%i.service" ];
       serviceConfig = {
         Type = "simple"; User = "tgw-review-broker"; Group = "tgw-review-broker";
         NetworkNamespacePath = "/run/netns/tgw-review-%i";
@@ -45,6 +46,9 @@ in {
     # probe evidence, then MACs the short-lived attestation. Broker sees only
     # the resulting receipt and a verification key, never provider auth.
     systemd.services."tgw-review-egress-attest@" = {
+      requires = [ "tgw-review-egress@%i.service" ];
+      after = [ "tgw-review-egress@%i.service" ];
+      partOf = [ "tgw-review-egress@%i.service" ];
       serviceConfig = {
         Type = "oneshot"; User = "root";
         LoadCredential = "attestation.key:/run/credentials/tgw-review-attestation.key";

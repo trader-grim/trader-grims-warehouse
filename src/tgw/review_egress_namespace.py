@@ -11,6 +11,7 @@ import argparse
 import json
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -100,10 +101,18 @@ def execute(action: str, topology: Topology, *, broker_uid: int, worker_uid: int
 
 
 def collect_kernel_attestation(
-    *, run_id: str, policy_hash: str, topology: Topology, broker_pid: int, issued_unix: int, expires_unix: int, nonce: str, private_key: bytes, invoke: Callable = subprocess.run
+    *, run_id: str, policy_hash: str, topology: Topology, private_key: bytes, expected_runtime_sha256: str, invoke: Callable = subprocess.run, now: Callable[[], float] = time.time
 ) -> dict:
     """Derive evidence through fixed privileged readbacks/probes; sign no caller claims."""
-    if topology.run_id != run_id or broker_pid <= 1 or expires_unix <= issued_unix or not nonce:
+    main = invoke(["systemctl", "show", f"tgw-review-egress@{run_id}.service", "-p", "MainPID", "--value"], text=True, capture_output=True, check=False, timeout=5)
+    try:
+        broker_pid = int(main.stdout.strip())
+    except ValueError as exc:
+        raise NamespaceError("systemd MainPID is unavailable") from exc
+    issued_unix = int(now())
+    expires_unix = issued_unix + 60
+    nonce = sha256(f"{run_id}:{issued_unix}:{broker_pid}".encode()).hexdigest()
+    if topology.run_id != run_id or broker_pid <= 1:
         raise NamespaceError("attestation identity or lifetime is invalid")
     fixed = {
         "namespace_readback": ["ip", "netns", "list-id"],
@@ -123,6 +132,20 @@ def collect_kernel_attestation(
         if result.returncode or not result.stdout.strip():
             raise NamespaceError(f"privileged {name} readback failed")
         evidence[name] = result.stdout.strip()
+    required_tokens = {
+        "namespace_readback": (topology.namespace,),
+        "address": (topology.peer_address.split("/")[0],),
+        "link": (topology.host_if,),
+        "route": (topology.host_address.split("/")[0],),
+        "ruleset": ("973", str(topology.broker_port)),
+        "counters": (f"tgw_review_{run_id}",),
+        "broker_process": (str(broker_pid), "972", f"tgw-review-egress@{run_id}.service"),
+        "broker_exe": (expected_runtime_sha256.removeprefix("sha256:"),),
+        "broker_socket": (str(broker_pid), "uid:972", topology.host_address.split("/")[0], str(topology.broker_port), "ino:"),
+    }
+    for name, tokens in required_tokens.items():
+        if any(token not in evidence[name] for token in tokens):
+            raise NamespaceError(f"{name} semantic mismatch")
     probes = {
         "direct_public_443_denied": ["ip", "netns", "exec", topology.namespace, "runuser", "-u", "tgw-review-worker", "--", "nc", "-z", "-w1", "1.1.1.1", "443"],
         "dns_denied": ["ip", "netns", "exec", topology.namespace, "runuser", "-u", "tgw-review-worker", "--", "nc", "-zu", "-w1", "1.1.1.1", "53"],
@@ -186,11 +209,8 @@ def main() -> int:
             run_id=args.run_id,
             policy_hash=evidence["policy_hash"],
             topology=topology,
-            broker_pid=evidence["broker_pid"],
-            issued_unix=evidence["issued_unix"],
-            expires_unix=evidence["expires_unix"],
-            nonce=evidence["nonce"],
             private_key=args.trust_key.read_bytes(),
+            expected_runtime_sha256=evidence["runtime_sha256"],
         )
     else:
         receipt = {
