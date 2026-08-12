@@ -1,0 +1,9 @@
+{
+  "schema": "tgw-candidate-test-receipt/v1",
+  "source_commit": "bb5c67d01b1f636a95b9461583a32d019a07df25",
+  "source_tree": "cd87d952bb0bde5ca526aae6a384bcfa1e29209e",
+  "command": "PYTHONPATH=src .venv/bin/pytest -q tests/test_plan_solver.py tests/test_plan_luet.py tests/test_plan_catalog.py tests/test_plan_runtime_bridge.py tests/test_plan_authority.py tests/test_effect_handlers.py tests/test_release_controller.py tests/test_release_installer.py tests/test_candidate_manifest.py tests/test_candidate_conformance_receipt.py tests/test_luet_conformance_receipt.py tests/test_candidate_review.py tests/test_governed_coding.py tests/test_harness_registry.py tests/test_http_server.py tests/test_check_announce_script_run.py --tb=short",
+  "result": "457 passed in 7.80s",
+  "status": "passed",
+  "worktree": "detached-clean"
+}

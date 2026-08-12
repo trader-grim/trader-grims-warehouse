@@ -1,0 +1,30 @@
+{
+  "schema": "tgw-integrated-candidate-manifest/v1",
+  "source": {
+    "commit": "bb5c67d01b1f636a95b9461583a32d019a07df25",
+    "tree": "cd87d952bb0bde5ca526aae6a384bcfa1e29209e",
+    "archive_sha256": "sha256:848338f61fc1967482cfef2b39c017e028711e3785a3258c457c4f1f9df5ff62",
+    "base_commit": "9355f1a082775016be36796afa1190a4657700d7"
+  },
+  "plan": {
+    "commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+    "solution_hash": "sha256:d28650c26c6a3d26d6c943597ccb7abd7c6670b1703d9ce941ac5ed7a2d73a4d",
+    "closure_hash": "sha256:bc0c53b2574fc359c629bd213e078fdd2824e5e1c4a98c0c7a347de869d9e6f8"
+  },
+  "conformance": {
+    "status": "VERIFIED",
+    "receipt": "agent-services/receipts/luet-conformance-bb5c67d.json",
+    "receipt_hash": "sha256:241a5cd30a8d9000f5d038dfb860478ac8bab447c85a1a3b09e6a3efba223370"
+  },
+  "tests": {
+    "focused": {"status": "PASSED", "receipt": "agent-services/receipts/W08-focused-tests-bb5c67d.json"},
+    "full_suite": {"status": "PASSED", "receipt": "agent-services/receipts/W08-full-suite-bb5c67d.json"}
+  },
+  "review": {"status": "NOT_RUN", "receipt": null},
+  "database": {"migration_paths": [], "backup_restore": null},
+  "candidate_closed": true,
+  "ready_for_independent_review": true,
+  "dispatchable": false,
+  "installed": false,
+  "hold": "Independent semantic and security review has not yet completed"
+}

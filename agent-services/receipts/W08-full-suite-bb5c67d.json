@@ -1,0 +1,12 @@
+{
+  "schema": "tgw-candidate-full-suite-receipt/v1",
+  "candidate": {"commit": "bb5c67d01b1f636a95b9461583a32d019a07df25", "tree": "cd87d952bb0bde5ca526aae6a384bcfa1e29209e", "worktree": "detached-clean", "worktree_status": "clean"},
+  "environment": {"os": "Linux 6.12.96+deb13-amd64 x86_64 GNU/Linux", "python": "3.13.5", "pytest": "9.1.1", "dependency_environment": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv", "candidate_import_root": "PYTHONPATH=src"},
+  "command": "PYTHONPATH=src /opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest -q --tb=short",
+  "result": {"status": "PASSED", "exit_code": 0, "passed": 3249, "skipped": 4, "failed": 0, "elapsed": "57.09s"},
+  "failures": [],
+  "full_suite_passed": true,
+  "review_complete": false,
+  "dispatchable": false,
+  "installed": false
+}
