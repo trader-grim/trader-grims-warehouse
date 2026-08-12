@@ -1952,8 +1952,9 @@ def _execute_a2_inner(
                 step = "provider-verifier-version"
             else:
                 step = "provider-drv-show"
+            effective_argv = [argv[0], *NIX_ARGV_PREFIX, *argv[1:]] if step == "provider-drv-show" else argv
             result = _run_bounded(
-                argv,
+                effective_argv,
                 executable=executable,
                 cwd=Path(kwargs.get("cwd", source)),
                 env=env,

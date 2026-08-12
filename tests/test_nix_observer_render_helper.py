@@ -505,7 +505,7 @@ def test_actual_framed_helper_subprocess_executes_offline_render_and_provider(tm
         call["argv"][: len(helper.NIX_ARGV_PREFIX)] == list(helper.NIX_ARGV_PREFIX)
         for call in policy_calls
     )
-    assert policy_calls
+    assert len(policy_calls) == len(nix_calls)
     assert all("builders =\n" in call["nix_config"] and "builders-use-substitutes = false" in call["nix_config"] for call in nix_calls)
     assert all(
         Path(call["home"]).parent == Path(call["tmpdir"]).parent
