@@ -186,8 +186,25 @@ class TypedEffectHandlerRegistry:
             if any(not isinstance(result.get(key), str) or not _SHA256.fullmatch(result[key]) for key in digest_keys):
                 raise EffectHandlerError("reviewed Nix evaluation receipt digest is invalid")
             closure_count = result.get("closure_path_count")
-            if not isinstance(closure_count, int) or not 1 <= closure_count <= 100_000:
+            if not isinstance(closure_count, int) or not 1 <= closure_count <= 10_000:
                 raise EffectHandlerError("reviewed Nix evaluation closure count is invalid")
+            manifest = result.get("closure_manifest")
+            if not isinstance(manifest, list) or len(manifest) != closure_count:
+                raise EffectHandlerError("reviewed Nix evaluation closure manifest is absent")
+            store_path = re.compile(r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+")
+            paths = []
+            for item in manifest:
+                valid_entry = (
+                    isinstance(item, Mapping) and set(item) == {"path", "nar_sha256"}
+                    and isinstance(item["path"], str) and store_path.fullmatch(item["path"])
+                    and isinstance(item["nar_sha256"], str) and _SHA256.fullmatch(item["nar_sha256"])
+                )
+                if not valid_entry:
+                    raise EffectHandlerError("reviewed Nix evaluation closure entry is invalid")
+                paths.append(item["path"])
+            manifest_hash = "sha256:" + hashlib.sha256(_canonical(manifest)).hexdigest()
+            if paths != sorted(set(paths)) or result["closure_manifest_sha256"] != manifest_hash or result.get("closure_manifest_ref") != "inline:" + manifest_hash:
+                raise EffectHandlerError("reviewed Nix evaluation closure manifest binding mismatch")
             if not isinstance(result.get("evaluated_config_drv"), str) or not _NIX_STORE_PATH.fullmatch(result["evaluated_config_drv"]):
                 raise EffectHandlerError("reviewed Nix evaluation derivation identity is invalid")
             if result.get("systemd_verify_exit") != 0:

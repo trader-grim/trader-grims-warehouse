@@ -45,7 +45,7 @@ def _evaluation_result(parameters):
         "profile_write": False, "home_db_write": False, "system": "x86_64-linux",
         "evaluation_target": "review-egress-systemd-units",
         "evaluated_config_drv": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-review-units.drv",
-        "closure_manifest_sha256": DIGEST, "closure_path_count": 1, "eval_log_sha256": DIGEST,
+        "closure_path_count": 1, "eval_log_sha256": DIGEST,
         "build_log_sha256": DIGEST, "systemd_verify_output_sha256": DIGEST,
         "systemd_verify_exit": 0, "systemd_version": 257,
         "nix_version": "2.28.5",
@@ -63,6 +63,9 @@ def _evaluation_result(parameters):
     import hashlib
     import json
 
+    result["closure_manifest"] = [{"path": "/nix/store/11111111111111111111111111111111-dependency", "nar_sha256": DIGEST}]
+    result["closure_manifest_sha256"] = "sha256:" + hashlib.sha256(json.dumps(result["closure_manifest"], sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    result["closure_manifest_ref"] = "inline:" + result["closure_manifest_sha256"]
     result["receipt_sha256"] = "sha256:" + hashlib.sha256(json.dumps(result, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     result["evidence"] = ["nixos-evaluation:" + result["receipt_sha256"]]
     return result

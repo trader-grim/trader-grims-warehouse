@@ -1,15 +1,17 @@
 import io
 import json
 import os
+import socket
 import struct
 import subprocess
 import tarfile
+import time
 from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
-from tgw.nixos_reviewed_evaluation import EXECUTABLES, SSH_EXECUTABLE, EvaluationError, SshReviewedEvaluationProvider, execute_packet
+from tgw.nixos_reviewed_evaluation import EXECUTABLES, SSH_EXECUTABLE, EvaluationError, SshReviewedEvaluationProvider, _sealed_memfd, execute_packet
 
 COMMIT = "a" * 40
 TREE = "b" * 40
@@ -253,3 +255,54 @@ def test_remote_archive_rejects_ambiguous_member_sets(tmp_path, monkeypatch, kin
     with pytest.raises(EvaluationError, match="unsafe|single root|duplicate"):
         execute_packet(packet(request, archive), scratch_root=scratch, scratch_uid=os.geteuid())
     assert not list(scratch.iterdir())
+
+
+def test_real_openssh_reads_sealed_parent_memfd_and_rejects_wrong_key(tmp_path):
+    sshd = Path("/usr/sbin/sshd")
+    if not sshd.is_file():
+        pytest.skip("local OpenSSH server is unavailable")
+    host_key = tmp_path / "host_key"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(host_key)], check=True)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    config = tmp_path / "sshd_config"
+    config.write_text(
+        f"Port {port}\nListenAddress 127.0.0.1\nHostKey {host_key}\nPidFile {tmp_path / 'sshd.pid'}\n"
+        "UsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n"
+    )
+    server = subprocess.Popen([str(sshd), "-D", "-e", "-f", str(config)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            with socket.socket() as client:
+                if client.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            time.sleep(0.05)
+        else:
+            pytest.skip("local sshd could not start unprivileged")
+        public = host_key.with_suffix(".pub").read_text().split()
+        correct = f"[127.0.0.1]:{port} {public[0]} {public[1]}\n".encode()
+        def connect(content):
+            fd = _sealed_memfd("known-hosts-test", content)
+            try:
+                return subprocess.run(
+                    [
+                        SSH_EXECUTABLE, "-F", "/dev/null", "-oBatchMode=yes", "-oClearAllForwardings=yes",
+                        "-oStrictHostKeyChecking=yes", f"-oUserKnownHostsFile=/proc/{os.getpid()}/fd/{fd}",
+                        "-p", str(port), "127.0.0.1", "true",
+                    ],
+                    pass_fds=(fd,), capture_output=True, text=True, timeout=5,
+                )
+            finally:
+                os.close(fd)
+
+        accepted_key = connect(correct)
+        assert "REMOTE HOST IDENTIFICATION HAS CHANGED" not in accepted_key.stderr and "Host key verification failed" not in accepted_key.stderr
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(tmp_path / "wrong")], check=True)
+        wrong_public = (tmp_path / "wrong.pub").read_text().split()
+        rejected_key = connect(f"[127.0.0.1]:{port} {wrong_public[0]} {wrong_public[1]}\n".encode())
+        assert "REMOTE HOST IDENTIFICATION HAS CHANGED" in rejected_key.stderr or "Host key verification failed" in rejected_key.stderr
+    finally:
+        server.terminate()
+        server.wait(timeout=5)

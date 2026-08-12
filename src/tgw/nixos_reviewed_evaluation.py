@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import io
 import json
 import os
@@ -60,6 +61,18 @@ def _digest_file(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return "sha256:" + digest.hexdigest()
+
+
+def _sealed_memfd(name: str, content: bytes) -> int:
+    fd = os.memfd_create(name, os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    os.write(fd, content)
+    os.lseek(fd, 0, os.SEEK_SET)
+    seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+    fcntl.fcntl(fd, fcntl.F_ADD_SEALS, seals)
+    if fcntl.fcntl(fd, fcntl.F_GET_SEALS) != seals:
+        os.close(fd)
+        raise EvaluationError("known-hosts memfd did not seal")
+    return fd
 
 
 def _packet_header(parameters: Mapping[str, str], provider_source: bytes) -> bytes:
@@ -124,6 +137,7 @@ class SshReviewedEvaluationProvider:
         provider_source = Path(__file__).read_bytes()
         ssh_fd = os.open(SSH_EXECUTABLE, os.O_RDONLY | os.O_NOFOLLOW)
         hosts_fd = os.open(self.known_hosts, os.O_RDONLY | os.O_NOFOLLOW)
+        sealed_hosts_fd = None
         try:
             ssh_stat, hosts_stat = os.fstat(ssh_fd), os.fstat(hosts_fd)
             if not stat.S_ISREG(ssh_stat.st_mode) or not stat.S_ISREG(hosts_stat.st_mode) or hosts_stat.st_uid not in {0, os.geteuid()} or hosts_stat.st_mode & 0o022:
@@ -139,20 +153,22 @@ class SshReviewedEvaluationProvider:
                 raise EvaluationError("known-hosts is not ASCII") from exc
             if not re.fullmatch(r"(100\.107\.99\.66|\[100\.107\.99\.66\]:22) (ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) ([A-Za-z0-9+/]+={0,2})", host_line):
                 raise EvaluationError("known-hosts is not the one admitted host key")
+            sealed_hosts_fd = _sealed_memfd("tgw-known-hosts", hosts_bytes)
             os.lseek(ssh_fd, 0, os.SEEK_SET)
-            os.lseek(hosts_fd, 0, os.SEEK_SET)
             command = [
                 f"/proc/self/fd/{ssh_fd}", "-F", "/dev/null", "-oBatchMode=yes", "-oClearAllForwardings=yes",
-                "-oStrictHostKeyChecking=yes", f"-oUserKnownHostsFile=/proc/self/fd/{hosts_fd}",
+                "-oStrictHostKeyChecking=yes", f"-oUserKnownHostsFile=/proc/{os.getpid()}/fd/{sealed_hosts_fd}",
                 "--", f"{REMOTE_USER}@{REMOTE_HOST}", "sudo", "-n", "--", REMOTE_PYTHON, "-I", "-c", BOOTSTRAP,
             ]
             header = _packet_header(parameters, provider_source)
-            pass_fds = (ssh_fd, hosts_fd)
+            pass_fds = (ssh_fd, sealed_hosts_fd)
             if self.invoke is None:
                 completed = self._invoke_streaming(command, header, archive, timeout=int(parameters["max_duration_seconds"]) + 30, max_output=int(parameters["max_output_bytes"]), pass_fds=pass_fds)
             else:
                 completed = self.invoke(command, input=header + archive.read_bytes(), capture_output=True, timeout=int(parameters["max_duration_seconds"]) + 30, check=False, pass_fds=pass_fds)
         finally:
+            if sealed_hosts_fd is not None:
+                os.close(sealed_hosts_fd)
             os.close(hosts_fd)
             os.close(ssh_fd)
         if completed.returncode:
@@ -344,7 +360,7 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
         requisites_raw = run([EXECUTABLES["nix_store"], "--query", "--requisites", closure], cwd=source, timeout=timeout)
         requisites = sorted(set(requisites_raw.splitlines()))
         store_path = re.compile(r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+")
-        if not requisites or len(requisites) > 100_000 or closure not in requisites or any(not store_path.fullmatch(item) for item in requisites):
+        if not requisites or len(requisites) > 10_000 or closure not in requisites or any(not store_path.fullmatch(item) for item in requisites):
             raise EvaluationError("Nix closure requisites are incomplete")
         closure_manifest = []
         for item in requisites:
@@ -352,6 +368,7 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
             if not re.fullmatch(r"[0-9a-f]{64}", nar_hash):
                 raise EvaluationError("Nix requisite NAR hash is invalid")
             closure_manifest.append({"path": item, "nar_sha256": "sha256:" + nar_hash})
+        closure_manifest_sha256 = "sha256:" + sha256(_canonical(closure_manifest)).hexdigest()
         receipt = {
             "schema": bound["output_schema"], "outcome": "verified", "source_commit": bound["source_commit"],
             "source_tree": bound["source_tree"], "source_archive_sha256": bound["source_archive_sha256"],
@@ -362,7 +379,8 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
             "scratch_id": bound["scratch_id"], "activate": False,
             "profile_write": False, "home_db_write": False, "system": bound["system"],
             "evaluation_target": bound["evaluation_target"], "evaluated_config_drv": drv,
-            "closure_manifest_sha256": "sha256:" + sha256(_canonical(closure_manifest)).hexdigest(),
+            "closure_manifest": closure_manifest, "closure_manifest_ref": "inline:" + closure_manifest_sha256,
+            "closure_manifest_sha256": closure_manifest_sha256,
             "closure_path_count": len(closure_manifest),
             "eval_log_sha256": "sha256:" + sha256(eval_log.encode()).hexdigest(),
             "build_log_sha256": "sha256:" + sha256(build_log.encode()).hexdigest(),
