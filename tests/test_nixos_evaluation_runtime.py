@@ -16,8 +16,8 @@ from tgw.nixos_evaluation_runtime import (
 
 def parameters():
     return {
-        "artifact_ref": "artifact:sha256:1071e2113d2a331e2893316f2c7bccadd749e517c29057a886856adf921987cd",
-        "source_archive_sha256": "sha256:1071e2113d2a331e2893316f2c7bccadd749e517c29057a886856adf921987cd",
+        "artifact_ref": "artifact:sha256:c288e2514b12bad292e6c712280bda1e071effe74deb7f095ad23be698a94fbe",
+        "source_archive_sha256": "sha256:c288e2514b12bad292e6c712280bda1e071effe74deb7f095ad23be698a94fbe",
         "known_hosts_sha256": "sha256:2efd6fc4243b15b6d0b16a8da723911614198620cabf31bc822cf12520715cdf",
     }
 

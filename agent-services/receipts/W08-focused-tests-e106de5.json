@@ -1,0 +1,1 @@
+{"schema":"tgw-candidate-test-receipt/v1","source_commit":"e106de5bcb2a217555fc12bc96f0a9381942f9ef","source_tree":"c2519d49a89c493738a852c66e6a3d27939ce603","result":"183 passed in 4.30s","status":"passed","suite":"Plan, authority/effects, review transport, exact artifact runtime, evaluator scratch lifecycle, candidate/release/bootstrap/deployment","worktree":"detached-clean"}

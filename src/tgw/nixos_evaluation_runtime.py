@@ -11,8 +11,8 @@ from typing import Any, Mapping
 
 from tgw.nixos_reviewed_evaluation import SshReviewedEvaluationProvider
 
-SOURCE_REF = "artifact:sha256:1071e2113d2a331e2893316f2c7bccadd749e517c29057a886856adf921987cd"
-SOURCE_PATH = Path("/opt/TGW/tgw-lib/actors/codex/artifacts/sha256/1071e2113d2a331e2893316f2c7bccadd749e517c29057a886856adf921987cd.tar")
+SOURCE_REF = "artifact:sha256:c288e2514b12bad292e6c712280bda1e071effe74deb7f095ad23be698a94fbe"
+SOURCE_PATH = Path("/opt/TGW/tgw-lib/actors/codex/artifacts/sha256/c288e2514b12bad292e6c712280bda1e071effe74deb7f095ad23be698a94fbe.tar")
 KNOWN_HOSTS_REF = "artifact:sha256:2efd6fc4243b15b6d0b16a8da723911614198620cabf31bc822cf12520715cdf"
 KNOWN_HOSTS_PATH = Path("/opt/TGW/tgw-lib/actors/codex/artifacts/sha256/2efd6fc4243b15b6d0b16a8da723911614198620cabf31bc822cf12520715cdf.known_hosts")
 
@@ -46,7 +46,7 @@ def preflight_reviewed_evaluation(parameters: Mapping[str, str]) -> dict[str, An
     if parameters.get("known_hosts_sha256") != "sha256:" + KNOWN_HOSTS_REF.rsplit(":", 1)[1]:
         raise RuntimeCompositionError("request known-hosts binding mismatch")
     artifacts = (
-        ("source_archive", SOURCE_PATH, 0o444, 8_704_000, parameters["source_archive_sha256"]),
+        ("source_archive", SOURCE_PATH, 0o444, 8_734_720, parameters["source_archive_sha256"]),
         ("known_hosts", KNOWN_HOSTS_PATH, 0o444, 95, parameters["known_hosts_sha256"]),
     )
     result = {}
@@ -57,7 +57,7 @@ def preflight_reviewed_evaluation(parameters: Mapping[str, str]) -> dict[str, An
         result[name] = {"path": str(path), "mode": f"{mode:04o}", "owner_uid": metadata.st_uid, "size": size, "sha256": digest, "symlink": False}
     return {
         "schema": "tgw-nixos-reviewed-evaluation-runtime-preflight/v1",
-        "request_hash": "sha256:c91e5e2617109dcb01e1df9dbfd25f34f2d07ed5d819f91bf8d07a8dd56587e5",
+        "request_hash": "sha256:5004cc18766a79958485cb30a75382f2b9d7a36a60bbb27f0bbd302b30796fcb",
         "resolver_id": "nixos-reviewed-evaluation-exact-artifacts@1",
         "artifacts": result,
         "ssh_started": False,
