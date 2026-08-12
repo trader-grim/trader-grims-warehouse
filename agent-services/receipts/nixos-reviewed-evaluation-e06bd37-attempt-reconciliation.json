@@ -1,0 +1,35 @@
+{
+  "schema": "tgw-nixos-reviewed-evaluation-reconciliation/v1",
+  "status": "RECONCILIATION_REQUIRED",
+  "request_hash": "sha256:3600fa868bbb301e8f36264df5396fbbf56fefa8d201a4e932d038013bc17d7c",
+  "controller_result": "NONZERO_WITH_EMPTY_OR_NON_JSON_STDOUT",
+  "validated_remote_receipt": null,
+  "failure_store_entries": [],
+  "observations": {
+    "current_system": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "system_profile": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "scratch_root": "/var/tmp/tgw-reviewed-evaluation",
+    "scratch_root_state": "ABSENT",
+    "scratch_entries": []
+  },
+  "classification": {
+    "generation_changed": false,
+    "profile_changed": false,
+    "scratch_residue": false,
+    "failure_receipt_persisted": false,
+    "streamed_helper_began": "UNKNOWN",
+    "nix_evaluation_or_build_began": "UNKNOWN",
+    "reason": "A provider that reaches its Python main should emit a bounded JSON failure receipt, but the controller received no valid stdout. Absent scratch is consistent with pre-helper refusal or successful cleanup and cannot distinguish them."
+  },
+  "forbidden_effects": {
+    "activation": false,
+    "profile_write": false,
+    "home_db_write": false,
+    "live_flake_write": false,
+    "deployment": false
+  },
+  "diagnostic_scope": ["readlink current system", "readlink system profile", "metadata-only exact scratch root inspection", "metadata-only exact failure store inspection"],
+  "diagnostic_claims": {"read_only": true, "retry": false, "build_or_eval": false, "broad_logs": false, "mutation": false},
+  "smallest_next_diagnostic": "A separately authorized fixed SSH transport preflight must execute the exact sudo/python bootstrap prefix with a harmless self-hashed probe and return a bounded stage code; do not resend the candidate archive or invoke Nix.",
+  "receipt_hash": "sha256:87fdd436ba416d9fa810dad17a82f435624f82c7d2e184a2bcca988ec12979db"
+}
