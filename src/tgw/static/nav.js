@@ -29,6 +29,7 @@
         '<a href="/form/size-classes">Size Classes</a>' +
         '<a href="/form/todos">Todos</a>' +
         '<a href="/form/runs">Agent Runs</a>' +
+        '<a href="/form/plan-authority">Plan Authority</a>' +
       '</div>' +
     '</div>';
 
