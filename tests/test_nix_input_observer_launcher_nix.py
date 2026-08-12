@@ -8,7 +8,9 @@ def test_nix_module_has_one_exact_no_argument_sudo_rule_and_rollback():
     assert 'environment.etc."tgw/nix-input-observer-launcher.conf"' in source
     assert 'mode = "0400"; user = "root"; group = "root"' in source
     assert "mkIf cfg.enable" in source
-    assert "systemd.services" not in source
+    assert "systemd.services.tgw-nix-input-observer-boundary" in source
+    assert 'wantedBy = [ "multi-user.target" ]' in source
+    assert 'Slice = "tgw-nix-input-observer.slice"' in source
     assert "NOPASSWD: ALL" not in source
 
 
@@ -37,3 +39,4 @@ def test_native_launcher_is_the_only_privileged_implementation():
     ):
         assert required in source
     assert "system(" not in source and "popen(" not in source
+    assert 'args[]={python,"-I",observer,NULL}' in source

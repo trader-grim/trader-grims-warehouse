@@ -21,8 +21,8 @@
 
 struct config {
   uid_t uid; gid_t gid;
-  char python[4096], ip[4096], cgroup[4096];
-  char launcher_sha256[72], python_sha256[72], ip_sha256[72], descriptor_sha256[72], sudo_rule_sha256[72];
+  char python[4096], ip[4096], observer[4096], cgroup[4096];
+  char launcher_sha256[72], python_sha256[72], ip_sha256[72], observer_sha256[72], descriptor_sha256[72], sudo_rule_sha256[72];
 };
 
 static void die(const char *message) { dprintf(2, "tgw-observer-launcher: %s\n", message); _exit(125); }
@@ -56,7 +56,9 @@ static void sha256_fd(int fd, char out[72]) {
   if(n<0) die("artifact digest read failed");
   if(EVP_DigestFinal_ex(ctx,digest,&length)!=1 || length!=32) die("digest finalization failed");
   EVP_MD_CTX_free(ctx); lseek(fd,0,SEEK_SET);
-  strcpy(out,"sha256:"); for(size_t i=0;i<sizeof(digest);i++) sprintf(out+7+i*2,"%02x",digest[i]);
+  strcpy(out,"sha256:");
+  for(size_t i=0;i<length;i++) if(snprintf(out+7+i*2,72-(7+i*2),"%02x",digest[i])!=2) die("digest formatting failed");
+  out[71]=0;
 }
 
 static void parse_descriptor(struct config *cfg) {
@@ -67,7 +69,7 @@ static void parse_descriptor(struct config *cfg) {
   if (n <= 0 || n > MAX_DESCRIPTOR) die("descriptor size invalid");
   raw[n] = 0; close(fd);
   char *save = NULL, *line = strtok_r(raw, "\n", &save), value[4096];
-  const char *keys[] = {"schema", "uid", "gid", "python", "ip", "launcher_sha256", "python_sha256", "ip_sha256", "sudo_rule_sha256", "observer_cgroup"};
+  const char *keys[] = {"schema", "uid", "gid", "python", "ip", "observer", "launcher_sha256", "python_sha256", "ip_sha256", "observer_sha256", "sudo_rule_sha256", "observer_cgroup"};
   for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
     if (!line) die("descriptor truncated");
     copy_value(value, sizeof(value), line, keys[i]);
@@ -76,14 +78,16 @@ static void parse_descriptor(struct config *cfg) {
     else if (i == 2) cfg->gid = (gid_t)parse_id(value);
     else if (i == 3) strcpy(cfg->python, value);
     else if (i == 4) strcpy(cfg->ip, value);
-    else if (i == 5) strcpy(cfg->launcher_sha256, value);
-    else if (i == 6) strcpy(cfg->python_sha256, value);
-    else if (i == 7) strcpy(cfg->ip_sha256, value);
-    else if (i == 8) strcpy(cfg->sudo_rule_sha256, value);
+    else if (i == 5) strcpy(cfg->observer, value);
+    else if (i == 6) strcpy(cfg->launcher_sha256, value);
+    else if (i == 7) strcpy(cfg->python_sha256, value);
+    else if (i == 8) strcpy(cfg->ip_sha256, value);
+    else if (i == 9) strcpy(cfg->observer_sha256, value);
+    else if (i == 10) strcpy(cfg->sudo_rule_sha256, value);
     else strcpy(cfg->cgroup, value);
     line = strtok_r(NULL, "\n", &save);
   }
-  if (line || !cfg->uid || !cfg->gid || cfg->python[0] != '/' || cfg->ip[0] != '/' || strncmp(cfg->cgroup, "0::/", 4)) die("descriptor not closed");
+  if (line || !cfg->uid || !cfg->gid || cfg->python[0] != '/' || cfg->ip[0] != '/' || cfg->observer[0] != '/' || strncmp(cfg->cgroup, "0::/", 4)) die("descriptor not closed");
 }
 
 static void require_empty_ip_output(int ipfd, char *const args[]) {
@@ -119,14 +123,7 @@ static void verify_post_drop(const struct config *cfg) {
   fclose(f); if(seen!=6) die("post-drop capability state invalid");
 }
 
-static void enter_fixed_cgroup(const struct config *cfg) {
-  char path[4096]; const char *relative=cfg->cgroup+3;
-  if(strstr(relative,"..") || snprintf(path,sizeof(path),"/sys/fs/cgroup/%s/cgroup.procs",relative)>=(int)sizeof(path)) die("cgroup path invalid");
-  int fd=open(path,O_WRONLY|O_NOFOLLOW|O_CLOEXEC); struct stat st;
-  if(fd<0 || fstat(fd,&st) || !S_ISREG(st.st_mode) || st.st_uid!=0) die("fixed cgroup unavailable");
-  char pid[32]; int n=snprintf(pid,sizeof(pid),"%ld\n",(long)getpid());
-  if(write(fd,pid,(size_t)n)!=n) die("fixed cgroup entry failed");
-  close(fd);
+static void verify_fixed_cgroup(const struct config *cfg) {
   FILE *cg=fopen("/proc/self/cgroup","re"); char actual[4096];
   if(!cg || !fgets(actual,sizeof(actual),cg)) die("cgroup unavailable");
   fclose(cg); actual[strcspn(actual,"\n")]=0;
@@ -140,10 +137,11 @@ int main(int argc, char **argv) {
   if(selffd<0 || fstat(selffd,&selfstat) || !S_ISREG(selfstat.st_mode) || selfstat.st_uid!=0 || (selfstat.st_mode&022)) die("launcher inode invalid");
   char digest[72]; sha256_fd(selffd,digest); close(selffd);
   if(strcmp(digest,cfg.launcher_sha256)) die("launcher digest mismatch");
-  int pythonfd=held_regular(cfg.python), ipfd=held_regular(cfg.ip);
+  int pythonfd=held_regular(cfg.python), ipfd=held_regular(cfg.ip), observerfd=held_regular(cfg.observer);
   sha256_fd(pythonfd,digest); if(strcmp(digest,cfg.python_sha256)) die("python digest mismatch");
   sha256_fd(ipfd,digest); if(strcmp(digest,cfg.ip_sha256)) die("ip digest mismatch");
-  enter_fixed_cgroup(&cfg);
+  sha256_fd(observerfd,digest); if(strcmp(digest,cfg.observer_sha256)) die("observer digest mismatch");
+  verify_fixed_cgroup(&cfg);
   if (unshare(CLONE_NEWNET)) die("CLONE_NEWNET failed");
   char state[32]; FILE *lo=fopen("/sys/class/net/lo/operstate","re");
   if(!lo || !fgets(state,sizeof(state),lo) || strcmp(state,"down\n")) die("loopback not down");
@@ -161,8 +159,8 @@ int main(int argc, char **argv) {
   clear_capabilities();
   if(prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0)) die("no_new_privs failed");
   verify_post_drop(&cfg);
-  char python[64]; snprintf(python,sizeof(python),"/proc/self/fd/%d",pythonfd);
-  char *args[]={python,"-I","-m","tgw.nix_input_observation",NULL};
+  char python[64], observer[64]; snprintf(python,sizeof(python),"/proc/self/fd/%d",pythonfd); snprintf(observer,sizeof(observer),"/proc/self/fd/%d",observerfd);
+  char *args[]={python,"-I",observer,NULL};
   char descriptor_env[160], rule_env[160];
   snprintf(descriptor_env,sizeof(descriptor_env),"TGW_OBSERVER_DESCRIPTOR_SHA256=%s",cfg.descriptor_sha256);
   snprintf(rule_env,sizeof(rule_env),"TGW_OBSERVER_SUDO_RULE_SHA256=%s",cfg.sudo_rule_sha256);

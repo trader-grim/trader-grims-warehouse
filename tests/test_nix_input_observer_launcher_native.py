@@ -14,10 +14,22 @@ def test_native_launcher_compiles_warning_free_and_rejects_arguments(tmp_path):
     assert result.stderr == "tgw-observer-launcher: arguments forbidden\n"
 
 
+def test_native_launcher_argument_path_is_sanitizer_clean(tmp_path):
+    binary = tmp_path / "launcher-sanitized"
+    subprocess.run(
+        ["gcc", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g", "-o", str(binary), "src/native/tgw_nix_input_observer_launcher.c", "-lcrypto"],
+        check=True,
+        capture_output=True,
+    )
+    result = subprocess.run([binary, "forbidden"], capture_output=True, text=True, check=False)
+    assert result.returncode == 125
+    assert "AddressSanitizer" not in result.stderr and "runtime error:" not in result.stderr
+
+
 def test_native_launcher_never_imports_or_parses_helper_as_root():
     source = Path("src/native/tgw_nix_input_observer_launcher.c").read_text()
     assert "Python.h" not in source
-    assert "tgw.nix_input_observation" in source  # Only an exec argv after verify_post_drop.
-    assert source.index("verify_post_drop(&cfg)") < source.index('"tgw.nix_input_observation"')
+    assert 'args[]={python,"-I",observer,NULL}' in source
+    assert source.index("verify_post_drop(&cfg)") < source.index('args[]={python,"-I",observer,NULL}')
     for forbidden in ("helper", "archive", "json", "PYTHONPATH"):
         assert forbidden not in source
