@@ -1,0 +1,28 @@
+{
+  "schema": "tgw-governed-coding-receipt/v1",
+  "status": "FAIL",
+  "role": "independent-review",
+  "selected_provider": "codex-isolated-review-runner",
+  "execution_identity": "isolated-review:bb5c67d01b1f636a95b9461583a32d019a07df25",
+  "card_hash": "sha256:252acd975bccbf4495b6161814a4572b782f731e0b86148d17167950d7d2f5da",
+  "promptcraft_receipt_hash": "sha256:bbff45fd929214782d28bc193525ffc7985fb7d38874adb52d30844edd2f90f3",
+  "outcome": "failed",
+  "established_conditions": [],
+  "artifacts": [{
+    "kind": "semantic_review",
+    "report": {
+      "schema": "tgw-code-review/v1",
+      "verdict": "FAIL",
+      "snapshot_hash": "sha256:e4286bffaced152545fb890566dcd339aeaaad42d8f95327b457a55b45f34388",
+      "summary": "The snapshot has unresolved isolation, authorization/lease-validation, fail-closed receipt handling, and partial-installation defects.",
+      "findings": [
+        {"severity":"critical","path":"src/tgw/review_runner.py","line":138,"message":"The supposedly isolated review provider is executed as an ordinary subprocess with only its working directory changed. It retains the runner's filesystem, process, environment, and network privileges, so a malicious or compromised provider can read secrets, mutate the original source tree or other host files, and perform external operations; the post-run hash check only detects changes inside the copied snapshot. Enforce an actual sandbox with read-only/bounded mounts, sanitized environment, and disabled network."},
+        {"severity":"high","path":"src/tgw/review_runner.py","line":138,"message":"The provider subprocess has no timeout or other execution limit. A hung or adversarial provider can block the review/controller indefinitely and consume unbounded resources, preventing a terminal receipt. Add a configured timeout and fail closed on TimeoutExpired; apply resource limits in the sandbox."},
+        {"severity":"high","path":"src/tgw/review_runner.py","line":117,"message":"run_review authenticates only recomputable, unkeyed hashes and bypasses the handoff verifier entirely. It does not validate the Promptcraft receipt, rendered instruction, receiver profile, resource-hash receipt, or lease expiration before launching the provider. Consequently an expired, incomplete, or locally fabricated handoff can authorize execution as long as its outer/card hashes are recomputed. Validate with verify_for_launcher (and enforce the expected receiver/role) before execution, or require a controller-authenticated envelope."},
+        {"severity":"high","path":"agent-services/providers/promptcraft/promptcraft/handoff.py","line":197,"message":"verify_for_launcher never checks that the receipt result is READY (nor validates the receipt's exact required fields). A hash-consistent receipt changed to a failure/hold result is still accepted and converted into a launcher invocation. Validate result == READY and the complete receipt schema before returning an invocation."},
+        {"severity":"medium","path":"agent-services/installers/materialize.py","line":107,"message":"Adapter installation is not transactional: links are created sequentially, and any error on a later mkdir/symlink/digest operation leaves earlier capabilities installed even though the function raises and emits no accurate receipt. This can leave a harness partially materialized after an apply failure. Stage and atomically commit the full matrix, or roll back links created by the failed invocation."}
+      ]
+    }
+  }],
+  "receipt_hash": "sha256:dfc7bb091850aabfdc30cbe1a471553b212784ce6047a1378ba5000f78d5c1db"
+}

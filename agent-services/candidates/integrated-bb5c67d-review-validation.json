@@ -1,0 +1,17 @@
+{
+  "schema": "tgw-integrated-candidate-review-validation/v1",
+  "status": "FAIL",
+  "candidate_manifest_hash": "sha256:afd08230e1f471a3b0045fe719886560d991f8d18a81af507793e339d6bf198f",
+  "candidate_source_commit": "bb5c67d01b1f636a95b9461583a32d019a07df25",
+  "candidate_source_tree": "cd87d952bb0bde5ca526aae6a384bcfa1e29209e",
+  "prior_findings": {
+    "api_cli_alias_bypass": "RESOLVED",
+    "embedded_script_json_injection": "RESOLVED"
+  },
+  "packet_hash": "sha256:28e2c9f5a5834053e224b493c97cb969b4d01c7543aec1ec666739b8c3f47da6",
+  "review_receipt_hash": "sha256:dfc7bb091850aabfdc30cbe1a471553b212784ce6047a1378ba5000f78d5c1db",
+  "result_hash": "sha256:83f6406e7d654d0ea2e7a4ea79757a5acc23065de6af53d7b40e09c7934523db",
+  "new_findings": {"critical": 1, "high": 3, "medium": 1},
+  "dispatchable": false,
+  "installed": false
+}
