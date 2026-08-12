@@ -47,6 +47,9 @@ def validate_failure(value: Mapping[str, object], *, request: Mapping[str, objec
         "cleanup",
         "effects",
         "return_code",
+        "original_stage",
+        "original_diagnostic_code",
+        "original_return_code",
         "stdout_bytes",
         "stdout_sha256",
         "stderr_bytes",
@@ -65,12 +68,18 @@ def validate_failure(value: Mapping[str, object], *, request: Mapping[str, objec
             raise RenderRuntimeError("render failure identity binding mismatch")
     if result["schema"] != FAILURE_SCHEMA or result["stage"] not in FAILURE_STAGES or result["diagnostic_code"] not in FAILURE_CODES:
         raise RenderRuntimeError("render failure classification invalid")
+    prebuild = {"request", "archive", "source", "input-closure"}
+    subprocess_stages = {"nix-eval", "nix-build", "systemd-verify"}
     if result["outcome"] == "FAILED":
         if result["cleanup"] != "removed":
             raise RenderRuntimeError("FAILED requires verified cleanup")
+        if (result["original_stage"], result["original_diagnostic_code"], result["original_return_code"]) != (result["stage"], result["diagnostic_code"], result["return_code"]):
+            raise RenderRuntimeError("FAILED original failure binding mismatch")
     elif result["outcome"] == "AMBIGUOUS":
-        if result["cleanup"] not in {"failed", "unknown"}:
+        if result["cleanup"] not in {"failed", "unknown"} or result["stage"] != "cleanup" or result["diagnostic_code"] != "CLEANUP_FAILED":
             raise RenderRuntimeError("AMBIGUOUS requires cleanup uncertainty")
+        if result["original_stage"] == "cleanup" or result["original_stage"] not in FAILURE_STAGES or result["original_diagnostic_code"] not in FAILURE_CODES:
+            raise RenderRuntimeError("AMBIGUOUS original failure is invalid")
     else:
         raise RenderRuntimeError("render failure outcome invalid")
     effects = result["effects"]
@@ -81,13 +90,28 @@ def validate_failure(value: Mapping[str, object], *, request: Mapping[str, objec
         or any(effects[key] is not False for key in FAILURE_EFFECTS - {"build_attempted"})
     ):
         raise RenderRuntimeError("render failure effects invalid")
-    if result["return_code"] is not None and (not isinstance(result["return_code"], int) or not -255 <= result["return_code"] <= 255):
+    for code in (result["return_code"], result["original_return_code"]):
+        if code is not None and (isinstance(code, bool) or not isinstance(code, int) or not -255 <= code <= 255):
+            raise RenderRuntimeError("render failure return code invalid")
+    original_stage, original_code, original_rc = result["original_stage"], result["original_diagnostic_code"], result["original_return_code"]
+    if original_stage in prebuild and effects["build_attempted"]:
+        raise RenderRuntimeError("pre-build failure claims a build")
+    if original_stage in subprocess_stages:
+        if original_code == "SUBPROCESS_FAILED" and (original_rc is None or original_rc == 0):
+            raise RenderRuntimeError("subprocess failure return code invalid")
+        if original_code == "BOUND_EXCEEDED" and original_rc is not None:
+            raise RenderRuntimeError("bounded failure cannot claim a return code")
+        if original_code not in {"SUBPROCESS_FAILED", "BOUND_EXCEEDED"}:
+            raise RenderRuntimeError("subprocess stage diagnostic invalid")
+    elif original_rc is not None:
         raise RenderRuntimeError("render failure return code invalid")
     for prefix in ("stdout", "stderr"):
-        if not isinstance(result[prefix + "_bytes"], int) or not 0 <= result[prefix + "_bytes"] <= request["max_output_bytes"]:
+        if isinstance(result[prefix + "_bytes"], bool) or not isinstance(result[prefix + "_bytes"], int) or not 0 <= result[prefix + "_bytes"] <= request["max_output_bytes"]:
             raise RenderRuntimeError("render failure diagnostic bound invalid")
         if not isinstance(result[prefix + "_sha256"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", result[prefix + "_sha256"]):
             raise RenderRuntimeError("render failure diagnostic hash invalid")
+        if result[prefix + "_bytes"] == 0 and result[prefix + "_sha256"] != "sha256:" + hashlib.sha256(b"").hexdigest():
+            raise RenderRuntimeError("empty diagnostic hash mismatch")
     return dict(value)
 
 
@@ -142,7 +166,7 @@ class ClosedRenderProvider:
             failure = validate_failure(untrusted, request=validated)
             try:
                 reference = self.failure_store.persist(failure)
-            except (OSError, ValueError) as exc:
+            except Exception as exc:
                 raise RenderRuntimeError("validated failure persistence is ambiguous", receipt=failure) from exc
             raise RenderRuntimeError("render evaluation terminated " + str(failure["outcome"]) + " at " + str(reference["artifact_ref"]))
         finally:

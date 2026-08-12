@@ -89,6 +89,9 @@ def test_failure_is_bound_and_persisted(tmp_path, monkeypatch):
         "cleanup": "removed",
         "effects": {"build_attempted": True, "activation": False, "deployment": False, "profile_write": False, "home_db_write": False, "live_flake_write": False, "network": False},
         "return_code": 1,
+        "original_stage": "nix-build",
+        "original_diagnostic_code": "SUBPROCESS_FAILED",
+        "original_return_code": 1,
         "stdout_bytes": 0,
         "stdout_sha256": empty,
         "stderr_bytes": 0,
@@ -99,6 +102,20 @@ def test_failure_is_bound_and_persisted(tmp_path, monkeypatch):
     with pytest.raises(RenderRuntimeError, match="terminated FAILED"):
         ClosedRenderProvider(lambda **_: deepcopy(failure), store, archive, hosts).execute(req)
     assert store.values == [failure]
+
+    for mutate in (
+        lambda x: x.update(return_code=True),
+        lambda x: x.update(stdout_sha256="sha256:" + "0" * 64),
+        lambda x: x.update(original_stage="request", effects={**x["effects"], "build_attempted": True}),
+        lambda x: x.update(original_return_code=0),
+        lambda x: x.update(outcome="AMBIGUOUS", cleanup="failed"),
+    ):
+        bad = deepcopy(failure)
+        mutate(bad)
+        bad.pop("receipt_sha256")
+        bad["receipt_sha256"] = "sha256:" + __import__("hashlib").sha256(canonical(bad)).hexdigest()
+        with pytest.raises(RenderRuntimeError):
+            module.validate_failure(bad, request=req)
 
 
 def test_unknown_schema_and_wrong_source_fail_before_coercion(tmp_path, monkeypatch):
