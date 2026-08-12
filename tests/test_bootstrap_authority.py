@@ -4,24 +4,71 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from tgw.bootstrap_authority import BootstrapGrant, BootstrapSessionAuthority
+from tgw.platform_bootstrap import (
+    ATTESTATION_KEY_REF,
+    MANIFEST_SCHEMA,
+    PLAN_COMMIT,
+    RETIREMENT_CONDITION,
+    SOLUTION_HASH,
+    SSH_KEY_REF,
+    digest,
+    platform_bootstrap_effect_parameters,
+)
+
+
+def _parameters():
+    checksum = "sha256:" + "d" * 64
+    artifact = {"artifact_ref": "artifact:" + checksum, "sha256": checksum}
+    manifest = {
+        "schema": MANIFEST_SCHEMA,
+        "plan_commit": PLAN_COMMIT,
+        "solution_hash": SOLUTION_HASH,
+        "target_host": "tgw-prod",
+        "flake_repository_id": "tgw-flake",
+        "flake_commit": "b" * 40,
+        "flake_tree": "c" * 40,
+        "expected_current_system": "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-tgw-prod-old",
+        "successor_system": "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-tgw-prod-new",
+        "prior_system": "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-tgw-prod-old",
+        "artifacts": {
+            name: dict(artifact)
+            for name in (
+                "native_wrapper",
+                "remote_bootstrap",
+                "helper",
+                "wrapper_config",
+                "composition",
+                "prerequisite_receipt",
+                "attestation_public_key",
+                "ssh_authorized_public_key",
+                "nix_module",
+                "package",
+            )
+        },
+        "credential_bindings": {
+            "attestation_signing": {"ref": ATTESTATION_KEY_REF, "sha256": checksum},
+            "ssh_identity": {"ref": SSH_KEY_REF, "sha256": checksum},
+        },
+        "operation_id": "bootstrap:a3-platform-1",
+        "review_receipt": "review:sha256:" + "1" * 64,
+        "controller_receipt": "controller:sha256:" + "2" * 64,
+        "health_receipt": "health:sha256:" + "3" * 64,
+        "probe_receipt": "probe:sha256:" + "4" * 64,
+        "retirement_condition": RETIREMENT_CONDITION,
+    }
+    manifest["manifest_sha256"] = digest(manifest)
+    return platform_bootstrap_effect_parameters(manifest)
 
 
 def _grant(**changes):
     effect = {
         "kind": "approval-platform-bootstrap-deployment",
         "generation": "platform-bb5c67d",
-        "parameters": {
-            "target_host": "tgw-prod", "flake_repository_id": "tgw-flake", "flake_commit": "b" * 40, "flake_tree": "c" * 40,
-            "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old", "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
-            "credential_ref": "credential:tgw-review:codex", "credential_sha256": "d" * 64, "broker_source_sha256": "d" * 64,
-            "namespace_source_sha256": "d" * 64, "nix_module_sha256": "d" * 64, "egress_contract_sha256": "d" * 64,
-            "install_contract_sha256": "d" * 64, "review_receipt": "review:passed", "controller_receipt": "controller:passed",
-            "network_attestation_receipt": "network:passed", "probe_receipt": "probes:passed", "operation_id": "bootstrap:review-transport-1",
-        },
+        "parameters": _parameters(),
     }
     value = {
-        "plan_commit": "f" * 40,
-        "solution_hash": "sha256:" + "a" * 64,
+        "plan_commit": PLAN_COMMIT,
+        "solution_hash": SOLUTION_HASH,
         "target_host": "tgw-prod",
         "root_id": "production-releases",
         "candidate_commit": "b" * 40,

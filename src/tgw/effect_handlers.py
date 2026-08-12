@@ -27,6 +27,7 @@ from tgw.nixos_observer_render_evaluation import (
 )
 from tgw.nixos_reviewed_evaluation import _validate_remote_effect
 from tgw.plan_authority import EffectKind, TypedEffect
+from tgw.platform_bootstrap import validate_platform_bootstrap_effect
 
 _SHA1 = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
@@ -156,7 +157,7 @@ class TypedEffectHandlerRegistry:
             EffectKind.DEPENDENCY_RESUBMIT: ("dependency-resubmit@1", dependency_resubmit, None),
             EffectKind.AUTHORITY_CANARY: ("authority-canary-receipt-only@1", _authority_canary, None),
             EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT: (
-                "nixos-reviewed-generation-switch@1",
+                "a3-platform-bootstrap-install@1",
                 bootstrap_install or self._unavailable_bootstrap,
                 bootstrap_rollback or self._unavailable_bootstrap,
             ),
@@ -415,55 +416,8 @@ class TypedEffectHandlerRegistry:
             if parameters["purpose"] != "verify-plan-authority-roundtrip":
                 raise ValueError("authority canary purpose is outside the harmless registered bound")
         elif effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT:
-            parameters = _required_strings(
-                effect.parameters,
-                {
-                    "target_host",
-                    "flake_repository_id",
-                    "flake_commit",
-                    "flake_tree",
-                    "expected_current_system",
-                    "successor_system",
-                    "credential_ref",
-                    "credential_sha256",
-                    "broker_source_sha256",
-                    "namespace_source_sha256",
-                    "nix_module_sha256",
-                    "egress_contract_sha256",
-                    "install_contract_sha256",
-                    "review_receipt",
-                    "controller_receipt",
-                    "network_attestation_receipt",
-                    "probe_receipt",
-                    "operation_id",
-                },
-            )
-            if parameters["target_host"] != "tgw-prod" or parameters["flake_repository_id"] != "tgw-flake":
-                raise ValueError("bootstrap deployment target is outside the registered production bound")
-            if not _SHA1.fullmatch(parameters["flake_commit"]) or not _SHA1.fullmatch(parameters["flake_tree"]):
-                raise ValueError("bootstrap reviewed flake identity is invalid")
-            digest_fields = {key for key in parameters if key.endswith("_sha256")}
-            if any(not _SHA256.fullmatch(parameters[key]) for key in digest_fields):
-                raise ValueError("bootstrap artifact or credential digest is invalid")
-            for key in ("expected_current_system", "successor_system"):
-                if not parameters[key].startswith("/nix/store/") or "nixos-system-tgw-prod-" not in parameters[key]:
-                    raise ValueError("bootstrap system closure is not an exact tgw-prod Nix store identity")
-            if parameters["expected_current_system"] == parameters["successor_system"]:
-                raise ValueError("bootstrap successor must differ from expected current generation")
-            if not parameters["credential_ref"].startswith("credential:tgw-review:"):
-                raise ValueError("bootstrap credential must use the dedicated symbolic review identity")
-            identity_fields = {
-                "target_host",
-                "flake_repository_id",
-                "credential_ref",
-                "review_receipt",
-                "controller_receipt",
-                "network_attestation_receipt",
-                "probe_receipt",
-                "operation_id",
-            }
-            if any(not _IDENTITY.fullmatch(parameters[key]) for key in identity_fields):
-                raise ValueError("bootstrap symbolic identity is invalid")
+            validate_platform_bootstrap_effect(effect.parameters)
+            parameters = dict(effect.parameters)
         elif effect.kind is EffectKind.NIXOS_REVIEWED_EVALUATION:
             parameters = _required_strings(
                 effect.parameters,

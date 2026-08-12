@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tgw.plan_authority import TypedEffect
+from tgw.platform_bootstrap import validate_platform_bootstrap_effect
 
 
 def _canonical(value: Any) -> bytes:
@@ -59,8 +60,16 @@ class BootstrapGrant:
             raise ValueError("bootstrap authority permits exactly one deployment")
         if effect.kind.value != "approval-platform-bootstrap-deployment":
             raise ValueError("bootstrap authority permits only the exact platform bootstrap deployment")
-        if effect.parameters.get("target_host") != value["target_host"] or effect.parameters.get("flake_commit") != value["candidate_commit"]:
-            raise ValueError("bootstrap target or candidate does not match its effect")
+        manifest = validate_platform_bootstrap_effect(effect.parameters)
+        if (
+            manifest["target_host"] != value["target_host"]
+            or manifest["flake_commit"] != value["candidate_commit"]
+            or manifest["plan_commit"] != value["plan_commit"]
+            or manifest["solution_hash"] != value["solution_hash"]
+            or manifest["retirement_condition"] != value["retirement_condition"]
+            or value["root_id"] != "production-releases"
+        ):
+            raise ValueError("bootstrap Plan, solution, target, candidate, root, or retirement binding does not match its effect")
         payload = dict(value)
         payload["effect_hash"] = effect.effect_hash
         payload.pop("effect")

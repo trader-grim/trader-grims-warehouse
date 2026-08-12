@@ -63,6 +63,7 @@
           chmod 0555 "$out/tools/$name"
         done
       '';
+      a3PlatformBootstrap = pkgs.callPackage ./nix/a3-platform-bootstrap-package.nix { };
       observerSystem = nixpkgs.lib.nixosSystem {
         inherit system;
         modules = [
@@ -111,6 +112,7 @@
         PY
       '';
     in {
+      nixosModules.a3-platform-bootstrap = import ./nix/a3-platform-bootstrap.nix;
       devShells.${system}.default = pkgs.mkShell { };
       inputIdentities.nixpkgs = {
         outPath = nixpkgs.outPath;
@@ -121,5 +123,7 @@
       checks.${system}.review-egress-systemd-units = reviewEgressSystemdUnits;
       packages.${system}.nix-input-observer-rendered-artifacts = observerRenderedArtifacts;
       checks.${system}.nix-input-observer-rendered-artifacts = observerRenderedArtifacts;
+      packages.${system}.a3-platform-bootstrap = a3PlatformBootstrap;
+      checks.${system}.a3-platform-bootstrap = a3PlatformBootstrap;
     };
 }

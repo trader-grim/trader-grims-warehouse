@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from tgw.effect_handlers import AuthorityEffectController, TypedEffectHandlerRegistry
+from tgw.platform_bootstrap import A3PlatformBootstrapProvider
 from tgw.release_controller import MountedReleaseController
 
 Provider = Callable[[Mapping[str, str]], Mapping[str, Any]]
@@ -32,6 +33,8 @@ def compose_deployment_controller(
     flake_push: Provider,
     flake_switch_record: Provider,
     dependency_resubmit: Provider,
+    enable_platform_bootstrap: bool = False,
+    platform_bootstrap: A3PlatformBootstrapProvider | None = None,
 ) -> AuthorityEffectController:
     """Create the production controller only after every binding is concrete."""
     if mounts.target_host != expected_host:
@@ -47,6 +50,13 @@ def compose_deployment_controller(
     for provider in (consume_authority, backup, health, require_authority_schema, flake_push, flake_switch_record, dependency_resubmit):
         if not callable(provider):
             raise ValueError("deployment provider binding is unavailable")
+    if enable_platform_bootstrap:
+        if not isinstance(platform_bootstrap, A3PlatformBootstrapProvider):
+            raise ValueError("enabled platform bootstrap lacks its closed provider, keys, closures, or receipt store")
+        if platform_bootstrap.manifest["target_host"] != expected_host:
+            raise ValueError("platform-bootstrap manifest target differs from the deployment host")
+    elif platform_bootstrap is not None:
+        raise ValueError("platform-bootstrap provider is mounted while installation is disabled")
     require_authority_schema()
     release = MountedReleaseController(
         roots={mounts.root_id: root},
@@ -60,5 +70,7 @@ def compose_deployment_controller(
         flake_push=flake_push,
         flake_switch_record=flake_switch_record,
         dependency_resubmit=dependency_resubmit,
+        bootstrap_install=platform_bootstrap.install if platform_bootstrap is not None else None,
+        bootstrap_rollback=platform_bootstrap.rollback if platform_bootstrap is not None else None,
     )
     return AuthorityEffectController(registry, consume_authority)

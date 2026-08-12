@@ -45,3 +45,13 @@ def test_missing_artifact_or_schema_fails_composition(tmp_path):
         _compose(tmp_path, mounts=missing)
     with pytest.raises(RuntimeError, match="schema absent"):
         _compose(tmp_path, require_authority_schema=Mock(side_effect=RuntimeError("schema absent")))
+
+
+def test_platform_bootstrap_installation_is_disabled_and_unmounted_by_default(tmp_path):
+    controller, _ = _compose(tmp_path)
+    provider = controller.registry._providers[next(kind for kind in controller.registry._providers if kind.value == "approval-platform-bootstrap-deployment")]
+    assert provider[0] == "a3-platform-bootstrap-install@1"
+    with pytest.raises(ValueError, match="closed provider"):
+        _compose(tmp_path, enable_platform_bootstrap=True)
+    with pytest.raises(ValueError, match="installation is disabled"):
+        _compose(tmp_path, platform_bootstrap=object())
