@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import re
 import selectors
 import shutil
 import stat
@@ -26,7 +28,12 @@ BOOTSTRAP = (
     "exec(compile(s,'<tgw-reviewed-evaluator>','exec'),"
     "{'__name__':'__main__','_BOOTSTRAP_PROVIDER_SHA256':'sha256:'+h})"
 )
-EXECUTABLES = {"git": "/run/current-system/sw/bin/git", "nix": "/run/current-system/sw/bin/nix", "systemd_analyze": "/run/current-system/sw/bin/systemd-analyze"}
+EXECUTABLES = {
+    "git": "/run/current-system/sw/bin/git", "nix": "/run/current-system/sw/bin/nix",
+    "nix_store": "/run/current-system/sw/bin/nix-store", "systemd_analyze": "/run/current-system/sw/bin/systemd-analyze",
+}
+REMOTE_HOST = "100.107.99.66"
+REMOTE_USER = "codex"
 UNITS = (
     "tgw-review-egress@.service",
     "tgw-review-egress-attest@.service",
@@ -34,7 +41,7 @@ UNITS = (
 )
 
 
-class EvaluationError(RuntimeError):
+class EvaluationError(ValueError):
     pass
 
 
@@ -61,6 +68,41 @@ def _packet_header(parameters: Mapping[str, str], provider_source: bytes) -> byt
     return struct.pack("!Q", len(provider_source)) + provider_source + sha256(provider_source).hexdigest().encode() + struct.pack("!Q", len(request)) + request
 
 
+def _validate_remote_parameters(value: Any) -> dict[str, str]:
+    """Standalone mirror of the closed effect boundary; imports no TGW package."""
+    keys = {
+        "target_host", "flake_repository_id", "artifact_ref", "source_commit", "source_tree",
+        "source_archive_sha256", "flake_lock_sha256", "archive_root", "module_path", "module_sha256",
+        "provider_sha256", "ssh_sha256", "known_hosts_sha256", "remote_python_sha256", "git_sha256",
+        "nix_sha256", "nix_store_sha256", "systemd_analyze_sha256", "scratch_id", "system", "evaluation_target", "unit_set",
+        "output_schema", "nix_network_policy", "minimum_systemd_version", "max_duration_seconds",
+        "max_output_bytes", "max_archive_bytes", "max_unpacked_bytes", "max_files", "activate",
+        "profile_write", "home_db_write", "operation_id", "generation",
+    }
+    if not isinstance(value, dict) or set(value) != keys or any(not isinstance(item, str) or not item for item in value.values()):
+        raise EvaluationError("remote evaluation parameters are not the exact typed object")
+    fixed = {
+        "target_host": "tgw-prod", "flake_repository_id": "tgw-flake", "archive_root": "trader-grims-warehouse",
+        "module_path": "nix/review-egress.nix", "system": "x86_64-linux", "evaluation_target": "review-egress-systemd-units",
+        "unit_set": ",".join(UNITS), "output_schema": "tgw-nixos-reviewed-evaluation-receipt/v1",
+        "nix_network_policy": "offline-no-substituters", "activate": "false", "profile_write": "false", "home_db_write": "false",
+    }
+    if any(value.get(key) != expected for key, expected in fixed.items()):
+        raise EvaluationError("remote evaluation fixed boundary mismatch")
+    if not re.fullmatch(r"[0-9a-f]{40}", value["source_commit"]) or not re.fullmatch(r"[0-9a-f]{40}", value["source_tree"]):
+        raise EvaluationError("remote source Git identity is invalid")
+    digest_keys = {key for key in keys if key.endswith("_sha256")}
+    if any(not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", value[key]) for key in digest_keys):
+        raise EvaluationError("remote digest binding is invalid")
+    if value["artifact_ref"] != "artifact:sha256:" + value["source_archive_sha256"].removeprefix("sha256:"):
+        raise EvaluationError("remote artifact identity mismatch")
+    bounds = tuple(int(value[key]) for key in ("minimum_systemd_version", "max_duration_seconds", "max_output_bytes", "max_archive_bytes", "max_unpacked_bytes", "max_files"))
+    systemd, duration, output, archive, unpacked, files = bounds
+    if systemd < 257 or not 1 <= duration <= 900 or not 1024 <= output <= 16 * 1024**2 or not 1024 <= archive <= 128 * 1024**2 or not archive <= unpacked <= 512 * 1024**2 or not 1 <= files <= 100_000:
+        raise EvaluationError("remote resource bound is invalid")
+    return dict(value)
+
+
 class SshReviewedEvaluationProvider:
     """Resolve one content-addressed artifact and invoke one fixed remote helper."""
 
@@ -79,11 +121,15 @@ class SshReviewedEvaluationProvider:
         host_key_matches = _digest_file(self.known_hosts) == "sha256:" + parameters["known_hosts_sha256"].removeprefix("sha256:")
         if not ssh_matches or not host_key_matches:
             raise EvaluationError("SSH executable or host-key pin mismatch")
+        admitted_hosts = {REMOTE_HOST, f"[{REMOTE_HOST}]:22"}
+        host_tokens = {token for line in self.known_hosts.read_text().splitlines() if line and not line.startswith("#") for token in line.split()[0].split(",")}
+        if not host_tokens or not host_tokens <= admitted_hosts:
+            raise EvaluationError("known-hosts contains an unbound host identity")
         provider_source = Path(__file__).read_bytes()
         command = [
             SSH_EXECUTABLE, "-F", "/dev/null", "-oBatchMode=yes", "-oClearAllForwardings=yes",
             "-oStrictHostKeyChecking=yes", "-oUserKnownHostsFile=" + str(self.known_hosts),
-            "--", "tgw-prod", "sudo", "-n", "--", REMOTE_PYTHON, "-I", "-c", BOOTSTRAP,
+            "--", f"{REMOTE_USER}@{REMOTE_HOST}", "sudo", "-n", "--", REMOTE_PYTHON, "-I", "-c", BOOTSTRAP,
         ]
         header = _packet_header(parameters, provider_source)
         if self.invoke is None:
@@ -173,7 +219,7 @@ def _run(argv: list[str], *, cwd: Path, timeout: int, max_output: int = 16 * 102
     return output.decode()
 
 
-def _safe_extract(archive: Path, target: Path, *, max_files: int, max_bytes: int) -> str:
+def _safe_extract(archive: Path, target: Path, *, expected_root: str, max_files: int, max_bytes: int) -> str:
     with tarfile.open(archive) as source:
         commit = source.pax_headers.get("comment", "")
         if not commit or len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
@@ -181,10 +227,16 @@ def _safe_extract(archive: Path, target: Path, *, max_files: int, max_bytes: int
         members = source.getmembers()
         if len(members) > max_files or sum(member.size for member in members) > max_bytes:
             raise EvaluationError("source archive exceeds unpack bounds")
+        normalized = []
         for member in members:
             member_path = Path(member.name)
-            if member_path.is_absolute() or ".." in member_path.parts or ".git" in member_path.parts or member.isdev() or member.issym() or member.islnk():
+            if member_path.is_absolute() or ".." in member_path.parts or ".git" in member_path.parts or not (member.isdir() or member.isfile()):
                 raise EvaluationError("source archive contains an unsafe member")
+            if not member_path.parts or member_path.parts[0] != expected_root:
+                raise EvaluationError("source archive does not have the exact single root")
+            normalized.append(member_path.as_posix().rstrip("/"))
+        if len(normalized) != len(set(normalized)):
+            raise EvaluationError("source archive contains duplicate normalized paths")
         source.extractall(target, filter="data")
         return commit
 
@@ -199,17 +251,7 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
     request_raw = stream.read(request_size)
     if len(request_raw) != request_size:
         raise EvaluationError("evaluation request is truncated")
-    parameters = json.loads(request_raw)
-    # Reuse the authority registry's exact closed parser before any filesystem write.
-    from tgw.effect_handlers import TypedEffectHandlerRegistry
-    from tgw.plan_authority import TypedEffect
-
-    def unavailable(_: Mapping[str, str]) -> Mapping[str, Any]:
-        raise EvaluationError("unavailable")
-
-    registry = TypedEffectHandlerRegistry(release_install=unavailable, release_rollback=unavailable, flake_push=unavailable, flake_switch_record=unavailable, dependency_resubmit=unavailable)
-    effect = TypedEffect.parse({"kind": "nixos-reviewed-evaluation", "generation": parameters.pop("generation"), "parameters": parameters})
-    _, bound, _, _ = registry.prepare(effect)
+    bound = _validate_remote_parameters(json.loads(request_raw))
     provider_digest = globals().get("_BOOTSTRAP_PROVIDER_SHA256") or _digest_file(Path(__file__))
     if provider_digest != "sha256:" + bound["provider_sha256"].removeprefix("sha256:"):
         raise EvaluationError("installed evaluation provider digest mismatch")
@@ -221,18 +263,24 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
     if executable_digests != expected_digests:
         raise EvaluationError("remote evaluation executable digest mismatch")
     timeout = int(bound["max_duration_seconds"])
-    if scratch_root.exists() and (scratch_root.is_symlink() or not scratch_root.is_dir()):
+    root_stat = scratch_root.lstat()
+    if not stat.S_ISDIR(root_stat.st_mode):
         raise EvaluationError("scratch root is not a real directory")
-    scratch_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    scratch_root.chmod(0o700)
-    root_stat = scratch_root.stat()
     if root_stat.st_uid != scratch_uid or stat.S_IMODE(root_stat.st_mode) != 0o700:
         raise EvaluationError("scratch root is not root-owned mode 0700")
     scratch = Path(tempfile.mkdtemp(prefix="run-", dir=scratch_root))
+    scratch_stat = scratch.lstat()
+    if scratch_stat.st_uid != scratch_uid or stat.S_IMODE(scratch_stat.st_mode) != 0o700 or not stat.S_ISDIR(scratch_stat.st_mode):
+        raise EvaluationError("atomic scratch directory identity mismatch")
     archive = scratch / "source.tar"
-    source = scratch / "source"
+    extract_root = scratch / "source"
+    source = extract_root / bound["archive_root"]
+    receipt = None
     try:
-        with archive.open("xb") as sink:
+        scratch_fd = os.open(scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        archive_fd = os.open("source.tar", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=scratch_fd)
+        os.close(scratch_fd)
+        with os.fdopen(archive_fd, "wb") as sink:
             remaining = int(bound["max_archive_bytes"]) + 1
             while remaining:
                 block = stream.read(min(1024 * 1024, remaining))
@@ -244,8 +292,8 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
                 raise EvaluationError("received archive exceeds its bound")
         if _digest_file(archive) != "sha256:" + bound["source_archive_sha256"].removeprefix("sha256:"):
             raise EvaluationError("received archive digest mismatch")
-        source.mkdir()
-        archive_commit = _safe_extract(archive, source, max_files=int(bound["max_files"]), max_bytes=int(bound["max_unpacked_bytes"]))
+        extract_root.mkdir()
+        archive_commit = _safe_extract(archive, extract_root, expected_root=bound["archive_root"], max_files=int(bound["max_files"]), max_bytes=int(bound["max_unpacked_bytes"]))
         if archive_commit != bound["source_commit"]:
             raise EvaluationError("archive commit identity mismatch")
         git = [EXECUTABLES["git"], "-c", "core.hooksPath=/dev/null", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.required=false"]
@@ -259,7 +307,7 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
             raise EvaluationError("lock or module digest mismatch")
         base = [
             EXECUTABLES["nix"], "--offline", "--option", "substituters", "",
-            "--option", "allow-import-from-derivation", "false", "--no-write-lock-file",
+            "--option", "allow-import-from-derivation", "false", "--option", "pure-eval", "true", "--no-write-lock-file",
         ]
         drv = run(base + ["eval", "--raw", ".#nixosConfigurations.tgw-prod.config.system.build.toplevel.drvPath"], cwd=source, timeout=timeout).strip()
         build_log = run(base + ["build", "--no-link", "--print-out-paths", ".#nixosConfigurations.tgw-prod.config.system.build.toplevel"], cwd=source, timeout=timeout)
@@ -271,17 +319,23 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
             raise EvaluationError("generated unit set is incomplete")
         verify_log = run([EXECUTABLES["systemd_analyze"], "verify", *map(str, unit_paths)], cwd=source, timeout=timeout)
         eval_log = drv + "\n"
-        receipt: dict[str, Any] = {
+        requisites_raw = run([EXECUTABLES["nix_store"], "--query", "--requisites", closure], cwd=source, timeout=timeout)
+        requisites = sorted(set(requisites_raw.splitlines()))
+        if not requisites or closure not in requisites or any(not item.startswith("/nix/store/") for item in requisites):
+            raise EvaluationError("Nix closure requisites are incomplete")
+        closure_manifest = [{"path": item, "nar_sha256": "sha256:" + run(base + ["hash", "path", "--type", "sha256", "--base16", item], cwd=source, timeout=timeout).strip()} for item in requisites]
+        receipt = {
             "schema": bound["output_schema"], "outcome": "verified", "source_commit": bound["source_commit"],
             "source_tree": bound["source_tree"], "source_archive_sha256": bound["source_archive_sha256"],
             "flake_lock_sha256": bound["flake_lock_sha256"], "module_sha256": bound["module_sha256"],
             "provider_sha256": bound["provider_sha256"], "executables": EXECUTABLES,
             "ssh_sha256": bound["ssh_sha256"], "known_hosts_sha256": bound["known_hosts_sha256"],
             "executable_sha256": executable_digests,
-            "scratch_id": bound["scratch_id"], "cleanup": "removed", "activate": False,
+            "scratch_id": bound["scratch_id"], "activate": False,
             "profile_write": False, "home_db_write": False, "system": bound["system"],
             "evaluation_target": bound["evaluation_target"], "evaluated_config_drv": drv,
-            "evaluated_closure_sha256": "sha256:" + run(base + ["hash", "path", "--type", "sha256", "--base16", closure], cwd=source, timeout=timeout).strip(),
+            "closure_manifest_sha256": "sha256:" + sha256(_canonical(closure_manifest)).hexdigest(),
+            "closure_path_count": len(closure_manifest),
             "eval_log_sha256": "sha256:" + sha256(eval_log.encode()).hexdigest(),
             "build_log_sha256": "sha256:" + sha256(build_log.encode()).hexdigest(),
             "systemd_verify_output_sha256": "sha256:" + sha256(verify_log.encode()).hexdigest(),
@@ -290,11 +344,14 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
             "unit_sha256": {unit: _digest_file(path) for unit, path in zip(UNITS, unit_paths, strict=True)},
             "evidence": [],
         }
-        receipt["receipt_sha256"] = "sha256:" + sha256(_canonical({key: value for key, value in receipt.items() if key != "evidence"})).hexdigest()
-        receipt["evidence"] = ["nixos-evaluation:" + receipt["receipt_sha256"]]
-        return receipt
     finally:
         shutil.rmtree(scratch, ignore_errors=False)
+    if scratch.exists() or receipt is None:
+        raise EvaluationError("scratch cleanup was not verified")
+    receipt["cleanup"] = "removed"
+    receipt["receipt_sha256"] = "sha256:" + sha256(_canonical({key: value for key, value in receipt.items() if key != "evidence"})).hexdigest()
+    receipt["evidence"] = ["nixos-evaluation:" + receipt["receipt_sha256"]]
+    return receipt
 
 
 def main() -> int:

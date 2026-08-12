@@ -170,15 +170,16 @@ class TypedEffectHandlerRegistry:
             expected_executables = {
                 "git": "/run/current-system/sw/bin/git",
                 "nix": "/run/current-system/sw/bin/nix",
+                "nix_store": "/run/current-system/sw/bin/nix-store",
                 "systemd_analyze": "/run/current-system/sw/bin/systemd-analyze",
             }
             if result.get("executables") != expected_executables:
                 raise EffectHandlerError("reviewed Nix evaluation executable provenance mismatch")
-            expected_digests = {name: parameters[name + "_sha256"] for name in ("remote_python", "git", "nix", "systemd_analyze")}
+            expected_digests = {name: parameters[name + "_sha256"] for name in ("remote_python", "git", "nix", "nix_store", "systemd_analyze")}
             if result.get("executable_sha256") != expected_digests:
                 raise EffectHandlerError("reviewed Nix evaluation executable digest mismatch")
             digest_keys = (
-                "evaluated_closure_sha256", "eval_log_sha256", "build_log_sha256",
+                "closure_manifest_sha256", "eval_log_sha256", "build_log_sha256",
                 "systemd_verify_output_sha256", "receipt_sha256",
             )
             if any(not isinstance(result.get(key), str) or not _SHA256.fullmatch(result[key]) for key in digest_keys):
@@ -278,15 +279,16 @@ class TypedEffectHandlerRegistry:
         else:
             parameters = _required_strings(effect.parameters, {
                 "target_host", "flake_repository_id", "artifact_ref", "source_commit",
-                "source_tree", "source_archive_sha256", "flake_lock_sha256", "module_path",
+                "source_tree", "source_archive_sha256", "flake_lock_sha256", "archive_root", "module_path",
                 "module_sha256", "provider_sha256", "ssh_sha256", "known_hosts_sha256", "remote_python_sha256",
-                "git_sha256", "nix_sha256", "systemd_analyze_sha256", "scratch_id", "system", "evaluation_target", "unit_set",
+                "git_sha256", "nix_sha256", "nix_store_sha256", "systemd_analyze_sha256", "scratch_id", "system", "evaluation_target", "unit_set",
                 "output_schema", "nix_network_policy", "minimum_systemd_version",
                 "max_duration_seconds", "max_output_bytes", "max_archive_bytes", "max_unpacked_bytes", "max_files", "activate", "profile_write",
                 "home_db_write", "operation_id",
             })
             fixed = {
                 "target_host": "tgw-prod", "flake_repository_id": "tgw-flake",
+                "archive_root": "trader-grims-warehouse",
                 "module_path": "nix/review-egress.nix", "system": "x86_64-linux",
                 "evaluation_target": "review-egress-systemd-units",
                 "unit_set": ",".join(_REVIEW_EVAL_UNITS),
@@ -301,7 +303,7 @@ class TypedEffectHandlerRegistry:
             digest_keys = (
                 "source_archive_sha256", "flake_lock_sha256", "module_sha256", "provider_sha256",
                 "ssh_sha256", "known_hosts_sha256", "remote_python_sha256", "git_sha256",
-                "nix_sha256", "systemd_analyze_sha256",
+                "nix_sha256", "nix_store_sha256", "systemd_analyze_sha256",
             )
             for key in digest_keys:
                 if not _SHA256.fullmatch(parameters[key]):
