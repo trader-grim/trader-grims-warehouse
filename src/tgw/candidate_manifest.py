@@ -34,6 +34,38 @@ def graph_hash(graph: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(json.dumps(graph, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def create_luet_conformance_receipt(
+    result: Mapping[str, Any],
+    *,
+    graph: Mapping[str, Any],
+    plan_commit: str,
+    source_commit: str,
+    source_tree: str,
+    binary_sha256: str,
+) -> dict[str, Any]:
+    """Turn one successful live pinned adapter result into an immutable receipt."""
+    if result.get("provider_id") != PROVIDER_ID or result.get("status") != "AGREEMENT" or result.get("available") is not True:
+        raise CandidateManifestError("live Luet result does not prove agreement")
+    if not isinstance(binary_sha256, str) or len(binary_sha256) != 71 or not binary_sha256.startswith("sha256:"):
+        raise CandidateManifestError("live Luet binary sha256 is required")
+    receipt = {
+        "schema": "tgw-luet-conformance-receipt/v1",
+        "provider_id": PROVIDER_ID,
+        "luet_version": LUET_VERSION,
+        "luet_revision": LUET_REVISION,
+        "binary_sha256": binary_sha256,
+        "plan_commit": plan_commit,
+        "graph_hash": graph_hash(graph),
+        "closure_hash": result["closure_hash"],
+        "source_commit": source_commit,
+        "source_tree": source_tree,
+        "status": "AGREEMENT",
+        "selected_providers": result.get("selected_providers", []),
+    }
+    receipt["receipt_hash"] = "sha256:" + hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return receipt
+
+
 def verify_luet_conformance_receipt(receipt: Mapping[str, Any], *, graph: Mapping[str, Any], plan_commit: str, closure_hash: str, source_commit: str, source_tree: str) -> dict[str, Any]:
     """Verify persisted conformance without invoking an ambient binary."""
     if receipt.get("schema") != "tgw-luet-conformance-receipt/v1":
@@ -49,6 +81,8 @@ def verify_luet_conformance_receipt(receipt: Mapping[str, Any], *, graph: Mappin
         "source_tree": source_tree,
         "status": "AGREEMENT",
     }
+    if not isinstance(receipt.get("binary_sha256"), str) or len(receipt["binary_sha256"]) != 71 or not receipt["binary_sha256"].startswith("sha256:"):
+        raise CandidateManifestError("Luet conformance receipt binary pin is invalid")
     mismatched = [key for key, value in expected.items() if receipt.get(key) != value]
     if mismatched:
         raise CandidateManifestError(f"Luet conformance receipt binding mismatch: {', '.join(mismatched)}")
