@@ -39,6 +39,7 @@ class EffectKind(str, Enum):
     FLAKE_SWITCH_RECORD_ONLY = "flake-switch-record-only"
     DEPENDENCY_RESUBMIT = "dependency-resubmit"
     AUTHORITY_CANARY = "authority-canary"
+    APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT = "approval-platform-bootstrap-deployment"
 
 
 @dataclass(frozen=True)

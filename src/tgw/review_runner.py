@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
 
+from tgw.review_broker_supervisor import run_with_broker
 from tgw.review_egress_broker import ReviewEgressPolicy
 
 
@@ -183,6 +184,8 @@ def run_review(
     egress_policy: Mapping[str, Any] | None = None,
     network_attestation: Mapping[str, Any] | None = None,
     egress_receipt: Mapping[str, Any] | None = None,
+    broker_argv: list[str] | None = None,
+    egress_receipt_path: Path | None = None,
 ) -> dict[str, Any]:
     if handoff.get("schema") != "tgw-launcher-handoff/v1":
         raise ReviewRunnerError("review runner requires a launcher handoff")
@@ -243,18 +246,26 @@ def run_review(
             tool_root=tool_root,
             proxy_url=proxy_url,
         )
-        try:
-            completed = subprocess.run(
-            sandboxed,
-            cwd=isolated,
-            input=json.dumps(request),
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise ReviewRunnerError("review provider exceeded bounded timeout") from exc
+        def invoke_provider():
+            try:
+                return subprocess.run(
+                    sandboxed,
+                    cwd=isolated,
+                    input=json.dumps(request),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ReviewRunnerError("review provider exceeded bounded timeout") from exc
+
+        if network_egress and broker_argv is not None:
+            if egress_receipt is not None or egress_receipt_path is None:
+                raise ReviewRunnerError("live broker requires one absent final receipt path, not a preloaded receipt")
+            completed, egress_receipt = run_with_broker(broker_argv, invoke_provider, egress_receipt_path)
+        else:
+            completed = invoke_provider()
         if completed.returncode:
             raise ReviewRunnerError(f"review provider exited {completed.returncode}: {completed.stderr[-500:]}")
         if snapshot_hash(isolated) != expected_hash:
@@ -273,7 +284,7 @@ def run_review(
                 raise ReviewRunnerError("review egress receipt hash/schema is invalid")
             if receipt["run_id"] != policy.run_id or receipt["policy_hash"] != policy.policy_hash:
                 raise ReviewRunnerError("review egress receipt policy binding mismatch")
-            if not isinstance(receipt["sessions"], list) or any(item.get("outcome") != "completed" for item in receipt["sessions"] if isinstance(item, Mapping)):
+            if not isinstance(receipt["sessions"], list) or any(not isinstance(item, Mapping) or item.get("outcome") != "completed" for item in receipt["sessions"]):
                 raise ReviewRunnerError("review egress receipt contains denied or invalid sessions")
     passed = report["verdict"] == "PASS"
     return {
@@ -293,6 +304,8 @@ def main() -> int:
     parser.add_argument("--egress-policy", type=Path)
     parser.add_argument("--network-attestation", type=Path)
     parser.add_argument("--egress-receipt", type=Path)
+    parser.add_argument("--broker-command-json")
+    parser.add_argument("--egress-receipt-path", type=Path)
     args = parser.parse_args()
     try:
         provider_argv = json.loads(args.provider_command_json)
@@ -306,6 +319,8 @@ def main() -> int:
             egress_policy=json.loads(args.egress_policy.read_text()) if args.egress_policy else None,
             network_attestation=json.loads(args.network_attestation.read_text()) if args.network_attestation else None,
             egress_receipt=json.loads(args.egress_receipt.read_text()) if args.egress_receipt else None,
+            broker_argv=json.loads(args.broker_command_json) if args.broker_command_json else None,
+            egress_receipt_path=args.egress_receipt_path,
         )
     except (ReviewRunnerError, json.JSONDecodeError, OSError) as exc:
         result = {

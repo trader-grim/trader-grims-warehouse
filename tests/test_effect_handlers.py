@@ -17,6 +17,8 @@ def _registry(**changes):
         "flake_push": Mock(return_value={"evidence": ["remote:readback"]}),
         "flake_switch_record": Mock(return_value={"evidence": ["switch:recorded"]}),
         "dependency_resubmit": Mock(return_value={"evidence": ["queue:accepted"]}),
+        "bootstrap_install": Mock(return_value={"evidence": ["nixos:switched", "probes:passed"]}),
+        "bootstrap_rollback": Mock(return_value={"receipt": "nixos:rollback"}),
     }
     providers.update(changes)
     return TypedEffectHandlerRegistry(**providers), providers
@@ -43,6 +45,18 @@ def _registry(**changes):
         ("flake-switch-record-only", {"host_role": "production", "commit": SHA, "execution_receipt": "manual:1"}),
         ("dependency-resubmit", {"dependency_id": "W03", "queue_id": "coding", "failed_generation": "generation-1"}),
         ("authority-canary", {"canary_id": "canary:w10-1", "purpose": "verify-plan-authority-roundtrip"}),
+        ("approval-platform-bootstrap-deployment", {
+            "target_host": "tgw-prod", "flake_repository_id": "tgw-flake",
+            "flake_commit": SHA, "flake_tree": TREE,
+            "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old",
+            "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
+            "credential_ref": "credential:tgw-review:codex", "credential_sha256": DIGEST,
+            "broker_source_sha256": DIGEST, "namespace_source_sha256": DIGEST,
+            "nix_module_sha256": DIGEST, "egress_contract_sha256": DIGEST,
+            "install_contract_sha256": DIGEST, "review_receipt": "review:passed",
+            "controller_receipt": "controller:passed", "network_attestation_receipt": "network:passed",
+            "probe_receipt": "probes:passed", "operation_id": "bootstrap:review-transport-1",
+        }),
     ],
 )
 def test_registered_effects_consume_exact_authority_then_invoke_only_their_handler(kind, parameters):
@@ -166,3 +180,47 @@ def test_authority_canary_is_internal_receipt_only_and_cannot_broaden_purpose():
     with pytest.raises(ValueError, match="harmless registered bound"):
         AuthorityEffectController(registry, consume).execute(request_id="request:bad", effect=broadened)
     assert consume.call_count == 1
+
+
+def test_bootstrap_effect_rejects_host_path_command_digest_and_cas_broadening_before_consumption():
+    registry, _ = _registry()
+    consume = Mock()
+    base = next(parameters for kind, parameters in [
+        ("approval-platform-bootstrap-deployment", {
+            "target_host": "tgw-prod", "flake_repository_id": "tgw-flake", "flake_commit": SHA, "flake_tree": TREE,
+            "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old", "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
+            "credential_ref": "credential:tgw-review:codex", "credential_sha256": DIGEST, "broker_source_sha256": DIGEST,
+            "namespace_source_sha256": DIGEST, "nix_module_sha256": DIGEST, "egress_contract_sha256": DIGEST, "install_contract_sha256": DIGEST,
+            "review_receipt": "review:passed", "controller_receipt": "controller:passed", "network_attestation_receipt": "network:passed",
+            "probe_receipt": "probes:passed", "operation_id": "bootstrap:review-transport-1",
+        })
+    ] if kind)
+    changes = (
+        {"target_host": "other"}, {"credential_ref": "/home/codex/.codex/auth.json"},
+        {"credential_sha256": "unbound"}, {"successor_system": base["expected_current_system"]},
+        {"command": "nixos-rebuild switch"},
+    )
+    for change in changes:
+        effect = {"kind": "approval-platform-bootstrap-deployment", "generation": "nixos-review-transport-1", "parameters": {**base, **change}}
+        with pytest.raises(ValueError):
+            AuthorityEffectController(registry, consume).execute(request_id="bootstrap", effect=TypedEffect.parse(effect))
+    consume.assert_not_called()
+
+
+def test_bootstrap_provider_failure_rolls_back_only_registered_prior_closure():
+    install = Mock(side_effect=RuntimeError("health probe failed"))
+    rollback = Mock(return_value={"receipt": "nixos:prior-closure-restored"})
+    registry, _ = _registry(bootstrap_install=install, bootstrap_rollback=rollback)
+    parameters = {
+        "target_host": "tgw-prod", "flake_repository_id": "tgw-flake", "flake_commit": SHA, "flake_tree": TREE,
+        "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old", "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
+        "credential_ref": "credential:tgw-review:codex", "credential_sha256": DIGEST, "broker_source_sha256": DIGEST,
+        "namespace_source_sha256": DIGEST, "nix_module_sha256": DIGEST, "egress_contract_sha256": DIGEST, "install_contract_sha256": DIGEST,
+        "review_receipt": "review:passed", "controller_receipt": "controller:passed", "network_attestation_receipt": "network:passed",
+        "probe_receipt": "probes:passed", "operation_id": "bootstrap:review-transport-1",
+    }
+    effect = TypedEffect.parse({"kind": "approval-platform-bootstrap-deployment", "generation": "nixos-review-transport-1", "parameters": parameters})
+    receipt = AuthorityEffectController(registry, Mock(return_value={"receipt_id": "bootstrap:consumed"})).execute(request_id="bootstrap", effect=effect)
+    assert receipt.outcome is EffectOutcome.ROLLED_BACK
+    assert receipt.rollback_receipt == "nixos:prior-closure-restored"
+    rollback.assert_called_once()
