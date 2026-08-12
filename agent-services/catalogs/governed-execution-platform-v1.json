@@ -18,7 +18,7 @@
     "promptcraft.receiver-profiles@1"
   ],
   "providers": [
-    {"id": "native-exact-resolver", "provides": ["plan.capability-resolution@2"], "requires": ["plan.graph-query@1"], "preference": 100},
+    {"id": "native-exact-resolver", "provides": ["plan.capability-resolution@2"], "requires": ["plan.graph-query@1"]},
     {"id": "canonical-plan-graph", "provides": ["plan.graph-query@1"], "requires": []},
     {"id": "shared-tgw-plan-skill", "provides": ["plan.shared-planning-skill@1"], "requires": ["plan.graph-query@1"]},
     {"id": "recovered-promptcraft", "provides": ["promptcraft.receiver-profiles@1"], "requires": []},
