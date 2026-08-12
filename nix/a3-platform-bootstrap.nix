@@ -1,7 +1,10 @@
 { config, lib, ... }:
 let
   cfg = config.services.tgw-a3-platform-bootstrap;
-  wrapper = "${cfg.package}/bin/tgw-nix-observer-render-wrapper";
+  wrapper = "/run/current-system/sw/bin/tgw-nix-observer-render-wrapper";
+  sudoCommand = "/run/wrappers/bin/sudo -n -- ${wrapper}";
+  authorizedKeyPrefix = ''restrict,command="${sudoCommand}" ssh-ed25519 '';
+  strictAuthorizedKey = builtins.match ''restrict,command="/run/wrappers/bin/sudo -n -- /run/current-system/sw/bin/tgw-nix-observer-render-wrapper" ssh-ed25519 [A-Za-z0-9+/]+={0,2}'' cfg.sshAuthorizedPublicKey != null;
 in {
   options.services.tgw-a3-platform-bootstrap = {
     enable = lib.mkEnableOption "one exact TGW A3 W09 platform bootstrap generation";
@@ -17,8 +20,8 @@ in {
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = lib.hasPrefix "ssh-ed25519 " cfg.sshAuthorizedPublicKey && !(lib.hasInfix "PRIVATE KEY" cfg.sshAuthorizedPublicKey);
-        message = "A3 bootstrap accepts one public ed25519 authorized key, never private key material";
+        assertion = strictAuthorizedKey && lib.hasPrefix authorizedKeyPrefix cfg.sshAuthorizedPublicKey && !(lib.hasInfix "\n" cfg.sshAuthorizedPublicKey) && !(lib.hasInfix "\r" cfg.sshAuthorizedPublicKey);
+        message = "A3 bootstrap requires one single-line Ed25519 key with restrict and the exact forced no-argv sudo command";
       }
     ];
     environment.systemPackages = [ cfg.package ];
@@ -29,7 +32,8 @@ in {
       "tgw/nix-observer-render-attestation.pub" = { source = cfg.attestationPublicKey; mode = "0444"; user = "root"; group = "root"; };
     };
     users.users.${cfg.remoteUser}.openssh.authorizedKeys.keys = [ cfg.sshAuthorizedPublicKey ];
-    # sudoers' explicit empty argument string permits this executable with no argv.
+    # Canonical command identity: forced SSH command invokes this exact sudo
+    # command; sudoers permits the stable wrapper path with an empty argv only.
     security.sudo.extraConfig = ''
       ${cfg.remoteUser} ALL=(root) NOPASSWD: ${wrapper} ""
     '';

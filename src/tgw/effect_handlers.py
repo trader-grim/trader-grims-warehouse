@@ -27,7 +27,7 @@ from tgw.nixos_observer_render_evaluation import (
 )
 from tgw.nixos_reviewed_evaluation import _validate_remote_effect
 from tgw.plan_authority import EffectKind, TypedEffect
-from tgw.platform_bootstrap import validate_platform_bootstrap_effect
+from tgw.platform_bootstrap import BootstrapStateAmbiguous, validate_platform_bootstrap_effect
 
 _SHA1 = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
@@ -147,6 +147,7 @@ class TypedEffectHandlerRegistry:
         dependency_resubmit: Callable[[Mapping[str, str]], Mapping[str, Any]],
         bootstrap_install: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         bootstrap_rollback: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
+        bootstrap_validate: Callable[[Mapping[str, Any]], None] | None = None,
         nixos_reviewed_evaluation: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         nixos_observer_render_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> None:
@@ -172,6 +173,7 @@ class TypedEffectHandlerRegistry:
                 None,
             ),
         }
+        self._bootstrap_validate = bootstrap_validate
 
     @staticmethod
     def _unavailable_bootstrap(parameters: Mapping[str, str]) -> Mapping[str, Any]:
@@ -529,6 +531,10 @@ class TypedEffectHandlerRegistry:
             raise ValueError("effect kind has no registered parameter validator")
         handler_id, handler, rollback = self._providers[effect.kind]
         parameters["generation"] = effect.generation
+        if effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT:
+            if self._bootstrap_validate is None:
+                raise ValueError("platform-bootstrap pre-authority validator is unavailable")
+            self._bootstrap_validate(parameters)
         return handler_id, parameters, handler, rollback
 
 
@@ -565,6 +571,48 @@ class AuthorityEffectController:
                 }
                 evidence = ("effect-ambiguity-memory:sha256:" + hashlib.sha256(_canonical(observation)).hexdigest(),)
             return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, evidence, detail=str(exc))
+        except BootstrapStateAmbiguous as exc:
+            if not exc.rollback_required:
+                return self._receipt(
+                    request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc)
+                )
+            if rollback is not None:
+                try:
+                    rolled_back = rollback(parameters)
+                    rollback_receipt = str(rolled_back["receipt"])
+                    return self._receipt(
+                        request_id,
+                        receipt_id,
+                        effect,
+                        handler_id,
+                        EffectOutcome.ROLLED_BACK,
+                        exc.evidence,
+                        rollback_receipt=rollback_receipt,
+                        detail=str(exc),
+                    )
+                except BootstrapStateAmbiguous as rollback_exc:
+                    return self._receipt(
+                        request_id,
+                        receipt_id,
+                        effect,
+                        handler_id,
+                        EffectOutcome.AMBIGUOUS,
+                        rollback_exc.evidence,
+                        detail=f"effect={exc}; rollback={rollback_exc}",
+                    )
+                except Exception as rollback_exc:
+                    return self._receipt(
+                        request_id,
+                        receipt_id,
+                        effect,
+                        handler_id,
+                        EffectOutcome.FAILED,
+                        exc.evidence,
+                        detail=f"effect={exc}; rollback={rollback_exc}",
+                    )
+            return self._receipt(
+                request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc)
+            )
         except Exception as exc:
             if rollback is not None:
                 try:
@@ -572,6 +620,16 @@ class AuthorityEffectController:
                     rollback_receipt = str(rolled_back["receipt"])
                     return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.ROLLED_BACK, (), rollback_receipt=rollback_receipt, detail=str(exc))
                 except Exception as rollback_exc:
+                    if isinstance(rollback_exc, BootstrapStateAmbiguous):
+                        return self._receipt(
+                            request_id,
+                            receipt_id,
+                            effect,
+                            handler_id,
+                            EffectOutcome.AMBIGUOUS,
+                            rollback_exc.evidence,
+                            detail=f"effect={exc}; rollback={rollback_exc}",
+                        )
                     return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.FAILED, (), detail=f"effect={exc}; rollback={rollback_exc}")
             evidence = exc.evidence if isinstance(exc, EffectHandlerError) else ()
             return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.FAILED, evidence, detail=str(exc))

@@ -29,6 +29,7 @@ from tgw.nixos_observer_render_evaluation import (
     HELPER_SHA256,
     PLAN_APPROVED_COMMIT,
     PRODUCTION_COMPOSITION_PATH,
+    REMOTE_SUDO_COMMAND,
     REMOTE_SUDO_PATH,
     REMOTE_WRAPPER_PATH,
     CompositionHold,
@@ -202,7 +203,15 @@ def _composition(
             "python": {"path": "/run/current-system/sw/bin/python3", "exe_path": "/run/current-system/sw/bin/python3", "sha256": remote_python_sha},
             "ip": {"path": "/run/current-system/sw/bin/ip", "sha256": remote_ip_sha},
             "sudo": {"path": REMOTE_SUDO_PATH, "sha256": remote_sudo_sha},
-            "sudoers": {"user": user, "runas": "root", "command": REMOTE_WRAPPER_PATH, "arguments": [], "nopasswd": True, "sha256": sudoers_sha},
+            "sudoers": {
+                "user": user,
+                "runas": "root",
+                "command": REMOTE_WRAPPER_PATH,
+                "arguments": [],
+                "nopasswd": True,
+                "sha256": sudoers_sha,
+                "invocation": REMOTE_SUDO_COMMAND,
+            },
             "attestation_public_key_sha256": _identity(public_path)["sha256"],
             "remote_uid": os.getuid(),
             "remote_gid": os.getgid(),
@@ -461,6 +470,7 @@ def test_transport_uses_dedicated_auth_sealed_host_key_fixed_no_argv_wrapper_and
     assert seen["seals"] == [expected_seals, expected_seals]
     assert "-oGlobalKnownHostsFile=/dev/null" in command
     assert "codex@100.107.99.66" in command
+    assert command[-1] == REMOTE_SUDO_COMMAND
     assert command[-1] == serialize_remote_argv([REMOTE_SUDO_PATH, "-n", "--", REMOTE_WRAPPER_PATH])
     assert "python" not in command[-1] and "-c" not in command[-1]
     assert len(attempts.values) == 1

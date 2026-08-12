@@ -38,13 +38,15 @@ from tgw import nix_observer_render_evaluation as provider
 from tgw import nix_observer_render_helper as helper
 from tgw import nix_observer_render_remote as remote_bootstrap
 from tgw.nix_observer_render_evaluation import validate_request, validate_result
+from tgw.platform_bootstrap import SUDO_COMMAND, SUDO_PATH, WRAPPER_PATH
 
 EFFECT_KIND = "nixos-observer-render-evaluation"
 PLAN_APPROVED_COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
 AUDITED_A2_COMMIT = "45ccc1f5643c6c81bba836dcdbd3cb46392c4679"
 HELPER_SHA256 = "sha256:bfbd824429a1449f50166b71417c010c48b60f3d579e6050fb082d8d41724eb9"
-REMOTE_WRAPPER_PATH = "/run/current-system/sw/bin/tgw-nix-observer-render-wrapper"
-REMOTE_SUDO_PATH = "/run/wrappers/bin/sudo"
+REMOTE_WRAPPER_PATH = WRAPPER_PATH
+REMOTE_SUDO_PATH = SUDO_PATH
+REMOTE_SUDO_COMMAND = SUDO_COMMAND
 PRODUCTION_COMPOSITION_PATH = Path("/etc/tgw/nix-observer-render-composition.json")
 TERMINAL_RECEIPT_ROOT = Path("/opt/TGW/tgw-lib/actors/codex/nixos-observer-render-terminals")
 ATTEMPT_RECEIPT_ROOT = Path("/opt/TGW/tgw-lib/actors/codex/nixos-observer-render-attempts")
@@ -512,6 +514,7 @@ def _validate_wrapper_prerequisite(value: Mapping[str, Any], composition: Mappin
         "arguments": [],
         "nopasswd": True,
         "sha256": wrapper["sudoers_sha256"],
+        "invocation": REMOTE_SUDO_COMMAND,
     }
     if (
         not isinstance(value, Mapping)
@@ -1091,6 +1094,8 @@ class SshObserverRenderTransport:
             if self._use_sudo:
                 remote_argv = [REMOTE_SUDO_PATH, "-n", "--", *remote_argv]
             remote_command = serialize_remote_argv(remote_argv)
+            if self._use_sudo and remote_command != REMOTE_SUDO_COMMAND:
+                raise CompositionHold("remote sudo command differs from the canonical no-argv identity")
             command = [
                 f"/proc/self/fd/{ssh_fd}",
                 "-F",

@@ -72,5 +72,6 @@ def compose_deployment_controller(
         dependency_resubmit=dependency_resubmit,
         bootstrap_install=platform_bootstrap.install if platform_bootstrap is not None else None,
         bootstrap_rollback=platform_bootstrap.rollback if platform_bootstrap is not None else None,
+        bootstrap_validate=platform_bootstrap.preflight if platform_bootstrap is not None else None,
     )
     return AuthorityEffectController(registry, consume_authority)

@@ -55,11 +55,14 @@ def _bootstrap_parameters():
             "ssh_identity": {"ref": SSH_KEY_REF, "sha256": "sha256:" + DIGEST},
         },
         "operation_id": "bootstrap:a3-platform-1",
+        "candidate_receipt": "candidate:sha256:" + "0" * 64,
         "review_receipt": "review:sha256:" + "1" * 64,
         "controller_receipt": "controller:sha256:" + "2" * 64,
+        "activation_provider_receipt": "activation-provider:sha256:" + "5" * 64,
         "health_receipt": "health:sha256:" + "3" * 64,
         "probe_receipt": "probe:sha256:" + "4" * 64,
         "retirement_condition": RETIREMENT_CONDITION,
+        "live_flake_gate": "EXTERNAL_TGW_PROD_FLAKE_IMPORT_BUILD_REQUIRED",
     }
     manifest["manifest_sha256"] = digest(manifest)
     return platform_bootstrap_effect_parameters(manifest)
@@ -190,6 +193,7 @@ def _registry(**changes):
         "dependency_resubmit": Mock(return_value={"evidence": ["queue:accepted"]}),
         "bootstrap_install": Mock(return_value={"evidence": ["nixos:switched", "probes:passed"]}),
         "bootstrap_rollback": Mock(return_value={"receipt": "nixos:rollback"}),
+        "bootstrap_validate": Mock(),
         "nixos_reviewed_evaluation": Mock(side_effect=_evaluation_result),
     }
     providers.update(changes)
@@ -234,7 +238,8 @@ def test_registered_effects_consume_exact_authority_then_invoke_only_their_handl
     assert receipt.receipt_hash.startswith("sha256:")
     handler_id, _, _, _ = registry.prepare(effect)
     assert receipt.handler_id == handler_id
-    assert sum(provider.call_count for provider in providers.values()) == (0 if kind == "authority-canary" else 1)
+    expected_calls = 0 if kind == "authority-canary" else 3 if kind == "approval-platform-bootstrap-deployment" else 1
+    assert sum(provider.call_count for provider in providers.values()) == expected_calls
 
 
 @pytest.mark.parametrize(
