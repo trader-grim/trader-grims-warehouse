@@ -42,6 +42,12 @@
       "evidence": ["source-commit:8fac6d6", "schema:src/tgw/plan_authority.sql"]
     },
     {
+      "capability": "operator.surface-projection@1",
+      "survivor": "src/tgw/operator_console.py",
+      "state": {"designed": true, "implemented": true, "tested": true, "reviewed": false, "admitted": true, "deployed": false, "live": false},
+      "evidence": ["console-commit:29dcdf7", "mount-contract-commit:6fc56b1", "http-admission-commit:20c941d", "http-repair-commit:9355f1a", "test:tests/test_operator_console.py", "test:tests/test_operator_console_host.py"]
+    },
+    {
       "capability": "coding.harness-role-selection@1",
       "survivor": "src/tgw/harness_registry.py",
       "state": {"designed": true, "implemented": true, "tested": true, "reviewed": false, "admitted": true, "deployed": false, "live": false},
@@ -71,9 +77,61 @@
     {"path": "/opt/TGW/library/archive/tigwadev-home-droppings-20260807/agent-runs/1721", "capability": "plan.graph-query@1", "disposition": "historical-review-and-controller-evidence"},
     {"path": "/opt/TGW/library/archive/catnanny-home-droppings-20260807/tgw-capability-lab", "capability": "promptcraft.receiver-profiles@1", "disposition": "historical-lineage-source"},
     {"path": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse", "capability": "coding.governed-provision@1", "disposition": "semantic-diff-required-before-source-convergence"},
-    {"path": "/opt/TGW/tgw-lib/actors/codex/worktrees/approval-console", "capability": "operator.http-console@1", "disposition": "review-and-admission-pending"},
+    {"path": "/opt/TGW/tgw-lib/actors/codex/worktrees/approval-console", "capability": "operator.http-console@1", "disposition": "superseded-by-canonical-PlanAuthority-console; preserve-until-review-cutover-and-operator-acceptance"},
     {"path": "/opt/TGW/var/worktrees/todo-1735-approval-bootstrap", "capability": "authority.operator-decisions@1", "disposition": "overlap-audit-pending"},
     {"path": "/opt/TGW/var/worktrees/todo-1743", "capability": "effects.typed-handler-registry@1", "disposition": "overlap-audit-pending"}
+  ],
+  "supersession_decisions": [
+    {
+      "candidate": "src/tgw/coding_cli.py",
+      "candidate_state": "untracked-preserved",
+      "decision": "rejected-for-admission",
+      "reason": "direct process/worktree control bypasses the governed provider-selected dispatch and receipt path",
+      "replacement_refs": ["src/tgw/governed_coding.py@baf9412", "src/tgw/harness_registry.py@29a630e", "src/tgw/review_runner.py@e816504", "src/tgw/workflow/scheduler.py@0bd226ca"],
+      "cleanup_eligible": false
+    },
+    {
+      "candidate": "tests/test_spine_integration.py",
+      "candidate_state": "untracked-preserved",
+      "decision": "rejected-for-admission",
+      "reason": "prepends an archived external source tree and redefines workflow contracts, receipts, scheduler, and coding snapshot now admitted canonically",
+      "replacement_refs": ["src/tgw/workflow/contracts.py@81447b72", "src/tgw/workflow/scheduler.py@0bd226ca", "src/tgw/workflow/coding_snapshot.py", "tests/test_coding_snapshot.py", "tests/test_governed_coding.py@baf9412"],
+      "cleanup_eligible": false
+    }
+  ],
+  "harness_specific_candidates": [
+    {
+      "path": ".claude/agents/nix-flake-maintainer.md",
+      "classification": "claude-profile-host-rename-preserve-for-adapter-cutover",
+      "semantic_change": "a1131 host identity renamed to tgw-lib throughout Claude-only sysadmin authority text",
+      "replacement_ref": "agent-services/catalogs/harness-providers-v1.json",
+      "admitted": false,
+      "cleanup_eligible": false
+    },
+    {
+      "path": ".claude/settings.json",
+      "classification": "claude-runtime-config-preserve-for-materialization-cutover",
+      "semantic_change": "host rename plus hook commands made project-relative with CLAUDE_PROJECT_DIR",
+      "replacement_ref": "agent-services/installers/materialize.py@2284e2c",
+      "admitted": false,
+      "cleanup_eligible": false
+    },
+    {
+      "path": ".claude/settings.local.json",
+      "classification": "user-specific-allowlist-with-stale-Plan-consumers",
+      "semantic_change": "local allowlist paths moved to tgw-lib source, but retained embedded docs/TGW-Plan-Vault consumers instead of standalone Plan",
+      "replacement_ref": "/opt/TGW/library/plans@fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+      "admitted": false,
+      "cleanup_eligible": false
+    },
+    {
+      "path": "CLAUDE.md",
+      "classification": "claude-only-operating-contract-preserve-and-thin-later",
+      "semantic_change": "a1131 host identity renamed to tgw-lib; Claude-specific authority and startup contract remains intentionally user-specific",
+      "replacement_ref": "agent-services/skills/tgw-plan/SKILL.md",
+      "admitted": false,
+      "cleanup_eligible": false
+    }
   ],
   "retirement_gate": {
     "requires": ["survivor-independent-review", "runtime-cutover", "operator-acceptance", "zero-stale-consumer-references"],
