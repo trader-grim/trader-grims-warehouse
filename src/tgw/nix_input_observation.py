@@ -20,12 +20,13 @@ SCHEMA = "tgw-nix-input-observation/v2"
 MAGIC = b"TGWNIXO1"
 PREFIX = struct.Struct("!8sIQQQ32s32s32s")
 PYTHON = "/run/current-system/sw/bin/python3"
+SUDO = "/run/current-system/sw/bin/sudo"
 UNSHARE = "/run/current-system/sw/bin/unshare"
 IP = "/run/current-system/sw/bin/ip"
 NIX = "/run/current-system/sw/bin/nix"
 NIX_STORE = "/run/current-system/sw/bin/nix-store"
 GIT = "/run/current-system/sw/bin/git"
-TOOLS = {"unshare": UNSHARE, "ip": IP, "python": PYTHON, "nix": NIX, "nix_store": NIX_STORE, "git": GIT}
+TOOLS = {"sudo": SUDO, "unshare": UNSHARE, "ip": IP, "python": PYTHON, "nix": NIX, "nix_store": NIX_STORE, "git": GIT}
 NODE = "nixpkgs"
 REV = "ac62194c3917d5f474c1a844b6fd6da2db95077d"
 LOCK_NAR = "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w="
@@ -66,9 +67,11 @@ def helper_command(*, known_tool_sha256: dict[str, str]) -> list[str]:
     if set(known_tool_sha256) != set(TOOLS) or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", value) for value in known_tool_sha256.values()):
         raise NixInputObservationError("exact observer tool identities are required")
     return [
+        SUDO,
+        "-n",
+        "--",
         UNSHARE,
         "--net",
-        "--map-root-user",
         "--",
         "/usr/bin/env",
         "-i",
@@ -131,9 +134,13 @@ def validate_receipt(value: Any, *, request: dict[str, Any]) -> dict[str, Any]:
     process = value["process"]
     if (
         not isinstance(process, dict)
-        or set(process) != {"pid", "starttime", "exe_sha256"}
+        or set(process) != {"pid", "starttime", "exe_sha256", "uid", "euid", "cgroup"}
         or not all(isinstance(process[key], int) and process[key] > 0 for key in ("pid", "starttime"))
         or process["exe_sha256"] != request["tool_sha256"]["python"]
+        or process["uid"] != 0
+        or process["euid"] != 0
+        or not isinstance(process["cgroup"], str)
+        or not process["cgroup"].startswith("0::/")
     ):
         raise NixInputObservationError("observer process identity is invalid")
     if value["tools"] != request["tool_sha256"] or value["nix_version"] != "nix (Nix) 2.28.5" or value["lock_nodes"] != [{"node": NODE, "rev": REV, "nar_hash": LOCK_NAR}]:
@@ -213,7 +220,8 @@ def observe_archive(
         else:
             stable_paths = dict(TOOLS)
         command = helper_command(known_tool_sha256=known_tool_sha256)
-        command[0] = stable_paths["unshare"]
+        command[0] = stable_paths["sudo"]
+        command[3] = stable_paths["unshare"]
         command[-4] = stable_paths["python"]
         bound_request = {**request, "tool_sha256": known_tool_sha256, "tool_paths": stable_paths}
         completed = run(command, input=packet(helper_source, bound_request, archive), capture_output=True, timeout=180, check=False, pass_fds=tuple(tool_fds.values()))
@@ -431,7 +439,14 @@ def standalone_main() -> int:
                 "route_json_sha256": route_hash,
                 "held_for_entire_run": True,
             },
-            "process": {"pid": os.getpid(), "starttime": int(stat_fields[21]), "exe_sha256": "sha256:" + hashlib.sha256(Path("/proc/self/exe").read_bytes()).hexdigest()},
+            "process": {
+                "pid": os.getpid(),
+                "starttime": int(stat_fields[21]),
+                "exe_sha256": "sha256:" + hashlib.sha256(Path("/proc/self/exe").read_bytes()).hexdigest(),
+                "uid": os.getuid(),
+                "euid": os.geteuid(),
+                "cgroup": Path("/proc/self/cgroup").read_text().strip(),
+            },
             "tools": tools,
             "negative_probes_before": probes_before,
             "negative_probes_after": probes_after,

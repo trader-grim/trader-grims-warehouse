@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from tgw.nix_input_observation import LOCK_NAR, NIX, PREFIX, REV, UNSHARE, NixInputObservationError, observe_archive
+from tgw.nix_input_observation import LOCK_NAR, NIX, PREFIX, REV, SUDO, UNSHARE, NixInputObservationError, observe_archive
 from tgw.nix_input_observation import TOOLS as TOOL_PATHS
 
 DIGEST = "a" * 64
-TOOLS = {name: "sha256:" + DIGEST for name in ("unshare", "ip", "python", "nix", "nix_store", "git")}
+TOOLS = {name: "sha256:" + DIGEST for name in ("sudo", "unshare", "ip", "python", "nix", "nix_store", "git")}
 
 
 def request(archive, helper=b"# fixed standalone helper"):
@@ -39,7 +39,7 @@ def receipt(bound):
             "route_json_sha256": "sha256:" + DIGEST,
             "held_for_entire_run": True,
         },
-        "process": {"pid": 123, "starttime": 456, "exe_sha256": TOOLS["python"]},
+        "process": {"pid": 123, "starttime": 456, "exe_sha256": TOOLS["python"], "uid": 0, "euid": 0, "cgroup": "0::/observer.scope"},
         "tools": TOOLS,
         "negative_probes_before": {"dns": "denied", "public_https": "denied", "private": "denied", "metadata": "denied"},
         "negative_probes_after": {"dns": "denied", "public_https": "denied", "private": "denied", "metadata": "denied"},
@@ -73,7 +73,7 @@ def test_one_helper_owns_archive_namespace_and_all_nix_steps(tmp_path):
     result = observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=b"# fixed standalone helper", run=run)
     assert result["namespace"]["held_for_entire_run"] is True and len(calls) == 1
     command, kwargs = calls[0]
-    assert command[:4] == [UNSHARE, "--net", "--map-root-user", "--"]
+    assert command[:6] == [SUDO, "-n", "--", UNSHARE, "--net", "--"]
     assert "NIX_REMOTE=local" in command and NIX not in command
     assert kwargs["timeout"] == 180 and kwargs["capture_output"] is True
     assert b"exact archive" in kwargs["input"]
@@ -99,6 +99,27 @@ def test_archive_and_receipt_tampering_fail_closed(tmp_path):
         return subprocess.CompletedProcess(command, 0, json.dumps(value).encode(), b"")
 
     with pytest.raises(NixInputObservationError, match="namespace"):
+        observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=b"helper", run=run)
+
+
+@pytest.mark.parametrize("field,value", [("uid", 1004), ("euid", 1004), ("cgroup", "")])
+def test_privileged_namespace_process_identity_is_exact(tmp_path, field, value):
+    archive = tmp_path / "source.tar"
+    archive.write_bytes(b"archive")
+    req = request(archive, b"helper")
+
+    def run(command, **kwargs):
+        raw = kwargs["input"]
+        _, _, n, h, payload_size, *_ = PREFIX.unpack(raw[: PREFIX.size])
+        off = PREFIX.size + n + h
+        bound = json.loads(raw[off : off + payload_size])
+        result = receipt(bound)
+        result["process"][field] = value
+        unsigned = {key: item for key, item in result.items() if key != "receipt_sha256"}
+        result["receipt_sha256"] = "sha256:" + hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return subprocess.CompletedProcess(command, 0, json.dumps(result).encode(), b"")
+
+    with pytest.raises(NixInputObservationError, match="process identity"):
         observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=b"helper", run=run)
 
 
