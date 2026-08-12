@@ -69,7 +69,6 @@ def _mock_common(monkeypatch, tmp_path, sku, hint=None, lookup_result=None):
     monkeypatch.setattr(lookup_mod, "lookup_product", lambda item, cfg: lookup_result)
     monkeypatch.setattr(taxonomy_mod, "best_category", lambda cfg, title, category: (None, None))
     monkeypatch.setattr(image_hash_mod, "compute_dhash", lambda p: "fakehash")
-    monkeypatch.setattr(ai_identify_mod.state_machine, "enqueue_job", lambda **k: "job-1")
     monkeypatch.setattr(ai_identify_mod, "fence_patch_item", lambda cfg, sku, fields: {"ok": True})
 
 

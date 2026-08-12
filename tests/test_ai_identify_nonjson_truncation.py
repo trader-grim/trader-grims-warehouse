@@ -49,7 +49,6 @@ def _mock_common(monkeypatch, tmp_path, sku, raw_response):
     monkeypatch.setattr(image_hash_mod, "compute_dhash", lambda p: "fakehash")
     monkeypatch.setattr(image_hash_mod, "lookup_hash", lambda h, task: None)
     monkeypatch.setattr(image_hash_mod, "store_hash", lambda *a, **k: None)
-    monkeypatch.setattr(ai_identify_mod.state_machine, "enqueue_job", lambda **k: "job-1")
 
 
 def test_nonjson_error_message_carries_2000_chars_not_200(monkeypatch, tmp_path):
