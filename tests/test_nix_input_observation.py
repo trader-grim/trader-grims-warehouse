@@ -33,6 +33,8 @@ def receipt(req):
             "loopback": "down",
             "other_links": [],
             "routes": [],
+            "link_json": [{"ifname": "lo", "operstate": "DOWN", "flags": ["LOOPBACK"]}],
+            "route_json": [],
             "link_json_sha256": "sha256:" + DIGEST,
             "route_json_sha256": "sha256:" + DIGEST,
             "held_for_entire_run": True,
@@ -44,9 +46,12 @@ def receipt(req):
         "lock_nodes": [{"node": "nixpkgs", "rev": REV, "nar_hash": LOCK_NAR}],
         "forced_inputs": [{"lock_node": "nixpkgs", "lock_rev": REV, "lock_nar_hash": LOCK_NAR, "path": "/nix/store/11111111111111111111111111111111-source", "nar_sha256": "sha256:" + DIGEST}],
         "evaluated_drv": "/nix/store/22222222222222222222222222222222-review.drv",
-        "store_additions": [{"role": "derivation", "path": "/nix/store/22222222222222222222222222222222-review.drv", "nar_sha256": "sha256:" + DIGEST, "preexisting": True}],
+        "observed_outputs": [{"role": "derivation", "path": "/nix/store/22222222222222222222222222222222-review.drv", "nar_sha256": "sha256:" + DIGEST}],
+        "cleanup": "removed",
         "nix_version": "nix (Nix) 2.28.5",
     }
+    value["namespace"]["link_json_sha256"] = "sha256:" + hashlib.sha256(json.dumps(value["namespace"]["link_json"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    value["namespace"]["route_json_sha256"] = "sha256:" + hashlib.sha256(json.dumps(value["namespace"]["route_json"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     value["receipt_sha256"] = "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return value
 

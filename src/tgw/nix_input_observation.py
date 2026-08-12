@@ -81,7 +81,8 @@ def validate_receipt(value: Any, *, request: dict[str, Any]) -> dict[str, Any]:
         "lock_nodes",
         "forced_inputs",
         "evaluated_drv",
-        "store_additions",
+        "observed_outputs",
+        "cleanup",
         "nix_version",
         "receipt_sha256",
     }
@@ -90,13 +91,17 @@ def validate_receipt(value: Any, *, request: dict[str, Any]) -> dict[str, Any]:
     namespace = value["namespace"]
     if (
         not isinstance(namespace, dict)
-        or set(namespace) != {"start_inode", "end_inode", "loopback", "other_links", "routes", "link_json_sha256", "route_json_sha256", "held_for_entire_run"}
+        or set(namespace) != {"start_inode", "end_inode", "loopback", "other_links", "routes", "link_json", "route_json", "link_json_sha256", "route_json_sha256", "held_for_entire_run"}
         or not isinstance(namespace["start_inode"], int)
         or namespace["start_inode"] != namespace["end_inode"]
         or namespace["held_for_entire_run"] is not True
         or namespace["loopback"] != "down"
         or namespace["other_links"] != []
         or namespace["routes"] != []
+        or not isinstance(namespace["link_json"], list)
+        or not isinstance(namespace["route_json"], list)
+        or "sha256:" + hashlib.sha256(_canonical(namespace["link_json"])).hexdigest() != namespace["link_json_sha256"]
+        or "sha256:" + hashlib.sha256(_canonical(namespace["route_json"])).hexdigest() != namespace["route_json_sha256"]
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", namespace["link_json_sha256"])
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", namespace["route_json_sha256"])
     ):
@@ -128,23 +133,21 @@ def validate_receipt(value: Any, *, request: dict[str, Any]) -> dict[str, Any]:
         raise NixInputObservationError("observer exact forced input is invalid")
     if not STORE_PATH.fullmatch(value["evaluated_drv"]):
         raise NixInputObservationError("observer derivation identity is invalid")
-    additions = value["store_additions"]
+    additions = value["observed_outputs"]
     if (
         not isinstance(additions, list)
         or additions != sorted(additions, key=lambda item: (item.get("role", ""), item.get("path", "")))
         or len({item.get("path") for item in additions}) != len(additions)
         or len(additions) > 4
         or any(
-            set(item) != {"role", "path", "nar_sha256", "preexisting"}
-            or item["role"] not in {"source", "evaluation", "derivation"}
-            or not STORE_PATH.fullmatch(item["path"])
-            or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["nar_sha256"])
-            or not isinstance(item["preexisting"], bool)
+            set(item) != {"role", "path", "nar_sha256"} or item["role"] != "derivation" or not STORE_PATH.fullmatch(item["path"]) or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["nar_sha256"])
             for item in additions
         )
         or not any(item["role"] == "derivation" and item["path"] == value["evaluated_drv"] for item in additions)
     ):
         raise NixInputObservationError("observer attributable store additions are invalid")
+    if value["cleanup"] != "removed":
+        raise NixInputObservationError("observer cleanup is not terminally verified")
     unsigned = dict(value)
     claimed = unsigned.pop("receipt_sha256", None)
     if claimed != "sha256:" + hashlib.sha256(_canonical(unsigned)).hexdigest():
@@ -324,11 +327,11 @@ def standalone_main() -> int:
         input_nar = _run(base + ["hash", "path", "--type", "sha256", "--base16", input_path], tree).strip()
         drv_target = ".#packages.x86_64-linux.review-egress-systemd-units.drvPath"
         drv = _run(base + ["eval", "--raw", drv_target], tree).strip()
-        additions = []
+        observed_outputs = []
         for role, path in (("derivation", drv),):
-            additions.append(
-                {"role": role, "path": path, "nar_sha256": "sha256:" + _run(base + ["hash", "path", "--type", "sha256", "--base16", path], tree).strip(), "preexisting": _valid_store_path(path, tree)}
-            )
+            if not _valid_store_path(path, tree):
+                raise NixInputObservationError("evaluated derivation is not a valid observed output")
+            observed_outputs.append({"role": role, "path": path, "nar_sha256": "sha256:" + _run(base + ["hash", "path", "--type", "sha256", "--base16", path], tree).strip()})
         probes_after = _all_probes()
         netns_end = os.stat("/proc/self/ns/net").st_ino
         stat_fields = Path("/proc/self/stat").read_text().split()
@@ -341,23 +344,23 @@ def standalone_main() -> int:
                 "loopback": "down",
                 "other_links": [],
                 "routes": [],
+                "link_json": links,
+                "route_json": routes,
                 "link_json_sha256": link_hash,
                 "route_json_sha256": route_hash,
                 "held_for_entire_run": True,
             },
-            "process": {"pid": os.getpid(), "starttime": int(stat_fields[21]), "exe_sha256": tools["python"]},
+            "process": {"pid": os.getpid(), "starttime": int(stat_fields[21]), "exe_sha256": "sha256:" + hashlib.sha256(Path("/proc/self/exe").read_bytes()).hexdigest()},
             "tools": tools,
             "negative_probes_before": probes_before,
             "negative_probes_after": probes_after,
             "lock_nodes": [{"node": NODE, "rev": REV, "nar_hash": LOCK_NAR}],
             "forced_inputs": [{"lock_node": NODE, "lock_rev": REV, "lock_nar_hash": LOCK_NAR, "path": input_path, "nar_sha256": "sha256:" + input_nar}],
             "evaluated_drv": drv,
-            "store_additions": additions,
+            "observed_outputs": observed_outputs,
             "nix_version": _run([NIX, "--version"], tree).strip(),
         }
-        value["receipt_sha256"] = "sha256:" + hashlib.sha256(_canonical(value)).hexdigest()
-        sys.stdout.write(json.dumps(value, sort_keys=True, separators=(",", ":")))
-        return 0
+        success_value = value
     except Exception as exc:
         failure_exc = exc
     finally:
@@ -366,6 +369,14 @@ def standalone_main() -> int:
             cleanup_result = "removed" if not scratch.exists() else "ambiguous"
         except Exception:
             cleanup_result = "ambiguous"
+    if "failure_exc" not in locals() and cleanup_result == "removed":
+        success_value["cleanup"] = "removed"
+        success_value["receipt_sha256"] = "sha256:" + hashlib.sha256(_canonical(success_value)).hexdigest()
+        sys.stdout.write(json.dumps(success_value, sort_keys=True, separators=(",", ":")))
+        return 0
+    if "failure_exc" not in locals():
+        failure_exc = NixInputObservationError("cleanup outcome ambiguous")
+        stage = "cleanup"
     if "failure_exc" in locals():
         failure = {
             "schema": "tgw-nix-input-observation-failure/v1",
