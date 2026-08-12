@@ -1,0 +1,33 @@
+{
+  "schema": "tgw-harness-provider-registry/v1",
+  "id": "canonical-coding-harness-providers@1",
+  "providers": [
+    {
+      "id": "codex-local-runner",
+      "receiver_profile": {"id": "codex", "version": 1},
+      "qualified_roles": ["implementation", "independent-review", "controller-verification"],
+      "capabilities": ["repository-shell", "source-mutation", "tests", "git-inspection"],
+      "runner": {"kind": "configured-argv", "key": "codex-implement"},
+      "adapter_requirements": ["tgw-plan", "promptcraft"],
+      "preference": 100
+    },
+    {
+      "id": "controller-local-runner",
+      "receiver_profile": {"id": "generic", "version": 1},
+      "qualified_roles": ["controller-verification", "independent-review"],
+      "capabilities": ["tests", "lint", "receipt-verification"],
+      "runner": {"kind": "configured-argv", "key": "controller-verify"},
+      "adapter_requirements": ["promptcraft-card-handoff"],
+      "preference": 120
+    },
+    {
+      "id": "claude-local-runner",
+      "receiver_profile": {"id": "claude-code", "version": 1},
+      "qualified_roles": ["implementation", "independent-review", "controller-verification"],
+      "capabilities": ["repository-shell", "source-mutation", "tests", "git-inspection"],
+      "runner": {"kind": "unavailable", "reason": "Claude runner is not present in the admitted canonical source tree"},
+      "adapter_requirements": ["tgw-plan", "promptcraft"],
+      "preference": 110
+    }
+  ]
+}
