@@ -199,6 +199,7 @@ class TypedEffectHandlerRegistry:
                 "eval_log_sha256",
                 "build_log_sha256",
                 "systemd_verify_output_sha256",
+                "verifier_metadata_sha256",
                 "receipt_sha256",
             )
             if any(not isinstance(result.get(key), str) or not _SHA256.fullmatch(result[key]) for key in digest_keys):
@@ -230,6 +231,13 @@ class TypedEffectHandlerRegistry:
                 raise EffectHandlerError("reviewed Nix evaluation derivation identity is invalid")
             if result.get("systemd_verify_exit") != 0:
                 raise EffectHandlerError("generated systemd units did not verify")
+            if result.get("verifier_metadata") != {
+                "schema": "tgw-review-egress-systemd-units/v1",
+                "system": "x86_64-linux",
+                "units": list(_REVIEW_EVAL_UNITS),
+                "activation": False,
+            }:
+                raise EffectHandlerError("generated unit verifier metadata is invalid")
             if not isinstance(result.get("nix_version"), str) or not result["nix_version"]:
                 raise EffectHandlerError("Nix version evidence is absent")
             try:
@@ -369,6 +377,9 @@ class TypedEffectHandlerRegistry:
                     "unit_set",
                     "output_schema",
                     "nix_network_policy",
+                    "input_closure_manifest_json",
+                    "input_closure_manifest_sha256",
+                    "input_closure_path_count",
                     "minimum_systemd_version",
                     "max_duration_seconds",
                     "max_output_bytes",

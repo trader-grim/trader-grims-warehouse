@@ -24,6 +24,7 @@ from tgw.nixos_reviewed_evaluation import (
     SshReviewedEvaluationProvider,
     StepFailure,
     _sealed_memfd,
+    _validate_remote_effect,
     create_bootstrap_failure_receipt,
     create_failure_receipt,
     execute_packet,
@@ -40,6 +41,7 @@ DIGEST = "c" * 64
 
 
 def parameters(archive_digest=DIGEST):
+    input_closure = [{"path": "/nix/store/11111111111111111111111111111111-input", "nar_sha256": "sha256:" + DIGEST}]
     return {
         "target_host": "tgw-prod",
         "flake_repository_id": "tgw-flake",
@@ -65,6 +67,9 @@ def parameters(archive_digest=DIGEST):
         "unit_set": "tgw-review-egress@.service,tgw-review-egress-attest@.service,tgw-review-egress-namespace@.service",
         "output_schema": "tgw-nixos-reviewed-evaluation-receipt/v1",
         "nix_network_policy": "offline-no-substituters",
+        "input_closure_manifest_json": json.dumps(input_closure, sort_keys=True, separators=(",", ":")),
+        "input_closure_manifest_sha256": "sha256:" + sha256(json.dumps(input_closure, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "input_closure_path_count": "1",
         "minimum_systemd_version": "257",
         "max_duration_seconds": "300",
         "max_output_bytes": "1048576",
@@ -85,7 +90,7 @@ def effect(request=None):
 def test_real_prepared_effect_envelope_matches_authority_and_remote_parser():
     import tgw.nixos_reviewed_evaluation as provider_module
 
-    prepared = json.loads(Path("agent-services/candidates/nixos-reviewed-evaluation-9ac61da-PREPARED.json").read_text())["effect"]
+    prepared = effect(parameters())
     authority = TypedEffect.parse(prepared)
     remote, bound = provider_module._validate_remote_effect(prepared)
     assert remote == prepared and bound == prepared["parameters"]
@@ -99,6 +104,28 @@ def test_real_prepared_effect_envelope_matches_authority_and_remote_parser():
     mismatched = {**prepared, "generation": ""}
     with pytest.raises(EvaluationError, match="identity"):
         provider_module._validate_remote_effect(mismatched)
+
+
+@pytest.mark.parametrize("mutation", ["hash", "count", "path", "nar", "duplicate"])
+def test_input_closure_manifest_is_exact_content_addressed_and_bounded(mutation):
+    value = parameters()
+    manifest = json.loads(value["input_closure_manifest_json"])
+    if mutation == "hash":
+        value["input_closure_manifest_sha256"] = "sha256:" + "0" * 64
+    elif mutation == "count":
+        value["input_closure_path_count"] = "2"
+    elif mutation == "path":
+        manifest[0]["path"] = "/tmp/not-store"
+    elif mutation == "nar":
+        manifest[0]["nar_sha256"] = "sha256:bad"
+    else:
+        manifest.append(dict(manifest[0]))
+        value["input_closure_path_count"] = "2"
+    if mutation in {"path", "nar", "duplicate"}:
+        value["input_closure_manifest_json"] = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        value["input_closure_manifest_sha256"] = "sha256:" + sha256(value["input_closure_manifest_json"].encode()).hexdigest()
+    with pytest.raises(EvaluationError, match="input closure"):
+        _validate_remote_effect(effect(value))
 
 
 def make_archive(path: Path, *, commit=COMMIT):
@@ -325,8 +352,29 @@ def test_remote_helper_executes_only_fixed_offline_steps_and_cleans_scratch(tmp_
     request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
     closure = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-tgw-prod-test"
     original_is_file = Path.is_file
+    original_read_text = Path.read_text
     original_digest = __import__("tgw.nixos_reviewed_evaluation", fromlist=["_digest_file"])._digest_file
-    monkeypatch.setattr(Path, "is_file", lambda path: True if str(path).startswith(closure + "/etc/systemd/system/") else original_is_file(path))
+    monkeypatch.setattr(
+        Path,
+        "is_file",
+        lambda path: True if str(path).startswith(closure + "/units/") or str(path) == closure + "/verifier-metadata.json" else original_is_file(path),
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda path, *args, **kwargs: (
+            json.dumps(
+                {
+                    "schema": "tgw-review-egress-systemd-units/v1",
+                    "system": "x86_64-linux",
+                    "units": list(provider_module.UNITS),
+                    "activation": False,
+                }
+            )
+            if str(path) == closure + "/verifier-metadata.json"
+            else original_read_text(path, *args, **kwargs)
+        ),
+    )
     remote_paths = {"/run/current-system/sw/bin/python3", *EXECUTABLES.values()}
     monkeypatch.setattr("tgw.nixos_reviewed_evaluation._digest_file", lambda path: "sha256:" + DIGEST if str(path).startswith(closure) or str(path) in remote_paths else original_digest(path))
     calls = []
@@ -381,6 +429,36 @@ def test_forced_index_reconstructs_tracked_files_hidden_by_ignore_rules(tmp_path
     assert ignored_tree != expected
     subprocess.run(git + ["add", "-f", "-A"], cwd=source, check=True)
     assert subprocess.check_output(git + ["write-tree"], cwd=source, text=True).strip() == expected
+
+
+def test_missing_offline_input_is_refused_before_eval_or_build(tmp_path, monkeypatch):
+    archive = tmp_path / "source.tar"
+    make_archive(archive)
+    request = parameters(sha256(archive.read_bytes()).hexdigest())
+    request["flake_lock_sha256"] = "sha256:" + sha256(b"lock").hexdigest()
+    request["module_sha256"] = "sha256:" + sha256(b"module").hexdigest()
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    original_digest = provider_module._digest_file
+    remote_paths = {provider_module.REMOTE_PYTHON, *EXECUTABLES.values()}
+    monkeypatch.setattr(provider_module, "_digest_file", lambda path: "sha256:" + DIGEST if str(path) in remote_paths else original_digest(path))
+    calls = []
+
+    def fake_run(argv, *, cwd, timeout):
+        calls.append(argv)
+        if argv[-1] == "write-tree":
+            return TREE
+        if "hash" in argv:
+            return "0" * 64
+        return ""
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+    with pytest.raises(EvaluationError, match="offline input closure"):
+        execute_packet(packet(request, archive), run=fake_run, scratch_root=scratch, scratch_uid=os.geteuid())
+    assert not any("eval" in call or "build" in call for call in calls)
+    assert not list(scratch.iterdir())
 
 
 def test_real_main_execute_packet_pre_scratch_failure(tmp_path, monkeypatch):

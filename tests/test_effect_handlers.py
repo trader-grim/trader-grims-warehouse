@@ -1,3 +1,5 @@
+import hashlib
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -11,6 +13,7 @@ DIGEST = "c" * 64
 
 
 def _evaluation_parameters():
+    input_closure = [{"path": "/nix/store/11111111111111111111111111111111-input", "nar_sha256": "sha256:" + DIGEST}]
     return {
         "target_host": "tgw-prod",
         "flake_repository_id": "tgw-flake",
@@ -36,6 +39,9 @@ def _evaluation_parameters():
         "unit_set": "tgw-review-egress@.service,tgw-review-egress-attest@.service,tgw-review-egress-namespace@.service",
         "output_schema": "tgw-nixos-reviewed-evaluation-receipt/v1",
         "nix_network_policy": "offline-no-substituters",
+        "input_closure_manifest_json": json.dumps(input_closure, sort_keys=True, separators=(",", ":")),
+        "input_closure_manifest_sha256": "sha256:" + hashlib.sha256(json.dumps(input_closure, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "input_closure_path_count": "1",
         "minimum_systemd_version": "257",
         "max_duration_seconds": "300",
         "max_output_bytes": "1048576",
@@ -77,6 +83,17 @@ def _evaluation_result(parameters):
         "eval_log_sha256": DIGEST,
         "build_log_sha256": DIGEST,
         "systemd_verify_output_sha256": DIGEST,
+        "verifier_metadata_sha256": DIGEST,
+        "verifier_metadata": {
+            "schema": "tgw-review-egress-systemd-units/v1",
+            "system": "x86_64-linux",
+            "units": [
+                "tgw-review-egress@.service",
+                "tgw-review-egress-attest@.service",
+                "tgw-review-egress-namespace@.service",
+            ],
+            "activation": False,
+        },
         "systemd_verify_exit": 0,
         "systemd_version": 257,
         "nix_version": "2.28.5",

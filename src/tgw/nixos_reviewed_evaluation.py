@@ -405,6 +405,9 @@ def _validate_remote_effect(value: Any) -> tuple[dict[str, Any], dict[str, str]]
         "unit_set",
         "output_schema",
         "nix_network_policy",
+        "input_closure_manifest_json",
+        "input_closure_manifest_sha256",
+        "input_closure_path_count",
         "minimum_systemd_version",
         "max_duration_seconds",
         "max_output_bytes",
@@ -442,6 +445,32 @@ def _validate_remote_effect(value: Any) -> tuple[dict[str, Any], dict[str, str]]
         raise EvaluationError("remote digest binding is invalid")
     if value["artifact_ref"] != "artifact:sha256:" + value["source_archive_sha256"].removeprefix("sha256:"):
         raise EvaluationError("remote artifact identity mismatch")
+    try:
+        input_closure = json.loads(value["input_closure_manifest_json"])
+    except json.JSONDecodeError as exc:
+        raise EvaluationError("input closure manifest is invalid JSON") from exc
+    store_path = re.compile(r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+")
+    if (
+        not isinstance(input_closure, list)
+        or not 1 <= len(input_closure) <= 10_000
+        or value["input_closure_path_count"] != str(len(input_closure))
+        or "sha256:" + sha256(_canonical(input_closure)).hexdigest() != "sha256:" + value["input_closure_manifest_sha256"].removeprefix("sha256:")
+    ):
+        raise EvaluationError("input closure manifest binding is invalid")
+    paths = []
+    for item in input_closure:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"path", "nar_sha256"}
+            or not isinstance(item["path"], str)
+            or not store_path.fullmatch(item["path"])
+            or not isinstance(item["nar_sha256"], str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["nar_sha256"])
+        ):
+            raise EvaluationError("input closure manifest entry is invalid")
+        paths.append(item["path"])
+    if paths != sorted(set(paths)):
+        raise EvaluationError("input closure paths must be unique and sorted")
     identity = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}")
     if not value["scratch_id"].startswith("nixos-review:") or not identity.fullmatch(value["scratch_id"]) or not identity.fullmatch(value["operation_id"]):
         raise EvaluationError("remote symbolic identity is invalid")
@@ -721,6 +750,7 @@ def execute_packet(
     if len(request_raw) != request_size:
         raise EvaluationError("evaluation request is truncated")
     effect, bound = _validate_remote_effect(json.loads(request_raw))
+    input_closure = json.loads(bound["input_closure_manifest_json"])
     _FAILURE_CONTEXT.update(
         {
             "request_hash": globals().get("_BOOTSTRAP_REQUEST_HASH", "unknown"),
@@ -809,16 +839,33 @@ def execute_packet(
             "true",
             "--no-write-lock-file",
         ]
-        drv = run(base + ["eval", "--raw", ".#nixosConfigurations.tgw-prod.config.system.build.toplevel.drvPath"], cwd=source, timeout=timeout).strip()
+        for item in input_closure:
+            observed = run(base + ["hash", "path", "--type", "sha256", "--base16", item["path"]], cwd=source, timeout=timeout).strip()
+            if observed != item["nar_sha256"].removeprefix("sha256:"):
+                raise EvaluationError("offline input closure NAR identity mismatch")
+        target = ".#packages.x86_64-linux.review-egress-systemd-units"
+        drv = run(base + ["eval", "--raw", target + ".drvPath"], cwd=source, timeout=timeout).strip()
         enter("nix-build")
-        build_log = run(base + ["build", "--no-link", "--print-out-paths", ".#nixosConfigurations.tgw-prod.config.system.build.toplevel"], cwd=source, timeout=timeout)
+        build_log = run(base + ["build", "--no-link", "--print-out-paths", target], cwd=source, timeout=timeout)
         closure = build_log.strip()
         if "\n" in closure or not closure.startswith("/nix/store/"):
             raise EvaluationError("Nix build returned an unexpected closure set")
-        unit_paths = [Path(closure) / "etc/systemd/system" / unit for unit in UNITS]
+        unit_paths = [Path(closure) / "units" / unit for unit in UNITS]
+        metadata_path = Path(closure) / "verifier-metadata.json"
         enter("unit-extract")
-        if any(not path.is_file() for path in unit_paths):
+        if any(not path.is_file() for path in unit_paths) or not metadata_path.is_file():
             raise EvaluationError("generated unit set is incomplete")
+        try:
+            verifier_metadata = json.loads(metadata_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise EvaluationError("generated verifier metadata is invalid") from exc
+        if verifier_metadata != {
+            "schema": "tgw-review-egress-systemd-units/v1",
+            "system": bound["system"],
+            "units": list(UNITS),
+            "activation": False,
+        }:
+            raise EvaluationError("generated verifier metadata contract mismatch")
         enter("systemd-verify")
         verify_log = run([EXECUTABLES["systemd_analyze"], "verify", *map(str, unit_paths)], cwd=source, timeout=timeout)
         enter("closure-manifest")
@@ -855,6 +902,8 @@ def execute_packet(
             "home_db_write": False,
             "system": bound["system"],
             "evaluation_target": bound["evaluation_target"],
+            "verifier_metadata": verifier_metadata,
+            "verifier_metadata_sha256": _digest_file(metadata_path),
             "evaluated_config_drv": drv,
             "closure_manifest": closure_manifest,
             "closure_manifest_ref": "inline:" + closure_manifest_sha256,

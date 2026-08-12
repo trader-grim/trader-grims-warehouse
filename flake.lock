@@ -77,6 +77,10 @@
     },
     "root": {
       "inputs": {
+        "nixpkgs": [
+          "tgw-flake",
+          "nixpkgs"
+        ],
         "tgw-flake": "tgw-flake"
       }
     },
