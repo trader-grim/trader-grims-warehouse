@@ -1,0 +1,33 @@
+{
+  "attempt": {
+    "artifact_sha256": "sha256:a5eee617cd931f6ffd9eabe08c17ef10ef608a7f57f9975d5b6d9045e3690ae4",
+    "diagnostic_code": "VALIDATION_REFUSED",
+    "outcome": "FAILED",
+    "receipt_sha256": "sha256:bce9aa440e1c67ce2fab8553f0c3704b55669c7e7208fd444befa9c9931824c5",
+    "request_hash": "sha256:788fa3d28e810d7c8a392d87940de803a1a504fedbaefbe8de309d7f3f67fc67",
+    "stage": "request-validation"
+  },
+  "classification": "VALIDATED_FAILED_NO_EFFECT",
+  "post_observation": {
+    "current_system": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "failure_artifact_mode": "0400",
+    "failure_artifact_owner_uid": 1004,
+    "failure_artifact_size": 801,
+    "scratch_root": "ABSENT",
+    "system_profile": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194"
+  },
+  "recommendation": {
+    "canonical_fix": "Transport and validate the canonical typed effect envelope with generation beside parameters. Derive the remote effect hash from that envelope and pass generation separately to failure context; do not store or admit generation as a second parameter authority field.",
+    "execution_adapter": "All execution paths, including prepared evaluation requests, must parse the outer TypedEffect and use the registered prepare/transport adapter rather than projecting effect.parameters directly.",
+    "fresh_lineage_required": true
+  },
+  "root_cause": {
+    "authority_shape": "The prepared request correctly stores generation at effect.generation and omits it from effect.parameters.",
+    "remote_shape": "The streamed remote validator incorrectly requires generation inside its flattened parameter object.",
+    "replay": "The exact request has 34 parameters; the remote parser requires the same 34 plus generation, so validation deterministically refuses before provider identity or scratch creation.",
+    "test_gap": "Provider tests supplied the flattened generation field directly and did not exercise projection from the canonical outer effect envelope."
+  },
+  "schema": "tgw-nixos-reviewed-evaluation-failure-reconciliation/v1",
+  "self_hash": "sha256:ea30aca3955d80ce8748e3e3516d192d94369bfdc23f202518631b2f2438b944",
+  "source_commit": "9ac61da68d25672dc3534b3b4684d7a54b5542de"
+}
