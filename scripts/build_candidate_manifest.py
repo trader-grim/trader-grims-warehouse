@@ -18,9 +18,13 @@ def main() -> int:
     parser.add_argument("--closure-hash", required=True)
     parser.add_argument("--focused-receipt", type=Path, required=True)
     parser.add_argument("--migration-receipt", type=Path)
+    parser.add_argument("--graph", type=Path)
+    parser.add_argument("--luet-conformance-receipt", type=Path)
     args = parser.parse_args()
     focused = json.loads(args.focused_receipt.read_text())
     migration = MigrationSafetyReceipt(**json.loads(args.migration_receipt.read_text())) if args.migration_receipt else None
+    graph = json.loads(args.graph.read_text()) if args.graph else None
+    conformance = json.loads(args.luet_conformance_receipt.read_text()) if args.luet_conformance_receipt else None
     manifest = build_candidate_manifest(
         args.repo,
         commit=args.commit,
@@ -30,6 +34,8 @@ def main() -> int:
         closure_hash=args.closure_hash,
         focused_receipt=focused,
         full_suite=(".venv/bin/pytest", "-q"),
+        graph=graph,
+        conformance_receipt=conformance,
         migration_receipt=migration,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
