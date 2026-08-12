@@ -27,7 +27,17 @@ def _registry(**changes):
     [
         (
             "coding-release",
-            {"candidate_commit": SHA, "candidate_tree": TREE, "archive_sha256": DIGEST, "artifact_ref": "artifact:release-1", "expected_current": "release-a", "operation_id": "install-b"},
+            {
+                "candidate_commit": SHA,
+                "candidate_tree": TREE,
+                "archive_sha256": DIGEST,
+                "artifact_ref": "artifact:release-1",
+                "root_id": "tgw-staging",
+                "expected_current": "release-a",
+                "operation_id": "install-b",
+                "review_receipt": "review:1",
+                "controller_receipt": "controller:1",
+            },
         ),
         ("bounded-flake-push", {"repository_id": "tgw-flake", "host_role": "production", "commit": SHA, "remote_ref": "origin/master"}),
         ("flake-switch-record-only", {"host_role": "production", "commit": SHA, "execution_receipt": "manual:1"}),
@@ -56,7 +66,18 @@ def test_all_four_registered_effects_consume_exact_authority_then_invoke_typed_p
         {
             "kind": "coding-release",
             "generation": "g",
-            "parameters": {"candidate_commit": SHA, "candidate_tree": TREE, "archive_sha256": DIGEST, "artifact_ref": "/tmp/arbitrary", "expected_current": "a", "operation_id": "x", "command": "sh"},
+            "parameters": {
+                "candidate_commit": SHA,
+                "candidate_tree": TREE,
+                "archive_sha256": DIGEST,
+                "artifact_ref": "/tmp/arbitrary",
+                "root_id": "x",
+                "expected_current": "a",
+                "operation_id": "x",
+                "review_receipt": "r",
+                "controller_receipt": "c",
+                "command": "sh",
+            },
         },
         {"kind": "bounded-flake-push", "generation": "g", "parameters": {"repository_id": "other", "host_role": "random-host", "commit": SHA, "remote_ref": "elsewhere"}},
         {"kind": "dependency-resubmit", "generation": "g", "parameters": {"dependency_id": "W", "queue_id": "arbitrary", "failed_generation": "g0"}},
@@ -94,7 +115,17 @@ def test_release_failure_invokes_only_registered_rollback_and_receipts_it():
         {
             "kind": "coding-release",
             "generation": "release-b",
-            "parameters": {"candidate_commit": SHA, "candidate_tree": TREE, "archive_sha256": DIGEST, "artifact_ref": "artifact:1", "expected_current": "release-a", "operation_id": "install-b"},
+            "parameters": {
+                "candidate_commit": SHA,
+                "candidate_tree": TREE,
+                "archive_sha256": DIGEST,
+                "artifact_ref": "artifact:1",
+                "root_id": "tgw-staging",
+                "expected_current": "release-a",
+                "operation_id": "install-b",
+                "review_receipt": "review:1",
+                "controller_receipt": "controller:1",
+            },
         }
     )
 
