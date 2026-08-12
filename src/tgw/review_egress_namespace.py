@@ -112,6 +112,106 @@ def _json_list(raw: str, name: str) -> list[dict]:
     return value
 
 
+def _nft_expr(item: dict) -> tuple:
+    for verdict in ("accept", "drop", "masquerade"):
+        if item == {verdict: None}:
+            return (verdict,)
+    if set(item) != {"match"} or set(item["match"]) != {"op", "left", "right"}:
+        raise NamespaceError("nft expression shape is not admitted")
+    value = item["match"]
+    if value["op"] not in ("==", "!=", "in"):
+        raise NamespaceError("nft comparison operator is not admitted")
+    left = value["left"]
+    if set(left) == {"meta"} and set(left["meta"]) == {"key"}:
+        field = ("meta", left["meta"]["key"])
+    elif set(left) == {"payload"} and set(left["payload"]) == {"protocol", "field"}:
+        field = ("payload", left["payload"]["protocol"], left["payload"]["field"])
+    elif left == {"ct": {"key": "state"}}:
+        field = ("ct", "state")
+    else:
+        raise NamespaceError("nft match field is not admitted")
+    right = tuple(value["right"]) if isinstance(value["right"], list) else value["right"]
+    return ("match", field, value["op"], right)
+
+
+def normalize_nft_rules(document: dict) -> tuple[dict, tuple]:
+    """Normalize nftables 1.1 JSON while ignoring only volatile handles."""
+    if set(document) != {"nftables"} or not isinstance(document["nftables"], list):
+        raise NamespaceError("nft document is malformed")
+    chains, rules = {}, []
+    for row in document["nftables"]:
+        if set(row) == {"metainfo"} or set(row) == {"table"}:
+            continue
+        if set(row) == {"chain"}:
+            chain = row["chain"]
+            key = (chain.get("family"), chain.get("table"), chain.get("name"))
+            chains[key] = {k: chain.get(k) for k in ("type", "hook", "prio", "policy")}
+        elif set(row) == {"rule"}:
+            rule = row["rule"]
+            if set(rule) - {"family", "table", "chain", "handle", "expr"}:
+                raise NamespaceError("nft rule has unapproved fields")
+            rules.append((rule.get("family"), rule.get("table"), rule.get("chain"), tuple(_nft_expr(item) for item in rule.get("expr", []))))
+        else:
+            raise NamespaceError("nft document row is not admitted")
+    return chains, tuple(rules)
+
+
+def validate_review_nft(namespace_doc: dict, host_doc: dict, topology: Topology) -> None:
+    def m(field, op, right):
+        return ("match", field, op, right)
+
+    ns_chain, ns_rules = normalize_nft_rules(namespace_doc)
+    host_chain, host_rules = normalize_nft_rules(host_doc)
+    ns = "tgw_review"
+    host = f"tgw_review_{topology.run_id}"
+    private = ("0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4")
+    expected_ns = (
+        ("inet", ns, "output", (m(("meta", "oifname"), "==", "lo"), m(("meta", "skuid"), "==", 972), ("accept",))),
+        ("inet", ns, "output", (m(("meta", "oifname"), "==", "lo"), m(("meta", "skuid"), "==", 973), m(("payload", "tcp", "dport"), "==", topology.broker_port), ("accept",))),
+        ("inet", ns, "output", (m(("meta", "skuid"), "==", 972), m(("payload", "udp", "dport"), "==", 53), ("accept",))),
+        ("inet", ns, "output", (m(("meta", "skuid"), "==", 972), m(("payload", "tcp", "dport"), "in", (53, 443)), ("accept",))),
+        ("inet", ns, "output", (m(("ct", "state"), "in", ("established", "related")), ("accept",))),
+    )
+    expected_host = (
+        ("inet", host, "forward", (m(("meta", "iifname"), "==", topology.host_if), m(("payload", "ip", "daddr"), "in", private), ("drop",))),
+        ("inet", host, "forward", (m(("meta", "iifname"), "==", topology.host_if), m(("payload", "tcp", "dport"), "==", 443), ("accept",))),
+        ("inet", host, "forward", (m(("meta", "iifname"), "==", topology.host_if), m(("payload", "udp", "dport"), "==", 53), ("accept",))),
+        ("inet", host, "forward", (m(("meta", "iifname"), "==", topology.host_if), m(("payload", "tcp", "dport"), "==", 53), ("accept",))),
+        ("inet", host, "forward", (m(("meta", "iifname"), "==", topology.host_if), ("drop",))),
+        ("inet", host, "postrouting", (m(("meta", "oifname"), "!=", topology.host_if), m(("payload", "ip", "saddr"), "==", topology.peer_address), ("masquerade",))),
+    )
+    if ns_chain != {("inet", ns, "output"): {"type": "filter", "hook": "output", "prio": 0, "policy": "drop"}} or ns_rules != expected_ns:
+        raise NamespaceError("namespace nft policy differs from the exact policy")
+    expected_chains = {
+        ("inet", host, "forward"): {"type": "filter", "hook": "forward", "prio": 0, "policy": "accept"},
+        ("inet", host, "postrouting"): {"type": "nat", "hook": "postrouting", "prio": 100, "policy": None},
+    }
+    if host_chain != expected_chains or host_rules != expected_host:
+        raise NamespaceError("host nft policy differs from the exact policy")
+
+
+def canonical_nft_capture_receipt(namespace_doc: dict, host_doc: dict, topology: Topology) -> dict:
+    """Validate and hash canonical ASTs without retaining unrelated live rules."""
+    validate_review_nft(namespace_doc, host_doc, topology)
+    namespace = normalize_nft_rules(namespace_doc)
+    host = normalize_nft_rules(host_doc)
+
+    def serializable(value):
+        chains, rules = value
+        return {"chains": [[*key, config] for key, config in sorted(chains.items())], "rules": rules}
+
+    payload = json.dumps({"namespace": serializable(namespace), "host": serializable(host)}, sort_keys=True, separators=(",", ":"), default=list).encode()
+    return {
+        "schema": "tgw-review-egress-nft-capture/v1",
+        "run_id": topology.run_id,
+        "namespace": topology.namespace,
+        "canonical_sha256": "sha256:" + sha256(payload).hexdigest(),
+        "namespace_rule_count": len(namespace[1]),
+        "host_rule_count": len(host[1]),
+        "raw_retained": False,
+    }
+
+
 def _contains(value, expected: dict) -> bool:
     if isinstance(value, dict):
         if all(key in value and value[key] == item for key, item in expected.items()):
@@ -143,26 +243,11 @@ def parse_live_identity(evidence: dict, topology: Topology, *, pid: int, runtime
         raise NamespaceError("route semantic mismatch")
     try:
         rules_doc, counters_doc = json.loads(evidence["ruleset"]), json.loads(evidence["counters"])
-        rules = rules_doc["nftables"]
-        counters = counters_doc["nftables"]
+        if not isinstance(rules_doc["nftables"], list) or not isinstance(counters_doc["nftables"], list):
+            raise TypeError("nftables is not a list")
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise NamespaceError("nft readback is malformed") from exc
-    tables = {(x["table"].get("family"), x["table"].get("name")) for x in rules if set(x) == {"table"}}
-    chains = [x["chain"] for x in rules if set(x) == {"chain"}]
-    host_tables = {(x["table"].get("family"), x["table"].get("name")) for x in counters if set(x) == {"table"}}
-    output = [x for x in chains if x.get("family") == "inet" and x.get("table") == "tgw_review" and x.get("name") == "output"]
-    rule_objects = [x["rule"] for x in rules if set(x) == {"rule"} and x["rule"].get("table") == "tgw_review"]
-    worker_rule = [r for r in rule_objects if _contains(r.get("expr"), {"right": 973}) and _contains(r.get("expr"), {"right": topology.broker_port}) and _contains(r.get("expr"), {"accept": None})]
-    broker_rule = [r for r in rule_objects if _contains(r.get("expr"), {"right": 972}) and _contains(r.get("expr"), {"accept": None})]
-    if (
-        tables != {("inet", "tgw_review")}
-        or len(output) != 1
-        or output[0].get("policy") != "drop"
-        or len(worker_rule) != 1
-        or not broker_rule
-        or host_tables != {("inet", f"tgw_review_{topology.run_id}")}
-    ):
-        raise NamespaceError("nft semantic mismatch")
+    validate_review_nft(rules_doc, counters_doc, topology)
     try:
         process_fields = evidence["broker_process"].split()
         process = {"pid": int(process_fields[0]), "uid": int(process_fields[1]), "cgroup": process_fields[2]}

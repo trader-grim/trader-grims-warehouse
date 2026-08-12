@@ -9,8 +9,55 @@ from tgw.review_egress_broker import ReviewEgressPolicy, verify_network_attestat
 from tgw.review_egress_namespace import NamespaceError, Topology, collect_kernel_attestation, commands, execute
 
 
+def nft_fixtures(t):
+    def match(left, right, op="=="):
+        return {"match": {"op": op, "left": left, "right": right}}
+
+    def meta(key):
+        return {"meta": {"key": key}}
+
+    def payload(protocol, field):
+        return {"payload": {"protocol": protocol, "field": field}}
+
+    ns_exprs = [
+        [match(meta("oifname"), "lo"), match(meta("skuid"), 972), {"accept": None}],
+        [match(meta("oifname"), "lo"), match(meta("skuid"), 973), match(payload("tcp", "dport"), 18443), {"accept": None}],
+        [match(meta("skuid"), 972), match(payload("udp", "dport"), 53), {"accept": None}],
+        [match(meta("skuid"), 972), match(payload("tcp", "dport"), [53, 443], "in"), {"accept": None}],
+        [match({"ct": {"key": "state"}}, ["established", "related"], "in"), {"accept": None}],
+    ]
+    private = ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4"]
+    host_exprs = [
+        [match(meta("iifname"), t.host_if), match(payload("ip", "daddr"), private, "in"), {"drop": None}],
+        [match(meta("iifname"), t.host_if), match(payload("tcp", "dport"), 443), {"accept": None}],
+        [match(meta("iifname"), t.host_if), match(payload("udp", "dport"), 53), {"accept": None}],
+        [match(meta("iifname"), t.host_if), match(payload("tcp", "dport"), 53), {"accept": None}],
+        [match(meta("iifname"), t.host_if), {"drop": None}],
+        [match(meta("oifname"), t.host_if, "!="), match(payload("ip", "saddr"), t.peer_address), {"masquerade": None}],
+    ]
+    ns = {
+        "nftables": [
+            {"metainfo": {"json_schema_version": 1}},
+            {"table": {"family": "inet", "name": "tgw_review"}},
+            {"chain": {"family": "inet", "table": "tgw_review", "name": "output", "type": "filter", "hook": "output", "prio": 0, "policy": "drop"}},
+        ]
+        + [{"rule": {"family": "inet", "table": "tgw_review", "chain": "output", "expr": expr}} for expr in ns_exprs]
+    }
+    name = f"tgw_review_{t.run_id}"
+    host = {
+        "nftables": [
+            {"table": {"family": "inet", "name": name}},
+            {"chain": {"family": "inet", "table": name, "name": "forward", "type": "filter", "hook": "forward", "prio": 0, "policy": "accept"}},
+            {"chain": {"family": "inet", "table": name, "name": "postrouting", "type": "nat", "hook": "postrouting", "prio": 100}},
+        ]
+        + [{"rule": {"family": "inet", "table": name, "chain": "postrouting" if i == 5 else "forward", "expr": expr}} for i, expr in enumerate(host_exprs)]
+    }
+    return ns, host
+
+
 def test_topology_is_derived_only_from_bounded_run_identity():
     topology = Topology.for_run("abcdef123456")
+    namespace_nft, host_nft = nft_fixtures(topology)
     assert topology.namespace == "tgw-review-abcdef123456"
     assert topology.broker_port == 18443
     for invalid in ("ABCDEF123456", "short", "../../escape", "a" * 13):
@@ -88,6 +135,7 @@ def test_privileged_kernel_attestation_derives_live_evidence_and_is_asymmetrical
     private = Ed25519PrivateKey.generate()
     private_bytes = private.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
     public_bytes = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    namespace_nft, host_nft = nft_fixtures(topology)
 
     def invoke(argv, **kwargs):
         if argv[0] == "systemctl":
@@ -112,28 +160,8 @@ def test_privileged_kernel_attestation_derives_live_evidence_and_is_asymmetrical
             f"ip netns exec {topology.namespace} ip -j route show": json.dumps(
                 [{"dst": "default", "gateway": topology.host_address.split("/")[0], "dev": topology.peer_if, "protocol": "static", "flags": []}]
             ),
-            f"ip netns exec {topology.namespace} nft -j list ruleset": json.dumps(
-                {
-                    "nftables": [
-                        {"table": {"family": "inet", "name": "tgw_review"}},
-                        {"chain": {"family": "inet", "table": "tgw_review", "name": "output", "policy": "drop"}},
-                        {
-                            "rule": {
-                                "family": "inet",
-                                "table": "tgw_review",
-                                "chain": "output",
-                                "expr": [
-                                    {"match": {"left": {"meta": {"key": "skuid"}}, "right": 973}},
-                                    {"match": {"left": {"payload": {"field": "dport"}}, "right": topology.broker_port}},
-                                    {"accept": None},
-                                ],
-                            }
-                        },
-                        {"rule": {"family": "inet", "table": "tgw_review", "chain": "output", "expr": [{"match": {"left": {"meta": {"key": "skuid"}}, "right": 972}}, {"accept": None}]}},
-                    ]
-                }
-            ),
-            f"nft -j list table inet tgw_review_{topology.run_id}": json.dumps({"nftables": [{"table": {"family": "inet", "name": f"tgw_review_{topology.run_id}"}}]}),
+            f"ip netns exec {topology.namespace} nft -j list ruleset": json.dumps(namespace_nft),
+            f"nft -j list table inet tgw_review_{topology.run_id}": json.dumps(host_nft),
             "ps --no-headers -o pid=,uid=,cgroup= -p 123": f"123 972 tgw-review-egress@{topology.run_id}.service",
             "awk {print $22} /proc/123/stat": "42",
             "sha256sum /proc/123/exe": "a" * 64 + " /proc/123/exe",
@@ -183,22 +211,14 @@ def test_typed_identity_parser_rejects_pid_uid_collisions(field, replacement):
     from tgw.review_egress_namespace import parse_live_identity
 
     topology = Topology.for_run("abcdef123456")
+    namespace_nft, host_nft = nft_fixtures(topology)
     evidence = {
         "namespace_readback": topology.namespace,
         "address": json.dumps([{"ifname": topology.peer_if, "flags": ["UP"], "addr_info": [{"family": "inet", "local": topology.peer_address.split("/")[0], "prefixlen": 30}]}]),
         "link": json.dumps([{"ifname": topology.host_if, "flags": ["UP"]}]),
         "route": json.dumps([{"dst": "default", "gateway": topology.host_address.split("/")[0], "dev": topology.peer_if}]),
-        "ruleset": json.dumps(
-            {
-                "nftables": [
-                    {"table": {"family": "inet", "name": "tgw_review"}},
-                    {"chain": {"family": "inet", "table": "tgw_review", "name": "output", "policy": "drop"}},
-                    {"rule": {"table": "tgw_review", "expr": [{"match": {"right": 973}}, {"match": {"right": 18443}}, {"accept": None}]}},
-                    {"rule": {"table": "tgw_review", "expr": [{"match": {"right": 972}}, {"accept": None}]}},
-                ]
-            }
-        ),
-        "counters": json.dumps({"nftables": [{"table": {"family": "inet", "name": "tgw_review_abcdef123456"}}]}),
+        "ruleset": json.dumps(namespace_nft),
+        "counters": json.dumps(host_nft),
         "broker_process": "123 972 tgw-review-egress@abcdef123456.service",
         "broker_starttime": "42",
         "broker_exe": "a" * 64 + " /proc/123/exe",
@@ -211,6 +231,50 @@ def test_typed_identity_parser_rejects_pid_uid_collisions(field, replacement):
         evidence[field] = f"LISTEN pid={row['pid']} uid={row['uid']} inode={row['inode']} local={row['local_ip']}:{row['local_port']}"
     with pytest.raises(NamespaceError):
         parse_live_identity(evidence, topology, pid=123, runtime_sha256="sha256:" + "a" * 64)
+
+
+@pytest.mark.parametrize("mutation", ["wrong_left", "wrong_op", "missing_private_drop", "extra_host_rule", "wrong_nat_interface"])
+def test_nft_ast_rejects_plausible_wrong_rules(mutation):
+    import copy
+
+    from tgw.review_egress_namespace import validate_review_nft
+
+    topology = Topology.for_run("abcdef123456")
+    namespace, host = nft_fixtures(topology)
+    if mutation == "wrong_left":
+        namespace["nftables"][3]["rule"]["expr"][0]["match"]["left"] = {"meta": {"key": "mark"}}
+    elif mutation == "wrong_op":
+        namespace["nftables"][3]["rule"]["expr"][0]["match"]["op"] = "!="
+    elif mutation == "missing_private_drop":
+        del host["nftables"][3]
+    elif mutation == "extra_host_rule":
+        host["nftables"].append(copy.deepcopy(host["nftables"][4]))
+    else:
+        host["nftables"][-1]["rule"]["expr"][0]["match"]["right"] = "unrelated0"
+    with pytest.raises(NamespaceError):
+        validate_review_nft(namespace, host, topology)
+
+
+def test_nft_capture_receipt_retains_only_canonical_hash_and_counts():
+    from tgw.review_egress_namespace import canonical_nft_capture_receipt
+
+    topology = Topology.for_run("abcdef123456")
+    namespace, host = nft_fixtures(topology)
+    receipt = canonical_nft_capture_receipt(namespace, host, topology)
+    assert receipt["canonical_sha256"].startswith("sha256:")
+    assert receipt["namespace_rule_count"] == 5 and receipt["host_rule_count"] == 6
+    assert receipt["raw_retained"] is False
+
+
+def test_prepared_nix_evaluation_request_is_non_deploying_and_content_bound():
+    from pathlib import Path
+
+    request = json.loads(Path("agent-services/catalogs/nixos-reviewed-evaluation-request-v1.json").read_text())
+    assert request["status"] == "PREPARED_NOT_EXECUTED"
+    assert request["target_host"] == "tgw-prod" and request["system"] == "x86_64-linux"
+    assert request["source"]["module_path"] == "nix/review-egress.nix"
+    assert set(request["forbidden_effects"]) >= {"switch", "profile-write", "home-db-write"}
+    assert len(request["evaluation"]["expected_units"]) == 3
 
 
 def test_systemd_dependency_graph_is_acyclic_and_rendered_units_verify(tmp_path):
