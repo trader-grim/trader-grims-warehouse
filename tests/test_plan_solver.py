@@ -2,7 +2,7 @@ from copy import deepcopy
 
 import pytest
 
-from tgw.plan_solver import PlanResolutionError, StalePlanCommit, solve, validate_for_dispatch
+from tgw.plan_solver import ExecutionGraphAdapter, PlanResolutionError, StalePlanCommit, solve, validate_for_dispatch
 
 COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
 
@@ -110,3 +110,55 @@ def test_stale_plan_commit_is_rejected_at_ingest_and_dispatch():
     solution = solve(document)
     with pytest.raises(StalePlanCommit):
         validate_for_dispatch(solution, current_plan_commit="new-commit")
+
+
+def test_execution_graph_adapter_exposes_bounded_catalog_gaps_without_inventing_providers():
+    execution = {
+        "schema": "tgw-plan-execution/v2",
+        "plan_id": "PLAN-GOVERNED-EXECUTION-PLATFORM",
+        "version": 1,
+        "target": {"profile": "production", "required_capabilities": ["plan.capability-resolution@2", "queue.durable-claims@1"]},
+        "work_units": [
+            {"id": "W02", "requires": ["W01"], "establishes": ["queue.durable-claims@1"]},
+            {"id": "W06", "requires": ["W02"], "establishes": ["plan.capability-resolution@2"]},
+        ],
+    }
+
+    catalog = ExecutionGraphAdapter().adapt(execution, plan_commit=COMMIT)
+    result = solve(catalog, expected_plan_commit=COMMIT)
+
+    assert catalog["providers"] == []
+    assert catalog["observations"] == []
+    assert catalog["catalog_gaps"] == [
+        {"code": "MISSING_PROVIDER_DECLARATION", "capability": "plan.capability-resolution@2", "required_by": "PLAN-GOVERNED-EXECUTION-PLATFORM"},
+        {"code": "MISSING_PROVIDER_DECLARATION", "capability": "queue.durable-claims@1", "required_by": "PLAN-GOVERNED-EXECUTION-PLATFORM"},
+    ]
+    assert result["complete"] is False
+    assert result["dispatchable"] is False
+    assert {(item["code"], item["capability"]) for item in result["unresolved"]} == {
+        ("UNSATISFIED", "plan.capability-resolution@2"),
+        ("UNSATISFIED", "queue.durable-claims@1"),
+    }
+
+
+def test_execution_graph_work_unit_ids_are_not_converted_to_capabilities_or_providers():
+    execution = {
+        "schema": "tgw-plan-execution/v2",
+        "plan_id": "P",
+        "target": {"profile": "implementation", "required_capabilities": ["app@1"]},
+        "work_units": [{"id": "W1", "requires": ["W0"], "establishes": ["app@1"]}],
+    }
+
+    catalog = ExecutionGraphAdapter().adapt(execution, plan_commit=COMMIT)
+
+    assert catalog["capabilities"] == [{"id": "app@1"}]
+    assert catalog["providers"] == []
+    assert "W0" not in str(catalog)
+
+
+@pytest.mark.parametrize("bad_commit", ["", None])
+def test_execution_graph_adapter_requires_exact_commit_binding(bad_commit):
+    execution = {"schema": "tgw-plan-execution/v2", "target": {"required_capabilities": ["app@1"]}}
+
+    with pytest.raises(PlanResolutionError, match="exact Plan commit"):
+        ExecutionGraphAdapter().adapt(execution, plan_commit=bad_commit)

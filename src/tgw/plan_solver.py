@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 SOLUTION_SCHEMA = "tgw-plan-solution/v1"
 GRAPH_SCHEMA = "tgw-plan/v2"
+EXECUTION_GRAPH_SCHEMA = "tgw-plan-execution/v2"
 
 STATE_RANK = {
     "unknown": 0,
@@ -121,6 +122,7 @@ class CapabilityGraph:
     providers: tuple[Provider, ...]
     observations: tuple[Observation, ...]
     target: Target
+    catalog_gaps: tuple[Mapping[str, Any], ...]
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any], *, expected_plan_commit: str | None = None) -> "CapabilityGraph":
@@ -161,7 +163,79 @@ class CapabilityGraph:
             providers=providers,
             observations=observations,
             target=Target(str(raw_target.get("id", "plan")), profile, minimum, Requirement.parse(required)),
+            catalog_gaps=tuple(dict(item) for item in data.get("catalog_gaps", ())),
         )
+
+
+class ExecutionGraphAdapter:
+    """Project explicit declarations from an execution graph into a catalog.
+
+    Execution work units are transitions, not capability providers.  In
+    particular, an ``establishes`` declaration proves neither an implementation
+    nor observed state.  The adapter therefore emits no providers or
+    observations unless a future execution schema contains those objects.
+    Missing catalog objects remain visible to the exact solver as bounded gaps.
+    """
+
+    adapter_id = "tgw-execution-graph-catalog-adapter@1"
+
+    def adapt(self, execution: Mapping[str, Any], *, plan_commit: str) -> dict[str, Any]:
+        if execution.get("schema") != EXECUTION_GRAPH_SCHEMA:
+            raise PlanResolutionError(f"expected schema {EXECUTION_GRAPH_SCHEMA!r}")
+        if not plan_commit:
+            raise PlanResolutionError("exact Plan commit is required")
+        target = execution.get("target")
+        if not isinstance(target, Mapping):
+            raise PlanResolutionError("execution graph target is required")
+        required = target.get("required_capabilities")
+        if not isinstance(required, Sequence) or isinstance(required, (str, bytes)) or not required:
+            raise PlanResolutionError("target.required_capabilities must be a non-empty sequence")
+        if not all(isinstance(item, str) for item in required):
+            raise PlanResolutionError("target capability identities must be strings")
+
+        # These are definitions/references explicitly present in canonical
+        # intent.  Work-unit IDs and prose acceptance criteria are deliberately
+        # not interpreted as dependencies or providers.
+        declared = set(required)
+        for unit in execution.get("work_units", ()):
+            if not isinstance(unit, Mapping):
+                raise PlanResolutionError("work_units must contain mappings")
+            for identity in unit.get("establishes", ()):
+                if not isinstance(identity, str):
+                    raise PlanResolutionError("work-unit capability identities must be strings")
+                declared.add(identity)
+            for identity in unit.get("requires_capabilities", ()):
+                if not isinstance(identity, str):
+                    raise PlanResolutionError("requires_capabilities identities must be strings")
+                declared.add(identity)
+
+        return {
+            "schema": GRAPH_SCHEMA,
+            "plan_commit": plan_commit,
+            "source": {
+                "adapter": self.adapter_id,
+                "schema": EXECUTION_GRAPH_SCHEMA,
+                "plan_id": execution.get("plan_id"),
+                "version": execution.get("version"),
+            },
+            "capabilities": [{"id": identity} for identity in sorted(declared)],
+            "providers": [],
+            "observations": [],
+            "target": {
+                "id": str(execution.get("plan_id", "plan")),
+                "profile": str(target.get("profile", "implementation")),
+                "minimum_state": str(target.get("minimum_state", "admitted")),
+                "required_capabilities": list(required),
+            },
+            "catalog_gaps": [
+                {
+                    "code": "MISSING_PROVIDER_DECLARATION",
+                    "capability": identity,
+                    "required_by": str(execution.get("plan_id", "plan")),
+                }
+                for identity in sorted(set(required))
+            ],
+        }
 
 
 @dataclass
@@ -303,7 +377,23 @@ class ExactCapabilitySolver:
                             "resume_from": list(observation.evidence) if observation else [],
                         }
                     )
-        unresolved = sorted({json.dumps(item, sort_keys=True): dict(item) for item in failures}.values(), key=lambda item: _canonical(item)) if winner is None else []
+        if winner is None and graph.catalog_gaps:
+            unresolved = sorted(
+                (
+                    {
+                        "code": "UNSATISFIED",
+                        "capability": str(item["capability"]),
+                        "reason": str(item["code"]),
+                        "required_by": str(item["required_by"]),
+                    }
+                    for item in graph.catalog_gaps
+                ),
+                key=lambda item: _canonical(item),
+            )
+        elif winner is None:
+            unresolved = sorted({json.dumps(item, sort_keys=True): dict(item) for item in failures}.values(), key=lambda item: _canonical(item))
+        else:
+            unresolved = []
         rejected = []
         if winner:
             selected_ids = set(winner.selected)
