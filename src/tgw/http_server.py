@@ -9,26 +9,6 @@ Auth: Bearer <api_key> — key stored in secrets_root/tgw-api-key.json
 
 from __future__ import annotations
 # ---------------------------------------------------------------------------
-    full_cmd = [tgw_bin, cmd] + [str(a) for a in args]
-
-    try:
-        proc = subprocess.run(
-            full_cmd, capture_output=True, text=True, timeout=30,
-            env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
-        )
-        return {
-            "ok": True,
-            "command": cmd,
-            "exit_code": proc.returncode,
-            "stdout": proc.stdout[:50000],
-            "stderr": proc.stderr[:5000],
-        }
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "command timed out"}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
-
-
 import json
 import logging
 import re
