@@ -17,12 +17,16 @@
   },
   "tests": {
     "focused_receipt": "agent-services/receipts/W08-focused-tests-9355f1a.json",
-    "full_suite": {"command": [".venv/bin/pytest", "-q"], "status": "DEFINED_NOT_RUN"}
+    "full_suite": {
+      "command": [".venv/bin/pytest", "-q"],
+      "status": "HOLD_BASELINE_COLLECTION_FAILURE",
+      "receipt": "agent-services/receipts/W08-full-suite-9355f1a-HOLD.json"
+    }
   },
   "review": {"status": "NOT_RUN", "receipt": null},
   "database": {"migration_paths": []},
   "candidate_closed": true,
   "dispatchable": false,
   "installed": false,
-  "hold": "Full suite and independent review are incomplete"
+  "hold": "Full suite stopped on a pre-existing missing AI aspect helper; independent review is also incomplete"
 }

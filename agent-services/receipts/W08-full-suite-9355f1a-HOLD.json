@@ -1,0 +1,48 @@
+{
+  "schema": "tgw-candidate-full-suite-receipt/v1",
+  "candidate": {
+    "commit": "9355f1a082775016be36796afa1190a4657700d7",
+    "tree": "4b48dc6d318720698eed2786da0463189dbac9aa",
+    "worktree": "detached-clean",
+    "worktree_status": "clean"
+  },
+  "environment": {
+    "os": "Linux 6.12.96+deb13-amd64 x86_64 GNU/Linux",
+    "python": "3.13.5",
+    "pytest": "9.1.1",
+    "dependency_environment": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv",
+    "candidate_import_root": "PYTHONPATH=src"
+  },
+  "command": "PYTHONPATH=src /opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest -q",
+  "result": {
+    "status": "HOLD",
+    "exit_code": 2,
+    "tests_executed": 0,
+    "skipped_during_collection": 1,
+    "collection_errors": 5,
+    "elapsed": "8.20s"
+  },
+  "failures": [
+    {
+      "classification": "BASELINE_PREEXISTING",
+      "root_cause": "src/tgw/workers/ai_identify.py imports get_category_group_aspects, but candidate src/tgw/apis/ebay/specifics.py does not define it",
+      "affected_collectors": [
+        "tests/test_ai_identify_model_provenance.py",
+        "tests/test_ai_identify_nonjson_truncation.py",
+        "tests/test_ai_identify_phash_cache_context.py",
+        "tests/test_ai_identify_reidentify_flag.py",
+        "tests/test_ai_identify_taxonomy_quota_propagation.py"
+      ],
+      "baseline_evidence": "The same unresolved import exists at comparison base a1e8a1c; neither implicated source file changed in a1e8a1c..9355f1a",
+      "candidate_introduced": false
+    }
+  ],
+  "bounded_remediation": [
+    "Semantically reconcile the existing category-group aspect helper fixes reachable at 57c64ae/504fb48 into a new closed candidate",
+    "Run the complete suite from a new clean detached worktree and issue a new receipt; do not amend or promote candidate 9355f1a"
+  ],
+  "full_suite_passed": false,
+  "review_complete": false,
+  "dispatchable": false,
+  "installed": false
+}
