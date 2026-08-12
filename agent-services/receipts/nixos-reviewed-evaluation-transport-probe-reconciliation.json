@@ -1,0 +1,36 @@
+{
+  "schema": "tgw-nixos-reviewed-evaluation-transport-probe-reconciliation/v1",
+  "status": "PROVABLY_NO_EFFECT",
+  "probe_source_commit": "2140b4973c175e7d57f92bfcb822940e6870c4de",
+  "request_hash": "sha256:3600fa868bbb301e8f36264df5396fbbf56fefa8d201a4e932d038013bc17d7c",
+  "observed_result": {
+    "ssh_return_code": 2,
+    "stdout_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256_prefix": "sha256:652fdd2d...",
+    "validated_probe_receipt": null
+  },
+  "local_reproduction": {
+    "ssh_option_parser_exit": 0,
+    "remote_command_login_shell_parser_exit": 2,
+    "shell_error_class": "SYNTAX_ERROR_BEFORE_COMMAND_EXECUTION",
+    "raw_stderr_retained": false
+  },
+  "root_cause": "OpenSSH concatenates post-host arguments into one remote login-shell command. The Python -c program was supplied as an unquoted argv element containing spaces, semicolons and parentheses, so the remote shell returns syntax error 2 before executing sudo or Python.",
+  "effects": {
+    "sudo_executed": false,
+    "python_executed": false,
+    "stdin_consumed_remotely": false,
+    "scratch": false,
+    "archive": false,
+    "nix": false,
+    "build": false,
+    "activation": false,
+    "profile_write": false,
+    "home_db_write": false,
+    "live_flake_write": false,
+    "deployment": false
+  },
+  "candidate_impact": "The same unquoted remote Python -c serialization defect exists in the reviewed-evaluation provider BOOTSTRAP command; all prior candidate attempts failed before sudo/Python and had no remote helper effects.",
+  "diagnostic_scope": {"local_only": true, "remote_connection": false, "retry": false, "mutation": false},
+  "receipt_hash": "sha256:aa71a20a76f5b9e41b2897f385027124e41f4b31c36646c3dd3db00f7b0676e2"
+}
