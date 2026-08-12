@@ -28,6 +28,7 @@ from tgw.platform_bootstrap import (
     ImmutableBootstrapReceiptStore,
     digest,
     platform_bootstrap_effect_parameters,
+    platform_bootstrap_request_binding,
     validate_platform_bootstrap_effect,
     validate_platform_bootstrap_manifest,
 )
@@ -70,21 +71,25 @@ def _manifest() -> dict:
             "ssh_identity": {"ref": SSH_KEY_REF, "sha256": "sha256:" + HEX},
         },
         "operation_id": "bootstrap:a3-platform-1",
+        "request_binding": "bootstrap-request:sha256:" + "9" * 64,
         "candidate_receipt": "candidate:sha256:" + "0" * 64,
         "review_receipt": "review:sha256:" + "1" * 64,
         "controller_receipt": "controller:sha256:" + "2" * 64,
+        "activation_receipt": "activation:sha256:" + "6" * 64,
         "activation_provider_receipt": "activation-provider:sha256:" + "5" * 64,
         "health_receipt": "health:sha256:" + "3" * 64,
         "probe_receipt": "probe:sha256:" + "4" * 64,
         "retirement_condition": RETIREMENT_CONDITION,
         "live_flake_gate": "EXTERNAL_TGW_PROD_FLAKE_IMPORT_BUILD_REQUIRED",
     }
+    value["request_binding"] = platform_bootstrap_request_binding(value)
     value["manifest_sha256"] = digest(value)
     return value
 
 
 def _rehash(value: dict) -> dict:
     value.pop("manifest_sha256", None)
+    value["request_binding"] = platform_bootstrap_request_binding(value)
     value["manifest_sha256"] = digest(value)
     return value
 
@@ -193,12 +198,15 @@ def _provider(tmp_path: Path, *, current=OLD, health=None, probe=None, activate=
         }
     )
     manifest["controller_receipt"] = "controller:" + controller["receipt_sha256"]
+    manifest["request_binding"] = platform_bootstrap_request_binding(manifest)
     closure = _record(
         tmp_path,
         "closure-record",
         {
             "schema": "tgw-a3-platform-bootstrap-closure-membership/v1",
             "status": "EXACT_MEMBER",
+            "request_binding": manifest["request_binding"],
+            "operation_id": manifest["operation_id"],
             "successor_system": manifest["successor_system"],
             "candidate_receipt": manifest["candidate_receipt"],
             "flake_commit": manifest["flake_commit"],
@@ -207,12 +215,59 @@ def _provider(tmp_path: Path, *, current=OLD, health=None, probe=None, activate=
         }
     )
     manifest["activation_provider_receipt"] = "activation-provider:" + closure["receipt_sha256"]
+    activation_record = _record(
+        tmp_path,
+        "activation-record",
+        {
+            "schema": "tgw-a3-platform-bootstrap-activation/v1",
+            "status": "ACTIVATED",
+            "request_binding": manifest["request_binding"],
+            "operation_id": manifest["operation_id"],
+            "successor_system": manifest["successor_system"],
+            "candidate_receipt": manifest["candidate_receipt"],
+            "from_system": manifest["prior_system"],
+            "provider_receipt": manifest["activation_provider_receipt"],
+        },
+    )
+    manifest["activation_receipt"] = "activation:" + activation_record["receipt_sha256"]
+    health_record = _record(
+        tmp_path,
+        "health-record",
+        {
+            "schema": "tgw-a3-platform-bootstrap-health/v1",
+            "status": "HEALTHY",
+            "request_binding": manifest["request_binding"],
+            "operation_id": manifest["operation_id"],
+            "successor_system": manifest["successor_system"],
+            "candidate_receipt": manifest["candidate_receipt"],
+            "activation_receipt": manifest["activation_receipt"],
+        },
+    )
+    manifest["health_receipt"] = "health:" + health_record["receipt_sha256"]
+    probe_record = _record(
+        tmp_path,
+        "probe-record",
+        {
+            "schema": "tgw-a3-platform-bootstrap-probe/v1",
+            "status": "PASSED",
+            "request_binding": manifest["request_binding"],
+            "operation_id": manifest["operation_id"],
+            "successor_system": manifest["successor_system"],
+            "candidate_receipt": manifest["candidate_receipt"],
+            "activation_receipt": manifest["activation_receipt"],
+            "health_receipt": manifest["health_receipt"],
+        },
+    )
+    manifest["probe_receipt"] = "probe:" + probe_record["receipt_sha256"]
     _rehash(manifest)
     records = {
         **{record["artifact_ref"]: record for record in artifact_records.values()},
         manifest["candidate_receipt"]: candidate,
         manifest["review_receipt"]: review,
         manifest["controller_receipt"]: controller,
+        manifest["activation_receipt"]: activation_record,
+        manifest["health_receipt"]: health_record,
+        manifest["probe_receipt"]: probe_record,
     }
     state = [current]
 
@@ -223,7 +278,7 @@ def _provider(tmp_path: Path, *, current=OLD, health=None, probe=None, activate=
             "from_system": value["prior_system"],
             "to_system": value["successor_system"],
             "provider_receipt": value["activation_provider_receipt"],
-            "receipt": "activation:sha256:" + "6" * 64,
+            "receipt": value["activation_receipt"],
         }
 
     def default_rollback(value):
@@ -326,7 +381,7 @@ def test_install_cas_is_immediately_before_activation_and_successor_readback_pre
             "from_system": OLD,
             "to_system": NEW,
             "provider_receipt": provider.manifest["activation_provider_receipt"],
-            "receipt": "activation:sha256:" + "6" * 64,
+            "receipt": provider.manifest["activation_receipt"],
         }
     )
     provider.verify_health = Mock()
@@ -368,7 +423,7 @@ def test_authority_receipt_classifies_third_state_rollback_as_ambiguous(tmp_path
             "from_system": value["prior_system"],
             "to_system": value["successor_system"],
             "provider_receipt": value["activation_provider_receipt"],
-            "receipt": "activation:sha256:" + "6" * 64,
+            "receipt": value["activation_receipt"],
         }
 
     provider.activate_successor = partial_activation
@@ -394,6 +449,58 @@ def test_authority_receipt_classifies_third_state_rollback_as_ambiguous(tmp_path
     )
     assert receipt.outcome is EffectOutcome.AMBIGUOUS
     assert receipt.evidence
+
+
+def test_post_probe_final_cas_refuses_third_state_and_never_writes_success(tmp_path):
+    provider, _, state, _, _ = _provider(tmp_path)
+    third = "/nix/store/cccccccccccccccccccccccccccccccc-nixos-system-tgw-prod-third"
+
+    def drifting_probe(value):
+        state[0] = third
+        return {"status": "passed", "receipt": value["probe_receipt"]}
+
+    provider.verify_probe = drifting_probe
+    parameters = {**platform_bootstrap_effect_parameters(provider.manifest), "generation": "a3-platform-bootstrap-1"}
+    with pytest.raises(BootstrapStateAmbiguous, match="final successor CAS") as raised:
+        provider.install(parameters)
+    assert provider.manifest["probe_receipt"] in raised.value.evidence
+    assert any(item.startswith("platform-bootstrap-state:sha256:") for item in raised.value.evidence)
+    assert not (tmp_path / "receipts" / "bootstrap_a3-platform-1-success.json").exists()
+
+
+def test_controller_reports_post_probe_third_state_as_ambiguous_not_success(tmp_path):
+    provider, _, state, _, _ = _provider(tmp_path)
+    third = "/nix/store/cccccccccccccccccccccccccccccccc-nixos-system-tgw-prod-third"
+
+    def drifting_probe(value):
+        state[0] = third
+        return {"status": "passed", "receipt": value["probe_receipt"]}
+
+    provider.verify_probe = drifting_probe
+    registry = TypedEffectHandlerRegistry(
+        release_install=Mock(),
+        release_rollback=Mock(),
+        flake_push=Mock(),
+        flake_switch_record=Mock(),
+        dependency_resubmit=Mock(),
+        bootstrap_install=provider.install,
+        bootstrap_rollback=provider.rollback,
+        bootstrap_validate=provider.preflight,
+    )
+    effect = TypedEffect.parse(
+        {
+            "kind": "approval-platform-bootstrap-deployment",
+            "generation": "a3-platform-bootstrap-1",
+            "parameters": platform_bootstrap_effect_parameters(provider.manifest),
+        }
+    )
+    receipt = AuthorityEffectController(
+        registry, Mock(return_value={"receipt_id": "bootstrap-consumption:durable"})
+    ).execute(request_id="bootstrap:a3", effect=effect)
+
+    assert receipt.outcome is EffectOutcome.AMBIGUOUS
+    assert receipt.evidence
+    assert receipt.rollback_receipt is None
 
 
 def test_partial_apply_failure_rolls_back_exact_prior_closure_through_authority(tmp_path):
@@ -472,6 +579,22 @@ def test_resolved_immutable_inputs_and_closure_membership_fail_before_authority_
     with pytest.raises(ValueError):
         AuthorityEffectController(registry, consume).execute(request_id="bootstrap:a3", effect=effect)
     consume.assert_not_called()
+
+
+@pytest.mark.parametrize(("kind", "mode"), [(kind, mode) for kind in ("activation", "health", "probe") for mode in ("absent", "tampered")])
+def test_absent_or_tampered_runtime_record_ref_refuses_install_without_success(tmp_path, kind, mode):
+    provider, _, _, records, _ = _provider(tmp_path)
+    reference = provider.manifest[f"{kind}_receipt"]
+    if mode == "absent":
+        records.pop(reference)
+        message = "immutable record is unavailable"
+    else:
+        records[reference]["status"] = "TAMPERED"
+        message = "record is invalid"
+    parameters = {**platform_bootstrap_effect_parameters(provider.manifest), "generation": "a3-platform-bootstrap-1"}
+    with pytest.raises(ValueError, match=message):
+        provider.install(parameters)
+    assert not (tmp_path / "receipts" / "bootstrap_a3-platform-1-success.json").exists()
 
 
 def test_success_receipt_binds_review_controller_activation_and_provider_receipts(tmp_path):
@@ -621,11 +744,75 @@ def test_attempt_persistence_failure_is_authority_ambiguous_without_valid_durabl
     assert receipt.rollback_receipt is None
 
 
+@pytest.mark.parametrize("starting_system", [OLD, NEW])
+def test_rollback_receipt_persistence_loss_after_restoration_is_typed_ambiguous(
+    tmp_path, starting_system
+):
+    provider, _, state, _, _ = _provider(tmp_path, current=starting_system)
+    provider.receipts.persist = Mock(side_effect=OSError("injected rollback receipt loss"))
+    parameters = {**platform_bootstrap_effect_parameters(provider.manifest), "generation": "a3-platform-bootstrap-1"}
+
+    with pytest.raises(BootstrapStateAmbiguous, match="state is restored") as raised:
+        provider.rollback(parameters)
+
+    assert state[0] == OLD
+    assert any(item.startswith("platform-bootstrap-rollback-memory:sha256:") for item in raised.value.evidence)
+    assert any(item.startswith("platform-bootstrap-state:sha256:") for item in raised.value.evidence)
+
+
+@pytest.mark.parametrize("starting_system", [OLD, NEW])
+def test_controller_classifies_rollback_receipt_persistence_loss_as_ambiguous(tmp_path, starting_system):
+    provider, _, state, _, _ = _provider(tmp_path, current=starting_system)
+    provider.receipts.persist = Mock(side_effect=OSError("injected rollback receipt loss"))
+    registry = TypedEffectHandlerRegistry(
+        release_install=Mock(),
+        release_rollback=Mock(),
+        flake_push=Mock(),
+        flake_switch_record=Mock(),
+        dependency_resubmit=Mock(),
+        bootstrap_install=Mock(side_effect=RuntimeError("post-activation verification failed")),
+        bootstrap_rollback=provider.rollback,
+        bootstrap_validate=provider.preflight,
+    )
+    effect = TypedEffect.parse(
+        {
+            "kind": "approval-platform-bootstrap-deployment",
+            "generation": "a3-platform-bootstrap-1",
+            "parameters": platform_bootstrap_effect_parameters(provider.manifest),
+        }
+    )
+    receipt = AuthorityEffectController(
+        registry, Mock(return_value={"receipt_id": "bootstrap-consumption:durable"})
+    ).execute(request_id="bootstrap:a3", effect=effect)
+
+    assert state[0] == OLD
+    assert receipt.outcome is EffectOutcome.AMBIGUOUS
+    assert receipt.authority_receipt_id == "bootstrap-consumption:durable"
+    assert receipt.rollback_receipt is None
+    assert any(item.startswith("platform-bootstrap-rollback-memory:sha256:") for item in receipt.evidence)
+    assert "injected rollback receipt loss" not in receipt.detail
+
+
 def test_nix_leaf_is_disabled_by_default_and_contains_only_fixed_public_material():
     module = Path("nix/a3-platform-bootstrap.nix").read_text()
     package = Path("nix/a3-platform-bootstrap-package.nix").read_text()
     assert "mkEnableOption" in module
-    assert "authorizedKeys.keys = [ cfg.sshAuthorizedPublicKey ]" in module
+    assert "keys = [ cfg.sshAuthorizedPublicKey ]" in module
+    assert "keyFiles = [ ]" in module
+    assert "remoteAuthorizedKeys.keys == [ cfg.sshAuthorizedPublicKey ]" in module
+    assert "remoteAuthorizedKeys.keyFiles == [ ]" in module
+    assert "authorizedKeysFiles = [ soleAuthorizedKeysFile ]" in module
+    assert "lib.mkForce" not in module
+    for closed_source in (
+        'AuthorizedKeysCommand = "none"',
+        'TrustedUserCAKeys = "none"',
+        'AuthorizedPrincipalsCommand = "none"',
+        'AuthorizedPrincipalsFile = "none"',
+        'AuthenticationMethods = "publickey"',
+        "PasswordAuthentication = false",
+        "KbdInteractiveAuthentication = false",
+    ):
+        assert closed_source in module
     assert 'NOPASSWD: ${wrapper} ""' in module
     assert 'restrict,command="/run/wrappers/bin/sudo -n -- /run/current-system/sw/bin/tgw-nix-observer-render-wrapper" ssh-ed25519' in module
     assert '!(lib.hasInfix "\\n" cfg.sshAuthorizedPublicKey)' in module
@@ -636,3 +823,14 @@ def test_nix_leaf_is_disabled_by_default_and_contains_only_fixed_public_material
     assert "nix_observer_render_remote.py" in package
     assert "nix_observer_render_helper.py" in package
     assert "tgw_nix_observer_render_transport.c" in package
+
+
+def test_nix_final_authorization_assertions_reject_extra_key_or_keyfile_merge():
+    expected = "forced-ed25519-key"
+
+    def final_assertion(keys, key_files):
+        return keys == [expected] and key_files == []
+
+    assert final_assertion([expected], [])
+    assert not final_assertion([expected, "attacker-key"], [])
+    assert not final_assertion([expected], ["/etc/ssh/extra_authorized_keys"])

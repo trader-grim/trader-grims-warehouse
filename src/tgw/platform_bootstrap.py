@@ -39,6 +39,7 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}")
 _OPERATION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,191}")
 _RECEIPT = re.compile(r"[a-z][a-z0-9-]{0,47}:sha256:[0-9a-f]{64}")
+_REQUEST = re.compile(r"bootstrap-request:sha256:[0-9a-f]{64}")
 _SYSTEM = re.compile(r"/nix/store/[0-9a-df-np-sv-z]{32}-nixos-system-tgw-prod-[A-Za-z0-9._+-]+")
 _ARTIFACTS = frozenset(
     {
@@ -62,6 +63,20 @@ def canonical(value: Any) -> bytes:
 
 def digest(value: Any) -> str:
     return "sha256:" + sha256(canonical(value)).hexdigest()
+
+
+def platform_bootstrap_request_binding(value: Mapping[str, Any]) -> str:
+    """Bind the immutable request core without creating receipt hash cycles."""
+    excluded = {
+        "manifest_sha256",
+        "request_binding",
+        "activation_receipt",
+        "activation_provider_receipt",
+        "health_receipt",
+        "probe_receipt",
+    }
+    core = {key: item for key, item in value.items() if key not in excluded}
+    return "bootstrap-request:" + digest(core)
 
 
 def _self_hashed(value: Mapping[str, Any]) -> bool:
@@ -95,9 +110,11 @@ def validate_platform_bootstrap_manifest(value: Any) -> dict[str, Any]:
         "artifacts",
         "credential_bindings",
         "operation_id",
+        "request_binding",
         "candidate_receipt",
         "review_receipt",
         "controller_receipt",
+        "activation_receipt",
         "activation_provider_receipt",
         "health_receipt",
         "probe_receipt",
@@ -140,10 +157,17 @@ def validate_platform_bootstrap_manifest(value: Any) -> dict[str, Any]:
         raise ValueError("platform-bootstrap external credential binding is invalid")
     if not isinstance(value["operation_id"], str) or not _OPERATION.fullmatch(value["operation_id"]):
         raise ValueError("platform-bootstrap operation_id is invalid")
+    if (
+        not isinstance(value["request_binding"], str)
+        or not _REQUEST.fullmatch(value["request_binding"])
+        or value["request_binding"] != platform_bootstrap_request_binding(value)
+    ):
+        raise ValueError("platform-bootstrap request binding is invalid")
     for name in (
         "candidate_receipt",
         "review_receipt",
         "controller_receipt",
+        "activation_receipt",
         "activation_provider_receipt",
         "health_receipt",
         "probe_receipt",
@@ -343,9 +367,21 @@ class BootstrapStateAmbiguous(RuntimeError):
 
 
 def _validate_self_hashed_record(
-    value: Any, reference: str, *, schema: str, prefix: str, trusted_uid: int
+    value: Any,
+    reference: str,
+    *,
+    schema: str,
+    prefix: str,
+    fields: frozenset[str],
+    trusted_uid: int,
 ) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or value.get("schema") != schema or not _self_hashed_record(value):
+    stored_fields = fields | {"record_path", "receipt_sha256"}
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != stored_fields
+        or value.get("schema") != schema
+        or not _self_hashed_record(value)
+    ):
         raise ValueError(f"{schema} record is invalid")
     if reference != prefix + value["receipt_sha256"]:
         raise ValueError(f"{schema} record reference is invalid")
@@ -498,6 +534,7 @@ class A3PlatformBootstrapProvider:
             manifest["candidate_receipt"],
             schema="tgw-a3-platform-bootstrap-candidate/v1",
             prefix="candidate:",
+            fields=frozenset({"schema", "status", "flake_commit", "flake_tree", "successor_system", "artifacts"}),
             trusted_uid=self.trusted_key_uid,
         )
         expected_candidate = {
@@ -514,6 +551,7 @@ class A3PlatformBootstrapProvider:
             manifest["review_receipt"],
             schema="tgw-a3-platform-bootstrap-review/v1",
             prefix="review:",
+            fields=frozenset({"schema", "status", "candidate_receipt"}),
             trusted_uid=self.trusted_key_uid,
         )
         controller = _validate_self_hashed_record(
@@ -521,6 +559,7 @@ class A3PlatformBootstrapProvider:
             manifest["controller_receipt"],
             schema="tgw-a3-platform-bootstrap-controller/v1",
             prefix="controller:",
+            fields=frozenset({"schema", "status", "candidate_receipt", "review_receipt"}),
             trusted_uid=self.trusted_key_uid,
         )
         if (
@@ -531,15 +570,37 @@ class A3PlatformBootstrapProvider:
             or controller.get("review_receipt") != manifest["review_receipt"]
         ):
             raise ValueError("platform-bootstrap review/controller record chain is invalid")
+        self._resolve_activation_provider(manifest)
+
+    def _resolve_activation_provider(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            resolved = self.resolve_closure(manifest["successor_system"])
+        except Exception as exc:
+            raise ValueError("platform-bootstrap activation provider record is unavailable") from exc
         closure = _validate_self_hashed_record(
-            self.resolve_closure(manifest["successor_system"]),
+            resolved,
             manifest["activation_provider_receipt"],
             schema="tgw-a3-platform-bootstrap-closure-membership/v1",
             prefix="activation-provider:",
+            fields=frozenset(
+                {
+                    "schema",
+                    "status",
+                    "request_binding",
+                    "operation_id",
+                    "successor_system",
+                    "candidate_receipt",
+                    "flake_commit",
+                    "flake_tree",
+                    "artifacts",
+                }
+            ),
             trusted_uid=self.trusted_key_uid,
         )
         if (
             closure.get("status") != "EXACT_MEMBER"
+            or closure.get("request_binding") != manifest["request_binding"]
+            or closure.get("operation_id") != manifest["operation_id"]
             or closure.get("successor_system") != manifest["successor_system"]
             or closure.get("candidate_receipt") != manifest["candidate_receipt"]
             or closure.get("flake_commit") != manifest["flake_commit"]
@@ -547,6 +608,62 @@ class A3PlatformBootstrapProvider:
             or closure.get("artifacts") != manifest["artifacts"]
         ):
             raise ValueError("platform-bootstrap successor closure membership is invalid")
+        return closure
+
+    def _resolve_runtime_record(self, manifest: Mapping[str, Any], kind: str) -> dict[str, Any]:
+        common = {
+            "request_binding": manifest["request_binding"],
+            "operation_id": manifest["operation_id"],
+            "successor_system": manifest["successor_system"],
+            "candidate_receipt": manifest["candidate_receipt"],
+        }
+        definitions = {
+            "activation": (
+                manifest["activation_receipt"],
+                "tgw-a3-platform-bootstrap-activation/v1",
+                "activation:",
+                {
+                    **common,
+                    "status": "ACTIVATED",
+                    "from_system": manifest["prior_system"],
+                    "provider_receipt": manifest["activation_provider_receipt"],
+                },
+            ),
+            "health": (
+                manifest["health_receipt"],
+                "tgw-a3-platform-bootstrap-health/v1",
+                "health:",
+                {**common, "status": "HEALTHY", "activation_receipt": manifest["activation_receipt"]},
+            ),
+            "probe": (
+                manifest["probe_receipt"],
+                "tgw-a3-platform-bootstrap-probe/v1",
+                "probe:",
+                {
+                    **common,
+                    "status": "PASSED",
+                    "activation_receipt": manifest["activation_receipt"],
+                    "health_receipt": manifest["health_receipt"],
+                },
+            ),
+        }
+        reference, schema, prefix, expected = definitions[kind]
+        fields = frozenset({"schema", *expected})
+        try:
+            resolved = self.resolve_record(reference)
+        except Exception as exc:
+            raise ValueError(f"platform-bootstrap {kind} immutable record is unavailable") from exc
+        record = _validate_self_hashed_record(
+            resolved,
+            reference,
+            schema=schema,
+            prefix=prefix,
+            fields=fields,
+            trusted_uid=self.trusted_key_uid,
+        )
+        if any(record.get(name) != value for name, value in expected.items()):
+            raise ValueError(f"platform-bootstrap {kind} record differs from the exact request")
+        return record
 
     def install(self, parameters: Mapping[str, Any]) -> Mapping[str, Any]:
         manifest = self._exact(parameters)
@@ -573,35 +690,55 @@ class A3PlatformBootstrapProvider:
             )
         activation = self.activate_successor(manifest)
         if (
-            activation.get("status") != "activated"
+            set(activation) != {"status", "from_system", "to_system", "provider_receipt", "receipt"}
+            or activation.get("status") != "activated"
             or activation.get("from_system") != manifest["prior_system"]
             or activation.get("to_system") != manifest["successor_system"]
             or activation.get("provider_receipt") != manifest["activation_provider_receipt"]
-            or not _RECEIPT.fullmatch(str(activation.get("receipt")))
+            or activation.get("receipt") != manifest["activation_receipt"]
         ):
             raise RuntimeError("platform-bootstrap activation result is invalid")
+        self._resolve_activation_provider(manifest)
+        self._resolve_runtime_record(manifest, "activation")
         if self.current_system() != manifest["successor_system"]:
             raise BootstrapStateAmbiguous(
                 "platform-bootstrap successor readback is not exact",
                 evidence=(attempt_receipt, str(activation["receipt"])),
             )
         health = self.verify_health(manifest)
-        probe = self.verify_probe(manifest)
-        if health.get("status") != "healthy" or health.get("receipt") != manifest["health_receipt"]:
+        if set(health) != {"status", "receipt"} or health.get("status") != "healthy" or health.get("receipt") != manifest["health_receipt"]:
             raise RuntimeError("platform-bootstrap health receipt is invalid")
-        if probe.get("status") != "passed" or probe.get("receipt") != manifest["probe_receipt"]:
+        self._resolve_runtime_record(manifest, "health")
+        probe = self.verify_probe(manifest)
+        if set(probe) != {"status", "receipt"} or probe.get("status") != "passed" or probe.get("receipt") != manifest["probe_receipt"]:
             raise RuntimeError("platform-bootstrap probe receipt is invalid")
+        self._resolve_runtime_record(manifest, "probe")
+        runtime_evidence = (
+            attempt_receipt,
+            manifest["activation_receipt"],
+            manifest["activation_provider_receipt"],
+            manifest["health_receipt"],
+            manifest["probe_receipt"],
+        )
+        final_system = self.current_system()
+        if final_system != manifest["successor_system"]:
+            state_evidence = "platform-bootstrap-state:sha256:" + sha256(final_system.encode()).hexdigest()
+            raise BootstrapStateAmbiguous(
+                "platform-bootstrap final successor CAS changed after health/probe",
+                evidence=runtime_evidence + (state_evidence,),
+            )
         result = {
             "schema": "tgw-a3-platform-bootstrap-success/v1",
             "operation_id": manifest["operation_id"],
             "manifest_sha256": manifest["manifest_sha256"],
+            "request_binding": manifest["request_binding"],
             "prior_system": manifest["prior_system"],
             "successor_system": manifest["successor_system"],
             "attempt_receipt": attempt_receipt,
             "candidate_receipt": manifest["candidate_receipt"],
             "review_receipt": manifest["review_receipt"],
             "controller_receipt": manifest["controller_receipt"],
-            "activation_receipt": activation["receipt"],
+            "activation_receipt": manifest["activation_receipt"],
             "activation_provider_receipt": manifest["activation_provider_receipt"],
             "health_receipt": manifest["health_receipt"],
             "probe_receipt": manifest["probe_receipt"],
@@ -613,7 +750,7 @@ class A3PlatformBootstrapProvider:
                 success_receipt,
                 manifest["review_receipt"],
                 manifest["controller_receipt"],
-                activation["receipt"],
+                manifest["activation_receipt"],
                 manifest["activation_provider_receipt"],
                 manifest["health_receipt"],
                 manifest["probe_receipt"],
@@ -632,7 +769,7 @@ class A3PlatformBootstrapProvider:
                 "restored_system": manifest["prior_system"],
                 "outcome": "NOOP_ALREADY_PRIOR",
             }
-            return {"receipt": self.receipts.persist(result, phase="rollback")}
+            return {"receipt": self._persist_rollback_observation(result, observed_before=observed)}
         if observed != manifest["successor_system"]:
             raise BootstrapStateAmbiguous(
                 "platform-bootstrap rollback observed neither prior nor successor closure",
@@ -656,4 +793,34 @@ class A3PlatformBootstrapProvider:
             "outcome": "RESTORED_PRIOR",
             "activation_receipt": restored["receipt"],
         }
-        return {"receipt": self.receipts.persist(result, phase="rollback")}
+        return {"receipt": self._persist_rollback_observation(result, observed_before=observed)}
+
+    def _persist_rollback_observation(self, result: Mapping[str, Any], *, observed_before: str) -> str:
+        try:
+            return self.receipts.persist(result, phase="rollback")
+        except Exception as exc:
+            try:
+                observed_after = self.current_system()
+            except Exception:
+                observed_after = "CURRENT_SYSTEM_UNAVAILABLE_AFTER_RESTORE"
+            observation = {
+                "schema": "tgw-a3-platform-bootstrap-rollback-persistence-observation/v1",
+                "operation_id": result["operation_id"],
+                "manifest_sha256": result["manifest_sha256"],
+                "intended_receipt_sha256": digest(result),
+                "outcome": result["outcome"],
+                "observed_before": observed_before,
+                "observed_after": observed_after,
+            }
+            evidence = (
+                "platform-bootstrap-rollback-memory:" + digest(observation),
+                "platform-bootstrap-state:sha256:" + sha256(observed_after.encode()).hexdigest(),
+            )
+            activation_receipt = result.get("activation_receipt")
+            if isinstance(activation_receipt, str) and _RECEIPT.fullmatch(activation_receipt):
+                evidence += (activation_receipt,)
+            raise BootstrapStateAmbiguous(
+                "platform-bootstrap rollback state is restored but receipt persistence is ambiguous",
+                evidence=evidence,
+                rollback_required=False,
+            ) from exc

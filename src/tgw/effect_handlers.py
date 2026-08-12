@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Mapping
 
+from tgw.bootstrap_authority import BootstrapConsumptionAmbiguous
 from tgw.nix_observer_render_evaluation import validate_request as validate_render_request
 from tgw.nixos_observer_render_evaluation import (
     EFFECT_KIND as OBSERVER_RENDER_EFFECT_KIND,
@@ -547,7 +548,19 @@ class AuthorityEffectController:
 
     def execute(self, *, request_id: str, effect: TypedEffect) -> EffectExecutionReceipt:
         handler_id, parameters, handler, rollback = self.registry.prepare(effect)
-        authority = self.consume_authority(request_id, effect_hash=effect.effect_hash, generation=effect.generation)
+        try:
+            authority = self.consume_authority(request_id, effect_hash=effect.effect_hash, generation=effect.generation)
+        except BootstrapConsumptionAmbiguous as exc:
+            authority_observation = exc.evidence[0]
+            return self._receipt(
+                request_id,
+                authority_observation,
+                effect,
+                handler_id,
+                EffectOutcome.AMBIGUOUS,
+                exc.evidence,
+                detail=str(exc),
+            )
         receipt_id = str(authority["receipt_id"])
         try:
             result = handler(parameters)
@@ -591,13 +604,14 @@ class AuthorityEffectController:
                         detail=str(exc),
                     )
                 except BootstrapStateAmbiguous as rollback_exc:
+                    evidence = tuple(sorted(set(exc.evidence + rollback_exc.evidence)))
                     return self._receipt(
                         request_id,
                         receipt_id,
                         effect,
                         handler_id,
                         EffectOutcome.AMBIGUOUS,
-                        rollback_exc.evidence,
+                        evidence,
                         detail=f"effect={exc}; rollback={rollback_exc}",
                     )
                 except Exception as rollback_exc:

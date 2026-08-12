@@ -15,6 +15,7 @@ from tgw.platform_bootstrap import (
     SSH_KEY_REF,
     digest,
     platform_bootstrap_effect_parameters,
+    platform_bootstrap_request_binding,
 )
 
 SHA = "a" * 40
@@ -55,15 +56,18 @@ def _bootstrap_parameters():
             "ssh_identity": {"ref": SSH_KEY_REF, "sha256": "sha256:" + DIGEST},
         },
         "operation_id": "bootstrap:a3-platform-1",
+        "request_binding": "bootstrap-request:sha256:" + "9" * 64,
         "candidate_receipt": "candidate:sha256:" + "0" * 64,
         "review_receipt": "review:sha256:" + "1" * 64,
         "controller_receipt": "controller:sha256:" + "2" * 64,
+        "activation_receipt": "activation:sha256:" + "6" * 64,
         "activation_provider_receipt": "activation-provider:sha256:" + "5" * 64,
         "health_receipt": "health:sha256:" + "3" * 64,
         "probe_receipt": "probe:sha256:" + "4" * 64,
         "retirement_condition": RETIREMENT_CONDITION,
         "live_flake_gate": "EXTERNAL_TGW_PROD_FLAKE_IMPORT_BUILD_REQUIRED",
     }
+    manifest["request_binding"] = platform_bootstrap_request_binding(manifest)
     manifest["manifest_sha256"] = digest(manifest)
     return platform_bootstrap_effect_parameters(manifest)
 

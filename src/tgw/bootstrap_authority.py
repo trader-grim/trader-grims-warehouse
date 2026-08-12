@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -79,13 +80,143 @@ class BootstrapGrant:
 class BootstrapSessionAuthority:
     """Redeem one immutable grant; absence/mismatch/expiry all fail closed."""
 
-    def __init__(self, grant: BootstrapGrant, *, receipt_path: Path, current_plan_commit: str):
+    def __init__(
+        self,
+        grant: BootstrapGrant,
+        *,
+        receipt_path: Path,
+        current_plan_commit: str,
+        trusted_uid: int = 0,
+    ):
         self.grant = grant
         self.receipt_path = Path(receipt_path)
         if current_plan_commit != grant.plan_commit:
             raise ValueError("bootstrap grant is bound to a different Plan commit")
-        if not self.receipt_path.parent.is_dir():
+        if not self.receipt_path.is_absolute() or self.receipt_path.name in {"", ".", ".."}:
+            raise ValueError("bootstrap receipt path is invalid")
+        try:
+            named = self.receipt_path.parent.lstat()
+        except OSError as exc:
+            raise ValueError("bootstrap receipt directory is not provisioned") from exc
+        if (
+            not stat.S_ISDIR(named.st_mode)
+            or named.st_uid != trusted_uid
+            or stat.S_IMODE(named.st_mode) != 0o700
+        ):
             raise ValueError("bootstrap receipt directory is not provisioned")
+        try:
+            self._directory_fd = os.open(
+                self.receipt_path.parent,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+        except OSError as exc:
+            raise ValueError("bootstrap receipt directory is not safely openable") from exc
+        opened = os.fstat(self._directory_fd)
+        self._root_identity = (opened.st_dev, opened.st_ino, opened.st_uid, stat.S_IMODE(opened.st_mode))
+        self._spent_receipt_id: str | None = None
+
+    def _revalidate_root(self) -> None:
+        opened = os.fstat(self._directory_fd)
+        try:
+            named = self.receipt_path.parent.lstat()
+        except OSError as exc:
+            raise OSError("bootstrap receipt directory identity is unavailable") from exc
+        opened_identity = (opened.st_dev, opened.st_ino, opened.st_uid, stat.S_IMODE(opened.st_mode))
+        named_identity = (named.st_dev, named.st_ino, named.st_uid, stat.S_IMODE(named.st_mode))
+        if (
+            opened_identity != self._root_identity
+            or named_identity != self._root_identity
+            or not stat.S_ISDIR(opened.st_mode)
+        ):
+            raise OSError("bootstrap receipt directory identity changed")
+
+    @staticmethod
+    def _write_all(fd: int, data: bytes) -> None:
+        offset = 0
+        while offset < len(data):
+            written = os.write(fd, data[offset:])
+            if written <= 0:
+                raise OSError("bootstrap consumption receipt short write")
+            offset += written
+
+    def _ambiguous(self, receipt: Mapping[str, Any], state: str, cause: Exception) -> BootstrapConsumptionAmbiguous:
+        observation = {
+            "schema": "tgw-bootstrap-consumption-persistence-observation/v1",
+            "grant_id": self.grant.grant_id,
+            "effect_hash": receipt["effect_hash"],
+            "generation": receipt["generation"],
+            "intended_receipt_id": receipt["receipt_id"],
+            "persistence_state": state,
+        }
+        evidence = (_digest("bootstrap-consumption-ambiguity", observation),)
+        return BootstrapConsumptionAmbiguous(
+            "bootstrap grant consumption persistence is ambiguous",
+            evidence=evidence,
+            cause=cause,
+        )
+
+    def _existing_is_valid(self) -> bool:
+        try:
+            fd = os.open(self.receipt_path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self._directory_fd)
+        except FileNotFoundError:
+            return False
+        try:
+            metadata = os.fstat(fd)
+            content = bytearray()
+            while block := os.read(fd, 64 * 1024):
+                content.extend(block)
+                if len(content) > 64 * 1024:
+                    return False
+        finally:
+            os.close(fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != self._root_identity[2]
+            or stat.S_IMODE(metadata.st_mode) != 0o400
+            or metadata.st_size != len(content)
+            or not content.endswith(b"\n")
+        ):
+            return False
+        try:
+            receipt = json.loads(content)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        fields = {
+            "schema",
+            "grant_id",
+            "plan_commit",
+            "solution_hash",
+            "target_host",
+            "root_id",
+            "candidate_commit",
+            "effect_hash",
+            "generation",
+            "consumed_at",
+            "retirement_condition",
+            "receipt_id",
+        }
+        if not isinstance(receipt, Mapping) or set(receipt) != fields:
+            return False
+        unsigned = dict(receipt)
+        receipt_id = unsigned.pop("receipt_id")
+        expected = {
+            "schema": "tgw-bootstrap-consumption-receipt/v1",
+            "grant_id": self.grant.grant_id,
+            "plan_commit": self.grant.plan_commit,
+            "solution_hash": self.grant.solution_hash,
+            "target_host": self.grant.target_host,
+            "root_id": self.grant.root_id,
+            "candidate_commit": self.grant.candidate_commit,
+            "effect_hash": self.grant.effect.effect_hash,
+            "generation": self.grant.effect.generation,
+            "retirement_condition": self.grant.retirement_condition,
+        }
+        return (
+            all(unsigned.get(key) == value for key, value in expected.items())
+            and isinstance(unsigned.get("consumed_at"), str)
+            and receipt_id == _digest("bootstrap-consumption", unsigned)
+            and content == _canonical(receipt) + b"\n"
+        )
 
     def consume(self, request_id: str, *, effect_hash: str, generation: str, now: datetime | None = None) -> Mapping[str, Any]:
         now = now or datetime.now(timezone.utc)
@@ -111,12 +242,61 @@ class BootstrapSessionAuthority:
         receipt["receipt_id"] = _digest("bootstrap-consumption", receipt)
         data = _canonical(receipt) + b"\n"
         try:
-            fd = os.open(self.receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o440)
-        except FileExistsError as exc:
-            raise ValueError("bootstrap grant is already consumed") from exc
+            self._revalidate_root()
+        except Exception as exc:
+            raise self._ambiguous(receipt, "root-not-durably-verifiable", exc) from exc
         try:
-            os.write(fd, data)
+            fd = os.open(
+                self.receipt_path.name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o400,
+                dir_fd=self._directory_fd,
+            )
+        except FileExistsError as exc:
+            try:
+                existing_valid = self._existing_is_valid()
+            except Exception as existing_exc:
+                raise self._ambiguous(receipt, "existing-unobservable", existing_exc) from existing_exc
+            if existing_valid:
+                raise ValueError("bootstrap grant is already consumed") from exc
+            raise self._ambiguous(receipt, "existing-invalid-or-partial", exc) from exc
+        except OSError as exc:
+            raise self._ambiguous(receipt, "not-created-or-unobservable", exc) from exc
+        try:
+            created = os.fstat(fd)
+            self._write_all(fd, data)
             os.fsync(fd)
+            written = os.fstat(fd)
+            os.fsync(self._directory_fd)
+            self._revalidate_root()
+            os.lseek(fd, 0, os.SEEK_SET)
+            observed = bytearray()
+            while block := os.read(fd, 64 * 1024):
+                observed.extend(block)
+                if len(observed) > len(data):
+                    raise OSError("bootstrap consumption held reread exceeded its exact size")
+            held = os.fstat(fd)
+            if (
+                (created.st_dev, created.st_ino) != (written.st_dev, written.st_ino)
+                or (created.st_dev, created.st_ino) != (held.st_dev, held.st_ino)
+                or held.st_uid != self._root_identity[2]
+                or stat.S_IMODE(held.st_mode) != 0o400
+                or held.st_size != len(data)
+                or bytes(observed) != data
+            ):
+                raise OSError("bootstrap consumption held reread or identity differs")
+        except Exception as exc:
+            raise self._ambiguous(receipt, "created-not-durably-verified", exc) from exc
         finally:
             os.close(fd)
+        self._spent_receipt_id = receipt["receipt_id"]
         return receipt
+
+
+class BootstrapConsumptionAmbiguous(RuntimeError):
+    """Authority may be spent, but no durable consumption receipt was proved."""
+
+    def __init__(self, message: str, *, evidence: tuple[str, ...], cause: Exception):
+        super().__init__(message)
+        self.evidence = evidence
+        self.__cause__ = cause
