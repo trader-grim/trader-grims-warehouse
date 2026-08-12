@@ -12,6 +12,8 @@ def test_flake_exports_dedicated_closed_review_unit_derivation():
     assert "nixosConfigurations.tgw-prod" not in flake
     assert "system.build.toplevel" not in flake
     assert "activation = false" in flake
+    assert "inputIdentities.nixpkgs" in flake
+    assert "nixpkgs.outPath" in flake
 
 
 def test_derivation_emits_only_the_exact_review_unit_contract():

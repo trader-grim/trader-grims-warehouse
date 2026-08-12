@@ -845,13 +845,7 @@ def execute_packet(
             "--no-write-lock-file",
         ]
         resolved_input = run(
-            base
-            + [
-                "eval",
-                "--raw",
-                "--expr",
-                "(builtins.getFlake (toString ./.)).inputs.nixpkgs.outPath",
-            ],
+            base + ["eval", "--raw", ".#inputIdentities.nixpkgs.outPath"],
             cwd=source,
             timeout=timeout,
         ).strip()

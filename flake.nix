@@ -54,6 +54,11 @@
       '';
     in {
       devShells.${system}.default = pkgs.mkShell { };
+      inputIdentities.nixpkgs = {
+        outPath = nixpkgs.outPath;
+        rev = "ac62194c3917d5f474c1a844b6fd6da2db95077d";
+        narHash = "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w=";
+      };
       packages.${system}.review-egress-systemd-units = reviewEgressSystemdUnits;
       checks.${system}.review-egress-systemd-units = reviewEgressSystemdUnits;
     };

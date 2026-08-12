@@ -412,7 +412,7 @@ def test_remote_helper_executes_only_fixed_offline_steps_and_cleans_scratch(tmp_
         calls.append(argv)
         if argv[-1] == "write-tree":
             return TREE
-        if "builtins.getFlake" in argv[-1]:
+        if argv[-1] == ".#inputIdentities.nixpkgs.outPath":
             return json.loads(request["input_closure_manifest_json"])[0]["path"]
         if "drvPath" in argv[-1]:
             return "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-review.drv"
