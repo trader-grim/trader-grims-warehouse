@@ -1,0 +1,16 @@
+{
+  "schema": "tgw-w07-gap-remediation-receipt/v1",
+  "work_unit": "W07",
+  "gap": "controller verification receipt could share an execution identity with implementation or independent review and still pass admission",
+  "correction": "admission requires unique non-empty execution identities across all three mandatory roles while continuing to permit the same provider or vendor in distinct contexts",
+  "source_files": [
+    "src/tgw/governed_coding.py",
+    "tests/test_governed_coding.py"
+  ],
+  "focused_test": {
+    "command": "PYTHONPATH=src pytest -q tests/test_governed_coding.py tests/test_review_runner.py",
+    "result": "11 passed"
+  },
+  "authority_claim": false,
+  "deployment_claim": false
+}
