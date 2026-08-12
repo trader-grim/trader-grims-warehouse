@@ -95,7 +95,17 @@ def test_solution_hash_is_deterministic_across_input_order_and_detects_mutation(
     second = solve(reordered)
 
     assert first == second
-    validate_for_dispatch(first, current_plan_commit=COMMIT)
+    assert first["complete"] is True
+    assert first["conformance_verified"] is False
+    assert first["dispatchable"] is False
+    with pytest.raises(PlanResolutionError, match="cannot dispatch"):
+        validate_for_dispatch(first, current_plan_commit=COMMIT)
+
+    agreed = solve(original, conformance_result={"available": True, "closure_hash": first["closure_hash"]})
+    assert agreed["conformance_verified"] is True
+    assert agreed["dispatchable"] is True
+    validate_for_dispatch(agreed, current_plan_commit=COMMIT)
+    first = agreed
     first["selected_providers"].append("fabricated")
     with pytest.raises(PlanResolutionError, match="hash mismatch"):
         validate_for_dispatch(first, current_plan_commit=COMMIT)
@@ -110,6 +120,21 @@ def test_stale_plan_commit_is_rejected_at_ingest_and_dispatch():
     solution = solve(document)
     with pytest.raises(StalePlanCommit):
         validate_for_dispatch(solution, current_plan_commit="new-commit")
+
+
+def test_conformance_disagreement_holds_dispatch_as_contradictory():
+    document = graph(capabilities=["a@1"], providers=[{"id": "a", "provides": ["a@1"]}], required=["a@1"])
+
+    result = solve(document, conformance_result={"provider_id": "luet-pinned@1", "available": True, "closure_hash": "sha256:different"})
+
+    assert result["complete"] is True
+    assert result["conformance_verified"] is False
+    assert result["dispatchable"] is False
+    contradiction = next(item for item in result["unresolved"] if item["code"] == "CONTRADICTORY_RESOLUTION")
+    assert contradiction["native_closure_hash"] == result["closure_hash"]
+    assert contradiction["provider"] == "luet-pinned@1"
+    with pytest.raises(PlanResolutionError, match="cannot dispatch"):
+        validate_for_dispatch(result, current_plan_commit=COMMIT)
 
 
 def test_execution_graph_adapter_exposes_bounded_catalog_gaps_without_inventing_providers():
