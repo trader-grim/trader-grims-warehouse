@@ -7,7 +7,7 @@ import pytest
 from tgw.nix_input_observation import LOCK_NAR, NIX, REV, UNSHARE, NixInputObservationError, observe_archive
 
 DIGEST = "a" * 64
-TOOLS = {name: "sha256:" + DIGEST for name in ("unshare", "ip", "python", "nix", "nix_store")}
+TOOLS = {name: "sha256:" + DIGEST for name in ("unshare", "ip", "python", "nix", "nix_store", "git")}
 
 
 def request(archive, helper=b"# fixed standalone helper"):
@@ -26,15 +26,15 @@ def receipt(req):
     value = {
         "schema": "tgw-nix-input-observation/v2",
         "request": bound,
-        "namespace": {"inode": 42, "links": [], "routes": [], "held_for_entire_run": True},
+        "namespace": {"start_inode": 42, "end_inode": 42, "loopback": "down", "other_links": [], "routes": [], "held_for_entire_run": True},
         "process": {"pid": 123, "starttime": 456, "exe_sha256": TOOLS["python"]},
         "tools": TOOLS,
         "negative_probes": {"dns": "denied", "public_https": "denied", "private": "denied", "metadata": "denied"},
         "lock_nodes": [{"node": "nixpkgs", "rev": REV, "nar_hash": LOCK_NAR}],
         "forced_inputs": [{"lock_node": "nixpkgs", "lock_rev": REV, "lock_nar_hash": LOCK_NAR, "path": "/nix/store/11111111111111111111111111111111-source", "nar_sha256": "sha256:" + DIGEST}],
         "evaluated_drv": "/nix/store/22222222222222222222222222222222-review.drv",
-        "store_additions": [{"role": "source", "path": "/nix/store/33333333333333333333333333333333-source", "nar_sha256": "sha256:" + DIGEST}],
-        "nix_version": "2.28.5",
+        "store_additions": [{"role": "derivation", "path": "/nix/store/22222222222222222222222222222222-review.drv", "nar_sha256": "sha256:" + DIGEST}],
+        "nix_version": "nix (Nix) 2.28.5",
     }
     value["receipt_sha256"] = "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return value
