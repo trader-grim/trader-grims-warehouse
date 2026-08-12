@@ -98,11 +98,42 @@ def test_privileged_kernel_attestation_derives_live_evidence_and_is_asymmetrical
         key = " ".join(argv)
         outputs = {
             "ip netns list-id": topology.namespace,
-            f"ip netns exec {topology.namespace} ip -j address show": json.dumps([{"ifname": topology.peer_if, "address": topology.peer_address}]),
-            f"ip -j link show {topology.host_if}": json.dumps([{"ifname": topology.host_if, "operstate": "UP"}]),
-            f"ip netns exec {topology.namespace} ip -j route show": json.dumps([{"dst": "default", "gateway": topology.host_address.split('/')[0], "dev": topology.peer_if}]),
-            f"ip netns exec {topology.namespace} nft -j list ruleset": json.dumps([{"worker_uid": 973, "broker_uid": 972, "broker_port": topology.broker_port, "policy": "drop"}]),
-            f"nft -j list table inet tgw_review_{topology.run_id}": json.dumps([{"table": f"tgw_review_{topology.run_id}", "family": "inet"}]),
+            f"ip netns exec {topology.namespace} ip -j address show dev {topology.peer_if}": json.dumps(
+                [
+                    {
+                        "ifindex": 2,
+                        "ifname": topology.peer_if,
+                        "flags": ["BROADCAST", "UP", "LOWER_UP"],
+                        "addr_info": [{"family": "inet", "local": topology.peer_address.split("/")[0], "prefixlen": 30, "scope": "global"}],
+                    }
+                ]
+            ),
+            f"ip -j link show {topology.host_if}": json.dumps([{"ifindex": 3, "ifname": topology.host_if, "flags": ["UP", "LOWER_UP"], "operstate": "UP"}]),
+            f"ip netns exec {topology.namespace} ip -j route show": json.dumps(
+                [{"dst": "default", "gateway": topology.host_address.split("/")[0], "dev": topology.peer_if, "protocol": "static", "flags": []}]
+            ),
+            f"ip netns exec {topology.namespace} nft -j list ruleset": json.dumps(
+                {
+                    "nftables": [
+                        {"table": {"family": "inet", "name": "tgw_review"}},
+                        {"chain": {"family": "inet", "table": "tgw_review", "name": "output", "policy": "drop"}},
+                        {
+                            "rule": {
+                                "family": "inet",
+                                "table": "tgw_review",
+                                "chain": "output",
+                                "expr": [
+                                    {"match": {"left": {"meta": {"key": "skuid"}}, "right": 973}},
+                                    {"match": {"left": {"payload": {"field": "dport"}}, "right": topology.broker_port}},
+                                    {"accept": None},
+                                ],
+                            }
+                        },
+                        {"rule": {"family": "inet", "table": "tgw_review", "chain": "output", "expr": [{"match": {"left": {"meta": {"key": "skuid"}}, "right": 972}}, {"accept": None}]}},
+                    ]
+                }
+            ),
+            f"nft -j list table inet tgw_review_{topology.run_id}": json.dumps({"nftables": [{"table": {"family": "inet", "name": f"tgw_review_{topology.run_id}"}}]}),
             "ps --no-headers -o pid=,uid=,cgroup= -p 123": f"123 972 tgw-review-egress@{topology.run_id}.service",
             "awk {print $22} /proc/123/stat": "42",
             "sha256sum /proc/123/exe": "a" * 64 + " /proc/123/exe",
@@ -154,11 +185,20 @@ def test_typed_identity_parser_rejects_pid_uid_collisions(field, replacement):
     topology = Topology.for_run("abcdef123456")
     evidence = {
         "namespace_readback": topology.namespace,
-        "address": json.dumps([{"ifname": topology.peer_if, "address": topology.peer_address}]),
-        "link": json.dumps([{"ifname": topology.host_if, "operstate": "UP"}]),
-        "route": json.dumps([{"dst": "default", "gateway": topology.host_address.split('/')[0], "dev": topology.peer_if}]),
-        "ruleset": json.dumps([{"worker_uid": 973, "broker_uid": 972, "broker_port": 18443, "policy": "drop"}]),
-        "counters": json.dumps([{"table": "tgw_review_abcdef123456", "family": "inet"}]),
+        "address": json.dumps([{"ifname": topology.peer_if, "flags": ["UP"], "addr_info": [{"family": "inet", "local": topology.peer_address.split("/")[0], "prefixlen": 30}]}]),
+        "link": json.dumps([{"ifname": topology.host_if, "flags": ["UP"]}]),
+        "route": json.dumps([{"dst": "default", "gateway": topology.host_address.split("/")[0], "dev": topology.peer_if}]),
+        "ruleset": json.dumps(
+            {
+                "nftables": [
+                    {"table": {"family": "inet", "name": "tgw_review"}},
+                    {"chain": {"family": "inet", "table": "tgw_review", "name": "output", "policy": "drop"}},
+                    {"rule": {"table": "tgw_review", "expr": [{"match": {"right": 973}}, {"match": {"right": 18443}}, {"accept": None}]}},
+                    {"rule": {"table": "tgw_review", "expr": [{"match": {"right": 972}}, {"accept": None}]}},
+                ]
+            }
+        ),
+        "counters": json.dumps({"nftables": [{"table": {"family": "inet", "name": "tgw_review_abcdef123456"}}]}),
         "broker_process": "123 972 tgw-review-egress@abcdef123456.service",
         "broker_starttime": "42",
         "broker_exe": "a" * 64 + " /proc/123/exe",
@@ -173,14 +213,30 @@ def test_typed_identity_parser_rejects_pid_uid_collisions(field, replacement):
         parse_live_identity(evidence, topology, pid=123, runtime_sha256="sha256:" + "a" * 64)
 
 
-def test_systemd_dependency_graph_is_acyclic_and_staged():
+def test_systemd_dependency_graph_is_acyclic_and_rendered_units_verify(tmp_path):
+    import re
+    import shutil
     from pathlib import Path
 
     nix = Path("nix/review-egress.nix").read_text()
     for token in ("requires", "after", "partOf", "tgw-review-egress@%i.service", "tgw-review-egress-attest@%i.service"):
         assert token in nix
-    graph = {"namespace": {"broker"}, "broker": {"attester"}, "attester": set()}
+    blocks = {}
+    for name in ("tgw-review-egress@", "tgw-review-egress-namespace@", "tgw-review-egress-attest@"):
+        start = nix.index(f'systemd.services."{name}"')
+        end = nix.find('systemd.services."', start + 20)
+        blocks[name] = nix[start : len(nix) if end < 0 else end]
+    graph = {name: set() for name in blocks}
+    unit_to_name = {f"{name}%i.service": name for name in blocks}
+    for name, block in blocks.items():
+        for relation in ("requires", "after"):
+            match = re.search(rf"{relation} = \[ ([^]]*) \]", block)
+            if match:
+                for unit in re.findall(r'"([^"]+)"', match.group(1)):
+                    if unit in unit_to_name and relation == "after":
+                        graph[unit_to_name[unit]].add(name)
     visiting, done = set(), set()
+
     def visit(node):
         assert node not in visiting
         if node not in done:
@@ -189,5 +245,15 @@ def test_systemd_dependency_graph_is_acyclic_and_staged():
                 visit(child)
             visiting.remove(node)
             done.add(node)
+
     for node in graph:
         visit(node)
+    if shutil.which("systemd-analyze"):
+        units = []
+        for index, (name, block) in enumerate(blocks.items()):
+            unit = tmp_path / f"review-{index}.service"
+            after = " ".join(f"review-{list(blocks).index(dep)}.service" for dep in graph if name in graph[dep])
+            unit.write_text(f"[Unit]\nAfter={after}\n[Service]\nType=oneshot\nExecStart=/bin/true\n")
+            units.append(str(unit))
+        result = subprocess.run(["systemd-analyze", "verify", *units], text=True, capture_output=True, check=False)
+        assert result.returncode == 0, result.stderr

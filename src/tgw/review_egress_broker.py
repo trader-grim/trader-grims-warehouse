@@ -131,6 +131,7 @@ def verify_network_attestation(value: Mapping[str, Any], policy: ReviewEgressPol
             for key in ("namespace_readback", "address", "link", "route", "ruleset", "counters", "broker_process", "broker_starttime", "broker_exe", "broker_socket")
         )
         or not isinstance(evidence["identity"], Mapping)
+        or evidence["identity"].get("exe_sha256") != policy.runtime_sha256
         or not value["nonce"]
     ):
         raise BrokerError("network kernel identity is incomplete")

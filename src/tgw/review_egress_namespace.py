@@ -112,25 +112,56 @@ def _json_list(raw: str, name: str) -> list[dict]:
     return value
 
 
+def _contains(value, expected: dict) -> bool:
+    if isinstance(value, dict):
+        if all(key in value and value[key] == item for key, item in expected.items()):
+            return True
+        return any(_contains(item, expected) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains(item, expected) for item in value)
+    return False
+
+
 def parse_live_identity(evidence: dict, topology: Topology, *, pid: int, runtime_sha256: str) -> dict:
     """Parse one exact process/socket/topology tuple; never search opaque text."""
     if evidence["namespace_readback"].splitlines() != [topology.namespace]:
         raise NamespaceError("namespace semantic mismatch")
     address = _json_list(evidence["address"], "address")
-    expected_address = {"ifname": topology.peer_if, "address": topology.peer_address}
-    if address != [expected_address]:
+    peer_ip, prefix = topology.peer_address.split("/")
+    if len(address) != 1 or address[0].get("ifname") != topology.peer_if or not {"UP", "LOWER_UP"}.intersection(address[0].get("flags", [])):
+        raise NamespaceError("address semantic mismatch")
+    inet = [row for row in address[0].get("addr_info", []) if row.get("family") == "inet"]
+    if len(inet) != 1 or inet[0].get("local") != peer_ip or inet[0].get("prefixlen") != int(prefix):
         raise NamespaceError("address semantic mismatch")
     link = _json_list(evidence["link"], "link")
-    if link != [{"ifname": topology.host_if, "operstate": "UP"}]:
+    if len(link) != 1 or link[0].get("ifname") != topology.host_if or "UP" not in link[0].get("flags", []):
         raise NamespaceError("link semantic mismatch")
     route = _json_list(evidence["route"], "route")
     expected_route = {"dst": "default", "gateway": topology.host_address.split("/")[0], "dev": topology.peer_if}
-    if route != [expected_route]:
+    defaults = [{key: row.get(key) for key in expected_route} for row in route if row.get("dst") == "default"]
+    if defaults != [expected_route]:
         raise NamespaceError("route semantic mismatch")
-    rules = _json_list(evidence["ruleset"], "ruleset")
-    expected_rules = [{"worker_uid": 973, "broker_uid": 972, "broker_port": topology.broker_port, "policy": "drop"}]
-    counters = _json_list(evidence["counters"], "counters")
-    if rules != expected_rules or counters != [{"table": f"tgw_review_{topology.run_id}", "family": "inet"}]:
+    try:
+        rules_doc, counters_doc = json.loads(evidence["ruleset"]), json.loads(evidence["counters"])
+        rules = rules_doc["nftables"]
+        counters = counters_doc["nftables"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise NamespaceError("nft readback is malformed") from exc
+    tables = {(x["table"].get("family"), x["table"].get("name")) for x in rules if set(x) == {"table"}}
+    chains = [x["chain"] for x in rules if set(x) == {"chain"}]
+    host_tables = {(x["table"].get("family"), x["table"].get("name")) for x in counters if set(x) == {"table"}}
+    output = [x for x in chains if x.get("family") == "inet" and x.get("table") == "tgw_review" and x.get("name") == "output"]
+    rule_objects = [x["rule"] for x in rules if set(x) == {"rule"} and x["rule"].get("table") == "tgw_review"]
+    worker_rule = [r for r in rule_objects if _contains(r.get("expr"), {"right": 973}) and _contains(r.get("expr"), {"right": topology.broker_port}) and _contains(r.get("expr"), {"accept": None})]
+    broker_rule = [r for r in rule_objects if _contains(r.get("expr"), {"right": 972}) and _contains(r.get("expr"), {"accept": None})]
+    if (
+        tables != {("inet", "tgw_review")}
+        or len(output) != 1
+        or output[0].get("policy") != "drop"
+        or len(worker_rule) != 1
+        or not broker_rule
+        or host_tables != {("inet", f"tgw_review_{topology.run_id}")}
+    ):
         raise NamespaceError("nft semantic mismatch")
     try:
         process_fields = evidence["broker_process"].split()
@@ -183,7 +214,7 @@ def collect_kernel_attestation(
         raise NamespaceError("attestation identity or lifetime is invalid")
     fixed = {
         "namespace_readback": ["ip", "netns", "list-id"],
-        "address": ["ip", "netns", "exec", topology.namespace, "ip", "-j", "address", "show"],
+        "address": ["ip", "netns", "exec", topology.namespace, "ip", "-j", "address", "show", "dev", topology.peer_if],
         "link": ["ip", "-j", "link", "show", topology.host_if],
         "route": ["ip", "netns", "exec", topology.namespace, "ip", "-j", "route", "show"],
         "ruleset": ["ip", "netns", "exec", topology.namespace, "nft", "-j", "list", "ruleset"],
@@ -252,19 +283,24 @@ def main() -> int:
     parser.add_argument("--worker-uid", type=int, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--policy", type=Path)
     parser.add_argument("--trust-key", type=Path)
     args = parser.parse_args()
     topology = Topology.for_run(args.run_id)
     if args.action == "attest":
-        if args.evidence is None or args.trust_key is None:
-            raise SystemExit("attestation requires privileged evidence and trust key")
-        evidence = json.loads(args.evidence.read_text(encoding="utf-8"))
+        if args.policy is None or args.trust_key is None:
+            raise SystemExit("attestation requires immutable policy and trust key")
+        from tgw.review_egress_broker import ReviewEgressPolicy
+
+        policy = ReviewEgressPolicy.parse(json.loads(args.policy.read_text(encoding="utf-8")))
+        if policy.run_id != args.run_id:
+            raise SystemExit("policy run identity mismatch")
         receipt = collect_kernel_attestation(
             run_id=args.run_id,
-            policy_hash=evidence["policy_hash"],
+            policy_hash=policy.policy_hash,
             topology=topology,
             private_key=args.trust_key.read_bytes(),
-            expected_runtime_sha256=evidence["runtime_sha256"],
+            expected_runtime_sha256=policy.runtime_sha256,
         )
     else:
         receipt = {

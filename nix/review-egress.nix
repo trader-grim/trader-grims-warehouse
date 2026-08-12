@@ -52,7 +52,7 @@ in {
       serviceConfig = {
         Type = "oneshot"; User = "root";
         LoadCredential = "attestation.key:/run/credentials/tgw-review-attestation.key";
-        ExecStart = "${cfg.package}/bin/tgw-review-egress-namespace attest %i --broker-uid 972 --worker-uid 973 --evidence /run/tgw-review/%i/kernel-probe-evidence.json --trust-key \${CREDENTIALS_DIRECTORY}/attestation.key --receipt /run/tgw-review/%i/network-attestation.json";
+        ExecStart = "${cfg.package}/bin/tgw-review-egress-namespace attest %i --broker-uid 972 --worker-uid 973 --policy /run/tgw-review/%i/policy.json --trust-key \${CREDENTIALS_DIRECTORY}/attestation.key --receipt /run/tgw-review/%i/network-attestation.json";
         CapabilityBoundingSet = [ "CAP_NET_ADMIN" "CAP_SYS_PTRACE" ];
         NoNewPrivileges = true; ProtectSystem = "strict"; ProtectHome = true;
         ReadWritePaths = [ "/run/tgw-review/%i" ];

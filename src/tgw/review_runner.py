@@ -72,9 +72,7 @@ def _snapshot_path(card: Mapping[str, Any]) -> tuple[Path, str]:
     return path, expected
 
 
-def _validate_report(
-    report: Any, expected_snapshot: str, snapshot_root: Path
-) -> dict[str, Any]:
+def _validate_report(report: Any, expected_snapshot: str, snapshot_root: Path) -> dict[str, Any]:
     if not isinstance(report, dict) or set(report) != {
         "schema",
         "verdict",
@@ -98,12 +96,7 @@ def _validate_report(
         if finding["severity"] not in {"critical", "high", "medium", "low"}:
             raise ReviewRunnerError("review finding severity is invalid")
         relative = Path(str(finding["path"]))
-        if (
-            not isinstance(finding["path"], str)
-            or not finding["path"]
-            or relative.is_absolute()
-            or ".." in relative.parts
-        ):
+        if not isinstance(finding["path"], str) or not finding["path"] or relative.is_absolute() or ".." in relative.parts:
             raise ReviewRunnerError("review finding path must be snapshot-relative")
         if not isinstance(finding["line"], int) or finding["line"] < 1:
             raise ReviewRunnerError("review finding line is invalid")
@@ -248,6 +241,7 @@ def run_review(
             tool_root=tool_root,
             proxy_url=proxy_url,
         )
+
         def invoke_provider():
             try:
                 return subprocess.run(
@@ -266,9 +260,13 @@ def run_review(
             if egress_receipt is not None or egress_receipt_path is None:
                 raise ReviewRunnerError("live broker requires one absent final receipt path, not a preloaded receipt")
             completed, egress_receipt = run_with_broker(
-                broker_argv, invoke_provider, egress_receipt_path,
+                broker_argv,
+                invoke_provider,
+                egress_receipt_path,
                 ready_path=egress_receipt_path.with_name("ready.json"),
-                expected_run_id=policy.run_id, expected_policy_hash=policy.policy_hash,
+                expected_run_id=policy.run_id,
+                expected_policy_hash=policy.policy_hash,
+                expected_runtime_sha256=policy.runtime_sha256,
             )
         else:
             completed = invoke_provider()

@@ -21,6 +21,7 @@ def run_with_broker(
     expected_run_id: str,
     expected_policy_hash: str,
     *,
+    expected_runtime_sha256: str,
     spawn: Callable[..., subprocess.Popen] = subprocess.Popen,
     verify_process_socket: Callable[[subprocess.Popen, Mapping[str, Any]], bool] | None = None,
     stop_timeout: float = 10,
@@ -54,6 +55,7 @@ def run_with_broker(
     ):
         process.terminate()
         raise BrokerSupervisorError("broker readiness is absent or not bound to the run policy")
+
     def strict_verifier(proc, value):
         identity = value["broker_identity"]
         socket = identity.get("socket") if isinstance(identity, Mapping) else None
@@ -65,13 +67,19 @@ def run_with_broker(
             and identity["pid"] == getattr(proc, "pid", None) == socket["pid"]
             and identity["uid"] == socket["uid"] == 972
             and identity["cgroup"] == f"tgw-review-egress@{expected_run_id}.service"
-            and isinstance(identity["starttime"], int) and identity["starttime"] > 0
-            and isinstance(identity["exe_sha256"], str) and identity["exe_sha256"].startswith("sha256:") and len(identity["exe_sha256"]) == 71
-            and isinstance(socket["inode"], int) and socket["inode"] > 0
+            and isinstance(identity["starttime"], int)
+            and identity["starttime"] > 0
+            and isinstance(identity["exe_sha256"], str)
+            and identity["exe_sha256"].startswith("sha256:")
+            and len(identity["exe_sha256"]) == 71
+            and identity["exe_sha256"] == expected_runtime_sha256
+            and isinstance(socket["inode"], int)
+            and socket["inode"] > 0
             and socket["local_ip"] == bind.get("host")
             and socket["local_port"] == bind.get("port")
             and socket["state"] == "LISTEN"
         )
+
     verifier = verify_process_socket or strict_verifier
     if not verifier(process, ready):
         process.terminate()
