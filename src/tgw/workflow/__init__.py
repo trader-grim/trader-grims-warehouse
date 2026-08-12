@@ -15,6 +15,7 @@ from .contracts import (
     TreatmentDisposition,
 )
 from .evaluator import evaluate
+from .plan_bridge import CompiledPlanRuntime, ResolutionHold, compile_solution_runtime
 from .standalone_plan import (
     PlanDocument,
     PlanValidationError,
@@ -43,6 +44,9 @@ __all__ = [
     "TreatmentContract",
     "TreatmentDisposition",
     "evaluate",
+    "CompiledPlanRuntime",
+    "ResolutionHold",
+    "compile_solution_runtime",
     "PlanDocument",
     "PlanValidationError",
     "canonical_hash",

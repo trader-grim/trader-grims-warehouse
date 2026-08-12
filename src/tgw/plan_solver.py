@@ -409,6 +409,7 @@ class ExactCapabilitySolver:
                     work_units.append(
                         {
                             "id": "establish:" + capability,
+                            "capability": capability,
                             "establishes": [f"{capability}@{graph.target.minimum_state}"],
                             "selected_provider": provider.id,
                             "requires_capabilities": sorted(self._leaf_capabilities(provider.requires)),
@@ -514,6 +515,14 @@ class ExactCapabilitySolver:
 def validate_for_dispatch(solution: Mapping[str, Any], *, current_plan_commit: str) -> None:
     """Fail closed unless a complete solution is current and internally intact."""
 
+    validate_solution_integrity(solution, current_plan_commit=current_plan_commit)
+    if not solution.get("complete") or not solution.get("conformance_verified") or not solution.get("dispatchable") or solution.get("unresolved"):
+        raise PlanResolutionError("solution is incomplete and cannot dispatch")
+
+
+def validate_solution_integrity(solution: Mapping[str, Any], *, current_plan_commit: str) -> None:
+    """Validate immutable identity/binding without implying dispatch authority."""
+
     if solution.get("schema") != SOLUTION_SCHEMA:
         raise PlanResolutionError("not a tgw-plan-solution/v1 artifact")
     if solution.get("plan_commit") != current_plan_commit:
@@ -522,8 +531,6 @@ def validate_for_dispatch(solution: Mapping[str, Any], *, current_plan_commit: s
     claimed = unsigned.pop("solution_hash", None)
     if claimed != _hash(unsigned):
         raise PlanResolutionError("solution hash mismatch")
-    if not solution.get("complete") or not solution.get("conformance_verified") or not solution.get("dispatchable") or solution.get("unresolved"):
-        raise PlanResolutionError("solution is incomplete and cannot dispatch")
 
 
 def solve(

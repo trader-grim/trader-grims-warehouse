@@ -72,6 +72,7 @@ def test_installed_state_is_reused_and_partial_state_becomes_work():
     assert result["work_units"] == [
         {
             "id": "establish:app@1",
+            "capability": "app@1",
             "establishes": ["app@1@admitted"],
             "selected_provider": "app",
             "requires_capabilities": ["queue@1"],
