@@ -50,3 +50,19 @@ def test_native_launcher_is_the_only_privileged_implementation():
     assert "system(" not in source and "popen(" not in source
     assert 'args[]={python,"-I",observer,NULL}' in source
     assert "strchr(instance,'/')" in source and "cgroup instance grammar invalid" in source
+
+
+def test_flake_exports_closed_observer_render_artifact():
+    source = Path("flake.nix").read_text()
+    assert "packages.${system}.nix-input-observer-rendered-artifacts" in source
+    assert "checks.${system}.nix-input-observer-rendered-artifacts" in source
+    for output in (
+        "tgw-nix-input-observer.socket",
+        "tgw-nix-input-observer@.service",
+        "tgw-nix-input-observer.slice",
+        "nix-input-observer-launcher.conf",
+        "nix-input-observer-transport.json",
+        "verifier-metadata.json",
+    ):
+        assert output in source
+    assert "activation = false" in source
