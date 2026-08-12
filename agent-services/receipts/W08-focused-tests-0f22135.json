@@ -1,0 +1,1 @@
+{"schema":"tgw-candidate-test-receipt/v1","source_commit":"0f221352c89d2050b1b2868490ce59c7b5b97cd6","source_tree":"8930df7c3262acc794177534cbe25ac60bd61f7a","result":"203 passed in 2.55s","status":"passed","suite":"canonical typed effect, Plan, authority, transport, evaluation","worktree":"detached-clean"}

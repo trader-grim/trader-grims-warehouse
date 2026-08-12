@@ -1,0 +1,1 @@
+{"schema":"tgw-candidate-full-suite-receipt/v1","candidate":{"commit":"0f221352c89d2050b1b2868490ce59c7b5b97cd6","tree":"8930df7c3262acc794177534cbe25ac60bd61f7a","worktree":"detached-clean"},"result":{"status":"PASSED","passed":3428,"skipped":4,"failed":0,"elapsed":"56.68s"},"full_suite_passed":true,"dispatchable":false}
