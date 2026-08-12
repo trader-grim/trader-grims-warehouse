@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -154,22 +155,47 @@ def source_case(tmp_path):
     _archive(archive, files, commit="b" * 40)
     request = _request(files, archive, tree=tree)
     helper_source = Path(helper.__file__).read_bytes()
-    wire = helper.packet(helper_source, request, archive, tool=Path("/usr/bin/git"))
+    tool_descriptor = helper.describe_tool(Path("/usr/bin/git"))
+    wire = helper.packet(helper_source, request, archive, tool_descriptor=tool_descriptor)
     binding = helper.parse_prefix(wire[: helper.PREFIX.size])
-    return files, archive, request, helper_source, wire, binding
+    return files, archive, request, helper_source, wire, binding, tool_descriptor
 
 
 def _run_bootstrap(wire: bytes, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
-    program = "_TEST_ONLY_GIT_PATH='/usr/bin/git'\n" + helper.BOOTSTRAP
-    return subprocess.run([sys.executable, "-I", "-c", program], input=wire, capture_output=True, check=False, env=env)
+    return subprocess.run([sys.executable, "-I", "-c", helper.BOOTSTRAP], input=wire, capture_output=True, check=False, env=env)
+
+
+def _helper_frame(request, tool_descriptor, archive):
+    request_raw = canonical(request)
+    tool_raw = canonical(tool_descriptor)
+    return struct.pack("!Q", len(request_raw)) + request_raw + struct.pack("!Q", len(tool_raw)) + tool_raw + archive.read_bytes()
+
+
+def _raw_wire(helper_source, request, tool_descriptor, archive):
+    request_raw = canonical(request)
+    tool_raw = canonical(tool_descriptor)
+    archive_raw = archive.read_bytes()
+    prefix = helper.PREFIX.pack(
+        helper.MAGIC,
+        helper.VERSION,
+        len(helper_source),
+        len(request_raw),
+        len(tool_raw),
+        len(archive_raw),
+        bytes.fromhex(request["request_sha256"].removeprefix("sha256:")),
+        hashlib.sha256(helper_source).digest(),
+        hashlib.sha256(tool_raw).digest(),
+        hashlib.sha256(archive_raw).digest(),
+    )
+    return prefix + helper_source + request_raw + tool_raw + archive_raw
 
 
 def test_actual_subprocess_frame_verifies_source_then_holds_before_executor(source_case):
-    _, _, request, _, wire, binding = source_case
+    _, _, request, _, wire, binding, tool_descriptor = source_case
     completed = _run_bootstrap(wire, env={**os.environ, "TGW_NIX_RENDER_EXECUTOR": "ambient-command"})
     receipt = json.loads(completed.stdout)
     assert completed.returncode == 3
-    assert helper.validate_terminal(receipt, binding=binding, request=request) == receipt
+    assert helper.validate_terminal(receipt, binding=binding, request=request, tool_descriptor=tool_descriptor) == receipt
     assert receipt["schema"] == helper.HOLD_SCHEMA
     assert receipt["outcome"] == helper.HOLD_OUTCOME
     assert receipt["request_sha256"] == request["request_sha256"] == binding.request_sha256
@@ -180,20 +206,98 @@ def test_actual_subprocess_frame_verifies_source_then_holds_before_executor(sour
 
 
 def test_fixed_prefix_binds_all_exact_lengths_and_hashes(source_case):
-    _, archive, request, helper_source, _, binding = source_case
+    _, archive, request, helper_source, _, binding, tool_descriptor = source_case
     assert binding.request_sha256 == request["request_sha256"]
     assert binding.helper_sha256 == _digest(helper_source)
-    assert binding.tool_sha256 == _digest(Path("/usr/bin/git").read_bytes())
+    assert binding.tool_descriptor_sha256 == _digest(canonical(tool_descriptor))
     assert binding.archive_sha256 == request["archive_sha256"]
     assert binding.request_bytes == len(canonical(request))
     assert binding.helper_bytes == len(helper_source)
-    assert binding.tool_bytes == Path("/usr/bin/git").stat().st_size
+    assert binding.tool_descriptor_bytes == len(canonical(tool_descriptor))
     assert binding.archive_bytes == archive.stat().st_size
+
+
+def test_packet_opens_archive_once_and_streams_that_held_inode(source_case, monkeypatch):
+    _, archive, request, helper_source, _, _, tool_descriptor = source_case
+    original_open = os.open
+    archive_opens = []
+
+    def tracked_open(path, flags, *args, **kwargs):
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if Path(path) == archive:
+            archive_opens.append((descriptor, os.fstat(descriptor).st_ino))
+        return descriptor
+
+    monkeypatch.setattr(helper.os, "open", tracked_open)
+    wire = helper.packet(helper_source, request, archive, tool_descriptor=tool_descriptor)
+    assert len(archive_opens) == 1
+    assert wire.endswith(archive.read_bytes())
+
+
+def test_packet_rejects_archive_changed_between_pre_and_post_fstat(source_case, monkeypatch):
+    _, archive, request, helper_source, _, _, tool_descriptor = source_case
+    original_open = os.open
+    original_fstat = os.fstat
+    archive_fd = -1
+    observations = 0
+
+    def tracked_open(path, flags, *args, **kwargs):
+        nonlocal archive_fd
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if Path(path) == archive:
+            archive_fd = descriptor
+        return descriptor
+
+    def changed_fstat(descriptor):
+        nonlocal observations
+        value = original_fstat(descriptor)
+        if descriptor != archive_fd:
+            return value
+        observations += 1
+        if observations == 1:
+            return value
+        return SimpleNamespace(
+            st_dev=value.st_dev,
+            st_ino=value.st_ino,
+            st_size=value.st_size,
+            st_mode=value.st_mode,
+            st_mtime_ns=value.st_mtime_ns + 1,
+            st_ctime_ns=value.st_ctime_ns,
+        )
+
+    monkeypatch.setattr(helper.os, "open", tracked_open)
+    monkeypatch.setattr(helper.os, "fstat", changed_fstat)
+    with pytest.raises(helper.RenderHelperError, match="changed while read"):
+        helper.packet(helper_source, request, archive, tool_descriptor=tool_descriptor)
+
+
+def test_resolved_regular_tool_descriptor_works_and_symlink_is_rejected(tmp_path, source_case):
+    _, _, request, _, wire, _, tool_descriptor = source_case
+    assert tool_descriptor["path"] == "/usr/bin/git"
+    completed = _run_bootstrap(wire)
+    assert completed.returncode == 3
+    assert json.loads(completed.stdout)["outcome"] == helper.HOLD_OUTCOME
+
+    symlink = tmp_path / "git-link"
+    symlink.symlink_to("/usr/bin/git")
+    with pytest.raises(helper.RenderHelperError, match="resolved regular artifact"):
+        helper.describe_tool(symlink)
+
+    hostile = {**tool_descriptor, "path": str(symlink)}
+    helper_source = Path(helper.__file__).read_bytes()
+    archive = source_case[1]
+    hostile_wire = helper.packet(helper_source, request, archive, tool_descriptor=hostile)
+    binding = helper.parse_prefix(hostile_wire[: helper.PREFIX.size])
+    failed = _run_bootstrap(hostile_wire)
+    receipt = json.loads(failed.stdout)
+    assert failed.returncode == 1
+    assert helper.validate_terminal(receipt, binding=binding, request=request, tool_descriptor=hostile) == receipt
+    assert receipt["stage"] == "tool" and receipt["cleanup"] == "not-created"
 
 
 @pytest.mark.parametrize("mutation", ["bad-magic", "bad-helper-hash", "bad-archive-hash", "trailing"])
 def test_production_bootstrap_emits_bound_phase1_failures(source_case, mutation):
-    _, _, _, _, original, binding = source_case
+    _, _, _, _, original, binding, _ = source_case
     wire = bytearray(original)
     if mutation == "bad-magic":
         wire[:8] = b"BADMAGIC"
@@ -213,7 +317,7 @@ def test_production_bootstrap_emits_bound_phase1_failures(source_case, mutation)
 
 @pytest.mark.parametrize("mutation", ["missing-pax", "wrong-pax", "duplicate", "dotdot", "dot", "double-slash", "dotgit", "symlink", "other-root"])
 def test_malformed_archive_fails_closed_after_verified_cleanup(tmp_path, source_case, mutation):
-    files, _, request, helper_source, _, _ = source_case
+    files, _, request, helper_source, _, _, tool_descriptor = source_case
     archive = tmp_path / (mutation + ".tar")
     _archive(archive, files, commit=request["source_commit"], mutation=mutation)
     changed = dict(request)
@@ -221,12 +325,12 @@ def test_malformed_archive_fails_closed_after_verified_cleanup(tmp_path, source_
     changed["artifact_ref"] = "artifact:" + changed["archive_sha256"]
     changed.pop("request_sha256")
     changed["request_sha256"] = _digest(canonical(changed))
-    wire = helper.packet(helper_source, changed, archive, tool=Path("/usr/bin/git"))
+    wire = helper.packet(helper_source, changed, archive, tool_descriptor=tool_descriptor)
     completed = _run_bootstrap(wire)
     receipt = json.loads(completed.stdout)
     assert completed.returncode == 1
     binding = helper.parse_prefix(wire[: helper.PREFIX.size])
-    assert helper.validate_terminal(receipt, binding=binding, request=changed) == receipt
+    assert helper.validate_terminal(receipt, binding=binding, request=changed, tool_descriptor=tool_descriptor) == receipt
     assert receipt["schema"] == helper.FAILURE_SCHEMA
     assert receipt["stage"] == "archive"
     assert receipt["outcome"] == "FAILED"
@@ -234,16 +338,16 @@ def test_malformed_archive_fails_closed_after_verified_cleanup(tmp_path, source_
 
 
 def test_reconstructed_tree_mismatch_is_a_source_failure(source_case):
-    _, archive, request, helper_source, _, _ = source_case
+    _, archive, request, helper_source, _, _, tool_descriptor = source_case
     changed = dict(request)
     changed["source_tree"] = "0" * 40
     changed.pop("request_sha256")
     changed["request_sha256"] = _digest(canonical(changed))
-    wire = helper.packet(helper_source, changed, archive, tool=Path("/usr/bin/git"))
+    wire = helper.packet(helper_source, changed, archive, tool_descriptor=tool_descriptor)
     completed = _run_bootstrap(wire)
     receipt = json.loads(completed.stdout)
     binding = helper.parse_prefix(wire[: helper.PREFIX.size])
-    assert helper.validate_terminal(receipt, binding=binding, request=changed) == receipt
+    assert helper.validate_terminal(receipt, binding=binding, request=changed, tool_descriptor=tool_descriptor) == receipt
     assert completed.returncode == 1
     assert receipt["stage"] == "source"
     assert receipt["diagnostic_code"] == "IDENTITY_MISMATCH"
@@ -252,7 +356,7 @@ def test_reconstructed_tree_mismatch_is_a_source_failure(source_case):
 
 @pytest.mark.parametrize("field,path", sorted(helper.SOURCE_DIGEST_PATHS.items()))
 def test_each_bound_source_file_digest_is_verified(tmp_path, source_case, field, path):
-    original_files, _, original_request, helper_source, _, _ = source_case
+    original_files, _, original_request, helper_source, _, _, tool_descriptor = source_case
     changed_files = dict(original_files)
     changed_files[path] += b"# changed candidate source\n"
     source = tmp_path / "changed-source"
@@ -265,20 +369,20 @@ def test_each_bound_source_file_digest_is_verified(tmp_path, source_case, field,
     request[field] = original_request[field]
     request.pop("request_sha256")
     request["request_sha256"] = _digest(canonical(request))
-    wire = helper.packet(helper_source, request, archive, tool=Path("/usr/bin/git"))
+    wire = helper.packet(helper_source, request, archive, tool_descriptor=tool_descriptor)
     binding = helper.parse_prefix(wire[: helper.PREFIX.size])
     completed = _run_bootstrap(wire)
     receipt = json.loads(completed.stdout)
     assert completed.returncode == 1
-    assert helper.validate_terminal(receipt, binding=binding, request=request) == receipt
+    assert helper.validate_terminal(receipt, binding=binding, request=request, tool_descriptor=tool_descriptor) == receipt
     assert receipt["stage"] == "source"
     assert receipt["diagnostic_code"] == "IDENTITY_MISMATCH"
     assert receipt["cleanup"] == "removed"
 
 
 def test_cleanup_failure_overrides_verified_source_and_never_emits_hold(tmp_path, source_case):
-    _, archive, request, _, _, binding = source_case
-    reconstructed = io.BytesIO(struct.pack("!Q", len(canonical(request))) + canonical(request) + archive.read_bytes())
+    _, archive, request, _, _, binding, tool_descriptor = source_case
+    reconstructed = io.BytesIO(_helper_frame(request, tool_descriptor, archive))
 
     def fail_cleanup(_path, **_kwargs):
         raise OSError("injected cleanup failure")
@@ -286,7 +390,6 @@ def test_cleanup_failure_overrides_verified_source_and_never_emits_hold(tmp_path
     receipt = helper.execute_packet(
         reconstructed,
         binding=binding,
-        git_path=Path("/usr/bin/git"),
         scratch_root=tmp_path / "scratch",
         cleanup_tree=fail_cleanup,
     )
@@ -296,12 +399,12 @@ def test_cleanup_failure_overrides_verified_source_and_never_emits_hold(tmp_path
     assert receipt["diagnostic_code"] == "CLEANUP_FAILED"
     assert receipt["original_stage"] == "source-verified"
     assert receipt["cleanup"] == "failed"
-    assert helper.validate_terminal(receipt, binding=binding, request=request) == receipt
+    assert helper.validate_terminal(receipt, binding=binding, request=request, tool_descriptor=tool_descriptor) == receipt
 
 
 @pytest.mark.parametrize("state", ["residue", "symlink"])
 def test_untrusted_scratch_root_is_refused_before_archive_write(tmp_path, source_case, state):
-    _, archive, request, _, _, binding = source_case
+    _, archive, request, _, _, binding, tool_descriptor = source_case
     scratch = tmp_path / "scratch"
     if state == "residue":
         scratch.mkdir(mode=0o700)
@@ -310,40 +413,89 @@ def test_untrusted_scratch_root_is_refused_before_archive_write(tmp_path, source
         target = tmp_path / "target"
         target.mkdir()
         scratch.symlink_to(target, target_is_directory=True)
-    framed = io.BytesIO(struct.pack("!Q", len(canonical(request))) + canonical(request) + archive.read_bytes())
-    receipt = helper.execute_packet(framed, binding=binding, git_path=Path("/usr/bin/git"), scratch_root=scratch)
+    framed = io.BytesIO(_helper_frame(request, tool_descriptor, archive))
+    receipt = helper.execute_packet(framed, binding=binding, scratch_root=scratch)
     assert receipt["schema"] == helper.FAILURE_SCHEMA
     assert receipt["stage"] == "scratch"
     assert receipt["diagnostic_code"] == "IDENTITY_MISMATCH"
     assert receipt["cleanup"] == "not-created"
-    assert helper.validate_terminal(receipt, binding=binding, request=request) == receipt
+    assert helper.validate_terminal(receipt, binding=binding, request=request, tool_descriptor=tool_descriptor) == receipt
 
 
-def test_test_executor_is_explicit_injection_only_and_runs_after_source_verification(tmp_path, source_case, monkeypatch):
-    _, archive, request, _, _, binding = source_case
-    framed = struct.pack("!Q", len(canonical(request))) + canonical(request) + archive.read_bytes()
-    monkeypatch.setenv("TGW_NIX_RENDER_EXECUTOR", "not-reachable")
-    called = []
-
-    receipt = helper.execute_packet(
-        io.BytesIO(framed),
-        binding=binding,
-        git_path=Path("/usr/bin/git"),
-        scratch_root=tmp_path / "scratch",
-        test_executor=lambda source, bound: called.append((source, bound["request_sha256"])) or "source-marker",
-    )
+def test_only_explicit_prebootstrap_injection_can_emit_test_marker(source_case):
+    _, _, request, _, wire, binding, tool_descriptor = source_case
+    program = "def injected(source,request): return 'prebootstrap-marker'\n_TEST_ONLY_EXECUTOR=injected\n" + helper.BOOTSTRAP
+    completed = subprocess.run([sys.executable, "-I", "-c", program], input=wire, capture_output=True, check=False)
+    assert completed.stdout, completed.stderr.decode(errors="replace")
+    receipt = json.loads(completed.stdout)
+    assert completed.returncode == 0
+    assert helper.validate_terminal(receipt, binding=binding, request=request, tool_descriptor=tool_descriptor, allow_test_marker=True) == receipt
     assert receipt["schema"] == helper.TEST_MARKER_SCHEMA
-    assert receipt["outcome"] == "TEST_ONLY_SOURCE_VERIFIED"
-    assert receipt["marker"] == "source-marker"
-    assert receipt["cleanup"] == "removed"
-    assert helper.validate_terminal(receipt, binding=binding, request=request, allow_test_marker=True) == receipt
-    assert called and called[0][1] == request["request_sha256"]
-    assert not (tmp_path / "scratch").exists()
+    assert receipt["marker"] == "prebootstrap-marker"
+
+
+def test_request_field_cannot_activate_test_executor(source_case):
+    _, archive, request, helper_source, _, _, tool_descriptor = source_case
+    hostile = dict(request)
+    hostile["test_executor"] = "emit-marker"
+    hostile.pop("request_sha256")
+    hostile["request_sha256"] = _digest(canonical(hostile))
+    completed = _run_bootstrap(_raw_wire(helper_source, hostile, tool_descriptor, archive))
+    receipt = json.loads(completed.stdout)
+    assert completed.returncode == 1
+    assert receipt["schema"] == helper.FAILURE_SCHEMA
+    assert receipt["outcome"] == "FAILED"
+    assert receipt["stage"] == "request"
+
+
+def test_archive_content_cannot_activate_test_executor(tmp_path):
+    files = {**_source_files(), "executor-trigger.py": b"_TEST_ONLY_EXECUTOR=lambda *_: 'archive-marker'\n"}
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_source(source, files)
+    tree = _tree_hash(source)
+    archive = tmp_path / "source.tar"
+    _archive(archive, files, commit="b" * 40)
+    request = _request(files, archive, tree=tree)
+    helper_source = Path(helper.__file__).read_bytes()
+    tool_descriptor = helper.describe_tool(Path("/usr/bin/git"))
+    wire = helper.packet(helper_source, request, archive, tool_descriptor=tool_descriptor)
+    binding = helper.parse_prefix(wire[: helper.PREFIX.size])
+    completed = _run_bootstrap(wire)
+    receipt = json.loads(completed.stdout)
+    assert completed.returncode == 3
+    assert helper.validate_terminal(receipt, binding=binding, request=request, tool_descriptor=tool_descriptor) == receipt
+    assert receipt["outcome"] == helper.HOLD_OUTCOME
+
+
+def test_environment_and_module_globals_cannot_activate_normal_production_main(source_case, monkeypatch):
+    _, archive, request, _, _, binding, tool_descriptor = source_case
+    for field, value in {
+        "_BOOTSTRAP_REQUEST_BYTES": binding.request_bytes,
+        "_BOOTSTRAP_HELPER_BYTES": binding.helper_bytes,
+        "_BOOTSTRAP_TOOL_BYTES": binding.tool_descriptor_bytes,
+        "_BOOTSTRAP_ARCHIVE_BYTES": binding.archive_bytes,
+        "_BOOTSTRAP_REQUEST_SHA256": binding.request_sha256,
+        "_BOOTSTRAP_HELPER_SHA256": binding.helper_sha256,
+        "_BOOTSTRAP_TOOL_SHA256": binding.tool_descriptor_sha256,
+        "_BOOTSTRAP_ARCHIVE_SHA256": binding.archive_sha256,
+        "_TEST_ONLY_EXECUTOR": lambda *_: "module-marker",
+        "_test_executor": lambda *_: "module-marker",
+        "test_executor": lambda *_: "module-marker",
+    }.items():
+        monkeypatch.setattr(helper, field, value, raising=False)
+    monkeypatch.setenv("TGW_NIX_RENDER_EXECUTOR", "environment-marker")
+    output = io.BytesIO()
+    return_code = helper.main(input_stream=io.BytesIO(_helper_frame(request, tool_descriptor, archive)), output_stream=output)
+    receipt = json.loads(output.getvalue())
+    assert return_code == 3
+    assert helper.validate_terminal(receipt, binding=binding, request=request, tool_descriptor=tool_descriptor) == receipt
+    assert receipt["outcome"] == helper.HOLD_OUTCOME
 
 
 @pytest.mark.parametrize("bound", ["members", "unpacked"])
 def test_archive_member_and_unpacked_bounds_are_enforced(tmp_path, source_case, monkeypatch, bound):
-    files, _, request, helper_source, _, _ = source_case
+    files, _, request, helper_source, _, _, tool_descriptor = source_case
     archive = tmp_path / "bounded.tar"
     _archive(archive, files, commit=request["source_commit"])
     changed = dict(request)
@@ -351,18 +503,18 @@ def test_archive_member_and_unpacked_bounds_are_enforced(tmp_path, source_case, 
     changed["artifact_ref"] = "artifact:" + changed["archive_sha256"]
     changed.pop("request_sha256")
     changed["request_sha256"] = _digest(canonical(changed))
-    wire = helper.packet(helper_source, changed, archive, tool=Path("/usr/bin/git"))
+    wire = helper.packet(helper_source, changed, archive, tool_descriptor=tool_descriptor)
     binding = helper.parse_prefix(wire[: helper.PREFIX.size])
-    framed = io.BytesIO(struct.pack("!Q", len(canonical(changed))) + canonical(changed) + archive.read_bytes())
+    framed = io.BytesIO(_helper_frame(changed, tool_descriptor, archive))
     if bound == "members":
         monkeypatch.setattr(helper, "MAX_ARCHIVE_MEMBERS", 1)
     else:
         monkeypatch.setattr(helper, "MAX_UNPACKED_BYTES", 1)
-    receipt = helper.execute_packet(framed, binding=binding, git_path=Path("/usr/bin/git"), scratch_root=tmp_path / "scratch")
+    receipt = helper.execute_packet(framed, binding=binding, scratch_root=tmp_path / "scratch")
     assert receipt["stage"] == "archive"
     assert receipt["diagnostic_code"] == "BOUND_EXCEEDED"
     assert receipt["cleanup"] == "removed"
-    assert helper.validate_terminal(receipt, binding=binding, request=changed) == receipt
+    assert helper.validate_terminal(receipt, binding=binding, request=changed, tool_descriptor=tool_descriptor) == receipt
 
 
 def test_source_helper_contains_no_nix_or_transport_executor():
