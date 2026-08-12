@@ -2393,6 +2393,50 @@ def test_item_detail_no_stale_dole_cycle_claim(env):
     assert "approveForListing" not in r.text
 
 
+def test_item_detail_script_json_cannot_terminate_script(env):
+    payload = "</script><script>alert('stored-xss')</script>"
+    doc_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
+    doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    doc["draft_listing"] = {"item_specifics": {"Brand": [payload]}}
+    doc["revision_draft"] = {"delta": {"item_specifics": {"Model": [payload]}}}
+    doc_path.write_text(json.dumps(doc), encoding="utf-8")
+    _login(env["client"])
+
+    response = env["client"].get(f"/form/items/{SKU_A}")
+
+    assert response.status_code == 200
+    assert payload not in response.text
+    assert "\\u003c/script\\u003e\\u003cscript\\u003ealert" in response.text
+
+
+@pytest.mark.parametrize(
+    "alias",
+    ["titleupdate", "locationupdate", "verifiedupdate", "statusupdate", "setshipping"],
+)
+def test_api_cli_rejects_mutating_aliases_without_subprocess(client, monkeypatch, alias):
+    invoked = False
+
+    def unexpected_run(*args, **kwargs):
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("write-protected command reached subprocess")
+
+    monkeypatch.setattr(http_server.subprocess, "run", unexpected_run)
+
+    response = client.post(
+        "/api/cli",
+        headers=AUTH_HEADERS,
+        json={"command": alias, "args": [SKU_A, "attacker-value"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": False,
+        "error": f"{alias} is not an allowed read-only command",
+    }
+    assert invoked is False
+
+
 # ---------------------------------------------------------------------------
 # GET /form/items/{sku} — eBay deep links (PP-EDITOR-001 Phase 3m)
 # ---------------------------------------------------------------------------

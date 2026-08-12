@@ -55,6 +55,18 @@ log = logging.getLogger(__name__)
 _DISPLAY_TZ = ZoneInfo("America/Los_Angeles")
 
 
+def _json_for_script(value: Any) -> str:
+    """Serialize JSON that is safe to embed inside an HTML script element."""
+    return (
+        json.dumps(value)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
 def _local_ts(raw: Any, fmt: str = "%Y-%m-%d %H:%M") -> str:
     """Format a timestamp (datetime, or ISO string with/without offset) in the
     operator's local timezone for display.
@@ -6440,11 +6452,11 @@ def _render_item_detail_html(
     _has_proposals = bool(_rev_delta)
 
     _cat_id_for_aspects = str((dl or {}).get("category_id") or item.get("ebay_category_id") or "")
-    _aspects_prefill_json = _json.dumps(_spec)  # Set B current values — the form's own field
-    _live_aspects_json = _json.dumps(_spec)  # same Set B values, used as the "live" comparison baseline
-    _proposed_aspects_json = _json.dumps(_proposed_aspects)  # pipeline proposals
-    _aspects_cat_json = _json.dumps(_cat_id_for_aspects)
-    _proposals_meta_json = _json.dumps(
+    _aspects_prefill_json = _json_for_script(_spec)  # Set B current values — the form's own field
+    _live_aspects_json = _json_for_script(_spec)  # same Set B values, used as the "live" comparison baseline
+    _proposed_aspects_json = _json_for_script(_proposed_aspects)  # pipeline proposals
+    _aspects_cat_json = _json_for_script(_cat_id_for_aspects)
+    _proposals_meta_json = _json_for_script(
         {
             "title": _rev_delta.get("title") or "",
             "description": _rev_delta.get("description") or "",
@@ -11335,17 +11347,20 @@ async def api_cli(request: Request):
     body = await request.json()
     cmd = body.get("command", "")
     args = body.get("args", [])
-    BLOCKED = {"update","update-where","update-title","update-location",
-        "update-verified","update-status","set-shipping","bulk",
-        "price-freeship","hint","data-scrub","revise","alt-text",
-        "enqueue-sku","requeue-identify","resolve-legacy","ready",
-        "publish","alt-text-batch","ebay-pull","import-sold-csv",
-        "sku-migrate","migrate-unblock","migrate-restore",
-        "restart-workers","restart-ebay-token","nix-bundle-usb",
-        "set-context","clear-context","set-template","create-item",
-        "serve","flake"}
-    if cmd in BLOCKED:
-        return {"ok": False, "error": f"{cmd} is write-protected"}
+    # This subprocess bridge is intentionally much narrower than the CLI.
+    # New commands and aliases remain unavailable until explicitly reviewed
+    # as read-only; a denylist is unsafe because argparse aliases can reach
+    # the same mutating handler under a different spelling.
+    read_only = {
+        "get", "list", "search", "resolve", "health", "status", "help",
+        "hint-trail", "audit-trail", "staged", "reprice-suggest", "seo-audit",
+        "review", "migrate-review", "store-categories", "strikethrough-check",
+        "ops-digest", "queue-history", "locate", "get-context", "ai-usage",
+    }
+    if not isinstance(cmd, str) or cmd not in read_only:
+        return {"ok": False, "error": f"{cmd} is not an allowed read-only command"}
+    if not isinstance(args, list) or not all(isinstance(arg, (str, int, float)) for arg in args):
+        return {"ok": False, "error": "args must be a list of scalar values"}
     fc = ["/opt/TGW/.venvironments/tgw/bin/tgw", cmd] + [str(a) for a in args]
     try:
         p = subprocess.run(fc, capture_output=True, text=True, timeout=30)
