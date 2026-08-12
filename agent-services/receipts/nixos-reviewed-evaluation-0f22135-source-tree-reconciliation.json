@@ -1,0 +1,46 @@
+{
+  "attempt": {
+    "artifact_sha256": "sha256:acda42b75ad89c8a652d24d5c70cb62627a41b89371176b229b2ca755bb3e207",
+    "diagnostic_code": "VALIDATION_REFUSED",
+    "effect_hash": "effect:sha256:920f638c8d6e946a6fce5d00c8b9b6eb24905865e3c1c1f7583cba3265ee8f8f",
+    "outcome": "FAILED",
+    "receipt_sha256": "sha256:af146f1d5e6c3c2b8e50f171921ba94a82ae4bf8b27a0501564b8547780c6c1b",
+    "request_hash": "sha256:dba46298f31e15e2759020466b6c383b9b25f1c30f3b599b3e3230779f2c64d1",
+    "stage": "source-tree"
+  },
+  "classification": "VALIDATED_FAILED_CLEANED_NO_FORBIDDEN_EFFECT",
+  "local_reproduction": {
+    "archive_sha256": "sha256:dfa915cb353e5da2113026cf3ccc7810299c1b429fc2d433abac5fad657425f0",
+    "expected_tree": "8930df7c3262acc794177534cbe25ac60bd61f7a",
+    "git_add_A_tree": "16261304658c6ecab9db536ecb122292d48d2c6c",
+    "git_add_force_A_tree": "8930df7c3262acc794177534cbe25ac60bd61f7a",
+    "omitted_tracked_files": [
+      "apps/linux/flutter/CMakeLists.txt",
+      "apps/linux/flutter/generated_plugin_registrant.cc",
+      "apps/linux/flutter/generated_plugin_registrant.h",
+      "apps/linux/flutter/generated_plugins.cmake",
+      "apps/tgw_app/linux/flutter/CMakeLists.txt",
+      "apps/tgw_app/linux/flutter/generated_plugin_registrant.cc",
+      "apps/tgw_app/linux/flutter/generated_plugin_registrant.h",
+      "apps/tgw_app/linux/flutter/generated_plugins.cmake",
+      "apps/windows/flutter/CMakeLists.txt",
+      "apps/windows/flutter/generated_plugin_registrant.cc",
+      "apps/windows/flutter/generated_plugin_registrant.h",
+      "apps/windows/flutter/generated_plugins.cmake"
+    ],
+    "reason": "The archive correctly contains tracked generated Flutter files that current .gitignore patterns ignore. Re-indexing a fresh repository with git add -A omits those tracked-and-ignored files; git add -f -A reproduces the admitted Git tree exactly."
+  },
+  "post_observation": {
+    "cleanup_result": "removed",
+    "current_system": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "failure_artifact_mode": "0400",
+    "failure_artifact_owner_uid": 1004,
+    "failure_artifact_size": 1058,
+    "scratch_root": "ABSENT",
+    "system_profile": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194"
+  },
+  "recommendation": "For this already path-safe, single-root, commit-bound archive, reconstruct the Git index with git add -f -A before write-tree, or implement a direct mode/path/blob tree builder. Add a regression containing tracked files matched by .gitignore. Do not weaken archive extraction or path constraints.",
+  "schema": "tgw-nixos-reviewed-evaluation-source-tree-reconciliation/v1",
+  "self_hash": "sha256:ab20d7176cd63c488810fc3c03f422ba3be195af2b5eca7c9fc749e5128311b9",
+  "source_commit": "0f221352c89d2050b1b2868490ce59c7b5b97cd6"
+}
