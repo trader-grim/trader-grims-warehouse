@@ -1,0 +1,27 @@
+{
+  "schema": "tgw-content-addressed-artifact-binding/v1",
+  "artifact_ref": "artifact:sha256:1071e2113d2a331e2893316f2c7bccadd749e517c29057a886856adf921987cd",
+  "resolver_id": "codex-immutable-artifact-store@1",
+  "stable_path": "/opt/TGW/tgw-lib/actors/codex/artifacts/sha256/1071e2113d2a331e2893316f2c7bccadd749e517c29057a886856adf921987cd.tar",
+  "sha256": "sha256:1071e2113d2a331e2893316f2c7bccadd749e517c29057a886856adf921987cd",
+  "size": 8704000,
+  "mode": "0444",
+  "format": "git-archive-tar",
+  "archive_prefix": "trader-grims-warehouse/",
+  "archive_member_count": 1050,
+  "source_commit": "94795fb870ba8fe09dbd1d1882bcf16c05d00b2d",
+  "source_tree": "c57339976f62d71096cd4ea74bcc11b5c02d60d4",
+  "provenance_checks": {
+    "git_get_tar_commit_id": "94795fb870ba8fe09dbd1d1882bcf16c05d00b2d",
+    "source_tree_from_commit": "c57339976f62d71096cd4ea74bcc11b5c02d60d4",
+    "hash_verified_after_materialization": true,
+    "no_overwrite": true
+  },
+  "request": {
+    "path": "agent-services/candidates/nixos-reviewed-evaluation-94795fb-PREPARED.json",
+    "request_hash": "sha256:c91e5e2617109dcb01e1df9dbfd25f34f2d07ed5d819f91bf8d07a8dd56587e5"
+  },
+  "remote_executed": false,
+  "installed": false,
+  "binding_hash": "sha256:cb60bd8a85d68087ce909a4cfc8bb76ea7711b3c555576f27ad8196798deca78"
+}
