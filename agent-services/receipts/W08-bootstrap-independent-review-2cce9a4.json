@@ -1,0 +1,16 @@
+{
+  "schema": "tgw-bootstrap-independent-source-review-receipt/v1",
+  "status": "FAIL",
+  "candidate_commit": "2cce9a44e83c3f2baec244386d36535ab98c1487",
+  "candidate_tree": "a116fabecf5b2eccdb588d71ca77b3bc50a56189",
+  "archive_sha256": "sha256:6eaad0b37a4665da12ffcf2fd5c9436028cd866bf0e500ae782169a9c5231d28",
+  "packet_hash": "sha256:4edd62e1ee627f83b462df568a1c51919f6f5bea392fde2f7adce922fc012248",
+  "result_hash": "sha256:d57cf88fad792fec5f483be96e7e1c3af3a08db3e3e70bfd6fa88afd97e02a77",
+  "reviewer_identity": "codex-bootstrap-independent-context",
+  "installed_transport_traversed": false,
+  "source_mutated": false,
+  "deployment_performed": false,
+  "finding_counts": {"critical": 1, "high": 3, "medium": 0, "low": 0},
+  "dispatchable": false,
+  "receipt_hash": "sha256:860e6da052a13cac37685f89a6380f2759715e13071b1f4fb52f895fbf100e8b"
+}

@@ -1,0 +1,15 @@
+{
+  "schema": "tgw-bootstrap-source-review-packet/v1",
+  "review_mode": "ONE_TIME_BOOTSTRAP_DISTINCT_CONTEXT",
+  "transport": "CURRENT_CODEX_CONTEXT_NOT_INSTALLED_PRODUCT_TRANSPORT",
+  "candidate": {
+    "commit": "2cce9a44e83c3f2baec244386d36535ab98c1487",
+    "tree": "a116fabecf5b2eccdb588d71ca77b3bc50a56189",
+    "archive_sha256": "sha256:6eaad0b37a4665da12ffcf2fd5c9436028cd866bf0e500ae782169a9c5231d28"
+  },
+  "baseline_reviewed_candidate": "bb5c67d01b1f636a95b9461583a32d019a07df25",
+  "scope": ["review broker", "Nix namespace/firewall", "credential flow", "typed bootstrap handler", "schema/bootstrap/console/canary", "rollback", "tests"],
+  "source_mutation": "forbidden",
+  "deployment": "forbidden",
+  "packet_hash": "sha256:4edd62e1ee627f83b462df568a1c51919f6f5bea392fde2f7adce922fc012248"
+}

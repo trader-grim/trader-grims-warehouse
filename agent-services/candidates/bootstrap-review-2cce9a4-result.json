@@ -1,0 +1,42 @@
+{
+  "schema": "tgw-bootstrap-source-review-result/v1",
+  "packet_hash": "sha256:4edd62e1ee627f83b462df568a1c51919f6f5bea392fde2f7adce922fc012248",
+  "candidate_commit": "2cce9a44e83c3f2baec244386d36535ab98c1487",
+  "candidate_tree": "a116fabecf5b2eccdb588d71ca77b3bc50a56189",
+  "review_context": "distinct current Codex context; bootstrap source review only; installed product transport was not traversed",
+  "overall": "FAIL",
+  "findings": [
+    {
+      "severity": "critical",
+      "path": "nix/review-egress.nix",
+      "line": 24,
+      "message": "The dedicated review credential is loaded into the network-capable broker service and passed to the broker solely so it can hash the file. This violates the intended credential separation: a compromised broker can read the bearer credential and exfiltrate or use it over its permitted DNS/HTTPS egress. The broker should receive only an expected digest; the credential itself must be mounted only into the isolated review worker."
+    },
+    {
+      "severity": "high",
+      "path": "src/tgw/review_broker_supervisor.py",
+      "line": 28,
+      "message": "The supervisor spawns the broker and immediately invokes the provider without waiting for a bound, policy-verified readiness signal. A normal startup race can make the first CONNECT fail, while an early broker failure is not detected until after provider execution. Require a bounded readiness handshake bound to the policy before launching the provider."
+    },
+    {
+      "severity": "high",
+      "path": "src/tgw/bootstrap_authority.py",
+      "line": 60,
+      "message": "The one-use BootstrapGrant rejects every effect except coding-release, while the new deployment path is approval-platform-bootstrap-deployment. Consequently the declared one-time bootstrap authority cannot authorize the reviewed Nix generation switch; using that handler requires bypassing this one-use grant or a different unmodeled authority path. Bind the grant to the exact new typed effect and its system closure identities."
+    },
+    {
+      "severity": "high",
+      "path": "src/tgw/review_egress_broker.py",
+      "line": 240,
+      "message": "The broker trusts a JSON network-attestation file based only on self-asserted fields and an unkeyed hash checked by the consumer. No candidate source component derives or signs tgw-review-egress-network-attestation/v1 from the privileged namespace probes, yet the Nix unit requires this file. An operator or compromised unprivileged producer can assert direct_egress_denied without kernel evidence. Generate the attestation in the privileged fixed helper from exact readback/probes and authenticate its provenance."
+    }
+  ],
+  "prior_review_findings": {
+    "provider_timeout": "RESOLVED_IN_SOURCE",
+    "promptcraft_handoff_and_lease_validation": "RESOLVED_IN_SOURCE",
+    "non_ready_receipt_rejection": "RESOLVED_IN_SOURCE",
+    "transactional_materializer_rollback": "RESOLVED_IN_SOURCE",
+    "provider_isolation": "PARTIALLY_REMEDIATED_BUT_BLOCKED_BY_FINDINGS"
+  },
+  "result_hash": "sha256:d57cf88fad792fec5f483be96e7e1c3af3a08db3e3e70bfd6fa88afd97e02a77"
+}
