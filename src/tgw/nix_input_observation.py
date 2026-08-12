@@ -21,12 +21,13 @@ MAGIC = b"TGWNIXO1"
 PREFIX = struct.Struct("!8sIQQQ32s32s32s")
 PYTHON = "/run/current-system/sw/bin/python3"
 SUDO = "/run/current-system/sw/bin/sudo"
+LAUNCHER = "/run/current-system/sw/bin/tgw-nix-input-observer-launcher"
 UNSHARE = "/run/current-system/sw/bin/unshare"
 IP = "/run/current-system/sw/bin/ip"
 NIX = "/run/current-system/sw/bin/nix"
 NIX_STORE = "/run/current-system/sw/bin/nix-store"
 GIT = "/run/current-system/sw/bin/git"
-TOOLS = {"sudo": SUDO, "unshare": UNSHARE, "ip": IP, "python": PYTHON, "nix": NIX, "nix_store": NIX_STORE, "git": GIT}
+TOOLS = {"sudo": SUDO, "launcher": LAUNCHER, "unshare": UNSHARE, "ip": IP, "python": PYTHON, "nix": NIX, "nix_store": NIX_STORE, "git": GIT}
 NODE = "nixpkgs"
 REV = "ac62194c3917d5f474c1a844b6fd6da2db95077d"
 LOCK_NAR = "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w="
@@ -70,18 +71,7 @@ def helper_command(*, known_tool_sha256: dict[str, str]) -> list[str]:
         SUDO,
         "-n",
         "--",
-        UNSHARE,
-        "--net",
-        "--",
-        "/usr/bin/env",
-        "-i",
-        "HOME=/var/empty",
-        "NIX_REMOTE=local",
-        "PATH=/run/current-system/sw/bin",
-        PYTHON,
-        "-I",
-        "-c",
-        BOOTSTRAP,
+        LAUNCHER,
     ]
 
 
@@ -134,11 +124,15 @@ def validate_receipt(value: Any, *, request: dict[str, Any]) -> dict[str, Any]:
     process = value["process"]
     if (
         not isinstance(process, dict)
-        or set(process) != {"pid", "starttime", "exe_sha256", "uid", "euid", "cgroup"}
+        or set(process) != {"pid", "starttime", "exe_sha256", "uid", "euid", "gid", "egid", "cgroup", "cap_eff", "cap_prm", "cap_inh", "cap_amb", "no_new_privs"}
         or not all(isinstance(process[key], int) and process[key] > 0 for key in ("pid", "starttime"))
         or process["exe_sha256"] != request["tool_sha256"]["python"]
-        or process["uid"] != 0
-        or process["euid"] != 0
+        or process["uid"] != 1004
+        or process["euid"] != 1004
+        or process["gid"] != 1004
+        or process["egid"] != 1004
+        or any(process[key] != "0000000000000000" for key in ("cap_eff", "cap_prm", "cap_inh", "cap_amb"))
+        or process["no_new_privs"] != 1
         or not isinstance(process["cgroup"], str)
         or not process["cgroup"].startswith("0::/")
     ):
@@ -191,7 +185,7 @@ def observe_archive(
 ) -> dict[str, Any]:
     """Invoke exactly one standalone helper; it owns extraction and every Nix step."""
     if (
-        set(request) != {"source_archive_sha256", "observer_source_sha256", "source_commit", "source_tree", "flake_lock_sha256", "module_sha256"}
+        set(request) != {"source_archive_sha256", "observer_source_sha256", "source_commit", "source_tree", "flake_lock_sha256", "module_sha256", "launcher_descriptor_sha256", "sudo_rule_sha256"}
         or request.get("source_archive_sha256") != "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest()
         or request.get("observer_source_sha256") != "sha256:" + hashlib.sha256(helper_source).hexdigest()
         or not isinstance(request.get("source_commit"), str)
@@ -202,6 +196,10 @@ def observe_archive(
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", request["flake_lock_sha256"])
         or not isinstance(request.get("module_sha256"), str)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", request["module_sha256"])
+        or not isinstance(request.get("launcher_descriptor_sha256"), str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", request["launcher_descriptor_sha256"])
+        or not isinstance(request.get("sudo_rule_sha256"), str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", request["sudo_rule_sha256"])
         or set(known_tool_sha256) != set(TOOLS)
         or any(not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value) for value in known_tool_sha256.values())
     ):
@@ -221,8 +219,6 @@ def observe_archive(
             stable_paths = dict(TOOLS)
         command = helper_command(known_tool_sha256=known_tool_sha256)
         command[0] = stable_paths["sudo"]
-        command[3] = stable_paths["unshare"]
-        command[-4] = stable_paths["python"]
         bound_request = {**request, "tool_sha256": known_tool_sha256, "tool_paths": stable_paths}
         completed = run(command, input=packet(helper_source, bound_request, archive), capture_output=True, timeout=180, check=False, pass_fds=tuple(tool_fds.values()))
     finally:
@@ -368,9 +364,22 @@ def standalone_main() -> int:
             bootstrap_request_hash != "sha256:" + hashlib.sha256(_canonical(request)).hexdigest()
             or bootstrap_helper_hash != request.get("observer_source_sha256")
             or bootstrap_tool_hash != "sha256:" + hashlib.sha256(_canonical(request.get("tool_sha256"))).hexdigest()
+            or os.environ.get("TGW_OBSERVER_DESCRIPTOR_SHA256") != request.get("launcher_descriptor_sha256")
+            or os.environ.get("TGW_OBSERVER_SUDO_RULE_SHA256") != request.get("sudo_rule_sha256")
         ):
             raise NixInputObservationError("bootstrap/helper identity cross-check failed")
-        expected = {"source_archive_sha256", "observer_source_sha256", "source_commit", "source_tree", "flake_lock_sha256", "module_sha256", "tool_sha256", "tool_paths"}
+        expected = {
+            "source_archive_sha256",
+            "observer_source_sha256",
+            "source_commit",
+            "source_tree",
+            "flake_lock_sha256",
+            "module_sha256",
+            "launcher_descriptor_sha256",
+            "sudo_rule_sha256",
+            "tool_sha256",
+            "tool_paths",
+        }
         if (
             set(request) != expected
             or not all(isinstance(request[key], str) for key in expected - {"tool_sha256", "tool_paths"})
@@ -382,7 +391,10 @@ def standalone_main() -> int:
             or any(not isinstance(value, str) or not value.startswith("/") for value in request["tool_paths"].values())
             or not re.fullmatch(r"[0-9a-f]{40}", request["source_commit"])
             or not re.fullmatch(r"[0-9a-f]{40}", request["source_tree"])
-            or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", request[key]) for key in ("source_archive_sha256", "observer_source_sha256", "flake_lock_sha256", "module_sha256"))
+            or any(
+                not re.fullmatch(r"sha256:[0-9a-f]{64}", request[key])
+                for key in ("source_archive_sha256", "observer_source_sha256", "flake_lock_sha256", "module_sha256", "launcher_descriptor_sha256", "sudo_rule_sha256")
+            )
         ):
             raise NixInputObservationError("REQUEST_VALIDATION_FAILED")
         enter("archive")
@@ -424,6 +436,7 @@ def standalone_main() -> int:
         probes_after = _all_probes()
         netns_end = os.stat("/proc/self/ns/net").st_ino
         stat_fields = Path("/proc/self/stat").read_text().split()
+        status = {key.rstrip(":"): value.strip() for key, value in (line.split(maxsplit=1) for line in Path("/proc/self/status").read_text().splitlines() if "\t" in line)}
         value = {
             "schema": SCHEMA,
             "request": request,
@@ -445,7 +458,14 @@ def standalone_main() -> int:
                 "exe_sha256": "sha256:" + hashlib.sha256(Path("/proc/self/exe").read_bytes()).hexdigest(),
                 "uid": os.getuid(),
                 "euid": os.geteuid(),
+                "gid": os.getgid(),
+                "egid": os.getegid(),
                 "cgroup": Path("/proc/self/cgroup").read_text().strip(),
+                "cap_eff": status["CapEff"],
+                "cap_prm": status["CapPrm"],
+                "cap_inh": status["CapInh"],
+                "cap_amb": status["CapAmb"],
+                "no_new_privs": int(status["NoNewPrivs"]),
             },
             "tools": tools,
             "negative_probes_before": probes_before,

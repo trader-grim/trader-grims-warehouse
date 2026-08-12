@@ -1,15 +1,16 @@
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from tgw.nix_input_observation import LOCK_NAR, NIX, PREFIX, REV, SUDO, UNSHARE, NixInputObservationError, observe_archive
+from tgw.nix_input_observation import LAUNCHER, LOCK_NAR, PREFIX, REV, SUDO, NixInputObservationError, observe_archive
 from tgw.nix_input_observation import TOOLS as TOOL_PATHS
 
 DIGEST = "a" * 64
-TOOLS = {name: "sha256:" + DIGEST for name in ("sudo", "unshare", "ip", "python", "nix", "nix_store", "git")}
+TOOLS = {name: "sha256:" + DIGEST for name in ("sudo", "launcher", "unshare", "ip", "python", "nix", "nix_store", "git")}
 
 
 def request(archive, helper=b"# fixed standalone helper"):
@@ -19,7 +20,17 @@ def request(archive, helper=b"# fixed standalone helper"):
         "source_tree": "c" * 40,
         "flake_lock_sha256": "sha256:" + "d" * 64,
         "module_sha256": "sha256:" + "e" * 64,
+        "launcher_descriptor_sha256": "sha256:" + "f" * 64,
+        "sudo_rule_sha256": "sha256:" + "1" * 64,
         "observer_source_sha256": "sha256:" + hashlib.sha256(helper).hexdigest(),
+    }
+
+
+def launcher_env(bound):
+    return {
+        **os.environ,
+        "TGW_OBSERVER_DESCRIPTOR_SHA256": bound["launcher_descriptor_sha256"],
+        "TGW_OBSERVER_SUDO_RULE_SHA256": bound["sudo_rule_sha256"],
     }
 
 
@@ -39,7 +50,21 @@ def receipt(bound):
             "route_json_sha256": "sha256:" + DIGEST,
             "held_for_entire_run": True,
         },
-        "process": {"pid": 123, "starttime": 456, "exe_sha256": TOOLS["python"], "uid": 0, "euid": 0, "cgroup": "0::/observer.scope"},
+        "process": {
+            "pid": 123,
+            "starttime": 456,
+            "exe_sha256": TOOLS["python"],
+            "uid": 1004,
+            "euid": 1004,
+            "gid": 1004,
+            "egid": 1004,
+            "cgroup": "0::/observer.scope",
+            "cap_eff": "0000000000000000",
+            "cap_prm": "0000000000000000",
+            "cap_inh": "0000000000000000",
+            "cap_amb": "0000000000000000",
+            "no_new_privs": 1,
+        },
         "tools": TOOLS,
         "negative_probes_before": {"dns": "denied", "public_https": "denied", "private": "denied", "metadata": "denied"},
         "negative_probes_after": {"dns": "denied", "public_https": "denied", "private": "denied", "metadata": "denied"},
@@ -73,8 +98,7 @@ def test_one_helper_owns_archive_namespace_and_all_nix_steps(tmp_path):
     result = observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=b"# fixed standalone helper", run=run)
     assert result["namespace"]["held_for_entire_run"] is True and len(calls) == 1
     command, kwargs = calls[0]
-    assert command[:6] == [SUDO, "-n", "--", UNSHARE, "--net", "--"]
-    assert "NIX_REMOTE=local" in command and NIX not in command
+    assert command == [SUDO, "-n", "--", LAUNCHER]
     assert kwargs["timeout"] == 180 and kwargs["capture_output"] is True
     assert b"exact archive" in kwargs["input"]
 
@@ -102,7 +126,7 @@ def test_archive_and_receipt_tampering_fail_closed(tmp_path):
         observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=b"helper", run=run)
 
 
-@pytest.mark.parametrize("field,value", [("uid", 1004), ("euid", 1004), ("cgroup", "")])
+@pytest.mark.parametrize("field,value", [("uid", 0), ("gid", 0), ("cap_eff", "0000000000000001"), ("no_new_privs", 0), ("cgroup", "")])
 def test_privileged_namespace_process_identity_is_exact(tmp_path, field, value):
     archive = tmp_path / "source.tar"
     archive.write_bytes(b"archive")
@@ -197,7 +221,13 @@ d['receipt_sha256']='sha256:'+hashlib.sha256(canon(d)).hexdigest(); print(canon(
     req = request(archive, helper)
 
     def run(command, **kwargs):
-        return subprocess.run([__import__("sys").executable, "-I", "-c", module.BOOTSTRAP], input=kwargs["input"], capture_output=True, check=False)
+        return subprocess.run(
+            [__import__("sys").executable, "-I", "-c", module.BOOTSTRAP],
+            input=kwargs["input"],
+            capture_output=True,
+            check=False,
+            env=launcher_env({**req, "tool_sha256": TOOLS, "tool_paths": TOOL_PATHS}),
+        )
 
     with pytest.raises(NixInputObservationError, match="validated failure"):
         observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=helper, run=run)
@@ -218,7 +248,14 @@ def test_bootstrap_real_standalone_main_builds_bound_failure(tmp_path, cleanup):
     req = request(archive, helper)
 
     def run(command, **kwargs):
-        return subprocess.run([__import__("sys").executable, "-I", "-c", module.BOOTSTRAP], input=kwargs["input"], capture_output=True, check=False)
+        bound = {**req, "tool_sha256": TOOLS, "tool_paths": TOOL_PATHS}
+        return subprocess.run(
+            [__import__("sys").executable, "-I", "-c", module.BOOTSTRAP],
+            input=kwargs["input"],
+            capture_output=True,
+            check=False,
+            env=launcher_env(bound),
+        )
 
     with pytest.raises(NixInputObservationError, match="validated failure"):
         observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=helper, run=run)
@@ -238,6 +275,7 @@ def test_bootstrap_real_standalone_rejects_malformed_typed_request_as_helper_fai
         input=module.packet(helper, bound, archive),
         capture_output=True,
         check=False,
+        env=launcher_env(bound),
     )
     failure = json.loads(completed.stdout)
     unsigned = dict(failure)
