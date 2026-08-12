@@ -1,5 +1,8 @@
+import os
 import subprocess
 from pathlib import Path
+
+import pytest
 
 
 def test_native_launcher_compiles_warning_free_and_rejects_arguments(tmp_path):
@@ -45,3 +48,23 @@ def test_tool_execution_uses_fixed_inherited_descriptors_not_ambient_paths():
         assert f'"/proc/self/fd/{fd}"' in observer
     assert "dup3(source,target,0)" in launcher
     assert "/run/current-system/sw/bin/nix" not in observer
+    assert "close_fds=True" in observer and "pass_fds=(TOOL_FDS[argv[0]],)" in observer
+
+
+def test_real_child_executes_only_when_exact_executable_fd_is_inherited(tmp_path):
+    from tgw.nix_input_observation import NixInputObservationError, _run
+
+    executable = os.open("/bin/echo", os.O_RDONLY | os.O_NOFOLLOW)
+    target = 203
+    os.dup2(executable, target)
+    os.close(executable)
+    try:
+        assert _run([f"/proc/self/fd/{target}", "pinned"], tmp_path) == "pinned\n"
+        os.close(target)
+        with pytest.raises(NixInputObservationError, match="failed"):
+            _run([f"/proc/self/fd/{target}", "closed"], tmp_path)
+    finally:
+        try:
+            os.close(target)
+        except OSError:
+            pass

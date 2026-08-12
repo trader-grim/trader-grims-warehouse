@@ -2,12 +2,41 @@
 let
   cfg = config.services.tgw-nix-input-observer-launcher;
   command = "/run/current-system/sw/bin/tgw-nix-input-observer-launcher";
-  transportContract = builtins.toJSON {
-    schema = "tgw-nix-input-observer-transport/v1";
-    socket = { path = "/run/tgw/nix-input-observer.sock"; user = "codex"; group = "codex"; mode = "0600"; accept = true; maxConnections = 1; };
-    service = { execStart = command; input = "socket"; output = "socket"; slice = "tgw-nix-input-observer.slice"; user = "root"; group = "root"; runtimeMaxSec = 180; };
-    slice = { cpuQuota = "100%"; memoryMax = "1G"; tasksMax = 64; };
+  sliceConfig = {
+    Description = "Fixed cgroup for bounded TGW Nix input observation";
+    CPUQuota = "100%";
+    MemoryMax = "1G";
+    TasksMax = 64;
   };
+  socketWantedBy = [ "sockets.target" ];
+  socketConfig = {
+    ListenStream = "/run/tgw/nix-input-observer.sock";
+    SocketUser = "codex";
+    SocketGroup = "codex";
+    SocketMode = "0600";
+    Accept = true;
+    MaxConnections = 1;
+    RemoveOnStop = true;
+  };
+  serviceConfig = {
+    Type = "simple";
+    ExecStart = command;
+    StandardInput = "socket";
+    StandardOutput = "socket";
+    StandardError = "journal";
+    Slice = "tgw-nix-input-observer.slice";
+    User = "root";
+    Group = "root";
+    RuntimeMaxSec = 180;
+    OOMPolicy = "stop";
+  };
+  transportObject = {
+    schema = "tgw-nix-input-observer-transport/v1";
+    socket = { wantedBy = socketWantedBy; inherit socketConfig; };
+    service = { inherit serviceConfig; };
+    slice = { inherit sliceConfig; };
+  };
+  transportContract = builtins.toJSON transportObject;
   transportHash = "sha256:${builtins.hashString "sha256" transportContract}";
   descriptor = ''
     schema=tgw-nix-input-observer-launcher/v2
@@ -55,39 +84,15 @@ in {
     environment.etc."tgw/nix-input-observer-launcher.conf" = { text = descriptor; mode = "0400"; user = "root"; group = "root"; };
     environment.etc."tgw/nix-input-observer-transport.json" = { text = transportContract; mode = "0444"; user = "root"; group = "root"; };
     environment.systemPackages = [ cfg.package ];
-    systemd.slices."tgw-nix-input-observer".sliceConfig = {
-      Description = "Fixed cgroup for bounded TGW Nix input observation";
-      CPUQuota = "100%";
-      MemoryMax = "1G";
-      TasksMax = 64;
-    };
+    systemd.slices."tgw-nix-input-observer".sliceConfig = sliceConfig;
     systemd.sockets.tgw-nix-input-observer = {
       description = "Closed local TGW Nix observer transport";
-      wantedBy = [ "sockets.target" ];
-      socketConfig = {
-        ListenStream = "/run/tgw/nix-input-observer.sock";
-        SocketUser = "codex";
-        SocketGroup = "codex";
-        SocketMode = "0600";
-        Accept = true;
-        MaxConnections = 1;
-        RemoveOnStop = true;
-      };
+      wantedBy = socketWantedBy;
+      inherit socketConfig;
     };
     systemd.services."tgw-nix-input-observer@" = {
       description = "One-shot fixed TGW Nix observer %i";
-      serviceConfig = {
-        Type = "simple";
-        ExecStart = command;
-        StandardInput = "socket";
-        StandardOutput = "socket";
-        StandardError = "journal";
-        Slice = "tgw-nix-input-observer.slice";
-        User = "root";
-        Group = "root";
-        RuntimeMaxSec = 180;
-        OOMPolicy = "stop";
-      };
+      inherit serviceConfig;
     };
     # Module disable removes the descriptor, socket, template service, and slice.
     # No profile or scratch state is written by the observer transport.

@@ -26,6 +26,7 @@ NIX = "/proc/self/fd/203"
 NIX_STORE = "/proc/self/fd/204"
 GIT = "/proc/self/fd/205"
 TOOLS = {"ip": IP, "python": PYTHON, "nix": NIX, "nix_store": NIX_STORE, "git": GIT}
+TOOL_FDS = {IP: 201, NIX: 203, NIX_STORE: 204, GIT: 205}
 NODE = "nixpkgs"
 REV = "ac62194c3917d5f474c1a844b6fd6da2db95077d"
 LOCK_NAR = "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w="
@@ -273,7 +274,12 @@ def observe_archive(
 
 
 def _run(argv: list[str], cwd: Path) -> str:
-    result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=120, check=False)
+    if not argv or argv[0] not in TOOL_FDS:
+        raise NixInputObservationError("observer subprocess executable is not a pinned tool")
+    try:
+        result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=120, check=False, close_fds=True, pass_fds=(TOOL_FDS[argv[0]],))
+    except OSError as exc:
+        raise NixInputObservationError("fixed observer command failed") from exc
     if result.returncode or len(result.stdout) > 8 * 1024 * 1024:
         raise NixInputObservationError("fixed observer command failed")
     return result.stdout
@@ -334,7 +340,15 @@ def _all_probes() -> dict[str, str]:
 
 
 def _valid_store_path(path: str, cwd: Path) -> bool:
-    result = subprocess.run([NIX_STORE, "--check-validity", path], cwd=cwd, capture_output=True, timeout=30, check=False)
+    result = subprocess.run(
+        [NIX_STORE, "--check-validity", path],
+        cwd=cwd,
+        capture_output=True,
+        timeout=30,
+        check=False,
+        close_fds=True,
+        pass_fds=(TOOL_FDS[NIX_STORE],),
+    )
     return result.returncode == 0
 
 

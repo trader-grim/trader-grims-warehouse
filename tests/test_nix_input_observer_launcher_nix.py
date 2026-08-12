@@ -15,6 +15,8 @@ def test_nix_module_has_closed_socket_service_and_rollback():
     assert "mkIf cfg.enable" in source
     assert 'transportHash = "sha256:${builtins.hashString "sha256" transportContract}"' in source
     assert "transportConfigSha256 = lib.mkOption" not in source
+    assert 'systemd.slices."tgw-nix-input-observer".sliceConfig = sliceConfig' in source
+    assert "wantedBy = socketWantedBy" in source and "inherit socketConfig" in source and "inherit serviceConfig" in source
 
 
 def test_launcher_descriptor_has_no_command_or_environment_override():
