@@ -102,11 +102,11 @@
         cp ${observerPackage}/bin/tgw-nix-input-observer-launcher $out/launcher
         cp ${observerPackage}/share/tgw/nix-input-observation.py $out/observer.py
         cp -r ${observerPackage}/tools $out/tools
-        python3 - "$out" <<'PY'
+        python3 - "$out" ${builtins.concatStringsSep " " observerUnitNames} <<'PY'
         import hashlib,json,pathlib,sys
         root=pathlib.Path(sys.argv[1])
         files=sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
-        value={"schema":"tgw-nix-input-observer-render/v1","system":"x86_64-linux","units":["tgw-nix-input-observer.socket","tgw-nix-input-observer@.service","tgw-nix-input-observer.slice"],"activation":False,"descriptor_status":"NON_DEPLOYABLE_RENDER_FIXTURE","files":[{"path":name,"sha256":"sha256:"+hashlib.sha256((root/name).read_bytes()).hexdigest()} for name in files]}
+        value={"schema":"tgw-nix-input-observer-render/v1","system":"x86_64-linux","units":sys.argv[2:],"activation":False,"descriptor_status":"NON_DEPLOYABLE_RENDER_FIXTURE","files":[{"path":name,"sha256":"sha256:"+hashlib.sha256((root/name).read_bytes()).hexdigest()} for name in files]}
         (root/"verifier-metadata.json").write_text(json.dumps(value,sort_keys=True,separators=(",",":")))
         PY
       '';

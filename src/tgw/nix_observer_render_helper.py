@@ -23,7 +23,7 @@ import tarfile
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
@@ -86,6 +86,55 @@ RENDER_EFFECT = {
     "live_flake_write": False,
     "network": False,
 }
+NIX_ARGV_PREFIX = (
+    "--offline",
+    "--option",
+    "substituters",
+    "",
+    "--option",
+    "trusted-public-keys",
+    "",
+    "--option",
+    "builders",
+    "",
+    "--option",
+    "builders-use-substitutes",
+    "false",
+    "--option",
+    "allow-import-from-derivation",
+    "false",
+    "--option",
+    "pure-eval",
+    "true",
+    "--option",
+    "restrict-eval",
+    "true",
+    "--option",
+    "sandbox",
+    "true",
+    "--option",
+    "sandbox-fallback",
+    "false",
+    "--option",
+    "flake-registry",
+    "",
+    "--no-write-lock-file",
+)
+NIX_CONFIG = (
+    "experimental-features = nix-command flakes\n"
+    "substituters =\n"
+    "trusted-public-keys =\n"
+    "builders =\n"
+    "builders-use-substitutes = false\n"
+    "allow-import-from-derivation = false\n"
+    "pure-eval = true\n"
+    "restrict-eval = true\n"
+    "sandbox = true\n"
+    "sandbox-fallback = false\n"
+    "flake-registry =\n"
+    "connect-timeout = 1\n"
+    "fallback = false\n"
+)
 
 OUTPUTS = (
     "etc/nix-input-observer-launcher.conf",
@@ -211,10 +260,20 @@ if test_executor is not None or test_tool_authority is not None or test_a2_autho
 
 
 class RenderHelperError(ValueError):
-    def __init__(self, message: str, *, stage: str, diagnostic_code: str):
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str,
+        diagnostic_code: str,
+        subprocess_step: str | None = None,
+        return_code: int | None = None,
+    ):
         super().__init__(message)
         self.stage = stage
         self.diagnostic_code = diagnostic_code
+        self.subprocess_step = subprocess_step
+        self.return_code = return_code
 
 
 @dataclass(frozen=True)
@@ -973,10 +1032,15 @@ def _validate_provider_receipt(value: Any, *, request: Mapping[str, Any], author
         "host_identity_receipt_sha256",
     }
     units = files[9:12]
+    if not isinstance(verify, dict) or set(verify) != verify_fields:
+        raise RenderHelperError("provider verifier evidence is not closed", stage="request", diagnostic_code="VALIDATION_REFUSED")
+    try:
+        observed = datetime.strptime(verify.get("observed_at", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError) as exc:
+        raise RenderHelperError("provider verifier timestamp is invalid", stage="request", diagnostic_code="VALIDATION_REFUSED") from exc
+    current = datetime.now(timezone.utc)
     if (
-        not isinstance(verify, dict)
-        or set(verify) != verify_fields
-        or verify["executable_sha256"] != request["systemd_analyze_sha256"]
+        verify["executable_sha256"] != request["systemd_analyze_sha256"]
         or verify["version"] != request["systemd_analyze_version"]
         or verify["argv"] != ["systemd-analyze", "verify", *OUTPUTS[9:12]]
         or verify["exit_code"] != 0
@@ -985,9 +1049,27 @@ def _validate_provider_receipt(value: Any, *, request: Mapping[str, Any], author
         or any(type(verify[key]) is not int or not 0 <= verify[key] <= request["max_output_bytes"] for key in ("stdout_bytes", "stderr_bytes"))
         or any(not isinstance(verify[key], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", verify[key]) for key in ("stdout_sha256", "stderr_sha256", "units_sha256"))
         or verify["units_sha256"] != _sha256(canonical(units))
+        or observed > current.replace(microsecond=0) + timedelta(minutes=1)
+        or current - observed > timedelta(hours=1)
     ):
         raise RenderHelperError("provider verifier evidence is invalid", stage="request", diagnostic_code="IDENTITY_MISMATCH")
-    return dict(value)
+    # Reuse the exact provider's complete validator instead of maintaining a
+    # permissive envelope-only approximation.  The source bytes must match the
+    # request before they can supply schema or freshness semantics.
+    try:
+        provider_path = Path(__file__).with_name("nix_observer_render_evaluation.py")
+        provider_raw = provider_path.read_bytes()
+        if _sha256(provider_raw) != request["provider_sha256"]:
+            raise RenderHelperError("provider validator source identity mismatch", stage="request", diagnostic_code="IDENTITY_MISMATCH")
+        namespace: dict[str, Any] = {"__name__": "tgw.nix_observer_render_evaluation_envelope_validator"}
+        exec(compile(provider_raw, "<bound-nix-observer-render-evaluation-validator>", "exec"), namespace)
+        namespace["STORE_ROOT"] = Path(authority.store_root)
+        validated = namespace["validate_result"](value, request=request, now=datetime.now(timezone.utc))
+    except RenderHelperError:
+        raise
+    except BaseException as exc:
+        raise RenderHelperError("provider receipt failed its bound validator", stage="request", diagnostic_code="VALIDATION_REFUSED") from exc
+    return dict(validated)
 
 
 def validate_a2_terminal(
@@ -1004,11 +1086,21 @@ def validate_a2_terminal(
         raise RenderHelperError("A2 terminal is absent or oversized", stage="request", diagnostic_code="VALIDATION_REFUSED")
     if tool["authority_receipt_sha256"] != authority.a1_prerequisite_receipt_sha256:
         raise RenderHelperError("A2 prerequisite composition is invalid", stage="request", diagnostic_code="IDENTITY_MISMATCH")
+    input_entry = validated["input_closure_manifest"][0]
+    if (
+        validated["host_identity_receipt_sha256"] != authority.a2_prerequisite_receipt_sha256
+        or validated["systemd_analyze_sha256"] != authority.systemd_analyze_sha256
+        or input_entry["store_path"] != authority.input_path
+        or input_entry["nar_sha256"] != authority.input_nar_sha256
+    ):
+        raise RenderHelperError("A2 request authority composition is invalid", stage="request", diagnostic_code="IDENTITY_MISMATCH")
+    execution_policy = _validate_execution_policy(value.get("execution_policy"))
     expected_base = _a2_terminal_base(
         binding,
         validated,
         tool_manifest_sha256=_sha256(canonical(_a2_tool_manifest(authority))),
         effect_sha256=_sha256(canonical(RENDER_EFFECT)),
+        execution_policy=execution_policy,
         authority=authority,
     )
     if any(value.get(key) != expected for key, expected in expected_base.items()):
@@ -1053,16 +1145,38 @@ def validate_a2_terminal(
         ):
             raise RenderHelperError("A2 success envelope is invalid", stage="request", diagnostic_code="VALIDATION_REFUSED")
     elif value.get("schema") == A2_FAILURE_SCHEMA:
-        fields = common | {"stage", "diagnostic_code", "original_stage", "original_diagnostic_code"}
-        stages = {"a2-tool", "a2-input", "a2-eval", "a2-build", "a2-closure", "provider", "a2-verified", "internal"}
-        codes = FAILURE_CODES | {"NONE"}
+        fields = common | {
+            "stage",
+            "diagnostic_code",
+            "original_stage",
+            "original_diagnostic_code",
+            "subprocess_step",
+            "return_code",
+        }
+        valid_failures = {
+            "a2-tool": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED"},
+            "a2-input": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED", "SUBPROCESS_FAILED"},
+            "a2-eval": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED", "SUBPROCESS_FAILED"},
+            "a2-build": {"IDENTITY_MISMATCH", "BOUND_EXCEEDED", "SUBPROCESS_FAILED"},
+            "a2-closure": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED", "SUBPROCESS_FAILED"},
+            "provider": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED", "SUBPROCESS_FAILED"},
+            "a2-verified": {"IDENTITY_MISMATCH", "BOUND_EXCEEDED", "INTERNAL_ERROR", "NONE"},
+            "internal": {"INTERNAL_ERROR"},
+        }
+        valid_steps = {
+            "a2-input": {"flake-metadata", "input-resolve", "input-hash", "input-references"},
+            "a2-eval": {"drv-eval", "drv-show"},
+            "a2-build": {"drv-build"},
+            "a2-closure": {"closure-requisites", "closure-hash"},
+            "provider": {"provider-drv-show", "provider-verifier-version", "provider-systemd-verify"},
+        }
         if value["outcome"] == "AMBIGUOUS":
             lifecycle = (
                 value["stage"] == "cleanup"
                 and value["diagnostic_code"] == "CLEANUP_FAILED"
                 and value["cleanup"] == "failed"
-                and value["original_stage"] in stages
-                and value["original_diagnostic_code"] in codes
+                and value["original_stage"] in valid_failures
+                and value["original_diagnostic_code"] in valid_failures[value["original_stage"]]
             )
         else:
             lifecycle = (
@@ -1070,11 +1184,37 @@ def validate_a2_terminal(
                 and value["stage"] == value["original_stage"]
                 and value["diagnostic_code"] == value["original_diagnostic_code"]
                 and value["cleanup"] in {"removed", "not-created"}
-                and value["original_stage"] in stages
-                and value["original_diagnostic_code"] in FAILURE_CODES - {"CLEANUP_FAILED"}
+                and value["original_stage"] in valid_failures
+                and value["original_diagnostic_code"] in valid_failures[value["original_stage"]] - {"NONE"}
             )
         expected_build = value["original_stage"] in {"a2-build", "a2-closure", "provider", "a2-verified"}
-        if set(value) != fields or not lifecycle or value["effects"] != _a2_effects(expected_build):
+        if value["original_diagnostic_code"] == "SUBPROCESS_FAILED":
+            process_evidence = (
+                value["original_stage"] in valid_steps
+                and value["subprocess_step"] in valid_steps[value["original_stage"]]
+                and (value["return_code"] is None or type(value["return_code"]) is int)
+                and value["return_code"] != 0
+            )
+        elif value["original_diagnostic_code"] == "BOUND_EXCEEDED":
+            process_evidence = (
+                value["original_stage"] in valid_steps
+                and value["subprocess_step"] in valid_steps[value["original_stage"]]
+                and value["return_code"] is None
+            )
+        elif value["original_diagnostic_code"] == "VALIDATION_REFUSED" and value["subprocess_step"] is not None:
+            process_evidence = (
+                value["original_stage"] in valid_steps
+                and value["subprocess_step"] in valid_steps[value["original_stage"]]
+                and type(value["return_code"]) is int
+            )
+        else:
+            process_evidence = value["subprocess_step"] is None and value["return_code"] is None
+        if (
+            set(value) != fields
+            or not lifecycle
+            or not process_evidence
+            or value["effects"] != _a2_effects(expected_build)
+        ):
             raise RenderHelperError("A2 failure envelope is invalid", stage="request", diagnostic_code="VALIDATION_REFUSED")
     else:
         raise RenderHelperError("A2 terminal schema is unknown", stage="request", diagnostic_code="VALIDATION_REFUSED")
@@ -1299,7 +1439,11 @@ def _a2_tool_authority(path: str, digest: str, authority: A2Authority) -> ToolAu
 
 def _open_a2_executable(name: str, path: str, digest: str, authority: A2Authority) -> tuple[HeldTool, dict[str, Any]]:
     tool_authority = _a2_tool_authority(path, digest, authority)
-    held = _open_resolved_regular(Path(path), authority=tool_authority)
+    try:
+        held = _open_resolved_regular(Path(path), authority=tool_authority)
+    except BaseException as exc:
+        code = exc.diagnostic_code if isinstance(exc, RenderHelperError) else "IDENTITY_MISMATCH"
+        raise RenderHelperError("Phase A2 executable is unavailable", stage="a2-tool", diagnostic_code=code) from exc
     try:
         raw, identity = _read_held(held.descriptor, stage="a2-tool", max_bytes=64 * 1024 * 1024)
         if _sha256(raw) != digest:
@@ -1330,23 +1474,35 @@ def _assert_a2_tool_unchanged(held: HeldTool, manifest: Mapping[str, Any], *, al
 
 def _fixed_nix_environment(run_path: Path) -> dict[str, str]:
     home = run_path / "nix-home"
-    home.mkdir(mode=0o700)
+    try:
+        home.mkdir(mode=0o700)
+    except FileExistsError:
+        metadata = home.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+            raise RenderHelperError("Phase A2 HOME trust mismatch", stage="a2-tool", diagnostic_code="IDENTITY_MISMATCH")
     return {
         "HOME": str(home),
         "LC_ALL": "C",
         "LANG": "C",
         "PATH": "/no-ambient-path",
         "NIX_REMOTE": "local",
-        "NIX_CONFIG": (
-            "experimental-features = nix-command flakes\n"
-            "substituters =\n"
-            "trusted-public-keys =\n"
-            "allow-import-from-derivation = false\n"
-            "pure-eval = true\n"
-            "flake-registry =\n"
-            "connect-timeout = 1\n"
-            "fallback = false\n"
-        ),
+        "NIX_CONFIG": NIX_CONFIG,
+    }
+
+
+def _execution_policy(run_path: Path) -> dict[str, Any]:
+    environment = _fixed_nix_environment(run_path)
+    return {
+        "schema": "tgw-nix-observer-render-execution-policy/v1",
+        "environment": environment,
+        "nix_argv_prefix": list(NIX_ARGV_PREFIX),
+        "render_attr": RENDER_ATTR,
+        "build_selector": "evaluated-drv^out",
+        "ambient_environment_inherited": False,
+        "remote_builders": False,
+        "builder_substitutes": False,
+        "sandbox_required": True,
+        "sandbox_fallback": False,
     }
 
 
@@ -1368,11 +1524,17 @@ def _run_bounded(
     timeout: float,
     max_output_bytes: int,
     stage: str,
+    subprocess_step: str,
     text: bool = False,
 ) -> subprocess.CompletedProcess[Any]:
     """Run one held executable with a hard wall-time and combined-output cap."""
     if timeout <= 0:
-        raise RenderHelperError("Phase A2 duration exhausted", stage=stage, diagnostic_code="BOUND_EXCEEDED")
+        raise RenderHelperError(
+            "Phase A2 duration exhausted",
+            stage=stage,
+            diagnostic_code="BOUND_EXCEEDED",
+            subprocess_step=subprocess_step,
+        )
     try:
         process = subprocess.Popen(
             argv,
@@ -1387,7 +1549,12 @@ def _run_bounded(
             start_new_session=True,
         )
     except OSError as exc:
-        raise RenderHelperError("Phase A2 subprocess could not start", stage=stage, diagnostic_code="SUBPROCESS_FAILED") from exc
+        raise RenderHelperError(
+            "Phase A2 subprocess could not start",
+            stage=stage,
+            diagnostic_code="SUBPROCESS_FAILED",
+            subprocess_step=subprocess_step,
+        ) from exc
     assert process.stdout is not None and process.stderr is not None
     selector = selectors.DefaultSelector()
     stdout_fd = process.stdout.fileno()
@@ -1401,7 +1568,12 @@ def _run_bounded(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 _terminate_process(process)
-                raise RenderHelperError("Phase A2 subprocess timed out", stage=stage, diagnostic_code="BOUND_EXCEEDED")
+                raise RenderHelperError(
+                    "Phase A2 subprocess timed out",
+                    stage=stage,
+                    diagnostic_code="BOUND_EXCEEDED",
+                    subprocess_step=subprocess_step,
+                )
             for key, _ in selector.select(min(remaining, 0.25)):
                 block = os.read(key.fd, min(64 * 1024, max_output_bytes + 1))
                 if not block:
@@ -1410,15 +1582,30 @@ def _run_bounded(
                 streams[key.fd].extend(block)
                 if sum(len(value) for value in streams.values()) > max_output_bytes:
                     _terminate_process(process)
-                    raise RenderHelperError("Phase A2 subprocess output exceeded bound", stage=stage, diagnostic_code="BOUND_EXCEEDED")
+                    raise RenderHelperError(
+                        "Phase A2 subprocess output exceeded bound",
+                        stage=stage,
+                        diagnostic_code="BOUND_EXCEEDED",
+                        subprocess_step=subprocess_step,
+                    )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _terminate_process(process)
-            raise RenderHelperError("Phase A2 subprocess timed out", stage=stage, diagnostic_code="BOUND_EXCEEDED")
+            raise RenderHelperError(
+                "Phase A2 subprocess timed out",
+                stage=stage,
+                diagnostic_code="BOUND_EXCEEDED",
+                subprocess_step=subprocess_step,
+            )
         return_code = process.wait(timeout=remaining)
     except subprocess.TimeoutExpired as exc:
         _terminate_process(process)
-        raise RenderHelperError("Phase A2 subprocess timed out", stage=stage, diagnostic_code="BOUND_EXCEEDED") from exc
+        raise RenderHelperError(
+            "Phase A2 subprocess timed out",
+            stage=stage,
+            diagnostic_code="BOUND_EXCEEDED",
+            subprocess_step=subprocess_step,
+        ) from exc
     finally:
         selector.close()
         process.stdout.close()
@@ -1429,7 +1616,13 @@ def _run_bounded(
         try:
             return subprocess.CompletedProcess(argv, return_code, stdout.decode(), stderr.decode())
         except UnicodeDecodeError as exc:
-            raise RenderHelperError("Phase A2 subprocess output is not UTF-8", stage=stage, diagnostic_code="VALIDATION_REFUSED") from exc
+            raise RenderHelperError(
+                "Phase A2 subprocess output is not UTF-8",
+                stage=stage,
+                diagnostic_code="VALIDATION_REFUSED",
+                subprocess_step=subprocess_step,
+                return_code=return_code,
+            ) from exc
     return subprocess.CompletedProcess(argv, return_code, stdout, stderr)
 
 
@@ -1450,7 +1643,25 @@ def _run_a2(
     text: bool = True,
 ) -> subprocess.CompletedProcess[Any]:
     executable = f"/proc/self/fd/{held.descriptor}"
-    return _run_bounded(
+    if stage == "a2-input":
+        step = (
+            "flake-metadata"
+            if "metadata" in arguments
+            else "input-resolve"
+            if "eval" in arguments
+            else "input-hash"
+            if "hash" in arguments
+            else "input-references"
+        )
+    elif stage == "a2-eval":
+        step = "drv-show" if "derivation" in arguments else "drv-eval"
+    elif stage == "a2-build":
+        step = "drv-build"
+    elif stage == "a2-closure":
+        step = "closure-hash" if "hash" in arguments else "closure-requisites"
+    else:
+        step = stage
+    result = _run_bounded(
         [label, *arguments],
         executable=executable,
         cwd=source,
@@ -1459,13 +1670,22 @@ def _run_a2(
         timeout=_remaining(deadline, request["max_duration_seconds"]),
         max_output_bytes=request["max_output_bytes"],
         stage=stage,
+        subprocess_step=step,
         text=text,
     )
+    result.tgw_subprocess_step = step
+    return result
 
 
-def _require_success(result: subprocess.CompletedProcess[Any], *, stage: str) -> str:
+def _require_success(result: subprocess.CompletedProcess[Any], *, stage: str, subprocess_step: str | None = None) -> str:
     if result.returncode != 0:
-        raise RenderHelperError("Phase A2 subprocess failed", stage=stage, diagnostic_code="SUBPROCESS_FAILED")
+        raise RenderHelperError(
+            "Phase A2 subprocess failed",
+            stage=stage,
+            diagnostic_code="SUBPROCESS_FAILED",
+            subprocess_step=subprocess_step or getattr(result, "tgw_subprocess_step", stage),
+            return_code=result.returncode,
+        )
     if not isinstance(result.stdout, str):
         raise RenderHelperError("Phase A2 subprocess result type mismatch", stage=stage, diagnostic_code="VALIDATION_REFUSED")
     return result.stdout
@@ -1494,6 +1714,7 @@ def _a2_terminal_base(
     *,
     tool_manifest_sha256: str,
     effect_sha256: str,
+    execution_policy: Mapping[str, Any],
     authority: A2Authority,
 ) -> dict[str, Any]:
     return {
@@ -1505,6 +1726,8 @@ def _a2_terminal_base(
         "a2_prerequisite_receipt_sha256": authority.a2_prerequisite_receipt_sha256,
         "tool_manifest_sha256": tool_manifest_sha256,
         "input_manifest_sha256": request["input_closure_manifest_sha256"],
+        "execution_policy": dict(execution_policy),
+        "execution_policy_sha256": _sha256(canonical(execution_policy)),
         "archive_sha256": binding.archive_sha256,
         "source_commit": request["source_commit"],
         "source_tree": request["source_tree"],
@@ -1520,6 +1743,9 @@ def _a2_failure(
     cleanup: str,
     build_attempted: bool,
     tool_manifest_sha256: str,
+    execution_policy: Mapping[str, Any],
+    subprocess_step: str | None,
+    return_code: int | None,
     authority: A2Authority,
 ) -> dict[str, Any]:
     ambiguous = cleanup == "failed"
@@ -1530,6 +1756,8 @@ def _a2_failure(
         "diagnostic_code": "CLEANUP_FAILED" if ambiguous else original_code,
         "original_stage": original_stage,
         "original_diagnostic_code": original_code,
+        "subprocess_step": subprocess_step,
+        "return_code": return_code,
         "cleanup": cleanup,
         "effects": _a2_effects(build_attempted),
         **_a2_terminal_base(
@@ -1537,6 +1765,7 @@ def _a2_failure(
             request,
             tool_manifest_sha256=tool_manifest_sha256,
             effect_sha256=_sha256(canonical(RENDER_EFFECT)),
+            execution_policy=execution_policy,
             authority=authority,
         ),
     }
@@ -1584,26 +1813,9 @@ def _execute_a2_inner(
     tool_manifest_sha256 = _sha256(canonical(tool_manifest))
     nix, nix_store, systemd_analyze = held_tools
     env = _fixed_nix_environment(run_path)
+    execution_policy = _execution_policy(run_path)
     deadline = time.monotonic() + request["max_duration_seconds"]
-    nix_base = [
-        "--offline",
-        "--option",
-        "substituters",
-        "",
-        "--option",
-        "trusted-public-keys",
-        "",
-        "--option",
-        "allow-import-from-derivation",
-        "false",
-        "--option",
-        "pure-eval",
-        "true",
-        "--option",
-        "flake-registry",
-        "",
-        "--no-write-lock-file",
-    ]
+    nix_base = list(NIX_ARGV_PREFIX)
 
     metadata_raw = _require_success(
         _run_a2(nix, "nix", [*nix_base, "flake", "metadata", "--json", "path:."], source=source, env=env, deadline=deadline, request=request, stage="a2-input"),
@@ -1699,13 +1911,20 @@ def _execute_a2_inner(
         provider_scratch.mkdir(mode=0o700)
         namespace["STORE_ROOT"] = store_root
         namespace["SCRATCH_PARENT"] = provider_scratch
+        provider_process: dict[str, Any] = {"step": None, "return_code": None}
 
         def provider_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
             executable = argv[0]
             pass_fds = tuple(kwargs.get("pass_fds", ()))
             if not re.fullmatch(r"/proc/self/fd/[0-9]+", executable) or int(executable.rsplit("/", 1)[1]) not in pass_fds:
                 raise RenderHelperError("provider requested an unheld executable", stage="provider", diagnostic_code="VALIDATION_REFUSED")
-            return _run_bounded(
+            if len(argv) > 1 and argv[1] == "verify":
+                step = "provider-systemd-verify"
+            elif len(argv) > 1 and argv[1] == "--version":
+                step = "provider-verifier-version"
+            else:
+                step = "provider-drv-show"
+            result = _run_bounded(
                 argv,
                 executable=executable,
                 cwd=Path(kwargs.get("cwd", source)),
@@ -1714,8 +1933,11 @@ def _execute_a2_inner(
                 timeout=_remaining(deadline, float(kwargs.get("timeout", 60))),
                 max_output_bytes=request["max_output_bytes"],
                 stage="provider",
+                subprocess_step=step,
                 text=bool(kwargs.get("text", False)),
             )
+            provider_process.update(step=step, return_code=result.returncode)
+            return result
 
         try:
             provider_receipt = namespace["produce_result"](
@@ -1731,7 +1953,15 @@ def _execute_a2_inner(
         except RenderHelperError:
             raise
         except BaseException as exc:
-            raise RenderHelperError("bound provider rejected the render", stage="provider", diagnostic_code="SUBPROCESS_FAILED") from exc
+            return_code = provider_process["return_code"]
+            diagnostic_code = "SUBPROCESS_FAILED" if isinstance(return_code, int) and return_code != 0 else "VALIDATION_REFUSED"
+            raise RenderHelperError(
+                "bound provider rejected the render",
+                stage="provider",
+                diagnostic_code=diagnostic_code,
+                subprocess_step=provider_process["step"] if diagnostic_code == "SUBPROCESS_FAILED" else None,
+                return_code=return_code if diagnostic_code == "SUBPROCESS_FAILED" else None,
+            ) from exc
         if _identity(os.fstat(provider_fd)) != provider_identity:
             raise RenderHelperError("Phase A2 provider changed while held", stage="provider", diagnostic_code="IDENTITY_MISMATCH")
     finally:
@@ -1760,6 +1990,7 @@ def _execute_a2_inner(
             request,
             tool_manifest_sha256=tool_manifest_sha256,
             effect_sha256=_sha256(canonical(RENDER_EFFECT)),
+            execution_policy=execution_policy,
             authority=authority,
         ),
     }
@@ -1788,6 +2019,50 @@ def _a2_tool_manifest(authority: A2Authority) -> dict[str, Any]:
         "a2_prerequisite_receipt_sha256": authority.a2_prerequisite_receipt_sha256,
         "tools": tools,
     }
+
+
+def _validate_execution_policy(value: Any) -> dict[str, Any]:
+    fields = {
+        "schema",
+        "environment",
+        "nix_argv_prefix",
+        "render_attr",
+        "build_selector",
+        "ambient_environment_inherited",
+        "remote_builders",
+        "builder_substitutes",
+        "sandbox_required",
+        "sandbox_fallback",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise RenderHelperError("A2 execution policy is not closed", stage="request", diagnostic_code="VALIDATION_REFUSED")
+    environment = value["environment"]
+    if not isinstance(environment, dict) or set(environment) != {"HOME", "LC_ALL", "LANG", "PATH", "NIX_REMOTE", "NIX_CONFIG"}:
+        raise RenderHelperError("A2 execution environment is not closed", stage="request", diagnostic_code="VALIDATION_REFUSED")
+    home = Path(environment["HOME"]) if isinstance(environment["HOME"], str) else Path()
+    expected_environment = {
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PATH": "/no-ambient-path",
+        "NIX_REMOTE": "local",
+        "NIX_CONFIG": NIX_CONFIG,
+    }
+    if (
+        home.name != "nix-home"
+        or not home.parent.name.startswith("run-")
+        or any(environment[key] != expected for key, expected in expected_environment.items())
+        or value["schema"] != "tgw-nix-observer-render-execution-policy/v1"
+        or value["nix_argv_prefix"] != list(NIX_ARGV_PREFIX)
+        or value["render_attr"] != RENDER_ATTR
+        or value["build_selector"] != "evaluated-drv^out"
+        or value["ambient_environment_inherited"] is not False
+        or value["remote_builders"] is not False
+        or value["builder_substitutes"] is not False
+        or value["sandbox_required"] is not True
+        or value["sandbox_fallback"] is not False
+    ):
+        raise RenderHelperError("A2 execution policy is not local-only", stage="request", diagnostic_code="IDENTITY_MISMATCH")
+    return dict(value)
 
 
 def _execute_a2(
@@ -1908,6 +2183,9 @@ def execute_packet(
     a2_started = False
     effect_state = {"build_attempted": False}
     a2_tool_manifest_sha256 = _sha256(canonical(_a2_tool_manifest(a2_authority)))
+    a2_execution_policy: dict[str, Any] | None = None
+    failure_subprocess_step: str | None = None
+    failure_return_code: int | None = None
     failure: BaseException | None = None
     try:
         size_raw = stream.read(8)
@@ -1974,6 +2252,7 @@ def execute_packet(
                 raise RenderHelperError("test executor marker is invalid", stage="test-executor", diagnostic_code="VALIDATION_REFUSED")
         else:
             a2_started = True
+            a2_execution_policy = _execution_policy(run_path)
             if a2_authority.a1_prerequisite_receipt_sha256 != tool["authority_receipt_sha256"]:
                 raise RenderHelperError("Phase A1/A2 prerequisite composition mismatch", stage="a2-tool", diagnostic_code="IDENTITY_MISMATCH")
             a2_success, observed_tool_manifest_sha256 = _execute_a2(
@@ -1992,6 +2271,8 @@ def execute_packet(
         failure = exc
         if isinstance(exc, RenderHelperError):
             original_stage, original_code = exc.stage, exc.diagnostic_code
+            failure_subprocess_step = exc.subprocess_step
+            failure_return_code = exc.return_code
         else:
             original_stage, original_code = "internal", "INTERNAL_ERROR"
     cleanup = "not-created"
@@ -2026,6 +2307,7 @@ def execute_packet(
                     pass
     if cleanup == "failed":
         if a2_started:
+            assert a2_execution_policy is not None
             if failure is None:
                 original_stage, original_code = "a2-verified", "NONE"
             return _a2_failure(
@@ -2036,6 +2318,9 @@ def execute_packet(
                 cleanup=cleanup,
                 build_attempted=effect_state["build_attempted"],
                 tool_manifest_sha256=a2_tool_manifest_sha256,
+                execution_policy=a2_execution_policy,
+                subprocess_step=failure_subprocess_step,
+                return_code=failure_return_code,
                 authority=a2_authority,
             )
         if failure is None:
@@ -2043,6 +2328,7 @@ def execute_packet(
         return _failure(bound, request, tool, original_stage=original_stage, original_code=original_code, cleanup=cleanup)
     if failure is not None:
         if a2_started:
+            assert a2_execution_policy is not None
             return _a2_failure(
                 bound,
                 request,
@@ -2051,6 +2337,9 @@ def execute_packet(
                 cleanup=cleanup,
                 build_attempted=effect_state["build_attempted"],
                 tool_manifest_sha256=a2_tool_manifest_sha256,
+                execution_policy=a2_execution_policy,
+                subprocess_step=failure_subprocess_step,
+                return_code=failure_return_code,
                 authority=a2_authority,
             )
         return _failure(bound, request, tool, original_stage=original_stage, original_code=original_code, cleanup=cleanup)

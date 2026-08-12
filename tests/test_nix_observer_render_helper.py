@@ -463,6 +463,11 @@ def test_actual_framed_helper_subprocess_executes_offline_render_and_provider(tm
         case["wire"],
         a2_authority=case["authority"],
         scratch_root=case["scratch"],
+        env={
+            **os.environ,
+            "NIX_REMOTE": "ssh://ambient-builder",
+            "NIX_CONFIG": "builders = @/etc/nix/machines\nbuilders-use-substitutes = true\n",
+        },
     )
     assert completed.returncode == 0, completed.stderr.decode(errors="replace")
     receipt = json.loads(completed.stdout)
@@ -488,13 +493,11 @@ def test_actual_framed_helper_subprocess_executes_offline_render_and_provider(tm
     assert nix_calls and all(call["nix_remote"] == "local" and call["path"] == "/no-ambient-path" for call in calls)
     policy_calls = [call for call in nix_calls if "--offline" in call["argv"]]
     assert all(
-        call["argv"][:4] == ["--offline", "--option", "substituters", ""]
-        and ["--option", "trusted-public-keys", ""] == call["argv"][4:7]
-        and ["--option", "allow-import-from-derivation", "false"] == call["argv"][7:10]
-        and "--no-write-lock-file" in call["argv"]
+        call["argv"][: len(helper.NIX_ARGV_PREFIX)] == list(helper.NIX_ARGV_PREFIX)
         for call in policy_calls
     )
     assert policy_calls
+    assert all("builders =\n" in call["nix_config"] and "builders-use-substitutes = false" in call["nix_config"] for call in nix_calls)
     build_calls = [call["argv"] for call in nix_calls if "build" in call["argv"]]
     assert len(build_calls) == 1
     assert build_calls[0][-4:] == [
@@ -506,15 +509,17 @@ def test_actual_framed_helper_subprocess_executes_offline_render_and_provider(tm
 
 
 @pytest.mark.parametrize(
-    ("mode", "stage"),
+    ("mode", "stage", "diagnostic_code", "subprocess_step", "return_code"),
     [
-        ("nix-failure", "a2-build"),
-        ("verifier-failure", "provider"),
-        ("lock-write", "a2-verified"),
-        ("output-flood", "a2-input"),
+        ("nix-failure", "a2-build", "SUBPROCESS_FAILED", "drv-build", 9),
+        ("verifier-failure", "provider", "SUBPROCESS_FAILED", "provider-systemd-verify", 7),
+        ("lock-write", "a2-verified", "IDENTITY_MISMATCH", None, None),
+        ("output-flood", "a2-input", "BOUND_EXCEEDED", "flake-metadata", None),
     ],
 )
-def test_actual_framed_helper_subprocess_emits_closed_a2_failures(tmp_path, mode, stage):
+def test_actual_framed_helper_subprocess_emits_closed_a2_failures(
+    tmp_path, mode, stage, diagnostic_code, subprocess_step, return_code
+):
     case = _make_a2_case(tmp_path, mode=mode)
     completed = _run_bootstrap(
         case["wire"],
@@ -535,6 +540,9 @@ def test_actual_framed_helper_subprocess_emits_closed_a2_failures(tmp_path, mode
     )
     assert receipt["schema"] == helper.A2_FAILURE_SCHEMA
     assert receipt["stage"] == stage
+    assert receipt["diagnostic_code"] == diagnostic_code
+    assert receipt["subprocess_step"] == subprocess_step
+    assert receipt["return_code"] == return_code
     assert receipt["effects"]["network"] is False
     assert not case["scratch"].exists()
 
@@ -565,7 +573,10 @@ def test_actual_framed_helper_cleanup_failure_overrides_a2_success(tmp_path):
     shutil.rmtree(case["scratch"])
 
 
-@pytest.mark.parametrize("mutation", ["provider-content", "provider-hash", "closure", "prerequisite"])
+@pytest.mark.parametrize(
+    "mutation",
+    ["provider-content", "provider-hash", "provider-time", "provider-verify-shape", "closure", "prerequisite", "policy"],
+)
 def test_nested_a2_success_mutations_are_rejected(tmp_path, mutation):
     case = _make_a2_case(tmp_path)
     completed = _run_bootstrap(
@@ -583,10 +594,25 @@ def test_nested_a2_success_mutations_are_rejected(tmp_path, mutation):
         changed["provider_receipt_sha256"] = changed["provider_receipt"]["receipt_sha256"]
     elif mutation == "provider-hash":
         changed["provider_receipt_sha256"] = "sha256:" + "0" * 64
+    elif mutation == "provider-time":
+        changed["provider_receipt"]["systemd_verify"]["observed_at"] = "not-a-time"
+        inner = dict(changed["provider_receipt"])
+        inner.pop("receipt_sha256")
+        changed["provider_receipt"]["receipt_sha256"] = _digest(canonical(inner))
+        changed["provider_receipt_sha256"] = changed["provider_receipt"]["receipt_sha256"]
+    elif mutation == "provider-verify-shape":
+        changed["provider_receipt"]["systemd_verify"] = []
+        inner = dict(changed["provider_receipt"])
+        inner.pop("receipt_sha256")
+        changed["provider_receipt"]["receipt_sha256"] = _digest(canonical(inner))
+        changed["provider_receipt_sha256"] = changed["provider_receipt"]["receipt_sha256"]
     elif mutation == "closure":
         changed["closure_manifest"][0]["nar_sha256"] = "sha256:" + "0" * 64
-    else:
+    elif mutation == "prerequisite":
         changed["a2_prerequisite_receipt_sha256"] = "sha256:" + "0" * 64
+    else:
+        changed["execution_policy"]["remote_builders"] = True
+        changed["execution_policy_sha256"] = _digest(canonical(changed["execution_policy"]))
     changed.pop("receipt_sha256")
     changed["receipt_sha256"] = _digest(canonical(changed))
     with pytest.raises(helper.RenderHelperError):
@@ -597,6 +623,82 @@ def test_nested_a2_success_mutations_are_rejected(tmp_path, mutation):
             tool_descriptor=case["tool_descriptor"],
             authority=case["authority"],
         )
+
+
+@pytest.mark.parametrize("mutation", ["stage-code", "step", "return-code", "effects", "cleanup"])
+def test_impossible_a2_failure_relationship_is_rejected(tmp_path, mutation):
+    case = _make_a2_case(tmp_path, mode="nix-failure")
+    completed = _run_bootstrap(
+        case["wire"],
+        a2_authority=case["authority"],
+        scratch_root=case["scratch"],
+    )
+    changed = json.loads(completed.stdout)
+    if mutation == "stage-code":
+        changed.update(
+            stage="a2-tool",
+            original_stage="a2-tool",
+            subprocess_step="a2-tool",
+            effects=helper._a2_effects(False),
+        )
+    elif mutation == "step":
+        changed["subprocess_step"] = "closure-hash"
+    elif mutation == "return-code":
+        changed["return_code"] = 0
+    elif mutation == "effects":
+        changed["effects"] = helper._a2_effects(False)
+    else:
+        changed["cleanup"] = "failed"
+    changed.pop("receipt_sha256")
+    changed["receipt_sha256"] = _digest(canonical(changed))
+    with pytest.raises(helper.RenderHelperError, match="failure envelope"):
+        helper.validate_a2_terminal(
+            changed,
+            binding=case["binding"],
+            request=case["request"],
+            tool_descriptor=case["tool_descriptor"],
+            authority=case["authority"],
+        )
+
+
+@pytest.mark.parametrize("field", ["a2-receipt", "systemd", "input-path", "input-nar"])
+def test_a2_validator_rejects_request_authority_cross_binding_mutations(tmp_path, field):
+    case = _make_a2_case(tmp_path)
+    completed = _run_bootstrap(
+        case["wire"],
+        a2_authority=case["authority"],
+        scratch_root=case["scratch"],
+    )
+    receipt = json.loads(completed.stdout)
+    authority_values = vars(case["authority"]).copy()
+    if field == "a2-receipt":
+        authority_values["a2_prerequisite_receipt_sha256"] = "sha256:" + "0" * 64
+    elif field == "systemd":
+        authority_values["systemd_analyze_sha256"] = "sha256:" + "0" * 64
+    elif field == "input-path":
+        authority_values["input_path"] = "/nix/store/00000000000000000000000000000000-source"
+    else:
+        authority_values["input_nar_sha256"] = "sha256:" + "0" * 64
+    with pytest.raises(helper.RenderHelperError, match="request authority composition"):
+        helper.validate_a2_terminal(
+            receipt,
+            binding=case["binding"],
+            request=case["request"],
+            tool_descriptor=case["tool_descriptor"],
+            authority=helper.A2Authority(**authority_values),
+        )
+
+
+def test_flake_render_metadata_uses_the_canonical_observer_unit_list():
+    source = Path("flake.nix").read_text()
+    expected = (
+        'observerUnitNames = [ "tgw-nix-input-observer.slice" '
+        '"tgw-nix-input-observer.socket" "tgw-nix-input-observer@.service" ];'
+    )
+    assert expected in source
+    assert 'python3 - "$out" ${builtins.concatStringsSep " " observerUnitNames}' in source
+    assert '"units":sys.argv[2:]' in source
+    assert '"units":["tgw-nix-input-observer.socket"' not in source
 
 
 def test_fixed_prefix_binds_all_exact_lengths_and_hashes(source_case):
