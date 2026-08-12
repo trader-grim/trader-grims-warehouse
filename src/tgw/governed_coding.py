@@ -231,10 +231,17 @@ def admission_gate(receipts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             reasons.append(f"missing-role:{role}")
         elif receipt.get("status") != "PASS":
             reasons.append(f"failed-role:{role}")
-    implementation = by_role.get("implementation")
-    review = by_role.get("independent-review")
-    if implementation and review and implementation.get("execution_identity") == review.get("execution_identity"):
-        reasons.append("review-context-not-independent")
+    # Vendors/providers may repeat, but the three mandatory roles must be
+    # independently bound executions. A controller sharing the implementation
+    # or review context is not independent verification.
+    contexts: dict[str, list[str]] = {}
+    for role, receipt in by_role.items():
+        identity = receipt.get("execution_identity")
+        if isinstance(identity, str) and identity:
+            contexts.setdefault(identity, []).append(role)
+    for roles in contexts.values():
+        if len(roles) > 1:
+            reasons.append("shared-execution-context:" + ",".join(sorted(roles)))
     return {
         "schema": "tgw-coding-admission-gate/v1",
         "allowed": not reasons,

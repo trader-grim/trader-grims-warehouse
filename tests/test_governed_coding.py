@@ -158,4 +158,20 @@ def test_same_execution_context_cannot_self_review_for_admission(tmp_path):
 
     gate = admission_gate([implementation, review, controller])
     assert gate["allowed"] is False
-    assert gate["reasons"] == ["review-context-not-independent"]
+    assert gate["reasons"] == ["shared-execution-context:implementation,independent-review"]
+
+
+def test_controller_must_use_independently_bound_execution_context(tmp_path):
+    registry, health, bound_adapters = setup(tmp_path)
+    implementation = dispatch(registry, health, bound_adapters, "implementation", "run:impl")
+    review = dispatch(registry, health, bound_adapters, "independent-review", "run:review")
+    controller = dispatch(
+        registry, health, bound_adapters,
+        "controller-verification", "run:review",
+    )
+
+    gate = admission_gate([implementation, review, controller])
+    assert gate["allowed"] is False
+    assert gate["reasons"] == [
+        "shared-execution-context:controller-verification,independent-review",
+    ]
