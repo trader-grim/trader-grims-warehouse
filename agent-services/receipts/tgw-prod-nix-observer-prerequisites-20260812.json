@@ -1,0 +1,48 @@
+{
+  "capability_probe": {
+    "effects": {
+      "build": false,
+      "deployment": false,
+      "flake_evaluation": false,
+      "network_egress": false,
+      "profile_write": false,
+      "store_write": false
+    },
+    "ip_links": [{"address":"00:00:00:00:00:00","broadcast":"00:00:00:00:00:00","flags":["LOOPBACK"],"group":"default","ifindex":1,"ifname":"lo","link_type":"loopback","linkmode":"DEFAULT","mtu":65536,"operstate":"DOWN","qdisc":"noop","txqlen":1000}],
+    "ip_routes": [],
+    "local_store_check": {
+      "classification": "user-namespace-unsupported",
+      "path": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+      "return_code": 1,
+      "stderr_bytes": 177,
+      "stderr_sha256": "sha256:07433f37927dc97305006d780c1abac5e840df6c116a5be46337c9a587876ba5",
+      "stdout_bytes": 0,
+      "stdout_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "netns_inode": 4026532596,
+    "result": "HOLD"
+  },
+  "host": {
+    "current_system": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "name": "tgw-prod",
+    "profile": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "scratch_root": "ABSENT"
+  },
+  "observed_at": "2026-08-12T08:07:03-07:00",
+  "schema": "tgw-nix-observer-host-prerequisites/v1",
+  "ssh": {
+    "executable_sha256": "sha256:af3b04ec5653755032fc18ad02445e4e51170e75d8bac4265647d423caa9a83e",
+    "known_hosts_sha256": "sha256:2efd6fc4243b15b6d0b16a8da723911614198620cabf31bc822cf12520715cdf",
+    "version": "OpenSSH_10.0p2 Debian-7+deb13u4, OpenSSL 3.5.6 7 Apr 2026"
+  },
+  "status": "HOLD_LOCAL_NIX_IN_USER_NAMESPACE_UNAVAILABLE",
+  "tools": {
+    "git": {"path":"/nix/store/jg9g0gs0x0f69m8mn31syic45bf9lwh9-git-2.50.1/bin/git","sha256":"sha256:7caeec432b21191b6227a0150dedcf4b5503d6a4819d8ef7b223fbf1128da5f8","version":"git version 2.50.1"},
+    "ip": {"path":"/nix/store/wi3vbjlri1xjjxam65h5dxdmb8lzlgcl-iproute2-6.14.0/bin/ip","sha256":"sha256:54971eb884b8629357508904fcb12e871cd764a5af2365a1a46c20d2f1e25546","version":"ip utility, iproute2-6.14.0, libbpf 1.5.0"},
+    "nix": {"path":"/nix/store/mxafjxh0amr24d2gb7n3km6hljj79qsj-nix-2.28.5/bin/nix","sha256":"sha256:8fadf78aa447b028410e9840f1f971a860bfdcf02a9205d9282455f21f21221b","version":"nix (Nix) 2.28.5"},
+    "nix_store": {"path":"/nix/store/mxafjxh0amr24d2gb7n3km6hljj79qsj-nix-2.28.5/bin/nix","sha256":"sha256:8fadf78aa447b028410e9840f1f971a860bfdcf02a9205d9282455f21f21221b","version":"nix-store (Nix) 2.28.5"},
+    "python": {"path":"/nix/store/1ncmydmnspk3ssmcanaw5ha5dbfdwnh5-python3-3.13.5/bin/python3.13","sha256":"sha256:98c4668fa5f84d0106ecc8ed8a76d7ff13d91a70f5cce1cacbf0f2fcb5da1184","version":"Python 3.13.5"},
+    "unshare": {"path":"/nix/store/lbmf09mml4llrvna9isqmy08f2k73ghd-util-linux-2.41.1-bin/bin/unshare","sha256":"sha256:18cdd9d12b9de548ea5e6d8a3066b24d150cde0034f2191790c7fbb25c56d0ca","version":"unshare from util-linux 2.41.1"}
+  },
+  "self_hash": "sha256:3a91e1a8824fa3f1d3bf563155d6af7d13f32d46e67f69146f80253aaf79cce6"
+}
