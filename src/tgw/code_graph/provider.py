@@ -10,14 +10,16 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 SCHEMA = "tgw-code-graph-snapshot/v1"
 SERVICE_SCHEMA = "tgw-code-graph-service/v1"
 MAX_LIMIT = 100
+_INVARIANT = re.compile(r"\b[CE]\d+[A-Z]?\b", re.IGNORECASE)
 
 
 class CodeGraphError(RuntimeError):
@@ -102,9 +104,27 @@ def build_snapshot(repository: Path, revision: str = "HEAD") -> dict[str, Any]:
     tree = _git(repo, "rev-parse", f"{commit}^{{tree}}").strip()
     paths = sorted(path for path in _git(repo, "ls-tree", "-r", "--name-only", commit).splitlines() if path.endswith(".py"))
     files, symbols, imports, pending_names, parse_errors = [], [], [], [], []
+    invariant_locations: dict[str, list[dict[str, Any]]] = {}
+    receipts: list[dict[str, Any]] = []
     for path in paths:
         source = _git(repo, "show", f"{commit}:{path}")
-        files.append({"path": path, "sha256": hashlib.sha256(source.encode()).hexdigest(), "module": _module(path)})
+        blob_sha = hashlib.sha256(source.encode()).hexdigest()
+        files.append({"path": path, "sha256": blob_sha, "module": _module(path)})
+        declared_detectors = {
+            match.upper() for match in re.findall(
+                r"Invariant\s+([CE]\d+[A-Z]?)[^\n]{0,100}\bdetector\b",
+                source, re.IGNORECASE,
+            )
+        }
+        for line_number, line in enumerate(source.splitlines(), 1):
+            for invariant in sorted(set(token.upper() for token in _INVARIANT.findall(line))):
+                invariant_locations.setdefault(invariant, []).append({
+                    "path": path, "line": line_number, "blob_sha256": blob_sha,
+                    "kind": "detector-test" if path.startswith("tests/") and (
+                        "invariant" in Path(path).name or invariant in declared_detectors
+                    ) else
+                    "test-reference" if path.startswith("tests/") else "source-reference",
+                })
         try:
             parsed = ast.parse(source, filename=path)
         except SyntaxError as exc:
@@ -129,16 +149,46 @@ def build_snapshot(repository: Path, revision: str = "HEAD") -> dict[str, Any]:
     symbols.sort(key=lambda item: item["id"])
     imports.sort(key=lambda item: (item["source"], item["line"], item["target"]))
     references.sort(key=lambda item: (item["source"], item["line"], item["target"]))
+    invariants = []
+    for invariant, locations in sorted(invariant_locations.items()):
+        detector = any(item["kind"] == "detector-test" for item in locations)
+        invariants.append({
+            "id": invariant,
+            "status": "detector-test-present" if detector else "referenced-only",
+            "evidence": locations[:50],
+            "evidence_count": len(locations),
+            "evidence_truncated": len(locations) > 50,
+            "binding": {"commit": commit, "tree": tree},
+        })
+    for path in sorted(
+        item for item in _git(repo, "ls-tree", "-r", "--name-only", commit).splitlines()
+        if item.startswith("agent-services/receipts/") and item.endswith(".json")
+    ):
+        raw = _git(repo, "show", f"{commit}:{path}")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = None
+        receipts.append({
+            "path": path, "blob_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+            "schema": payload.get("schema") if isinstance(payload, Mapping) else None,
+            "source_commit": payload.get("source_commit") if isinstance(payload, Mapping) else None,
+            "status": payload.get("status") if isinstance(payload, Mapping) else None,
+            "parse_status": "valid-json" if payload is not None else "invalid-json",
+            "binding": {"snapshot_commit": commit, "snapshot_tree": tree},
+        })
     core = {
         "schema": SCHEMA, "repository": str(repo), "commit": commit, "tree": tree,
         "languages": ["python"], "files": files, "symbols": symbols,
         "imports": imports, "dependencies": imports, "references": references,
+        "invariants": invariants, "execution_receipts": receipts,
         "parse_errors": parse_errors,
         "capabilities": {
             "symbols": "available", "imports": "available",
             "references": "partial:module-local-exact-only",
             "dependencies": "available:syntactic-imports",
-            "invariants": "unavailable:not-implemented",
+            "invariants": "partial:committed-references-and-detector-tests",
+            "execution_receipts": "available:committed-receipt-metadata" if receipts else "unavailable:none-at-commit",
             "runtime_traces": "unavailable:not-collected",
         },
     }
@@ -148,9 +198,24 @@ def build_snapshot(repository: Path, revision: str = "HEAD") -> dict[str, Any]:
     return core
 
 
+class TraceReader(Protocol):
+    def list(self, limit: int) -> Sequence[Mapping[str, Any]]: ...
+
+
+@dataclass(frozen=True)
+class AgentRunTraceReader:
+    """Read-only adapter over the existing ``list_agent_runs(limit)`` seam."""
+
+    loader: Callable[[int], Sequence[Mapping[str, Any]]]
+
+    def list(self, limit: int) -> Sequence[Mapping[str, Any]]:
+        return self.loader(limit)
+
+
 @dataclass(frozen=True)
 class CodeGraphService:
     snapshot: Mapping[str, Any]
+    trace_reader: TraceReader | None = None
 
     def query(self, operation: str, query: str = "", limit: int = 20) -> dict[str, Any]:
         if not 1 <= limit <= MAX_LIMIT:
@@ -159,13 +224,25 @@ class CodeGraphService:
         collections = {
             "symbols": "symbols", "imports": "imports", "references": "references",
             "dependencies": "dependencies", "files": "files",
+            "invariants": "invariants", "receipts": "execution_receipts",
         }
         if operation == "status":
+            capabilities = dict(self.snapshot["capabilities"])
+            if self.trace_reader is not None:
+                capabilities["runtime_traces"] = "available:injected-agent-runs-reader"
             result: Any = {
                 "commit": self.snapshot["commit"], "tree": self.snapshot["tree"],
                 "freshness_hash": self.snapshot["freshness_hash"],
-                "capabilities": self.snapshot["capabilities"],
+                "capabilities": capabilities,
             }
+        elif operation == "traces":
+            if self.trace_reader is None:
+                result = {"status": "unavailable", "reason": "no-trace-reader-injected", "objects": []}
+            else:
+                result = {
+                    "status": "available",
+                    "objects": [_trace_object(row, self.snapshot["freshness_hash"]) for row in self.trace_reader.list(limit)[:limit]],
+                }
         elif operation in collections:
             values = self.snapshot[collections[operation]]
             result = [item for item in values if not needle or needle in _canonical(item).decode().casefold()][:limit]
@@ -180,3 +257,17 @@ def service_call(snapshot: Mapping[str, Any], request: Mapping[str, Any]) -> dic
         str(request.get("operation", "status")),
         str(request.get("query", "")), int(request.get("limit", 20)),
     )
+
+
+def _trace_object(row: Mapping[str, Any], snapshot_hash: str) -> dict[str, Any]:
+    """Bounded typed metadata only; transcript contents remain in their backend."""
+    return {
+        "schema": "tgw-code-graph-execution-trace/v1",
+        "run_id": row.get("run_id"), "parent_run_id": row.get("parent_run_id"),
+        "agent_type": row.get("agent_type"), "todo_id": row.get("todo_id"),
+        "pp_ref": row.get("pp_ref"), "host": row.get("host"),
+        "git_branch": row.get("git_branch"), "started_at": row.get("started_at"),
+        "ended_at": row.get("ended_at"), "status": row.get("status"),
+        "summary": row.get("summary"), "transcript_ref": row.get("transcript_path"),
+        "code_snapshot_hash": snapshot_hash,
+    }
