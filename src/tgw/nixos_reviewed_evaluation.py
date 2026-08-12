@@ -24,9 +24,14 @@ from typing import Any, Callable, Mapping, Protocol
 SSH_EXECUTABLE = "/usr/bin/ssh"
 REMOTE_PYTHON = "/run/current-system/sw/bin/python3"
 BOOTSTRAP = (
-    "import hashlib,struct,sys; n=struct.unpack('!Q',sys.stdin.buffer.read(8))[0]; "
+    "import hashlib,json,struct,sys; n=struct.unpack('!Q',sys.stdin.buffer.read(8))[0]; "
     "s=sys.stdin.buffer.read(n); h=sys.stdin.buffer.read(64).decode(); r=sys.stdin.buffer.read(71).decode(); "
-    "hashlib.sha256(s).hexdigest()==h or sys.exit(91); "
+    "d={'schema':'tgw-nixos-reviewed-evaluation-bootstrap-failure/v1','outcome':'FAILED','stage':'request-validation',"
+    "'diagnostic_code':'IDENTITY_MISMATCH','exception_class':'EvaluationError','request_hash':r,'provider_sha256':'sha256:'+h,"
+    "'stdout_bytes':0,'stdout_sha256':'sha256:'+hashlib.sha256(b'').hexdigest(),'stderr_bytes':0,'stderr_sha256':'sha256:'+hashlib.sha256(b'').hexdigest(),"
+    "'forbidden_effects':{'activation':False,'profile_write':False,'home_db_write':False,'live_flake_write':False,'deployment':False}}; "
+    "d['receipt_sha256']='sha256:'+hashlib.sha256(json.dumps(d,sort_keys=True,separators=(',',':')).encode()).hexdigest(); "
+    "hashlib.sha256(s).hexdigest()==h or (sys.stdout.write(json.dumps(d,sort_keys=True,separators=(',',':'))),sys.exit(91)); "
     "exec(compile(s,'<tgw-reviewed-evaluator>','exec'),"
     "{'__name__':'__main__','_BOOTSTRAP_PROVIDER_SHA256':'sha256:'+h,'_BOOTSTRAP_REQUEST_HASH':r})"
 )
@@ -51,6 +56,7 @@ class EvaluationError(ValueError):
 
 
 FAILURE_SCHEMA = "tgw-nixos-reviewed-evaluation-failure/v1"
+BOOTSTRAP_FAILURE_SCHEMA = "tgw-nixos-reviewed-evaluation-bootstrap-failure/v1"
 FAILURE_STAGES = frozenset(
     {
         "request-validation",
@@ -78,9 +84,12 @@ EXCEPTION_CLASSES = frozenset({"EvaluationError", "TimeoutExpired", "OSError", "
 
 
 class RemoteEvaluationFailure(EvaluationError):
-    def __init__(self, receipt: Mapping[str, Any]):
+    def __init__(self, receipt: Mapping[str, Any], *, receipt_ref: Mapping[str, Any] | None = None, persistence_error: bool = False):
         super().__init__("remote reviewed evaluation emitted a validated failure receipt")
         self.receipt = dict(receipt)
+        self.receipt_ref = dict(receipt_ref) if receipt_ref is not None else None
+        self.persistence_error = persistence_error
+        self.reconciliation_outcome = "AMBIGUOUS" if persistence_error else receipt["outcome"]
 
 
 class StepFailure(EvaluationError):
@@ -126,6 +135,60 @@ def create_failure_receipt(
     }
     receipt["receipt_sha256"] = "sha256:" + sha256(_canonical(receipt)).hexdigest()
     return receipt
+
+
+def create_bootstrap_failure_receipt(*, request_hash: str, provider_sha256: str, diagnostic_code: str, exception_class: str) -> dict[str, Any]:
+    receipt = {
+        "schema": BOOTSTRAP_FAILURE_SCHEMA,
+        "outcome": "FAILED",
+        "stage": "request-validation",
+        "diagnostic_code": diagnostic_code,
+        "exception_class": exception_class,
+        "request_hash": request_hash,
+        "provider_sha256": provider_sha256,
+        "stdout_bytes": 0,
+        "stdout_sha256": "sha256:" + sha256(b"").hexdigest(),
+        "stderr_bytes": 0,
+        "stderr_sha256": "sha256:" + sha256(b"").hexdigest(),
+        "forbidden_effects": {"activation": False, "profile_write": False, "home_db_write": False, "live_flake_write": False, "deployment": False},
+    }
+    receipt["receipt_sha256"] = "sha256:" + sha256(_canonical(receipt)).hexdigest()
+    return receipt
+
+
+def validate_bootstrap_failure_receipt(value: Any, *, request_hash: str, provider_sha256: str) -> dict[str, Any]:
+    required = {
+        "schema",
+        "outcome",
+        "stage",
+        "diagnostic_code",
+        "exception_class",
+        "request_hash",
+        "provider_sha256",
+        "stdout_bytes",
+        "stdout_sha256",
+        "stderr_bytes",
+        "stderr_sha256",
+        "forbidden_effects",
+        "receipt_sha256",
+    }
+    if not isinstance(value, dict) or len(_canonical(value)) > 4096 or set(value) != required:
+        raise EvaluationError("remote bootstrap failure receipt schema is invalid")
+    if value["schema"] != BOOTSTRAP_FAILURE_SCHEMA or value["outcome"] != "FAILED" or value["stage"] != "request-validation":
+        raise EvaluationError("remote bootstrap failure receipt outcome is invalid")
+    if value["request_hash"] != request_hash or value["provider_sha256"] != provider_sha256:
+        raise EvaluationError("remote bootstrap failure receipt binding mismatch")
+    if value["diagnostic_code"] not in DIAGNOSTIC_CODES or value["exception_class"] not in EXCEPTION_CLASSES:
+        raise EvaluationError("remote bootstrap failure diagnostic is invalid")
+    if value["stdout_bytes"] != 0 or value["stderr_bytes"] != 0 or value["stdout_sha256"] != "sha256:" + sha256(b"").hexdigest() or value["stderr_sha256"] != "sha256:" + sha256(b"").hexdigest():
+        raise EvaluationError("remote bootstrap failure exposed diagnostics")
+    if set(value["forbidden_effects"]) != {"activation", "profile_write", "home_db_write", "live_flake_write", "deployment"} or any(value["forbidden_effects"].values()):
+        raise EvaluationError("remote bootstrap failure claims a forbidden effect")
+    unsigned = dict(value)
+    claimed = unsigned.pop("receipt_sha256")
+    if claimed != "sha256:" + sha256(_canonical(unsigned)).hexdigest():
+        raise EvaluationError("remote bootstrap failure receipt self-hash mismatch")
+    return dict(value)
 
 
 def _effect_hash(parameters: Mapping[str, str]) -> str:
@@ -185,7 +248,7 @@ def validate_failure_receipt(value: Any, parameters: Mapping[str, str], *, reque
     if type(value["return_code"]) not in {int, type(None)} or isinstance(value["return_code"], int) and not -255 <= value["return_code"] <= 255:
         raise EvaluationError("remote failure receipt return code is invalid")
     for prefix in ("stdout", "stderr"):
-        if type(value[prefix + "_bytes"]) is not int or not 0 <= value[prefix + "_bytes"] <= 16 * 1024 * 1024 or not re.fullmatch(r"sha256:[0-9a-f]{64}", value[prefix + "_sha256"]):
+        if type(value[prefix + "_bytes"]) is not int or not 0 <= value[prefix + "_bytes"] <= int(parameters["max_output_bytes"]) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value[prefix + "_sha256"]):
             raise EvaluationError("remote failure receipt diagnostic digest is invalid")
     if (
         not isinstance(value["forbidden_effects"], dict)
@@ -207,6 +270,38 @@ class ArtifactResolver(Protocol):
 
 def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+class ImmutableFailureReceiptStore:
+    """Controller-owned, content-addressed receipt store with atomic exclusive writes."""
+
+    def __init__(self, root: Path):
+        self.root = root
+
+    def persist(self, receipt: Mapping[str, Any]) -> dict[str, Any]:
+        metadata = self.root.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+            raise EvaluationError("failure receipt store identity is unsafe")
+        content = _canonical(dict(receipt))
+        digest = sha256(content).hexdigest()
+        name = digest + ".json"
+        directory_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            try:
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=directory_fd)
+            except FileExistsError:
+                existing = self.root / name
+                if _digest_file(existing) != "sha256:" + digest or stat.S_IMODE(existing.stat().st_mode) != 0o400:
+                    raise EvaluationError("existing failure receipt artifact is contradictory")
+            else:
+                with os.fdopen(fd, "wb") as sink:
+                    sink.write(content)
+                    sink.flush()
+                    os.fsync(sink.fileno())
+                os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return {"artifact_ref": "artifact:sha256:" + digest, "path": str(self.root / name), "sha256": "sha256:" + digest, "size": len(content)}
 
 
 def _digest_file(path: Path) -> str:
@@ -321,13 +416,13 @@ class SshReviewedEvaluationProvider:
         *,
         known_hosts: Path,
         request_hash: str = "",
-        failure_sink: Callable[[Mapping[str, Any]], None] | None = None,
+        failure_store: ImmutableFailureReceiptStore | None = None,
         invoke: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
     ):
         self.resolve_artifact = resolve_artifact
         self.known_hosts = known_hosts
         self.request_hash = request_hash
-        self.failure_sink = failure_sink
+        self.failure_store = failure_store
         self.invoke = invoke
 
     def __call__(self, parameters: Mapping[str, str]) -> Mapping[str, Any]:
@@ -388,12 +483,22 @@ class SshReviewedEvaluationProvider:
             os.close(ssh_fd)
         if completed.returncode:
             try:
-                failure = validate_failure_receipt(json.loads(completed.stdout), parameters, request_hash=self.request_hash)
+                untrusted = json.loads(completed.stdout)
+                if isinstance(untrusted, dict) and untrusted.get("schema") == BOOTSTRAP_FAILURE_SCHEMA:
+                    failure = validate_bootstrap_failure_receipt(untrusted, request_hash=self.request_hash, provider_sha256=parameters["provider_sha256"])
+                else:
+                    failure = validate_failure_receipt(untrusted, parameters, request_hash=self.request_hash)
             except (json.JSONDecodeError, UnicodeDecodeError, EvaluationError) as exc:
                 raise EvaluationError("remote reviewed evaluation failed without a valid failure receipt") from exc
-            if self.failure_sink is not None:
-                self.failure_sink(failure)
-            raise RemoteEvaluationFailure(failure)
+            receipt_ref = None
+            persistence_error = False
+            try:
+                if self.failure_store is None:
+                    raise EvaluationError("immutable failure receipt store is not configured")
+                receipt_ref = self.failure_store.persist(failure)
+            except (OSError, EvaluationError):
+                persistence_error = True
+            raise RemoteEvaluationFailure(failure, receipt_ref=receipt_ref, persistence_error=persistence_error)
         if len(completed.stdout) > int(parameters["max_output_bytes"]):
             raise EvaluationError("remote reviewed evaluation output exceeded its bound")
         try:
@@ -702,7 +807,7 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
             "evidence": [],
         }
     finally:
-        _FAILURE_CONTEXT.update({"stage": "cleanup", "cleanup_attempted": True})
+        _FAILURE_CONTEXT["cleanup_attempted"] = True
         try:
             shutil.rmtree(scratch, ignore_errors=False)
             os.close(root_fd)
@@ -710,7 +815,7 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
                 os.rmdir(scratch_root.name, dir_fd=parent_fd)
             _FAILURE_CONTEXT["cleanup_result"] = "removed" if root_created else "retained-existing"
         except Exception:
-            _FAILURE_CONTEXT["cleanup_result"] = "failed"
+            _FAILURE_CONTEXT.update({"stage": "cleanup", "cleanup_result": "failed"})
             raise
         finally:
             try:
@@ -739,16 +844,24 @@ def main() -> int:
         exception_class = type(exc).__name__ if type(exc).__name__ in EXCEPTION_CLASSES else "EvaluationError"
         code = "CLEANUP_FAILED" if _FAILURE_CONTEXT.get("stage") == "cleanup" else "SUBPROCESS_FAILED" if "failed" in str(exc).lower() else "VALIDATION_REFUSED"
         step_failure = exc if isinstance(exc, StepFailure) else None
-        receipt = create_failure_receipt(
-            context=_FAILURE_CONTEXT,
-            stage=_FAILURE_CONTEXT.get("stage", "internal"),
-            diagnostic_code=code,
-            exception_class=exception_class,
-            cleanup_result=_FAILURE_CONTEXT.get("cleanup_result", "unknown"),
-            subprocess_step=step_failure.step if step_failure else "none",
-            return_code=step_failure.return_code if step_failure else None,
-            stdout=step_failure.stdout if step_failure else b"",
-            stderr=step_failure.stderr if step_failure else b"",
-        )
+        if not all(_FAILURE_CONTEXT.get(key) for key in ("effect_hash", "generation", "provider_sha256")):
+            receipt = create_bootstrap_failure_receipt(
+                request_hash=globals().get("_BOOTSTRAP_REQUEST_HASH", "sha256:" + "0" * 64),
+                provider_sha256=globals().get("_BOOTSTRAP_PROVIDER_SHA256", "sha256:" + "0" * 64),
+                diagnostic_code=code,
+                exception_class=exception_class,
+            )
+        else:
+            receipt = create_failure_receipt(
+                context=_FAILURE_CONTEXT,
+                stage=_FAILURE_CONTEXT.get("stage", "internal"),
+                diagnostic_code=code,
+                exception_class=exception_class,
+                cleanup_result=_FAILURE_CONTEXT.get("cleanup_result", "unknown"),
+                subprocess_step=step_failure.step if step_failure else "none",
+                return_code=step_failure.return_code if step_failure else None,
+                stdout=step_failure.stdout if step_failure else b"",
+                stderr=step_failure.stderr if step_failure else b"",
+            )
         sys.stdout.buffer.write(_canonical(receipt))
         return 1

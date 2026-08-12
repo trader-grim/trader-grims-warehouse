@@ -16,11 +16,15 @@ from tgw.nixos_reviewed_evaluation import (
     FAILURE_STAGES,
     SSH_EXECUTABLE,
     EvaluationError,
+    ImmutableFailureReceiptStore,
     RemoteEvaluationFailure,
     SshReviewedEvaluationProvider,
     _sealed_memfd,
+    create_bootstrap_failure_receipt,
     create_failure_receipt,
     execute_packet,
+    main,
+    validate_bootstrap_failure_receipt,
     validate_failure_receipt,
 )
 
@@ -161,9 +165,14 @@ def test_failure_receipt_cleanup_ambiguity_and_fabrication_are_rejected():
         forged.update(mutation)
         with pytest.raises(EvaluationError):
             validate_failure_receipt(forged, request, request_hash=context["request_hash"])
+    oversized = dict(receipt)
+    oversized["stdout_bytes"] = int(request["max_output_bytes"]) + 1
+    with pytest.raises(EvaluationError, match="diagnostic digest"):
+        validate_failure_receipt(oversized, request, request_hash=context["request_hash"])
 
 
-def test_controller_persists_only_validated_remote_failure(tmp_path):
+@pytest.mark.parametrize("stage", sorted(FAILURE_STAGES))
+def test_controller_persists_only_validated_remote_failure(tmp_path, stage):
     archive = tmp_path / "source.tar"
     make_archive(archive)
     request = parameters(sha256(archive.read_bytes()).hexdigest())
@@ -182,24 +191,89 @@ def test_controller_persists_only_validated_remote_failure(tmp_path):
     }
     failure = create_failure_receipt(
         context=context,
-        stage="nix-eval",
+        stage=stage,
         diagnostic_code="SUBPROCESS_FAILED",
         exception_class="EvaluationError",
         cleanup_result="removed",
-        subprocess_step="nix-eval",
+        subprocess_step="nix-eval" if stage == "nix-eval" else "none",
         return_code=1,
     )
-    persisted = []
+    store_root = tmp_path / "failure-receipts"
+    store_root.mkdir(mode=0o700)
     provider = SshReviewedEvaluationProvider(
         lambda _: archive,
         known_hosts=known_hosts,
         request_hash=request_hash,
-        failure_sink=persisted.append,
+        failure_store=ImmutableFailureReceiptStore(store_root),
         invoke=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, json.dumps(failure).encode(), b"raw secret"),
     )
-    with pytest.raises(RemoteEvaluationFailure):
+    with pytest.raises(RemoteEvaluationFailure) as captured:
         provider(request)
-    assert persisted == [failure]
+    assert captured.value.receipt_ref["artifact_ref"].startswith("artifact:sha256:")
+    assert json.loads(Path(captured.value.receipt_ref["path"]).read_text()) == failure
+
+
+def test_bootstrap_failure_is_bound_and_rejects_fabrication():
+    request_hash = "sha256:" + "d" * 64
+    provider_hash = "sha256:" + "c" * 64
+    receipt = create_bootstrap_failure_receipt(
+        request_hash=request_hash,
+        provider_sha256=provider_hash,
+        diagnostic_code="VALIDATION_REFUSED",
+        exception_class="EvaluationError",
+    )
+    assert validate_bootstrap_failure_receipt(receipt, request_hash=request_hash, provider_sha256=provider_hash) == receipt
+    forged = dict(receipt)
+    forged["request_hash"] = "sha256:" + "e" * 64
+    with pytest.raises(EvaluationError, match="binding mismatch"):
+        validate_bootstrap_failure_receipt(forged, request_hash=request_hash, provider_sha256=provider_hash)
+
+
+def test_main_emits_bootstrap_schema_for_pretyped_request_failure(monkeypatch):
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    request_hash = "sha256:" + "d" * 64
+    provider_hash = "sha256:" + "c" * 64
+    monkeypatch.setattr(provider_module, "_BOOTSTRAP_REQUEST_HASH", request_hash, raising=False)
+    monkeypatch.setattr(provider_module, "_BOOTSTRAP_PROVIDER_SHA256", provider_hash, raising=False)
+    monkeypatch.setattr(provider_module, "execute_packet", lambda stream: (_ for _ in ()).throw(EvaluationError("invalid request")))
+    provider_module._FAILURE_CONTEXT = {"stage": "request-validation", "cleanup_result": "not-created"}
+    output = io.BytesIO()
+    monkeypatch.setattr(provider_module.sys, "stdout", type("Output", (), {"buffer": output})())
+    assert main() == 1
+    receipt = json.loads(output.getvalue())
+    assert validate_bootstrap_failure_receipt(receipt, request_hash=request_hash, provider_sha256=provider_hash) == receipt
+
+
+@pytest.mark.parametrize("stage", sorted(FAILURE_STAGES - {"cleanup"}))
+def test_main_control_channel_preserves_original_failure_stage(stage, monkeypatch):
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    request = parameters()
+    provider_module._FAILURE_CONTEXT = {
+        "stage": stage,
+        "request_hash": "sha256:" + "d" * 64,
+        "effect_hash": provider_module._effect_hash(request),
+        "generation": request["generation"],
+        "provider_sha256": request["provider_sha256"],
+        "cleanup_attempted": True,
+        "cleanup_result": "removed",
+    }
+    monkeypatch.setattr(provider_module, "execute_packet", lambda stream: (_ for _ in ()).throw(EvaluationError("injected refusal")))
+    output = io.BytesIO()
+    monkeypatch.setattr(provider_module.sys, "stdout", type("Output", (), {"buffer": output})())
+    assert main() == 1
+    assert json.loads(output.getvalue())["stage"] == stage
+
+
+def test_immutable_sink_failure_retains_validated_receipt_as_ambiguous(tmp_path):
+    root = tmp_path / "unsafe"
+    root.mkdir(mode=0o755)
+    failure = {"outcome": "FAILED"}
+    exc = RemoteEvaluationFailure(failure, persistence_error=True)
+    assert exc.receipt == failure and exc.reconciliation_outcome == "AMBIGUOUS"
+    with pytest.raises(EvaluationError, match="store identity"):
+        ImmutableFailureReceiptStore(root).persist(failure)
 
 
 def test_controller_provider_rejects_artifact_mismatch_before_ssh(tmp_path):
