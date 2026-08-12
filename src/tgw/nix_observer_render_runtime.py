@@ -30,6 +30,17 @@ FAILURE_SCHEMA = "tgw-nix-observer-render-evaluation-failure/v1"
 FAILURE_STAGES = {"request", "archive", "source", "input-closure", "nix-eval", "nix-build", "output", "systemd-verify", "cleanup", "internal"}
 FAILURE_CODES = {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED", "SUBPROCESS_FAILED", "CLEANUP_FAILED", "INTERNAL_ERROR"}
 FAILURE_EFFECTS = {"build_attempted", "activation", "deployment", "profile_write", "home_db_write", "live_flake_write", "network"}
+STAGE_CODES = {
+    "request": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED"},
+    "archive": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED"},
+    "source": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "SUBPROCESS_FAILED", "BOUND_EXCEEDED"},
+    "input-closure": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH"},
+    "nix-eval": {"SUBPROCESS_FAILED", "BOUND_EXCEEDED"},
+    "nix-build": {"SUBPROCESS_FAILED", "BOUND_EXCEEDED"},
+    "output": {"VALIDATION_REFUSED", "IDENTITY_MISMATCH", "BOUND_EXCEEDED"},
+    "systemd-verify": {"SUBPROCESS_FAILED", "BOUND_EXCEEDED"},
+    "internal": {"INTERNAL_ERROR"},
+}
 
 
 def validate_failure(value: Mapping[str, object], *, request: Mapping[str, object]) -> dict[str, object]:
@@ -68,17 +79,18 @@ def validate_failure(value: Mapping[str, object], *, request: Mapping[str, objec
             raise RenderRuntimeError("render failure identity binding mismatch")
     if result["schema"] != FAILURE_SCHEMA or result["stage"] not in FAILURE_STAGES or result["diagnostic_code"] not in FAILURE_CODES:
         raise RenderRuntimeError("render failure classification invalid")
-    prebuild = {"request", "archive", "source", "input-closure"}
-    subprocess_stages = {"nix-eval", "nix-build", "systemd-verify"}
     if result["outcome"] == "FAILED":
-        if result["cleanup"] != "removed":
+        if result["cleanup"] != "removed" or result["stage"] == "cleanup":
             raise RenderRuntimeError("FAILED requires verified cleanup")
         if (result["original_stage"], result["original_diagnostic_code"], result["original_return_code"]) != (result["stage"], result["diagnostic_code"], result["return_code"]):
             raise RenderRuntimeError("FAILED original failure binding mismatch")
     elif result["outcome"] == "AMBIGUOUS":
         if result["cleanup"] not in {"failed", "unknown"} or result["stage"] != "cleanup" or result["diagnostic_code"] != "CLEANUP_FAILED":
             raise RenderRuntimeError("AMBIGUOUS requires cleanup uncertainty")
-        if result["original_stage"] == "cleanup" or result["original_stage"] not in FAILURE_STAGES or result["original_diagnostic_code"] not in FAILURE_CODES:
+        if result["original_stage"] == "complete":
+            if result["original_diagnostic_code"] != "NONE" or result["original_return_code"] is not None:
+                raise RenderRuntimeError("completed pre-cleanup state invalid")
+        elif result["original_stage"] not in STAGE_CODES:
             raise RenderRuntimeError("AMBIGUOUS original failure is invalid")
     else:
         raise RenderRuntimeError("render failure outcome invalid")
@@ -94,17 +106,15 @@ def validate_failure(value: Mapping[str, object], *, request: Mapping[str, objec
         if code is not None and (isinstance(code, bool) or not isinstance(code, int) or not -255 <= code <= 255):
             raise RenderRuntimeError("render failure return code invalid")
     original_stage, original_code, original_rc = result["original_stage"], result["original_diagnostic_code"], result["original_return_code"]
-    if original_stage in prebuild and effects["build_attempted"]:
-        raise RenderRuntimeError("pre-build failure claims a build")
-    if original_stage in subprocess_stages:
-        if original_code == "SUBPROCESS_FAILED" and (original_rc is None or original_rc == 0):
-            raise RenderRuntimeError("subprocess failure return code invalid")
-        if original_code == "BOUND_EXCEEDED" and original_rc is not None:
-            raise RenderRuntimeError("bounded failure cannot claim a return code")
-        if original_code not in {"SUBPROCESS_FAILED", "BOUND_EXCEEDED"}:
-            raise RenderRuntimeError("subprocess stage diagnostic invalid")
-    elif original_rc is not None:
-        raise RenderRuntimeError("render failure return code invalid")
+    if original_stage != "complete":
+        if original_code not in STAGE_CODES[original_stage]:
+            raise RenderRuntimeError("failure stage/code tuple invalid")
+        needs_rc = original_code == "SUBPROCESS_FAILED"
+        if needs_rc != (original_rc is not None and original_rc != 0):
+            raise RenderRuntimeError("failure return-code tuple invalid")
+    expected_build = original_stage in {"nix-build", "output", "systemd-verify", "complete"}
+    if effects["build_attempted"] is not expected_build:
+        raise RenderRuntimeError("failure build-attempt tuple invalid")
     for prefix in ("stdout", "stderr"):
         if isinstance(result[prefix + "_bytes"], bool) or not isinstance(result[prefix + "_bytes"], int) or not 0 <= result[prefix + "_bytes"] <= request["max_output_bytes"]:
             raise RenderRuntimeError("render failure diagnostic bound invalid")
