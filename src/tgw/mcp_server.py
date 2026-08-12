@@ -638,6 +638,36 @@ def tgw_get_plan_brief(pp: Annotated[str, alias_field('pp', 'PP')]) -> str:
     return json.dumps(plan_brief(cfg, pp), ensure_ascii=False)
 
 
+@mcp.tool()
+def tgw_get_plan_graph(
+    task: Annotated[str, alias_field('task')],
+    receiver: Annotated[str, alias_field('receiver')] = 'codex',
+    operation: Annotated[str, alias_field('operation')] = 'brief',
+    limit: Annotated[int, alias_field('limit')] = 12,
+) -> str:
+    """Retrieve a source-envelope-bound graph from the standalone Plan.
+
+    The graph is read-only derived navigation. Canonical Markdown remains
+    authoritative and the result grants no approval or effect authority.
+    """
+    from tgw.plan_graph import live_plan_graph
+
+    cfg = _get_cfg()
+    root = Path(cfg.get('plan_vault_path', '/opt/TGW/library/plans'))
+    try:
+        return json.dumps(live_plan_graph(
+            root, task, receiver=receiver, operation=operation, limit=limit,
+        ), ensure_ascii=False)
+    except Exception as exc:
+        code = getattr(exc, 'code', None)
+        return json.dumps({
+            'ok': False,
+            'error': {'code': code, 'message': str(exc)} if code else str(exc),
+            'derived': True,
+            'canonical_authority': 'Standalone Plan Markdown remains canonical.',
+        }, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # tgw_simple_llm_jobs — generic DeepSeek V4-Flash cheap text-transform tool
 # (PP-SIMPLEJOBS-001, todo #1574). Backed by the existing tgw.apis.llm

@@ -140,7 +140,23 @@ def _build_preflight_context(work_dir: Path) -> str:
     Best-effort: any failure here degrades to a short note rather than
     blocking the task (this is context, not a gate).
     """
-    lines = ['## Plan Vault preflight (auto-injected, PP-HERMES-EA-001)']
+    lines = ['## Plan Vault preflight (source-envelope bound)']
+
+    try:
+        from tgw.plan_graph import live_plan_graph
+
+        packet = live_plan_graph(
+            Path(os.environ.get('TGW_STANDALONE_PLAN_VAULT', '/opt/TGW/library/plans')),
+            'Aider worktree implementation context', receiver='aider', limit=8,
+        )
+        lines.extend([
+            f"- Standalone Plan commit: {packet['plan_commit']}",
+            f"- Source envelope: {packet['source_envelope']}",
+            f"- Aider receiver rule: {packet['receiver_profile']}",
+            f"- Authority: {packet['canonical_authority']}",
+        ])
+    except Exception as exc:
+        lines.append(f'- Plan Graph unavailable; do not infer missing intent ({exc})')
 
     inbox_dir = work_dir / 'docs/TGW-Plan-Vault/inbox/claude'
     try:
