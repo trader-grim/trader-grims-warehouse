@@ -65,7 +65,8 @@ def test_controller_provider_uses_only_fixed_ssh_helper_and_content_bound_input(
         return subprocess.CompletedProcess(argv, 0, output, b"")
 
     known_hosts = tmp_path / "known_hosts"
-    known_hosts.write_text("100.107.99.66 ssh-ed25519 key")
+    known_hosts.write_text("100.107.99.66 ssh-ed25519 AAAA")
+    known_hosts.chmod(0o600)
     request["ssh_sha256"] = "sha256:" + sha256(Path(SSH_EXECUTABLE).read_bytes()).hexdigest()
     request["known_hosts_sha256"] = "sha256:" + sha256(known_hosts.read_bytes()).hexdigest()
     provider = SshReviewedEvaluationProvider(lambda identity: archive, known_hosts=known_hosts, invoke=invoke)
@@ -207,6 +208,24 @@ def test_controller_rejects_archive_size_before_transport(tmp_path):
     request["max_archive_bytes"] = "1024"
     with pytest.raises(EvaluationError, match="exceeds"):
         SshReviewedEvaluationProvider(lambda _: archive, known_hosts=tmp_path / "unused")(request)
+
+
+@pytest.mark.parametrize("line", [
+    "tgw-prod ssh-ed25519 AAAA", "100.107.99.66 ssh-dss AAAA",
+    "100.107.99.66 ssh-ed25519 !!!", "100.107.99.66 ssh-ed25519 AAAA\n100.107.99.66 ssh-ed25519 BBBB",
+])
+def test_controller_rejects_nonexact_known_host_grammar(tmp_path, line):
+    archive = tmp_path / "source.tar"
+    make_archive(archive)
+    digest = sha256(archive.read_bytes()).hexdigest()
+    request = parameters(digest)
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text(line)
+    known_hosts.chmod(0o600)
+    request["ssh_sha256"] = "sha256:" + sha256(Path(SSH_EXECUTABLE).read_bytes()).hexdigest()
+    request["known_hosts_sha256"] = "sha256:" + sha256(known_hosts.read_bytes()).hexdigest()
+    with pytest.raises(EvaluationError, match="one admitted host key"):
+        SshReviewedEvaluationProvider(lambda _: archive, known_hosts=known_hosts, invoke=lambda *a, **k: None)(request)
 
 
 @pytest.mark.parametrize("kind", ["duplicate", "special", "wrong_root"])

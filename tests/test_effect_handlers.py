@@ -293,6 +293,7 @@ def test_bootstrap_provider_failure_rolls_back_only_registered_prior_closure():
     {"home_db_write": "true"}, {"module_path": "../../etc/passwd"},
     {"max_duration_seconds": "901"}, {"max_output_bytes": "16777217"},
     {"command": "nixos-rebuild switch"},
+    {"scratch_id": "other:run"}, {"operation_id": "bad identity with spaces"},
 ])
 def test_reviewed_nixos_evaluation_rejects_broadening_before_authority(change):
     registry, providers = _registry()
@@ -308,7 +309,7 @@ def test_reviewed_nixos_evaluation_rejects_broadening_before_authority(change):
 @pytest.mark.parametrize("change", [
     {"cleanup": "present"}, {"activate": True}, {"profile_write": True},
     {"home_db_write": True}, {"systemd_verify_exit": 1}, {"unit_sha256": {}},
-    {"source_tree": "d" * 40}, {"evaluated_config_drv": "/tmp/fake.drv"},
+    {"source_tree": "d" * 40}, {"evaluated_config_drv": "/tmp/fake.drv"}, {"closure_path_count": 0},
 ])
 def test_reviewed_nixos_evaluation_fails_closed_on_unsafe_or_unbound_receipt(change):
     provider = Mock(side_effect=lambda parameters: {**_evaluation_result(parameters), **change})

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Mapping
 
+from tgw.nixos_reviewed_evaluation import _validate_remote_parameters
 from tgw.plan_authority import EffectKind, TypedEffect
 
 _SHA1 = re.compile(r"^[0-9a-f]{40}$")
@@ -184,6 +185,9 @@ class TypedEffectHandlerRegistry:
             )
             if any(not isinstance(result.get(key), str) or not _SHA256.fullmatch(result[key]) for key in digest_keys):
                 raise EffectHandlerError("reviewed Nix evaluation receipt digest is invalid")
+            closure_count = result.get("closure_path_count")
+            if not isinstance(closure_count, int) or not 1 <= closure_count <= 100_000:
+                raise EffectHandlerError("reviewed Nix evaluation closure count is invalid")
             if not isinstance(result.get("evaluated_config_drv"), str) or not _NIX_STORE_PATH.fullmatch(result["evaluated_config_drv"]):
                 raise EffectHandlerError("reviewed Nix evaluation derivation identity is invalid")
             if result.get("systemd_verify_exit") != 0:
@@ -286,6 +290,9 @@ class TypedEffectHandlerRegistry:
                 "max_duration_seconds", "max_output_bytes", "max_archive_bytes", "max_unpacked_bytes", "max_files", "activate", "profile_write",
                 "home_db_write", "operation_id",
             })
+            canonical = _validate_remote_parameters({**parameters, "generation": effect.generation})
+            canonical.pop("generation")
+            parameters = canonical
             fixed = {
                 "target_host": "tgw-prod", "flake_repository_id": "tgw-flake",
                 "archive_root": "trader-grims-warehouse",

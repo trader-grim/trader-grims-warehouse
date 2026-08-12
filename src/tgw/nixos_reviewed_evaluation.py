@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import secrets
 import selectors
 import shutil
 import stat
@@ -96,6 +97,9 @@ def _validate_remote_parameters(value: Any) -> dict[str, str]:
         raise EvaluationError("remote digest binding is invalid")
     if value["artifact_ref"] != "artifact:sha256:" + value["source_archive_sha256"].removeprefix("sha256:"):
         raise EvaluationError("remote artifact identity mismatch")
+    identity = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}")
+    if not value["scratch_id"].startswith("nixos-review:") or not identity.fullmatch(value["scratch_id"]) or not identity.fullmatch(value["operation_id"]):
+        raise EvaluationError("remote symbolic identity is invalid")
     bounds = tuple(int(value[key]) for key in ("minimum_systemd_version", "max_duration_seconds", "max_output_bytes", "max_archive_bytes", "max_unpacked_bytes", "max_files"))
     systemd, duration, output, archive, unpacked, files = bounds
     if systemd < 257 or not 1 <= duration <= 900 or not 1024 <= output <= 16 * 1024**2 or not 1024 <= archive <= 128 * 1024**2 or not archive <= unpacked <= 512 * 1024**2 or not 1 <= files <= 100_000:
@@ -117,25 +121,40 @@ class SshReviewedEvaluationProvider:
             raise EvaluationError("resolved source artifact digest mismatch")
         if archive.stat().st_size > int(parameters["max_archive_bytes"]):
             raise EvaluationError("resolved source artifact exceeds its bound")
-        ssh_matches = _digest_file(Path(SSH_EXECUTABLE)) == "sha256:" + parameters["ssh_sha256"].removeprefix("sha256:")
-        host_key_matches = _digest_file(self.known_hosts) == "sha256:" + parameters["known_hosts_sha256"].removeprefix("sha256:")
-        if not ssh_matches or not host_key_matches:
-            raise EvaluationError("SSH executable or host-key pin mismatch")
-        admitted_hosts = {REMOTE_HOST, f"[{REMOTE_HOST}]:22"}
-        host_tokens = {token for line in self.known_hosts.read_text().splitlines() if line and not line.startswith("#") for token in line.split()[0].split(",")}
-        if not host_tokens or not host_tokens <= admitted_hosts:
-            raise EvaluationError("known-hosts contains an unbound host identity")
         provider_source = Path(__file__).read_bytes()
-        command = [
-            SSH_EXECUTABLE, "-F", "/dev/null", "-oBatchMode=yes", "-oClearAllForwardings=yes",
-            "-oStrictHostKeyChecking=yes", "-oUserKnownHostsFile=" + str(self.known_hosts),
-            "--", f"{REMOTE_USER}@{REMOTE_HOST}", "sudo", "-n", "--", REMOTE_PYTHON, "-I", "-c", BOOTSTRAP,
-        ]
-        header = _packet_header(parameters, provider_source)
-        if self.invoke is None:
-            completed = self._invoke_streaming(command, header, archive, timeout=int(parameters["max_duration_seconds"]) + 30, max_output=int(parameters["max_output_bytes"]))
-        else:
-            completed = self.invoke(command, input=header + archive.read_bytes(), capture_output=True, timeout=int(parameters["max_duration_seconds"]) + 30, check=False)
+        ssh_fd = os.open(SSH_EXECUTABLE, os.O_RDONLY | os.O_NOFOLLOW)
+        hosts_fd = os.open(self.known_hosts, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            ssh_stat, hosts_stat = os.fstat(ssh_fd), os.fstat(hosts_fd)
+            if not stat.S_ISREG(ssh_stat.st_mode) or not stat.S_ISREG(hosts_stat.st_mode) or hosts_stat.st_uid not in {0, os.geteuid()} or hosts_stat.st_mode & 0o022:
+                raise EvaluationError("SSH executable or known-hosts ownership is unsafe")
+            ssh_bytes, hosts_bytes = os.read(ssh_fd, ssh_stat.st_size), os.read(hosts_fd, hosts_stat.st_size)
+            ssh_digest = "sha256:" + sha256(ssh_bytes).hexdigest()
+            hosts_digest = "sha256:" + sha256(hosts_bytes).hexdigest()
+            if ssh_digest != "sha256:" + parameters["ssh_sha256"].removeprefix("sha256:") or hosts_digest != "sha256:" + parameters["known_hosts_sha256"].removeprefix("sha256:"):
+                raise EvaluationError("SSH executable or host-key pin mismatch")
+            try:
+                host_line = hosts_bytes.decode("ascii").strip()
+            except UnicodeDecodeError as exc:
+                raise EvaluationError("known-hosts is not ASCII") from exc
+            if not re.fullmatch(r"(100\.107\.99\.66|\[100\.107\.99\.66\]:22) (ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) ([A-Za-z0-9+/]+={0,2})", host_line):
+                raise EvaluationError("known-hosts is not the one admitted host key")
+            os.lseek(ssh_fd, 0, os.SEEK_SET)
+            os.lseek(hosts_fd, 0, os.SEEK_SET)
+            command = [
+                f"/proc/self/fd/{ssh_fd}", "-F", "/dev/null", "-oBatchMode=yes", "-oClearAllForwardings=yes",
+                "-oStrictHostKeyChecking=yes", f"-oUserKnownHostsFile=/proc/self/fd/{hosts_fd}",
+                "--", f"{REMOTE_USER}@{REMOTE_HOST}", "sudo", "-n", "--", REMOTE_PYTHON, "-I", "-c", BOOTSTRAP,
+            ]
+            header = _packet_header(parameters, provider_source)
+            pass_fds = (ssh_fd, hosts_fd)
+            if self.invoke is None:
+                completed = self._invoke_streaming(command, header, archive, timeout=int(parameters["max_duration_seconds"]) + 30, max_output=int(parameters["max_output_bytes"]), pass_fds=pass_fds)
+            else:
+                completed = self.invoke(command, input=header + archive.read_bytes(), capture_output=True, timeout=int(parameters["max_duration_seconds"]) + 30, check=False, pass_fds=pass_fds)
+        finally:
+            os.close(hosts_fd)
+            os.close(ssh_fd)
         if completed.returncode:
             raise EvaluationError("remote reviewed evaluation failed")
         if len(completed.stdout) > int(parameters["max_output_bytes"]):
@@ -149,13 +168,13 @@ class SshReviewedEvaluationProvider:
         return result
 
     @staticmethod
-    def _invoke_streaming(command: list[str], header: bytes, archive: Path, *, timeout: int, max_output: int) -> subprocess.CompletedProcess[bytes]:
+    def _invoke_streaming(command: list[str], header: bytes, archive: Path, *, timeout: int, max_output: int, pass_fds: tuple[int, ...]) -> subprocess.CompletedProcess[bytes]:
         with tempfile.TemporaryFile() as packet:
             packet.write(header)
             with archive.open("rb") as source:
                 shutil.copyfileobj(source, packet, length=1024 * 1024)
             packet.seek(0)
-            process = subprocess.Popen(command, stdin=packet, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            process = subprocess.Popen(command, stdin=packet, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=pass_fds)
             assert process.stdout is not None
             output = bytearray()
             deadline = time.monotonic() + timeout
@@ -268,7 +287,10 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
         raise EvaluationError("scratch root is not a real directory")
     if root_stat.st_uid != scratch_uid or stat.S_IMODE(root_stat.st_mode) != 0o700:
         raise EvaluationError("scratch root is not root-owned mode 0700")
-    scratch = Path(tempfile.mkdtemp(prefix="run-", dir=scratch_root))
+    root_fd = os.open(scratch_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    scratch_name = "run-" + secrets.token_hex(16)
+    os.mkdir(scratch_name, mode=0o700, dir_fd=root_fd)
+    scratch = scratch_root / scratch_name
     scratch_stat = scratch.lstat()
     if scratch_stat.st_uid != scratch_uid or stat.S_IMODE(scratch_stat.st_mode) != 0o700 or not stat.S_ISDIR(scratch_stat.st_mode):
         raise EvaluationError("atomic scratch directory identity mismatch")
@@ -277,7 +299,7 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
     source = extract_root / bound["archive_root"]
     receipt = None
     try:
-        scratch_fd = os.open(scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        scratch_fd = os.open(scratch_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
         archive_fd = os.open("source.tar", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=scratch_fd)
         os.close(scratch_fd)
         with os.fdopen(archive_fd, "wb") as sink:
@@ -321,9 +343,15 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
         eval_log = drv + "\n"
         requisites_raw = run([EXECUTABLES["nix_store"], "--query", "--requisites", closure], cwd=source, timeout=timeout)
         requisites = sorted(set(requisites_raw.splitlines()))
-        if not requisites or closure not in requisites or any(not item.startswith("/nix/store/") for item in requisites):
+        store_path = re.compile(r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+")
+        if not requisites or len(requisites) > 100_000 or closure not in requisites or any(not store_path.fullmatch(item) for item in requisites):
             raise EvaluationError("Nix closure requisites are incomplete")
-        closure_manifest = [{"path": item, "nar_sha256": "sha256:" + run(base + ["hash", "path", "--type", "sha256", "--base16", item], cwd=source, timeout=timeout).strip()} for item in requisites]
+        closure_manifest = []
+        for item in requisites:
+            nar_hash = run(base + ["hash", "path", "--type", "sha256", "--base16", item], cwd=source, timeout=timeout).strip()
+            if not re.fullmatch(r"[0-9a-f]{64}", nar_hash):
+                raise EvaluationError("Nix requisite NAR hash is invalid")
+            closure_manifest.append({"path": item, "nar_sha256": "sha256:" + nar_hash})
         receipt = {
             "schema": bound["output_schema"], "outcome": "verified", "source_commit": bound["source_commit"],
             "source_tree": bound["source_tree"], "source_archive_sha256": bound["source_archive_sha256"],
@@ -346,6 +374,7 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
         }
     finally:
         shutil.rmtree(scratch, ignore_errors=False)
+        os.close(root_fd)
     if scratch.exists() or receipt is None:
         raise EvaluationError("scratch cleanup was not verified")
     receipt["cleanup"] = "removed"
