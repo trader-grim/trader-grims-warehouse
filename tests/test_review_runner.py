@@ -2,6 +2,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from tgw.governed_coding import admission_gate, dispatch_role
 from tgw.harness_registry import load_registry, observe_health
 from tgw.review_runner import run_review, snapshot_hash
@@ -92,10 +94,54 @@ def test_provider_mutation_is_confined_and_rejected(tmp_path):
             handoff(source), [backend(tmp_path / "review-provider", mutate=True)]
         )
     except ValueError as exc:
-        assert "mutated the isolated snapshot" in str(exc)
+        assert "Read-only file system" in str(exc)
     else:
         raise AssertionError("mutating review provider was accepted")
     assert (source / "app.py").read_text() == before
+
+
+def test_review_provider_has_no_network_or_host_secret_access(tmp_path):
+    source = snapshot(tmp_path)
+    secret = tmp_path / "host-secret"
+    secret.write_text("must-not-be-visible")
+    provider = tmp_path / "probe-provider"
+    provider.write_text(
+        "#!/usr/bin/python3\n"
+        "import json,pathlib,socket,sys\n"
+        "r=json.load(sys.stdin)\n"
+        f"secret=pathlib.Path({str(secret)!r}).exists()\n"
+        "network=True\n"
+        "try: socket.socket().connect(('127.0.0.1', 9))\n"
+        "except OSError: network=False\n"
+        "ok=not secret and not network\n"
+        "finding={'severity':'critical','path':'app.py','line':1,'message':'sandbox escaped'}\n"
+        "print(json.dumps({'schema':'tgw-code-review/v1','verdict':'PASS' if ok else 'FAIL','snapshot_hash':r['snapshot_hash'],'summary':'bounded','findings':[] if ok else [finding]}))\n"
+    )
+    provider.chmod(0o755)
+    assert run_review(handoff(source), [str(provider)])["outcome"] == "satisfied"
+
+
+def test_expired_or_incomplete_handoff_never_launches_provider(tmp_path):
+    source = snapshot(tmp_path)
+    value = handoff(source)
+    value["receipt"]["result"] = "HOLD"
+    receipt = dict(value["receipt"])
+    receipt.pop("receipt_hash")
+    value["receipt"]["receipt_hash"] = "sha256:" + __import__("hashlib").sha256(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    unsigned = dict(value)
+    unsigned.pop("handoff_hash")
+    value["handoff_hash"] = "sha256:" + __import__("hashlib").sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    with pytest.raises(ValueError, match="not READY"):
+        run_review(value, [backend(tmp_path / "review-provider")])
+
+
+def test_hung_provider_is_terminated_at_bounded_timeout(tmp_path):
+    source = snapshot(tmp_path)
+    provider = tmp_path / "hung-provider"
+    provider.write_text("#!/usr/bin/python3\nimport time\ntime.sleep(30)\n")
+    provider.chmod(0o755)
+    with pytest.raises(ValueError, match="bounded timeout"):
+        run_review(handoff(source), [str(provider)], timeout_seconds=0.05)
 
 
 def adapters():

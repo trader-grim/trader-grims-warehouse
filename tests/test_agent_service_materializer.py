@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALLERS = ROOT / "agent-services/installers"
 sys.path.insert(0, str(INSTALLERS.parent))
 
+import installers.materialize as materialize_module  # noqa: E402
 from installers.materialize import materialize  # noqa: E402
 
 
@@ -134,3 +135,23 @@ def test_installed_skill_symlink_passes_existing_digest_verifier(tmp_path):
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout)["ok"] is True
+
+
+def test_apply_failure_rolls_back_all_links_created_by_invocation(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    real_symlink = materialize_module.os.symlink
+    calls = 0
+
+    def fail_second(source, destination, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected second-link failure")
+        return real_symlink(source, destination, **kwargs)
+
+    monkeypatch.setattr(materialize_module.os, "symlink", fail_second)
+    with pytest.raises(OSError, match="injected"):
+        materialize("codex", home=home, project=project, source_root=ROOT, apply=True)
+    assert not (home / ".codex/skills/tgw-plan").exists()
+    assert not (home / ".codex/providers/promptcraft").exists()

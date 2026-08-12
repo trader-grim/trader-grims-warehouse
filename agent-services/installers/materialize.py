@@ -100,27 +100,35 @@ def materialize(
     ok = not any(status == "CONFLICT" for _, status in initial)
 
     actions: list[dict[str, Any]] = []
-    for adapter, initial_status in initial:
-        destination = adapter.destination
-        if initial_status != "MISSING":
-            status = initial_status
-        elif apply and ok:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.symlink(adapter.source, destination, target_is_directory=adapter.source.is_dir())
-            status = "INSTALLED"
-        elif apply:
-            status = "HELD_CONFLICT"
-        else:
-            status = "WOULD_INSTALL"
-        actions.append(
-            {
-                "capability": adapter.capability,
-                "source": str(adapter.source),
-                "source_digest": tree_digest(adapter.source) if adapter.source.is_dir() else "sha256:" + hashlib.sha256(adapter.source.read_bytes()).hexdigest(),
-                "destination": str(destination),
-                "status": status,
-            }
-        )
+    created: list[Path] = []
+    try:
+        for adapter, initial_status in initial:
+            destination = adapter.destination
+            if initial_status != "MISSING":
+                status = initial_status
+            elif apply and ok:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(adapter.source, destination, target_is_directory=adapter.source.is_dir())
+                created.append(destination)
+                status = "INSTALLED"
+            elif apply:
+                status = "HELD_CONFLICT"
+            else:
+                status = "WOULD_INSTALL"
+            actions.append(
+                {
+                    "capability": adapter.capability,
+                    "source": str(adapter.source),
+                    "source_digest": tree_digest(adapter.source) if adapter.source.is_dir() else "sha256:" + hashlib.sha256(adapter.source.read_bytes()).hexdigest(),
+                    "destination": str(destination),
+                    "status": status,
+                }
+            )
+    except Exception:
+        for destination in reversed(created):
+            if destination.is_symlink():
+                destination.unlink()
+        raise
     return {
         "schema": SCHEMA,
         "target": target,

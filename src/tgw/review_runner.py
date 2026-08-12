@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
@@ -16,6 +17,12 @@ from urllib.parse import unquote, urlparse
 
 class ReviewRunnerError(ValueError):
     pass
+
+
+_PROMPTCRAFT = Path(__file__).resolve().parents[2] / "agent-services/providers/promptcraft"
+if str(_PROMPTCRAFT) not in sys.path:
+    sys.path.insert(0, str(_PROMPTCRAFT))
+from promptcraft.handoff import HandoffError, verify_for_launcher  # noqa: E402
 
 
 def _canonical(value: Any) -> bytes:
@@ -111,14 +118,52 @@ def _validate_report(
     return report
 
 
-def run_review(handoff: Mapping[str, Any], provider_argv: list[str]) -> dict[str, Any]:
+def _sandbox_command(provider_argv: list[str], snapshot: Path) -> list[str]:
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        raise ReviewRunnerError("review sandbox is unavailable")
+    executable = Path(provider_argv[0]).resolve()
+    if not executable.is_file():
+        raise ReviewRunnerError("review provider executable is unavailable")
+    command = [bwrap, "--unshare-all", "--die-with-parent", "--new-session", "--clearenv"]
+    for system_path in ("/usr", "/bin", "/lib", "/lib64"):
+        if Path(system_path).exists():
+            command.extend(["--ro-bind", system_path, system_path])
+    command.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
+    command.extend(["--ro-bind", str(snapshot), "/workspace", "--chdir", "/workspace"])
+    if executable.name.startswith("python"):
+        runtime = executable.parent.parent
+        command.extend(["--ro-bind", str(runtime), "/runtime"])
+        provider = [f"/runtime/bin/{executable.name}", *provider_argv[1:]]
+    else:
+        command.extend(["--ro-bind", str(executable), "/review-provider"])
+        provider = ["/review-provider", *provider_argv[1:]]
+    command.extend(["--setenv", "PATH", "/runtime/bin:/usr/bin:/bin"])
+    command.extend(["--setenv", "PYTHONPATH", "/workspace/src"])
+    return [*command, "--", *provider]
+
+
+def run_review(
+    handoff: Mapping[str, Any],
+    provider_argv: list[str],
+    *,
+    timeout_seconds: float = 300,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     if handoff.get("schema") != "tgw-launcher-handoff/v1":
         raise ReviewRunnerError("review runner requires a launcher handoff")
-    _verify_bound(handoff, "handoff_hash")
+    try:
+        invocation = verify_for_launcher(handoff, now=now or datetime.now(timezone.utc))
+    except HandoffError as exc:
+        raise ReviewRunnerError(f"invalid Promptcraft handoff: {exc}") from exc
     card = handoff.get("card")
     if not isinstance(card, Mapping) or card.get("role") != "independent-review":
         raise ReviewRunnerError("review runner received another role")
     _verify_bound(card, "card_hash")
+    if invocation.get("role") != "independent-review":
+        raise ReviewRunnerError("review launcher invocation role mismatch")
+    if invocation.get("selected_provider") != card.get("selected_provider"):
+        raise ReviewRunnerError("review launcher provider mismatch")
     source, expected_hash = _snapshot_path(card)
     if not provider_argv or not all(isinstance(item, str) and item for item in provider_argv):
         raise ReviewRunnerError("review provider argv is invalid")
@@ -135,14 +180,19 @@ def run_review(handoff: Mapping[str, Any], provider_argv: list[str]) -> dict[str
             "snapshot_root": str(isolated),
             "output_contract": "tgw-code-review/v1",
         }
-        completed = subprocess.run(
-            provider_argv,
+        sandboxed = _sandbox_command(provider_argv, isolated)
+        try:
+            completed = subprocess.run(
+            sandboxed,
             cwd=isolated,
             input=json.dumps(request),
             text=True,
             capture_output=True,
             check=False,
-        )
+            timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ReviewRunnerError("review provider exceeded bounded timeout") from exc
         if completed.returncode:
             raise ReviewRunnerError(f"review provider exited {completed.returncode}: {completed.stderr[-500:]}")
         if snapshot_hash(isolated) != expected_hash:

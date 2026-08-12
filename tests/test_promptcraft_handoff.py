@@ -113,6 +113,23 @@ def test_expired_lease_fails_before_launcher_invocation():
         )
 
 
+def test_non_ready_or_extra_receipt_fields_fail_closed():
+    for mutation, message in (
+        (lambda receipt: receipt.update(result="HOLD"), "not READY"),
+        (lambda receipt: receipt.update(unreviewed=True), "fields are invalid"),
+    ):
+        handoff = craft_handoff(card().value, receiver_identity="receiver-run-8")
+        mutation(handoff["receipt"])
+        receipt_unsigned = dict(handoff["receipt"])
+        receipt_unsigned.pop("receipt_hash")
+        handoff["receipt"]["receipt_hash"] = canonical_hash(receipt_unsigned)
+        handoff_unsigned = dict(handoff)
+        handoff_unsigned.pop("handoff_hash")
+        handoff["handoff_hash"] = canonical_hash(handoff_unsigned)
+        with pytest.raises(HandoffError, match=message):
+            verify_for_launcher(handoff)
+
+
 def test_cli_crafts_then_verifies_without_manual_transcription():
     executable = ROOT / "bin" / "promptcraft-handoff"
     crafted = subprocess.run(
