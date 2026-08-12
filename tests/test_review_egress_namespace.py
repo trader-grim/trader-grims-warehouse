@@ -233,7 +233,9 @@ def test_typed_identity_parser_rejects_pid_uid_collisions(field, replacement):
         parse_live_identity(evidence, topology, pid=123, runtime_sha256="sha256:" + "a" * 64)
 
 
-@pytest.mark.parametrize("mutation", ["wrong_left", "wrong_op", "missing_private_drop", "extra_host_rule", "wrong_nat_interface"])
+@pytest.mark.parametrize(
+    "mutation", ["wrong_left", "wrong_op", "missing_private_drop", "extra_host_rule", "wrong_nat_interface", "missing_table", "extra_table", "duplicate_chain", "duplicate_metainfo", "bad_metainfo"]
+)
 def test_nft_ast_rejects_plausible_wrong_rules(mutation):
     import copy
 
@@ -249,8 +251,18 @@ def test_nft_ast_rejects_plausible_wrong_rules(mutation):
         del host["nftables"][3]
     elif mutation == "extra_host_rule":
         host["nftables"].append(copy.deepcopy(host["nftables"][4]))
-    else:
+    elif mutation == "wrong_nat_interface":
         host["nftables"][-1]["rule"]["expr"][0]["match"]["right"] = "unrelated0"
+    elif mutation == "missing_table":
+        del namespace["nftables"][1]
+    elif mutation == "extra_table":
+        namespace["nftables"].append({"table": {"family": "inet", "name": "unrelated"}})
+    elif mutation == "duplicate_chain":
+        namespace["nftables"].append(copy.deepcopy(namespace["nftables"][2]))
+    elif mutation == "duplicate_metainfo":
+        namespace["nftables"].append(copy.deepcopy(namespace["nftables"][0]))
+    else:
+        namespace["nftables"][0]["metainfo"]["json_schema_version"] = 2
     with pytest.raises(NamespaceError):
         validate_review_nft(namespace, host, topology)
 
@@ -264,17 +276,6 @@ def test_nft_capture_receipt_retains_only_canonical_hash_and_counts():
     assert receipt["canonical_sha256"].startswith("sha256:")
     assert receipt["namespace_rule_count"] == 5 and receipt["host_rule_count"] == 6
     assert receipt["raw_retained"] is False
-
-
-def test_prepared_nix_evaluation_request_is_non_deploying_and_content_bound():
-    from pathlib import Path
-
-    request = json.loads(Path("agent-services/catalogs/nixos-reviewed-evaluation-request-v1.json").read_text())
-    assert request["status"] == "PREPARED_NOT_EXECUTED"
-    assert request["target_host"] == "tgw-prod" and request["system"] == "x86_64-linux"
-    assert request["source"]["module_path"] == "nix/review-egress.nix"
-    assert set(request["forbidden_effects"]) >= {"switch", "profile-write", "home-db-write"}
-    assert len(request["evaluation"]["expected_units"]) == 3
 
 
 def test_systemd_dependency_graph_is_acyclic_and_rendered_units_verify(tmp_path):

@@ -134,34 +134,52 @@ def _nft_expr(item: dict) -> tuple:
     return ("match", field, value["op"], right)
 
 
-def normalize_nft_rules(document: dict) -> tuple[dict, tuple]:
+def normalize_nft_rules(document: dict) -> tuple[tuple, dict, tuple]:
     """Normalize nftables 1.1 JSON while ignoring only volatile handles."""
     if set(document) != {"nftables"} or not isinstance(document["nftables"], list):
         raise NamespaceError("nft document is malformed")
-    chains, rules = {}, []
+    tables, chains, rules = [], {}, []
+    metainfo_seen = False
     for row in document["nftables"]:
-        if set(row) == {"metainfo"} or set(row) == {"table"}:
-            continue
+        if set(row) == {"metainfo"}:
+            meta = row["metainfo"]
+            allowed = {"version", "release_name", "json_schema_version"}
+            if metainfo_seen or not isinstance(meta, dict) or set(meta) - allowed or meta.get("json_schema_version") not in (1, 1.0):
+                raise NamespaceError("nft metainfo is invalid or duplicated")
+            if "version" in meta and not isinstance(meta["version"], str):
+                raise NamespaceError("nft metainfo version is invalid")
+            if "release_name" in meta and not isinstance(meta["release_name"], str):
+                raise NamespaceError("nft metainfo release is invalid")
+            metainfo_seen = True
+        elif set(row) == {"table"}:
+            table = row["table"]
+            if set(table) - {"family", "name", "handle"} or not isinstance(table.get("family"), str) or not isinstance(table.get("name"), str):
+                raise NamespaceError("nft table row is invalid")
+            tables.append((table["family"], table["name"]))
         if set(row) == {"chain"}:
             chain = row["chain"]
             key = (chain.get("family"), chain.get("table"), chain.get("name"))
+            if key in chains:
+                raise NamespaceError("nft chain is duplicated")
             chains[key] = {k: chain.get(k) for k in ("type", "hook", "prio", "policy")}
         elif set(row) == {"rule"}:
             rule = row["rule"]
             if set(rule) - {"family", "table", "chain", "handle", "expr"}:
                 raise NamespaceError("nft rule has unapproved fields")
             rules.append((rule.get("family"), rule.get("table"), rule.get("chain"), tuple(_nft_expr(item) for item in rule.get("expr", []))))
-        else:
+        elif set(row) not in ({"metainfo"}, {"table"}):
             raise NamespaceError("nft document row is not admitted")
-    return chains, tuple(rules)
+    if len(set(tables)) != len(tables):
+        raise NamespaceError("nft table is duplicated")
+    return tuple(tables), chains, tuple(rules)
 
 
 def validate_review_nft(namespace_doc: dict, host_doc: dict, topology: Topology) -> None:
     def m(field, op, right):
         return ("match", field, op, right)
 
-    ns_chain, ns_rules = normalize_nft_rules(namespace_doc)
-    host_chain, host_rules = normalize_nft_rules(host_doc)
+    ns_tables, ns_chain, ns_rules = normalize_nft_rules(namespace_doc)
+    host_tables, host_chain, host_rules = normalize_nft_rules(host_doc)
     ns = "tgw_review"
     host = f"tgw_review_{topology.run_id}"
     private = ("0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4")
@@ -180,13 +198,13 @@ def validate_review_nft(namespace_doc: dict, host_doc: dict, topology: Topology)
         ("inet", host, "forward", (m(("meta", "iifname"), "==", topology.host_if), ("drop",))),
         ("inet", host, "postrouting", (m(("meta", "oifname"), "!=", topology.host_if), m(("payload", "ip", "saddr"), "==", topology.peer_address), ("masquerade",))),
     )
-    if ns_chain != {("inet", ns, "output"): {"type": "filter", "hook": "output", "prio": 0, "policy": "drop"}} or ns_rules != expected_ns:
+    if ns_tables != (("inet", ns),) or ns_chain != {("inet", ns, "output"): {"type": "filter", "hook": "output", "prio": 0, "policy": "drop"}} or ns_rules != expected_ns:
         raise NamespaceError("namespace nft policy differs from the exact policy")
     expected_chains = {
         ("inet", host, "forward"): {"type": "filter", "hook": "forward", "prio": 0, "policy": "accept"},
         ("inet", host, "postrouting"): {"type": "nat", "hook": "postrouting", "prio": 100, "policy": None},
     }
-    if host_chain != expected_chains or host_rules != expected_host:
+    if host_tables != (("inet", host),) or host_chain != expected_chains or host_rules != expected_host:
         raise NamespaceError("host nft policy differs from the exact policy")
 
 
@@ -197,8 +215,8 @@ def canonical_nft_capture_receipt(namespace_doc: dict, host_doc: dict, topology:
     host = normalize_nft_rules(host_doc)
 
     def serializable(value):
-        chains, rules = value
-        return {"chains": [[*key, config] for key, config in sorted(chains.items())], "rules": rules}
+        tables, chains, rules = value
+        return {"tables": tables, "chains": [[*key, config] for key, config in sorted(chains.items())], "rules": rules}
 
     payload = json.dumps({"namespace": serializable(namespace), "host": serializable(host)}, sort_keys=True, separators=(",", ":"), default=list).encode()
     return {
@@ -206,8 +224,8 @@ def canonical_nft_capture_receipt(namespace_doc: dict, host_doc: dict, topology:
         "run_id": topology.run_id,
         "namespace": topology.namespace,
         "canonical_sha256": "sha256:" + sha256(payload).hexdigest(),
-        "namespace_rule_count": len(namespace[1]),
-        "host_rule_count": len(host[1]),
+        "namespace_rule_count": len(namespace[2]),
+        "host_rule_count": len(host[2]),
         "raw_retained": False,
     }
 
