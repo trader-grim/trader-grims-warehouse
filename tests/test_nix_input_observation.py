@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tgw.nix_input_observation import LOCK_NAR, NIX, REV, UNSHARE, NixInputObservationError, observe_archive
+from tgw.nix_input_observation import LOCK_NAR, NIX, PREFIX, REV, UNSHARE, NixInputObservationError, observe_archive
 from tgw.nix_input_observation import TOOLS as TOOL_PATHS
 
 DIGEST = "a" * 64
@@ -65,12 +65,9 @@ def test_one_helper_owns_archive_namespace_and_all_nix_steps(tmp_path):
     def run(command, **kwargs):
         calls.append((command, kwargs))
         raw = kwargs["input"]
-        frame_size = int.from_bytes(raw[:4], "big")
-        offset = 4 + frame_size
-        helper_size = int.from_bytes(raw[offset : offset + 8], "big")
-        offset += 8 + helper_size + 64
-        frame = json.loads(raw[4 : 4 + frame_size])
-        bound = json.loads(raw[offset : offset + frame["payload_length"]])
+        _, _, frame_size, helper_size, payload_size, *_ = PREFIX.unpack(raw[: PREFIX.size])
+        offset = PREFIX.size + frame_size + helper_size
+        bound = json.loads(raw[offset : offset + payload_size])
         return subprocess.CompletedProcess(command, 0, json.dumps(receipt(bound)).encode(), b"")
 
     result = observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=b"# fixed standalone helper", run=run)
@@ -94,12 +91,9 @@ def test_archive_and_receipt_tampering_fail_closed(tmp_path):
 
     def run(command, **kwargs):
         raw = kwargs["input"]
-        n = int.from_bytes(raw[:4], "big")
-        off = 4 + n
-        h = int.from_bytes(raw[off : off + 8], "big")
-        off += 8 + h + 64
-        frame = json.loads(raw[4 : 4 + n])
-        bound = json.loads(raw[off : off + frame["payload_length"]])
+        _, _, n, h, payload_size, *_ = PREFIX.unpack(raw[: PREFIX.size])
+        off = PREFIX.size + n + h
+        bound = json.loads(raw[off : off + payload_size])
         value = receipt(bound)
         value["namespace"]["routes"] = ["default"]
         return subprocess.CompletedProcess(command, 0, json.dumps(value).encode(), b"")
@@ -113,8 +107,8 @@ def test_flake_native_input_resolution_has_no_unlocked_getflake():
     assert ".#inputIdentities.nixpkgs.outPath" in source and "builtins.getFlake" not in source
 
 
-@pytest.mark.parametrize("mutation", ["truncated", "bad_json", "bad_hash", "oversized"])
-def test_real_bootstrap_frame_rejects_malformed_payload_with_bound_failure(tmp_path, mutation, monkeypatch):
+@pytest.mark.parametrize("mutation", ["truncated", "bad_json", "bad_hash", "bad_magic"])
+def test_real_bootstrap_frame_rejects_malformed_payload_with_bound_failure(tmp_path, mutation):
     from tgw import nix_input_observation as module
 
     archive = tmp_path / "source.tar"
@@ -122,33 +116,21 @@ def test_real_bootstrap_frame_rejects_malformed_payload_with_bound_failure(tmp_p
     req = request(archive, Path(module.__file__).read_bytes())
     bound = {**req, "tool_sha256": TOOLS, "tool_paths": TOOL_PATHS}
     raw = bytearray(module.packet(Path(module.__file__).read_bytes(), bound, archive))
-    frame_size = int.from_bytes(raw[:4], "big")
-    frame = json.loads(raw[4 : 4 + frame_size])
-    helper_offset = 4 + frame_size
-    helper_size = int.from_bytes(raw[helper_offset : helper_offset + 8], "big")
-    payload_offset = helper_offset + 8 + helper_size + 64
+    magic, version, frame_size, helper_size, payload_size, request_hash, helper_hash, tool_hash = PREFIX.unpack(raw[: PREFIX.size])
+    payload_offset = PREFIX.size + frame_size + helper_size
     if mutation == "truncated":
-        raw = raw[: payload_offset + frame["payload_length"] - 1]
+        raw = raw[: payload_offset + payload_size - 1]
     elif mutation == "bad_json":
         raw[payload_offset] = ord("x")
     elif mutation == "bad_hash":
-        frame["payload_sha256"] = "sha256:" + "0" * 64
-        encoded = json.dumps(frame, sort_keys=True, separators=(",", ":")).encode()
-        assert len(encoded) == frame_size
-        raw[4 : 4 + frame_size] = encoded
+        raw[payload_offset] ^= 1
     else:
-        raw[:4] = (4097).to_bytes(4, "big")
-    monkeypatch.setattr("sys.stdin", type("Input", (), {"buffer": __import__("io").BytesIO(bytes(raw))})())
-    output = __import__("io").StringIO()
-    monkeypatch.setattr("sys.stdout", output)
-    monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **kwargs: str(tmp_path / "scratch"))
-    (tmp_path / "scratch").mkdir()
-    code = module.standalone_main()
-    failure = json.loads(output.getvalue())
-    assert code in {1, 2}
+        raw[:8] = b"BADMAGIC"
+    completed = subprocess.run([__import__("sys").executable, "-I", "-c", module.BOOTSTRAP], input=bytes(raw), capture_output=True, check=False)
+    failure = json.loads(completed.stdout)
+    assert completed.returncode == 1
     assert failure["schema"] == "tgw-nix-input-observation-bootstrap-failure/v1"
-    expected = frame if mutation != "oversized" else {}
-    assert failure["request_sha256"] == expected.get("request_sha256", "unknown")
-    assert failure["helper_sha256"] == expected.get("helper_sha256", "unknown")
-    assert failure["tool_manifest_sha256"] == expected.get("tool_manifest_sha256", "unknown")
+    assert failure["request_sha256"] == "sha256:" + request_hash.hex()
+    assert failure["helper_sha256"] == "sha256:" + helper_hash.hex()
+    assert failure["tool_manifest_sha256"] == "sha256:" + tool_hash.hex()
     assert failure["cleanup"] == "removed"

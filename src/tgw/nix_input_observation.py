@@ -18,6 +18,8 @@ from typing import Any, Callable
 
 SCHEMA = "tgw-nix-input-observation/v2"
 FRAME_SCHEMA = "tgw-nix-input-observation-frame/v1"
+MAGIC = b"TGWNIXO1"
+PREFIX = struct.Struct("!8sIQQQ32s32s32s")
 PYTHON = "/run/current-system/sw/bin/python3"
 UNSHARE = "/run/current-system/sw/bin/unshare"
 IP = "/run/current-system/sw/bin/ip"
@@ -29,12 +31,27 @@ NODE = "nixpkgs"
 REV = "ac62194c3917d5f474c1a844b6fd6da2db95077d"
 LOCK_NAR = "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w="
 STORE_PATH = re.compile(r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+(?:\.drv)?")
-BOOTSTRAP = (
-    "import hashlib,struct,sys; n=struct.unpack('!Q',sys.stdin.buffer.read(8))[0]; "
-    "s=sys.stdin.buffer.read(n); h=sys.stdin.buffer.read(64).decode(); "
-    "assert hashlib.sha256(s).hexdigest()==h; "
-    "exec(compile(s,'<tgw-nix-input-observer>','exec'),{'__name__':'__main__'})"
-)
+BOOTSTRAP = """import hashlib,io,json,struct,sys
+P=struct.Struct('!8sIQQQ32s32s32s'); raw=sys.stdin.buffer.read(P.size)
+def fail(code,r=b'',h=b'',t=b''):
+ d={'schema':'tgw-nix-input-observation-bootstrap-failure/v1','request_sha256':'sha256:'+r.hex() if len(r)==32 else 'unknown'}
+ d.update({'helper_sha256':'sha256:'+h.hex() if len(h)==32 else 'unknown','tool_manifest_sha256':'sha256:'+t.hex() if len(t)==32 else 'unknown'})
+ d.update({'stage':'request','code':code,'cleanup':'removed','netns_inode':0})
+ d['receipt_sha256']='sha256:'+hashlib.sha256(json.dumps(d,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+ sys.stdout.write(json.dumps(d,sort_keys=True,separators=(',',':'))); raise SystemExit(1)
+if len(raw)!=P.size: fail('TRUNCATED_PREFIX')
+magic,version,flen,hlen,plen,rh,hh,th=P.unpack(raw)
+if magic!=b'TGWNIXO1' or version!=1: fail('BAD_PREFIX',rh,hh,th)
+if flen>4096 or hlen>1048576 or plen>65536 or min(flen,hlen,plen)<1: fail('BAD_LENGTH',rh,hh,th)
+frame=sys.stdin.buffer.read(flen); helper=sys.stdin.buffer.read(hlen); payload=sys.stdin.buffer.read(plen)
+if len(frame)!=flen or len(helper)!=hlen or len(payload)!=plen: fail('TRUNCATED_BODY',rh,hh,th)
+try: f=json.loads(frame)
+except Exception: fail('BAD_FRAME_JSON',rh,hh,th)
+if hashlib.sha256(helper).digest()!=hh or hashlib.sha256(payload).digest()!=rh: fail('HASH_MISMATCH',rh,hh,th)
+try: q=json.loads(payload)
+except Exception: fail('BAD_PAYLOAD_JSON',rh,hh,th)
+if hashlib.sha256(json.dumps(q['tool_sha256'],sort_keys=True,separators=(',',':')).encode()).digest()!=th: fail('TOOL_HASH_MISMATCH',rh,hh,th)
+rest=sys.stdin.buffer.read(); sys.stdin=io.TextIOWrapper(io.BytesIO(struct.pack('!Q',plen)+payload+rest)); exec(compile(helper,'<tgw-nix-input-observer>','exec'),{'__name__':'__main__'})"""
 
 
 class NixInputObservationError(ValueError):
@@ -77,7 +94,10 @@ def packet(helper_source: bytes, request: dict[str, Any], archive: Path) -> byte
         "nonce": request["source_commit"] + ":nix-input-observation",
     }
     frame = _canonical(header)
-    return struct.pack("!I", len(frame)) + frame + struct.pack("!Q", len(helper_source)) + helper_source + hashlib.sha256(helper_source).hexdigest().encode() + raw + archive.read_bytes()
+    prefix = PREFIX.pack(
+        MAGIC, 1, len(frame), len(helper_source), len(raw), hashlib.sha256(raw).digest(), hashlib.sha256(helper_source).digest(), hashlib.sha256(_canonical(request["tool_sha256"])).digest()
+    )
+    return prefix + frame + helper_source + raw + archive.read_bytes()
 
 
 def validate_receipt(value: Any, *, request: dict[str, Any]) -> dict[str, Any]:
@@ -305,24 +325,10 @@ def standalone_main() -> int:
     frame: dict[str, Any] = {}
     try:
         netns_start = os.stat("/proc/self/ns/net").st_ino
-        frame_size_raw = sys.stdin.buffer.read(4)
-        if len(frame_size_raw) != 4:
-            raise NixInputObservationError("bootstrap frame is truncated")
-        frame_size = struct.unpack("!I", frame_size_raw)[0]
-        if not 1 <= frame_size <= 4096:
-            raise NixInputObservationError("bootstrap frame is oversized")
-        frame = json.loads(sys.stdin.buffer.read(frame_size))
-        frame_keys = {"schema", "request_sha256", "helper_sha256", "tool_manifest_sha256", "payload_length", "payload_sha256", "nonce"}
-        if set(frame) != frame_keys or frame["schema"] != FRAME_SCHEMA or not isinstance(frame["payload_length"], int) or not 1 <= frame["payload_length"] <= 64 * 1024:
-            raise NixInputObservationError("bootstrap frame schema is invalid")
-        helper_size = struct.unpack("!Q", sys.stdin.buffer.read(8))[0]
-        helper = sys.stdin.buffer.read(helper_size)
-        helper_digest = sys.stdin.buffer.read(64).decode()
-        if helper_size > 1024 * 1024 or hashlib.sha256(helper).hexdigest() != helper_digest or frame["helper_sha256"] != "sha256:" + helper_digest:
-            raise NixInputObservationError("bootstrap helper identity mismatch")
-        raw = sys.stdin.buffer.read(frame["payload_length"])
-        if len(raw) != frame["payload_length"] or frame["payload_sha256"] != "sha256:" + hashlib.sha256(raw).hexdigest() or frame["request_sha256"] != frame["payload_sha256"]:
-            raise NixInputObservationError("bootstrap payload binding mismatch")
+        raw_size = struct.unpack("!Q", sys.stdin.buffer.read(8))[0]
+        if not 1 <= raw_size <= 64 * 1024:
+            raise NixInputObservationError("bootstrap payload size is invalid")
+        raw = sys.stdin.buffer.read(raw_size)
         request = json.loads(raw)
         expected = {"source_archive_sha256", "observer_source_sha256", "source_commit", "source_tree", "flake_lock_sha256", "module_sha256", "tool_sha256", "tool_paths"}
         if set(request) != expected or not all(isinstance(request[key], (str, dict)) for key in expected):
