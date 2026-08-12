@@ -134,3 +134,69 @@ def test_unknown_schema_and_wrong_source_fail_before_coercion(tmp_path, monkeypa
     wrong["request_sha256"] = "sha256:" + __import__("hashlib").sha256(canonical(unsigned)).hexdigest()
     with pytest.raises(Exception):
         ClosedRenderProvider(lambda **_: {}, Store(), archive, hosts).execute(wrong)
+
+
+def terminal(req, *, stage, code, build, rc=None, ambiguous=False):
+    empty = "sha256:" + __import__("hashlib").sha256(b"").hexdigest()
+    value = {
+        "schema": "tgw-nix-observer-render-evaluation-failure/v1",
+        "request_sha256": req["request_sha256"],
+        "source_commit": req["source_commit"],
+        "source_tree": req["source_tree"],
+        "archive_sha256": req["archive_sha256"],
+        "provider_sha256": req["provider_sha256"],
+        "host_identity_receipt_sha256": req["host_identity_receipt_sha256"],
+        "outcome": "AMBIGUOUS" if ambiguous else "FAILED",
+        "stage": "cleanup" if ambiguous else stage,
+        "diagnostic_code": "CLEANUP_FAILED" if ambiguous else code,
+        "cleanup": "failed" if ambiguous else "removed",
+        "effects": {"build_attempted": build, "activation": False, "deployment": False, "profile_write": False, "home_db_write": False, "live_flake_write": False, "network": False},
+        "return_code": None if ambiguous else rc,
+        "original_stage": stage,
+        "original_diagnostic_code": code,
+        "original_return_code": rc,
+        "stdout_bytes": 0,
+        "stdout_sha256": empty,
+        "stderr_bytes": 0,
+        "stderr_sha256": empty,
+    }
+    value["receipt_sha256"] = "sha256:" + __import__("hashlib").sha256(canonical(value)).hexdigest()
+    return value
+
+
+@pytest.mark.parametrize(
+    "stage,code,build,rc",
+    [
+        (stage, code, stage in {"nix-build", "output", "systemd-verify"}, 7 if code == "SUBPROCESS_FAILED" else None)
+        for stage, codes in __import__("tgw.nix_observer_render_runtime", fromlist=["STAGE_CODES"]).STAGE_CODES.items()
+        for code in sorted(codes)
+    ],
+)
+def test_exhaustive_terminal_state_table(stage, code, build, rc):
+    from tgw.nix_observer_render_runtime import validate_failure
+
+    req = request()
+    valid = terminal(req, stage=stage, code=code, build=build, rc=rc)
+    assert validate_failure(valid, request=req)["outcome"] == "FAILED"
+    ambiguous = terminal(req, stage=stage, code=code, build=build, rc=rc, ambiguous=True)
+    assert validate_failure(ambiguous, request=req)["outcome"] == "AMBIGUOUS"
+    for field, bad in (("cleanup", "unknown"), ("return_code", True), ("original_diagnostic_code", "CLEANUP_FAILED")):
+        changed = deepcopy(valid)
+        changed[field] = bad
+        changed["receipt_sha256"] = "sha256:" + __import__("hashlib").sha256(canonical({k: v for k, v in changed.items() if k != "receipt_sha256"})).hexdigest()
+        with pytest.raises(RenderRuntimeError):
+            validate_failure(changed, request=req)
+
+
+def test_post_success_cleanup_ambiguity_is_the_only_complete_tuple():
+    from tgw.nix_observer_render_runtime import validate_failure
+
+    req = request()
+    valid = terminal(req, stage="complete", code="NONE", build=True, ambiguous=True)
+    assert validate_failure(valid, request=req)["outcome"] == "AMBIGUOUS"
+    for field, bad in (("return_code", 1), ("original_diagnostic_code", "INTERNAL_ERROR"), ("original_return_code", 1)):
+        changed = deepcopy(valid)
+        changed[field] = bad
+        changed["receipt_sha256"] = "sha256:" + __import__("hashlib").sha256(canonical({k: v for k, v in changed.items() if k != "receipt_sha256"})).hexdigest()
+        with pytest.raises(RenderRuntimeError):
+            validate_failure(changed, request=req)

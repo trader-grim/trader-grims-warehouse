@@ -87,6 +87,8 @@ def validate_failure(value: Mapping[str, object], *, request: Mapping[str, objec
     elif result["outcome"] == "AMBIGUOUS":
         if result["cleanup"] not in {"failed", "unknown"} or result["stage"] != "cleanup" or result["diagnostic_code"] != "CLEANUP_FAILED":
             raise RenderRuntimeError("AMBIGUOUS requires cleanup uncertainty")
+        if result["return_code"] is not None:
+            raise RenderRuntimeError("cleanup ambiguity cannot claim subprocess return code")
         if result["original_stage"] == "complete":
             if result["original_diagnostic_code"] != "NONE" or result["original_return_code"] is not None:
                 raise RenderRuntimeError("completed pre-cleanup state invalid")
