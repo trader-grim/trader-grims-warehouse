@@ -16,8 +16,8 @@ from tgw.nixos_evaluation_runtime import (
 
 def parameters():
     return {
-        "artifact_ref": "artifact:sha256:d78726247e9168c0878975ff4f39acd6a1c1dc063febd3b8370713f5053e8095",
-        "source_archive_sha256": "sha256:d78726247e9168c0878975ff4f39acd6a1c1dc063febd3b8370713f5053e8095",
+        "artifact_ref": "artifact:sha256:0dd33b208fe978cf393e44656636f9717716a9a5aef8da1475c67b17d5947a58",
+        "source_archive_sha256": "sha256:0dd33b208fe978cf393e44656636f9717716a9a5aef8da1475c67b17d5947a58",
         "known_hosts_sha256": "sha256:2efd6fc4243b15b6d0b16a8da723911614198620cabf31bc822cf12520715cdf",
     }
 
@@ -52,7 +52,7 @@ def test_preflight_rejects_mutable_or_wrong_stable_stat(monkeypatch):
     class Changed:
         st_mode = 0o100664
         st_uid = os.geteuid()
-        st_size = 8_826_880
+        st_size = 8_847_360
 
     monkeypatch.setattr(Path, "lstat", lambda self: Changed() if self == SOURCE_PATH else original(self))
     with pytest.raises(RuntimeCompositionError, match="source_archive"):

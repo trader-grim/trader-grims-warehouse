@@ -1,0 +1,1 @@
+{"schema":"tgw-candidate-test-receipt/v1","source_commit":"9ac61da68d25672dc3534b3b4684d7a54b5542de","source_tree":"1fff2d81bb93e75bdbd5e3dc37aef77bdf194aba","result":"201 passed in 2.53s","status":"passed","suite":"Plan, authority/effects, review transport, deployment, evaluation bootstrap/failure protocol","worktree":"detached-clean"}
