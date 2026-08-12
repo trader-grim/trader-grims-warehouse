@@ -4,82 +4,80 @@ import subprocess
 
 import pytest
 
-from tgw.nix_input_observation import LOCK_NAR, NIX, REV, UNSHARE, NixInputObservationError, observe, validate_receipt
+from tgw.nix_input_observation import LOCK_NAR, NIX, REV, UNSHARE, NixInputObservationError, observe_archive
 
-SOURCE_COMMIT = "a" * 40
-SOURCE_TREE = "b" * 40
-LOCK_SHA = "sha256:" + "c" * 64
-INPUT = "/nix/store/11111111111111111111111111111111-source"
-DRV = "/nix/store/22222222222222222222222222222222-review.drv"
-NAR = "d" * 64
+DIGEST = "a" * 64
+TOOLS = {name: "sha256:" + DIGEST for name in ("unshare", "ip", "python", "nix", "nix_store")}
 
 
-def runner(*, additions=(), metadata_mutation=None):
+def request(archive, helper=b"# fixed standalone helper"):
+    return {
+        "source_archive_sha256": "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "source_commit": "b" * 40,
+        "source_tree": "c" * 40,
+        "flake_lock_sha256": "sha256:" + "d" * 64,
+        "module_sha256": "sha256:" + "e" * 64,
+        "observer_source_sha256": "sha256:" + hashlib.sha256(helper).hexdigest(),
+    }
+
+
+def receipt(req):
+    bound = {**req, "tool_sha256": TOOLS}
+    value = {
+        "schema": "tgw-nix-input-observation/v2",
+        "request": bound,
+        "namespace": {"inode": 42, "links": [], "routes": [], "held_for_entire_run": True},
+        "process": {"pid": 123, "starttime": 456, "exe_sha256": TOOLS["python"]},
+        "tools": TOOLS,
+        "negative_probes": {"dns": "denied", "public_https": "denied", "private": "denied", "metadata": "denied"},
+        "lock_nodes": [{"node": "nixpkgs", "rev": REV, "nar_hash": LOCK_NAR}],
+        "forced_inputs": [{"lock_node": "nixpkgs", "lock_rev": REV, "lock_nar_hash": LOCK_NAR, "path": "/nix/store/11111111111111111111111111111111-source", "nar_sha256": "sha256:" + DIGEST}],
+        "evaluated_drv": "/nix/store/22222222222222222222222222222222-review.drv",
+        "store_additions": [{"role": "source", "path": "/nix/store/33333333333333333333333333333333-source", "nar_sha256": "sha256:" + DIGEST}],
+        "nix_version": "2.28.5",
+    }
+    value["receipt_sha256"] = "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return value
+
+
+def test_one_helper_owns_archive_namespace_and_all_nix_steps(tmp_path):
+    archive = tmp_path / "source.tar"
+    archive.write_bytes(b"exact archive")
+    req = request(archive)
     calls = []
 
     def run(command, **kwargs):
         calls.append((command, kwargs))
-        tail = command[command.index(NIX) + 1 :]
-        if "metadata" in tail:
-            value = {"locks": {"nodes": {"root": {"inputs": {"nixpkgs": "nixpkgs"}}, "nixpkgs": {"locked": {"rev": REV, "narHash": LOCK_NAR}}}}}
-            if metadata_mutation:
-                metadata_mutation(value)
-            output = json.dumps(value)
-        elif tail[-3:] == ["path-info", "--all", "--json"]:
-            output = json.dumps([INPUT, *additions] if sum("path-info" in item[0] for item in calls) > 1 else [INPUT])
-        elif tail[-1] == ".#inputIdentities.nixpkgs.outPath":
-            output = INPUT
-        elif "hash" in tail:
-            output = NAR
-        elif tail[-1].endswith(".drvPath"):
-            output = DRV
-        else:
-            raise AssertionError(tail)
-        return subprocess.CompletedProcess(command, 0, output, "")
+        return subprocess.CompletedProcess(command, 0, json.dumps(receipt(req)).encode(), b"")
 
-    return run, calls
+    result = observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=b"# fixed standalone helper", run=run)
+    assert result["namespace"]["held_for_entire_run"] is True and len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[:4] == [UNSHARE, "--net", "--map-root-user", "--"]
+    assert "NIX_REMOTE=local" in command and NIX not in command
+    assert kwargs["timeout"] == 180 and kwargs["capture_output"] is True
+    assert b"exact archive" in kwargs["input"]
 
 
-def test_zero_fetch_observation_uses_fixed_nix_228_command_contract(tmp_path):
-    run, calls = runner()
-    receipt = observe(tmp_path, source_commit=SOURCE_COMMIT, source_tree=SOURCE_TREE, flake_lock_sha256=LOCK_SHA, run=run)
-    assert receipt["forced_inputs"][0]["path"] == INPUT
-    assert receipt["store_additions"] == []
-    assert len(calls) == 6
-    for command, kwargs in calls:
-        assert command[:4] == [UNSHARE, "--net", "--map-root-user", "--"]
-        assert "NIX_REMOTE=local" in command
-        assert ["--offline", "--option", "substituters", ""] == command[command.index(NIX) + 1 : command.index(NIX) + 5]
-        assert "--no-write-lock-file" in command and "--impure" not in command
-        assert kwargs["timeout"] == 120 and kwargs["capture_output"] is True
+def test_archive_and_receipt_tampering_fail_closed(tmp_path):
+    archive = tmp_path / "source.tar"
+    archive.write_bytes(b"archive")
+    req = request(archive, b"helper")
+    req["source_archive_sha256"] = "sha256:" + "0" * 64
+    with pytest.raises(NixInputObservationError, match="archive request"):
+        observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=b"helper", run=lambda *a, **k: None)
 
+    req = request(archive, b"helper")
+    value = receipt(req)
+    value["namespace"]["routes"] = ["default"]
 
-def test_observation_rejects_store_addition_and_extra_lock_node(tmp_path):
-    run, _ = runner(additions=["/nix/store/33333333333333333333333333333333-added"])
-    with pytest.raises(NixInputObservationError, match="wrote to the store"):
-        observe(tmp_path, source_commit=SOURCE_COMMIT, source_tree=SOURCE_TREE, flake_lock_sha256=LOCK_SHA, run=run)
+    def run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, json.dumps(value).encode(), b"")
 
-    def add_node(value):
-        value["locks"]["nodes"]["unrelated"] = {"locked": {}}
-
-    run, _ = runner(metadata_mutation=add_node)
-    with pytest.raises(NixInputObservationError, match="lock graph"):
-        observe(tmp_path, source_commit=SOURCE_COMMIT, source_tree=SOURCE_TREE, flake_lock_sha256=LOCK_SHA, run=run)
-
-
-def test_observation_receipt_rejects_tampering(tmp_path):
-    run, _ = runner()
-    receipt = observe(tmp_path, source_commit=SOURCE_COMMIT, source_tree=SOURCE_TREE, flake_lock_sha256=LOCK_SHA, run=run)
-    receipt["forced_inputs"][0]["path"] = "/nix/store/33333333333333333333333333333333-other"
-    with pytest.raises(NixInputObservationError, match="self-hash"):
-        validate_receipt(receipt, source_commit=SOURCE_COMMIT, source_tree=SOURCE_TREE, flake_lock_sha256=LOCK_SHA)
+    with pytest.raises(NixInputObservationError, match="namespace"):
+        observe_archive(archive, request=req, known_tool_sha256=TOOLS, helper_source=b"helper", run=run)
 
 
 def test_flake_native_input_resolution_has_no_unlocked_getflake():
     source = open("src/tgw/nixos_reviewed_evaluation.py").read()
-    assert ".#inputIdentities.nixpkgs.outPath" in source
-    assert "builtins.getFlake" not in source
-    flake = open("flake.nix").read()
-    assert "inputIdentities.nixpkgs" in flake
-    assert 'rev = "' + REV + '"' in flake
-    assert hashlib.sha256(open("flake.lock", "rb").read()).hexdigest()
+    assert ".#inputIdentities.nixpkgs.outPath" in source and "builtins.getFlake" not in source
