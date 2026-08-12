@@ -1,0 +1,34 @@
+{
+  "schema": "tgw-nixos-reviewed-evaluation-reconciliation/v1",
+  "status": "PROVABLY_NO_EFFECT",
+  "attempt_commit": "6525fd376bf2e02b8270e85ce3f07253d3d87c62",
+  "attempt_receipt_hash": "sha256:ce1258ab508811a8e71155725d64d2f6433f8793a672dfe7bb124af0ee640adf",
+  "request_hash": "sha256:c91e5e2617109dcb01e1df9dbfd25f34f2d07ed5d819f91bf8d07a8dd56587e5",
+  "observations": {
+    "current_system": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "system_profile": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+    "scratch_root": "/var/tmp/tgw-reviewed-evaluation",
+    "scratch_root_state": "ABSENT",
+    "scratch_entries": [],
+    "provider_receipt": null,
+    "generated_units": null,
+    "closure_manifest": null
+  },
+  "reasoning": {
+    "fixed_helper_requires_scratch_root_before_run_creation": true,
+    "scratch_root_was_absent_before_and_after_attempt": true,
+    "therefore_helper_cannot_reach_archive_write_or_nix_invocation": true,
+    "generation_and_system_profile_unchanged": true
+  },
+  "forbidden_effects": {
+    "activation": false,
+    "profile_write": false,
+    "home_db_write": false,
+    "live_flake_write": false,
+    "deployment": false
+  },
+  "diagnostic_commands": ["readlink -f /run/current-system", "test -e /var/tmp/tgw-reviewed-evaluation", "find /var/tmp/tgw-reviewed-evaluation -maxdepth 2", "readlink -f /nix/var/nix/profiles/system"],
+  "diagnostic_claims": {"read_only": true, "retry": false, "build_or_eval": false, "deletion": false, "deployment": false},
+  "root_cause": "REQUIRED_PREPROVISIONED_SCRATCH_ROOT_ABSENT",
+  "receipt_hash": "sha256:ce674b3ab4fdbf64bf7c089a9b210e2561f159f7b2f1b09e2bf73cbbec128da7"
+}
