@@ -93,9 +93,10 @@ class RemoteEvaluationFailure(EvaluationError):
 
 
 class StepFailure(EvaluationError):
-    def __init__(self, message: str, *, step: str, return_code: int | None, stdout: bytes, stderr: bytes):
+    def __init__(self, message: str, *, step: str, diagnostic_code: str, return_code: int | None, stdout: bytes, stderr: bytes):
         super().__init__(message)
         self.step, self.return_code, self.stdout, self.stderr = step, return_code, stdout, stderr
+        self.diagnostic_code = diagnostic_code
 
 
 def create_failure_receipt(
@@ -277,30 +278,59 @@ class ImmutableFailureReceiptStore:
 
     def __init__(self, root: Path):
         self.root = root
+        parent_meta = root.parent.lstat()
+        if not stat.S_ISDIR(parent_meta.st_mode) or parent_meta.st_uid not in {0, os.geteuid()} or parent_meta.st_mode & 0o022:
+            raise EvaluationError("failure receipt store parent is unsafe")
+        self._parent_fd = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        created = False
+        try:
+            try:
+                os.mkdir(root.name, mode=0o700, dir_fd=self._parent_fd)
+                created = True
+            except FileExistsError:
+                pass
+            metadata = os.stat(root.name, dir_fd=self._parent_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+                raise EvaluationError("failure receipt store identity is unsafe")
+            self._directory_fd = os.open(root.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self._parent_fd)
+        except Exception:
+            os.close(self._parent_fd)
+            raise
+        self.readiness = {
+            "schema": "tgw-nixos-evaluation-failure-store-readiness/v1",
+            "path": str(root),
+            "created": created,
+            "owner_uid": metadata.st_uid,
+            "mode": "0700",
+            "ready": True,
+        }
+        self.readiness["receipt_sha256"] = "sha256:" + sha256(_canonical(self.readiness)).hexdigest()
+
+    def close(self) -> None:
+        os.close(self._directory_fd)
+        os.close(self._parent_fd)
 
     def persist(self, receipt: Mapping[str, Any]) -> dict[str, Any]:
-        metadata = self.root.lstat()
-        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
-            raise EvaluationError("failure receipt store identity is unsafe")
         content = _canonical(dict(receipt))
         digest = sha256(content).hexdigest()
         name = digest + ".json"
-        directory_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            try:
-                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=directory_fd)
-            except FileExistsError:
-                existing = self.root / name
-                if _digest_file(existing) != "sha256:" + digest or stat.S_IMODE(existing.stat().st_mode) != 0o400:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=self._directory_fd)
+        except FileExistsError:
+            metadata = os.stat(name, dir_fd=self._directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o400 or metadata.st_size != len(content):
+                raise EvaluationError("existing failure receipt artifact is unsafe")
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self._directory_fd)
+            with os.fdopen(fd, "rb") as existing:
+                opened = os.fstat(existing.fileno())
+                if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino) or sha256(existing.read()).hexdigest() != digest:
                     raise EvaluationError("existing failure receipt artifact is contradictory")
-            else:
-                with os.fdopen(fd, "wb") as sink:
-                    sink.write(content)
-                    sink.flush()
-                    os.fsync(sink.fileno())
-                os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        else:
+            with os.fdopen(fd, "wb") as sink:
+                sink.write(content)
+                sink.flush()
+                os.fsync(sink.fileno())
+            os.fsync(self._directory_fd)
         return {"artifact_ref": "artifact:sha256:" + digest, "path": str(self.root / name), "sha256": "sha256:" + digest, "size": len(content)}
 
 
@@ -566,7 +596,7 @@ def _run(argv: list[str], *, cwd: Path, timeout: int, max_output: int = 16 * 102
         if remaining <= 0:
             process.kill()
             process.wait()
-            raise StepFailure("fixed evaluation step timed out", step=_subprocess_step(argv), return_code=None, stdout=bytes(output), stderr=b"")
+            raise StepFailure("fixed evaluation step timed out", step=_subprocess_step(argv), diagnostic_code="BOUND_EXCEEDED", return_code=None, stdout=bytes(output), stderr=b"")
         for key, _ in selector.select(min(remaining, 0.25)):
             block = key.fileobj.read1(min(65536, max_output + 1 - len(output)))
             if not block:
@@ -576,10 +606,12 @@ def _run(argv: list[str], *, cwd: Path, timeout: int, max_output: int = 16 * 102
         if len(output) > max_output:
             process.kill()
             process.wait()
-            raise StepFailure("fixed evaluation step exceeded its output bound", step=_subprocess_step(argv), return_code=None, stdout=bytes(output), stderr=b"")
+            raise StepFailure("fixed evaluation step exceeded its output bound", step=_subprocess_step(argv), diagnostic_code="BOUND_EXCEEDED", return_code=None, stdout=bytes(output), stderr=b"")
     return_code = process.wait()
     if return_code != 0:
-        raise StepFailure("fixed evaluation step failed", step=_subprocess_step(argv), return_code=max(-255, min(255, return_code)), stdout=bytes(output), stderr=b"")
+        raise StepFailure(
+            "fixed evaluation step failed", step=_subprocess_step(argv), diagnostic_code="SUBPROCESS_FAILED", return_code=max(-255, min(255, return_code)), stdout=bytes(output), stderr=b""
+        )
     return output.decode()
 
 
@@ -651,9 +683,23 @@ def _prepare_scratch_root(scratch_root: Path, *, expected_uid: int) -> tuple[int
         raise
 
 
-def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run, scratch_root: Path = Path("/var/tmp/tgw-reviewed-evaluation"), scratch_uid: int = 0) -> dict[str, Any]:
+def execute_packet(
+    stream: io.BufferedReader,
+    *,
+    run: Callable[..., str] = _run,
+    scratch_root: Path = Path("/var/tmp/tgw-reviewed-evaluation"),
+    scratch_uid: int = 0,
+    stage_hook: Callable[[str], None] | None = None,
+    cleanup_tree: Callable[..., None] = shutil.rmtree,
+) -> dict[str, Any]:
     global _FAILURE_CONTEXT
     _FAILURE_CONTEXT = {"stage": "request-validation", "cleanup_result": "not-created"}
+
+    def enter(stage: str) -> None:
+        _FAILURE_CONTEXT["stage"] = stage
+        if stage_hook is not None:
+            stage_hook(stage)
+
     header = stream.read(8)
     if len(header) != 8:
         raise EvaluationError("evaluation packet header is truncated")
@@ -673,9 +719,11 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
             "stage": "provider-identity",
         }
     )
+    enter("provider-identity")
     provider_digest = globals().get("_BOOTSTRAP_PROVIDER_SHA256") or _digest_file(Path(__file__))
     if provider_digest != "sha256:" + bound["provider_sha256"].removeprefix("sha256:"):
         raise EvaluationError("installed evaluation provider digest mismatch")
+    enter("executable-identity")
     executable_digests = {
         "remote_python": _digest_file(Path(REMOTE_PYTHON)),
         **{name: _digest_file(Path(path)) for name, path in EXECUTABLES.items()},
@@ -683,10 +731,11 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
     expected_digests = {name: "sha256:" + bound[name + "_sha256"].removeprefix("sha256:") for name in executable_digests}
     if executable_digests != expected_digests:
         raise EvaluationError("remote evaluation executable digest mismatch")
-    _FAILURE_CONTEXT["stage"] = "scratch-root"
+    enter("scratch-root")
     timeout = int(bound["max_duration_seconds"])
     parent_fd, root_fd, root_created = _prepare_scratch_root(scratch_root, expected_uid=scratch_uid)
     _FAILURE_CONTEXT.update({"scratch_root_created": root_created, "cleanup_result": "unknown", "stage": "run-scratch"})
+    enter("run-scratch")
     scratch_name = "run-" + secrets.token_hex(16)
     os.mkdir(scratch_name, mode=0o700, dir_fd=root_fd)
     _FAILURE_CONTEXT["run_created"] = True
@@ -699,7 +748,7 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
     source = extract_root / bound["archive_root"]
     receipt = None
     try:
-        _FAILURE_CONTEXT["stage"] = "archive-stream"
+        enter("archive-stream")
         scratch_fd = os.open(scratch_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
         archive_fd = os.open("source.tar", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=scratch_fd)
         os.close(scratch_fd)
@@ -716,22 +765,22 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
         if _digest_file(archive) != "sha256:" + bound["source_archive_sha256"].removeprefix("sha256:"):
             raise EvaluationError("received archive digest mismatch")
         extract_root.mkdir()
-        _FAILURE_CONTEXT["stage"] = "archive-verify"
+        enter("archive-verify")
         archive_commit = _safe_extract(archive, extract_root, expected_root=bound["archive_root"], max_files=int(bound["max_files"]), max_bytes=int(bound["max_unpacked_bytes"]))
         if archive_commit != bound["source_commit"]:
             raise EvaluationError("archive commit identity mismatch")
         git = [EXECUTABLES["git"], "-c", "core.hooksPath=/dev/null", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.required=false"]
-        _FAILURE_CONTEXT["stage"] = "source-tree"
+        enter("source-tree")
         run(git + ["init", "-q"], cwd=source, timeout=timeout)
         run(git + ["add", "-A"], cwd=source, timeout=timeout)
         if run(git + ["write-tree"], cwd=source, timeout=timeout).strip() != bound["source_tree"]:
             raise EvaluationError("unpacked source tree mismatch")
-        _FAILURE_CONTEXT["stage"] = "source-digests"
+        enter("source-digests")
         lock_matches = _digest_file(source / "flake.lock") == "sha256:" + bound["flake_lock_sha256"].removeprefix("sha256:")
         module_matches = _digest_file(source / bound["module_path"]) == "sha256:" + bound["module_sha256"].removeprefix("sha256:")
         if not lock_matches or not module_matches:
             raise EvaluationError("lock or module digest mismatch")
-        _FAILURE_CONTEXT["stage"] = "nix-eval"
+        enter("nix-eval")
         base = [
             EXECUTABLES["nix"],
             "--offline",
@@ -747,18 +796,18 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
             "--no-write-lock-file",
         ]
         drv = run(base + ["eval", "--raw", ".#nixosConfigurations.tgw-prod.config.system.build.toplevel.drvPath"], cwd=source, timeout=timeout).strip()
-        _FAILURE_CONTEXT["stage"] = "nix-build"
+        enter("nix-build")
         build_log = run(base + ["build", "--no-link", "--print-out-paths", ".#nixosConfigurations.tgw-prod.config.system.build.toplevel"], cwd=source, timeout=timeout)
         closure = build_log.strip()
         if "\n" in closure or not closure.startswith("/nix/store/"):
             raise EvaluationError("Nix build returned an unexpected closure set")
         unit_paths = [Path(closure) / "etc/systemd/system" / unit for unit in UNITS]
-        _FAILURE_CONTEXT["stage"] = "unit-extract"
+        enter("unit-extract")
         if any(not path.is_file() for path in unit_paths):
             raise EvaluationError("generated unit set is incomplete")
-        _FAILURE_CONTEXT["stage"] = "systemd-verify"
+        enter("systemd-verify")
         verify_log = run([EXECUTABLES["systemd_analyze"], "verify", *map(str, unit_paths)], cwd=source, timeout=timeout)
-        _FAILURE_CONTEXT["stage"] = "closure-manifest"
+        enter("closure-manifest")
         eval_log = drv + "\n"
         requisites_raw = run([EXECUTABLES["nix_store"], "--query", "--requisites", closure], cwd=source, timeout=timeout)
         requisites = sorted(set(requisites_raw.splitlines()))
@@ -772,7 +821,7 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
                 raise EvaluationError("Nix requisite NAR hash is invalid")
             closure_manifest.append({"path": item, "nar_sha256": "sha256:" + nar_hash})
         closure_manifest_sha256 = "sha256:" + sha256(_canonical(closure_manifest)).hexdigest()
-        _FAILURE_CONTEXT["stage"] = "version-probes"
+        enter("version-probes")
         receipt = {
             "schema": bound["output_schema"],
             "outcome": "verified",
@@ -806,10 +855,21 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
             "unit_sha256": {unit: _digest_file(path) for unit, path in zip(UNITS, unit_paths, strict=True)},
             "evidence": [],
         }
+    except StepFailure as exc:
+        _FAILURE_CONTEXT.update(
+            {
+                "subprocess_step": exc.step,
+                "return_code": exc.return_code,
+                "failure_stdout": exc.stdout,
+                "failure_stderr": exc.stderr,
+                "subprocess_diagnostic_code": exc.diagnostic_code,
+            }
+        )
+        raise
     finally:
         _FAILURE_CONTEXT["cleanup_attempted"] = True
         try:
-            shutil.rmtree(scratch, ignore_errors=False)
+            cleanup_tree(scratch, ignore_errors=False)
             os.close(root_fd)
             if root_created:
                 os.rmdir(scratch_root.name, dir_fd=parent_fd)
@@ -835,15 +895,31 @@ def execute_packet(stream: io.BufferedReader, *, run: Callable[..., str] = _run,
     return receipt
 
 
-def main() -> int:
+def main(
+    *,
+    input_stream: io.BufferedReader | None = None,
+    output_stream: io.BufferedWriter | None = None,
+    execute_kwargs: Mapping[str, Any] | None = None,
+) -> int:
+    source = input_stream if input_stream is not None else sys.stdin.buffer
+    sink = output_stream if output_stream is not None else sys.stdout.buffer
     try:
-        receipt = execute_packet(sys.stdin.buffer)
-        sys.stdout.buffer.write(_canonical(receipt))
+        receipt = execute_packet(source, **dict(execute_kwargs or {}))
+        sink.write(_canonical(receipt))
         return 0
     except Exception as exc:
         exception_class = type(exc).__name__ if type(exc).__name__ in EXCEPTION_CLASSES else "EvaluationError"
-        code = "CLEANUP_FAILED" if _FAILURE_CONTEXT.get("stage") == "cleanup" else "SUBPROCESS_FAILED" if "failed" in str(exc).lower() else "VALIDATION_REFUSED"
         step_failure = exc if isinstance(exc, StepFailure) else None
+        if _FAILURE_CONTEXT.get("stage") == "cleanup":
+            code = "CLEANUP_FAILED"
+        elif step_failure is not None:
+            code = step_failure.diagnostic_code
+        elif isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
+            code = "BOUND_EXCEEDED"
+        elif isinstance(exc, EvaluationError):
+            code = "VALIDATION_REFUSED"
+        else:
+            code = "INTERNAL_ERROR"
         if not all(_FAILURE_CONTEXT.get(key) for key in ("effect_hash", "generation", "provider_sha256")):
             receipt = create_bootstrap_failure_receipt(
                 request_hash=globals().get("_BOOTSTRAP_REQUEST_HASH", "sha256:" + "0" * 64),
@@ -858,10 +934,10 @@ def main() -> int:
                 diagnostic_code=code,
                 exception_class=exception_class,
                 cleanup_result=_FAILURE_CONTEXT.get("cleanup_result", "unknown"),
-                subprocess_step=step_failure.step if step_failure else "none",
-                return_code=step_failure.return_code if step_failure else None,
-                stdout=step_failure.stdout if step_failure else b"",
-                stderr=step_failure.stderr if step_failure else b"",
+                subprocess_step=step_failure.step if step_failure else _FAILURE_CONTEXT.get("subprocess_step", "none"),
+                return_code=step_failure.return_code if step_failure else _FAILURE_CONTEXT.get("return_code"),
+                stdout=step_failure.stdout if step_failure else _FAILURE_CONTEXT.get("failure_stdout", b""),
+                stderr=step_failure.stderr if step_failure else _FAILURE_CONTEXT.get("failure_stderr", b""),
             )
-        sys.stdout.buffer.write(_canonical(receipt))
+        sink.write(_canonical(receipt))
         return 1

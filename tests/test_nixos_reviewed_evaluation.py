@@ -19,6 +19,7 @@ from tgw.nixos_reviewed_evaluation import (
     ImmutableFailureReceiptStore,
     RemoteEvaluationFailure,
     SshReviewedEvaluationProvider,
+    StepFailure,
     _sealed_memfd,
     create_bootstrap_failure_receipt,
     create_failure_receipt,
@@ -332,6 +333,78 @@ def test_remote_helper_executes_only_fixed_offline_steps_and_cleans_scratch(tmp_
     assert all(["--option", "allow-import-from-derivation", "false"] == call[5:8] and "--no-write-lock-file" in call for call in nix_calls)
     assert not any(word in {"switch", "boot", "test", "profile"} for call in calls for word in call)
     assert set(result["unit_sha256"]) == set(request["unit_set"].split(","))
+
+
+def test_real_main_execute_packet_pre_scratch_failure(tmp_path, monkeypatch):
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    archive = tmp_path / "source.tar"
+    make_archive(archive)
+    request = parameters(sha256(archive.read_bytes()).hexdigest())
+    request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    request_hash = "sha256:" + "d" * 64
+    monkeypatch.setattr(provider_module, "_BOOTSTRAP_REQUEST_HASH", request_hash, raising=False)
+    monkeypatch.setattr(provider_module, "_BOOTSTRAP_PROVIDER_SHA256", request["provider_sha256"], raising=False)
+    output = io.BytesIO()
+
+    def inject(stage):
+        if stage == "provider-identity":
+            raise EvaluationError("injected typed refusal")
+
+    scratch = tmp_path / "scratch"
+    assert main(input_stream=packet(request, archive), output_stream=output, execute_kwargs={"scratch_root": scratch, "scratch_uid": os.geteuid(), "stage_hook": inject}) == 1
+    receipt = json.loads(output.getvalue())
+    assert receipt["stage"] == "provider-identity" and receipt["cleanup_result"] == "not-created"
+    assert not scratch.exists()
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_real_main_execute_packet_nix_eval_failure_and_cleanup_outcome(tmp_path, monkeypatch, cleanup_fails):
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    archive = tmp_path / "source.tar"
+    make_archive(archive)
+    request = parameters(sha256(archive.read_bytes()).hexdigest())
+    request["flake_lock_sha256"] = "sha256:" + sha256(b"lock").hexdigest()
+    request["module_sha256"] = "sha256:" + sha256(b"module").hexdigest()
+    request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    original_digest = provider_module._digest_file
+    remote_paths = {provider_module.REMOTE_PYTHON, *EXECUTABLES.values()}
+    monkeypatch.setattr(provider_module, "_digest_file", lambda path: "sha256:" + DIGEST if str(path) in remote_paths else original_digest(path))
+    monkeypatch.setattr(provider_module, "_BOOTSTRAP_REQUEST_HASH", "sha256:" + "d" * 64, raising=False)
+    monkeypatch.setattr(provider_module, "_BOOTSTRAP_PROVIDER_SHA256", request["provider_sha256"], raising=False)
+
+    def fake_run(argv, *, cwd, timeout):
+        return TREE if argv[-1] == "write-tree" else ""
+
+    def inject(stage):
+        if stage == "nix-eval":
+            raise StepFailure("injected timeout", step="nix-eval", diagnostic_code="BOUND_EXCEEDED", return_code=None, stdout=b"", stderr=b"")
+
+    def cleanup(path, *, ignore_errors):
+        import shutil
+
+        shutil.rmtree(path, ignore_errors=ignore_errors)
+        if cleanup_fails:
+            raise OSError("injected cleanup uncertainty")
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+    output = io.BytesIO()
+    assert (
+        main(
+            input_stream=packet(request, archive),
+            output_stream=output,
+            execute_kwargs={"run": fake_run, "scratch_root": scratch, "scratch_uid": os.geteuid(), "stage_hook": inject, "cleanup_tree": cleanup},
+        )
+        == 1
+    )
+    receipt = json.loads(output.getvalue())
+    assert receipt["stage"] == ("cleanup" if cleanup_fails else "nix-eval")
+    assert receipt["outcome"] == ("AMBIGUOUS" if cleanup_fails else "FAILED")
+    assert receipt["diagnostic_code"] == ("CLEANUP_FAILED" if cleanup_fails else "BOUND_EXCEEDED")
+    assert receipt["subprocess_step"] == "nix-eval"
+    assert not list(scratch.iterdir())
 
 
 @pytest.mark.parametrize("change", [{"activate": "true"}, {"module_path": "../../etc/passwd"}, {"command": "id"}])

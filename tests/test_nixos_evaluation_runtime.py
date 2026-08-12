@@ -22,13 +22,16 @@ def parameters():
     }
 
 
-def test_exact_runtime_resolves_both_immutable_artifacts_without_repo_fallback():
+def test_exact_runtime_resolves_both_immutable_artifacts_without_repo_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr("tgw.nixos_evaluation_runtime.FAILURE_RECEIPT_ROOT", tmp_path / "failures")
     provider, receipt = compose_reviewed_evaluation_provider(parameters(), invoke=lambda *a, **k: None)
     assert provider.resolve_artifact(parameters()["artifact_ref"]) == SOURCE_PATH
     assert provider.known_hosts == KNOWN_HOSTS_PATH
     assert receipt["artifacts"]["source_archive"]["mode"] == "0444"
     assert receipt["artifacts"]["known_hosts"]["mode"] == "0444"
     assert receipt["ssh_started"] is False
+    assert receipt["failure_store"]["ready"] is True
+    provider.failure_store.close()
 
 
 def test_malicious_repo_paths_and_unregistered_identities_are_never_selected(tmp_path):
