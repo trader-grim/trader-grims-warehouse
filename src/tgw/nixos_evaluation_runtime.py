@@ -64,7 +64,7 @@ def preflight_reviewed_evaluation(parameters: Mapping[str, str]) -> dict[str, An
     }
 
 
-def compose_reviewed_evaluation_provider(parameters: Mapping[str, str], *, invoke=None) -> tuple[SshReviewedEvaluationProvider, Mapping[str, Any]]:
+def compose_reviewed_evaluation_provider(parameters: Mapping[str, str], *, failure_sink=None, invoke=None) -> tuple[SshReviewedEvaluationProvider, Mapping[str, Any]]:
     preflight = preflight_reviewed_evaluation(parameters)
-    provider = SshReviewedEvaluationProvider(ExactArtifactResolver(), known_hosts=KNOWN_HOSTS_PATH, invoke=invoke)
+    provider = SshReviewedEvaluationProvider(ExactArtifactResolver(), known_hosts=KNOWN_HOSTS_PATH, request_hash=preflight["request_hash"], failure_sink=failure_sink, invoke=invoke)
     return provider, preflight
