@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGW Operator Authority</title>
+<style>
+body{font:16px system-ui,sans-serif;background:#101216;color:#e5e7eb;margin:0;padding:2rem}main{max-width:70rem;margin:auto}
+.notice,.card{border:1px solid #46505f;border-radius:.6rem;padding:1rem;margin:1rem 0;background:#181c22}.notice{border-color:#8a6d2f;color:#f2d68a}
+.meta{font:13px ui-monospace,monospace;color:#aab2bf;overflow-wrap:anywhere}.actions{color:#9fd3ad}.error{color:#ff9b9b}
+</style></head><body><main><h1>Operator Authority</h1>
+<p>The status, evidence, and legal actions for Plan-bound effects.</p>
+<div class="notice">Only records from PlanAuthority grant authority. Agent Runs, Todos, PP-CLIP, listing state, notifications, and visiting this page do not approve an effect.</div>
+<section id="requests">Loading authority records…</section>
+<script>
+const esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+fetch('/api/operator-console/requests').then(async r=>{const d=await r.json();if(!r.ok)throw Error(d.detail||r.statusText);return d}).then(d=>{
+ const root=document.getElementById('requests'); if(!d.requests.length){root.textContent='No authority requests exist.';return}
+ root.innerHTML=d.requests.map(x=>`<article class="card"><h2>${esc(x.summary)}</h2><b>${esc(x.status)}</b><p class="actions">Legal actions: ${esc(x.legal_actions.join(', '))}</p><p>Evidence: ${esc(x.evidence.join(', '))}</p><div class="meta">Request ${esc(x.request_id)}<br>Plan ${esc(x.plan_commit)}<br>Closure ${esc(x.closure_hash)}<br>Effect ${esc(x.effect.kind)} @ ${esc(x.effect.generation)}</div></article>`).join('')
+}).catch(e=>document.getElementById('requests').innerHTML=`<p class="error">Authority unavailable: ${esc(e.message)}</p>`);
+</script></main></body></html>
