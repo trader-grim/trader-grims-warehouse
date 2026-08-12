@@ -1,0 +1,36 @@
+{
+  "schema": "tgw-foundation-admission-receipt/v1",
+  "capabilities": [
+    "queue.durable-claims@1",
+    "evidence.immutable-receipts@1",
+    "item.generation-cas@1"
+  ],
+  "provider": "canonical-workflow-foundations@1",
+  "source_commit": "faca3ddea15bc2c8f160d18813e93b7d9286716a",
+  "source_hashes": {
+    "src/tgw/workflow/foundation.py": "sha256:fb3e4e379e12e2e1df1c06ed6d6915d71293b7d15dde121a09c75a1283e514fc",
+    "tests/test_workflow_foundation_integration.py": "sha256:cdf65b9ec3f0077e6f45685b4f7295e5db65f0b35160763eb169ffcc45124e9b"
+  },
+  "evidence": [
+    {
+      "command": ".venv/bin/pytest -q tests/test_workflow_foundation_integration.py",
+      "result": "10 passed"
+    },
+    {
+      "command": ".venv/bin/pytest -q tests/test_scheduler.py",
+      "result": "17 passed"
+    },
+    {
+      "command": ".venv/bin/pytest -q tests/test_receipt.py tests/test_invariants_queue_transitions.py tests/test_mark_failed_lease_race.py tests/test_worker_base_terminal_failure.py tests/test_workflow_condition_evaluator.py",
+      "result": "41 passed"
+    }
+  ],
+  "acceptance": {
+    "lease_and_dedupe": "passed",
+    "run_once_identity": "passed",
+    "terminal_receipts": "passed",
+    "generation_conflict_fails_closed": "passed",
+    "ambiguity_and_retry_remain_distinct": "passed"
+  },
+  "deployment_claim": false
+}
