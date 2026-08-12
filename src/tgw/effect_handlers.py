@@ -94,7 +94,20 @@ class TypedEffectHandlerRegistry:
 
     def prepare(self, effect: TypedEffect) -> tuple[str, dict[str, str], Callable[..., Mapping[str, Any]], Callable[..., Mapping[str, Any]] | None]:
         if effect.kind is EffectKind.CODING_RELEASE:
-            parameters = _required(effect.parameters, {"candidate_commit", "candidate_tree", "archive_sha256", "artifact_ref", "expected_current", "operation_id"})
+            parameters = _required(
+                effect.parameters,
+                {
+                    "candidate_commit",
+                    "candidate_tree",
+                    "archive_sha256",
+                    "artifact_ref",
+                    "root_id",
+                    "expected_current",
+                    "operation_id",
+                    "review_receipt",
+                    "controller_receipt",
+                },
+            )
             if not _SHA1.fullmatch(parameters["candidate_commit"]) or not _SHA1.fullmatch(parameters["candidate_tree"]) or not _SHA256.fullmatch(parameters["archive_sha256"]):
                 raise ValueError("coding release hashes are invalid")
         elif effect.kind is EffectKind.BOUNDED_FLAKE_PUSH:
@@ -115,6 +128,7 @@ class TypedEffectHandlerRegistry:
             if parameters["queue_id"] not in {"coding", "review", "controller", "release"}:
                 raise ValueError("dependency queue is not registered")
         handler_id, handler, rollback = self._providers[effect.kind]
+        parameters["generation"] = effect.generation
         return handler_id, parameters, handler, rollback
 
 
