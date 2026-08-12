@@ -50,21 +50,21 @@ def load_descriptor(path: Path = DESCRIPTOR, *, expected_owner_uid: int = 0) -> 
     finally:
         os.close(fd)
     value = json.loads(raw)
-    expected = {"schema", "uid", "gid", "python", "ip", "python_sha256", "ip_sha256", "sudo_rule_sha256", "observer_cgroup"}
+    expected = {"schema", "uid", "gid", "launcher", "python", "ip", "launcher_sha256", "python_sha256", "ip_sha256", "sudo_rule_sha256", "observer_cgroup"}
     if (
         not isinstance(value, dict)
         or set(value) != expected
         or value["schema"] != SCHEMA
         or not all(isinstance(value[key], int) and value[key] > 0 for key in ("uid", "gid"))
-        or not all(isinstance(value[key], str) and value[key].startswith("/") for key in ("python", "ip"))
-        or not all(isinstance(value[key], str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value[key]) for key in ("python_sha256", "ip_sha256", "sudo_rule_sha256"))
+        or not all(isinstance(value[key], str) and value[key].startswith("/") for key in ("launcher", "python", "ip"))
+        or not all(isinstance(value[key], str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value[key]) for key in ("launcher_sha256", "python_sha256", "ip_sha256", "sudo_rule_sha256"))
         or not isinstance(value["observer_cgroup"], str)
         or not value["observer_cgroup"].startswith("0::/")
     ):
         raise LauncherError("launcher descriptor schema is invalid")
     value["_descriptor_sha256"] = "sha256:" + hashlib.sha256(raw).hexdigest()
     held: dict[str, int] = {}
-    for name in ("python", "ip"):
+    for name in ("launcher", "python", "ip"):
         tool = os.open(str(value[name]), os.O_RDONLY | os.O_NOFOLLOW)
         tool_stat = os.fstat(tool)
         if tool_stat.st_uid != expected_owner_uid or tool_stat.st_mode & 0o022 or not os.path.isfile(f"/proc/self/fd/{tool}") or _digest_fd(tool) != value[f"{name}_sha256"]:

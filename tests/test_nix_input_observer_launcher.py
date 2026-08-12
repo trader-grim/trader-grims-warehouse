@@ -11,16 +11,21 @@ from tgw.nix_input_observer_launcher import SCHEMA, LauncherError, load_descript
 def _descriptor(tmp_path: Path) -> Path:
     python = tmp_path / "python"
     ip = tmp_path / "ip"
+    launcher = tmp_path / "launcher"
     python.write_bytes(b"python")
     ip.write_bytes(b"ip")
+    launcher.write_bytes(b"launcher")
     python.chmod(0o500)
     ip.chmod(0o500)
+    launcher.chmod(0o500)
     value = {
         "schema": SCHEMA,
         "uid": os.getuid() or 1004,
         "gid": os.getgid() or 1004,
+        "launcher": str(launcher),
         "python": str(python),
         "ip": str(ip),
+        "launcher_sha256": "sha256:" + hashlib.sha256(b"launcher").hexdigest(),
         "python_sha256": "sha256:" + hashlib.sha256(b"python").hexdigest(),
         "ip_sha256": "sha256:" + hashlib.sha256(b"ip").hexdigest(),
         "sudo_rule_sha256": "sha256:" + "a" * 64,
@@ -37,7 +42,7 @@ def test_descriptor_is_closed_and_holds_exact_tools(tmp_path, monkeypatch):
     descriptor, held = load_descriptor(path, expected_owner_uid=os.getuid())
     assert descriptor["schema"] == SCHEMA
     assert descriptor["_descriptor_sha256"].startswith("sha256:")
-    assert set(held) == {"python", "ip"}
+    assert set(held) == {"launcher", "python", "ip"}
     for fd in held.values():
         os.close(fd)
 

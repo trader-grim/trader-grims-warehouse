@@ -3,7 +3,7 @@ from pathlib import Path
 
 def test_nix_module_has_one_exact_no_argument_sudo_rule_and_rollback():
     source = Path("nix/nix-input-observer-launcher.nix").read_text()
-    assert 'sudoRule = "codex ALL=(root) NOPASSWD: ${command}"' in source
+    assert 'sudoRule = "codex ALL=(root) NOPASSWD: ${command} \\"\\""' in source
     assert "security.sudo.extraConfig = sudoRule" in source
     assert 'environment.etc."tgw/nix-input-observer-launcher.json"' in source
     assert 'mode = "0400"; user = "root"; group = "root"' in source
