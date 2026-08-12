@@ -40,18 +40,32 @@ def configured_review_command(
             "health": evidence,
         }
     backend = [python_path, "-m", "tgw.codex_review_backend"]
+    auth_file = Path(str(evidence["auth_file"])).resolve()
+    executable = Path(str(evidence["executable"])).absolute()
+    tool_root = executable.parent.parent
     wrapper = [
         python_path,
         "-m",
         "tgw.review_runner",
         "--provider-command-json",
         json.dumps(backend, separators=(",", ":")),
+        "--network-egress",
+        "--credential-file",
+        str(auth_file),
+        "--tool-root",
+        str(tool_root),
     ]
     return {
         "schema": "tgw-review-runner-configuration/v1",
         "status": "AVAILABLE",
         "command": wrapper,
         "health": evidence,
+        "isolation": {
+            "filesystem": "read-only snapshot and runtime mounts",
+            "environment": "cleared; only PATH, PYTHONPATH, HOME, and TGW_CODEX_REVIEW_AUTH injected",
+            "network": "declared provider egress; business/provider effects remain forbidden by review authority",
+            "credential": str(auth_file),
+        },
     }
 
 

@@ -75,6 +75,22 @@ def test_isolated_review_pass_establishes_reviewed_without_mutating_source(tmp_p
     assert result["artifacts"][0]["report"]["snapshot_hash"] == before
 
 
+def test_bwrap_translates_snapshot_path_and_clears_ambient_environment(tmp_path, monkeypatch):
+    source = snapshot(tmp_path)
+    monkeypatch.setenv("HOST_SECRET", "must-not-cross")
+    provider = tmp_path / "contract-provider"
+    provider.write_text(
+        "#!/usr/bin/python3\n"
+        "import json,os,pathlib,sys\n"
+        "r=json.load(sys.stdin)\n"
+        "ok=r['snapshot_root']=='/workspace' and pathlib.Path('/workspace/app.py').is_file() and 'HOST_SECRET' not in os.environ\n"
+        "finding={'severity':'high','path':'app.py','line':1,'message':'sandbox contract mismatch'}\n"
+        "print(json.dumps({'schema':'tgw-code-review/v1','verdict':'PASS' if ok else 'FAIL','snapshot_hash':r['snapshot_hash'],'summary':'contract checked','findings':[] if ok else [finding]}))\n"
+    )
+    provider.chmod(0o755)
+    assert run_review(handoff(source), [str(provider)])["outcome"] == "satisfied"
+
+
 def test_failed_semantic_review_never_establishes_reviewed(tmp_path):
     source = snapshot(tmp_path)
     result = run_review(
