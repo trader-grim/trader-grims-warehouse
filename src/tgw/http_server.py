@@ -44,6 +44,8 @@ from .ebay.draft_specifics import get_ebay_aspects, set_ebay_aspects
 from .ebay.draft_specifics import is_envelope as _is_ebay_draft_envelope
 from .ebay.inventory_diff import apply_inventory_diff, diff_ebay_draft_to_inventory
 from .items import _archive_before_overwrite, atomic_write_json, create_item, locationupdate
+from .operator_console_host import configured_console_mount
+from .operator_console_plugin import mount_operator_console
 from .queue import state_machine
 from .readiness import check_ebay, readiness_html
 from .resolver import load_item_doc
@@ -307,6 +309,17 @@ def _require_auth(
 
 
 AUTH = Depends(_require_auth)
+
+# Consolidated PlanAuthority console. The late-bound host adapter performs no
+# database or Plan access at import time and reuses this service's auth seam.
+mount_operator_console(
+    app,
+    configured_console_mount(
+        lambda: _cfg,
+        require_operator=_require_auth,
+        require_executor=_require_auth,
+    ),
+)
 
 
 @app.middleware("http")
@@ -11132,11 +11145,11 @@ _DOCS_EXTRA_CSS = (
 
 
 def _vault_root() -> Path:
-    """Return the plan vault root from config, or fall back to repo-relative default."""
+    """Return the standalone Plan root; embedded Plan copies are never authority."""
     p = _cfg.get("plan_vault_path")
     if p:
         return Path(p)
-    return (Path(__file__).parent.parent.parent / "docs" / "TGW-Plan-Vault").resolve()
+    return Path("/opt/TGW/library/plans")
 
 
 def _list_docs_sections() -> list[tuple[str, list[tuple[str, str]]]]:

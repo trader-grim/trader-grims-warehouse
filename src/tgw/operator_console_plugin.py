@@ -53,7 +53,7 @@ def mount_operator_console(app: FastAPI, config: OperatorConsoleMount) -> None:
         require_executor=config.require_executor,
     )
     existing = {
-        (route.path, tuple(sorted(route.methods or ())))
+        (route.path, tuple(sorted(getattr(route, "methods", None) or ())))
         for route in app.routes
         if hasattr(route, "path")
     }
