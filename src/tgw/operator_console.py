@@ -28,6 +28,14 @@ NON_AUTHORITY_SURFACES = (
     {"path": "/api/items/*", "meaning": "listing workflow state only"},
 )
 
+NAVIGATION = {
+    "id": "plan-authority",
+    "label": "Plan Authority",
+    "href": "/form/plan-authority",
+    "group": "Admin",
+    "order": 30,
+}
+
 
 def _status(row: Mapping[str, Any], now: datetime) -> str:
     if row.get("receipt_id") or row.get("consumed_at"):
@@ -110,6 +118,7 @@ def create_operator_console_router(
             "authority_api": "/api/plan-authority",
             "authority_backend": AUTHORITY_SCHEMA,
             "clients": ["web", "flutter"],
+            "navigation": NAVIGATION,
             "non_authority_surfaces": NON_AUTHORITY_SURFACES,
         }
 
