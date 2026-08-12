@@ -86,6 +86,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "tgw.queue" = ["*.sql"]
+"tgw" = ["plan_authority.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
