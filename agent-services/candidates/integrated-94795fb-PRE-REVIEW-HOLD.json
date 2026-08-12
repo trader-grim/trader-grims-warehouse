@@ -1,0 +1,13 @@
+{
+  "schema": "tgw-integrated-candidate-manifest/v1",
+  "source": {"commit": "94795fb870ba8fe09dbd1d1882bcf16c05d00b2d", "tree": "c57339976f62d71096cd4ea74bcc11b5c02d60d4", "archive_sha256": "sha256:1071e2113d2a331e2893316f2c7bccadd749e517c29057a886856adf921987cd", "archive_size": 8704000, "archive_format": "git-archive-tar", "archive_prefix": "trader-grims-warehouse/"},
+  "plan": {"commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b", "evidence_head": "53820427eca9f224414a548a29ed754d741e6d50", "solution_hash": "sha256:d28650c26c6a3d26d6c943597ccb7abd7c6670b1703d9ce941ac5ed7a2d73a4d", "closure_hash": "sha256:bc0c53b2574fc359c629bd213e078fdd2824e5e1c4a98c0c7a347de869d9e6f8"},
+  "tests": {"focused": {"status": "PASSED", "receipt": "agent-services/receipts/W08-focused-tests-94795fb.json"}, "full_suite": {"status": "PASSED", "receipt": "agent-services/receipts/W08-full-suite-94795fb.json"}},
+  "conformance": {"status": "VERIFIED", "receipt": "agent-services/receipts/luet-conformance-94795fb.json", "receipt_hash": "sha256:5c33f18807fc202d769c487b6ca0a295b5e80d53dd58cb6943e073047042e906"},
+  "review": {"status": "HOLD", "code": "NON_DEPLOYING_NIX_EVALUATION_NOT_EXECUTED", "detail": "Independent source audit and host identity observation passed; the exact prepared non-deploying Nix evaluation request has not been executed."},
+  "candidate_closed": true,
+  "ready_for_independent_review": false,
+  "dispatchable": false,
+  "installed": false,
+  "manifest_hash": "sha256:5eac0e6484291187fba7923645e34640349139e82471ea57e00ab9825de6959e"
+}
