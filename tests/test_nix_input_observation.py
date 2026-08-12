@@ -134,3 +134,26 @@ def test_real_bootstrap_frame_rejects_malformed_payload_with_bound_failure(tmp_p
     assert failure["helper_sha256"] == "sha256:" + helper_hash.hex()
     assert failure["tool_manifest_sha256"] == "sha256:" + tool_hash.hex()
     assert failure["cleanup"] == "removed"
+
+
+def test_real_bootstrap_executes_inert_helper_with_exact_reconstructed_payload_and_tail(tmp_path):
+    from tgw import nix_input_observation as module
+
+    archive = tmp_path / "source.tar"
+    archive.write_bytes(b"exact-tail")
+    helper = b"""import hashlib,json,struct,sys
+n=struct.unpack('!Q',sys.stdin.buffer.read(8))[0]; payload=sys.stdin.buffer.read(n); tail=sys.stdin.buffer.read()
+q=json.loads(payload); print(json.dumps({'request':hashlib.sha256(payload).hexdigest(),'tail':hashlib.sha256(tail).hexdigest(),'commit':q['source_commit']},sort_keys=True,separators=(',',':')))
+"""
+    req = request(archive, helper)
+    bound = {**req, "tool_sha256": TOOLS, "tool_paths": TOOL_PATHS}
+    wire = module.packet(helper, bound, archive)
+    completed = subprocess.run([__import__("sys").executable, "-I", "-c", module.BOOTSTRAP], input=wire, capture_output=True, check=False)
+    assert completed.returncode == 0
+    marker = json.loads(completed.stdout)
+    payload = json.dumps(bound, sort_keys=True, separators=(",", ":")).encode()
+    assert marker == {
+        "request": hashlib.sha256(payload).hexdigest(),
+        "tail": hashlib.sha256(b"exact-tail").hexdigest(),
+        "commit": req["source_commit"],
+    }
