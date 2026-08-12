@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,6 +51,30 @@ def _authority_literal(authority: helper.ToolAuthority = LOCAL_TOOL_AUTHORITY) -
             "mode": authority.mode,
             "require_nix_store": authority.require_nix_store,
             "forbid_owner_write": authority.forbid_owner_write,
+        }
+    )
+
+
+def _a2_authority_literal(authority: helper.A2Authority) -> str:
+    return repr(
+        {
+            "a1_prerequisite_receipt_sha256": authority.a1_prerequisite_receipt_sha256,
+            "a2_prerequisite_receipt_sha256": authority.a2_prerequisite_receipt_sha256,
+            "nix_path": authority.nix_path,
+            "nix_sha256": authority.nix_sha256,
+            "nix_store_path": authority.nix_store_path,
+            "nix_store_sha256": authority.nix_store_sha256,
+            "systemd_analyze_path": authority.systemd_analyze_path,
+            "systemd_analyze_sha256": authority.systemd_analyze_sha256,
+            "input_path": authority.input_path,
+            "input_nar_sha256": authority.input_nar_sha256,
+            "store_root": authority.store_root,
+            "owner_uid": authority.owner_uid,
+            "mode": authority.mode,
+            "require_nix_store": authority.require_nix_store,
+            "allow_mutable_parents": authority.allow_mutable_parents,
+            "held_input_path": authority.held_input_path,
+            "derivation_store_root": authority.derivation_store_root,
         }
     )
 
@@ -206,8 +231,17 @@ def _run_bootstrap(
     *,
     env: dict[str, str] | None = None,
     tool_authority: helper.ToolAuthority | None = LOCAL_TOOL_AUTHORITY,
+    a2_authority: helper.A2Authority | None = None,
+    scratch_root: Path | None = None,
+    cleanup_failure: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
     preamble = "" if tool_authority is None else "_TEST_ONLY_TOOL_AUTHORITY=" + _authority_literal(tool_authority) + "\n"
+    if a2_authority is not None:
+        preamble += "_TEST_ONLY_A2_AUTHORITY=" + _a2_authority_literal(a2_authority) + "\n"
+    if scratch_root is not None:
+        preamble += "_TEST_ONLY_SCRATCH_ROOT=" + repr(str(scratch_root)) + "\n"
+    if cleanup_failure:
+        preamble += "def fail_cleanup(*args,**kwargs): raise OSError('injected cleanup failure')\n_TEST_ONLY_CLEANUP_TREE=fail_cleanup\n"
     return subprocess.run(
         [sys.executable, "-I", "-c", preamble + helper.BOOTSTRAP],
         input=wire,
@@ -242,28 +276,327 @@ def _raw_wire(helper_source, request, tool_descriptor, archive):
     return prefix + helper_source + request_raw + tool_raw + archive_raw
 
 
-def test_actual_subprocess_frame_verifies_source_then_holds_before_executor(source_case):
+def _write_executable(path: Path, source: str) -> None:
+    path.write_text(source)
+    path.chmod(0o555)
+
+
+def _make_a2_case(tmp_path: Path, *, mode: str = "success") -> dict[str, object]:
+    store = tmp_path / "store"
+    tools = tmp_path / "held-tools"
+    store.mkdir()
+    tools.mkdir()
+    held_input_path = store / "11111111111111111111111111111111-source"
+    input_path = "/nix/store/11111111111111111111111111111111-source"
+    output_path = store / "22222222222222222222222222222222-render"
+    drv = "/nix/store/33333333333333333333333333333333-render.drv"
+    held_input_path.mkdir()
+    output_path.mkdir()
+    for name in OUTPUTS[:-1]:
+        path = output_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((name + "\n").encode())
+    metadata_files = [
+        {"path": name, "sha256": _digest((output_path / name).read_bytes())}
+        for name in OUTPUTS[:-1]
+    ]
+    (output_path / "verifier-metadata.json").write_bytes(
+        canonical(
+            {
+                "schema": "tgw-nix-input-observer-render/v1",
+                "system": "x86_64-linux",
+                "descriptor_status": "NON_DEPLOYABLE_RENDER_FIXTURE",
+                "activation": False,
+                "units": list(OUTPUTS[9:12]),
+                "files": metadata_files,
+            }
+        )
+    )
+    input_nar = "a" * 64
+    output_nar = "b" * 64
+    nix = tools / "nix"
+    nix_store = tools / "nix-store"
+    systemd_analyze = tools / "systemd-analyze"
+    call_log = tmp_path / "tool-calls.jsonl"
+    nix_failure = mode == "nix-failure"
+    lock_write = mode == "lock-write"
+    output_flood = mode == "output-flood"
+    _write_executable(
+        nix,
+        "#!/usr/bin/python3\n"
+        "import json,os,sys\n"
+        f"INPUT={input_path!r}\nOUT={str(output_path)!r}\nDRV={drv!r}\nLOG={str(call_log)!r}\n"
+        f"INPUT_NAR={input_nar!r}\nOUT_NAR={output_nar!r}\nFAIL_BUILD={nix_failure!r}\n"
+        f"LOCK_WRITE={lock_write!r}\nOUTPUT_FLOOD={output_flood!r}\n"
+        "a=sys.argv[1:]\n"
+        "with open(LOG,'a') as f: f.write(json.dumps("
+        "{'tool':'nix','argv':a,'nix_remote':os.environ.get('NIX_REMOTE'),"
+        "'nix_config':os.environ.get('NIX_CONFIG'),'path':os.environ.get('PATH')})+'\\n')\n"
+        "if OUTPUT_FLOOD and 'flake' in a: sys.stdout.write('x'*(1024*1024+1)); raise SystemExit()\n"
+        "if 'flake' in a and 'metadata' in a:\n"
+        " print(json.dumps({'locks':{'nodes':"
+        "{'root':{'inputs':{'nixpkgs':'nixpkgs'}},"
+        "'nixpkgs':{'locked':"
+        "{'rev':'ac62194c3917d5f474c1a844b6fd6da2db95077d',"
+        "'narHash':'sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w='}}}}}))\n"
+        "elif 'eval' in a and a[-1].endswith('inputIdentities.nixpkgs.outPath'): print(INPUT,end='')\n"
+        "elif 'eval' in a and a[-1].endswith('.drvPath'): print(DRV,end='')\n"
+        "elif 'derivation' in a and 'show' in a: print(json.dumps({DRV:{'outputs':{'out':{'path':OUT}}}}))\n"
+        "elif 'build' in a:\n"
+        "  if FAIL_BUILD: print('bounded nix failure',file=sys.stderr); raise SystemExit(9)\n"
+        "  if LOCK_WRITE:\n"
+        "   with open('flake.lock','a') as f: f.write('mutated')\n"
+        "  print(OUT)\n"
+        "elif 'hash' in a and 'path' in a: print(INPUT_NAR if a[-1]==INPUT else OUT_NAR)\n"
+        "else: print('unexpected nix argv',a,file=sys.stderr); raise SystemExit(8)\n",
+    )
+    _write_executable(
+        nix_store,
+        "#!/usr/bin/python3\n"
+        "import json,os,sys\n"
+        f"INPUT={input_path!r}\nOUT={str(output_path)!r}\nLOG={str(call_log)!r}\n"
+        "a=sys.argv[1:]\n"
+        "with open(LOG,'a') as f: f.write(json.dumps({'tool':'nix-store','argv':a,'nix_remote':os.environ.get('NIX_REMOTE'),'path':os.environ.get('PATH')})+'\\n')\n"
+        "if '--references' in a and a[-1]==INPUT: pass\n"
+        "elif '--requisites' in a and a[-1]==OUT: print(OUT)\n"
+        "else: print('unexpected nix-store argv',a,file=sys.stderr); raise SystemExit(8)\n",
+    )
+    version_stdout = b"systemd 257 (257.10)\nfeatures\n"
+    verifier_failure = mode == "verifier-failure"
+    _write_executable(
+        systemd_analyze,
+        "#!/usr/bin/python3\n"
+        "import json,os,sys\n"
+        f"VERSION={version_stdout!r}\nFAIL_VERIFY={verifier_failure!r}\nLOG={str(call_log)!r}\n"
+        "a=sys.argv[1:]\n"
+        "with open(LOG,'a') as f: f.write(json.dumps({'tool':'systemd-analyze','argv':a,'nix_remote':os.environ.get('NIX_REMOTE'),'path':os.environ.get('PATH')})+'\\n')\n"
+        "if a==['--version']: sys.stdout.buffer.write(VERSION)\n"
+        "elif a and a[0]=='verify':\n"
+        "  if FAIL_VERIFY: print('bounded verifier failure',file=sys.stderr); raise SystemExit(7)\n"
+        "elif True: print('unexpected verifier argv',a,file=sys.stderr); raise SystemExit(8)\n",
+    )
+
+    files = _source_files()
+    files["src/tgw/nix_observer_render_evaluation.py"] = Path("src/tgw/nix_observer_render_evaluation.py").read_bytes()
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_source(source, files)
+    tree = _tree_hash(source)
+    archive = tmp_path / "source.tar"
+    _archive(archive, files, commit="b" * 40)
+    request = _request(files, archive, tree=tree)
+    request.update(
+        {
+            "host_identity_receipt_sha256": helper.AUTHORIZED_RENDER_RECEIPT_SHA256,
+            "systemd_analyze_sha256": _digest(systemd_analyze.read_bytes()),
+            "systemd_analyze_version_stdout_sha256": _digest(version_stdout),
+            "systemd_analyze_version_stdout_bytes": len(version_stdout),
+            "input_closure_manifest": [
+                {
+                    "node": "nixpkgs",
+                    "rev": "ac62194c3917d5f474c1a844b6fd6da2db95077d",
+                    "lock_nar_hash": "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w=",
+                    "store_path": input_path,
+                    "nar_sha256": "sha256:" + input_nar,
+                }
+            ],
+        }
+    )
+    request["input_closure_manifest_sha256"] = _digest(canonical(request["input_closure_manifest"]))
+    request.pop("request_sha256")
+    request["request_sha256"] = _digest(canonical(request))
+    authority = helper.A2Authority(
+        a1_prerequisite_receipt_sha256=LOCAL_TOOL_AUTHORITY.authority_receipt_sha256,
+        a2_prerequisite_receipt_sha256=helper.AUTHORIZED_RENDER_RECEIPT_SHA256,
+        nix_path=str(nix),
+        nix_sha256=_digest(nix.read_bytes()),
+        nix_store_path=str(nix_store),
+        nix_store_sha256=_digest(nix_store.read_bytes()),
+        systemd_analyze_path=str(systemd_analyze),
+        systemd_analyze_sha256=_digest(systemd_analyze.read_bytes()),
+        input_path=input_path,
+        input_nar_sha256="sha256:" + input_nar,
+        store_root=str(store),
+        owner_uid=os.getuid(),
+        mode=0o555,
+        require_nix_store=False,
+        allow_mutable_parents=True,
+        held_input_path=str(held_input_path),
+    )
+    helper_source = Path(helper.__file__).read_bytes()
+    tool_descriptor = helper.describe_tool(request, _test_tool_authority=LOCAL_TOOL_AUTHORITY)
+    wire = helper.packet(
+        helper_source,
+        request,
+        archive,
+        tool_descriptor=tool_descriptor,
+        _test_tool_authority=LOCAL_TOOL_AUTHORITY,
+    )
+    return {
+        "request": request,
+        "authority": authority,
+        "tool_descriptor": tool_descriptor,
+        "wire": wire,
+        "binding": helper.parse_prefix(wire[: helper.PREFIX.size]),
+        "scratch": tmp_path / "scratch",
+        "output": output_path,
+        "call_log": call_log,
+    }
+
+
+def test_actual_subprocess_frame_does_not_accept_ambient_executor(source_case):
     _, _, request, _, wire, binding, tool_descriptor = source_case
     completed = _run_bootstrap(wire, env={**os.environ, "TGW_NIX_RENDER_EXECUTOR": "ambient-command"})
     receipt = json.loads(completed.stdout)
-    assert completed.returncode == 3
+    assert completed.returncode == 1
+    assert receipt["schema"] == helper.A2_FAILURE_SCHEMA
+    assert receipt["outcome"] == "FAILED"
+    assert receipt["request_sha256"] == request["request_sha256"] == binding.request_sha256
+    assert receipt["cleanup"] == "removed"
+    assert receipt["effects"] == helper._a2_effects(False)
+    assert "marker" not in receipt
+
+
+def test_actual_framed_helper_subprocess_executes_offline_render_and_provider(tmp_path):
+    case = _make_a2_case(tmp_path)
+    completed = _run_bootstrap(
+        case["wire"],
+        a2_authority=case["authority"],
+        scratch_root=case["scratch"],
+    )
+    assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+    receipt = json.loads(completed.stdout)
     assert (
-        helper.validate_terminal(
+        helper.validate_a2_terminal(
             receipt,
-            binding=binding,
-            request=request,
-            tool_descriptor=tool_descriptor,
-            _test_tool_authority=LOCAL_TOOL_AUTHORITY,
+            binding=case["binding"],
+            request=case["request"],
+            tool_descriptor=case["tool_descriptor"],
+            authority=case["authority"],
         )
         == receipt
     )
-    assert receipt["schema"] == helper.HOLD_SCHEMA
-    assert receipt["outcome"] == helper.HOLD_OUTCOME
-    assert receipt["request_sha256"] == request["request_sha256"] == binding.request_sha256
-    assert receipt["executor"] == {"installed": False, "reachable_from_request": False, "reachable_from_environment": False}
-    assert receipt["cleanup"] == "removed"
-    assert receipt["effects"] == helper.EFFECTS
-    assert set(receipt["verified_source_files"]) == set(helper.SOURCE_DIGEST_PATHS.values())
+    assert receipt["schema"] == helper.SUCCESS_SCHEMA
+    assert receipt["provider_receipt"]["metadata_status"] == "NON_DEPLOYABLE_RENDER_FIXTURE"
+    assert [item["path"] for item in receipt["provider_receipt"]["files"]] == list(OUTPUTS)
+    assert receipt["provider_receipt"]["systemd_verify"]["exit_code"] == 0
+    assert receipt["closure_path_count"] == 1
+    assert receipt["effects"] == helper._a2_effects(True)
+    assert not case["scratch"].exists()
+    calls = [json.loads(line) for line in case["call_log"].read_text().splitlines()]
+    nix_calls = [call for call in calls if call["tool"] == "nix"]
+    assert nix_calls and all(call["nix_remote"] == "local" and call["path"] == "/no-ambient-path" for call in calls)
+    policy_calls = [call for call in nix_calls if "--offline" in call["argv"]]
+    assert all(
+        call["argv"][:4] == ["--offline", "--option", "substituters", ""]
+        and ["--option", "trusted-public-keys", ""] == call["argv"][4:7]
+        and ["--option", "allow-import-from-derivation", "false"] == call["argv"][7:10]
+        and "--no-write-lock-file" in call["argv"]
+        for call in policy_calls
+    )
+    assert policy_calls
+    build_calls = [call["argv"] for call in nix_calls if "build" in call["argv"]]
+    assert len(build_calls) == 1
+    assert build_calls[0][-4:] == [
+        "build",
+        "--no-link",
+        "--print-out-paths",
+        "/nix/store/33333333333333333333333333333333-render.drv^out",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mode", "stage"),
+    [
+        ("nix-failure", "a2-build"),
+        ("verifier-failure", "provider"),
+        ("lock-write", "a2-verified"),
+        ("output-flood", "a2-input"),
+    ],
+)
+def test_actual_framed_helper_subprocess_emits_closed_a2_failures(tmp_path, mode, stage):
+    case = _make_a2_case(tmp_path, mode=mode)
+    completed = _run_bootstrap(
+        case["wire"],
+        a2_authority=case["authority"],
+        scratch_root=case["scratch"],
+    )
+    assert completed.returncode == 1
+    receipt = json.loads(completed.stdout)
+    assert (
+        helper.validate_a2_terminal(
+            receipt,
+            binding=case["binding"],
+            request=case["request"],
+            tool_descriptor=case["tool_descriptor"],
+            authority=case["authority"],
+        )
+        == receipt
+    )
+    assert receipt["schema"] == helper.A2_FAILURE_SCHEMA
+    assert receipt["stage"] == stage
+    assert receipt["effects"]["network"] is False
+    assert not case["scratch"].exists()
+
+
+def test_actual_framed_helper_cleanup_failure_overrides_a2_success(tmp_path):
+    case = _make_a2_case(tmp_path)
+    completed = _run_bootstrap(
+        case["wire"],
+        a2_authority=case["authority"],
+        scratch_root=case["scratch"],
+        cleanup_failure=True,
+    )
+    assert completed.returncode == 2
+    receipt = json.loads(completed.stdout)
+    assert (
+        helper.validate_a2_terminal(
+            receipt,
+            binding=case["binding"],
+            request=case["request"],
+            tool_descriptor=case["tool_descriptor"],
+            authority=case["authority"],
+        )
+        == receipt
+    )
+    assert receipt["outcome"] == "AMBIGUOUS"
+    assert receipt["original_stage"] == "a2-verified"
+    assert receipt["cleanup"] == "failed"
+    shutil.rmtree(case["scratch"])
+
+
+@pytest.mark.parametrize("mutation", ["provider-content", "provider-hash", "closure", "prerequisite"])
+def test_nested_a2_success_mutations_are_rejected(tmp_path, mutation):
+    case = _make_a2_case(tmp_path)
+    completed = _run_bootstrap(
+        case["wire"],
+        a2_authority=case["authority"],
+        scratch_root=case["scratch"],
+    )
+    receipt = json.loads(completed.stdout)
+    changed = deepcopy(receipt)
+    if mutation == "provider-content":
+        changed["provider_receipt"]["files"][0]["size"] += 1
+        inner = dict(changed["provider_receipt"])
+        inner.pop("receipt_sha256")
+        changed["provider_receipt"]["receipt_sha256"] = _digest(canonical(inner))
+        changed["provider_receipt_sha256"] = changed["provider_receipt"]["receipt_sha256"]
+    elif mutation == "provider-hash":
+        changed["provider_receipt_sha256"] = "sha256:" + "0" * 64
+    elif mutation == "closure":
+        changed["closure_manifest"][0]["nar_sha256"] = "sha256:" + "0" * 64
+    else:
+        changed["a2_prerequisite_receipt_sha256"] = "sha256:" + "0" * 64
+    changed.pop("receipt_sha256")
+    changed["receipt_sha256"] = _digest(canonical(changed))
+    with pytest.raises(helper.RenderHelperError):
+        helper.validate_a2_terminal(
+            changed,
+            binding=case["binding"],
+            request=case["request"],
+            tool_descriptor=case["tool_descriptor"],
+            authority=case["authority"],
+        )
 
 
 def test_fixed_prefix_binds_all_exact_lengths_and_hashes(source_case):
@@ -348,8 +681,8 @@ def test_resolved_regular_tool_descriptor_works_and_symlink_is_rejected(tmp_path
     _, _, request, _, wire, _, tool_descriptor = source_case
     assert tool_descriptor["path"] == "/usr/bin/git"
     completed = _run_bootstrap(wire)
-    assert completed.returncode == 3
-    assert json.loads(completed.stdout)["outcome"] == helper.HOLD_OUTCOME
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["stage"] == "a2-tool"
 
     symlink = tmp_path / "git-link"
     symlink.symlink_to("/usr/bin/git")
@@ -415,6 +748,31 @@ def test_production_git_authority_matches_frozen_self_hashed_receipt():
         "sha256": helper.AUTHORIZED_GIT_SHA256,
         "version": "git version 2.50.1",
     }
+
+
+def test_production_a2_authority_cross_binds_both_frozen_prerequisite_receipts():
+    a1 = json.loads(Path("agent-services/receipts/tgw-prod-nix-observer-prerequisites-20260812.json").read_bytes())
+    claimed_a1 = a1.pop("self_hash")
+    assert claimed_a1 == _digest(canonical(a1)) == helper.AUTHORIZED_TOOL_RECEIPT_SHA256
+    assert a1["tools"]["nix"] == {
+        "path": helper.AUTHORIZED_NIX_PATH,
+        "sha256": helper.AUTHORIZED_NIX_SHA256,
+        "version": "nix (Nix) 2.28.5",
+    }
+    assert a1["tools"]["nix_store"] == {
+        "path": helper.AUTHORIZED_NIX_STORE_PATH,
+        "sha256": helper.AUTHORIZED_NIX_STORE_SHA256,
+        "version": "nix-store (Nix) 2.28.5",
+    }
+    a2 = json.loads(Path("agent-services/receipts/tgw-prod-observer-render-prerequisites-20260812.json").read_bytes())
+    claimed_a2 = a2.pop("receipt_sha256")
+    assert claimed_a2 == _digest(canonical(a2)) == helper.AUTHORIZED_RENDER_RECEIPT_SHA256
+    assert a2["nixpkgs_input"]["store_path"] == helper.AUTHORIZED_INPUT_PATH
+    assert a2["nixpkgs_input"]["nar_sha256"] == helper.AUTHORIZED_INPUT_NAR_SHA256
+    assert a2["systemd_analyze"]["path"] == helper.AUTHORIZED_SYSTEMD_ANALYZE_PATH
+    assert a2["systemd_analyze"]["executable_sha256"] == helper.AUTHORIZED_SYSTEMD_ANALYZE_SHA256
+    assert helper.PRODUCTION_A2_AUTHORITY.a1_prerequisite_receipt_sha256 == claimed_a1
+    assert helper.PRODUCTION_A2_AUTHORITY.a2_prerequisite_receipt_sha256 == claimed_a2
 
 
 def _assert_tool_refused_before_subprocess(
@@ -601,6 +959,7 @@ def test_malformed_archive_fails_closed_after_verified_cleanup(tmp_path, source_
         tool_descriptor=tool_descriptor,
         _test_tool_authority=LOCAL_TOOL_AUTHORITY,
     )
+    binding = helper.parse_prefix(wire[: helper.PREFIX.size])
     completed = _run_bootstrap(wire)
     receipt = json.loads(completed.stdout)
     assert completed.returncode == 1
@@ -708,6 +1067,7 @@ def test_cleanup_failure_overrides_verified_source_and_never_emits_hold(tmp_path
         binding=binding,
         scratch_root=tmp_path / "scratch",
         cleanup_tree=fail_cleanup,
+        _test_executor=lambda *_: "source-only-cleanup-test",
         _test_tool_authority=LOCAL_TOOL_AUTHORITY,
     )
     assert receipt["schema"] == helper.FAILURE_SCHEMA
@@ -824,21 +1184,12 @@ def test_archive_content_cannot_activate_test_executor(tmp_path):
         tool_descriptor=tool_descriptor,
         _test_tool_authority=LOCAL_TOOL_AUTHORITY,
     )
-    binding = helper.parse_prefix(wire[: helper.PREFIX.size])
     completed = _run_bootstrap(wire)
     receipt = json.loads(completed.stdout)
-    assert completed.returncode == 3
-    assert (
-        helper.validate_terminal(
-            receipt,
-            binding=binding,
-            request=request,
-            tool_descriptor=tool_descriptor,
-            _test_tool_authority=LOCAL_TOOL_AUTHORITY,
-        )
-        == receipt
-    )
-    assert receipt["outcome"] == helper.HOLD_OUTCOME
+    assert completed.returncode == 1
+    assert receipt["schema"] == helper.A2_FAILURE_SCHEMA
+    assert receipt["stage"] == "a2-tool"
+    assert "marker" not in receipt
 
 
 def test_environment_and_module_globals_cannot_activate_normal_production_main(source_case, monkeypatch):
@@ -914,10 +1265,15 @@ def test_archive_member_and_unpacked_bounds_are_enforced(tmp_path, source_case, 
     )
 
 
-def test_source_helper_contains_no_nix_or_transport_executor():
+def test_source_helper_contains_no_transport_or_ambient_executor():
     source = Path(helper.__file__).read_text()
-    assert "nix eval" not in source
-    assert "nix build" not in source
     assert "ssh" not in source.lower()
     assert "TGW_NIX_RENDER_EXECUTOR" not in source
+    assert '"NIX_REMOTE": "local"' in source
+    assert '"--offline"' in source
+    assert '"substituters"' in source
+    assert '"trusted-public-keys"' in source
+    assert '"allow-import-from-derivation"' in source
+    assert '"--no-write-lock-file"' in source
+    assert 'drv + "^out"' in source
     assert shutil.which("git") is not None

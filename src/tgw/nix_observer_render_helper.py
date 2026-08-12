@@ -1,7 +1,8 @@
-"""Standalone Phase-A1 source verifier for observer render evaluation.
+"""Standalone, source-bound observer render evaluator.
 
-The production entry point intentionally stops after verifying the immutable
-source.  Nix evaluation is an A2 concern and is not reachable from this file.
+Phase A1 verifies the immutable source and its admitted Git artifact.  Only
+that verified boundary can enter Phase A2, which performs one offline render
+and delegates final artifact inspection to the source-bound provider.
 """
 
 from __future__ import annotations
@@ -11,14 +12,18 @@ import json
 import os
 import re
 import secrets
+import selectors
 import shutil
+import signal
 import stat
 import struct
 import subprocess
 import sys
 import tarfile
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
@@ -41,6 +46,8 @@ FAILURE_SCHEMA = "tgw-nix-observer-render-helper-failure/v1"
 HOLD_SCHEMA = "tgw-nix-observer-render-source-hold/v1"
 TEST_MARKER_SCHEMA = "tgw-nix-observer-render-test-marker/v1"
 TOOL_DESCRIPTOR_SCHEMA = "tgw-nix-observer-render-source-tool/v2"
+SUCCESS_SCHEMA = "tgw-nix-observer-render-helper-success/v1"
+A2_FAILURE_SCHEMA = "tgw-nix-observer-render-helper-a2-failure/v1"
 HOLD_OUTCOME = "SOURCE_VERIFIED_NO_EXECUTOR"
 
 # The prerequisite receipt authorizes this resolved Nix-store Git artifact.
@@ -52,6 +59,33 @@ AUTHORIZED_GIT_SHA256 = "sha256:7caeec432b21191b6227a0150dedcf4b5503d6a4819d8ef7
 AUTHORIZED_GIT_BYTES = 4_373_016
 AUTHORIZED_GIT_OWNER_UID = 0
 AUTHORIZED_GIT_MODE = 0o555
+
+# Cross-bound, immutable Phase-A2 host prerequisites.  The first receipt
+# admits the Nix executables; the second admits the exact input NAR and full
+# systemd-analyze identity/version evidence used by the request.
+AUTHORIZED_RENDER_RECEIPT_SHA256 = "sha256:820e95594e9825d6b10bd8d0dcbf9ba8d0dd3e3656132333351fd3121fce01ad"
+AUTHORIZED_NIX_PATH = "/nix/store/mxafjxh0amr24d2gb7n3km6hljj79qsj-nix-2.28.5/bin/nix"
+AUTHORIZED_NIX_SHA256 = "sha256:8fadf78aa447b028410e9840f1f971a860bfdcf02a9205d9282455f21f21221b"
+# The prerequisite deliberately records the same multi-call artifact for
+# nix-store.  It is invoked with an explicit nix-store argv[0].
+AUTHORIZED_NIX_STORE_PATH = AUTHORIZED_NIX_PATH
+AUTHORIZED_NIX_STORE_SHA256 = AUTHORIZED_NIX_SHA256
+AUTHORIZED_SYSTEMD_ANALYZE_PATH = "/nix/store/kiplbb6yv7rmjf21hf9ky01b9kmgmnqn-systemd-257.10/bin/systemd-analyze"
+AUTHORIZED_SYSTEMD_ANALYZE_SHA256 = "sha256:28c62cb24a08bebc45ce138078d4b3a3d3f47bcbfea3bf92d9b3dddfcd40bce3"
+AUTHORIZED_INPUT_PATH = "/nix/store/3p306srz83h9z9v0ma9xcxb8y8cdxkxj-source"
+AUTHORIZED_INPUT_NAR_SHA256 = "sha256:d7a2a481f758aa369e44605a62c36b84f45110db34ab3910554a28347b68cb6c"
+RENDER_ATTR = "packages.x86_64-linux.nix-input-observer-rendered-artifacts"
+RENDER_EFFECT = {
+    "kind": "offline-nix-observer-render",
+    "target": RENDER_ATTR,
+    "build": True,
+    "activation": False,
+    "deployment": False,
+    "profile_write": False,
+    "home_db_write": False,
+    "live_flake_write": False,
+    "network": False,
+}
 
 OUTPUTS = (
     "etc/nix-input-observer-launcher.conf",
@@ -150,14 +184,28 @@ if tool.get("request_sha256")!=claimed: fail("TOOL_REQUEST_BINDING_MISMATCH",b)
 g={"__name__":"__main__","_BOOTSTRAP_REQUEST_SHA256":"sha256:"+rh.hex(),"_BOOTSTRAP_HELPER_SHA256":"sha256:"+hh.hex(),"_BOOTSTRAP_TOOL_SHA256":"sha256:"+th.hex(),"_BOOTSTRAP_ARCHIVE_SHA256":"sha256:"+ah.hex(),"_BOOTSTRAP_REQUEST_BYTES":rlen,"_BOOTSTRAP_HELPER_BYTES":hlen,"_BOOTSTRAP_TOOL_BYTES":tlen,"_BOOTSTRAP_ARCHIVE_BYTES":alen}
 test_executor=globals().get("_TEST_ONLY_EXECUTOR")
 test_tool_authority=globals().get("_TEST_ONLY_TOOL_AUTHORITY")
-if test_executor is not None or test_tool_authority is not None: g["_BOOTSTRAP_DEFER_MAIN"]=True
+test_a2_authority=globals().get("_TEST_ONLY_A2_AUTHORITY")
+test_cleanup=globals().get("_TEST_ONLY_CLEANUP_TREE")
+test_scratch=globals().get("_TEST_ONLY_SCRATCH_ROOT")
+if test_executor is not None or test_tool_authority is not None or test_a2_authority is not None or test_cleanup is not None or test_scratch is not None: g["_BOOTSTRAP_DEFER_MAIN"]=True
 sys.stdin=io.TextIOWrapper(io.BytesIO(struct.pack("!Q",rlen)+request_raw+struct.pack("!Q",tlen)+tool_raw+archive))
 exec(compile(helper,"<tgw-nix-observer-render-helper>","exec"),g)
-if test_executor is not None or test_tool_authority is not None:
+if test_executor is not None or test_tool_authority is not None or test_a2_authority is not None or test_cleanup is not None or test_scratch is not None:
  if test_tool_authority is not None: test_tool_authority=g["ToolAuthority"](**test_tool_authority)
- value=g["execute_packet"](sys.stdin.buffer,_test_executor=test_executor,_test_tool_authority=test_tool_authority)
+ if test_a2_authority is not None: test_a2_authority=g["A2Authority"](**test_a2_authority)
+ value=g["execute_packet"](
+  sys.stdin.buffer,
+  _test_executor=test_executor,
+  _test_tool_authority=test_tool_authority,
+  _test_a2_authority=test_a2_authority,
+  cleanup_tree=test_cleanup or g["shutil"].rmtree,
+  scratch_root=g["Path"](test_scratch) if test_scratch is not None else g["SCRATCH_ROOT"],
+ )
  sys.stdout.buffer.write(g["canonical"](value))
- code=0 if value.get("schema")=="tgw-nix-observer-render-test-marker/v1" else (3 if value.get("outcome")=="SOURCE_VERIFIED_NO_EXECUTOR" else (2 if value.get("outcome")=="AMBIGUOUS" else 1))
+ if value.get("schema") in {"tgw-nix-observer-render-test-marker/v1","tgw-nix-observer-render-helper-success/v1"}: code=0
+ elif value.get("outcome")=="SOURCE_VERIFIED_NO_EXECUTOR": code=3
+ elif value.get("outcome")=="AMBIGUOUS": code=2
+ else: code=1
  raise SystemExit(code)
 '''
 
@@ -201,6 +249,7 @@ class ToolAuthority:
     mode: int
     require_nix_store: bool = True
     forbid_owner_write: bool = True
+    allow_mutable_parents: bool = False
 
 
 @dataclass(frozen=True)
@@ -223,6 +272,27 @@ class HeldTool:
     component_identities: tuple[ToolPathIdentity, ...]
 
 
+@dataclass(frozen=True)
+class A2Authority:
+    a1_prerequisite_receipt_sha256: str
+    a2_prerequisite_receipt_sha256: str
+    nix_path: str
+    nix_sha256: str
+    nix_store_path: str
+    nix_store_sha256: str
+    systemd_analyze_path: str
+    systemd_analyze_sha256: str
+    input_path: str
+    input_nar_sha256: str
+    store_root: str = "/nix/store"
+    owner_uid: int = 0
+    mode: int = 0o555
+    require_nix_store: bool = True
+    allow_mutable_parents: bool = False
+    held_input_path: str = ""
+    derivation_store_root: str = "/nix/store"
+
+
 PRODUCTION_GIT_AUTHORITY = ToolAuthority(
     authority_receipt_sha256=AUTHORIZED_TOOL_RECEIPT_SHA256,
     path=AUTHORIZED_GIT_PATH,
@@ -230,6 +300,19 @@ PRODUCTION_GIT_AUTHORITY = ToolAuthority(
     bytes=AUTHORIZED_GIT_BYTES,
     owner_uid=AUTHORIZED_GIT_OWNER_UID,
     mode=AUTHORIZED_GIT_MODE,
+)
+
+PRODUCTION_A2_AUTHORITY = A2Authority(
+    a1_prerequisite_receipt_sha256=AUTHORIZED_TOOL_RECEIPT_SHA256,
+    a2_prerequisite_receipt_sha256=AUTHORIZED_RENDER_RECEIPT_SHA256,
+    nix_path=AUTHORIZED_NIX_PATH,
+    nix_sha256=AUTHORIZED_NIX_SHA256,
+    nix_store_path=AUTHORIZED_NIX_STORE_PATH,
+    nix_store_sha256=AUTHORIZED_NIX_STORE_SHA256,
+    systemd_analyze_path=AUTHORIZED_SYSTEMD_ANALYZE_PATH,
+    systemd_analyze_sha256=AUTHORIZED_SYSTEMD_ANALYZE_SHA256,
+    input_path=AUTHORIZED_INPUT_PATH,
+    input_nar_sha256=AUTHORIZED_INPUT_NAR_SHA256,
 )
 
 
@@ -286,13 +369,14 @@ def _validate_tool_component(
     authority: ToolAuthority,
     allow_owner_write: bool = False,
     allow_group_write: bool = False,
+    allow_world_write: bool = False,
     require_sticky: bool = False,
 ) -> None:
     expected_kind = stat.S_ISREG if final else stat.S_ISDIR
-    forbidden_writes = 0o002 | (0 if allow_group_write else 0o020) | (0 if allow_owner_write else 0o200)
+    forbidden_writes = (0 if allow_world_write else 0o002) | (0 if allow_group_write else 0o020) | (0 if allow_owner_write else 0o200)
     if (
         not expected_kind(metadata.st_mode)
-        or metadata.st_uid != authority.owner_uid
+        or ((final or not authority.allow_mutable_parents) and metadata.st_uid != authority.owner_uid)
         or metadata.st_mode & forbidden_writes
         or (require_sticky and not metadata.st_mode & stat.S_ISVTX)
         or (
@@ -313,7 +397,7 @@ def _open_resolved_regular(path: Path, *, authority: ToolAuthority) -> HeldTool:
     if not pure.is_absolute() or pure.as_posix() != raw or any(part in {"", ".", ".."} for part in pure.parts[1:]):
         raise RenderHelperError("tool path is not exact and absolute", stage="tool", diagnostic_code="VALIDATION_REFUSED")
     if authority.require_nix_store and not re.fullmatch(
-        r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+/bin/git", raw
+        r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+/bin/[A-Za-z0-9+._?=-]+", raw
     ):
         raise RenderHelperError("tool path is outside the immutable Nix store", stage="tool", diagnostic_code="VALIDATION_REFUSED")
     directory_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -337,7 +421,8 @@ def _open_resolved_regular(path: Path, *, authority: ToolAuthority) -> HeldTool:
                 final=False,
                 authority=authority,
                 allow_owner_write=not immutable_store_member,
-                allow_group_write=store_root,
+                allow_group_write=store_root or authority.allow_mutable_parents,
+                allow_world_write=authority.allow_mutable_parents,
                 require_sticky=store_root and bool(metadata.st_mode & 0o020),
             )
             component_identities.append(_tool_path_identity(metadata))
@@ -714,12 +799,26 @@ def validate_terminal(
     _test_tool_authority: ToolAuthority | None = None,
     _production_tool_authority: ToolAuthority = PRODUCTION_GIT_AUTHORITY,
 ) -> dict[str, Any]:
-    """Validate a post-bootstrap terminal without treating the A1 hold as success."""
+    """Validate a closed post-bootstrap A1 or A2 terminal."""
     validated = _validate_request(dict(request))
     authority = _production_tool_authority if _test_tool_authority is None else _test_tool_authority
+    a2_authority = PRODUCTION_A2_AUTHORITY
     tool = _validate_tool_descriptor(dict(tool_descriptor), request_sha256=validated["request_sha256"])
     if not isinstance(value, dict) or len(canonical(value)) > 16 * 1024:
-        raise RenderHelperError("helper terminal is absent or oversized", stage="request", diagnostic_code="VALIDATION_REFUSED")
+        if not isinstance(value, dict) or len(canonical(value)) > validated["max_output_bytes"]:
+            raise RenderHelperError("helper terminal is absent or oversized", stage="request", diagnostic_code="VALIDATION_REFUSED")
+    if value.get("schema") in {SUCCESS_SCHEMA, A2_FAILURE_SCHEMA}:
+        if _test_tool_authority is not None:
+            # Test callers which use a non-production A1 identity must supply
+            # their A2 authority through the dedicated validator.
+            raise RenderHelperError("A2 terminal requires explicit A2 authority", stage="request", diagnostic_code="VALIDATION_REFUSED")
+        return validate_a2_terminal(
+            value,
+            binding=binding,
+            request=validated,
+            tool_descriptor=tool,
+            authority=a2_authority,
+        )
     unsigned = dict(value)
     claimed = unsigned.pop("receipt_sha256", None)
     common = {
@@ -807,6 +906,178 @@ def validate_terminal(
             raise RenderHelperError("test marker terminal is invalid", stage="request", diagnostic_code="VALIDATION_REFUSED")
     else:
         raise RenderHelperError("helper terminal schema is unknown", stage="request", diagnostic_code="VALIDATION_REFUSED")
+    return dict(value)
+
+
+def _validate_provider_receipt(value: Any, *, request: Mapping[str, Any], authority: A2Authority) -> dict[str, Any]:
+    fields = {
+        "schema",
+        "request_sha256",
+        "outcome",
+        "metadata_status",
+        "files",
+        "output_root",
+        "evaluated_drv",
+        "drv_output",
+        "output_manifest_sha256",
+        "systemd_verify",
+        "cleanup",
+        "effects",
+        "receipt_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise RenderHelperError("provider receipt schema is not closed", stage="request", diagnostic_code="VALIDATION_REFUSED")
+    unsigned = dict(value)
+    claimed = unsigned.pop("receipt_sha256")
+    files = value["files"]
+    verify = value["systemd_verify"]
+    store_root = Path(authority.store_root)
+    if (
+        claimed != _sha256(canonical(unsigned))
+        or value["schema"] != "tgw-nix-observer-render-evaluation-receipt/v1"
+        or value["request_sha256"] != request["request_sha256"]
+        or value["outcome"] != "VERIFIED"
+        or value["metadata_status"] != "NON_DEPLOYABLE_RENDER_FIXTURE"
+        or value["cleanup"] != "removed"
+        or value["effects"] != _a2_effects(True)
+        or not isinstance(files, list)
+        or [item.get("path") for item in files if isinstance(item, dict)] != list(OUTPUTS)
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"path", "sha256", "size"}
+            or not isinstance(item["sha256"], str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["sha256"])
+            or type(item["size"]) is not int
+            or item["size"] < 0
+            for item in files
+        )
+        or value["output_manifest_sha256"] != _sha256(canonical(files))
+        or not isinstance(value["output_root"], str)
+        or not _store_path(value["output_root"], store_root)
+        or not isinstance(value["evaluated_drv"], str)
+        or not _store_path(value["evaluated_drv"], Path(authority.derivation_store_root), derivation=True)
+        or value["drv_output"] != {"drv": value["evaluated_drv"], "output": value["output_root"]}
+    ):
+        raise RenderHelperError("provider receipt identity is invalid", stage="request", diagnostic_code="IDENTITY_MISMATCH")
+    verify_fields = {
+        "executable_sha256",
+        "version",
+        "argv",
+        "exit_code",
+        "stdout_bytes",
+        "stdout_sha256",
+        "stderr_bytes",
+        "stderr_sha256",
+        "units_sha256",
+        "observed_at",
+        "host_identity_receipt_sha256",
+    }
+    units = files[9:12]
+    if (
+        not isinstance(verify, dict)
+        or set(verify) != verify_fields
+        or verify["executable_sha256"] != request["systemd_analyze_sha256"]
+        or verify["version"] != request["systemd_analyze_version"]
+        or verify["argv"] != ["systemd-analyze", "verify", *OUTPUTS[9:12]]
+        or verify["exit_code"] != 0
+        or verify["host_identity_receipt_sha256"] != authority.a2_prerequisite_receipt_sha256
+        or not isinstance(verify["observed_at"], str)
+        or any(type(verify[key]) is not int or not 0 <= verify[key] <= request["max_output_bytes"] for key in ("stdout_bytes", "stderr_bytes"))
+        or any(not isinstance(verify[key], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", verify[key]) for key in ("stdout_sha256", "stderr_sha256", "units_sha256"))
+        or verify["units_sha256"] != _sha256(canonical(units))
+    ):
+        raise RenderHelperError("provider verifier evidence is invalid", stage="request", diagnostic_code="IDENTITY_MISMATCH")
+    return dict(value)
+
+
+def validate_a2_terminal(
+    value: Any,
+    *,
+    binding: WireBinding,
+    request: Mapping[str, Any],
+    tool_descriptor: Mapping[str, Any],
+    authority: A2Authority = PRODUCTION_A2_AUTHORITY,
+) -> dict[str, Any]:
+    validated = _validate_request(dict(request))
+    tool = _validate_tool_descriptor(dict(tool_descriptor), request_sha256=validated["request_sha256"])
+    if not isinstance(value, dict) or len(canonical(value)) > validated["max_output_bytes"]:
+        raise RenderHelperError("A2 terminal is absent or oversized", stage="request", diagnostic_code="VALIDATION_REFUSED")
+    if tool["authority_receipt_sha256"] != authority.a1_prerequisite_receipt_sha256:
+        raise RenderHelperError("A2 prerequisite composition is invalid", stage="request", diagnostic_code="IDENTITY_MISMATCH")
+    expected_base = _a2_terminal_base(
+        binding,
+        validated,
+        tool_manifest_sha256=_sha256(canonical(_a2_tool_manifest(authority))),
+        effect_sha256=_sha256(canonical(RENDER_EFFECT)),
+        authority=authority,
+    )
+    if any(value.get(key) != expected for key, expected in expected_base.items()):
+        raise RenderHelperError("A2 terminal binding is invalid", stage="request", diagnostic_code="IDENTITY_MISMATCH")
+    unsigned = dict(value)
+    claimed = unsigned.pop("receipt_sha256", None)
+    if claimed != _sha256(canonical(unsigned)):
+        raise RenderHelperError("A2 terminal self-hash is invalid", stage="request", diagnostic_code="IDENTITY_MISMATCH")
+    common = set(expected_base) | {"schema", "outcome", "cleanup", "effects", "receipt_sha256"}
+    if value.get("schema") == SUCCESS_SCHEMA:
+        fields = common | {
+            "provider_receipt_sha256",
+            "closure_manifest",
+            "closure_manifest_sha256",
+            "closure_path_count",
+            "provider_receipt",
+        }
+        provider = _validate_provider_receipt(value.get("provider_receipt"), request=validated, authority=authority)
+        closure = value.get("closure_manifest")
+        if (
+            set(value) != fields
+            or value["outcome"] != "VERIFIED"
+            or value["cleanup"] != "removed"
+            or value["effects"] != _a2_effects(True)
+            or value["provider_receipt_sha256"] != provider["receipt_sha256"]
+            or not isinstance(closure, list)
+            or not 1 <= len(closure) <= 10_000
+            or closure != sorted(closure, key=lambda item: item.get("path", "") if isinstance(item, dict) else "")
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"path", "nar_sha256"}
+                or not isinstance(item["path"], str)
+                or not _store_path(item["path"], Path(authority.store_root))
+                or not isinstance(item["nar_sha256"], str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["nar_sha256"])
+                for item in closure
+            )
+            or len({item["path"] for item in closure}) != len(closure)
+            or provider["output_root"] not in {item["path"] for item in closure}
+            or value["closure_path_count"] != len(closure)
+            or value["closure_manifest_sha256"] != _sha256(canonical(closure))
+        ):
+            raise RenderHelperError("A2 success envelope is invalid", stage="request", diagnostic_code="VALIDATION_REFUSED")
+    elif value.get("schema") == A2_FAILURE_SCHEMA:
+        fields = common | {"stage", "diagnostic_code", "original_stage", "original_diagnostic_code"}
+        stages = {"a2-tool", "a2-input", "a2-eval", "a2-build", "a2-closure", "provider", "a2-verified", "internal"}
+        codes = FAILURE_CODES | {"NONE"}
+        if value["outcome"] == "AMBIGUOUS":
+            lifecycle = (
+                value["stage"] == "cleanup"
+                and value["diagnostic_code"] == "CLEANUP_FAILED"
+                and value["cleanup"] == "failed"
+                and value["original_stage"] in stages
+                and value["original_diagnostic_code"] in codes
+            )
+        else:
+            lifecycle = (
+                value["outcome"] == "FAILED"
+                and value["stage"] == value["original_stage"]
+                and value["diagnostic_code"] == value["original_diagnostic_code"]
+                and value["cleanup"] in {"removed", "not-created"}
+                and value["original_stage"] in stages
+                and value["original_diagnostic_code"] in FAILURE_CODES - {"CLEANUP_FAILED"}
+            )
+        expected_build = value["original_stage"] in {"a2-build", "a2-closure", "provider", "a2-verified"}
+        if set(value) != fields or not lifecycle or value["effects"] != _a2_effects(expected_build):
+            raise RenderHelperError("A2 failure envelope is invalid", stage="request", diagnostic_code="VALIDATION_REFUSED")
+    else:
+        raise RenderHelperError("A2 terminal schema is unknown", stage="request", diagnostic_code="VALIDATION_REFUSED")
     return dict(value)
 
 
@@ -1012,6 +1283,548 @@ def _verify_source(source: Path, *, request: Mapping[str, Any], git_fd: int) -> 
     return verified
 
 
+def _a2_tool_authority(path: str, digest: str, authority: A2Authority) -> ToolAuthority:
+    return ToolAuthority(
+        authority_receipt_sha256=authority.a1_prerequisite_receipt_sha256,
+        path=path,
+        sha256=digest,
+        bytes=1,
+        owner_uid=authority.owner_uid,
+        mode=authority.mode,
+        require_nix_store=authority.require_nix_store,
+        forbid_owner_write=authority.require_nix_store,
+        allow_mutable_parents=authority.allow_mutable_parents,
+    )
+
+
+def _open_a2_executable(name: str, path: str, digest: str, authority: A2Authority) -> tuple[HeldTool, dict[str, Any]]:
+    tool_authority = _a2_tool_authority(path, digest, authority)
+    held = _open_resolved_regular(Path(path), authority=tool_authority)
+    try:
+        raw, identity = _read_held(held.descriptor, stage="a2-tool", max_bytes=64 * 1024 * 1024)
+        if _sha256(raw) != digest:
+            raise RenderHelperError("Phase A2 executable digest mismatch", stage="a2-tool", diagnostic_code="IDENTITY_MISMATCH")
+        return held, {
+            "name": name,
+            "path": path,
+            "sha256": digest,
+            "owner_uid": authority.owner_uid,
+            "mode": f"{authority.mode:04o}",
+        }
+    except BaseException:
+        _close_held_tool(held)
+        raise
+
+
+def _assert_a2_tool_unchanged(held: HeldTool, manifest: Mapping[str, Any], *, allow_mutable_parents: bool = False) -> None:
+    raw, identity = _read_held(held.descriptor, stage="a2-tool", max_bytes=64 * 1024 * 1024)
+    current_tool_identity = _tool_path_identity(os.fstat(held.descriptor))
+    current_components = tuple(_tool_path_identity(os.fstat(fd)) for fd in held.component_descriptors)
+    if (
+        current_tool_identity != held.identity
+        or (not allow_mutable_parents and current_components != held.component_identities)
+        or _sha256(raw) != manifest["sha256"]
+    ):
+        raise RenderHelperError("Phase A2 executable changed while held", stage="a2-tool", diagnostic_code="IDENTITY_MISMATCH")
+
+
+def _fixed_nix_environment(run_path: Path) -> dict[str, str]:
+    home = run_path / "nix-home"
+    home.mkdir(mode=0o700)
+    return {
+        "HOME": str(home),
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PATH": "/no-ambient-path",
+        "NIX_REMOTE": "local",
+        "NIX_CONFIG": (
+            "experimental-features = nix-command flakes\n"
+            "substituters =\n"
+            "trusted-public-keys =\n"
+            "allow-import-from-derivation = false\n"
+            "pure-eval = true\n"
+            "flake-registry =\n"
+            "connect-timeout = 1\n"
+            "fallback = false\n"
+        ),
+    }
+
+
+def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        process.kill()
+    process.wait()
+
+
+def _run_bounded(
+    argv: list[str],
+    *,
+    executable: str,
+    cwd: Path,
+    env: Mapping[str, str],
+    pass_fds: tuple[int, ...],
+    timeout: float,
+    max_output_bytes: int,
+    stage: str,
+    text: bool = False,
+) -> subprocess.CompletedProcess[Any]:
+    """Run one held executable with a hard wall-time and combined-output cap."""
+    if timeout <= 0:
+        raise RenderHelperError("Phase A2 duration exhausted", stage=stage, diagnostic_code="BOUND_EXCEEDED")
+    try:
+        process = subprocess.Popen(
+            argv,
+            executable=executable,
+            cwd=cwd,
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            pass_fds=pass_fds,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise RenderHelperError("Phase A2 subprocess could not start", stage=stage, diagnostic_code="SUBPROCESS_FAILED") from exc
+    assert process.stdout is not None and process.stderr is not None
+    selector = selectors.DefaultSelector()
+    stdout_fd = process.stdout.fileno()
+    stderr_fd = process.stderr.fileno()
+    streams = {stdout_fd: bytearray(), stderr_fd: bytearray()}
+    selector.register(process.stdout, selectors.EVENT_READ)
+    selector.register(process.stderr, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_process(process)
+                raise RenderHelperError("Phase A2 subprocess timed out", stage=stage, diagnostic_code="BOUND_EXCEEDED")
+            for key, _ in selector.select(min(remaining, 0.25)):
+                block = os.read(key.fd, min(64 * 1024, max_output_bytes + 1))
+                if not block:
+                    selector.unregister(key.fileobj)
+                    continue
+                streams[key.fd].extend(block)
+                if sum(len(value) for value in streams.values()) > max_output_bytes:
+                    _terminate_process(process)
+                    raise RenderHelperError("Phase A2 subprocess output exceeded bound", stage=stage, diagnostic_code="BOUND_EXCEEDED")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_process(process)
+            raise RenderHelperError("Phase A2 subprocess timed out", stage=stage, diagnostic_code="BOUND_EXCEEDED")
+        return_code = process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process(process)
+        raise RenderHelperError("Phase A2 subprocess timed out", stage=stage, diagnostic_code="BOUND_EXCEEDED") from exc
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+    stdout = bytes(streams[stdout_fd])
+    stderr = bytes(streams[stderr_fd])
+    if text:
+        try:
+            return subprocess.CompletedProcess(argv, return_code, stdout.decode(), stderr.decode())
+        except UnicodeDecodeError as exc:
+            raise RenderHelperError("Phase A2 subprocess output is not UTF-8", stage=stage, diagnostic_code="VALIDATION_REFUSED") from exc
+    return subprocess.CompletedProcess(argv, return_code, stdout, stderr)
+
+
+def _remaining(deadline: float, requested: float) -> float:
+    return min(requested, max(0.0, deadline - time.monotonic()))
+
+
+def _run_a2(
+    held: HeldTool,
+    label: str,
+    arguments: list[str],
+    *,
+    source: Path,
+    env: Mapping[str, str],
+    deadline: float,
+    request: Mapping[str, Any],
+    stage: str,
+    text: bool = True,
+) -> subprocess.CompletedProcess[Any]:
+    executable = f"/proc/self/fd/{held.descriptor}"
+    return _run_bounded(
+        [label, *arguments],
+        executable=executable,
+        cwd=source,
+        env=env,
+        pass_fds=(held.descriptor,),
+        timeout=_remaining(deadline, request["max_duration_seconds"]),
+        max_output_bytes=request["max_output_bytes"],
+        stage=stage,
+        text=text,
+    )
+
+
+def _require_success(result: subprocess.CompletedProcess[Any], *, stage: str) -> str:
+    if result.returncode != 0:
+        raise RenderHelperError("Phase A2 subprocess failed", stage=stage, diagnostic_code="SUBPROCESS_FAILED")
+    if not isinstance(result.stdout, str):
+        raise RenderHelperError("Phase A2 subprocess result type mismatch", stage=stage, diagnostic_code="VALIDATION_REFUSED")
+    return result.stdout
+
+
+def _store_path(value: str, root: Path, *, derivation: bool = False) -> bool:
+    suffix = r"\.drv" if derivation else ""
+    return bool(re.fullmatch(re.escape(str(root)) + r"/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+" + suffix, value))
+
+
+def _a2_effects(build_attempted: bool) -> dict[str, bool]:
+    return {
+        "build": build_attempted,
+        "activation": False,
+        "deployment": False,
+        "profile_write": False,
+        "home_db_write": False,
+        "live_flake_write": False,
+        "network": False,
+    }
+
+
+def _a2_terminal_base(
+    binding: WireBinding,
+    request: Mapping[str, Any],
+    *,
+    tool_manifest_sha256: str,
+    effect_sha256: str,
+    authority: A2Authority,
+) -> dict[str, Any]:
+    return {
+        "request_sha256": binding.request_sha256,
+        "effect_sha256": effect_sha256,
+        "helper_sha256": binding.helper_sha256,
+        "provider_source_sha256": request["provider_sha256"],
+        "a1_prerequisite_receipt_sha256": authority.a1_prerequisite_receipt_sha256,
+        "a2_prerequisite_receipt_sha256": authority.a2_prerequisite_receipt_sha256,
+        "tool_manifest_sha256": tool_manifest_sha256,
+        "input_manifest_sha256": request["input_closure_manifest_sha256"],
+        "archive_sha256": binding.archive_sha256,
+        "source_commit": request["source_commit"],
+        "source_tree": request["source_tree"],
+    }
+
+
+def _a2_failure(
+    binding: WireBinding,
+    request: Mapping[str, Any],
+    *,
+    original_stage: str,
+    original_code: str,
+    cleanup: str,
+    build_attempted: bool,
+    tool_manifest_sha256: str,
+    authority: A2Authority,
+) -> dict[str, Any]:
+    ambiguous = cleanup == "failed"
+    value = {
+        "schema": A2_FAILURE_SCHEMA,
+        "outcome": "AMBIGUOUS" if ambiguous else "FAILED",
+        "stage": "cleanup" if ambiguous else original_stage,
+        "diagnostic_code": "CLEANUP_FAILED" if ambiguous else original_code,
+        "original_stage": original_stage,
+        "original_diagnostic_code": original_code,
+        "cleanup": cleanup,
+        "effects": _a2_effects(build_attempted),
+        **_a2_terminal_base(
+            binding,
+            request,
+            tool_manifest_sha256=tool_manifest_sha256,
+            effect_sha256=_sha256(canonical(RENDER_EFFECT)),
+            authority=authority,
+        ),
+    }
+    value["receipt_sha256"] = _sha256(canonical(value))
+    return value
+
+
+def _execute_a2_inner(
+    source: Path,
+    request: Mapping[str, Any],
+    binding: WireBinding,
+    run_path: Path,
+    *,
+    authority: A2Authority,
+    held_tools: list[HeldTool],
+    git_fd: int,
+    effect_state: dict[str, bool],
+) -> tuple[dict[str, Any], str]:
+    if (
+        authority.a1_prerequisite_receipt_sha256 != AUTHORIZED_TOOL_RECEIPT_SHA256
+        and authority.require_nix_store
+    ) or request["host_identity_receipt_sha256"] != authority.a2_prerequisite_receipt_sha256:
+        raise RenderHelperError("Phase A2 prerequisite receipt mismatch", stage="a2-tool", diagnostic_code="IDENTITY_MISMATCH")
+    input_entry = request["input_closure_manifest"][0]
+    if input_entry["store_path"] != authority.input_path or input_entry["nar_sha256"] != authority.input_nar_sha256:
+        raise RenderHelperError("Phase A2 input authority mismatch", stage="a2-input", diagnostic_code="IDENTITY_MISMATCH")
+    if request["systemd_analyze_sha256"] != authority.systemd_analyze_sha256:
+        raise RenderHelperError("Phase A2 verifier authority mismatch", stage="a2-tool", diagnostic_code="IDENTITY_MISMATCH")
+
+    manifests: list[dict[str, Any]] = []
+    for name, path, digest in (
+        ("nix", authority.nix_path, authority.nix_sha256),
+        ("nix-store", authority.nix_store_path, authority.nix_store_sha256),
+        ("systemd-analyze", authority.systemd_analyze_path, authority.systemd_analyze_sha256),
+    ):
+        held, manifest = _open_a2_executable(name, path, digest, authority)
+        held_tools.append(held)
+        manifests.append(manifest)
+    tool_manifest = {
+        "schema": "tgw-nix-observer-render-a2-tools/v1",
+        "a1_prerequisite_receipt_sha256": authority.a1_prerequisite_receipt_sha256,
+        "a2_prerequisite_receipt_sha256": authority.a2_prerequisite_receipt_sha256,
+        "tools": manifests,
+    }
+    tool_manifest_sha256 = _sha256(canonical(tool_manifest))
+    nix, nix_store, systemd_analyze = held_tools
+    env = _fixed_nix_environment(run_path)
+    deadline = time.monotonic() + request["max_duration_seconds"]
+    nix_base = [
+        "--offline",
+        "--option",
+        "substituters",
+        "",
+        "--option",
+        "trusted-public-keys",
+        "",
+        "--option",
+        "allow-import-from-derivation",
+        "false",
+        "--option",
+        "pure-eval",
+        "true",
+        "--option",
+        "flake-registry",
+        "",
+        "--no-write-lock-file",
+    ]
+
+    metadata_raw = _require_success(
+        _run_a2(nix, "nix", [*nix_base, "flake", "metadata", "--json", "path:."], source=source, env=env, deadline=deadline, request=request, stage="a2-input"),
+        stage="a2-input",
+    )
+    try:
+        metadata = json.loads(metadata_raw)
+        nodes = metadata["locks"]["nodes"]
+        locked = nodes["nixpkgs"]["locked"]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RenderHelperError("Phase A2 flake metadata is invalid", stage="a2-input", diagnostic_code="VALIDATION_REFUSED") from exc
+    if set(nodes) != {"root", "nixpkgs"} or locked.get("rev") != input_entry["rev"] or locked.get("narHash") != input_entry["lock_nar_hash"]:
+        raise RenderHelperError("Phase A2 lock graph mismatch", stage="a2-input", diagnostic_code="IDENTITY_MISMATCH")
+    input_path = _require_success(
+        _run_a2(nix, "nix", [*nix_base, "eval", "--raw", "path:.#inputIdentities.nixpkgs.outPath"], source=source, env=env, deadline=deadline, request=request, stage="a2-input"),
+        stage="a2-input",
+    ).strip()
+    if input_path != authority.input_path:
+        raise RenderHelperError("Phase A2 resolved input path mismatch", stage="a2-input", diagnostic_code="IDENTITY_MISMATCH")
+    held_input_path = authority.held_input_path or input_path
+    input_fd = os.open(held_input_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    input_identity = _tool_path_identity(os.fstat(input_fd))
+    try:
+        input_nar = _require_success(
+            _run_a2(nix, "nix", [*nix_base, "hash", "path", "--type", "sha256", "--base16", input_path], source=source, env=env, deadline=deadline, request=request, stage="a2-input"),
+            stage="a2-input",
+        ).strip()
+        if "sha256:" + input_nar != authority.input_nar_sha256:
+            raise RenderHelperError("Phase A2 input NAR mismatch", stage="a2-input", diagnostic_code="IDENTITY_MISMATCH")
+        references = _require_success(
+            _run_a2(nix_store, "nix-store", ["--query", "--references", input_path], source=source, env=env, deadline=deadline, request=request, stage="a2-input"),
+            stage="a2-input",
+        )
+        if references.strip() or _tool_path_identity(os.fstat(input_fd)) != input_identity:
+            raise RenderHelperError("Phase A2 input closure is not exact and held", stage="a2-input", diagnostic_code="IDENTITY_MISMATCH")
+    finally:
+        os.close(input_fd)
+
+    target = "path:.#" + RENDER_ATTR
+    drv = _require_success(
+        _run_a2(nix, "nix", [*nix_base, "eval", "--raw", target + ".drvPath"], source=source, env=env, deadline=deadline, request=request, stage="a2-eval"),
+        stage="a2-eval",
+    ).strip()
+    store_root = Path(authority.store_root)
+    if not _store_path(drv, Path(authority.derivation_store_root), derivation=True):
+        raise RenderHelperError("Phase A2 derivation is not an exact singleton", stage="a2-eval", diagnostic_code="VALIDATION_REFUSED")
+    derivation_raw = _require_success(
+        _run_a2(nix, "nix", [*nix_base, "derivation", "show", drv], source=source, env=env, deadline=deadline, request=request, stage="a2-eval"),
+        stage="a2-eval",
+    )
+    try:
+        derivation = json.loads(derivation_raw)
+        outputs = derivation[drv]["outputs"]
+        output_path = outputs["out"]["path"]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RenderHelperError("Phase A2 derivation schema is invalid", stage="a2-eval", diagnostic_code="VALIDATION_REFUSED") from exc
+    if set(derivation) != {drv} or outputs != {"out": {"path": output_path}} or not _store_path(output_path, store_root):
+        raise RenderHelperError("Phase A2 derivation output is not exact", stage="a2-eval", diagnostic_code="IDENTITY_MISMATCH")
+    effect_state["build_attempted"] = True
+    built = _require_success(
+        _run_a2(nix, "nix", [*nix_base, "build", "--no-link", "--print-out-paths", drv + "^out"], source=source, env=env, deadline=deadline, request=request, stage="a2-build"),
+        stage="a2-build",
+    ).strip()
+    if built != output_path:
+        raise RenderHelperError("Phase A2 build output is not the evaluated singleton", stage="a2-build", diagnostic_code="IDENTITY_MISMATCH")
+
+    requisites_raw = _require_success(
+        _run_a2(nix_store, "nix-store", ["--query", "--requisites", output_path], source=source, env=env, deadline=deadline, request=request, stage="a2-closure"),
+        stage="a2-closure",
+    )
+    requisites = sorted(set(requisites_raw.splitlines()))
+    if not requisites or len(requisites) > 10_000 or output_path not in requisites or any(not _store_path(item, store_root) for item in requisites):
+        raise RenderHelperError("Phase A2 closure is incomplete", stage="a2-closure", diagnostic_code="VALIDATION_REFUSED")
+    closure_manifest = []
+    for item in requisites:
+        nar = _require_success(
+            _run_a2(nix, "nix", [*nix_base, "hash", "path", "--type", "sha256", "--base16", item], source=source, env=env, deadline=deadline, request=request, stage="a2-closure"),
+            stage="a2-closure",
+        ).strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", nar):
+            raise RenderHelperError("Phase A2 closure NAR is invalid", stage="a2-closure", diagnostic_code="VALIDATION_REFUSED")
+        closure_manifest.append({"path": item, "nar_sha256": "sha256:" + nar})
+
+    provider_path = source / SOURCE_DIGEST_PATHS["provider_sha256"]
+    provider_fd = os.open(provider_path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        provider_raw, provider_identity = _read_held(provider_fd, stage="provider", max_bytes=1024 * 1024)
+        if _sha256(provider_raw) != request["provider_sha256"]:
+            raise RenderHelperError("Phase A2 provider identity mismatch", stage="provider", diagnostic_code="IDENTITY_MISMATCH")
+        namespace: dict[str, Any] = {"__name__": "tgw.nix_observer_render_evaluation_a2_bound"}
+        exec(compile(provider_raw, "<bound-nix-observer-render-evaluation>", "exec"), namespace)
+        provider_scratch = run_path / "provider-scratch"
+        provider_scratch.mkdir(mode=0o700)
+        namespace["STORE_ROOT"] = store_root
+        namespace["SCRATCH_PARENT"] = provider_scratch
+
+        def provider_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+            executable = argv[0]
+            pass_fds = tuple(kwargs.get("pass_fds", ()))
+            if not re.fullmatch(r"/proc/self/fd/[0-9]+", executable) or int(executable.rsplit("/", 1)[1]) not in pass_fds:
+                raise RenderHelperError("provider requested an unheld executable", stage="provider", diagnostic_code="VALIDATION_REFUSED")
+            return _run_bounded(
+                argv,
+                executable=executable,
+                cwd=Path(kwargs.get("cwd", source)),
+                env=env,
+                pass_fds=pass_fds,
+                timeout=_remaining(deadline, float(kwargs.get("timeout", 60))),
+                max_output_bytes=request["max_output_bytes"],
+                stage="provider",
+                text=bool(kwargs.get("text", False)),
+            )
+
+        try:
+            provider_receipt = namespace["produce_result"](
+                request=request,
+                output_root=Path(output_path),
+                evaluated_drv=drv,
+                nix=Path(authority.nix_path),
+                nix_sha256=authority.nix_sha256,
+                systemd_analyze=Path(authority.systemd_analyze_path),
+                now=datetime.now(timezone.utc),
+                run=provider_run,
+            )
+        except RenderHelperError:
+            raise
+        except BaseException as exc:
+            raise RenderHelperError("bound provider rejected the render", stage="provider", diagnostic_code="SUBPROCESS_FAILED") from exc
+        if _identity(os.fstat(provider_fd)) != provider_identity:
+            raise RenderHelperError("Phase A2 provider changed while held", stage="provider", diagnostic_code="IDENTITY_MISMATCH")
+    finally:
+        os.close(provider_fd)
+    try:
+        for held, manifest in zip(held_tools, manifests, strict=True):
+            _assert_a2_tool_unchanged(held, manifest, allow_mutable_parents=authority.allow_mutable_parents)
+        # `--no-write-lock-file` is enforced at the CLI, and this final complete
+        # tree reconstruction proves that neither Nix nor the provider mutated
+        # any admitted source byte while producing the evidence.
+        _verify_source(source, request=request, git_fd=git_fd)
+    except BaseException as exc:
+        raise RenderHelperError("Phase A2 final identity check failed", stage="a2-verified", diagnostic_code="IDENTITY_MISMATCH") from exc
+    success = {
+        "schema": SUCCESS_SCHEMA,
+        "outcome": "VERIFIED",
+        "provider_receipt_sha256": provider_receipt["receipt_sha256"],
+        "closure_manifest": closure_manifest,
+        "closure_manifest_sha256": _sha256(canonical(closure_manifest)),
+        "closure_path_count": len(closure_manifest),
+        "cleanup": "removed",
+        "effects": _a2_effects(True),
+        "provider_receipt": provider_receipt,
+        **_a2_terminal_base(
+            binding,
+            request,
+            tool_manifest_sha256=tool_manifest_sha256,
+            effect_sha256=_sha256(canonical(RENDER_EFFECT)),
+            authority=authority,
+        ),
+    }
+    success["receipt_sha256"] = _sha256(canonical(success))
+    return success, tool_manifest_sha256
+
+
+def _a2_tool_manifest(authority: A2Authority) -> dict[str, Any]:
+    tools = [
+        {
+            "name": name,
+            "path": path,
+            "sha256": digest,
+            "owner_uid": authority.owner_uid,
+            "mode": f"{authority.mode:04o}",
+        }
+        for name, path, digest in (
+            ("nix", authority.nix_path, authority.nix_sha256),
+            ("nix-store", authority.nix_store_path, authority.nix_store_sha256),
+            ("systemd-analyze", authority.systemd_analyze_path, authority.systemd_analyze_sha256),
+        )
+    ]
+    return {
+        "schema": "tgw-nix-observer-render-a2-tools/v1",
+        "a1_prerequisite_receipt_sha256": authority.a1_prerequisite_receipt_sha256,
+        "a2_prerequisite_receipt_sha256": authority.a2_prerequisite_receipt_sha256,
+        "tools": tools,
+    }
+
+
+def _execute_a2(
+    source: Path,
+    request: Mapping[str, Any],
+    binding: WireBinding,
+    run_path: Path,
+    *,
+    authority: A2Authority,
+    git_fd: int,
+    effect_state: dict[str, bool],
+) -> tuple[dict[str, Any], str]:
+    held_tools: list[HeldTool] = []
+    try:
+        return _execute_a2_inner(
+            source,
+            request,
+            binding,
+            run_path,
+            authority=authority,
+            held_tools=held_tools,
+            git_fd=git_fd,
+            effect_state=effect_state,
+        )
+    except RenderHelperError as exc:
+        if effect_state["build_attempted"] and exc.stage not in {"a2-build", "a2-closure", "provider", "a2-verified"}:
+            raise RenderHelperError("Phase A2 failed after build began", stage="a2-verified", diagnostic_code=exc.diagnostic_code) from exc
+        raise
+    except BaseException as exc:
+        if effect_state["build_attempted"]:
+            raise RenderHelperError("Phase A2 failed after build began", stage="a2-verified", diagnostic_code="INTERNAL_ERROR") from exc
+        raise
+    finally:
+        for held in reversed(held_tools):
+            _close_held_tool(held)
+
+
 def _terminal_base(binding: WireBinding, request: Mapping[str, Any], tool: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "request_sha256": binding.request_sha256,
@@ -1073,11 +1886,14 @@ def execute_packet(
     cleanup_tree: Callable[..., None] = shutil.rmtree,
     _test_executor: Callable[[Path, Mapping[str, Any]], str] | None = None,
     _test_tool_authority: ToolAuthority | None = None,
+    _test_a2_authority: A2Authority | None = None,
     _production_tool_authority: ToolAuthority = PRODUCTION_GIT_AUTHORITY,
+    _production_a2_authority: A2Authority = PRODUCTION_A2_AUTHORITY,
 ) -> dict[str, Any]:
-    """Verify source and return only a post-cleanup failure, hold, or test marker."""
+    """Verify source, execute its one admitted render, then emit post-cleanup."""
     bound = binding or _binding_from_globals()
     authority = _production_tool_authority if _test_tool_authority is None else _test_tool_authority
+    a2_authority = _production_a2_authority if _test_a2_authority is None else _test_a2_authority
     request: dict[str, Any] = {}
     tool: dict[str, Any] = {}
     parent_fd = root_fd = -1
@@ -1088,6 +1904,10 @@ def execute_packet(
     original_code = "INTERNAL_ERROR"
     verified: dict[str, str] | None = None
     marker: str | None = None
+    a2_success: dict[str, Any] | None = None
+    a2_started = False
+    effect_state = {"build_attempted": False}
+    a2_tool_manifest_sha256 = _sha256(canonical(_a2_tool_manifest(a2_authority)))
     failure: BaseException | None = None
     try:
         size_raw = stream.read(8)
@@ -1152,6 +1972,22 @@ def execute_packet(
             marker = _test_executor(source, request)
             if not isinstance(marker, str) or not 1 <= len(marker.encode()) <= 256:
                 raise RenderHelperError("test executor marker is invalid", stage="test-executor", diagnostic_code="VALIDATION_REFUSED")
+        else:
+            a2_started = True
+            if a2_authority.a1_prerequisite_receipt_sha256 != tool["authority_receipt_sha256"]:
+                raise RenderHelperError("Phase A1/A2 prerequisite composition mismatch", stage="a2-tool", diagnostic_code="IDENTITY_MISMATCH")
+            a2_success, observed_tool_manifest_sha256 = _execute_a2(
+                source,
+                request,
+                bound,
+                run_path,
+                authority=a2_authority,
+                git_fd=held_git.descriptor,
+                effect_state=effect_state,
+            )
+            if observed_tool_manifest_sha256 != a2_tool_manifest_sha256:
+                raise RenderHelperError("Phase A2 tool manifest changed", stage="a2-tool", diagnostic_code="IDENTITY_MISMATCH")
+            _assert_bound_tool_unchanged(held_git, tool)
     except BaseException as exc:
         failure = exc
         if isinstance(exc, RenderHelperError):
@@ -1189,10 +2025,34 @@ def execute_packet(
                 except OSError:
                     pass
     if cleanup == "failed":
+        if a2_started:
+            if failure is None:
+                original_stage, original_code = "a2-verified", "NONE"
+            return _a2_failure(
+                bound,
+                request,
+                original_stage=original_stage,
+                original_code=original_code,
+                cleanup=cleanup,
+                build_attempted=effect_state["build_attempted"],
+                tool_manifest_sha256=a2_tool_manifest_sha256,
+                authority=a2_authority,
+            )
         if failure is None:
             original_stage, original_code = "source-verified", "NONE"
         return _failure(bound, request, tool, original_stage=original_stage, original_code=original_code, cleanup=cleanup)
     if failure is not None:
+        if a2_started:
+            return _a2_failure(
+                bound,
+                request,
+                original_stage=original_stage,
+                original_code=original_code,
+                cleanup=cleanup,
+                build_attempted=effect_state["build_attempted"],
+                tool_manifest_sha256=a2_tool_manifest_sha256,
+                authority=a2_authority,
+            )
         return _failure(bound, request, tool, original_stage=original_stage, original_code=original_code, cleanup=cleanup)
     if verified is None:
         return _failure(bound, request, tool, original_stage="internal", original_code="INTERNAL_ERROR", cleanup=cleanup)
@@ -1206,7 +2066,9 @@ def execute_packet(
         }
         value["receipt_sha256"] = _sha256(canonical(value))
         return value
-    return _hold(bound, request, tool, verified)
+    if a2_success is None:
+        return _failure(bound, request, tool, original_stage="internal", original_code="INTERNAL_ERROR", cleanup=cleanup)
+    return a2_success
 
 
 def main(*, input_stream: BinaryIO | None = None, output_stream: BinaryIO | None = None) -> int:
@@ -1220,6 +2082,8 @@ def main(*, input_stream: BinaryIO | None = None, output_stream: BinaryIO | None
         return 70
     sink.write(canonical(value))
     if value["schema"] == TEST_MARKER_SCHEMA:
+        return 0
+    if value["schema"] == SUCCESS_SCHEMA:
         return 0
     if value["outcome"] == HOLD_OUTCOME:
         return 3
