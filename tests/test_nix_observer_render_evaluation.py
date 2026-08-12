@@ -1,8 +1,10 @@
 import hashlib
 import json
+import shutil
 import subprocess
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +27,7 @@ def request():
         "provider_sha256": "sha256:" + "4" * 64,
         "host_identity_receipt_sha256": "sha256:" + "5" * 64,
         "systemd_analyze_sha256": "sha256:" + "6" * 64,
+        "systemd_analyze_version_stdout_sha256": "sha256:" + hashlib.sha256(b"systemd 257 (257.10)\nfeatures\n").hexdigest(),
         "target": "nix-input-observer-rendered-artifacts",
         "system": "x86_64-linux",
         "network_policy": "offline-no-substituters",
@@ -45,6 +48,7 @@ def request():
         ],
         "input_closure_path_count": 1,
         "systemd_analyze_version": "systemd 257 (257.10)",
+        "systemd_analyze_version_stdout_bytes": len(b"systemd 257 (257.10)\nfeatures\n"),
         "max_duration_seconds": 900,
         "max_output_bytes": 16 * 1024 * 1024,
     }
@@ -206,7 +210,7 @@ def provider_case(tmp_path, monkeypatch, *, metadata_mutation=None, run_mutation
         if argv[1:3] == ["derivation", "show"]:
             return subprocess.CompletedProcess(argv, 0, json.dumps({drv: {"outputs": {"out": {"path": out}}}}), "")
         if argv[1:] == ["--version"]:
-            return subprocess.CompletedProcess(argv, 0, b"systemd 257 (257.10)\n", b"")
+            return subprocess.CompletedProcess(argv, 0, b"systemd 257 (257.10)\nfeatures\n", b"")
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
     kwargs = {
@@ -226,7 +230,7 @@ def test_provider_derives_receipt_from_held_files_and_actual_commands(tmp_path, 
     kwargs, calls, scratch, _ = provider_case(tmp_path, monkeypatch)
     receipt = produce_result(**kwargs)
     assert receipt["effects"]["build"] is True
-    assert calls[0][1]["pass_fds"] and len(calls[2][1]["pass_fds"]) == 4
+    assert calls[0][1]["pass_fds"] and len(calls[2][1]["pass_fds"]) == 1
     assert not list(scratch.iterdir())
 
 
@@ -296,6 +300,23 @@ def test_provider_cleanup_uncertainty_overrides_success(tmp_path, monkeypatch):
     assert (next(scratch.iterdir()) / "hostile").exists()
 
 
+def test_provider_rejects_materialized_unit_path_swap(tmp_path, monkeypatch):
+    swapped = False
+
+    def mutate(argv, _kwargs, _scratch, _root, _drv):
+        nonlocal swapped
+        if len(argv) > 1 and argv[1] == "verify" and not swapped:
+            victim = Path(argv[2])
+            victim.unlink()
+            victim.symlink_to("/dev/null")
+            swapped = True
+
+    kwargs, _, scratch, _ = provider_case(tmp_path, monkeypatch, run_mutation=mutate)
+    with pytest.raises(RenderEvaluationError, match="identity changed"):
+        produce_result(**kwargs)
+    assert not list(scratch.iterdir())
+
+
 def test_provider_rejects_untrusted_or_symlink_scratch_parent(tmp_path, monkeypatch):
     from tgw import nix_observer_render_evaluation as module
 
@@ -311,3 +332,24 @@ def test_provider_rejects_untrusted_or_symlink_scratch_parent(tmp_path, monkeypa
     monkeypatch.setattr(module, "SCRATCH_PARENT", scratch)
     with pytest.raises(OSError):
         produce_result(**kwargs)
+
+
+def test_real_systemd_analyze_accepts_canonical_materialized_unit_names(tmp_path):
+    verifier = shutil.which("systemd-analyze")
+    if verifier is None:
+        pytest.skip("systemd-analyze unavailable")
+    units = {
+        OUTPUTS[9]: "[Unit]\nDescription=TGW observer slice\n",
+        OUTPUTS[10]: "[Unit]\nDescription=TGW observer socket\n[Socket]\nListenStream=%t/tgw-observer-test.sock\nAccept=yes\n",
+        OUTPUTS[11]: "[Unit]\nDescription=TGW observer service\n[Service]\nExecStart=/bin/true\n",
+    }
+    paths = []
+    for name, body in units.items():
+        path = tmp_path / name.removeprefix("units/")
+        path.write_text(body)
+        paths.append(str(path))
+    version = subprocess.run([verifier, "--version"], capture_output=True, check=False, timeout=30)
+    assert version.returncode == 0
+    assert len(version.stdout.splitlines()) > 1
+    verified = subprocess.run([verifier, "verify", *paths], capture_output=True, check=False, timeout=30)
+    assert verified.returncode == 0, verified.stderr.decode(errors="replace")

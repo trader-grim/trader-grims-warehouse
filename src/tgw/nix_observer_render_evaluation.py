@@ -42,6 +42,7 @@ DIGEST_FIELDS = {
     "provider_sha256",
     "host_identity_receipt_sha256",
     "systemd_analyze_sha256",
+    "systemd_analyze_version_stdout_sha256",
     "input_closure_manifest_sha256",
 }
 
@@ -74,6 +75,7 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
         "input_closure_manifest",
         "input_closure_path_count",
         "systemd_analyze_version",
+        "systemd_analyze_version_stdout_bytes",
         "max_duration_seconds",
         "max_output_bytes",
         "request_sha256",
@@ -115,6 +117,8 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
         raise RenderEvaluationError("render input closure binding mismatch")
     if request["systemd_analyze_version"] != "systemd 257 (257.10)":
         raise RenderEvaluationError("render verifier version mismatch")
+    if not isinstance(request["systemd_analyze_version_stdout_bytes"], int) or not 1 <= request["systemd_analyze_version_stdout_bytes"] <= 4096:
+        raise RenderEvaluationError("render verifier version evidence bound invalid")
     if not isinstance(request["max_duration_seconds"], int) or not 1 <= request["max_duration_seconds"] <= 900:
         raise RenderEvaluationError("render timeout invalid")
     if not isinstance(request["max_output_bytes"], int) or not 1 <= request["max_output_bytes"] <= 16 * 1024 * 1024:
@@ -248,6 +252,8 @@ def produce_result(
 
     nix_fd = verify_fd = store_fd = output_fd = -1
     file_fds: list[int] = []
+    materialized_units: list[str] = []
+    materialized_fds: list[int] = []
     result: dict[str, object] | None = None
     original_error: BaseException | None = None
     try:
@@ -326,15 +332,50 @@ def produce_result(
         versioned = run([f"/proc/self/fd/{verify_fd}", "--version"], capture_output=True, check=False, timeout=30, close_fds=True, pass_fds=(verify_fd,))
         version_out = versioned.stdout if isinstance(versioned.stdout, bytes) else versioned.stdout.encode()
         version_err = versioned.stderr if isinstance(versioned.stderr, bytes) else versioned.stderr.encode()
-        if versioned.returncode or len(version_out) > 4096 or len(version_err) > 4096 or version_err or version_out != request["systemd_analyze_version"].encode() + b"\n":
+        if (
+            versioned.returncode
+            or len(version_out) != request["systemd_analyze_version_stdout_bytes"]
+            or len(version_err) > 4096
+            or version_err
+            or version_out.splitlines()[:1] != [request["systemd_analyze_version"].encode()]
+            or "sha256:" + hashlib.sha256(version_out).hexdigest() != request["systemd_analyze_version_stdout_sha256"]
+        ):
             raise RenderEvaluationError("render held verifier version mismatch")
         unit_fds = file_fds[9:12]
-        argv = [f"/proc/self/fd/{verify_fd}", "verify", *[f"/proc/self/fd/{fd}" for fd in unit_fds]]
-        verified = run(argv, capture_output=True, check=False, timeout=60, close_fds=True, pass_fds=(verify_fd, *unit_fds))
+        unit_paths = []
+        for name, source_fd in zip(OUTPUTS[9:12], unit_fds, strict=True):
+            basename = name.removeprefix("units/")
+            target_fd = os.open(basename, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=attempt_fd)
+            try:
+                source_stat = os.fstat(source_fd)
+                source = raw_files[name]
+                written = 0
+                while written < len(source):
+                    written += os.write(target_fd, source[written:])
+                os.fsync(target_fd)
+                target_stat = os.fstat(target_fd)
+                if target_stat.st_size != source_stat.st_size:
+                    raise RenderEvaluationError("render materialized unit size mismatch")
+                os.lseek(target_fd, 0, os.SEEK_SET)
+                if os.read(target_fd, len(source) + 1) != source:
+                    raise RenderEvaluationError("render materialized unit content mismatch")
+            except BaseException:
+                os.close(target_fd)
+                raise
+            materialized_fds.append(target_fd)
+            materialized_units.append(basename)
+            unit_paths.append(str(SCRATCH_PARENT / attempt_name / basename))
+        argv = [f"/proc/self/fd/{verify_fd}", "verify", *unit_paths]
+        verified = run(argv, capture_output=True, check=False, timeout=60, close_fds=True, pass_fds=(verify_fd,))
         stdout = verified.stdout if isinstance(verified.stdout, bytes) else verified.stdout.encode()
         stderr = verified.stderr if isinstance(verified.stderr, bytes) else verified.stderr.encode()
         if verified.returncode or max(len(stdout), len(stderr)) > request["max_output_bytes"]:
             raise RenderEvaluationError("render systemd verification failed")
+        for name, held_fd in zip(materialized_units, materialized_fds, strict=True):
+            held_stat = os.fstat(held_fd)
+            path_stat = os.stat(name, dir_fd=attempt_fd, follow_symlinks=False)
+            if (held_stat.st_dev, held_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+                raise RenderEvaluationError("render materialized unit identity changed")
         unit_manifest = files[9:12]
         result = {
             "schema": RESULT_SCHEMA,
@@ -371,6 +412,11 @@ def produce_result(
                 os.close(fd)
         cleanup_error = None
         try:
+            for name in materialized_units:
+                os.unlink(name, dir_fd=attempt_fd)
+            for fd in materialized_fds:
+                os.close(fd)
+            materialized_fds.clear()
             if os.listdir(attempt_fd):
                 raise OSError("attempt directory is not empty")
             os.close(attempt_fd)
@@ -387,6 +433,8 @@ def produce_result(
         finally:
             if attempt_fd >= 0:
                 os.close(attempt_fd)
+            for fd in materialized_fds:
+                os.close(fd)
             os.close(scratch_parent_fd)
         if cleanup_error is not None:
             raise RenderEvaluationError("render scratch cleanup ambiguous") from cleanup_error
