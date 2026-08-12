@@ -1,0 +1,32 @@
+{
+  "schema": "tgw-integrated-candidate-manifest/v1",
+  "source": {
+    "commit": "22aca630fe37175573ab736c384662cdf0503913",
+    "tree": "5a9495152a4978eafb63db75f4b707718e276393",
+    "archive_sha256": "sha256:898570c90df126c29b1441dab90e17a0f5cd8222c323749477ca37780e1d5160",
+    "base_commit": "a1e8a1c8405c38b125e872424e5d45bf22d3d27d"
+  },
+  "plan": {
+    "commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+    "solution_hash": "sha256:e528e15e50e0506cc48563b966754602df53e42ffc4e7e823580385039e90b7c",
+    "closure_hash": "sha256:bc0c53b2574fc359c629bd213e078fdd2824e5e1c4a98c0c7a347de869d9e6f8",
+    "complete": true,
+    "conformance_verified": false,
+    "dispatchable": false
+  },
+  "tests": {
+    "focused_receipt": "agent-services/receipts/W08-focused-tests-22aca63.json",
+    "full_suite": {
+      "command": [".venv/bin/pytest", "-q"],
+      "status": "DEFINED_NOT_RUN"
+    }
+  },
+  "database": {
+    "migration_paths": [],
+    "backup_restore_fixture": "tests/test_candidate_manifest.py::test_database_change_requires_verified_backup_restore"
+  },
+  "candidate_closed": true,
+  "installed": false,
+  "hold": "Luet conformance unavailable; this candidate is not dispatchable or installable",
+  "manifest_hash": "sha256:ec0dc758ca01741ac75a2f89fe5325723cbd7bcbb4aa0dfc9086e523a3ae2d67"
+}

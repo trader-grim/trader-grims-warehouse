@@ -1,0 +1,13 @@
+{
+  "schema": "tgw-candidate-test-receipt/v1",
+  "source_commit": "22aca630fe37175573ab736c384662cdf0503913",
+  "command": [
+    ".venv/bin/pytest", "-q",
+    "tests/test_plan_solver.py", "tests/test_plan_luet.py", "tests/test_plan_catalog.py",
+    "tests/test_plan_runtime_bridge.py", "tests/test_plan_authority.py",
+    "tests/test_effect_handlers.py", "tests/test_release_installer.py",
+    "tests/test_release_controller.py", "tests/test_candidate_manifest.py"
+  ],
+  "result": "61 passed in 1.32s",
+  "status": "passed"
+}
