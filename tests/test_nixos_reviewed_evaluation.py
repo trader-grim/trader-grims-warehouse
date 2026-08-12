@@ -360,6 +360,27 @@ def test_remote_helper_executes_only_fixed_offline_steps_and_cleans_scratch(tmp_
     assert all(["--option", "allow-import-from-derivation", "false"] == call[5:8] and "--no-write-lock-file" in call for call in nix_calls)
     assert not any(word in {"switch", "boot", "test", "profile"} for call in calls for word in call)
     assert set(result["unit_sha256"]) == set(request["unit_set"].split(","))
+    assert any(call[-3:] == ["add", "-f", "-A"] for call in calls)
+
+
+def test_forced_index_reconstructs_tracked_files_hidden_by_ignore_rules(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / ".gitignore").write_text("generated/\n")
+    generated = source / "generated"
+    generated.mkdir()
+    (generated / "tracked.txt").write_text("candidate content")
+    git = ["/usr/bin/git", "-c", "core.hooksPath=/dev/null", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.required=false"]
+    subprocess.run(git + ["init", "-q"], cwd=source, check=True)
+    subprocess.run(git + ["add", "-f", "-A"], cwd=source, check=True)
+    expected = subprocess.check_output(git + ["write-tree"], cwd=source, text=True).strip()
+
+    subprocess.run(git + ["read-tree", "--empty"], cwd=source, check=True)
+    subprocess.run(git + ["add", "-A"], cwd=source, check=True)
+    ignored_tree = subprocess.check_output(git + ["write-tree"], cwd=source, text=True).strip()
+    assert ignored_tree != expected
+    subprocess.run(git + ["add", "-f", "-A"], cwd=source, check=True)
+    assert subprocess.check_output(git + ["write-tree"], cwd=source, text=True).strip() == expected
 
 
 def test_real_main_execute_packet_pre_scratch_failure(tmp_path, monkeypatch):

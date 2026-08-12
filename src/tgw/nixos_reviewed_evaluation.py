@@ -783,7 +783,10 @@ def execute_packet(
         git = [EXECUTABLES["git"], "-c", "core.hooksPath=/dev/null", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.required=false"]
         enter("source-tree")
         run(git + ["init", "-q"], cwd=source, timeout=timeout)
-        run(git + ["add", "-A"], cwd=source, timeout=timeout)
+        # The archive is already bounded and every member was path/type/root
+        # validated.  Force-index all of it so repository ignore rules cannot
+        # hide files that are tracked in the candidate tree.
+        run(git + ["add", "-f", "-A"], cwd=source, timeout=timeout)
         if run(git + ["write-tree"], cwd=source, timeout=timeout).strip() != bound["source_tree"]:
             raise EvaluationError("unpacked source tree mismatch")
         enter("source-digests")
