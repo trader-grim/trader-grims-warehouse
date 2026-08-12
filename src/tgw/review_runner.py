@@ -118,14 +118,24 @@ def _validate_report(
     return report
 
 
-def _sandbox_command(provider_argv: list[str], snapshot: Path) -> list[str]:
+def _sandbox_command(
+    provider_argv: list[str],
+    snapshot: Path,
+    *,
+    network_egress: bool,
+    credential_file: Path | None,
+    tool_root: Path | None,
+) -> list[str]:
     bwrap = shutil.which("bwrap")
     if bwrap is None:
         raise ReviewRunnerError("review sandbox is unavailable")
     executable = Path(provider_argv[0]).resolve()
     if not executable.is_file():
         raise ReviewRunnerError("review provider executable is unavailable")
-    command = [bwrap, "--unshare-all", "--die-with-parent", "--new-session", "--clearenv"]
+    command = [bwrap, "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup"]
+    if not network_egress:
+        command.append("--unshare-net")
+    command.extend(["--die-with-parent", "--new-session", "--clearenv"])
     for system_path in ("/usr", "/bin", "/lib", "/lib64"):
         if Path(system_path).exists():
             command.extend(["--ro-bind", system_path, system_path])
@@ -140,6 +150,17 @@ def _sandbox_command(provider_argv: list[str], snapshot: Path) -> list[str]:
         provider = ["/review-provider", *provider_argv[1:]]
     command.extend(["--setenv", "PATH", "/runtime/bin:/usr/bin:/bin"])
     command.extend(["--setenv", "PYTHONPATH", "/workspace/src"])
+    command.extend(["--setenv", "HOME", "/tmp/home"])
+    command.extend(["--dir", "/tmp/home"])
+    if network_egress:
+        if credential_file is None or not credential_file.is_file():
+            raise ReviewRunnerError("declared network review credential is unavailable")
+        if tool_root is None or not tool_root.is_dir():
+            raise ReviewRunnerError("declared network review tool root is unavailable")
+        command.extend(["--ro-bind", str(credential_file.resolve()), "/credentials/auth.json"])
+        command.extend(["--ro-bind", str(tool_root.resolve()), "/tools"])
+        command.extend(["--setenv", "TGW_CODEX_REVIEW_AUTH", "/credentials/auth.json"])
+        command.extend(["--setenv", "PATH", "/tools/bin:/runtime/bin:/usr/bin:/bin"])
     return [*command, "--", *provider]
 
 
@@ -149,6 +170,9 @@ def run_review(
     *,
     timeout_seconds: float = 300,
     now: datetime | None = None,
+    network_egress: bool = False,
+    credential_file: Path | None = None,
+    tool_root: Path | None = None,
 ) -> dict[str, Any]:
     if handoff.get("schema") != "tgw-launcher-handoff/v1":
         raise ReviewRunnerError("review runner requires a launcher handoff")
@@ -177,10 +201,16 @@ def run_review(
             "handoff_hash": handoff["handoff_hash"],
             "card_hash": card["card_hash"],
             "snapshot_hash": expected_hash,
-            "snapshot_root": str(isolated),
+            "snapshot_root": "/workspace",
             "output_contract": "tgw-code-review/v1",
         }
-        sandboxed = _sandbox_command(provider_argv, isolated)
+        sandboxed = _sandbox_command(
+            provider_argv,
+            isolated,
+            network_egress=network_egress,
+            credential_file=credential_file,
+            tool_root=tool_root,
+        )
         try:
             completed = subprocess.run(
             sandboxed,
@@ -212,10 +242,21 @@ def run_review(
 def main() -> int:
     parser = argparse.ArgumentParser(prog="tgw-review-runner")
     parser.add_argument("--provider-command-json", required=True)
+    parser.add_argument("--timeout-seconds", type=float, default=300)
+    parser.add_argument("--network-egress", action="store_true")
+    parser.add_argument("--credential-file", type=Path)
+    parser.add_argument("--tool-root", type=Path)
     args = parser.parse_args()
     try:
         provider_argv = json.loads(args.provider_command_json)
-        result = run_review(json.load(sys.stdin), provider_argv)
+        result = run_review(
+            json.load(sys.stdin),
+            provider_argv,
+            timeout_seconds=args.timeout_seconds,
+            network_egress=args.network_egress,
+            credential_file=args.credential_file,
+            tool_root=args.tool_root,
+        )
     except (ReviewRunnerError, json.JSONDecodeError, OSError) as exc:
         result = {
             "outcome": "failed",

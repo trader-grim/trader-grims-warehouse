@@ -48,7 +48,11 @@ def test_configuration_materializes_wrapper_only_after_health_pass(tmp_path):
 
     assert configured["status"] == "AVAILABLE"
     assert configured["command"][1:3] == ["-m", "tgw.review_runner"]
-    assert json.loads(configured["command"][-1])[-1] == "tgw.codex_review_backend"
+    command = configured["command"]
+    provider = json.loads(command[command.index("--provider-command-json") + 1])
+    assert provider[-1] == "tgw.codex_review_backend"
+    assert "--network-egress" in command
+    assert configured["isolation"]["environment"].startswith("cleared")
     assert calls[0][0][-1] == "--health"
 
 
