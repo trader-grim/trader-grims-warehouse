@@ -25,8 +25,8 @@
 
 struct config {
   uid_t uid; gid_t gid;
-  char python[4096], ip[4096], observer[4096], cgroup[4096];
-  char launcher_sha256[72], python_sha256[72], ip_sha256[72], observer_sha256[72], request_sha256[72], descriptor_sha256[72], transport_config_sha256[72];
+  char python[4096], ip[4096], observer[4096], nix[4096], nix_store[4096], git[4096], cgroup[4096];
+  char launcher_sha256[72], python_sha256[72], ip_sha256[72], observer_sha256[72], nix_sha256[72], nix_store_sha256[72], git_sha256[72], request_sha256[72], descriptor_sha256[72], transport_config_sha256[72];
 };
 
 static void die(const char *message) { dprintf(2, "tgw-observer-launcher: %s\n", message); _exit(125); }
@@ -81,7 +81,7 @@ static void parse_descriptor(struct config *cfg) {
   if (n <= 0 || n > MAX_DESCRIPTOR) die("descriptor size invalid");
   raw[n] = 0; close(fd);
   char *save = NULL, *line = strtok_r(raw, "\n", &save), value[4096];
-  const char *keys[] = {"schema", "uid", "gid", "python", "ip", "observer", "launcher_sha256", "python_sha256", "ip_sha256", "observer_sha256", "request_sha256", "transport_config_sha256", "observer_cgroup"};
+  const char *keys[] = {"schema", "uid", "gid", "python", "ip", "observer", "nix", "nix_store", "git", "launcher_sha256", "python_sha256", "ip_sha256", "observer_sha256", "nix_sha256", "nix_store_sha256", "git_sha256", "request_sha256", "transport_config_sha256", "observer_cgroup"};
   for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
     if (!line) die("descriptor truncated");
     copy_value(value, sizeof(value), line, keys[i]);
@@ -91,16 +91,22 @@ static void parse_descriptor(struct config *cfg) {
     else if (i == 3) strcpy(cfg->python, value);
     else if (i == 4) strcpy(cfg->ip, value);
     else if (i == 5) strcpy(cfg->observer, value);
-    else if (i == 6) strcpy(cfg->launcher_sha256, value);
-    else if (i == 7) strcpy(cfg->python_sha256, value);
-    else if (i == 8) strcpy(cfg->ip_sha256, value);
-    else if (i == 9) strcpy(cfg->observer_sha256, value);
-    else if (i == 10) strcpy(cfg->request_sha256, value);
-    else if (i == 11) strcpy(cfg->transport_config_sha256, value);
+    else if (i == 6) strcpy(cfg->nix, value);
+    else if (i == 7) strcpy(cfg->nix_store, value);
+    else if (i == 8) strcpy(cfg->git, value);
+    else if (i == 9) strcpy(cfg->launcher_sha256, value);
+    else if (i == 10) strcpy(cfg->python_sha256, value);
+    else if (i == 11) strcpy(cfg->ip_sha256, value);
+    else if (i == 12) strcpy(cfg->observer_sha256, value);
+    else if (i == 13) strcpy(cfg->nix_sha256, value);
+    else if (i == 14) strcpy(cfg->nix_store_sha256, value);
+    else if (i == 15) strcpy(cfg->git_sha256, value);
+    else if (i == 16) strcpy(cfg->request_sha256, value);
+    else if (i == 17) strcpy(cfg->transport_config_sha256, value);
     else strcpy(cfg->cgroup, value);
     line = strtok_r(NULL, "\n", &save);
   }
-  if (line || !cfg->uid || !cfg->gid || cfg->python[0] != '/' || cfg->ip[0] != '/' || cfg->observer[0] != '/' || strncmp(cfg->cgroup, "0::/", 4)) die("descriptor not closed");
+  if (line || !cfg->uid || !cfg->gid || cfg->python[0] != '/' || cfg->ip[0] != '/' || cfg->observer[0] != '/' || cfg->nix[0]!='/' || cfg->nix_store[0]!='/' || cfg->git[0]!='/' || strncmp(cfg->cgroup, "0::/", 4)) die("descriptor not closed");
 }
 
 static void require_empty_ip_output(int ipfd, char *const args[]) {
@@ -141,7 +147,9 @@ static void verify_fixed_cgroup(const struct config *cfg) {
   if(!cg || !fgets(actual,sizeof(actual),cg)) die("cgroup unavailable");
   fclose(cg); actual[strcspn(actual,"\n")]=0;
   size_t prefix=strlen(cfg->cgroup);
-  if(strncmp(actual,cfg->cgroup,prefix) || !strstr(actual+prefix,".service") || strstr(actual,"..")) die("cgroup identity mismatch");
+  const char *instance=actual+prefix, *suffix=strstr(instance,".service");
+  if(strncmp(actual,cfg->cgroup,prefix) || !*instance || !suffix || suffix[8] || suffix==instance || strchr(instance,'/') || strstr(instance,"..")) die("cgroup identity mismatch");
+  for(const char *p=instance;p<suffix;p++) if(!((*p>='a'&&*p<='z')||(*p>='A'&&*p<='Z')||(*p>='0'&&*p<='9')||strchr("_.:-\\x",*p))) die("cgroup instance grammar invalid");
 }
 
 static void verify_prepared_request(const struct config *cfg) {
@@ -152,6 +160,12 @@ static void verify_prepared_request(const struct config *cfg) {
   digest[71]=0; if(strcmp(digest,cfg->request_sha256)) die("prepared request identity mismatch");
 }
 
+static int pin_fd(const char *path, const char *expected, int target) {
+  int source=held_regular(path); char digest[72]; sha256_fd(source,digest);
+  if(strcmp(digest,expected) || dup3(source,target,0)<0) die("tool pinning failed");
+  close(source); return target;
+}
+
 int main(int argc, char **argv) {
   if (argc != 1 || argv[1]) die("arguments forbidden");
   struct config cfg = {0}; parse_descriptor(&cfg);
@@ -159,10 +173,8 @@ int main(int argc, char **argv) {
   if(selffd<0 || fstat(selffd,&selfstat) || !S_ISREG(selfstat.st_mode) || selfstat.st_uid!=0 || (selfstat.st_mode&022)) die("launcher inode invalid");
   char digest[72]; sha256_fd(selffd,digest); close(selffd);
   if(strcmp(digest,cfg.launcher_sha256)) die("launcher digest mismatch");
-  int pythonfd=held_regular(cfg.python), ipfd=held_regular(cfg.ip), observerfd=held_regular(cfg.observer);
-  sha256_fd(pythonfd,digest); if(strcmp(digest,cfg.python_sha256)) die("python digest mismatch");
-  sha256_fd(ipfd,digest); if(strcmp(digest,cfg.ip_sha256)) die("ip digest mismatch");
-  sha256_fd(observerfd,digest); if(strcmp(digest,cfg.observer_sha256)) die("observer digest mismatch");
+  int pythonfd=pin_fd(cfg.python,cfg.python_sha256,200), ipfd=pin_fd(cfg.ip,cfg.ip_sha256,201), observerfd=pin_fd(cfg.observer,cfg.observer_sha256,202);
+  pin_fd(cfg.nix,cfg.nix_sha256,203); pin_fd(cfg.nix_store,cfg.nix_store_sha256,204); pin_fd(cfg.git,cfg.git_sha256,205);
   verify_fixed_cgroup(&cfg);
   verify_prepared_request(&cfg);
   if (unshare(CLONE_NEWNET)) die("CLONE_NEWNET failed");

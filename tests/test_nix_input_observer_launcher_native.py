@@ -36,3 +36,12 @@ def test_native_launcher_never_imports_or_parses_helper_as_root():
     assert source.index("verify_post_drop(&cfg)") < source.index('args[]={python,"-I",observer,NULL}')
     for forbidden in ("helper", "archive", "json", "PYTHONPATH"):
         assert forbidden not in source
+
+
+def test_tool_execution_uses_fixed_inherited_descriptors_not_ambient_paths():
+    launcher = Path("src/native/tgw_nix_input_observer_launcher.c").read_text()
+    observer = Path("src/tgw/nix_input_observation.py").read_text()
+    for fd in (200, 201, 203, 204, 205):
+        assert f'"/proc/self/fd/{fd}"' in observer
+    assert "dup3(source,target,0)" in launcher
+    assert "/run/current-system/sw/bin/nix" not in observer

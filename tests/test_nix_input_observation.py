@@ -10,7 +10,7 @@ from tgw.nix_input_observation import OBSERVER_SOCKET, LOCK_NAR, PREFIX, REV, Ni
 from tgw.nix_input_observation import TOOLS as TOOL_PATHS
 
 DIGEST = "a" * 64
-TOOLS = {name: "sha256:" + DIGEST for name in ("launcher", "ip", "python", "nix", "nix_store", "git")}
+TOOLS = {name: "sha256:" + DIGEST for name in ("ip", "python", "nix", "nix_store", "git")}
 
 
 def request(archive, helper=b"# fixed standalone helper"):

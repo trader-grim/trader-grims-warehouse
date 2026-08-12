@@ -19,15 +19,13 @@ from typing import Any, Callable
 SCHEMA = "tgw-nix-input-observation/v2"
 MAGIC = b"TGWNIXO1"
 PREFIX = struct.Struct("!8sIQQQ32s32s32s")
-PYTHON = "/run/current-system/sw/bin/python3"
-LAUNCHER = "/run/current-system/sw/bin/tgw-nix-input-observer-launcher"
+PYTHON = "/proc/self/fd/200"
 OBSERVER_SOCKET = "/run/tgw/nix-input-observer.sock"
-UNSHARE = "/run/current-system/sw/bin/unshare"
-IP = "/run/current-system/sw/bin/ip"
-NIX = "/run/current-system/sw/bin/nix"
-NIX_STORE = "/run/current-system/sw/bin/nix-store"
-GIT = "/run/current-system/sw/bin/git"
-TOOLS = {"launcher": LAUNCHER, "ip": IP, "python": PYTHON, "nix": NIX, "nix_store": NIX_STORE, "git": GIT}
+IP = "/proc/self/fd/201"
+NIX = "/proc/self/fd/203"
+NIX_STORE = "/proc/self/fd/204"
+GIT = "/proc/self/fd/205"
+TOOLS = {"ip": IP, "python": PYTHON, "nix": NIX, "nix_store": NIX_STORE, "git": GIT}
 NODE = "nixpkgs"
 REV = "ac62194c3917d5f474c1a844b6fd6da2db95077d"
 LOCK_NAR = "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w="
