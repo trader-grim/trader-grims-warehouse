@@ -1,0 +1,38 @@
+{
+  "schema": "tgw-integrated-candidate-manifest/v1",
+  "source": {
+    "commit": "15bde4e2fd5e7a1ab3e1476d82ff0a7ee3f419dc",
+    "tree": "8b6eb4fac998819b2aa8739d7730045b5a76a989",
+    "archive_sha256": "sha256:06f021192e5bf9588d43a950c30b659ccae7b454fa77fe13f5d557c6b32aa50d",
+    "base_commit": "22aca630fe37175573ab736c384662cdf0503913"
+  },
+  "plan": {
+    "commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+    "solution_hash": "sha256:e528e15e50e0506cc48563b966754602df53e42ffc4e7e823580385039e90b7c",
+    "closure_hash": "sha256:bc0c53b2574fc359c629bd213e078fdd2824e5e1c4a98c0c7a347de869d9e6f8"
+  },
+  "conformance": {
+    "status": "MISSING",
+    "required_schema": "tgw-luet-conformance-receipt/v1",
+    "receipt_hash": null
+  },
+  "tests": {
+    "tooling": "12 passed in 0.59s",
+    "focused": "NOT_RUN_FOR_THIS_CANDIDATE",
+    "full_suite": {
+      "command": [".venv/bin/pytest", "-q"],
+      "status": "DEFINED_NOT_RUN"
+    }
+  },
+  "review": {
+    "status": "NOT_RUN",
+    "receipt": null
+  },
+  "database": {
+    "migration_paths": []
+  },
+  "candidate_closed": true,
+  "dispatchable": false,
+  "installed": false,
+  "hold": "Persisted source-pinned Luet conformance, focused/full tests, and independent review are incomplete"
+}
