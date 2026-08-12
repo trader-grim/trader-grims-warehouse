@@ -65,6 +65,25 @@ def test_inventory_is_deterministic_and_does_not_modify_worktree(tmp_path: Path)
     ).stdout == before
 
 
+def test_receipt_only_worktree_is_evidence_not_lost_implementation(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "fixture@example.invalid")
+    _git(repo, "config", "user.name", "Fixture")
+    (repo / "tracked").write_text("same\n")
+    _git(repo, "add", "tracked")
+    _git(repo, "commit", "-qm", "fixture")
+    (repo / "controller-harness-receipt.json").write_text('{"result":"failed"}\n')
+
+    result = inspect_worktree(repo)
+
+    assert result["classification"] == "EVIDENCE-RESIDUE"
+    assert result["states"]["implemented"] is False
+    assert result["states"]["executed"] is True
+    assert result["cleanup_authorized"] is False
+
+
 def test_environment_inventory_discovers_nested_repository(tmp_path: Path):
     repo = tmp_path / "nested" / "repo"
     repo.mkdir(parents=True)
@@ -85,4 +104,5 @@ def test_environment_inventory_discovers_nested_repository(tmp_path: Path):
         "worktree_count": 1,
         "stranded_work_count": 0,
         "inaccessible_worktree_count": 0,
+        "evidence_residue_count": 0,
     }

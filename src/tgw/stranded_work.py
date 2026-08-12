@@ -77,7 +77,8 @@ def inspect_worktree(worktree: Path) -> dict[str, Any]:
     records = [value for value in status.split("\0") if value]
     changed = sorted({value[3:] for value in records if len(value) > 3})
     evidence = _signals(worktree, changed)
-    stranded = bool(records) and bool(evidence["implemented"] or evidence["executed"])
+    stranded = bool(records) and bool(evidence["implemented"])
+    evidence_residue = bool(records) and not stranded and bool(evidence["executed"])
     return {
         "schema": "tgw-worktree-evidence/v1",
         "path": str(worktree),
@@ -92,7 +93,11 @@ def inspect_worktree(worktree: Path) -> dict[str, Any]:
             "admitted": False if stranded else None,
             "deployed": None,
         },
-        "classification": "STRANDED-WORK" if stranded else "OBSERVED-WORKTREE",
+        "classification": (
+            "STRANDED-WORK" if stranded
+            else "EVIDENCE-RESIDUE" if evidence_residue
+            else "OBSERVED-WORKTREE"
+        ),
         "cleanup_authorized": False,
     }
 
@@ -213,6 +218,10 @@ def inventory_environment(roots: Iterable[Path]) -> dict[str, Any]:
             ),
             "inaccessible_worktree_count": sum(
                 item["classification"] == "INACCESSIBLE-WORKTREE"
+                for item in worktree_inventory["worktrees"]
+            ),
+            "evidence_residue_count": sum(
+                item["classification"] == "EVIDENCE-RESIDUE"
                 for item in worktree_inventory["worktrees"]
             ),
         },
