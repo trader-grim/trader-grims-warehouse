@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from tgw.nix_input_observation import OBSERVER_SOCKET, LOCK_NAR, PREFIX, REV, NixInputObservationError, observe_archive
+from tgw.nix_input_observation import (
+    LOCK_NAR,
+    OBSERVER_SOCKET,
+    PREFIX,
+    REV,
+    NixInputObservationError,
+    observe_archive,
+)
 from tgw.nix_input_observation import TOOLS as TOOL_PATHS
 
 DIGEST = "a" * 64
