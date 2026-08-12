@@ -1,0 +1,38 @@
+{
+  "schema": "tgw-nixos-reviewed-evaluation-preflight/v1",
+  "status": "READY_FOR_FRESH_ATTEMPT_DECISION",
+  "request_hash": "sha256:c91e5e2617109dcb01e1df9dbfd25f34f2d07ed5d819f91bf8d07a8dd56587e5",
+  "prior_hold": {
+    "commit": "299966d3631235ba0e1136642c8a9c9865a44b2e",
+    "receipt": "agent-services/receipts/nixos-reviewed-evaluation-94795fb-HOLD.json",
+    "failure_code": "KNOWN_HOSTS_OWNERSHIP_UNSAFE"
+  },
+  "source_artifact": {
+    "path": "agent-services/catalogs/tgw-prod-known-hosts-94795fb",
+    "type": "regular-file",
+    "symlink": false,
+    "owner_uid": 1004,
+    "owner": "codex",
+    "mode_at_preflight": "0444",
+    "git_mode_limitation": "Git preserves this as non-executable 100644, not exact read-only permission bits",
+    "sha256": "sha256:2efd6fc4243b15b6d0b16a8da723911614198620cabf31bc822cf12520715cdf",
+    "size": 95
+  },
+  "runtime_artifact": {
+    "resolver_id": "codex-immutable-artifact-store@1",
+    "stable_path": "/opt/TGW/tgw-lib/actors/codex/artifacts/sha256/2efd6fc4243b15b6d0b16a8da723911614198620cabf31bc822cf12520715cdf.known_hosts",
+    "type": "regular-file",
+    "symlink": false,
+    "owner_uid": 1004,
+    "owner": "codex",
+    "mode": "0444",
+    "sha256": "sha256:2efd6fc4243b15b6d0b16a8da723911614198620cabf31bc822cf12520715cdf",
+    "size": 95,
+    "materialization": "copy-no-clobber then explicit chmod 0444"
+  },
+  "content_changed": false,
+  "request_changed": false,
+  "remote_retried": false,
+  "dispatchable": false,
+  "receipt_hash": "sha256:da335db3aefe5359c0467fe9edf5c3f93e6a22ce27984a5f12a94ca7db0325a3"
+}
