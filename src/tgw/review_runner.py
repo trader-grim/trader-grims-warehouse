@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
 
+from tgw.review_egress_broker import ReviewEgressPolicy
+
 
 class ReviewRunnerError(ValueError):
     pass
@@ -125,6 +127,7 @@ def _sandbox_command(
     network_egress: bool,
     credential_file: Path | None,
     tool_root: Path | None,
+    proxy_url: str | None,
 ) -> list[str]:
     bwrap = shutil.which("bwrap")
     if bwrap is None:
@@ -161,6 +164,10 @@ def _sandbox_command(
         command.extend(["--ro-bind", str(tool_root.resolve()), "/tools"])
         command.extend(["--setenv", "TGW_CODEX_REVIEW_AUTH", "/credentials/auth.json"])
         command.extend(["--setenv", "PATH", "/tools/bin:/runtime/bin:/usr/bin:/bin"])
+        if not proxy_url:
+            raise ReviewRunnerError("attested review broker address is unavailable")
+        command.extend(["--setenv", "HTTPS_PROXY", proxy_url])
+        command.extend(["--setenv", "https_proxy", proxy_url])
     return [*command, "--", *provider]
 
 
@@ -173,6 +180,9 @@ def run_review(
     network_egress: bool = False,
     credential_file: Path | None = None,
     tool_root: Path | None = None,
+    egress_policy: Mapping[str, Any] | None = None,
+    network_attestation: Mapping[str, Any] | None = None,
+    egress_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if handoff.get("schema") != "tgw-launcher-handoff/v1":
         raise ReviewRunnerError("review runner requires a launcher handoff")
@@ -204,12 +214,34 @@ def run_review(
             "snapshot_root": "/workspace",
             "output_contract": "tgw-code-review/v1",
         }
+        proxy_url = None
+        policy = None
+        if network_egress:
+            try:
+                policy = ReviewEgressPolicy.parse(egress_policy or {})
+                policy.verify_runtime(Path(provider_argv[0]).resolve(), credential_file or Path(""))
+            except (ValueError, OSError) as exc:
+                raise ReviewRunnerError(f"review egress policy is invalid: {exc}") from exc
+            attestation = network_attestation or {}
+            if set(attestation) != {"schema", "policy_hash", "direct_egress_denied", "broker_bind", "attestation_hash"}:
+                raise ReviewRunnerError("review network attestation fields are invalid")
+            unsigned_attestation = dict(attestation)
+            claimed = unsigned_attestation.pop("attestation_hash")
+            if claimed != _hash(unsigned_attestation):
+                raise ReviewRunnerError("review network attestation hash mismatch")
+            if attestation["schema"] != "tgw-review-egress-network-attestation/v1" or attestation["policy_hash"] != policy.policy_hash or attestation["direct_egress_denied"] is not True:
+                raise ReviewRunnerError("review network isolation is not attested")
+            bind = attestation["broker_bind"]
+            if not isinstance(bind, Mapping) or set(bind) != {"host", "port"} or not isinstance(bind["host"], str) or not isinstance(bind["port"], int):
+                raise ReviewRunnerError("attested review broker bind is invalid")
+            proxy_url = f"http://{bind['host']}:{bind['port']}"
         sandboxed = _sandbox_command(
             provider_argv,
             isolated,
             network_egress=network_egress,
             credential_file=credential_file,
             tool_root=tool_root,
+            proxy_url=proxy_url,
         )
         try:
             completed = subprocess.run(
@@ -231,6 +263,18 @@ def run_review(
             report = _validate_report(json.loads(completed.stdout), expected_hash, isolated)
         except json.JSONDecodeError as exc:
             raise ReviewRunnerError("review provider returned invalid JSON") from exc
+        if network_egress:
+            receipt = egress_receipt or {}
+            if set(receipt) != {"schema", "run_id", "policy_hash", "sessions", "receipt_hash"}:
+                raise ReviewRunnerError("review egress receipt fields are invalid")
+            unsigned_receipt = dict(receipt)
+            claimed = unsigned_receipt.pop("receipt_hash")
+            if claimed != _hash(unsigned_receipt) or receipt["schema"] != "tgw-review-egress-receipt/v1":
+                raise ReviewRunnerError("review egress receipt hash/schema is invalid")
+            if receipt["run_id"] != policy.run_id or receipt["policy_hash"] != policy.policy_hash:
+                raise ReviewRunnerError("review egress receipt policy binding mismatch")
+            if not isinstance(receipt["sessions"], list) or any(item.get("outcome") != "completed" for item in receipt["sessions"] if isinstance(item, Mapping)):
+                raise ReviewRunnerError("review egress receipt contains denied or invalid sessions")
     passed = report["verdict"] == "PASS"
     return {
         "outcome": "satisfied" if passed else "failed",
@@ -246,6 +290,9 @@ def main() -> int:
     parser.add_argument("--network-egress", action="store_true")
     parser.add_argument("--credential-file", type=Path)
     parser.add_argument("--tool-root", type=Path)
+    parser.add_argument("--egress-policy", type=Path)
+    parser.add_argument("--network-attestation", type=Path)
+    parser.add_argument("--egress-receipt", type=Path)
     args = parser.parse_args()
     try:
         provider_argv = json.loads(args.provider_command_json)
@@ -256,6 +303,9 @@ def main() -> int:
             network_egress=args.network_egress,
             credential_file=args.credential_file,
             tool_root=args.tool_root,
+            egress_policy=json.loads(args.egress_policy.read_text()) if args.egress_policy else None,
+            network_attestation=json.loads(args.network_attestation.read_text()) if args.network_attestation else None,
+            egress_receipt=json.loads(args.egress_receipt.read_text()) if args.egress_receipt else None,
         )
     except (ReviewRunnerError, json.JSONDecodeError, OSError) as exc:
         result = {
