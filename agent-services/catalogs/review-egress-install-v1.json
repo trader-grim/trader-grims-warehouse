@@ -1,0 +1,18 @@
+{
+  "schema": "tgw-review-egress-install-contract/v1",
+  "source_commit": "8cb12b5",
+  "broker_source": "src/tgw/review_egress_broker.py",
+  "namespace_source": "src/tgw/review_egress_namespace.py",
+  "declarative_module": "nix/review-egress.nix",
+  "credential_path_contract": "Nix option services.tgw-review-egress.credentialPath; dedicated review-only auth, root-readable input, systemd credential copy only",
+  "install": ["evaluate Nix module", "build package and record store-path digest", "activate units without starting an instance", "run offline and isolated namespace probes"],
+  "verify": [
+    "unit hardening score and exact ExecStart readback", "runtime and credential digest match policy",
+    "worker can connect only to broker port", "worker direct public 443 denied", "worker DNS denied",
+    "worker loopback non-broker port denied", "metadata/private/link-local denied", "broker exact allowlisted TLS succeeds",
+    "unlisted CONNECT denied", "SNI mismatch denied", "mixed public/private DNS denied", "byte/connection/expiry limits terminate",
+    "receipt binds run, policy, host, resolved IP, counts and outcome"
+  ],
+  "rollback": ["stop broker instance", "stop namespace instance invoking fixed teardown", "verify namespace/veth/rules absent", "disable module and return prior Nix generation"],
+  "deployment_status": "NOT_INSTALLED"
+}
