@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import re
-import shutil
+import stat as statmod
 import subprocess
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -16,6 +16,7 @@ SCHEMA = "tgw-nix-observer-render-evaluation-request/v1"
 RESULT_SCHEMA = "tgw-nix-observer-render-evaluation-receipt/v1"
 TARGET = "nix-input-observer-rendered-artifacts"
 STORE_ROOT = Path("/nix/store")
+SCRATCH_PARENT = Path("/var/tmp/tgw-nix-observer-render-evaluation")
 OUTPUTS = (
     "etc/nix-input-observer-launcher.conf",
     "etc/nix-input-observer-transport.json",
@@ -202,7 +203,6 @@ def produce_result(
     nix_sha256: str,
     systemd_analyze: Path,
     now: datetime,
-    scratch_root: Path,
     run: object = subprocess.run,
 ) -> dict[str, object]:
     """Derive one receipt from held output/tool inodes and actual subprocesses."""
@@ -228,14 +228,49 @@ def produce_result(
             raise RenderEvaluationError("render tool identity mismatch")
         return fd, digest, stat.st_size
 
-    nix_fd, _, _ = held(nix, nix_sha256)
-    verify_fd, verify_digest, _ = held(systemd_analyze, request["systemd_analyze_sha256"])
-    file_fds: list[int] = []
-    store_fd = os.open(STORE_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    output_fd = os.open(output_root.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=store_fd)
+    scratch_parent_fd = os.open(SCRATCH_PARENT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    parent_stat = os.fstat(scratch_parent_fd)
+    if parent_stat.st_uid != os.getuid() or statmod.S_IMODE(parent_stat.st_mode) != 0o700:
+        os.close(scratch_parent_fd)
+        raise RenderEvaluationError("render scratch parent trust mismatch")
+    attempt_name = "attempt-" + str(request["request_sha256"])[7:39]
     try:
+        os.mkdir(attempt_name, 0o700, dir_fd=scratch_parent_fd)
+    except OSError as exc:
+        os.close(scratch_parent_fd)
+        raise RenderEvaluationError("render scratch attempt is not fresh") from exc
+    attempt_fd = os.open(attempt_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=scratch_parent_fd)
+    attempt_stat = os.fstat(attempt_fd)
+    if attempt_stat.st_uid != os.getuid() or statmod.S_IMODE(attempt_stat.st_mode) != 0o700:
+        os.close(attempt_fd)
+        os.close(scratch_parent_fd)
+        raise RenderEvaluationError("render scratch attempt trust mismatch")
+
+    nix_fd = verify_fd = store_fd = output_fd = -1
+    file_fds: list[int] = []
+    result: dict[str, object] | None = None
+    original_error: BaseException | None = None
+    try:
+        nix_fd, _, _ = held(nix, nix_sha256)
+        verify_fd, verify_digest, _ = held(systemd_analyze, request["systemd_analyze_sha256"])
+        store_fd = os.open(STORE_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        output_fd = os.open(output_root.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=store_fd)
+        if set(os.listdir(output_fd)) != {"etc", "launcher", "observer.py", "tools", "units", "verifier-metadata.json"}:
+            raise RenderEvaluationError("render output root entry set mismatch")
         files = []
         raw_files = {}
+        expected_subdirs = {
+            "etc": {"nix-input-observer-launcher.conf", "nix-input-observer-transport.json"},
+            "tools": {"git", "ip", "nix", "nix-store", "python"},
+            "units": {"tgw-nix-input-observer.slice", "tgw-nix-input-observer.socket", "tgw-nix-input-observer@.service"},
+        }
+        for directory, expected_entries in expected_subdirs.items():
+            directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=output_fd)
+            try:
+                if set(os.listdir(directory_fd)) != expected_entries:
+                    raise RenderEvaluationError("render output directory entry set mismatch")
+            finally:
+                os.close(directory_fd)
         for name in OUTPUTS:
             parts = name.split("/")
             parent_fd = output_fd
@@ -277,16 +312,21 @@ def produce_result(
         if outputs != {"out": {"path": identity}}:
             raise RenderEvaluationError("render derivation output observation mismatch")
         metadata = json.loads(raw_files["verifier-metadata.json"])
-        if (
-            metadata.get("schema") != "tgw-nix-input-observer-render/v1"
-            or metadata.get("descriptor_status") != "NON_DEPLOYABLE_RENDER_FIXTURE"
-            or metadata.get("activation") is not False
-            or metadata.get("units") != list(OUTPUTS[9:12])
-        ):
+        expected_metadata_files = [{"path": item["path"], "sha256": item["sha256"]} for item in files[:-1]]
+        expected_metadata = {
+            "schema": "tgw-nix-input-observer-render/v1",
+            "system": "x86_64-linux",
+            "descriptor_status": "NON_DEPLOYABLE_RENDER_FIXTURE",
+            "activation": False,
+            "units": list(OUTPUTS[9:12]),
+            "files": expected_metadata_files,
+        }
+        if metadata != expected_metadata:
             raise RenderEvaluationError("render held metadata contract mismatch")
         versioned = run([f"/proc/self/fd/{verify_fd}", "--version"], capture_output=True, check=False, timeout=30, close_fds=True, pass_fds=(verify_fd,))
         version_out = versioned.stdout if isinstance(versioned.stdout, bytes) else versioned.stdout.encode()
-        if versioned.returncode or not version_out.startswith(request["systemd_analyze_version"].encode() + b"\n"):
+        version_err = versioned.stderr if isinstance(versioned.stderr, bytes) else versioned.stderr.encode()
+        if versioned.returncode or len(version_out) > 4096 or len(version_err) > 4096 or version_err or version_out != request["systemd_analyze_version"].encode() + b"\n":
             raise RenderEvaluationError("render held verifier version mismatch")
         unit_fds = file_fds[9:12]
         argv = [f"/proc/self/fd/{verify_fd}", "verify", *[f"/proc/self/fd/{fd}" for fd in unit_fds]]
@@ -296,9 +336,6 @@ def produce_result(
         if verified.returncode or max(len(stdout), len(stderr)) > request["max_output_bytes"]:
             raise RenderEvaluationError("render systemd verification failed")
         unit_manifest = files[9:12]
-        shutil.rmtree(scratch_root)
-        if scratch_root.exists():
-            raise RenderEvaluationError("render scratch cleanup ambiguous")
         result = {
             "schema": RESULT_SCHEMA,
             "request_sha256": request["request_sha256"],
@@ -326,7 +363,34 @@ def produce_result(
             "effects": {"build": True, "activation": False, "deployment": False, "profile_write": False, "home_db_write": False, "live_flake_write": False, "network": False},
         }
         result["receipt_sha256"] = "sha256:" + hashlib.sha256(canonical(result)).hexdigest()
-        return validate_result(result, request=request, now=now)
+    except BaseException as exc:
+        original_error = exc
     finally:
         for fd in [nix_fd, verify_fd, output_fd, store_fd, *file_fds]:
-            os.close(fd)
+            if fd >= 0:
+                os.close(fd)
+        cleanup_error = None
+        try:
+            if os.listdir(attempt_fd):
+                raise OSError("attempt directory is not empty")
+            os.close(attempt_fd)
+            attempt_fd = -1
+            os.rmdir(attempt_name, dir_fd=scratch_parent_fd)
+            try:
+                os.stat(attempt_name, dir_fd=scratch_parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise OSError("attempt directory remains")
+        except OSError as exc:
+            cleanup_error = exc
+        finally:
+            if attempt_fd >= 0:
+                os.close(attempt_fd)
+            os.close(scratch_parent_fd)
+        if cleanup_error is not None:
+            raise RenderEvaluationError("render scratch cleanup ambiguous") from cleanup_error
+    if original_error is not None:
+        raise original_error
+    assert result is not None
+    return validate_result(result, request=request, now=now)

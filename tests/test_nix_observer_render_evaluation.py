@@ -151,7 +151,7 @@ def test_result_mutations_fail_closed(mutate):
         validate_result(value, request=req, now=NOW)
 
 
-def test_provider_derives_receipt_from_held_files_and_actual_commands(tmp_path, monkeypatch):
+def provider_case(tmp_path, monkeypatch, *, metadata_mutation=None, run_mutation=None):
     from tgw import nix_observer_render_evaluation as module
 
     req = request()
@@ -163,9 +163,23 @@ def test_provider_derives_receipt_from_held_files_and_actual_commands(tmp_path, 
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(name.encode())
+    metadata_files = [{"path": name, "sha256": "sha256:" + hashlib.sha256((root / name).read_bytes()).hexdigest()} for name in OUTPUTS[:-1]]
     (root / "verifier-metadata.json").write_text(
-        json.dumps({"schema": "tgw-nix-input-observer-render/v1", "descriptor_status": "NON_DEPLOYABLE_RENDER_FIXTURE", "activation": False, "units": list(OUTPUTS[9:12])})
+        json.dumps(
+            {
+                "schema": "tgw-nix-input-observer-render/v1",
+                "system": "x86_64-linux",
+                "descriptor_status": "NON_DEPLOYABLE_RENDER_FIXTURE",
+                "activation": False,
+                "units": list(OUTPUTS[9:12]),
+                "files": metadata_files,
+            }
+        )
     )
+    if metadata_mutation:
+        value = json.loads((root / "verifier-metadata.json").read_text())
+        metadata_mutation(value)
+        (root / "verifier-metadata.json").write_text(json.dumps(value))
     nix = tmp_path / "nix"
     verifier = tmp_path / "systemd-analyze"
     nix.write_bytes(b"nix")
@@ -178,29 +192,122 @@ def test_provider_derives_receipt_from_held_files_and_actual_commands(tmp_path, 
     req["request_sha256"] = "sha256:" + hashlib.sha256(canonical(unsigned)).hexdigest()
     drv = "/nix/store/33333333333333333333333333333333-render.drv"
     out = str(root)
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
+    scratch = tmp_path / "scratch-parent"
+    scratch.mkdir(mode=0o700)
+    monkeypatch.setattr(module, "SCRATCH_PARENT", scratch)
     calls = []
 
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
+        if run_mutation:
+            changed = run_mutation(argv, kwargs, scratch, root, drv)
+            if changed is not None:
+                return changed
         if argv[1:3] == ["derivation", "show"]:
             return subprocess.CompletedProcess(argv, 0, json.dumps({drv: {"outputs": {"out": {"path": out}}}}), "")
         if argv[1:] == ["--version"]:
             return subprocess.CompletedProcess(argv, 0, b"systemd 257 (257.10)\n", b"")
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
-    receipt = produce_result(
-        request=req,
-        output_root=root,
-        evaluated_drv=drv,
-        nix=nix,
-        nix_sha256="sha256:" + hashlib.sha256(b"nix").hexdigest(),
-        systemd_analyze=verifier,
-        now=NOW,
-        scratch_root=scratch,
-        run=run,
-    )
+    kwargs = {
+        "request": req,
+        "output_root": root,
+        "evaluated_drv": drv,
+        "nix": nix,
+        "nix_sha256": "sha256:" + hashlib.sha256(b"nix").hexdigest(),
+        "systemd_analyze": verifier,
+        "now": NOW,
+        "run": run,
+    }
+    return kwargs, calls, scratch, root
+
+
+def test_provider_derives_receipt_from_held_files_and_actual_commands(tmp_path, monkeypatch):
+    kwargs, calls, scratch, _ = provider_case(tmp_path, monkeypatch)
+    receipt = produce_result(**kwargs)
     assert receipt["effects"]["build"] is True
     assert calls[0][1]["pass_fds"] and len(calls[2][1]["pass_fds"]) == 4
-    assert not scratch.exists()
+    assert not list(scratch.iterdir())
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.update(extra=True),
+        lambda value: value.update(system="aarch64-linux"),
+        lambda value: value["files"][0].update(sha256="sha256:" + "0" * 64),
+        lambda value: value["units"].reverse(),
+    ],
+)
+def test_provider_rejects_metadata_lies(tmp_path, monkeypatch, mutation):
+    kwargs, _, scratch, _ = provider_case(tmp_path, monkeypatch, metadata_mutation=mutation)
+    with pytest.raises(RenderEvaluationError, match="metadata contract"):
+        produce_result(**kwargs)
+    assert not list(scratch.iterdir())
+
+
+@pytest.mark.parametrize("version", [b"systemd 256\n", b"systemd 257 (257.10)\nextra", b"x" * 4097])
+def test_provider_rejects_malformed_or_oversize_verifier_version(tmp_path, monkeypatch, version):
+    def mutate(argv, _kwargs, _scratch, _root, _drv):
+        if argv[1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, version, b"")
+
+    kwargs, _, scratch, _ = provider_case(tmp_path, monkeypatch, run_mutation=mutate)
+    with pytest.raises(RenderEvaluationError, match="verifier version"):
+        produce_result(**kwargs)
+    assert not list(scratch.iterdir())
+
+
+def test_provider_rejects_output_identity_substitution(tmp_path, monkeypatch):
+    def mutate(argv, _kwargs, _scratch, _root, drv):
+        if argv[1:3] == ["derivation", "show"]:
+            other = "/nix/store/44444444444444444444444444444444-other"
+            return subprocess.CompletedProcess(argv, 0, json.dumps({drv: {"outputs": {"out": {"path": other}}}}), "")
+
+    kwargs, _, scratch, _ = provider_case(tmp_path, monkeypatch, run_mutation=mutate)
+    with pytest.raises(RenderEvaluationError, match="output observation"):
+        produce_result(**kwargs)
+    assert not list(scratch.iterdir())
+
+
+def test_provider_rejects_output_file_symlink(tmp_path, monkeypatch):
+    kwargs, _, scratch, root = provider_case(tmp_path, monkeypatch)
+    victim = root / OUTPUTS[0]
+    victim.unlink()
+    victim.symlink_to(root / OUTPUTS[1])
+    with pytest.raises(OSError):
+        produce_result(**kwargs)
+    assert not list(scratch.iterdir())
+
+
+def test_provider_cleanup_uncertainty_overrides_success(tmp_path, monkeypatch):
+    touched = False
+
+    def mutate(argv, _kwargs, scratch, _root, _drv):
+        nonlocal touched
+        if argv[1:] == ["--version"] and not touched:
+            attempt = next(scratch.iterdir())
+            (attempt / "hostile").write_text("not provider-owned")
+            touched = True
+
+    kwargs, _, scratch, _ = provider_case(tmp_path, monkeypatch, run_mutation=mutate)
+    with pytest.raises(RenderEvaluationError, match="cleanup ambiguous"):
+        produce_result(**kwargs)
+    assert (next(scratch.iterdir()) / "hostile").exists()
+
+
+def test_provider_rejects_untrusted_or_symlink_scratch_parent(tmp_path, monkeypatch):
+    from tgw import nix_observer_render_evaluation as module
+
+    kwargs, _, scratch, _ = provider_case(tmp_path, monkeypatch)
+    scratch.chmod(0o755)
+    with pytest.raises(RenderEvaluationError, match="parent trust"):
+        produce_result(**kwargs)
+    scratch.chmod(0o700)
+    target = tmp_path / "other"
+    target.mkdir()
+    scratch.rmdir()
+    scratch.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(module, "SCRATCH_PARENT", scratch)
+    with pytest.raises(OSError):
+        produce_result(**kwargs)
