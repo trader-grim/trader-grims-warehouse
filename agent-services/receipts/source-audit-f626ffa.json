@@ -1,0 +1,1 @@
+{"schema":"tgw-source-audit-receipt/v1","source_commit":"f626ffab4e19cca2811b491b7a2b7d818623ebf3","source_tree":"22a2d36a3777c7a7b4c667197814047df5800eff","status":"PASS","audit_ref":"PASS:f626ffa","scope":"render helper/provider/transport/native/effect/runtime source","remote_executed":false}
