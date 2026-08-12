@@ -1,0 +1,30 @@
+{
+  "schema": "tgw-nixos-reviewed-evaluation-attempt/v1",
+  "status": "HOLD",
+  "request_hash": "sha256:c91e5e2617109dcb01e1df9dbfd25f34f2d07ed5d819f91bf8d07a8dd56587e5",
+  "request_path": "agent-services/candidates/nixos-reviewed-evaluation-94795fb-PREPARED.json",
+  "artifact_binding_hash": "sha256:cb60bd8a85d68087ce909a4cfc8bb76ea7711b3c555576f27ad8196798deca78",
+  "attempt_stage": "controller-local-preflight",
+  "failure_code": "KNOWN_HOSTS_OWNERSHIP_UNSAFE",
+  "failure": "SSH executable or known-hosts ownership is unsafe",
+  "observed_known_hosts": {
+    "path": "agent-services/catalogs/tgw-prod-known-hosts-94795fb",
+    "mode": "0664",
+    "owner": "codex",
+    "group": "tgw-coders",
+    "sha256": "sha256:2efd6fc4243b15b6d0b16a8da723911614198620cabf31bc822cf12520715cdf"
+  },
+  "provider_requirement": "known-hosts must be a regular file owned by root or the controller effective UID and not writable by group or other",
+  "remote_process_started": false,
+  "remote_scratch_created": false,
+  "nix_evaluation_started": false,
+  "activation": false,
+  "profile_write": false,
+  "home_db_write": false,
+  "live_flake_write": false,
+  "provider_receipt": null,
+  "closure_manifest": null,
+  "generated_units": null,
+  "systemd_verify_output": null,
+  "dispatchable": false
+}
