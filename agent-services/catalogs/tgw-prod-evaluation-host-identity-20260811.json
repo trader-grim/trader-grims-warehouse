@@ -1,0 +1,26 @@
+{
+  "schema": "tgw-read-only-host-identity-receipt/v1",
+  "host": "tgw-prod",
+  "observed_at": "2026-08-11T21:50:17-07:00",
+  "current_system": "/nix/store/rjpqj1kf2g6i34anklih1dmk4afcdkmj-nixos-system-tgw-prod-25.05.20260102.ac62194",
+  "transport": {
+    "ssh_path": "/usr/bin/ssh",
+    "ssh_sha256": "sha256:af3b04ec5653755032fc18ad02445e4e51170e75d8bac4265647d423caa9a83e",
+    "ssh_version": "OpenSSH_10.0p2 Debian-7+deb13u4, OpenSSL 3.5.6 7 Apr 2026",
+    "config_sha256": "sha256:8760ecc5254b6c4186bb9f109eee755a1c489f7df405d3efd33d58a96ca47e20",
+    "known_hosts_sha256": "sha256:6e9b495cac516bc1045274fce3b25d6f2cf3c552e7183d179af1051f5cf6ab83",
+    "strict_host_key_checking": true,
+    "batch_mode": true,
+    "forwardings_cleared": true
+  },
+  "executables": {
+    "remote_python": {"path": "/run/current-system/sw/bin/python3", "store_path": "/nix/store/1ncmydmnspk3ssmcanaw5ha5dbfdwnh5-python3-3.13.5/bin/python3.13", "sha256": "sha256:98c4668fa5f84d0106ecc8ed8a76d7ff13d91a70f5cce1cacbf0f2fcb5da1184", "version": "Python 3.13.5"},
+    "git": {"path": "/run/current-system/sw/bin/git", "store_path": "/nix/store/jg9g0gs0x0f69m8mn31syic45bf9lwh9-git-2.50.1/bin/git", "sha256": "sha256:7caeec432b21191b6227a0150dedcf4b5503d6a4819d8ef7b223fbf1128da5f8", "version": "git version 2.50.1"},
+    "nix": {"path": "/run/current-system/sw/bin/nix", "store_path": "/nix/store/mxafjxh0amr24d2gb7n3km6hljj79qsj-nix-2.28.5/bin/nix", "sha256": "sha256:8fadf78aa447b028410e9840f1f971a860bfdcf02a9205d9282455f21f21221b", "version": "nix (Nix) 2.28.5"},
+    "nix_store": {"path": "/run/current-system/sw/bin/nix-store", "store_path": "/nix/store/mxafjxh0amr24d2gb7n3km6hljj79qsj-nix-2.28.5/bin/nix", "sha256": "sha256:8fadf78aa447b028410e9840f1f971a860bfdcf02a9205d9282455f21f21221b", "version": "nix-store (Nix) 2.28.5"},
+    "systemd_analyze": {"path": "/run/current-system/sw/bin/systemd-analyze", "store_path": "/nix/store/kiplbb6yv7rmjf21hf9ky01b9kmgmnqn-systemd-257.10/bin/systemd-analyze", "sha256": "sha256:28c62cb24a08bebc45ce138078d4b3a3d3f47bcbfea3bf92d9b3dddfcd40bce3", "version": "systemd 257 (257.10)"}
+  },
+  "command_allowlist": ["command -v", "readlink -f", "sha256sum", "python3 --version", "git --version", "nix --version", "nix-store --version", "systemd-analyze --version"],
+  "claims": {"read_only": true, "remote_sudo": false, "remote_write": false, "flake_access": false, "build_or_eval": false, "deployment": false},
+  "receipt_sha256": "sha256:e81d726dc9f7694e955dd27fcd8f61b2add94fd5200b83c738a34a619567bd68"
+}
