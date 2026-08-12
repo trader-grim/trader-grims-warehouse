@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import struct
 import subprocess
 import tarfile
@@ -8,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tgw.nixos_reviewed_evaluation import EXECUTABLES, SSH_COMMAND, EvaluationError, SshReviewedEvaluationProvider, execute_packet
+from tgw.nixos_reviewed_evaluation import EXECUTABLES, SSH_EXECUTABLE, EvaluationError, SshReviewedEvaluationProvider, execute_packet
 
 COMMIT = "a" * 40
 TREE = "b" * 40
@@ -21,11 +22,14 @@ def parameters(archive_digest=DIGEST):
         "artifact_ref": f"artifact:sha256:{archive_digest}", "source_commit": COMMIT,
         "source_tree": TREE, "source_archive_sha256": archive_digest,
         "flake_lock_sha256": DIGEST, "module_path": "nix/review-egress.nix", "module_sha256": DIGEST, "provider_sha256": DIGEST,
+        "ssh_sha256": DIGEST, "known_hosts_sha256": DIGEST,
+        "remote_python_sha256": DIGEST, "git_sha256": DIGEST, "nix_sha256": DIGEST, "systemd_analyze_sha256": DIGEST,
         "scratch_id": "nixos-review:test", "system": "x86_64-linux",
         "evaluation_target": "review-egress-systemd-units",
         "unit_set": "tgw-review-egress@.service,tgw-review-egress-attest@.service,tgw-review-egress-namespace@.service",
         "output_schema": "tgw-nixos-reviewed-evaluation-receipt/v1", "nix_network_policy": "offline-no-substituters",
         "minimum_systemd_version": "257", "max_duration_seconds": "300", "max_output_bytes": "1048576",
+        "max_archive_bytes": "1048576", "max_unpacked_bytes": "4194304", "max_files": "1000",
         "activate": "false", "profile_write": "false", "home_db_write": "false",
         "operation_id": "nixos-review:test", "generation": "eval-1",
     }
@@ -53,13 +57,14 @@ def test_controller_provider_uses_only_fixed_ssh_helper_and_content_bound_input(
     def invoke(argv, **kwargs):
         return subprocess.CompletedProcess(argv, 0, output, b"")
 
-    provider = SshReviewedEvaluationProvider(lambda identity: archive, invoke=invoke)
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("host key")
+    request["ssh_sha256"] = "sha256:" + sha256(Path(SSH_EXECUTABLE).read_bytes()).hexdigest()
+    request["known_hosts_sha256"] = "sha256:" + sha256(known_hosts.read_bytes()).hexdigest()
+    provider = SshReviewedEvaluationProvider(lambda identity: archive, known_hosts=known_hosts, invoke=invoke)
 
     assert provider(request) == {"schema": "receipt"}
-    assert SSH_COMMAND == (
-        "ssh", "-oBatchMode=yes", "-oClearAllForwardings=yes", "-oStrictHostKeyChecking=yes",
-        "--", "tgw-prod", "sudo", "-n", "--", "/run/current-system/sw/bin/tgw-nixos-reviewed-evaluation",
-    )
+    assert SSH_EXECUTABLE == "/usr/bin/ssh"
 
 
 def test_controller_provider_rejects_artifact_mismatch_before_ssh(tmp_path):
@@ -67,7 +72,7 @@ def test_controller_provider_rejects_artifact_mismatch_before_ssh(tmp_path):
     archive.write_bytes(b"wrong")
     called = []
     with pytest.raises(EvaluationError, match="digest mismatch"):
-        SshReviewedEvaluationProvider(lambda _: archive, invoke=lambda *a, **k: called.append(a))(parameters())
+        SshReviewedEvaluationProvider(lambda _: archive, known_hosts=tmp_path / "missing", invoke=lambda *a, **k: called.append(a))(parameters())
     assert not called
 
 
@@ -85,17 +90,20 @@ def test_remote_helper_executes_only_fixed_offline_steps_and_cleans_scratch(tmp_
     original_is_file = Path.is_file
     original_digest = __import__("tgw.nixos_reviewed_evaluation", fromlist=["_digest_file"])._digest_file
     monkeypatch.setattr(Path, "is_file", lambda path: True if str(path).startswith(closure + "/etc/systemd/system/") else original_is_file(path))
-    monkeypatch.setattr("tgw.nixos_reviewed_evaluation._digest_file", lambda path: "sha256:" + DIGEST if str(path).startswith(closure) else original_digest(path))
+    remote_paths = {"/run/current-system/sw/bin/python3", *EXECUTABLES.values()}
+    monkeypatch.setattr("tgw.nixos_reviewed_evaluation._digest_file", lambda path: "sha256:" + DIGEST if str(path).startswith(closure) or str(path) in remote_paths else original_digest(path))
     calls = []
 
     def fake_run(argv, *, cwd, timeout):
         calls.append(argv)
-        if argv[:2] == [EXECUTABLES["git"], "write-tree"]:
+        if argv[-1] == "write-tree":
             return TREE
         if "drvPath" in argv[-1]:
             return "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-review.drv"
         if "build" in argv:
             return closure
+        if "hash" in argv:
+            return DIGEST
         if argv == [EXECUTABLES["systemd_analyze"], "--version"]:
             return "systemd 257\n"
         if argv == [EXECUTABLES["nix"], "--version"]:
@@ -103,11 +111,12 @@ def test_remote_helper_executes_only_fixed_offline_steps_and_cleans_scratch(tmp_
         return ""
 
     scratch = tmp_path / "scratch"
-    result = execute_packet(packet(request, archive), run=fake_run, scratch_root=scratch)
+    result = execute_packet(packet(request, archive), run=fake_run, scratch_root=scratch, scratch_uid=os.geteuid())
 
     assert result["cleanup"] == "removed" and not list(scratch.iterdir())
     nix_calls = [call for call in calls if call[0] == EXECUTABLES["nix"] and call != [EXECUTABLES["nix"], "--version"]]
-    assert nix_calls and all(call[1:6] == ["--offline", "--option", "substituters", "", "--no-write-lock-file"] for call in nix_calls)
+    assert nix_calls and all(call[1:5] == ["--offline", "--option", "substituters", ""] for call in nix_calls)
+    assert all(["--option", "allow-import-from-derivation", "false"] == call[5:8] and "--no-write-lock-file" in call for call in nix_calls)
     assert not any(word in {"switch", "boot", "test", "profile"} for call in calls for word in call)
     assert set(result["unit_sha256"]) == set(request["unit_set"].split(","))
 
@@ -119,20 +128,23 @@ def test_remote_helper_rejects_broadened_request_before_scratch(tmp_path, change
     request = {**parameters(sha256(archive.read_bytes()).hexdigest()), **change}
     scratch = tmp_path / "scratch"
     with pytest.raises(ValueError):
-        execute_packet(packet(request, archive), scratch_root=scratch)
+        execute_packet(packet(request, archive), scratch_root=scratch, scratch_uid=os.geteuid())
     assert not scratch.exists()
 
 
-def test_remote_helper_cleans_scratch_on_failure(tmp_path):
+def test_remote_helper_cleans_scratch_on_failure(tmp_path, monkeypatch):
     archive = tmp_path / "source.tar"
     make_archive(archive, commit="d" * 40)
     request = parameters(sha256(archive.read_bytes()).hexdigest())
     import tgw.nixos_reviewed_evaluation as provider_module
 
     request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    original_digest = provider_module._digest_file
+    remote_paths = {provider_module.REMOTE_PYTHON, *EXECUTABLES.values()}
+    monkeypatch.setattr(provider_module, "_digest_file", lambda path: "sha256:" + DIGEST if str(path) in remote_paths else original_digest(path))
     scratch = tmp_path / "scratch"
     with pytest.raises(EvaluationError, match="commit identity"):
-        execute_packet(packet(request, archive), scratch_root=scratch)
+        execute_packet(packet(request, archive), scratch_root=scratch, scratch_uid=os.geteuid())
     assert not list(scratch.iterdir())
 
 
@@ -144,4 +156,39 @@ def test_provider_source_has_no_shell_or_activation_escape_hatch():
     assert "nixos-rebuild" not in source
     assert "nix profile" not in source
     assert "/home/db/tgw-flake" not in source
-    assert "SSH_COMMAND = (" in source
+    assert 'SSH_EXECUTABLE = "/usr/bin/ssh"' in source
+    assert '"-F", "/dev/null"' in source
+
+
+def test_remote_helper_rejects_git_control_files_and_scratch_symlink(tmp_path, monkeypatch):
+    archive = tmp_path / "source.tar"
+    with tarfile.open(archive, "w", format=tarfile.PAX_FORMAT, pax_headers={"comment": COMMIT}) as value:
+        info = tarfile.TarInfo(".git/config")
+        info.size = 6
+        value.addfile(info, io.BytesIO(b"[core]"))
+    request = parameters(sha256(archive.read_bytes()).hexdigest())
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    original_digest = provider_module._digest_file
+    remote_paths = {provider_module.REMOTE_PYTHON, *EXECUTABLES.values()}
+    monkeypatch.setattr(provider_module, "_digest_file", lambda path: "sha256:" + DIGEST if str(path) in remote_paths else original_digest(path))
+    scratch = tmp_path / "scratch"
+    with pytest.raises(EvaluationError, match="unsafe member"):
+        execute_packet(packet(request, archive), scratch_root=scratch, scratch_uid=os.geteuid())
+    target = tmp_path / "target"
+    target.mkdir()
+    scratch.rmdir()
+    scratch.symlink_to(target, target_is_directory=True)
+    with pytest.raises(EvaluationError, match="not a real directory"):
+        execute_packet(packet(request, archive), scratch_root=scratch, scratch_uid=os.geteuid())
+
+
+def test_controller_rejects_archive_size_before_transport(tmp_path):
+    archive = tmp_path / "large.tar"
+    archive.write_bytes(b"x" * 2048)
+    digest = sha256(archive.read_bytes()).hexdigest()
+    request = parameters(digest)
+    request["max_archive_bytes"] = "1024"
+    with pytest.raises(EvaluationError, match="exceeds"):
+        SshReviewedEvaluationProvider(lambda _: archive, known_hosts=tmp_path / "unused")(request)

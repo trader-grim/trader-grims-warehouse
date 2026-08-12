@@ -24,6 +24,8 @@ from typing import Any, Mapping
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from tgw.review_egress_namespace import Topology
+
 
 class BrokerError(ValueError):
     pass
@@ -317,13 +319,20 @@ def main() -> int:
     parser.add_argument("--attestation-public-key", type=Path, required=True)
     parser.add_argument("--ready", type=Path, required=True)
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--bind-topology-run", required=True)
     args = parser.parse_args()
     policy = load_policy(args.policy)
     policy.verify_runtime(args.verify_runtime)
     if args.receipt is None:
         raise SystemExit("receipt required")
-    host = os.environ.get("TGW_REVIEW_BROKER_BIND", "169.254.1.1")
-    port = int(os.environ.get("TGW_REVIEW_BROKER_PORT", "18443"))
+    if args.bind_topology_run != policy.run_id:
+        raise SystemExit("broker bind topology does not match policy run")
+    topology = Topology.for_run(args.bind_topology_run)
+    expected_host, expected_port = topology.peer_address.split("/")[0], topology.broker_port
+    host = os.environ.get("TGW_REVIEW_BROKER_BIND", expected_host)
+    port = int(os.environ.get("TGW_REVIEW_BROKER_PORT", str(expected_port)))
+    if (host, port) != (expected_host, expected_port):
+        raise SystemExit("broker bind must equal the exact namespace peer endpoint")
     asyncio.run(serve(policy, host, port, args.receipt, args.network_attestation, args.attestation_public_key.read_bytes(), args.ready))
     return 0
 

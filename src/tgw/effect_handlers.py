@@ -155,6 +155,8 @@ class TypedEffectHandlerRegistry:
                 "flake_lock_sha256": parameters["flake_lock_sha256"],
                 "module_sha256": parameters["module_sha256"],
                 "provider_sha256": parameters["provider_sha256"],
+                "ssh_sha256": parameters["ssh_sha256"],
+                "known_hosts_sha256": parameters["known_hosts_sha256"],
                 "scratch_id": parameters["scratch_id"],
                 "cleanup": "removed",
                 "activate": False,
@@ -172,6 +174,9 @@ class TypedEffectHandlerRegistry:
             }
             if result.get("executables") != expected_executables:
                 raise EffectHandlerError("reviewed Nix evaluation executable provenance mismatch")
+            expected_digests = {name: parameters[name + "_sha256"] for name in ("remote_python", "git", "nix", "systemd_analyze")}
+            if result.get("executable_sha256") != expected_digests:
+                raise EffectHandlerError("reviewed Nix evaluation executable digest mismatch")
             digest_keys = (
                 "evaluated_closure_sha256", "eval_log_sha256", "build_log_sha256",
                 "systemd_verify_output_sha256", "receipt_sha256",
@@ -274,9 +279,10 @@ class TypedEffectHandlerRegistry:
             parameters = _required_strings(effect.parameters, {
                 "target_host", "flake_repository_id", "artifact_ref", "source_commit",
                 "source_tree", "source_archive_sha256", "flake_lock_sha256", "module_path",
-                "module_sha256", "provider_sha256", "scratch_id", "system", "evaluation_target", "unit_set",
+                "module_sha256", "provider_sha256", "ssh_sha256", "known_hosts_sha256", "remote_python_sha256",
+                "git_sha256", "nix_sha256", "systemd_analyze_sha256", "scratch_id", "system", "evaluation_target", "unit_set",
                 "output_schema", "nix_network_policy", "minimum_systemd_version",
-                "max_duration_seconds", "max_output_bytes", "activate", "profile_write",
+                "max_duration_seconds", "max_output_bytes", "max_archive_bytes", "max_unpacked_bytes", "max_files", "activate", "profile_write",
                 "home_db_write", "operation_id",
             })
             fixed = {
@@ -292,7 +298,12 @@ class TypedEffectHandlerRegistry:
                 raise ValueError("reviewed Nix evaluation target or safety invariant is outside the registered bound")
             if not _SHA1.fullmatch(parameters["source_commit"]) or not _SHA1.fullmatch(parameters["source_tree"]):
                 raise ValueError("reviewed Nix source identity is invalid")
-            for key in ("source_archive_sha256", "flake_lock_sha256", "module_sha256", "provider_sha256"):
+            digest_keys = (
+                "source_archive_sha256", "flake_lock_sha256", "module_sha256", "provider_sha256",
+                "ssh_sha256", "known_hosts_sha256", "remote_python_sha256", "git_sha256",
+                "nix_sha256", "systemd_analyze_sha256",
+            )
+            for key in digest_keys:
                 if not _SHA256.fullmatch(parameters[key]):
                     raise ValueError("reviewed Nix source digest is invalid")
             if parameters["artifact_ref"] != f"artifact:sha256:{parameters['source_archive_sha256'].removeprefix('sha256:')}":
@@ -305,9 +316,19 @@ class TypedEffectHandlerRegistry:
                 minimum_systemd = int(parameters["minimum_systemd_version"])
                 max_duration = int(parameters["max_duration_seconds"])
                 max_output = int(parameters["max_output_bytes"])
+                max_archive = int(parameters["max_archive_bytes"])
+                max_unpacked = int(parameters["max_unpacked_bytes"])
+                max_files = int(parameters["max_files"])
             except ValueError as exc:
                 raise ValueError("reviewed Nix bounds must be decimal integers") from exc
-            if minimum_systemd < 257 or not 1 <= max_duration <= 900 or not 1024 <= max_output <= 16 * 1024 * 1024:
+            invalid_bounds = (
+                minimum_systemd < 257 or not 1 <= max_duration <= 900
+                or not 1024 <= max_output <= 16 * 1024 * 1024
+                or not 1024 <= max_archive <= 128 * 1024 * 1024
+                or not max_archive <= max_unpacked <= 512 * 1024 * 1024
+                or not 1 <= max_files <= 100_000
+            )
+            if invalid_bounds:
                 raise ValueError("reviewed Nix resource or verifier bound is outside the registered range")
         handler_id, handler, rollback = self._providers[effect.kind]
         parameters["generation"] = effect.generation

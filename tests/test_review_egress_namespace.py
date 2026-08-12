@@ -60,6 +60,7 @@ def test_topology_is_derived_only_from_bounded_run_identity():
     namespace_nft, host_nft = nft_fixtures(topology)
     assert topology.namespace == "tgw-review-abcdef123456"
     assert topology.broker_port == 18443
+    assert topology.peer_address.endswith(".2/30")
     for invalid in ("ABCDEF123456", "short", "../../escape", "a" * 13):
         with pytest.raises(ValueError):
             Topology.for_run(invalid)
@@ -166,7 +167,7 @@ def test_privileged_kernel_attestation_derives_live_evidence_and_is_asymmetrical
             "awk {print $22} /proc/123/stat": "42",
             "sha256sum /proc/123/exe": "a" * 64 + " /proc/123/exe",
             f"ip netns exec {topology.namespace} tgw-review-socket-readback 123 {topology.broker_port}": (
-                f"LISTEN pid=123 uid=972 inode=9 local={topology.host_address.split('/')[0]}:{topology.broker_port}"
+                f"LISTEN pid=123 uid=972 inode=9 local={topology.peer_address.split('/')[0]}:{topology.broker_port}"
             ),
         }
         output = outputs[key]
@@ -222,7 +223,7 @@ def test_typed_identity_parser_rejects_pid_uid_collisions(field, replacement):
         "broker_process": "123 972 tgw-review-egress@abcdef123456.service",
         "broker_starttime": "42",
         "broker_exe": "a" * 64 + " /proc/123/exe",
-        "broker_socket": f"LISTEN pid=123 uid=972 inode=9 local={topology.host_address.split('/')[0]}:18443",
+        "broker_socket": f"LISTEN pid=123 uid=972 inode=9 local={topology.peer_address.split('/')[0]}:18443",
     }
     if field == "broker_process":
         evidence[field] = f"{replacement['pid']} {replacement['uid']} {replacement['cgroup']}"

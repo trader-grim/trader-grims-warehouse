@@ -292,7 +292,7 @@ def parse_live_identity(evidence: dict, topology: Topology, *, pid: int, runtime
         "pid": pid,
         "uid": 972,
         "inode": socket.get("inode"),
-        "local_ip": topology.host_address.split("/")[0],
+        "local_ip": topology.peer_address.split("/")[0],
         "local_port": topology.broker_port,
         "state": "LISTEN",
     }
@@ -352,7 +352,7 @@ def collect_kernel_attestation(
             "nc",
             "-z",
             "-w1",
-            topology.host_address.split("/")[0],
+            topology.peer_address.split("/")[0],
             str(topology.broker_port),
         ],
     }
@@ -372,7 +372,7 @@ def collect_kernel_attestation(
         "issued_unix": issued_unix,
         "expires_unix": expires_unix,
         "nonce": nonce,
-        "broker_bind": {"host": topology.host_address.split("/")[0], "port": topology.broker_port},
+        "broker_bind": {"host": topology.peer_address.split("/")[0], "port": topology.broker_port},
     }
     signature = Ed25519PrivateKey.from_private_bytes(private_key).sign(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hex()
     return {**unsigned, "signature": "ed25519:" + signature}
