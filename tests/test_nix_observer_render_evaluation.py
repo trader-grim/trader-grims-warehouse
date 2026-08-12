@@ -151,13 +151,21 @@ def test_result_mutations_fail_closed(mutate):
         validate_result(value, request=req, now=NOW)
 
 
-def test_provider_derives_receipt_from_held_files_and_actual_commands(tmp_path):
+def test_provider_derives_receipt_from_held_files_and_actual_commands(tmp_path, monkeypatch):
+    from tgw import nix_observer_render_evaluation as module
+
     req = request()
-    root = tmp_path / "result"
+    store = tmp_path / "store"
+    store.mkdir()
+    monkeypatch.setattr(module, "STORE_ROOT", store)
+    root = store / "22222222222222222222222222222222-render"
     for name in OUTPUTS:
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(name.encode())
+    (root / "verifier-metadata.json").write_text(
+        json.dumps({"schema": "tgw-nix-input-observer-render/v1", "descriptor_status": "NON_DEPLOYABLE_RENDER_FIXTURE", "activation": False, "units": list(OUTPUTS[9:12])})
+    )
     nix = tmp_path / "nix"
     verifier = tmp_path / "systemd-analyze"
     nix.write_bytes(b"nix")
@@ -169,25 +177,30 @@ def test_provider_derives_receipt_from_held_files_and_actual_commands(tmp_path):
     unsigned.pop("request_sha256")
     req["request_sha256"] = "sha256:" + hashlib.sha256(canonical(unsigned)).hexdigest()
     drv = "/nix/store/33333333333333333333333333333333-render.drv"
-    out = "/nix/store/22222222222222222222222222222222-render"
+    out = str(root)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
     calls = []
 
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
         if argv[1:3] == ["derivation", "show"]:
             return subprocess.CompletedProcess(argv, 0, json.dumps({drv: {"outputs": {"out": {"path": out}}}}), "")
+        if argv[1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, b"systemd 257 (257.10)\n", b"")
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
     receipt = produce_result(
         request=req,
         output_root=root,
-        output_identity=out,
         evaluated_drv=drv,
         nix=nix,
         nix_sha256="sha256:" + hashlib.sha256(b"nix").hexdigest(),
         systemd_analyze=verifier,
         now=NOW,
+        scratch_root=scratch,
         run=run,
     )
     assert receipt["effects"]["build"] is True
-    assert calls[0][1]["pass_fds"] and len(calls[1][1]["pass_fds"]) == 4
+    assert calls[0][1]["pass_fds"] and len(calls[2][1]["pass_fds"]) == 4
+    assert not scratch.exists()

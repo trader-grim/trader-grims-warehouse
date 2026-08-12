@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,7 @@ from pathlib import Path
 SCHEMA = "tgw-nix-observer-render-evaluation-request/v1"
 RESULT_SCHEMA = "tgw-nix-observer-render-evaluation-receipt/v1"
 TARGET = "nix-input-observer-rendered-artifacts"
+STORE_ROOT = Path("/nix/store")
 OUTPUTS = (
     "etc/nix-input-observer-launcher.conf",
     "etc/nix-input-observer-transport.json",
@@ -169,7 +171,8 @@ def validate_result(value: Mapping[str, object], *, request: Mapping[str, object
         or any(set(item) != {"path", "sha256", "size"} or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["sha256"]) or not isinstance(item["size"], int) or item["size"] < 0 for item in files)
     ):
         raise RenderEvaluationError("render output manifest mismatch")
-    if not isinstance(result["output_root"], str) or not re.fullmatch(r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+", result["output_root"]):
+    output_path = Path(result["output_root"]) if isinstance(result["output_root"], str) else Path()
+    if output_path.parent != STORE_ROOT or not re.fullmatch(r"[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+", output_path.name):
         raise RenderEvaluationError("render output root invalid")
     if not isinstance(result["evaluated_drv"], str) or not re.fullmatch(r"/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+\.drv", result["evaluated_drv"]):
         raise RenderEvaluationError("render derivation identity invalid")
@@ -199,12 +202,14 @@ def produce_result(
     nix_sha256: str,
     systemd_analyze: Path,
     now: datetime,
+    scratch_root: Path,
     run: object = subprocess.run,
-    output_identity: str | None = None,
 ) -> dict[str, object]:
     """Derive one receipt from held output/tool inodes and actual subprocesses."""
     validate_request(request)
-    identity = output_identity or str(output_root)
+    if output_root.parent != STORE_ROOT or not re.fullmatch(r"[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+", output_root.name):
+        raise RenderEvaluationError("render output root is not canonical")
+    identity = str(output_root)
 
     def held(path: Path, expected: str | None = None) -> tuple[int, str, int]:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -212,7 +217,10 @@ def produce_result(
         if not os.path.isfile(f"/proc/self/fd/{fd}"):
             os.close(fd)
             raise RenderEvaluationError("render evidence path is not regular")
-        raw = os.read(fd, stat.st_size)
+        chunks = []
+        while chunk := os.read(fd, 1024 * 1024):
+            chunks.append(chunk)
+        raw = b"".join(chunks)
         os.lseek(fd, 0, os.SEEK_SET)
         digest = "sha256:" + hashlib.sha256(raw).hexdigest()
         if expected is not None and digest != expected:
@@ -223,12 +231,34 @@ def produce_result(
     nix_fd, _, _ = held(nix, nix_sha256)
     verify_fd, verify_digest, _ = held(systemd_analyze, request["systemd_analyze_sha256"])
     file_fds: list[int] = []
+    store_fd = os.open(STORE_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    output_fd = os.open(output_root.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=store_fd)
     try:
         files = []
+        raw_files = {}
         for name in OUTPUTS:
-            fd, digest, size = held(output_root / name)
+            parts = name.split("/")
+            parent_fd = output_fd
+            owned_parent = None
+            if len(parts) == 2:
+                owned_parent = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=output_fd)
+                parent_fd = owned_parent
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            if owned_parent is not None:
+                os.close(owned_parent)
+            stat = os.fstat(fd)
+            chunks = []
+            while chunk := os.read(fd, 1024 * 1024):
+                chunks.append(chunk)
+            raw = b"".join(chunks)
+            os.lseek(fd, 0, os.SEEK_SET)
+            if len(raw) != stat.st_size:
+                raise RenderEvaluationError("render file changed while held")
+            digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+            size = stat.st_size
             file_fds.append(fd)
             files.append({"path": name, "sha256": digest, "size": size})
+            raw_files[name] = raw
         nix_result = run(
             [f"/proc/self/fd/{nix_fd}", "derivation", "show", evaluated_drv],
             capture_output=True,
@@ -238,12 +268,26 @@ def produce_result(
             close_fds=True,
             pass_fds=(nix_fd,),
         )
-        if nix_result.returncode or len(nix_result.stdout) > request["max_output_bytes"]:
+        if nix_result.returncode or max(len(nix_result.stdout), len(nix_result.stderr)) > request["max_output_bytes"]:
             raise RenderEvaluationError("render derivation observation failed")
         derivation = json.loads(nix_result.stdout)
+        if set(derivation) != {evaluated_drv} or set(derivation[evaluated_drv]) < {"outputs"}:
+            raise RenderEvaluationError("render derivation schema mismatch")
         outputs = derivation.get(evaluated_drv, {}).get("outputs", {})
         if outputs != {"out": {"path": identity}}:
             raise RenderEvaluationError("render derivation output observation mismatch")
+        metadata = json.loads(raw_files["verifier-metadata.json"])
+        if (
+            metadata.get("schema") != "tgw-nix-input-observer-render/v1"
+            or metadata.get("descriptor_status") != "NON_DEPLOYABLE_RENDER_FIXTURE"
+            or metadata.get("activation") is not False
+            or metadata.get("units") != list(OUTPUTS[9:12])
+        ):
+            raise RenderEvaluationError("render held metadata contract mismatch")
+        versioned = run([f"/proc/self/fd/{verify_fd}", "--version"], capture_output=True, check=False, timeout=30, close_fds=True, pass_fds=(verify_fd,))
+        version_out = versioned.stdout if isinstance(versioned.stdout, bytes) else versioned.stdout.encode()
+        if versioned.returncode or not version_out.startswith(request["systemd_analyze_version"].encode() + b"\n"):
+            raise RenderEvaluationError("render held verifier version mismatch")
         unit_fds = file_fds[9:12]
         argv = [f"/proc/self/fd/{verify_fd}", "verify", *[f"/proc/self/fd/{fd}" for fd in unit_fds]]
         verified = run(argv, capture_output=True, check=False, timeout=60, close_fds=True, pass_fds=(verify_fd, *unit_fds))
@@ -252,6 +296,9 @@ def produce_result(
         if verified.returncode or max(len(stdout), len(stderr)) > request["max_output_bytes"]:
             raise RenderEvaluationError("render systemd verification failed")
         unit_manifest = files[9:12]
+        shutil.rmtree(scratch_root)
+        if scratch_root.exists():
+            raise RenderEvaluationError("render scratch cleanup ambiguous")
         result = {
             "schema": RESULT_SCHEMA,
             "request_sha256": request["request_sha256"],
@@ -281,5 +328,5 @@ def produce_result(
         result["receipt_sha256"] = "sha256:" + hashlib.sha256(canonical(result)).hexdigest()
         return validate_result(result, request=request, now=now)
     finally:
-        for fd in [nix_fd, verify_fd, *file_fds]:
+        for fd in [nix_fd, verify_fd, output_fd, store_fd, *file_fds]:
             os.close(fd)
