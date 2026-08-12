@@ -1,0 +1,28 @@
+{
+  "schema": "tgw-integrated-candidate-manifest/v1",
+  "source": {
+    "commit": "9355f1a082775016be36796afa1190a4657700d7",
+    "tree": "4b48dc6d318720698eed2786da0463189dbac9aa",
+    "archive_sha256": "sha256:9a407c9293ea023ae486d5fcb26a05bb03873479fb33ac22f338354a77479e9e"
+  },
+  "plan": {
+    "commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+    "solution_hash": "sha256:d28650c26c6a3d26d6c943597ccb7abd7c6670b1703d9ce941ac5ed7a2d73a4d",
+    "closure_hash": "sha256:bc0c53b2574fc359c629bd213e078fdd2824e5e1c4a98c0c7a347de869d9e6f8"
+  },
+  "conformance": {
+    "status": "VERIFIED",
+    "receipt": "agent-services/receipts/luet-conformance-9355f1a.json",
+    "receipt_hash": "sha256:3d37d88edd20dd82eb1810e5b65b7defadad1dd1a312bc91a1a62355254b6823"
+  },
+  "tests": {
+    "focused_receipt": "agent-services/receipts/W08-focused-tests-9355f1a.json",
+    "full_suite": {"command": [".venv/bin/pytest", "-q"], "status": "DEFINED_NOT_RUN"}
+  },
+  "review": {"status": "NOT_RUN", "receipt": null},
+  "database": {"migration_paths": []},
+  "candidate_closed": true,
+  "dispatchable": false,
+  "installed": false,
+  "hold": "Full suite and independent review are incomplete"
+}

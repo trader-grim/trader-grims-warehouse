@@ -1,0 +1,15 @@
+{
+  "schema": "tgw-luet-conformance-receipt/v1",
+  "provider_id": "luet-pinned-0.9.26@1",
+  "luet_version": "0.9.26",
+  "luet_revision": "48f17dbc7a9edb94b1415a2eeeac4e5c2d45f5d3",
+  "binary_sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+  "plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+  "graph_hash": "sha256:030f13c8e24d9bc6eb47793ae67f2459efa6db92317d2846579a936ff8558339",
+  "closure_hash": "sha256:bc0c53b2574fc359c629bd213e078fdd2824e5e1c4a98c0c7a347de869d9e6f8",
+  "source_commit": "9355f1a082775016be36796afa1190a4657700d7",
+  "source_tree": "4b48dc6d318720698eed2786da0463189dbac9aa",
+  "status": "AGREEMENT",
+  "selected_providers": ["build-governed-execution", "build-harness-role-lanes", "build-operator-authority", "build-operator-surface", "build-workflow-convergence", "canonical-plan-graph", "native-exact-resolver", "recovered-promptcraft", "shared-tgw-plan-skill"],
+  "receipt_hash": "sha256:3d37d88edd20dd82eb1810e5b65b7defadad1dd1a312bc91a1a62355254b6823"
+}

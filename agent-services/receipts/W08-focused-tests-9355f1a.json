@@ -1,0 +1,7 @@
+{
+  "schema": "tgw-candidate-test-receipt/v1",
+  "source_commit": "9355f1a082775016be36796afa1190a4657700d7",
+  "result": "90 passed in 4.29s",
+  "status": "passed",
+  "suite": "plan, luet, catalog, runtime bridge, authority, effects, release, candidate, governed coding, harness registry, operator console"
+}
