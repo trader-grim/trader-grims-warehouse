@@ -1,0 +1,4 @@
+interface:
+  display_name: "TGW Plan"
+  short_description: "Plan, resolve, and launch governed TGW work"
+  default_prompt: "Use $tgw-plan to reconcile and execute the approved TGW Plan."
