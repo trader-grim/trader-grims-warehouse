@@ -1,0 +1,65 @@
+{
+  "schema": "tgw-execution-card-result/v1",
+  "card_id": "A3O01-host-state-python-binding-correction",
+  "plan_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+  "approval_sha256": "sha256:9e524ddae0ebdd2a34b1a96487df6f3cec714e4c378409705910c11b528f3e80",
+  "solution_sha256": "sha256:da79baa90916ba0fbe3af76365c8d25012ec0a38af4917bc57abaa44e21fb740",
+  "closure_sha256": "sha256:3ef92c5a2c8ccf72ebb271ed4fec2c1fbe9fa7fe47c0311ad39b34ae2f4c31b9",
+  "outcome": "SOURCE_REVIEW_PASS_IMPLEMENTED_NOT_EXECUTABLE",
+  "observed_at": "2026-08-13T21:49:52Z",
+  "implementation": {
+    "commit": "591b3e1db632587eef88e4fa4447dc3f24bf6f99",
+    "tree": "2fc5ad5a0c496dbe45d6ede1fb94579cbb818331",
+    "parent": "07d6bcb4d1cd1eeeb06397c946942805c3232e60",
+    "controller_sha256": "sha256:bfdc706d4c8d416cf247ab56ba87303227ea3a77f8a7c4dd124f880a4d8b7022",
+    "stdlib_helper_sha256": "sha256:0bed27307faf352d1fa53a9991b5b9c58e436655331e43574af65f93eb74cc87",
+    "tests_sha256": "sha256:2207f0554a42004f27887d5cb0955d1c78cdf1a5edba710d5dd92e07b80f7c27",
+    "provider_descriptor_file_sha256": "sha256:ddbe8b68f3d3ae7477f28ced8b72742620340e73aa82cd26f7d84b379eb02a72"
+  },
+  "freeze": {
+    "archive_path": "/opt/TGW/evidence/codex/sha256/f767f63b61d3646ebbab53f892e284121ba8e26a119318e34b011649e2684a34.tar",
+    "archive_sha256": "sha256:f767f63b61d3646ebbab53f892e284121ba8e26a119318e34b011649e2684a34",
+    "archive_size": 12810240,
+    "archive_prefix": "trader-grims-warehouse/",
+    "embedded_commit": "591b3e1db632587eef88e4fa4447dc3f24bf6f99",
+    "owner": "root:root",
+    "mode": 292,
+    "nlink": 1
+  },
+  "review": {
+    "reviewer": "/root",
+    "scope": "remote Python logical-path correction and unchanged zero-effect host-observation boundary",
+    "findings": [
+      "request and remote helper now bind /run/current-system/sw/bin/python3, matching admitted host identity evidence",
+      "production observation remains read-only and NOT_EXECUTABLE",
+      "fixture executable overrides preserve the production logical path in emitted tool identity",
+      "no remote connection or remote mutation occurred during source review"
+    ]
+  },
+  "gates": {
+    "focused": {"status": "PASS", "passed": 94, "failed": 0},
+    "tracked_full": {"status": "PASS", "passed": 3943, "skipped": 5, "failed": 0, "elapsed_seconds": 128.26},
+    "ruff": "PASS",
+    "py_compile": "PASS",
+    "diff_check": "PASS",
+    "archive_reproduction": "PASS"
+  },
+  "effects": {
+    "remote_connection": false,
+    "remote_write": false,
+    "repository_write": false,
+    "nix": false,
+    "build": false,
+    "install": false,
+    "profile": false,
+    "service": false,
+    "deploy": false,
+    "key_generation": false,
+    "credential_provisioning": false,
+    "a3_observation": false
+  },
+  "dispatchable": false,
+  "grant": null,
+  "request": null,
+  "result_sha256": "sha256:42e1adedbbb244f247745bc3e5908aab6c05408248d66c61b5d7a949ae51d5ea"
+}
