@@ -352,6 +352,42 @@ def test_controller_readiness_codes_match_helper_and_retain_legacy_evidence() ->
     assert decode_helper_response(encode_helper_response(legacy), request, now=now) == legacy
 
 
+def test_streamed_helper_resolves_and_postchecks_bounded_profile_link_chain(tmp_path: Path) -> None:
+    generation = tmp_path / "system-42-link"
+    logical = tmp_path / "system"
+    store = tmp_path / "nix" / "store" / ("a" * 32 + "-nixos-system-tgw-prod")
+    store.mkdir(parents=True)
+    generation.symlink_to(store)
+    logical.symlink_to(generation.name)
+    chain, resolved = a3_host_state_helper._resolve_link_chain(logical)
+    assert resolved == store
+    assert [Path(item[0]).name for item in chain] == ["system", "system-42-link"]
+    a3_host_state_helper._postcheck_link_chain(chain)
+    generation.unlink()
+    generation.symlink_to(tmp_path / "different")
+    with pytest.raises(a3_host_state_helper.HelperError, match="chain changed"):
+        a3_host_state_helper._postcheck_link_chain(chain)
+
+
+def test_streamed_helper_rejects_link_cycle_and_excessive_depth(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.symlink_to(second.name)
+    second.symlink_to(first.name)
+    with pytest.raises(a3_host_state_helper.HelperHold) as cycle:
+        a3_host_state_helper._resolve_link_chain(first)
+    assert cycle.value.code == "SYSTEM_LINK_CHAIN_CYCLE"
+    previous = tmp_path / "link-0"
+    for index in range(1, 10):
+        current = tmp_path / f"link-{index}"
+        previous.symlink_to(current.name)
+        previous = current
+    previous.write_text("end")
+    with pytest.raises(a3_host_state_helper.HelperHold) as deep:
+        a3_host_state_helper._resolve_link_chain(tmp_path / "link-0")
+    assert deep.value.code == "SYSTEM_LINK_CHAIN_TOO_DEEP"
+
+
 @pytest.mark.parametrize(
     "tuple_value",
     list(

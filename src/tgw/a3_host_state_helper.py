@@ -45,6 +45,9 @@ HOST_NOT_READY_DIAGNOSTICS = frozenset(
         "REPOSITORY_HEAD_ABSENT",
         "REPOSITORY_LAYOUT_NOT_DIRECT",
         "SYSTEM_LINK_NOT_SYMLINK",
+        "SYSTEM_LINK_CHAIN_CYCLE",
+        "SYSTEM_LINK_CHAIN_NOT_TRUSTED",
+        "SYSTEM_LINK_CHAIN_TOO_DEEP",
         "SYSTEM_LINK_TARGET_NOT_STORE",
         "SYSTEM_PROFILE_CAS_MISMATCH",
         "SYSTEM_TARGET_ABSENT",
@@ -313,23 +316,70 @@ def _version(fd: int, timeout: int = 10, limit: int = 65536) -> tuple[str, str, 
     )
 
 
-def _link(path: Path) -> tuple[os.stat_result, str, dict[str, int]]:
-    before = os.lstat(path)
-    if not stat.S_ISLNK(before.st_mode):
+def _resolve_link_chain(
+    path: Path,
+    *,
+    trusted_uid: int | None = None,
+) -> tuple[tuple[tuple[str, str, tuple[int, ...]], ...], Path]:
+    chain: list[tuple[str, str, tuple[int, ...]]] = []
+    current = path
+    seen: set[str] = set()
+    for _hop in range(8):
+        key = os.path.normpath(str(current))
+        if key in seen:
+            raise HelperHold("SYSTEM_LINK_CHAIN_CYCLE")
+        seen.add(key)
+        try:
+            item = os.lstat(current)
+        except FileNotFoundError:
+            if chain:
+                return tuple(chain), current
+            raise HelperHold("SYSTEM_TARGET_ABSENT") from None
+        if not stat.S_ISLNK(item.st_mode):
+            return tuple(chain), current
+        if trusted_uid is not None:
+            if item.st_uid != trusted_uid or item.st_nlink != 1:
+                raise HelperHold("SYSTEM_LINK_CHAIN_NOT_TRUSTED")
+            for ancestor in (current.parent, *current.parents):
+                ancestor_st = os.lstat(ancestor)
+                if (
+                    not stat.S_ISDIR(ancestor_st.st_mode)
+                    or stat.S_ISLNK(ancestor_st.st_mode)
+                    or ancestor_st.st_uid != trusted_uid
+                    or stat.S_IMODE(ancestor_st.st_mode) & 0o022
+                ):
+                    raise HelperHold("SYSTEM_LINK_CHAIN_NOT_TRUSTED")
+                if ancestor == Path("/"):
+                    break
+        target = os.readlink(current)
+        chain.append((str(current), target, _inode(item)))
+        current = Path(target) if os.path.isabs(target) else current.parent / target
+        current = Path(os.path.normpath(str(current)))
+    raise HelperHold("SYSTEM_LINK_CHAIN_TOO_DEEP")
+
+
+def _postcheck_link_chain(chain: tuple[tuple[str, str, tuple[int, ...]], ...]) -> None:
+    for path, target, identity in chain:
+        if _inode(os.lstat(path)) != identity or os.readlink(path) != target:
+            raise HelperError("system link chain changed")
+
+
+def _link(path: Path) -> tuple[tuple[tuple[str, str, tuple[int, ...]], ...], str, dict[str, int]]:
+    chain, resolved = _resolve_link_chain(path, trusted_uid=0)
+    if not chain:
         raise HelperHold("SYSTEM_LINK_NOT_SYMLINK")
-    target = os.readlink(path)
+    target = str(resolved)
     if not _STORE.fullmatch(target):
         raise HelperHold("SYSTEM_LINK_TARGET_NOT_STORE")
-    if _inode(os.lstat(path)) != _inode(before) or os.readlink(path) != target:
-        raise HelperError("system identity changed")
+    _postcheck_link_chain(chain)
     try:
-        target_st = os.stat(target, follow_symlinks=True)
+        target_st = os.stat(target, follow_symlinks=False)
     except FileNotFoundError as exc:
         raise HelperHold("SYSTEM_TARGET_ABSENT") from exc
     if not stat.S_ISDIR(target_st.st_mode) or target_st.st_uid != 0 or stat.S_IMODE(target_st.st_mode) & 0o022:
         raise HelperHold("SYSTEM_TARGET_NOT_TRUSTED")
     return (
-        before,
+        chain,
         target,
         {
             "dev": target_st.st_dev,
@@ -396,8 +446,8 @@ def _repository(path: Path, expected_branch: str) -> tuple[dict[str, Any], tuple
 
 
 def observe(request: Mapping[str, Any], now: datetime) -> dict[str, Any]:
-    current_st, current, current_identity = _link(Path("/run/current-system"))
-    profile_st, profile, profile_identity = _link(Path("/nix/var/nix/profiles/system"))
+    current_chain, current, current_identity = _link(Path("/run/current-system"))
+    profile_chain, profile, profile_identity = _link(Path("/nix/var/nix/profiles/system"))
     if current != profile or current_identity != profile_identity:
         raise HelperHold("SYSTEM_PROFILE_CAS_MISMATCH")
     python_fd, python_raw, python_identity = _held_executable(Path(request["target"]["remote_python"]))
@@ -417,8 +467,8 @@ def observe(request: Mapping[str, Any], now: datetime) -> dict[str, Any]:
             git_identity["version_b64"],
         ) = _version(git_fd)
         repository, repo_before = _repository(Path(request["target"]["repository"]), request["target"]["expected_branch"])
-        if _inode(os.lstat("/run/current-system")) != _inode(current_st) or _inode(os.lstat("/nix/var/nix/profiles/system")) != _inode(profile_st):
-            raise HelperError("system link changed after observation")
+        _postcheck_link_chain(current_chain)
+        _postcheck_link_chain(profile_chain)
         if (
             _inode(os.lstat(request["target"]["repository"])) != repo_before[0]
             or _inode(os.lstat(Path(request["target"]["repository"]) / ".git")) != repo_before[1]
