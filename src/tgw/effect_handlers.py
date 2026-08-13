@@ -16,6 +16,19 @@ from typing import Any, Callable, Mapping
 
 from tgw.bootstrap_authority import BootstrapConsumptionAmbiguous
 from tgw.nix_observer_render_evaluation import validate_request as validate_render_request
+from tgw.nixos_a3_successor_evaluation import (
+    EFFECT_KIND as A3_SUCCESSOR_EFFECT_KIND,
+)
+from tgw.nixos_a3_successor_evaluation import (
+    A3EvaluationAmbiguous,
+    A3EvaluationHold,
+)
+from tgw.nixos_a3_successor_evaluation import (
+    validate_request as validate_a3_successor_request,
+)
+from tgw.nixos_a3_successor_evaluation import (
+    validate_success as validate_a3_successor_success,
+)
 from tgw.nixos_observer_render_evaluation import (
     EFFECT_KIND as OBSERVER_RENDER_EFFECT_KIND,
 )
@@ -151,6 +164,7 @@ class TypedEffectHandlerRegistry:
         bootstrap_validate: Callable[[Mapping[str, Any]], None] | None = None,
         nixos_reviewed_evaluation: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         nixos_observer_render_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        nixos_a3_successor_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> None:
         self._providers = {
             EffectKind.CODING_RELEASE: ("immutable-release-installer@1", release_install, release_rollback),
@@ -173,8 +187,14 @@ class TypedEffectHandlerRegistry:
                 self._observer_render_provider(nixos_observer_render_evaluation or self._unavailable_render_evaluation),
                 None,
             ),
+            EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION: (
+                "nixos-a3-successor-evaluation@1",
+                self._a3_successor_provider(nixos_a3_successor_evaluation or self._unavailable_a3_successor_evaluation),
+                None,
+            ),
         }
         self._bootstrap_validate = bootstrap_validate
+        self._a3_successor_allow_fixture = bool(getattr(getattr(nixos_a3_successor_evaluation, "composition", None), "allow_fixture", False))
 
     @staticmethod
     def _unavailable_bootstrap(parameters: Mapping[str, str]) -> Mapping[str, Any]:
@@ -187,6 +207,49 @@ class TypedEffectHandlerRegistry:
     @staticmethod
     def _unavailable_render_evaluation(parameters: Mapping[str, Any]) -> Mapping[str, Any]:
         raise EffectHandlerError("observer render evaluation provider is not mounted")
+
+    @staticmethod
+    def _unavailable_a3_successor_evaluation(parameters: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise HeldEffect("A3 successor evaluation provider is not mounted")
+
+    @staticmethod
+    def _a3_successor_provider(
+        provider: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+    ) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
+        """Rebind the new A3 evaluator result to its exact mounted composition."""
+
+        def invoke(parameters: Mapping[str, Any]) -> Mapping[str, Any]:
+            generation = parameters["generation"]
+            request = {key: value for key, value in parameters.items() if key != "generation"}
+            composition = getattr(provider, "composition", None)
+            if composition is None:
+                raise HeldEffect("A3 successor provider has no immutable composition binding")
+            try:
+                result = provider({"kind": A3_SUCCESSOR_EFFECT_KIND, "generation": generation, "parameters": request})
+            except A3EvaluationHold as exc:
+                raise HeldEffect(str(exc), evidence=("nixos-a3-successor-composition:" + composition.receipt_sha256,)) from exc
+            except A3EvaluationAmbiguous as exc:
+                raise AmbiguousEffect(str(exc), evidence=exc.evidence) from exc
+            if not isinstance(result, Mapping) or set(result) != {"evidence", "terminal", "store_ref"}:
+                raise AmbiguousEffect(
+                    "A3 successor provider returned a malformed post-build envelope",
+                    evidence=("nixos-a3-successor-handler-memory:" + hashlib.sha256(_canonical(result)).hexdigest(),),
+                )
+            try:
+                terminal = validate_a3_successor_success(result["terminal"], request)
+            except Exception as exc:
+                raise AmbiguousEffect(
+                    "A3 successor provider returned invalid post-build evidence",
+                    evidence=("nixos-a3-successor-handler-memory:" + hashlib.sha256(_canonical(result)).hexdigest(),),
+                ) from exc
+            if result["evidence"] != ["nixos-a3-successor-evaluation:" + terminal["receipt_sha256"]]:
+                raise AmbiguousEffect(
+                    "A3 successor provider evidence is not exact",
+                    evidence=("nixos-a3-successor-handler-memory:" + hashlib.sha256(_canonical(result)).hexdigest(),),
+                )
+            return result
+
+        return invoke
 
     @staticmethod
     def _observer_render_provider(provider: Callable[[Mapping[str, Any]], Mapping[str, Any]]) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
@@ -528,6 +591,8 @@ class TypedEffectHandlerRegistry:
             parameters = validate_render_request(effect.parameters)
             if any(parameters[key] is not False for key in ("activate", "profile_write", "home_db_write")):
                 raise ValueError("observer render contains a forbidden activation or write effect")
+        elif effect.kind is EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION:
+            parameters = validate_a3_successor_request(effect.parameters, allow_fixture=self._a3_successor_allow_fixture)
         else:  # pragma: no cover - EffectKind is closed above
             raise ValueError("effect kind has no registered parameter validator")
         handler_id, handler, rollback = self._providers[effect.kind]

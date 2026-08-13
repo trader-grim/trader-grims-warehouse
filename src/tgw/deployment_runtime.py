@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from tgw.effect_handlers import AuthorityEffectController, TypedEffectHandlerRegistry
+from tgw.nixos_a3_successor_evaluation import A3SuccessorEvaluationProvider
 from tgw.platform_bootstrap import A3PlatformBootstrapProvider
 from tgw.release_controller import MountedReleaseController
 
@@ -35,6 +36,8 @@ def compose_deployment_controller(
     dependency_resubmit: Provider,
     enable_platform_bootstrap: bool = False,
     platform_bootstrap: A3PlatformBootstrapProvider | None = None,
+    enable_a3_successor_evaluation: bool = False,
+    a3_successor_evaluation: A3SuccessorEvaluationProvider | None = None,
 ) -> AuthorityEffectController:
     """Create the production controller only after every binding is concrete."""
     if mounts.target_host != expected_host:
@@ -57,6 +60,13 @@ def compose_deployment_controller(
             raise ValueError("platform-bootstrap manifest target differs from the deployment host")
     elif platform_bootstrap is not None:
         raise ValueError("platform-bootstrap provider is mounted while installation is disabled")
+    if enable_a3_successor_evaluation:
+        if not isinstance(a3_successor_evaluation, A3SuccessorEvaluationProvider):
+            raise ValueError("enabled A3 successor evaluation lacks its closed provider and composition")
+        if a3_successor_evaluation.composition.status != "REVIEWED_EXECUTABLE" or a3_successor_evaluation.composition.allow_fixture:
+            raise ValueError("A3 successor production integration is not executable")
+    elif a3_successor_evaluation is not None:
+        raise ValueError("A3 successor evaluation provider is mounted while evaluation is disabled")
     require_authority_schema()
     release = MountedReleaseController(
         roots={mounts.root_id: root},
@@ -73,5 +83,6 @@ def compose_deployment_controller(
         bootstrap_install=platform_bootstrap.install if platform_bootstrap is not None else None,
         bootstrap_rollback=platform_bootstrap.rollback if platform_bootstrap is not None else None,
         bootstrap_validate=platform_bootstrap.preflight if platform_bootstrap is not None else None,
+        nixos_a3_successor_evaluation=a3_successor_evaluation,
     )
     return AuthorityEffectController(registry, consume_authority)
