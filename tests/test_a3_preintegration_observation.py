@@ -195,12 +195,14 @@ def test_sealed_transport_uses_exact_identity_and_frame(tmp_path: Path) -> None:
     fake.write_text("#!/usr/bin/python3\nimport os,pathlib\nos.read(0,1<<20)\nos.write(1,pathlib.Path(" + repr(str(response_path)) + ").read_bytes())\n")
     fake.chmod(0o755)
     hosts = tmp_path / "hosts"
-    hosts.write_text("host key\n")
+    hosts.write_text("tgw-prod ssh-ed25519 a2V5\n")
+    hosts.chmod(0o444)
     identity = tmp_path / "identity"
     identity.write_text("identity\n")
     identity.chmod(0o400)
     helper = tmp_path / "helper"
     helper.write_bytes(Path("src/tgw/a3_preintegration_observation.py").read_bytes())
+    helper.chmod(0o444)
     source = _fixture_source_descriptor()
     source["helper_sha256"] = digest(helper.read_bytes())
     source["descriptor_sha256"] = digest(canonical({k: v for k, v in source.items() if k != "descriptor_sha256"}))
@@ -215,9 +217,9 @@ def test_sealed_transport_uses_exact_identity_and_frame(tmp_path: Path) -> None:
     request = make_request(operation_id="ssh-frame", transport=transport, source=source)
     receipt, archive = observe_repository(repo, request)
     response_path.write_bytes(encode_helper_response(receipt, archive))
-    provider = SshObservationProvider(request, fake, hosts, identity, helper, "/usr/bin/python3")
+    provider = SshObservationProvider(request, fake, hosts, identity, helper, "/usr/bin/python3", request["source"])
     assert provider.ready(request)
-    result = provider.observe(request)
+    result = provider.observe(request, on_dispatch=lambda: None)
     assert result["receipt"]["repository"]["archive_sha256"] == digest(result["archive"])
 
 
@@ -226,6 +228,25 @@ def test_sealed_transport_rejects_ambient_identity_mutation(tmp_path: Path) -> N
     missing = tmp_path / "missing"
     provider = SshObservationProvider(request, missing, missing, missing, missing, "/usr/bin/python3")
     assert provider.ready(request) is False
+
+
+def test_production_provider_rejects_self_consistent_descriptor_xy(tmp_path: Path) -> None:
+    request = make_request(operation_id="descriptor-xy", transport=_transport())
+    changed = deepcopy(request["source"])
+    changed["catalog_sha256"] = "sha256:" + "8" * 64
+    changed["descriptor_sha256"] = digest(canonical({k: v for k, v in changed.items() if k != "descriptor_sha256"}))
+    provider = SshObservationProvider(request, tmp_path / "ssh", tmp_path / "hosts", tmp_path / "key", tmp_path / "helper", "/usr/bin/python3", changed)
+    assert provider.ready(request) is False
+
+
+@pytest.mark.parametrize("relative", ["objects/info/http-alternates", "commondir", "shallow"])
+def test_repository_rejects_common_and_shallow_state(tmp_path: Path, relative: str) -> None:
+    repo = _repo(tmp_path)
+    path = repo / ".git" / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("external\n")
+    with pytest.raises(ObservationHold):
+        observe_repository(repo, make_request(operation_id="common-state", transport=_transport()))
 
 
 def test_transport_kills_term_ignoring_descendant_group(tmp_path: Path) -> None:
@@ -238,12 +259,14 @@ def test_transport_kills_term_ignoring_descendant_group(tmp_path: Path) -> None:
     )
     fake.chmod(0o755)
     hosts = tmp_path / "hosts"
-    hosts.write_text("host key\n")
+    hosts.write_text("tgw-prod ssh-ed25519 a2V5\n")
+    hosts.chmod(0o444)
     identity = tmp_path / "identity"
     identity.write_text("identity\n")
     identity.chmod(0o400)
     helper = tmp_path / "helper"
     helper.write_bytes(Path("src/tgw/a3_preintegration_observation.py").read_bytes())
+    helper.chmod(0o444)
     source = _fixture_source_descriptor()
     source["helper_sha256"] = digest(helper.read_bytes())
     source["descriptor_sha256"] = digest(canonical({k: v for k, v in source.items() if k != "descriptor_sha256"}))
@@ -258,9 +281,9 @@ def test_transport_kills_term_ignoring_descendant_group(tmp_path: Path) -> None:
     request = make_request(operation_id="killpg", transport=transport, source=source)
     request["bounds"]["timeout_seconds"] = 1
     request["request_sha256"] = digest(canonical({k: v for k, v in request.items() if k != "request_sha256"}))
-    provider = SshObservationProvider(request, fake, hosts, identity, helper, "/usr/bin/python3")
+    provider = SshObservationProvider(request, fake, hosts, identity, helper, "/usr/bin/python3", request["source"])
     with pytest.raises(ObservationError, match="timed out"):
-        provider.observe(request)
+        provider.observe(request, on_dispatch=lambda: None)
     for _ in range(20):
         if pid_file.exists() and not Path("/proc", pid_file.read_text()).exists():
             break

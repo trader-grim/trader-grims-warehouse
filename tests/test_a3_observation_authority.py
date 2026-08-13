@@ -32,7 +32,7 @@ def _grant(request, token_root: Path, evidence_root: Path):
         composition_sha256="sha256:" + "2" * 64,
         token_root_identity=_identity(token_root),
         evidence_root_identity=_identity(evidence_root),
-        host_state_dependency_sha256="sha256:" + "3" * 64,
+        host_state_dependency_sha256=request["host_state_dependency"]["descriptor_sha256"],
         expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
     )
 
@@ -116,3 +116,14 @@ def test_postdispatch_failure_is_ambiguous_and_consumed(tmp_path: Path) -> None:
     with pytest.raises(ObservationDispatchAmbiguous):
         controller.execute(request)
     assert controller.consumed is True and provider.calls == 1
+
+
+def test_grant_rejects_bool_attempts(tmp_path: Path) -> None:
+    token_root = tmp_path / "tokens"
+    token_root.mkdir(mode=0o700)
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    grant = dict(_grant(_request(), token_root, evidence_root).value)
+    grant["attempts"] = True
+    with pytest.raises(Exception):
+        ReadOnlyObservationGrant.validate(grant)

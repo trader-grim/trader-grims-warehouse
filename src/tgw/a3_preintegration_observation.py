@@ -7,6 +7,7 @@ and testable without touching a production host.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -93,6 +94,15 @@ def validate_source_descriptor(value: Any) -> dict[str, Any]:
     return source
 
 
+def load_mounted_source_descriptor(path: Path, expected_sha256: str) -> dict[str, Any]:
+    fd, raw = _held_regular(path, expected_sha256)
+    try:
+        descriptor = validate_source_descriptor(json.loads(raw))
+    finally:
+        os.close(fd)
+    return descriptor
+
+
 def _fixture_source_descriptor() -> dict[str, Any]:
     """Non-production descriptor used only by local tests; production mounts one."""
     value = {
@@ -110,13 +120,35 @@ def _fixture_source_descriptor() -> dict[str, Any]:
 
 
 def validate_request(value: Any, *, now: datetime | None = None) -> dict[str, Any]:
-    request = dict(_exact(value, {"schema", "operation_id", "plan", "source", "target", "transport", "bounds", "freshness", "repo_expectation", "policy", "request_sha256"}, "request"))
+    request_fields = {
+        "schema",
+        "operation_id",
+        "plan",
+        "source",
+        "host_state_dependency",
+        "target",
+        "transport",
+        "bounds",
+        "freshness",
+        "repo_expectation",
+        "policy",
+        "request_sha256",
+    }
+    request = dict(_exact(value, request_fields, "request"))
     if request["schema"] != REQUEST_SCHEMA or not isinstance(request["operation_id"], str) or not _OPERATION.fullmatch(request["operation_id"]):
         raise ObservationError("request identity is invalid")
     plan = _exact(request["plan"], {"commit", "solution_sha256", "closure_sha256"}, "Plan")
     if dict(plan) != {"commit": PLAN_COMMIT, "solution_sha256": PLAN_SOLUTION, "closure_sha256": PLAN_CLOSURE}:
         raise ObservationError("Plan binding is not exact")
     validate_source_descriptor(request["source"])
+    dependency = _exact(request["host_state_dependency"], {"schema", "status", "descriptor_sha256", "receipt_sha256"}, "host state dependency")
+    if (
+        dependency["schema"] != "tgw-prod-a3-host-state-observation-dependency/v1"
+        or dependency["status"] != "REQUIRED_NOT_EXECUTABLE"
+        or dependency["receipt_sha256"] is not None
+        or not _SHA.fullmatch(str(dependency["descriptor_sha256"]))
+    ):
+        raise ObservationError("host state dependency is not exact and executable")
     if request["target"] != {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "main", "system": "x86_64-linux", "user": "codex", "port": 22}:
         raise ObservationError("target is not exact")
     transport = _exact(request["transport"], {"ssh_sha256", "known_hosts_sha256", "identity_sha256", "helper_sha256", "python_sha256", "git_sha256"}, "transport")
@@ -124,7 +156,7 @@ def validate_request(value: Any, *, now: datetime | None = None) -> dict[str, An
         raise ObservationError("transport identities are invalid")
     if transport["helper_sha256"] != request["source"]["helper_sha256"]:
         raise ObservationError("mounted helper differs from reviewed source descriptor")
-    bounds = _exact(request["bounds"], {"timeout_seconds", "max_output_bytes", "max_archive_bytes"}, "bounds")
+    bounds = _exact(request["bounds"], {"timeout_seconds", "max_output_bytes", "max_archive_bytes", "max_members", "max_file_bytes", "max_unpacked_bytes"}, "bounds")
     if any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in bounds.values()):
         raise ObservationError("bounds are invalid")
     if bounds["timeout_seconds"] > 120 or bounds["max_output_bytes"] > 1_048_576 or bounds["max_archive_bytes"] > 64 * 1024 * 1024:
@@ -157,9 +189,22 @@ def make_request(*, operation_id: str, transport: Mapping[str, str], source: Map
         "operation_id": operation_id,
         "plan": {"commit": PLAN_COMMIT, "solution_sha256": PLAN_SOLUTION, "closure_sha256": PLAN_CLOSURE},
         "source": source,
+        "host_state_dependency": {
+            "schema": "tgw-prod-a3-host-state-observation-dependency/v1",
+            "status": "REQUIRED_NOT_EXECUTABLE",
+            "descriptor_sha256": "sha256:" + "7" * 64,
+            "receipt_sha256": None,
+        },
         "target": {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "main", "system": "x86_64-linux", "user": "codex", "port": 22},
         "transport": transport,
-        "bounds": {"timeout_seconds": 60, "max_output_bytes": 262144, "max_archive_bytes": 64 * 1024 * 1024},
+        "bounds": {
+            "timeout_seconds": 60,
+            "max_output_bytes": 262144,
+            "max_archive_bytes": 64 * 1024 * 1024,
+            "max_members": 100000,
+            "max_file_bytes": 16 * 1024 * 1024,
+            "max_unpacked_bytes": 256 * 1024 * 1024,
+        },
         "freshness": {"issued_at": now.isoformat(), "expires_at": (now + timedelta(minutes=5)).isoformat()},
         "repo_expectation": {"uid": 1001, "gid": 1001, "mode": 0o755, "git_dir": ".git", "lock_file": "flake.lock"},
         "policy": {"read_only": True, "nix": False, "network_beyond_ssh": False, "writes": False, "authority_consumption": False},
@@ -168,7 +213,7 @@ def make_request(*, operation_id: str, transport: Mapping[str, str], source: Map
     return validate_request(value)
 
 
-def _verify_repository_components(repo: Path, request: Mapping[str, Any], *, enforce_owner: bool) -> None:
+def _verify_repository_components(repo: Path, request: Mapping[str, Any], *, enforce_owner: bool) -> tuple[tuple[int, ...], tuple[int, ...]]:
     expectation = request["repo_expectation"]
     repo_stat = os.lstat(repo)
     if not stat.S_ISDIR(repo_stat.st_mode) or stat.S_ISLNK(repo_stat.st_mode):
@@ -185,6 +230,24 @@ def _verify_repository_components(repo: Path, request: Mapping[str, Any], *, enf
     replace = git_dir / "refs/replace"
     if replace.exists() and (not replace.is_dir() or any(replace.iterdir())):
         raise ObservationHold("repository uses replacement objects")
+    for forbidden in (git_dir / "objects/info/http-alternates", git_dir / "commondir", git_dir / "shallow"):
+        if forbidden.exists() or forbidden.is_symlink():
+            raise ObservationHold("repository uses forbidden common/shallow object state")
+    packed = git_dir / "packed-refs"
+    if packed.exists() and "refs/replace/" in packed.read_text(errors="replace"):
+        raise ObservationHold("repository uses packed replacement objects")
+    config = git_dir / "config"
+    if config.exists():
+        text = config.read_text(errors="replace").lower()
+        if "include.path" in text or "[include" in text or "submodule" in text:
+            raise ObservationHold("repository config includes external or submodule state")
+    for path in repo.rglob(".gitmodules"):
+        if path.is_file():
+            raise ObservationHold("repository contains submodule configuration")
+    return (
+        (repo_stat.st_dev, repo_stat.st_ino, repo_stat.st_mode, repo_stat.st_uid, repo_stat.st_gid, repo_stat.st_nlink),
+        (git_stat.st_dev, git_stat.st_ino, git_stat.st_mode, git_stat.st_uid, git_stat.st_gid, git_stat.st_nlink),
+    )
 
 
 def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_owner: bool = False, git_path: str | None = None) -> tuple[dict[str, Any], bytes]:
@@ -192,7 +255,7 @@ def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_
     repo = repository.resolve(strict=True)
     if repo != repository or not repo.is_dir():
         raise ObservationError("repository path is not a stable directory")
-    _verify_repository_components(repo, request, enforce_owner=enforce_owner)
+    component_identity = _verify_repository_components(repo, request, enforce_owner=enforce_owner)
     git_path = git_path or shutil.which("git")
     if not git_path:
         raise ObservationError("Git executable is unavailable")
@@ -209,6 +272,8 @@ def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_
     if status:
         raise ObservationHold("production flake is not clean")
     commit, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+    if any(line.startswith("160000 ") for line in str(git("ls-files", "--stage")).splitlines()):
+        raise ObservationHold("repository contains gitlinks")
     if git("symbolic-ref", "--short", "HEAD") != request["target"]["branch"]:
         raise ObservationHold("production flake branch differs")
     if not _GIT.fullmatch(str(commit)) or not _GIT.fullmatch(str(tree)):
@@ -231,6 +296,8 @@ def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_
         raise ObservationHold("flake.lock changed during observation")
     if git("rev-parse", "HEAD") != commit or git("rev-parse", "HEAD^{tree}") != tree or git("status", "--porcelain=v1", "--untracked-files=all"):
         raise ObservationHold("repository changed during observation")
+    if _verify_repository_components(repo, request, enforce_owner=enforce_owner) != component_identity:
+        raise ObservationHold("repository components changed during observation")
     if len(archive) > request["bounds"]["max_archive_bytes"]:
         raise ObservationError("archive exceeds bound")
     receipt: dict[str, Any] = {
@@ -257,6 +324,7 @@ def validate_receipt(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
         or isinstance(repo["archive_size"], bool)
         or not isinstance(repo["archive_size"], int)
         or repo["archive_size"] <= 0
+        or repo["archive_size"] > request["bounds"]["max_archive_bytes"]
     ):
         raise ObservationError("repository hashes are invalid")
     expected_effects = {"nix": False, "store": False, "build": False, "write": False, "install": False, "profile": False, "deploy": False, "keygen": False, "authority_consumption": False}
@@ -279,20 +347,26 @@ def replay_archive(archive: bytes, receipt: Mapping[str, Any], request: Mapping[
             raise ObservationError("archive PAX commit binding is invalid")
         root = Path(temporary) / "tgw-flake"
         members = stream.getmembers()
-        if not members or len(members) > 100_000:
+        if not members or len(members) > request["bounds"]["max_members"]:
             raise ObservationError("archive member count is invalid")
         seen: set[str] = set()
+        unpacked = 0
         for member in members:
             parts = Path(member.name).parts
-            if not parts or parts[0] != "tgw-flake" or ".." in parts or ".git" in parts or member.name in seen:
+            raw_parts = member.name.rstrip("/").split("/")
+            normalized = "/".join(parts)
+            if not parts or parts[0] != "tgw-flake" or any(part in {"", ".", ".."} for part in raw_parts) or ".git" in parts or normalized in seen:
                 raise ObservationError("archive path is invalid or duplicated")
-            seen.add(member.name)
+            seen.add(normalized)
             if not (member.isdir() or member.isreg()):
                 raise ObservationError("archive contains a forbidden member type")
             destination = Path(temporary).joinpath(*parts)
             if member.isdir():
                 destination.mkdir(mode=0o700, parents=True, exist_ok=True)
             else:
+                unpacked += member.size
+                if member.size > request["bounds"]["max_file_bytes"] or unpacked > request["bounds"]["max_unpacked_bytes"]:
+                    raise ObservationError("archive unpacked content exceeds bound")
                 destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 source = stream.extractfile(member)
                 if source is None:
@@ -366,6 +440,8 @@ def validate_terminal(value: Any) -> dict[str, Any]:
     item = dict(_exact(value, fields, "terminal"))
     if item["schema"] != TERMINAL_SCHEMA or (item["outcome"], item["stage"], item["code"], item["dispatched"]) not in _TERMINALS:
         raise ObservationError("terminal state tuple is invalid")
+    if not _SHA.fullmatch(str(item["request_sha256"])):
+        raise ObservationError("terminal request identity is invalid")
     try:
         observed = datetime.fromisoformat(str(item["observed_at"]).replace("Z", "+00:00"))
     except ValueError as exc:
@@ -423,10 +499,35 @@ def _sealed(name: str, raw: bytes) -> int:
     import fcntl
 
     fd = os.memfd_create(name, os.MFD_ALLOW_SEALING)
-    os.write(fd, raw)
+    os.fchmod(fd, 0o400)
+    view = memoryview(raw)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            os.close(fd)
+            raise ObservationError("sealed artifact write was incomplete")
+        view = view[written:]
     fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
     os.lseek(fd, 0, os.SEEK_SET)
     return fd
+
+
+def _group_empty_or_kill(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    os.killpg(pgid, signal.SIGTERM)
+    for _ in range(20):
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        import time
+
+        time.sleep(0.01)
+    os.killpg(pgid, signal.SIGKILL)
+    return False
 
 
 @dataclass(frozen=True)
@@ -437,24 +538,46 @@ class SshObservationProvider:
     identity_path: Path
     helper_path: Path
     python_path: str
+    mounted_source: Mapping[str, Any] | None = None
 
     def ready(self, request: Mapping[str, Any]) -> bool:
         try:
             if validate_request(request)["request_sha256"] != validate_request(self.request)["request_sha256"]:
                 return False
-            fds = [
-                _held_regular(self.ssh_path, request["transport"]["ssh_sha256"], executable=True)[0],
-                _held_regular(self.known_hosts_path, request["transport"]["known_hosts_sha256"])[0],
-                _held_regular(self.identity_path, request["transport"]["identity_sha256"])[0],
-                _held_regular(self.helper_path, request["transport"]["helper_sha256"])[0],
-            ]
+            if self.mounted_source is None or validate_source_descriptor(self.mounted_source) != request["source"]:
+                return False
+            fds = []
+            for path, identity, executable, modes in (
+                (self.ssh_path, "ssh_sha256", True, {0o555, 0o755}),
+                (self.known_hosts_path, "known_hosts_sha256", False, {0o400, 0o444}),
+                (self.identity_path, "identity_sha256", False, {0o400}),
+                (self.helper_path, "helper_sha256", False, {0o400, 0o444}),
+            ):
+                fd, raw = _held_regular(path, request["transport"][identity], executable=executable)
+                st = os.fstat(fd)
+                if st.st_uid != os.getuid() or st.st_nlink != 1 or stat.S_IMODE(st.st_mode) not in modes:
+                    raise ObservationError("held SSH artifact ownership/mode/link count is invalid")
+                if identity == "known_hosts_sha256":
+                    lines = raw.decode().splitlines()
+                    if (
+                        len(lines) != 1
+                        or len(lines[0].split()) != 3
+                        or lines[0].split()[0] != request["target"]["host"]
+                        or lines[0].split()[1] not in {"ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256"}
+                    ):
+                        raise ObservationError("known-hosts grammar is invalid")
+                    try:
+                        base64.b64decode(lines[0].split()[2], validate=True)
+                    except ValueError as exc:
+                        raise ObservationError("known-hosts key encoding is invalid") from exc
+                fds.append(fd)
             for fd in fds:
                 os.close(fd)
             return True
         except Exception:
             return False
 
-    def observe(self, request: Mapping[str, Any], *, on_dispatch: Any = lambda: None) -> Mapping[str, Any]:
+    def observe(self, request: Mapping[str, Any], *, on_dispatch: Any) -> Mapping[str, Any]:
         request = validate_request(request, now=datetime.now(timezone.utc))
         ssh_fd, _ = _held_regular(self.ssh_path, request["transport"]["ssh_sha256"], executable=True)
         hosts_fd, hosts = _held_regular(self.known_hosts_path, request["transport"]["known_hosts_sha256"])
@@ -498,6 +621,8 @@ class SshObservationProvider:
                 raise ObservationError("SSH observation output exceeded bound")
             if process.returncode != 0:
                 raise ObservationError("SSH observation helper failed")
+            if not _group_empty_or_kill(process.pid):
+                raise ObservationError("SSH leader exited with surviving process-group members")
             receipt, archive = decode_helper_response(stdout, request)
             return {"receipt": receipt, "archive": archive}
         finally:
@@ -526,11 +651,21 @@ class ImmutableEvidenceStore:
         request_raw = canonical(request or {"request_sha256": receipt["request_sha256"]})
         receipt_raw = canonical(receipt)
         manifest = {"request_sha256": digest(request_raw), "receipt_sha256": digest(receipt_raw), "archive_sha256": digest(archive), "archive_size": len(archive)}
-        items = ((f"{identity}.request.json", request_raw), (f"{identity}.receipt.json", receipt_raw), (f"{identity}.tar", archive), (f"{identity}.manifest.json", canonical(manifest)))
+        items = (("request.json", request_raw), ("receipt.json", receipt_raw), ("archive.tar", archive), ("manifest.json", canonical(manifest)))
         paths: list[Path] = []
+        attempt = ".attempt-" + identity
         try:
+            try:
+                existing = os.open(identity, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+            except FileNotFoundError:
+                pass
+            else:
+                os.close(existing)
+                raise FileExistsError(identity)
+            os.mkdir(attempt, mode=0o700, dir_fd=root_fd)
+            attempt_fd = os.open(attempt, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
             for name, raw in items:
-                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=root_fd)
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=attempt_fd)
                 try:
                     view = memoryview(raw)
                     while view:
@@ -542,13 +677,16 @@ class ImmutableEvidenceStore:
                     os.lseek(fd, 0, os.SEEK_SET)
                 finally:
                     os.close(fd)
-                check_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+                check_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=attempt_fd)
                 try:
                     if digest(os.read(check_fd, len(raw) + 1)) != digest(raw):
                         raise ObservationError("evidence readback differs")
                 finally:
                     os.close(check_fd)
-                paths.append(self.root / name)
+                paths.append(self.root / identity / name)
+            os.fsync(attempt_fd)
+            os.close(attempt_fd)
+            os.rename(attempt, identity, src_dir_fd=root_fd, dst_dir_fd=root_fd)
             os.fsync(root_fd)
         finally:
             os.close(root_fd)

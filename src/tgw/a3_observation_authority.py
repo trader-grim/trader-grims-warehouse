@@ -98,6 +98,8 @@ class ReadOnlyObservationGrant:
         now: datetime | None = None,
     ) -> "ReadOnlyObservationGrant":
         request = validate_request(request)
+        if host_state_dependency_sha256 != request["host_state_dependency"]["descriptor_sha256"]:
+            raise ObservationAuthorityError("grant host-state dependency differs from request")
         now = now or datetime.now(timezone.utc)
         payload = {
             "schema": GRANT_SCHEMA,
@@ -180,6 +182,8 @@ class ReadOnlyObservationController:
         return self._consumed
 
     def execute(self, request: Mapping[str, Any], *, now: datetime | None = None) -> Mapping[str, Any]:
+        if self._consumed:
+            raise ObservationAlreadyConsumed("read-only observation attempt already consumed")
         request = validate_request(request)
         grant = ReadOnlyObservationGrant.validate(self.grant.value)
         now = now or datetime.now(timezone.utc)
