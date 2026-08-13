@@ -25,64 +25,84 @@ INTEGRATION_SCHEMA = "tgw-nixos-a3-successor-integration/v1"
 SUCCESS_SCHEMA = "tgw-nixos-a3-successor-evaluation-success/v1"
 TERMINAL_SCHEMA = "tgw-nixos-a3-successor-evaluation-terminal/v1"
 STORE_REF_SCHEMA = "tgw-nixos-a3-successor-evaluation-store-ref/v1"
+LAUNCH_EVIDENCE_SCHEMA = "tgw-nixos-a3-launch-evidence/v1"
+ATTESTATION_SCHEMA = "tgw-nixos-a3-local-netns-attestation/v1"
+REPLAY_CLAIM_SCHEMA = "tgw-nixos-a3-launch-replay-claim/v1"
+REPLAY_CLAIM_REF_SCHEMA = "tgw-nixos-a3-launch-replay-claim-ref/v1"
 _PROVIDER_SEAL = object()
 
-TERMINAL_STATE_TABLE: Mapping[tuple[str, str], Mapping[str, Any]] = {
-    ("FAILED", "composition-readiness"): {"steps": {"provider-mount", "request"}, "codes": {"A3KnownFailure"}, "cleanup": "NOT_CREATED", "build": False, "rc": "none"},
-    ("FAILED", "stdin-or-provider"): {"steps": {"stdin-parse-or-dispatch"}, "codes": {"InputOrProviderFailure"}, "cleanup": "NOT_CREATED", "build": False, "rc": "none"},
-    ("FAILED", "prebuild-validation"): {"steps": {"contract-validation"}, "codes": {"A3KnownFailure"}, "cleanup": "REMOVED", "build": False, "rc": "none"},
-    ("FAILED", "evaluation"): {
-        "steps": {"eval", "path-info", "hash", "derivation", "subprocess", "output-contract", "process-state", "attestation", "timeout", "output-bound", "process-group"},
-        "codes": {"A3KnownFailure", "StepFailure"},
-        "cleanup": "REMOVED",
+# Exact terminal tuples.  The key names the complete classification and the
+# row fixes cleanup, build observation and return-code semantics.  Keeping the
+# command step in the key prevents a new subprocess path from silently gaining
+# authority merely because it happens to share a broad stage name.
+TERMINAL_STATE_TABLE: Mapping[tuple[str, str, str, str], Mapping[str, Any]] = {
+    ("FAILED", "composition-readiness", step, "A3KnownFailure"): {"cleanup": "NOT_CREATED", "build": False, "rc": "none"}
+    for step in ("provider-mount", "request")
+} | {
+    ("FAILED", "stdin-or-provider", "stdin-parse-or-dispatch", "InputOrProviderFailure"): {
+        "cleanup": "NOT_CREATED",
         "build": False,
-        "rc": "subprocess",
+        "rc": "none",
     },
-    ("FAILED", "subprocess"): {"steps": {"output-contract", "process-state"}, "codes": {"A3KnownFailure", "StepFailure"}, "cleanup": "REMOVED", "build": False, "rc": "subprocess"},
-    ("FAILED", "nix-build"): {
-        "steps": {"build", "timeout", "output-bound", "process-group", "output-contract", "process-state", "attestation"},
-        "codes": {"A3KnownFailure", "StepFailure"},
-        "cleanup": "REMOVED",
+} | {
+    ("AMBIGUOUS", "stdin-or-provider", "stdin-parse-or-dispatch", code): {
+        "cleanup": "UNKNOWN",
+        "build": False,
+        "rc": "none",
+    }
+    for code in ("ReceiptStoreUnavailable", "ReceiptStorePersistenceFailure")
+} | {
+    ("FAILED", "prebuild-validation", "contract-validation", "A3KnownFailure"): {"cleanup": "REMOVED", "build": False, "rc": "none"},
+} | {
+    ("FAILED", "post-build", step, "A3KnownFailure"): {"cleanup": "REMOVED", "build": True, "rc": "none"}
+    for step in ("contract-validation", "success-validation", "tool-identity")
+} | {
+    ("FAILED", stage, step, "A3KnownFailure"): {"cleanup": "REMOVED", "build": built, "rc": "nonzero"}
+    for stage, built, steps in (
+        ("evaluation", False, ("nix-version", "nix-store-version", "sshd-version", "systemd-version", "path-info", "nix-hash", "nix-eval")),
+        ("nix-build", True, ("nix-build",)),
+        ("post-build", True, ("nix-store", "path-info", "nix-hash")),
+        ("static-verification", True, ("sshd-verify", "systemd-verify")),
+    )
+    for step in steps
+} | {
+    ("FAILED", stage, step, "StepFailure"): {"cleanup": "REMOVED", "build": built, "rc": rc_rule}
+    for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
+    for step, rc_rule in (
+        ("launcher", "nonzero"),
+        ("launcher-identity", "none"),
+        ("timeout", "bounded-optional"),
+        ("output-bound", "bounded-optional"),
+    )
+} | {
+    ("AMBIGUOUS", stage, step, "StepFailure"): {"cleanup": "UNKNOWN", "build": built, "rc": "bounded-optional"}
+    for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
+    for step in ("response", "response-contract", "timeout", "output-bound", "process-group", "process-state")
+} | {
+    ("FAILED", stage, "output-contract", "A3KnownFailure"): {"cleanup": "REMOVED", "build": built, "rc": "none"}
+    for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
+} | {
+    ("FAILED", stage, "attestation", "A3KnownFailure"): {"cleanup": "REMOVED", "build": built, "rc": "none"}
+    for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
+} | {
+    ("AMBIGUOUS", "evaluation-or-success-persistence", "unknown", "UnknownExternalState"): {
+        "cleanup": "UNKNOWN",
         "build": True,
-        "rc": "subprocess",
+        "rc": "none",
     },
-    ("FAILED", "post-build"): {"steps": {"contract-validation", "success-validation"}, "codes": {"A3KnownFailure"}, "cleanup": "REMOVED", "build": True, "rc": "none"},
-    ("FAILED", "static-verification"): {
-        "steps": {"-T", "verify", "timeout", "output-bound", "process-group", "output-contract", "process-state", "attestation"},
-        "codes": {"A3KnownFailure", "StepFailure"},
-        "cleanup": "REMOVED",
-        "build": True,
-        "rc": "subprocess",
-    },
-    ("AMBIGUOUS", "evaluation-or-success-persistence"): {"steps": {"unknown"}, "codes": {"UnknownExternalState"}, "cleanup": "UNKNOWN", "build": True, "rc": "none"},
-    ("AMBIGUOUS", "stdin-or-provider"): {
-        "steps": {"stdin-parse-or-dispatch"},
-        "codes": {"ReceiptStoreUnavailable", "ReceiptStorePersistenceFailure"},
+    ("AMBIGUOUS", "prebuild-terminal-classification", "unknown", "UnknownFailureTuple"): {
         "cleanup": "UNKNOWN",
         "build": False,
         "rc": "none",
     },
-    ("AMBIGUOUS", "evaluation"): {
-        "steps": {"timeout", "output-bound", "process-group", "process-state", "attestation"},
-        "codes": {"StepFailure"},
-        "cleanup": "UNKNOWN",
-        "build": False,
-        "rc": "any",
-    },
-    ("AMBIGUOUS", "nix-build"): {
-        "steps": {"timeout", "output-bound", "process-group", "process-state", "attestation"},
-        "codes": {"StepFailure"},
+    ("AMBIGUOUS", "postbuild-terminal-classification", "unknown", "UnknownFailureTuple"): {
         "cleanup": "UNKNOWN",
         "build": True,
-        "rc": "any",
+        "rc": "none",
     },
-    ("AMBIGUOUS", "static-verification"): {
-        "steps": {"timeout", "output-bound", "process-group", "process-state", "attestation"},
-        "codes": {"StepFailure"},
-        "cleanup": "UNKNOWN",
-        "build": True,
-        "rc": "any",
-    },
+} | {
+    ("AMBIGUOUS", stage, "process-state", "A3KnownFailure"): {"cleanup": "UNKNOWN", "build": built, "rc": "bounded-optional"}
+    for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
 }
 
 PLAN_COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
@@ -517,7 +537,7 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
         "tool_versions",
         "verifiers",
         "isolation",
-        "launcher_attestations",
+        "launcher_evidence",
         "effects",
         "cleanup",
         "deployable",
@@ -634,8 +654,10 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
             raise A3EvaluationError("static verifier actual held-fd command is invalid")
         if name == "sshd" and (actual[1:-1] != command[1:-1] or not re.fullmatch(r"/proc/[1-9][0-9]*/fd/[1-9][0-9]*", str(actual[-1]))):
             raise A3EvaluationError("sshd verifier did not consume its held materialization")
-        if name == "systemd_analyze" and (actual[1:3] != ["verify", "--man=no"] or not re.fullmatch(r"/proc/[1-9][0-9]*/fd/[1-9][0-9]*", str(actual[-1]))):
-            raise A3EvaluationError("systemd verifier did not consume its held materialization")
+        if name == "systemd_analyze":
+            unit_path = Path(str(actual[-1]))
+            if actual[1:3] != ["verify", "--man=no"] or not unit_path.is_absolute() or ".." in unit_path.parts or unit_path.name != "sshd.service":
+                raise A3EvaluationError("systemd verifier did not consume its canonical held materialization")
         for hash_field in ("stdout_sha256", "stderr_sha256", "version_stdout_sha256", "version_stderr_sha256"):
             _sha(item[hash_field], f"{name} {hash_field}")
         if {
@@ -645,35 +667,125 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
             raise A3EvaluationError("static verifier output differs from the admitted result")
     isolation = _exact(
         result["isolation"],
-        {"schema", "kind", "composition_sha256", "command_count", "attestations_sha256", "launcher_attested", "network_observed"},
+        {"schema", "kind", "composition_sha256", "command_count", "launch_evidence_sha256", "launcher_attested", "network_observed"},
         "isolation evidence",
     )
     if (
         isolation["schema"] != "tgw-nixos-a3-local-isolation-summary/v1"
         or isolation["kind"] != "root-launcher-fresh-netns-per-command"
         or not _SHA256.fullmatch(str(isolation["composition_sha256"]))
+        or isinstance(isolation["command_count"], bool)
         or not isinstance(isolation["command_count"], int)
         or isolation["command_count"] < 1
-        or not _SHA256.fullmatch(str(isolation["attestations_sha256"]))
+        or not _SHA256.fullmatch(str(isolation["launch_evidence_sha256"]))
         or isolation["launcher_attested"] is not True
         or isolation["network_observed"] is not False
     ):
         raise A3EvaluationError("network isolation evidence is invalid")
-    attestations = result["launcher_attestations"]
+    attestations = result["launcher_evidence"]
     if (
         not isinstance(attestations, list)
         or len(attestations) != isolation["command_count"]
-        or digest(attestations) != isolation["attestations_sha256"]
+        or digest(attestations) != isolation["launch_evidence_sha256"]
     ):
-        raise A3EvaluationError("signed launcher attestation set is incomplete or tampered")
-    for attestation in attestations:
+        raise A3EvaluationError("launcher evidence set is incomplete or tampered")
+    observed_challenges: set[tuple[str, str]] = set()
+    for envelope_value in attestations:
+        envelope = _exact(
+            envelope_value,
+            {"schema", "signed_attestation", "replay_claim", "replay_claim_ref"},
+            "launcher evidence envelope",
+        )
+        attestation = _exact(
+            envelope["signed_attestation"],
+            {
+                "schema",
+                "packet_sha256",
+                "composition_sha256",
+                "request_sha256",
+                "launch_nonce",
+                "attempt_id",
+                "issued_at",
+                "started_at",
+                "ended_at",
+                "expires_at",
+                "netns",
+                "child",
+                "probes",
+                "signature",
+            },
+            "signed launcher attestation",
+        )
+        claim = _exact(
+            envelope["replay_claim"],
+            {
+                "schema",
+                "launch_nonce",
+                "attempt_id",
+                "request_sha256",
+                "composition_sha256",
+                "attestation_sha256",
+                "claim_sha256",
+            },
+            "launcher replay claim",
+        )
+        claim_ref = _exact(envelope["replay_claim_ref"], {"schema", "name", "sha256", "size"}, "launcher replay claim ref")
+        netns = _exact(attestation["netns"], {"start_inode", "end_inode", "lo_only", "routes_empty", "link_sha256", "route_sha256"}, "signed netns")
+        child = _exact(attestation["child"], {"pid", "starttime", "exe", "uid", "gid", "capabilities", "no_new_privs"}, "signed child")
+        probes = _exact(attestation["probes"], {"pre", "post"}, "signed probes")
+        for phase in ("pre", "post"):
+            phase_value = _exact(probes[phase], {"direct", "dns", "private", "metadata"}, f"signed probes {phase}")
+            for probe_name, probe_value in phase_value.items():
+                probe = _exact(probe_value, {"attempted", "connected", "evidence_sha256"}, f"signed probe {phase}.{probe_name}")
+                if probe["attempted"] is not True or probe["connected"] is not False or not _SHA256.fullmatch(str(probe["evidence_sha256"])):
+                    raise A3EvaluationError("signed launcher probe is not exact negative evidence")
+        challenge = (str(attestation["launch_nonce"]), str(attestation["attempt_id"]))
+        timestamp_values = [attestation[name] for name in ("issued_at", "started_at", "ended_at", "expires_at")]
         if (
-            not isinstance(attestation, Mapping)
-            or attestation.get("schema") != "tgw-nixos-a3-local-netns-attestation/v1"
-            or not isinstance(attestation.get("signature"), str)
+            envelope["schema"] != LAUNCH_EVIDENCE_SCHEMA
+            or attestation["schema"] != ATTESTATION_SCHEMA
+            or attestation["request_sha256"] != request["request_sha256"]
+            or attestation["composition_sha256"] != isolation["composition_sha256"]
+            or not re.fullmatch(r"[0-9a-f]{64}", str(attestation["launch_nonce"]))
+            or not re.fullmatch(r"attempt:[0-9a-f]{64}", str(attestation["attempt_id"]))
+            or not _SHA256.fullmatch(str(attestation["packet_sha256"]))
+            or any(not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z", value) for value in timestamp_values)
+            or timestamp_values != sorted(timestamp_values)
+            or not isinstance(attestation["signature"], str)
             or not re.fullmatch(r"ed25519:[0-9a-f]{128}", attestation["signature"])
+            or isinstance(netns["start_inode"], bool)
+            or not isinstance(netns["start_inode"], int)
+            or netns["start_inode"] <= 0
+            or netns["end_inode"] != netns["start_inode"]
+            or netns["lo_only"] is not True
+            or netns["routes_empty"] is not True
+            or not _SHA256.fullmatch(str(netns["link_sha256"]))
+            or not _SHA256.fullmatch(str(netns["route_sha256"]))
+            or any(isinstance(child[name], bool) or not isinstance(child[name], int) or child[name] <= 0 for name in ("pid", "starttime"))
+            or not isinstance(child["uid"], int)
+            or isinstance(child["uid"], bool)
+            or not isinstance(child["gid"], int)
+            or isinstance(child["gid"], bool)
+            or not isinstance(child["exe"], str)
+            or not child["exe"].startswith("/proc/")
+            or child["capabilities"] != []
+            or child["no_new_privs"] is not True
+            or claim["schema"] != REPLAY_CLAIM_SCHEMA
+            or claim["launch_nonce"] != attestation["launch_nonce"]
+            or claim["attempt_id"] != attestation["attempt_id"]
+            or claim["request_sha256"] != request["request_sha256"]
+            or claim["composition_sha256"] != isolation["composition_sha256"]
+            or claim["attestation_sha256"] != digest(attestation)
+            or claim["claim_sha256"] != self_hash({key: item for key, item in claim.items() if key != "claim_sha256"})
+            or claim_ref["schema"] != REPLAY_CLAIM_REF_SCHEMA
+            or claim_ref["name"] != digest({"launch_nonce": attestation["launch_nonce"]}).removeprefix("sha256:") + ".json"
+            or claim_ref["sha256"] != claim["claim_sha256"]
+            or isinstance(claim_ref["size"], bool)
+            or claim_ref["size"] != len(canonical(claim))
+            or challenge in observed_challenges
         ):
-            raise A3EvaluationError("signed launcher attestation is structurally invalid")
+            raise A3EvaluationError("signed launcher/replay evidence is structurally invalid or unbound")
+        observed_challenges.add(challenge)
     effects = _exact(result["effects"], {"build", *FORBIDDEN_EFFECTS}, "effect observation")
     if effects["build"] is not True or any(effects[name] is not False for name in FORBIDDEN_EFFECTS):
         raise A3EvaluationError("receipt reports a forbidden operational effect")
@@ -752,7 +864,14 @@ def validate_terminal(value: Any, *, request_sha256: str, provider_sha256: str) 
         or terminal["provider_sha256"] != provider_sha256
         or terminal["cleanup"] not in {"NOT_CREATED", "REMOVED", "UNKNOWN"}
         or not all(isinstance(terminal[key], str) and terminal[key] for key in ("stage", "step", "code"))
-        or (terminal["returncode"] is not None and not isinstance(terminal["returncode"], int))
+        or (
+            terminal["returncode"] is not None
+            and (
+                isinstance(terminal["returncode"], bool)
+                or not isinstance(terminal["returncode"], int)
+                or not -255 <= terminal["returncode"] <= 255
+            )
+        )
     ):
         raise A3EvaluationError("terminal receipt classification or binding is invalid")
     for key in ("stdout_sha256", "stderr_sha256", "observation_sha256"):
@@ -762,11 +881,9 @@ def validate_terminal(value: Any, *, request_sha256: str, provider_sha256: str) 
         raise A3EvaluationError("terminal receipt reports a forbidden effect")
     if any(len(terminal[key]) > 128 for key in ("stage", "step", "code")):
         raise A3EvaluationError("terminal diagnostics are unbounded")
-    row = TERMINAL_STATE_TABLE.get((terminal["outcome"], terminal["stage"]))
+    row = TERMINAL_STATE_TABLE.get((terminal["outcome"], terminal["stage"], terminal["step"], terminal["code"]))
     if (
         row is None
-        or terminal["step"] not in row["steps"]
-        or terminal["code"] not in row["codes"]
         or terminal["cleanup"] != row["cleanup"]
         or effects["build"] is not row["build"]
     ):
@@ -774,7 +891,7 @@ def validate_terminal(value: Any, *, request_sha256: str, provider_sha256: str) 
     rc_rule = row["rc"]
     if (
         (rc_rule == "none" and terminal["returncode"] is not None)
-        or (rc_rule == "subprocess" and (not isinstance(terminal["returncode"], int) or terminal["returncode"] == 0))
+        or (rc_rule == "nonzero" and (not isinstance(terminal["returncode"], int) or isinstance(terminal["returncode"], bool) or terminal["returncode"] == 0))
     ):
         raise A3EvaluationError("terminal returncode relation is outside the exact state table")
     if terminal["receipt_sha256"] != self_hash({key: item for key, item in terminal.items() if key != "evidence"}):
@@ -861,20 +978,38 @@ class _A3SuccessorEvaluationProviderCore:
             raise
         except A3KnownFailure as exc:
             ambiguous = exc.cleanup == "UNKNOWN"
-            terminal = terminal_receipt(
-                request_sha256=request["request_sha256"],
-                provider_sha256=self.composition.receipt_sha256,
-                outcome="AMBIGUOUS" if ambiguous else "FAILED",
-                stage=exc.stage,
-                step=exc.step,
-                code="StepFailure" if type(exc).__name__ == "StepFailure" else "A3KnownFailure",
-                returncode=exc.returncode,
-                stdout=exc.stdout,
-                stderr=exc.stderr,
-                cleanup=exc.cleanup,
-                effects={"build": exc.stage in {"nix-build", "post-build", "static-verification"}, **{name: False for name in FORBIDDEN_EFFECTS}},
-                observation={"detail": str(exc)},
-            )
+            built = exc.stage in {"nix-build", "post-build", "static-verification"}
+            try:
+                terminal = terminal_receipt(
+                    request_sha256=request["request_sha256"],
+                    provider_sha256=self.composition.receipt_sha256,
+                    outcome="AMBIGUOUS" if ambiguous else "FAILED",
+                    stage=exc.stage,
+                    step=exc.step,
+                    code="StepFailure" if type(exc).__name__ == "StepFailure" else "A3KnownFailure",
+                    returncode=exc.returncode,
+                    stdout=exc.stdout,
+                    stderr=exc.stderr,
+                    cleanup=exc.cleanup,
+                    effects={"build": built, **{name: False for name in FORBIDDEN_EFFECTS}},
+                    observation={"detail": str(exc)},
+                )
+            except A3EvaluationError as classification_exc:
+                ambiguous = True
+                terminal = terminal_receipt(
+                    request_sha256=request["request_sha256"],
+                    provider_sha256=self.composition.receipt_sha256,
+                    outcome="AMBIGUOUS",
+                    stage="postbuild-terminal-classification" if built else "prebuild-terminal-classification",
+                    step="unknown",
+                    code="UnknownFailureTuple",
+                    returncode=None,
+                    stdout=b"",
+                    stderr=b"",
+                    cleanup="UNKNOWN",
+                    effects={"build": built, **{name: False for name in FORBIDDEN_EFFECTS}},
+                    observation={"detail": str(exc), "classification_error": str(classification_exc)},
+                )
             try:
                 reference = self.composition.receipt_store.persist(terminal)
             except Exception as store_exc:

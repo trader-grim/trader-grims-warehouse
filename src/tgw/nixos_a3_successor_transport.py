@@ -45,6 +45,9 @@ COMPOSITION_SCHEMA = "tgw-nixos-a3-local-production-composition/v1"
 LAUNCH_PACKET_SCHEMA = "tgw-nixos-a3-local-launch-packet/v1"
 LAUNCH_RESPONSE_SCHEMA = "tgw-nixos-a3-local-launch-response/v1"
 ATTESTATION_SCHEMA = "tgw-nixos-a3-local-netns-attestation/v1"
+LAUNCH_EVIDENCE_SCHEMA = "tgw-nixos-a3-launch-evidence/v1"
+REPLAY_CLAIM_SCHEMA = "tgw-nixos-a3-launch-replay-claim/v1"
+REPLAY_CLAIM_REF_SCHEMA = "tgw-nixos-a3-launch-replay-claim-ref/v1"
 
 _HEX64 = set("0123456789abcdef")
 _SEAL = object()
@@ -655,12 +658,21 @@ class DurableNonceReplayStore:
             os.close(self._root_fd)
             self._root_fd = -1
 
-    def claim(self, *, launch_nonce: str, attempt_id: str, request_sha256: str, attestation_sha256: str) -> str:
+    def claim(
+        self,
+        *,
+        launch_nonce: str,
+        attempt_id: str,
+        request_sha256: str,
+        composition_sha256: str,
+        attestation_sha256: str,
+    ) -> dict[str, Any]:
         value = {
-            "schema": "tgw-nixos-a3-launch-replay-claim/v1",
+            "schema": REPLAY_CLAIM_SCHEMA,
             "launch_nonce": launch_nonce,
             "attempt_id": attempt_id,
             "request_sha256": request_sha256,
+            "composition_sha256": composition_sha256,
             "attestation_sha256": attestation_sha256,
         }
         value["claim_sha256"] = digest(value)
@@ -709,7 +721,15 @@ class DurableNonceReplayStore:
             ) or (named_root.st_dev, named_root.st_ino) != (root.st_dev, root.st_ino):
                 raise A3EvaluationError("replay claim/root changed during commit")
             valid = True
-            return value["claim_sha256"]
+            return {
+                "claim": value,
+            "ref": {
+                "schema": REPLAY_CLAIM_REF_SCHEMA,
+                "name": name,
+                "sha256": value["claim_sha256"],
+                "size": len(raw),
+                },
+            }
         finally:
             os.close(fd)
             if not valid:
@@ -773,18 +793,29 @@ class ExactSubprocessRunner:
         launcher_fd = os.open(self._composition.root_launcher["path"], os.O_RDONLY | os.O_NOFOLLOW)
         try:
             launcher_path = f"/proc/{os.getpid()}/fd/{launcher_fd}"
-            process = subprocess.Popen(
-                [launcher_path],
-                cwd=cwd,
-                env={"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": ""},
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=False,
-                close_fds=True,
-                pass_fds=tuple((*pass_fds, launcher_fd)),
-                start_new_session=True,
-            )
+            try:
+                process = subprocess.Popen(
+                    [launcher_path],
+                    cwd=cwd,
+                    env={"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": ""},
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    shell=False,
+                    close_fds=True,
+                    pass_fds=tuple((*pass_fds, launcher_fd)),
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                raise StepFailure(
+                    "root launcher process creation was refused",
+                    step="launcher",
+                    returncode=-1,
+                    stdout=b"",
+                    stderr=str(exc).encode()[:4096],
+                    process_state="NOT_CREATED",
+                    cleanup="REMOVED",
+                ) from exc
             rc, response_raw, launcher_stderr, outer_process_state = _stream_bounded(
                 process,
                 input_bytes=packet_raw,
@@ -886,11 +917,17 @@ class ExactSubprocessRunner:
             launch_nonce=launch_nonce,
             attempt_id=attempt_id,
             request_sha256=self._composition.request_sha256,
+            composition_sha256=self._composition.composition_sha256,
             attestation_sha256=digest(attestation),
         )
-        attestation["replay_claim_sha256"] = replay_claim
-        self.attestations.append(attestation)
-        return Completed(response["returncode"], stdout, stderr, attestation=attestation, process_state="REAPED", process_facts=dict(process_facts))
+        evidence = {
+            "schema": LAUNCH_EVIDENCE_SCHEMA,
+            "signed_attestation": attestation,
+            "replay_claim": replay_claim["claim"],
+            "replay_claim_ref": replay_claim["ref"],
+        }
+        self.attestations.append(evidence)
+        return Completed(response["returncode"], stdout, stderr, attestation=evidence, process_state="REAPED", process_facts=dict(process_facts))
 
 
 class A3LocalProductionTransport:

@@ -346,6 +346,8 @@ def _run_exact(
     runner: Runner,
     argv: Sequence[str],
     *,
+    failure_stage: str,
+    failure_step: str,
     cwd: Path,
     env: Mapping[str, str],
     timeout: int,
@@ -354,33 +356,45 @@ def _run_exact(
     attestations: list[Mapping[str, Any]],
     allow_fixture: bool,
 ) -> Completed:
-    stage = "nix-build" if "build" in argv else "static-verification" if ("-T" in argv or "verify" in argv) else "evaluation"
     try:
         result = runner(list(argv), cwd=cwd, env=dict(env), timeout=timeout, max_output=max_output, pass_fds=tuple(pass_fds))
     except A3KnownFailure as exc:
         if exc.stage == "local-launcher":
-            exc.stage = "nix-build" if "build" in argv else "static-verification" if ("-T" in argv or "verify" in argv) else "evaluation"
+            exc.stage = failure_stage
+            if type(exc).__name__ == "StepFailure":
+                if exc.step == "launcher-identity":
+                    exc.returncode = None
+                    exc.cleanup = "REMOVED"
+                elif exc.step in {"response", "response-contract"}:
+                    exc.returncode = None
+                    exc.cleanup = "UNKNOWN"
         raise
-    if not isinstance(result, Completed) or len(result.stdout) + len(result.stderr) > max_output:
-        raise A3KnownFailure("subprocess result violates its closed output contract", stage=stage, step="output-contract", returncode=-1)
+    if (
+        not isinstance(result, Completed)
+        or isinstance(result.returncode, bool)
+        or not isinstance(result.returncode, int)
+        or not -255 <= result.returncode <= 255
+        or len(result.stdout) + len(result.stderr) > max_output
+    ):
+        raise A3KnownFailure("subprocess result violates its closed output contract", stage=failure_stage, step="output-contract")
     if result.process_state != "REAPED":
         raise A3KnownFailure(
             "subprocess process group is not proven reaped",
-            stage=stage,
+            stage=failure_stage,
             step="process-state",
-            returncode=result.returncode or -1,
+            returncode=result.returncode,
             cleanup="UNKNOWN",
         )
     if result.attestation is None:
         if not allow_fixture:
-            raise A3KnownFailure("local root launcher omitted signed isolation evidence", stage=stage, step="attestation", returncode=result.returncode or -1)
+            raise A3KnownFailure("local root launcher omitted signed isolation evidence", stage=failure_stage, step="attestation")
     else:
         attestations.append(result.attestation)
     if result.returncode != 0:
         raise A3KnownFailure(
             "fixed non-activating evaluation step failed",
-            stage=stage,
-            step=next((item for item in ("build", "eval", "path-info", "hash", "derivation", "-T", "verify") if item in argv), "subprocess"),
+            stage=failure_stage,
+            step=failure_step,
             returncode=result.returncode,
             stdout=result.stdout,
             stderr=result.stderr,
@@ -404,7 +418,7 @@ def execute(
     request = validate_request(request_value, allow_fixture=allow_fixture)
     policy = request["policy"]
     scratch_parent = Path(scratch_parent)
-    run_root = Path(tempfile.mkdtemp(prefix="a3-successor-", dir=scratch_parent))
+    run_root = Path(tempfile.mkdtemp(prefix="a3-successor-", dir=scratch_parent)).resolve(strict=True)
     os.chmod(run_root, 0o700)
     source = run_root / "tgw-lib"
     integration = run_root / "tgw-flake"
@@ -532,9 +546,19 @@ def execute(
             "allow_fixture": allow_fixture,
         }
         version_flags = {"nix": "--version", "nix_store": "--version", "sshd": "-V", "systemd_analyze": "--version"}
-        version_results = {name: _run_exact(runner, [held[name], flag], **common) for name, flag in version_flags.items()}
+        version_steps = {"nix": "nix-version", "nix_store": "nix-store-version", "sshd": "sshd-version", "systemd_analyze": "systemd-version"}
+        version_results = {
+            name: _run_exact(runner, [held[name], flag], failure_stage="evaluation", failure_step=version_steps[name], **common)
+            for name, flag in version_flags.items()
+        }
         for expected in request["input_closure"]["paths"]:
-            path_info = _run_exact(runner, [*base, "path-info", "--json", expected["path"]], **common).stdout
+            path_info = _run_exact(
+                runner,
+                [*base, "path-info", "--json", expected["path"]],
+                failure_stage="evaluation",
+                failure_step="path-info",
+                **common,
+            ).stdout
             try:
                 input_info = json_loads(path_info)
             except Exception as exc:
@@ -550,6 +574,8 @@ def execute(
                 _run_exact(
                     runner,
                     [*base, "hash", "path", "--type", "sha256", "--base16", expected["path"]],
+                    failure_stage="evaluation",
+                    failure_step="nix-hash",
                     **common,
                 )
                 .stdout.decode()
@@ -557,12 +583,30 @@ def execute(
             )
             if observed != expected["nar_sha256"].removeprefix("sha256:"):
                 raise A3EvaluationError("offline input closure NAR identity mismatch")
-        drv = _run_exact(runner, [*base, "eval", *flake_flags, "--raw", flake_target + ".drvPath"], **common).stdout.decode().strip()
+        drv = _run_exact(
+            runner,
+            [*base, "eval", *flake_flags, "--raw", flake_target + ".drvPath"],
+            failure_stage="evaluation",
+            failure_step="nix-eval",
+            **common,
+        ).stdout.decode().strip()
         build_started = True
-        output = _run_exact(runner, [*base, "build", *flake_flags, "--no-link", "--print-out-paths", flake_target], **common).stdout.decode().strip()
+        output = _run_exact(
+            runner,
+            [*base, "build", *flake_flags, "--no-link", "--print-out-paths", flake_target],
+            failure_stage="nix-build",
+            failure_step="nix-build",
+            **common,
+        ).stdout.decode().strip()
         if "\n" in drv or "\n" in output or output != request["target"]["expected_successor"]:
             raise A3EvaluationError("Nix returned multiple derivations or outputs")
-        derivation_raw = _run_exact(runner, [*base, "derivation", "show", drv], **common).stdout
+        derivation_raw = _run_exact(
+            runner,
+            [*base, "derivation", "show", drv],
+            failure_stage="post-build",
+            failure_step="nix-store",
+            **common,
+        ).stdout
         try:
             derivation = json_loads(derivation_raw)
             outputs = derivation[drv]["outputs"]
@@ -570,7 +614,13 @@ def execute(
             raise A3EvaluationError("derivation output relation is invalid") from exc
         if outputs != {"out": {"path": output}}:
             raise A3EvaluationError("derivation does not bind the exact singleton successor output")
-        requisites_raw = _run_exact(runner, [held["nix_store"], "--query", "--requisites", output], **common).stdout
+        requisites_raw = _run_exact(
+            runner,
+            [held["nix_store"], "--query", "--requisites", output],
+            failure_stage="post-build",
+            failure_step="nix-store",
+            **common,
+        ).stdout
         try:
             requisites = requisites_raw.decode("utf-8").splitlines()
         except UnicodeDecodeError as exc:
@@ -586,7 +636,13 @@ def execute(
             raise A3EvaluationError("Nix store requisites are incomplete, duplicate, unsorted, or malformed")
         manifest = []
         for path in requisites:
-            path_info = _run_exact(runner, [*base, "path-info", "--json", path], **common).stdout
+            path_info = _run_exact(
+                runner,
+                [*base, "path-info", "--json", path],
+                failure_stage="post-build",
+                failure_step="path-info",
+                **common,
+            ).stdout
             try:
                 info = json_loads(path_info)
                 metadata = info[path]
@@ -598,6 +654,8 @@ def execute(
                 _run_exact(
                     runner,
                     [*base, "hash", "path", "--type", "sha256", "--base16", path],
+                    failure_stage="post-build",
+                    failure_step="nix-hash",
                     **common,
                 )
                 .stdout.decode()
@@ -625,7 +683,7 @@ def execute(
 
         verifier_inputs: list[tuple[Path, int, bytes, os.stat_result]] = []
 
-        def materialize(name: str, raw: bytes) -> tuple[int, str]:
+        def materialize(name: str, raw: bytes, *, named_path: bool = False) -> tuple[int, str]:
             path = run_root / name
             fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
             offset = 0
@@ -640,14 +698,26 @@ def execute(
             verifier_inputs.append((path, fd, raw, before))
             verifier_input_fds.append(fd)
             common["pass_fds"].append(fd)
-            return fd, f"/proc/{os.getpid()}/fd/{fd}"
+            return fd, str(path) if named_path else f"/proc/{os.getpid()}/fd/{fd}"
 
         _, sshd_proc = materialize("sshd-verifier.conf", rendered_bytes["sshd-config"])
-        _, systemd_proc = materialize("sshd.service", rendered_bytes["sshd-service"])
+        _, systemd_proc = materialize("sshd.service", rendered_bytes["sshd-service"], named_path=True)
         sshd_command = [held["sshd"], "-T", "-C", "user=codex,host=tgw-prod,addr=127.0.0.1", "-f", sshd_proc]
         systemd_command = [held["systemd_analyze"], "verify", "--man=no", systemd_proc]
-        sshd_result = _run_exact(runner, sshd_command, **common)
-        systemd_result = _run_exact(runner, systemd_command, **common)
+        sshd_result = _run_exact(
+            runner,
+            sshd_command,
+            failure_stage="static-verification",
+            failure_step="sshd-verify",
+            **common,
+        )
+        systemd_result = _run_exact(
+            runner,
+            systemd_command,
+            failure_stage="static-verification",
+            failure_step="systemd-verify",
+            **common,
+        )
         for path, fd, expected_raw, before in verifier_inputs:
             os.lseek(fd, 0, os.SEEK_SET)
             observed_raw = bytearray()
@@ -657,7 +727,10 @@ def execute(
                     break
                 observed_raw.extend(block)
             after = os.fstat(fd)
-            named = path.lstat()
+            try:
+                named = path.lstat()
+            except OSError as exc:
+                raise A3EvaluationError("verifier input named path disappeared during use") from exc
             if bytes(observed_raw) != expected_raw or (before.st_dev, before.st_ino, before.st_size, before.st_ctime_ns) != (
                 after.st_dev,
                 after.st_ino,
@@ -711,7 +784,10 @@ def execute(
             for name in version_flags
         }
         for name, fd in tool_fd_by_name.items():
-            _verify_held_tool(fd, request["tools"][name])
+            try:
+                _verify_held_tool(fd, request["tools"][name])
+            except A3EvaluationError as exc:
+                raise A3KnownFailure(str(exc), stage="post-build", step="tool-identity", cleanup="REMOVED") from exc
         receipt: dict[str, Any] = {
             "schema": SUCCESS_SCHEMA,
             "outcome": "SUCCEEDED",
@@ -730,13 +806,13 @@ def execute(
             "isolation": {
                 "schema": "tgw-nixos-a3-local-isolation-summary/v1",
                 "kind": "root-launcher-fresh-netns-per-command",
-                "composition_sha256": attestations[0]["composition_sha256"] if attestations else digest({"fixture_only": True}),
+                "composition_sha256": attestations[0]["signed_attestation"]["composition_sha256"] if attestations else digest({"test_transport_no_launcher_evidence": True}),
                 "command_count": len(attestations),
-                "attestations_sha256": digest(attestations),
+                "launch_evidence_sha256": digest(attestations),
                 "launcher_attested": bool(attestations),
                 "network_observed": False,
             },
-            "launcher_attestations": list(attestations),
+            "launcher_evidence": list(attestations),
             "effects": {"build": True, **{name: False for name in FORBIDDEN_EFFECTS}},
             "cleanup": "REMOVED",
             "deployable": request["integration"]["status"] == "REVIEWED_EXECUTABLE" and request["credentials"]["final"] is True,

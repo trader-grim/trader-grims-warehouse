@@ -48,7 +48,7 @@ from tgw.nixos_a3_successor_evaluation import (
     validate_success,
     validate_terminal,
 )
-from tgw.nixos_a3_successor_remote import RENDERED_ARTIFACTS, Completed, execute, verify_git_archive
+from tgw.nixos_a3_successor_remote import RENDERED_ARTIFACTS, Completed, _run_exact, execute, verify_git_archive
 from tgw.nixos_a3_successor_transport import (
     A3LocalProductionComposition,
     A3LocalProductionTransport,
@@ -77,6 +77,7 @@ PUBLIC_FIXTURE_VALUES = {
     "nix-observer-render-prerequisite.json": "{}\n",
     "nix-observer-render-wrapper.conf": "fixture=true\n",
 }
+SSHD_SERVICE_FIXTURE = b"[Unit]\nDescription=OpenSSH server\n[Service]\nType=simple\nExecStart=/bin/true\n"
 
 
 class MemoryStore:
@@ -225,8 +226,8 @@ def request_fixture(tmp_path: Path) -> tuple[dict[str, Any], bytes]:
         "expected_rendered": {
             name: {
                 "relative_path": RENDERED_PATHS[name],
-                "sha256": integration["public_files"][name]["sha256"] if name in INTEGRATION_PUBLIC_FILES else digest((name + "\n").encode()),
-                "size": integration["public_files"][name]["size"] if name in INTEGRATION_PUBLIC_FILES else len(name) + 1,
+                "sha256": integration["public_files"][name]["sha256"] if name in INTEGRATION_PUBLIC_FILES else digest(SSHD_SERVICE_FIXTURE if name == "sshd-service" else (name + "\n").encode()),
+                "size": integration["public_files"][name]["size"] if name in INTEGRATION_PUBLIC_FILES else len(SSHD_SERVICE_FIXTURE if name == "sshd-service" else (name + "\n").encode()),
             }
             for name in RENDERED_ARTIFACTS
         },
@@ -296,11 +297,55 @@ def success_fixture(request: Mapping[str, Any]) -> dict[str, Any]:
             "version_stderr_sha256": digest(b""),
         }
 
-    launcher_attestations = [
+    signed_attestation = {
+        "schema": "tgw-nixos-a3-local-netns-attestation/v1",
+        "packet_sha256": "sha256:" + "1" * 64,
+        "composition_sha256": "sha256:" + "a" * 64,
+        "request_sha256": request["request_sha256"],
+        "launch_nonce": "2" * 64,
+        "attempt_id": "attempt:" + "3" * 64,
+        "issued_at": "2026-08-12T00:00:00.000000Z",
+        "started_at": "2026-08-12T00:00:00.100000Z",
+        "ended_at": "2026-08-12T00:00:01.000000Z",
+        "expires_at": "2026-08-12T00:01:00.000000Z",
+        "netns": {
+            "start_inode": 10,
+            "end_inode": 10,
+            "lo_only": True,
+            "routes_empty": True,
+            "link_sha256": "sha256:" + "4" * 64,
+            "route_sha256": "sha256:" + "5" * 64,
+        },
+        "child": {"pid": 123, "starttime": 1, "exe": "/proc/123/fd/9", "uid": 1000, "gid": 1000, "capabilities": [], "no_new_privs": True},
+        "probes": {
+            phase: {
+                name: {"attempted": True, "connected": False, "evidence_sha256": "sha256:" + str(index) * 64}
+                for index, name in enumerate(("direct", "dns", "private", "metadata"), 6)
+            }
+            for phase in ("pre", "post")
+        },
+        "signature": "ed25519:" + "0" * 128,
+    }
+    replay_claim = {
+        "schema": "tgw-nixos-a3-launch-replay-claim/v1",
+        "launch_nonce": signed_attestation["launch_nonce"],
+        "attempt_id": signed_attestation["attempt_id"],
+        "request_sha256": request["request_sha256"],
+        "composition_sha256": signed_attestation["composition_sha256"],
+        "attestation_sha256": digest(signed_attestation),
+    }
+    replay_claim["claim_sha256"] = self_hash(replay_claim)
+    launcher_evidence = [
         {
-            "schema": "tgw-nixos-a3-local-netns-attestation/v1",
-            "fixture_only": True,
-            "signature": "ed25519:" + "0" * 128,
+            "schema": "tgw-nixos-a3-launch-evidence/v1",
+            "signed_attestation": signed_attestation,
+            "replay_claim": replay_claim,
+            "replay_claim_ref": {
+                "schema": "tgw-nixos-a3-launch-replay-claim-ref/v1",
+                "name": digest({"launch_nonce": signed_attestation["launch_nonce"]}).removeprefix("sha256:") + ".json",
+                "sha256": replay_claim["claim_sha256"],
+                "size": len(canonical(replay_claim)),
+            },
         }
     ]
     result: dict[str, Any] = {
@@ -332,7 +377,7 @@ def success_fixture(request: Mapping[str, Any]) -> dict[str, Any]:
             "systemd_analyze": verifier(
                 "systemd_analyze",
                 systemd_command,
-                ["/proc/123/fd/11", "verify", "--man=no", "/proc/123/fd/13"],
+                ["/proc/123/fd/11", "verify", "--man=no", "/tmp/a3-successor-fixture/sshd.service"],
                 "--version",
             ),
         },
@@ -340,12 +385,12 @@ def success_fixture(request: Mapping[str, Any]) -> dict[str, Any]:
             "schema": "tgw-nixos-a3-local-isolation-summary/v1",
             "kind": "root-launcher-fresh-netns-per-command",
             "composition_sha256": "sha256:" + "a" * 64,
-            "command_count": len(launcher_attestations),
-            "attestations_sha256": digest(launcher_attestations),
+            "command_count": len(launcher_evidence),
+            "launch_evidence_sha256": digest(launcher_evidence),
             "launcher_attested": True,
             "network_observed": False,
         },
-        "launcher_attestations": launcher_attestations,
+        "launcher_evidence": launcher_evidence,
         "effects": {
             "build": True,
             "activate": False,
@@ -627,9 +672,10 @@ def test_durable_launch_challenge_replay_is_refused(tmp_path: Path) -> None:
         "launch_nonce": "a" * 64,
         "attempt_id": "attempt:" + "b" * 64,
         "request_sha256": "sha256:" + "c" * 64,
+        "composition_sha256": "sha256:" + "f" * 64,
         "attestation_sha256": "sha256:" + "d" * 64,
     }
-    assert store.claim(**values).startswith("sha256:")
+    assert store.claim(**values)["ref"]["sha256"].startswith("sha256:")
     with pytest.raises(A3EvaluationError, match="already consumed"):
         store.claim(**values)
     with pytest.raises(A3EvaluationError, match="already consumed"):
@@ -747,8 +793,229 @@ def test_terminal_exact_tuple_mutation_matrix(field: str, replacement: Any) -> N
     terminal[field] = replacement
     terminal["receipt_sha256"] = self_hash({key: item for key, item in terminal.items() if key != "evidence"})
     terminal["evidence"] = ["nixos-a3-successor-evaluation-terminal:" + terminal["receipt_sha256"]]
-    with pytest.raises(A3EvaluationError, match="state table"):
+    with pytest.raises(A3EvaluationError, match="(state table|classification)"):
         validate_terminal(terminal, request_sha256=request_sha256, provider_sha256=provider_sha256)
+
+
+@pytest.mark.parametrize("returncode", [True, False, -256, 256])
+def test_terminal_rejects_bool_and_out_of_domain_returncodes(returncode: Any) -> None:
+    request_sha256 = "sha256:" + "1" * 64
+    provider_sha256 = "sha256:" + "2" * 64
+    terminal = terminal_receipt(
+        request_sha256=request_sha256,
+        provider_sha256=provider_sha256,
+        outcome="FAILED",
+        stage="nix-build",
+        step="nix-build",
+        code="A3KnownFailure",
+        returncode=17,
+        stdout=b"",
+        stderr=b"",
+        cleanup="REMOVED",
+        effects={"build": True, **{name: False for name in ("activate", "profile_write", "home_db_write", "live_flake_write", "gc_root_write", "deploy", "network", "lock_write", "substitute")}},
+        observation={},
+    )
+    terminal["returncode"] = returncode
+    terminal["receipt_sha256"] = self_hash({key: item for key, item in terminal.items() if key != "evidence"})
+    terminal["evidence"] = ["nixos-a3-successor-evaluation-terminal:" + terminal["receipt_sha256"]]
+    with pytest.raises(A3EvaluationError, match="classification"):
+        validate_terminal(terminal, request_sha256=request_sha256, provider_sha256=provider_sha256)
+
+
+@pytest.mark.parametrize("returncode", [0, None])
+def test_nonzero_subprocess_terminal_rejects_zero_or_null(returncode: int | None) -> None:
+    request_sha256 = "sha256:" + "1" * 64
+    provider_sha256 = "sha256:" + "2" * 64
+    terminal = terminal_receipt(
+        request_sha256=request_sha256,
+        provider_sha256=provider_sha256,
+        outcome="FAILED",
+        stage="evaluation",
+        step="nix-eval",
+        code="A3KnownFailure",
+        returncode=17,
+        stdout=b"",
+        stderr=b"",
+        cleanup="REMOVED",
+        effects={"build": False, **{name: False for name in ("activate", "profile_write", "home_db_write", "live_flake_write", "gc_root_write", "deploy", "network", "lock_write", "substitute")}},
+        observation={},
+    )
+    terminal["returncode"] = returncode
+    terminal["receipt_sha256"] = self_hash({key: item for key, item in terminal.items() if key != "evidence"})
+    terminal["evidence"] = ["nixos-a3-successor-evaluation-terminal:" + terminal["receipt_sha256"]]
+    with pytest.raises(A3EvaluationError, match="returncode relation"):
+        validate_terminal(terminal, request_sha256=request_sha256, provider_sha256=provider_sha256)
+
+
+@pytest.mark.parametrize(
+    ("stage", "step"),
+    [
+        ("evaluation", "nix-version"),
+        ("evaluation", "nix-store-version"),
+        ("evaluation", "sshd-version"),
+        ("evaluation", "systemd-version"),
+        ("evaluation", "path-info"),
+        ("evaluation", "nix-hash"),
+        ("evaluation", "nix-eval"),
+        ("nix-build", "nix-build"),
+        ("post-build", "nix-store"),
+        ("post-build", "path-info"),
+        ("post-build", "nix-hash"),
+        ("static-verification", "sshd-verify"),
+        ("static-verification", "systemd-verify"),
+    ],
+)
+def test_run_exact_nonzero_paths_persist_valid_terminal(tmp_path: Path, stage: str, step: str) -> None:
+    request, _ = request_fixture(tmp_path)
+    store = MemoryStore()
+
+    def invoke(_: Mapping[str, Any]) -> Mapping[str, Any]:
+        _run_exact(
+            lambda *_args, **_kwargs: Completed(23, b"bounded stdout", b"bounded stderr"),
+            ["/proc/1/fd/9", step],
+            failure_stage=stage,
+            failure_step=step,
+            cwd=tmp_path,
+            env={},
+            timeout=1,
+            max_output=1024,
+            pass_fds=(),
+            attestations=[],
+            allow_fixture=True,
+        )
+        raise AssertionError("nonzero result was accepted")
+
+    provider = A3TestSuccessorEvaluationProvider(A3EvaluationComposition(request["integration"], store, A3TestTransport(invoke), allow_fixture=True))
+    with pytest.raises(A3EvaluationFailure) as raised:
+        provider({"kind": EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION.value, "generation": "g1", "parameters": request})
+    terminal = raised.value.terminal
+    assert terminal["stage"] == stage and terminal["step"] == step and terminal["returncode"] == 23
+    assert store.values == [terminal]
+    validate_terminal(terminal, request_sha256=request["request_sha256"], provider_sha256=provider.composition.receipt_sha256)
+
+
+@pytest.mark.parametrize(
+    ("step", "returncode", "cleanup", "outcome"),
+    [
+        ("launcher", 7, "REMOVED", "FAILED"),
+        ("launcher-identity", 0, "REMOVED", "FAILED"),
+        ("timeout", None, "REMOVED", "FAILED"),
+        ("output-bound", -9, "REMOVED", "FAILED"),
+        ("process-group", 0, "UNKNOWN", "AMBIGUOUS"),
+        ("response", 0, "REMOVED", "AMBIGUOUS"),
+        ("response-contract", 0, "REMOVED", "AMBIGUOUS"),
+    ],
+)
+def test_run_exact_launcher_failures_always_persist_terminal(
+    tmp_path: Path,
+    step: str,
+    returncode: int | None,
+    cleanup: str,
+    outcome: str,
+) -> None:
+    request, _ = request_fixture(tmp_path)
+    store = MemoryStore()
+
+    def invoke(_: Mapping[str, Any]) -> Mapping[str, Any]:
+        def runner(*_args: Any, **_kwargs: Any) -> Completed:
+            raise StepFailure(
+                "launcher failure",
+                step=step,
+                returncode=returncode,
+                stdout=b"out",
+                stderr=b"err",
+                process_state="UNKNOWN" if cleanup == "UNKNOWN" else "REAPED_GROUP_EMPTY",
+                cleanup=cleanup,
+            )
+
+        _run_exact(
+            runner,
+            ["/proc/1/fd/9", "eval"],
+            failure_stage="evaluation",
+            failure_step="nix-eval",
+            cwd=tmp_path,
+            env={},
+            timeout=1,
+            max_output=1024,
+            pass_fds=(),
+            attestations=[],
+            allow_fixture=True,
+        )
+        raise AssertionError("launcher failure was accepted")
+
+    provider = A3TestSuccessorEvaluationProvider(A3EvaluationComposition(request["integration"], store, A3TestTransport(invoke), allow_fixture=True))
+    error = A3EvaluationAmbiguous if outcome == "AMBIGUOUS" else A3EvaluationFailure
+    with pytest.raises(error):
+        provider({"kind": EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION.value, "generation": "g1", "parameters": request})
+    terminal = store.values[-1]
+    assert terminal["outcome"] == outcome and terminal["step"] == step
+    validate_terminal(terminal, request_sha256=request["request_sha256"], provider_sha256=provider.composition.receipt_sha256)
+
+
+@pytest.mark.parametrize(
+    ("mode", "outcome", "step"),
+    [
+        ("output-contract", "FAILED", "output-contract"),
+        ("process-state", "AMBIGUOUS", "process-state"),
+        ("attestation", "FAILED", "attestation"),
+    ],
+)
+def test_run_exact_contract_failures_always_persist_terminal(tmp_path: Path, mode: str, outcome: str, step: str) -> None:
+    request, _ = request_fixture(tmp_path)
+    store = MemoryStore()
+
+    def invoke(_: Mapping[str, Any]) -> Mapping[str, Any]:
+        def runner(*_args: Any, **_kwargs: Any) -> Any:
+            if mode == "output-contract":
+                return object()
+            if mode == "process-state":
+                return Completed(0, b"", b"", process_state="UNKNOWN")
+            return Completed(0, b"", b"")
+
+        _run_exact(
+            runner,
+            ["/proc/1/fd/9", "eval"],
+            failure_stage="evaluation",
+            failure_step="nix-eval",
+            cwd=tmp_path,
+            env={},
+            timeout=1,
+            max_output=1024,
+            pass_fds=(),
+            attestations=[],
+            allow_fixture=mode != "attestation",
+        )
+        raise AssertionError("invalid runner result was accepted")
+
+    provider = A3TestSuccessorEvaluationProvider(A3EvaluationComposition(request["integration"], store, A3TestTransport(invoke), allow_fixture=True))
+    error = A3EvaluationAmbiguous if outcome == "AMBIGUOUS" else A3EvaluationFailure
+    with pytest.raises(error):
+        provider({"kind": EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION.value, "generation": "g1", "parameters": request})
+    terminal = store.values[-1]
+    assert terminal["outcome"] == outcome and terminal["step"] == step
+    validate_terminal(terminal, request_sha256=request["request_sha256"], provider_sha256=provider.composition.receipt_sha256)
+
+
+@pytest.mark.parametrize("mutation", ["signed-extra", "claim-extra", "foreign-nonce", "foreign-composition", "wrong-ref", "fixture-only"])
+def test_success_rejects_unbound_or_broadened_launcher_evidence(tmp_path: Path, mutation: str) -> None:
+    request, _ = request_fixture(tmp_path)
+    result = success_fixture(request)
+    envelope = result["launcher_evidence"][0]
+    if mutation in {"signed-extra", "fixture-only"}:
+        envelope["signed_attestation"]["fixture_only" if mutation == "fixture-only" else "unsigned_extra"] = True
+    elif mutation == "claim-extra":
+        envelope["replay_claim"]["extra"] = True
+    elif mutation == "foreign-nonce":
+        envelope["replay_claim"]["launch_nonce"] = "f" * 64
+    elif mutation == "foreign-composition":
+        envelope["replay_claim"]["composition_sha256"] = "sha256:" + "f" * 64
+    else:
+        envelope["replay_claim_ref"]["sha256"] = "sha256:" + "f" * 64
+    result["isolation"]["launch_evidence_sha256"] = digest(result["launcher_evidence"])
+    result["receipt_sha256"] = self_hash({key: item for key, item in result.items() if key != "evidence"})
+    result["evidence"] = ["nixos-a3-successor-evaluation:" + result["receipt_sha256"]]
+    with pytest.raises(A3EvaluationError, match="(launcher|replay|attestation)"):
+        validate_success(result, request)
 
 
 def test_integration_contract_not_executable_fixture_is_source_truth() -> None:
@@ -963,7 +1230,7 @@ def test_known_failure_is_persisted_failed_and_store_loss_is_ambiguous(tmp_path:
         raise A3KnownFailure(
             "nix refused",
             stage="nix-build",
-            step="build",
+            step="nix-build",
             returncode=17,
             stdout=b"known stdout",
             stderr=b"known stderr",
@@ -1056,8 +1323,8 @@ def test_archive_rejects_links_and_wrong_commit(tmp_path: Path) -> None:
         verify_git_archive(raw.getvalue(), tmp_path / "out", expected_root="root", expected_commit="a" * 40, expected_tree="b" * 40, max_files=10, max_bytes=1_000_000)
 
 
-@pytest.mark.parametrize("transient_replace", [False, True])
-def test_remote_fake_nix_systemd_sshd_e2e(tmp_path: Path, transient_replace: bool) -> None:
+@pytest.mark.parametrize("unit_attack", [None, "replace", "missing"])
+def test_remote_fake_nix_systemd_sshd_e2e(tmp_path: Path, unit_attack: str | None) -> None:
     request, integration_archive = request_fixture(tmp_path)
     product_archive = subprocess.run(
         ["git", "-c", "safe.directory=/opt/TGW/tgw-lib/src/trader-grims-warehouse", "archive", "--format=tar", "--prefix=trader-grims-warehouse/", SOURCE_COMMIT],
@@ -1071,7 +1338,13 @@ def test_remote_fake_nix_systemd_sshd_e2e(tmp_path: Path, transient_replace: boo
         target = output_root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         public_name = Path(INTEGRATION_PUBLIC_FILES[name]).name if name in INTEGRATION_PUBLIC_FILES else None
-        target.write_text(PUBLIC_FIXTURE_VALUES[public_name] if public_name is not None else name + "\n")
+        target.write_bytes(
+            PUBLIC_FIXTURE_VALUES[public_name].encode()
+            if public_name is not None
+            else SSHD_SERVICE_FIXTURE
+            if name == "sshd-service"
+            else (name + "\n").encode()
+        )
 
     seen: list[tuple[list[str], Mapping[str, str]]] = []
 
@@ -1102,17 +1375,23 @@ def test_remote_fake_nix_systemd_sshd_e2e(tmp_path: Path, transient_replace: boo
             path = argv[-1]
             digest_hex = "6" * 64 if path == OUTPUT else "8" * 64 if path.endswith("-dependency") else "2" * 64
             return Completed(0, (digest_hex + "\n").encode(), b"")
-        if transient_replace and " verify " in f" {joined} ":
-            target = output_root / RENDERED_PATHS["sshd-config"]
-            displaced = target.with_name("sshd-config.displaced")
-            target.rename(displaced)
-            target.write_bytes(b"transient replacement")
-            target.unlink()
-            displaced.rename(target)
+        if " verify " in f" {joined} ":
+            unit = Path(argv[-1])
+            assert unit.is_absolute() and unit.name == "sshd.service" and not str(unit).startswith("/proc/")
+            completed = subprocess.run(["/usr/bin/systemd-analyze", *argv[1:]], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if unit_attack == "replace":
+                displaced = unit.with_name("sshd.service.displaced")
+                unit.rename(displaced)
+                unit.write_bytes(SSHD_SERVICE_FIXTURE)
+                unit.unlink()
+                displaced.rename(unit)
+            elif unit_attack == "missing":
+                unit.unlink()
+            return Completed(completed.returncode, completed.stdout, completed.stderr)
         return Completed(0, b"", b"")
 
-    if transient_replace:
-        with pytest.raises(A3KnownFailure, match="(held inode|named component) changed"):
+    if unit_attack is not None:
+        with pytest.raises(A3KnownFailure, match="verifier input (changed|named path disappeared)"):
             execute(
                 request,
                 tgw_archive=product_archive,
