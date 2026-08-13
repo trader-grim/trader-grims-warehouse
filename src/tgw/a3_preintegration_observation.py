@@ -47,6 +47,7 @@ _SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT = re.compile(r"^[0-9a-f]{40}$")
 _OPERATION = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 SOURCE_DESCRIPTOR_SCHEMA = "tgw-reviewed-observation-source/v1"
+_SOURCE_AUTHORITY_SEAL = object()
 
 
 class ObservationError(RuntimeError):
@@ -124,6 +125,37 @@ def load_mounted_source_descriptor(path: Path, expected_sha256: str) -> dict[str
     finally:
         os.close(fd)
     return descriptor
+
+
+class MountedSourceAuthority:
+    """Held root-owned content-addressed source authority for production only."""
+
+    __slots__ = ("descriptor", "fd", "identity", "sha256")
+
+    def __init__(self, path: Path, expected_sha256: str, *, _token: object) -> None:
+        if _token is not _SOURCE_AUTHORITY_SEAL or path.name != expected_sha256.removeprefix("sha256:") + ".json":
+            raise ObservationError("source authority locator is not content addressed")
+        absolute = path.absolute()
+        for ancestor in (absolute.parent, *absolute.parents):
+            ancestor_st = os.lstat(ancestor)
+            if not stat.S_ISDIR(ancestor_st.st_mode) or stat.S_ISLNK(ancestor_st.st_mode) or ancestor_st.st_uid != 0 or stat.S_IMODE(ancestor_st.st_mode) & 0o022:
+                raise ObservationError("source authority root chain is not protected")
+            if ancestor == Path("/"):
+                break
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        st = os.fstat(fd)
+        raw = os.read(fd, st.st_size + 1)
+        if st.st_uid != 0 or stat.S_IMODE(st.st_mode) != 0o444 or st.st_nlink != 1 or digest(raw) != expected_sha256:
+            os.close(fd)
+            raise ObservationError("source authority file is not root-protected and exact")
+        self.descriptor = validate_source_descriptor(json.loads(raw))
+        self.fd = fd
+        self.identity = _inode_identity(st)
+        self.sha256 = expected_sha256
+
+
+def load_source_authority(path: Path, expected_sha256: str) -> MountedSourceAuthority:
+    return MountedSourceAuthority(path, expected_sha256, _token=_SOURCE_AUTHORITY_SEAL)
 
 
 def _fixture_source_descriptor() -> dict[str, Any]:
@@ -331,16 +363,18 @@ def _verify_repository_components(repo: Path, request: Mapping[str, Any], *, enf
     )
 
 
-def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_owner: bool = False, git_path: str | None = None) -> tuple[dict[str, Any], bytes]:
+def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_owner: bool = False, git_path: str | None = None, git_fd: int | None = None) -> tuple[dict[str, Any], bytes]:
     request = validate_request(request)
     repo = repository.resolve(strict=True)
     if repo != repository or not repo.is_dir():
         raise ObservationError("repository path is not a stable directory")
     component_identity = _verify_repository_components(repo, request, enforce_owner=enforce_owner)
-    git_path = os.path.realpath(git_path or shutil.which("git") or "")
-    if not git_path:
-        raise ObservationError("Git executable is unavailable")
-    git_fd = os.open(git_path, os.O_RDONLY | os.O_NOFOLLOW)
+    owned_git = git_fd is None
+    if git_fd is None:
+        git_path = os.path.realpath(git_path or shutil.which("git") or "")
+        if not git_path:
+            raise ObservationError("Git executable is unavailable")
+        git_fd = os.open(git_path, os.O_RDONLY | os.O_NOFOLLOW)
     git_stat = os.fstat(git_fd)
     if not stat.S_ISREG(git_stat.st_mode) or not git_stat.st_mode & 0o111:
         os.close(git_fd)
@@ -376,9 +410,11 @@ def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_
     if _verify_repository_components(repo, request, enforce_owner=enforce_owner) != component_identity:
         raise ObservationHold("repository components changed during observation")
     if _inode_identity(os.fstat(git_fd)) != _inode_identity(git_stat):
-        os.close(git_fd)
+        if owned_git:
+            os.close(git_fd)
         raise ObservationHold("held Git executable identity changed")
-    os.close(git_fd)
+    if owned_git:
+        os.close(git_fd)
     if len(archive) > request["bounds"]["max_archive_bytes"]:
         raise ObservationError("archive exceeds bound")
     receipt: dict[str, Any] = {
@@ -416,6 +452,21 @@ def validate_receipt(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
         raise ObservationError("receipt hash is invalid")
     receipt["receipt_sha256"] = claimed
     return receipt
+
+
+def _git_tree(directory: Path) -> str:
+    entries = bytearray()
+    for child in sorted(directory.iterdir(), key=lambda item: item.name.encode() + (b"/" if item.is_dir() else b"")):
+        if child.is_dir():
+            mode, object_hash = b"40000", bytes.fromhex(_git_tree(child))
+        else:
+            raw = child.read_bytes()
+            header = b"blob " + str(len(raw)).encode() + b"\0"
+            mode = b"100755" if child.stat().st_mode & 0o111 else b"100644"
+            object_hash = hashlib.sha1(header + raw).digest()  # noqa: S324 - Git object identity
+        entries.extend(mode + b" " + child.name.encode() + b"\0" + object_hash)
+    header = b"tree " + str(len(entries)).encode() + b"\0"
+    return hashlib.sha1(header + entries).hexdigest()  # noqa: S324 - Git object identity
 
 
 def replay_archive(archive: bytes, receipt: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
@@ -465,14 +516,7 @@ def replay_archive(archive: bytes, receipt: Mapping[str, Any], request: Mapping[
                         view = view[written:]
                 finally:
                     os.close(fd)
-        env = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "GIT_CONFIG_NOSYSTEM": "1", "GIT_OPTIONAL_LOCKS": "0"}
-        commands = (["git", "init", "-q"], ["git", "-c", "core.hooksPath=/dev/null", "add", "-f", "-A"], ["git", "write-tree"])
-        output = ""
-        for argv in commands:
-            result = subprocess.run(argv, cwd=root, env=env, capture_output=True, timeout=request["bounds"]["timeout_seconds"], check=False)
-            if result.returncode:
-                raise ObservationError("archive tree replay failed")
-            output = result.stdout.decode().strip()
+        output = _git_tree(root)
         if output != validated["repository"]["tree"]:
             raise ObservationError("archive replay tree differs")
         lock_raw = (root / "flake.lock").read_bytes()
@@ -505,18 +549,19 @@ def replay_archive(archive: bytes, receipt: Mapping[str, Any], request: Mapping[
                     isinstance(target, str) or (isinstance(target, list) and target and all(isinstance(part, str) and part for part in target))
                 ):
                     raise ObservationError("flake.lock input edge is invalid")
-                target_node = target if isinstance(target, str) else target[0]
-                if target_node not in lock["nodes"]:
-                    raise ObservationError("flake.lock input edge target is absent")
                 if isinstance(target, list):
-                    current = target_node
+                    current = lock["root"]
                     visited = {current}
-                    for edge in target[1:]:
+                    for edge in target:
                         nested = lock["nodes"][current].get("inputs", {}).get(edge)
+                        if isinstance(nested, list):
+                            raise ObservationError("nested flake.lock follows path is unsupported")
                         if not isinstance(nested, str) or nested not in lock["nodes"] or nested in visited:
                             raise ObservationError("flake.lock follows path is missing or cyclic")
                         visited.add(nested)
                         current = nested
+                elif target not in lock["nodes"]:
+                    raise ObservationError("flake.lock input edge target is absent")
         return {"tree": output, "lock_sha256": digest(lock_raw), "lock_nodes": sorted(lock["nodes"])}
 
 
@@ -695,7 +740,7 @@ class SshObservationProvider:
     identity_path: Path
     helper_path: Path
     python_path: str
-    mounted_source: Mapping[str, Any] | None = None
+    mounted_source: Mapping[str, Any] | MountedSourceAuthority | None = None
     ssh_keygen_path: Path | None = None
     source_authority_sha256: str | None = None
 
@@ -841,8 +886,9 @@ class SshObservationProvider:
             validated != configured
             or self.mounted_source is None
             or self.source_authority_sha256 is None
-            or self.source_authority_sha256 != validated["source"]["descriptor_sha256"]
-            or validate_source_descriptor(self.mounted_source) != validated["source"]
+            or not isinstance(self.mounted_source, MountedSourceAuthority)
+            or self.source_authority_sha256 != self.mounted_source.sha256
+            or self.mounted_source.descriptor != validated["source"]
         ):
             raise ObservationHold("sealed provider request or source authority differs")
         ssh_fd, _ = _held_regular(self.ssh_path, validated["transport"]["ssh_sha256"], executable=True)
@@ -1071,13 +1117,13 @@ def helper_main() -> int:
         request = validate_request(json.loads(request_raw), now=datetime.now(timezone.utc))
         python_real = Path(sys.executable).resolve(strict=True)
         git_real = Path("/run/current-system/sw/bin/git").resolve(strict=True)
-        for path, expected in (
-            (python_real, request["transport"]["python_sha256"]),
-            (git_real, request["transport"]["git_sha256"]),
-        ):
-            fd, _ = _held_regular(path, expected, executable=True)
-            os.close(fd)
-        receipt, archive = observe_repository(Path("/home/db/tgw-flake"), request, enforce_owner=True, git_path=str(git_real))
+        python_fd, _ = _held_regular(python_real, request["transport"]["python_sha256"], executable=True)
+        git_fd, _ = _held_regular(git_real, request["transport"]["git_sha256"], executable=True)
+        os.close(python_fd)
+        try:
+            receipt, archive = observe_repository(Path("/home/db/tgw-flake"), request, enforce_owner=True, git_fd=git_fd)
+        finally:
+            os.close(git_fd)
         sys.stdout.buffer.write(encode_helper_response(receipt, archive))
         return 0
     except ObservationHold:

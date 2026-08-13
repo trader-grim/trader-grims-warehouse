@@ -14,6 +14,7 @@ from typing import Any, Mapping, Protocol
 from tgw.a3_preintegration_observation import (
     EvidencePersistenceAmbiguous,
     ImmutableEvidenceStore,
+    MountedSourceAuthority,
     ObservationHold,
     SshObservationProvider,
     persist_evidence,
@@ -204,7 +205,7 @@ class ReadOnlyObservationController:
         self.token = token
         if not allow_test_provider and type(provider) is not SshObservationProvider:
             raise ObservationAuthorityError("production controller requires the sealed SSH observation provider")
-        if not allow_test_provider and provider.source_authority_sha256 is None:
+        if not allow_test_provider and not isinstance(provider.mounted_source, MountedSourceAuthority):
             raise ObservationAuthorityError("production controller requires a sealed source authority digest")
         self._lock = threading.Lock()
         self._consumed = False
