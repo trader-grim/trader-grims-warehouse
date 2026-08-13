@@ -25,10 +25,37 @@
   },
   "flake_lock_sha256": null,
   "live_gate": "external:tgw-prod-flake-import-build-and-sshd-T",
-  "manifest_ref": "manifest:sha256:64bf1f3acf6b282245f1f9fba246fbac3ccecca35820d0353d4ac6a2a2550b89",
-  "manifest_sha256": "sha256:64bf1f3acf6b282245f1f9fba246fbac3ccecca35820d0353d4ac6a2a2550b89",
+  "manifest_ref": "manifest:sha256:0cb5d42bcaebafc1035b596ee8ffa8b94d814b6bd6c7d6aedcb8c927cd22c414",
+  "manifest_sha256": "sha256:0cb5d42bcaebafc1035b596ee8ffa8b94d814b6bd6c7d6aedcb8c927cd22c414",
   "module_import": "inputs.tgw-lib.nixosModules.a3-platform-bootstrap",
   "public_credentials_final": false,
+  "public_files": {
+    "attestation-public-key": {
+      "path": "a3-public/nix-observer-render-attestation.pub",
+      "sha256": null,
+      "size": null
+    },
+    "authorized-key-codex": {
+      "path": "a3-public/codex-authorized-key.txt",
+      "sha256": null,
+      "size": null
+    },
+    "prerequisite-receipt": {
+      "path": "a3-public/nix-observer-render-prerequisite.json",
+      "sha256": null,
+      "size": null
+    },
+    "render-composition": {
+      "path": "a3-public/nix-observer-render-composition.json",
+      "sha256": null,
+      "size": null
+    },
+    "wrapper-config": {
+      "path": "a3-public/nix-observer-render-wrapper.conf",
+      "sha256": null,
+      "size": null
+    }
+  },
   "repository_id": "tgw-flake",
   "schema": "tgw-nixos-a3-successor-integration/v1",
   "status": "NOT_EXECUTABLE",

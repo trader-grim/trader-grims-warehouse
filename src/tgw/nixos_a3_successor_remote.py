@@ -6,6 +6,7 @@ selects an attribute, repository, command, or path from ambient configuration.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import shutil
@@ -18,12 +19,14 @@ from typing import Any, Callable, Mapping, Sequence
 
 from tgw.nixos_a3_successor_evaluation import (
     FORBIDDEN_EFFECTS,
+    INTEGRATION_PUBLIC_FILES,
     RENDERED_ARTIFACTS,
     RENDERED_RELATIVE_PATHS,
     SUCCESS_SCHEMA,
     TARGET_ATTR,
     A3EvaluationError,
     A3KnownFailure,
+    canonical,
     digest,
     self_hash,
     validate_request,
@@ -35,9 +38,73 @@ class Completed:
     returncode: int
     stdout: bytes
     stderr: bytes
+    attestation: Mapping[str, Any] | None = None
+    process_state: str = "REAPED"
 
 
 Runner = Callable[..., Completed]
+
+_INTEGRATION_MODULE_LINES = (
+    "{ inputs, ... }:",
+    "{",
+    "imports = [ inputs.tgw-lib.nixosModules.a3-platform-bootstrap ];",
+    "services.tgw-a3-platform-bootstrap = {",
+    "enable = true;",
+    "package = inputs.tgw-lib.packages.x86_64-linux.a3-platform-bootstrap;",
+    "wrapperConfig = ../../a3-public/nix-observer-render-wrapper.conf;",
+    "composition = ../../a3-public/nix-observer-render-composition.json;",
+    "prerequisiteReceipt = ../../a3-public/nix-observer-render-prerequisite.json;",
+    "attestationPublicKey = ../../a3-public/nix-observer-render-attestation.pub;",
+    "sshAuthorizedPublicKey = builtins.readFile ../../a3-public/codex-authorized-key.txt;",
+    "};",
+    "}",
+)
+
+
+def parse_integration_module(raw: bytes) -> dict[str, Any]:
+    """Parse the complete closed fixture grammar; comments/extras are refused."""
+    try:
+        lines = tuple(line.strip() for line in raw.decode("utf-8").splitlines() if line.strip())
+    except UnicodeDecodeError as exc:
+        raise A3EvaluationError("reviewed integration module is not UTF-8") from exc
+    if lines != _INTEGRATION_MODULE_LINES:
+        raise A3EvaluationError("reviewed integration module is outside the exact structural grammar")
+    return {
+        "module_import": "inputs.tgw-lib.nixosModules.a3-platform-bootstrap",
+        "options": {
+            "services.tgw-a3-platform-bootstrap.enable": True,
+            "services.tgw-a3-platform-bootstrap.package": "inputs.tgw-lib.packages.x86_64-linux.a3-platform-bootstrap",
+            "services.tgw-a3-platform-bootstrap.wrapperConfig": "../../a3-public/nix-observer-render-wrapper.conf",
+            "services.tgw-a3-platform-bootstrap.composition": "../../a3-public/nix-observer-render-composition.json",
+            "services.tgw-a3-platform-bootstrap.prerequisiteReceipt": "../../a3-public/nix-observer-render-prerequisite.json",
+            "services.tgw-a3-platform-bootstrap.attestationPublicKey": "../../a3-public/nix-observer-render-attestation.pub",
+            "services.tgw-a3-platform-bootstrap.sshAuthorizedPublicKey": "../../a3-public/codex-authorized-key.txt",
+        },
+    }
+
+
+def _read_archive_regular(path: Path) -> bytes:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise A3EvaluationError("integration public input is not regular")
+        raw = bytearray()
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(fd)
+        named = path.lstat()
+        if (before.st_dev, before.st_ino, before.st_size, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_ctime_ns) or (
+            named.st_dev,
+            named.st_ino,
+        ) != (before.st_dev, before.st_ino):
+            raise A3EvaluationError("integration public input changed while held")
+        return bytes(raw)
+    finally:
+        os.close(fd)
 
 
 def _git_object(kind: str, raw: bytes) -> bytes:
@@ -178,7 +245,50 @@ def _verify_held_tool(fd: int, value: Mapping[str, Any]) -> None:
         raise A3EvaluationError("held executable changed during evaluation")
 
 
-def _read_rendered(path: Path, *, logical_path: str, expected: Mapping[str, Any], allow_fixture: bool) -> tuple[dict[str, Any], bytes]:
+@dataclass
+class _HeldRendered:
+    fd: int
+    raw: bytes
+    before: os.stat_result
+    resolved: Path
+    components: list[tuple[Path, os.stat_result, str | None]]
+
+
+def _verify_held_rendered(held: _HeldRendered) -> None:
+    after = os.fstat(held.fd)
+    os.lseek(held.fd, 0, os.SEEK_SET)
+    raw = bytearray()
+    while len(raw) <= len(held.raw):
+        block = os.read(held.fd, min(1024 * 1024, len(held.raw) + 1 - len(raw)))
+        if not block:
+            break
+        raw.extend(block)
+    if bytes(raw) != held.raw or (after.st_dev, after.st_ino, after.st_size, after.st_ctime_ns) != (
+        held.before.st_dev,
+        held.before.st_ino,
+        held.before.st_size,
+        held.before.st_ctime_ns,
+    ):
+        raise A3EvaluationError("rendered artifact held inode changed after verifier use")
+    for named, metadata, link in held.components:
+        observed = named.lstat()
+        if (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_size, observed.st_ctime_ns) != (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_size,
+            metadata.st_ctime_ns,
+        ) or (link is not None and os.readlink(named) != link):
+            raise A3EvaluationError("rendered artifact named component changed after verifier use")
+
+
+def _read_rendered(
+    path: Path,
+    *,
+    logical_path: str,
+    expected: Mapping[str, Any],
+    allow_fixture: bool,
+) -> tuple[dict[str, Any], bytes, _HeldRendered]:
     """Hold the resolved store file and prove every named component is unchanged."""
     components: list[tuple[Path, os.stat_result, str | None]] = []
     current = path
@@ -193,29 +303,29 @@ def _read_rendered(path: Path, *, logical_path: str, expected: Mapping[str, Any]
     if not allow_fixture and not str(resolved).startswith("/nix/store/"):
         raise A3EvaluationError("rendered artifact does not resolve to a bounded store fixture")
     fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW)
-    try:
-        before = os.fstat(fd)
-        raw = bytearray()
-        while True:
-            block = os.read(fd, 1024 * 1024)
-            if not block:
-                break
-            raw.extend(block)
-        after = os.fstat(fd)
-        if (before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size):
-            raise A3EvaluationError("rendered artifact changed while held")
-    finally:
+    before = os.fstat(fd)
+    raw = bytearray()
+    while True:
+        block = os.read(fd, 1024 * 1024)
+        if not block:
+            break
+        raw.extend(block)
+    after = os.fstat(fd)
+    if (before.st_dev, before.st_ino, before.st_size, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_ctime_ns):
         os.close(fd)
+        raise A3EvaluationError("rendered artifact changed while held")
     for named, metadata, link in components:
         observed = named.lstat()
         if (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_size) != (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size) or (
             link is not None and os.readlink(named) != link
         ):
+            os.close(fd)
             raise A3EvaluationError("rendered artifact named identity changed")
     content = bytes(raw)
     if digest(content) != expected["sha256"] or len(content) != expected["size"]:
+        os.close(fd)
         raise A3EvaluationError("rendered artifact content differs from the admitted identity")
-    return {
+    identity = {
         "path": logical_path,
         "sha256": digest(content),
         "size": len(content),
@@ -228,7 +338,8 @@ def _read_rendered(path: Path, *, logical_path: str, expected: Mapping[str, Any]
             "mode": stat.S_IMODE(before.st_mode),
             "nlink": before.st_nlink,
         },
-    }, content
+    }
+    return identity, content, _HeldRendered(fd, content, before, resolved, components)
 
 
 def _run_exact(
@@ -240,12 +351,24 @@ def _run_exact(
     timeout: int,
     max_output: int,
     pass_fds: Sequence[int],
-    isolation: str,
+    attestations: list[Mapping[str, Any]],
+    allow_fixture: bool,
 ) -> Completed:
-    actual = [isolation, "--net", "--", *argv]
-    result = runner(actual, cwd=cwd, env=dict(env), timeout=timeout, max_output=max_output, pass_fds=tuple(pass_fds))
+    try:
+        result = runner(list(argv), cwd=cwd, env=dict(env), timeout=timeout, max_output=max_output, pass_fds=tuple(pass_fds))
+    except A3KnownFailure as exc:
+        if exc.stage == "local-launcher":
+            exc.stage = "nix-build" if "build" in argv else "static-verification" if ("-T" in argv or "verify" in argv) else "evaluation"
+        raise
     if not isinstance(result, Completed) or len(result.stdout) + len(result.stderr) > max_output:
         raise A3KnownFailure("subprocess result violates its closed output contract", stage="subprocess", step="output-contract")
+    if result.process_state != "REAPED":
+        raise A3KnownFailure("subprocess process group is not proven reaped", stage="subprocess", step="process-state", cleanup="UNKNOWN")
+    if result.attestation is None:
+        if not allow_fixture:
+            raise A3KnownFailure("local root launcher omitted signed isolation evidence", stage="local-launcher", step="attestation")
+    else:
+        attestations.append(result.attestation)
     if result.returncode != 0:
         raise A3KnownFailure(
             "fixed non-activating evaluation step failed",
@@ -282,12 +405,22 @@ def execute(
     integration.mkdir(mode=0o700)
     tool_fds: list[int] = []
     tool_fd_by_name: dict[str, int] = {}
+    rendered_holds: list[_HeldRendered] = []
+    verifier_input_fds: list[int] = []
+    attestations: list[Mapping[str, Any]] = []
     cleanup_state = "UNKNOWN"
+    build_started = False
     try:
         if digest(tgw_archive) != request["source"]["archive_sha256"] or len(tgw_archive) != request["source"]["archive_size"]:
             raise A3EvaluationError("product archive bytes do not match the request")
         if digest(integration_archive) != request["integration"]["archive_sha256"] or len(integration_archive) != request["integration"]["archive_size"]:
             raise A3EvaluationError("integration archive bytes do not match the request")
+        if (
+            len(tgw_archive) > policy["max_archive_bytes"]
+            or len(integration_archive) > policy["max_archive_bytes"]
+            or len(tgw_archive) + len(integration_archive) > policy["max_archive_bytes"]
+        ):
+            raise A3EvaluationError("individual or total archive byte bound exceeded")
         source_counts = verify_git_archive(
             tgw_archive,
             source,
@@ -309,25 +442,31 @@ def execute(
         if source_counts[0] + integration_counts[0] > policy["max_files"] or source_counts[1] + integration_counts[1] > policy["max_unpacked_bytes"]:
             raise A3EvaluationError("combined archive unpack bounds exceeded")
         lock = integration / "flake.lock"
-        if not lock.is_file() or digest(lock.read_bytes()) != request["integration"]["flake_lock_sha256"]:
+        if digest(_read_archive_regular(lock)) != request["integration"]["flake_lock_sha256"]:
             raise A3EvaluationError("reviewed integration flake.lock identity mismatch")
         module = integration / "hosts/tgw-prod/a3-platform-bootstrap.nix"
         if not module.is_file():
             raise A3EvaluationError("reviewed integration module is absent")
-        module_text = module.read_text()
-        required_integration_lines = (
-            "imports = [ inputs.tgw-lib.nixosModules.a3-platform-bootstrap ];",
-            "services.tgw-a3-platform-bootstrap = {",
-            "enable = true;",
-            "package = inputs.tgw-lib.packages.x86_64-linux.a3-platform-bootstrap;",
-            "wrapperConfig = ../../a3-public/nix-observer-render-wrapper.conf;",
-            "composition = ../../a3-public/nix-observer-render-composition.json;",
-            "prerequisiteReceipt = ../../a3-public/nix-observer-render-prerequisite.json;",
-            "attestationPublicKey = ../../a3-public/nix-observer-render-attestation.pub;",
-            "sshAuthorizedPublicKey = builtins.readFile ../../a3-public/codex-authorized-key.txt;",
-        )
-        if any(module_text.count(line) != 1 for line in required_integration_lines):
-            raise A3EvaluationError("reviewed integration module does not implement the exact A3 contract")
+        structure = parse_integration_module(_read_archive_regular(module))
+        if structure != {
+            "module_import": request["integration"]["module_import"],
+            "options": request["integration"]["exact_options"],
+        }:
+            raise A3EvaluationError("reviewed integration module does not implement the admitted structural contract")
+        integration_public: dict[str, bytes] = {}
+        for name, relative_path in INTEGRATION_PUBLIC_FILES.items():
+            raw = _read_archive_regular(integration / relative_path)
+            expected_public = request["integration"]["public_files"][name]
+            if digest(raw) != expected_public["sha256"] or len(raw) != expected_public["size"]:
+                raise A3EvaluationError("integration public file differs from its manifest identity")
+            integration_public[name] = raw
+        if digest(integration_public["authorized-key-codex"]) != request["credentials"]["authorized_public_key_sha256"] or digest(
+            integration_public["attestation-public-key"]
+        ) != request["credentials"]["attestation_public_key_sha256"]:
+            raise A3EvaluationError("integration public credential bytes differ from request credentials")
+        for name in INTEGRATION_PUBLIC_FILES:
+            if digest(integration_public[name]) != request["expected_rendered"][name]["sha256"] or len(integration_public[name]) != request["expected_rendered"][name]["size"]:
+                raise A3EvaluationError("integration public bytes differ from expected rendered identity")
         held: dict[str, str] = {}
         for name, value in request["tools"].items():
             fd, path = _held_tool(value)
@@ -381,9 +520,12 @@ def execute(
             "env": env,
             "timeout": policy["max_seconds"],
             "max_output": policy["max_output_bytes"],
-            "pass_fds": tool_fds,
-            "isolation": held["unshare"],
+            "pass_fds": list(tool_fds),
+            "attestations": attestations,
+            "allow_fixture": allow_fixture,
         }
+        version_flags = {"nix": "--version", "nix_store": "--version", "sshd": "-V", "systemd_analyze": "--version"}
+        version_results = {name: _run_exact(runner, [held[name], flag], **common) for name, flag in version_flags.items()}
         for expected in request["input_closure"]["paths"]:
             path_info = _run_exact(runner, [*base, "path-info", "--json", expected["path"]], **common).stdout
             try:
@@ -391,7 +533,11 @@ def execute(
             except Exception as exc:
                 raise A3EvaluationError("offline input closure size evidence is invalid") from exc
             metadata = input_info.get(expected["path"]) if isinstance(input_info, Mapping) else None
-            if not isinstance(metadata, Mapping) or metadata.get("narSize") != expected["nar_size"]:
+            if (
+                not isinstance(metadata, Mapping)
+                or metadata.get("narSize") != expected["nar_size"]
+                or _nar_hash_hex(metadata.get("narHash")) != expected["nar_sha256"]
+            ):
                 raise A3EvaluationError("offline input closure NAR size mismatch")
             observed = (
                 _run_exact(
@@ -405,6 +551,7 @@ def execute(
             if observed != expected["nar_sha256"].removeprefix("sha256:"):
                 raise A3EvaluationError("offline input closure NAR identity mismatch")
         drv = _run_exact(runner, [*base, "eval", *flake_flags, "--raw", flake_target + ".drvPath"], **common).stdout.decode().strip()
+        build_started = True
         output = _run_exact(runner, [*base, "build", *flake_flags, "--no-link", "--print-out-paths", flake_target], **common).stdout.decode().strip()
         if "\n" in drv or "\n" in output or output != request["target"]["expected_successor"]:
             raise A3EvaluationError("Nix returned multiple derivations or outputs")
@@ -416,16 +563,29 @@ def execute(
             raise A3EvaluationError("derivation output relation is invalid") from exc
         if outputs != {"out": {"path": output}}:
             raise A3EvaluationError("derivation does not bind the exact singleton successor output")
-        path_info = _run_exact(runner, [*base, "path-info", "--json", "--recursive", output], **common).stdout
+        requisites_raw = _run_exact(runner, [held["nix_store"], "--query", "--requisites", output], **common).stdout
         try:
-            info = json_loads(path_info)
-        except Exception as exc:
-            raise A3EvaluationError("recursive Nix store path metadata is invalid") from exc
-        if not isinstance(info, Mapping) or not info:
-            raise A3EvaluationError("recursive Nix store path metadata is not an object")
+            requisites = requisites_raw.decode("utf-8").splitlines()
+        except UnicodeDecodeError as exc:
+            raise A3EvaluationError("Nix store requisites are not UTF-8") from exc
+        if (
+            len(requisites) < 2
+            or len(requisites) > 100_000
+            or requisites != sorted(requisites)
+            or len(set(requisites)) != len(requisites)
+            or output not in requisites
+            or any(not _store_path(path) for path in requisites)
+        ):
+            raise A3EvaluationError("Nix store requisites are incomplete, duplicate, unsorted, or malformed")
         manifest = []
-        for path, metadata in sorted(info.items()):
-            if not isinstance(metadata, Mapping) or "narSize" not in metadata:
+        for path in requisites:
+            path_info = _run_exact(runner, [*base, "path-info", "--json", path], **common).stdout
+            try:
+                info = json_loads(path_info)
+                metadata = info[path]
+            except Exception as exc:
+                raise A3EvaluationError("recursive Nix store metadata entry is invalid") from exc
+            if not isinstance(metadata, Mapping) or not isinstance(metadata.get("narSize"), int) or metadata["narSize"] <= 0:
                 raise A3EvaluationError("recursive Nix store metadata entry is invalid")
             observed = (
                 _run_exact(
@@ -436,7 +596,7 @@ def execute(
                 .stdout.decode()
                 .strip()
             )
-            if not re_fullmatch_sha256(observed):
+            if not re_fullmatch_sha256(observed) or _nar_hash_hex(metadata.get("narHash")) != "sha256:" + observed:
                 raise A3EvaluationError("recursive Nix store NAR hash is invalid")
             manifest.append({"path": path, "nar_sha256": "sha256:" + observed, "nar_size": metadata["narSize"]})
         rendered: dict[str, dict[str, Any]] = {}
@@ -444,45 +604,121 @@ def execute(
         output_root = output_resolver(output)
         for name in RENDERED_ARTIFACTS:
             path = output_root / RENDERED_RELATIVE_PATHS[name]
-            rendered[name], rendered_bytes[name] = _read_rendered(
+            identity, content, rendered_hold = _read_rendered(
                 path,
                 logical_path=str(Path(output) / RENDERED_RELATIVE_PATHS[name]),
                 expected=request["expected_rendered"][name],
                 allow_fixture=allow_fixture,
             )
-        verifier_path = run_root / "sshd-verifier.conf"
-        verifier_fd = os.open(verifier_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
-        verifier_raw = rendered_bytes["sshd-config"]
-        offset = 0
-        while offset < len(verifier_raw):
-            count = os.write(verifier_fd, verifier_raw[offset:])
-            if count <= 0:
-                raise A3EvaluationError("short verifier-input write")
-            offset += count
-        os.fsync(verifier_fd)
-        common["pass_fds"].append(verifier_fd)
-        verifier_proc = f"/proc/{os.getpid()}/fd/{verifier_fd}"
-        sshd_command = [held["sshd"], "-T", "-C", "user=codex,host=tgw-prod,addr=127.0.0.1", "-f", verifier_proc]
+            rendered[name], rendered_bytes[name] = identity, content
+            rendered_holds.append(rendered_hold)
+        for name in INTEGRATION_PUBLIC_FILES:
+            if rendered_bytes[name] != integration_public[name]:
+                raise A3EvaluationError("rendered public artifact bytes differ from reviewed integration input")
+
+        verifier_inputs: list[tuple[Path, int, bytes, os.stat_result]] = []
+
+        def materialize(name: str, raw: bytes) -> tuple[int, str]:
+            path = run_root / name
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+            offset = 0
+            while offset < len(raw):
+                count = os.write(fd, raw[offset:])
+                if count <= 0:
+                    os.close(fd)
+                    raise A3EvaluationError("short verifier-input write")
+                offset += count
+            os.fsync(fd)
+            before = os.fstat(fd)
+            verifier_inputs.append((path, fd, raw, before))
+            verifier_input_fds.append(fd)
+            common["pass_fds"].append(fd)
+            return fd, f"/proc/{os.getpid()}/fd/{fd}"
+
+        _, sshd_proc = materialize("sshd-verifier.conf", rendered_bytes["sshd-config"])
+        unit_raw = canonical(
+            {
+                "schema": "tgw-nixos-a3-systemd-verifier-input/v1",
+                "wrapper_path": rendered["system-wrapper"]["path"],
+                "wrapper_sha256": digest(rendered_bytes["system-wrapper"]),
+            }
+        )
+        # The installed unit is not invented here.  This closed transient unit
+        # asks systemd-analyze to parse the exact admitted wrapper as ExecStart.
+        unit_text = (
+            b"[Unit]\nDescription=TGW A3 successor rendered wrapper static check\n"
+            b"[Service]\nType=oneshot\nExecStart="
+            + rendered["system-wrapper"]["path"].encode()
+            + b"\n# binding="
+            + digest(unit_raw).encode()
+            + b"\n"
+        )
+        _, systemd_proc = materialize("a3-successor-rendered.service", unit_text)
+        sshd_command = [held["sshd"], "-T", "-C", "user=codex,host=tgw-prod,addr=127.0.0.1", "-f", sshd_proc]
+        systemd_command = [held["systemd_analyze"], "verify", "--man=no", systemd_proc]
         sshd_result = _run_exact(runner, sshd_command, **common)
-        os.lseek(verifier_fd, 0, os.SEEK_SET)
-        if os.read(verifier_fd, len(verifier_raw) + 1) != verifier_raw:
-            raise A3EvaluationError("verifier input changed while held")
-        verifier_metadata = os.fstat(verifier_fd)
-        named_verifier = verifier_path.lstat()
-        if (verifier_metadata.st_dev, verifier_metadata.st_ino) != (named_verifier.st_dev, named_verifier.st_ino):
-            raise A3EvaluationError("verifier input named identity changed")
-        os.close(verifier_fd)
-        common["pass_fds"].remove(verifier_fd)
+        systemd_result = _run_exact(runner, systemd_command, **common)
+        for path, fd, expected_raw, before in verifier_inputs:
+            os.lseek(fd, 0, os.SEEK_SET)
+            observed_raw = bytearray()
+            while len(observed_raw) <= len(expected_raw):
+                block = os.read(fd, min(1024 * 1024, len(expected_raw) + 1 - len(observed_raw)))
+                if not block:
+                    break
+                observed_raw.extend(block)
+            after = os.fstat(fd)
+            named = path.lstat()
+            if bytes(observed_raw) != expected_raw or (before.st_dev, before.st_ino, before.st_size, before.st_ctime_ns) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_ctime_ns,
+            ) or (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino):
+                raise A3EvaluationError("verifier input changed while held or by named replacement")
+        for rendered_hold in rendered_holds:
+            _verify_held_rendered(rendered_hold)
+        for path, fd, _, _ in verifier_inputs:
+            common["pass_fds"].remove(fd)
+            os.close(fd)
+            verifier_input_fds.remove(fd)
         logical_sshd_command = [request["tools"]["sshd"]["path"], "-T", "-C", "user=codex,host=tgw-prod,addr=127.0.0.1", "-f", rendered["sshd-config"]["path"]]
+        logical_systemd_command = [request["tools"]["systemd_analyze"]["path"], "verify", "--man=no", "a3-successor-rendered.service"]
         verifiers = {
             "sshd": {
                 "command": logical_sshd_command,
-                "actual_command": [held["unshare"], "--net", "--", *sshd_command],
+                "actual_command": sshd_command,
+                "version_command": [request["tools"]["sshd"]["path"], "-V"],
+                "actual_version_command": [held["sshd"], "-V"],
                 "executable": request["tools"]["sshd"],
                 "returncode": 0,
                 "stdout_sha256": digest(sshd_result.stdout),
                 "stderr_sha256": digest(sshd_result.stderr),
+                "version_stdout_sha256": digest(version_results["sshd"].stdout),
+                "version_stderr_sha256": digest(version_results["sshd"].stderr),
             },
+            "systemd_analyze": {
+                "command": logical_systemd_command,
+                "actual_command": systemd_command,
+                "version_command": [request["tools"]["systemd_analyze"]["path"], "--version"],
+                "actual_version_command": [held["systemd_analyze"], "--version"],
+                "executable": request["tools"]["systemd_analyze"],
+                "returncode": 0,
+                "stdout_sha256": digest(systemd_result.stdout),
+                "stderr_sha256": digest(systemd_result.stderr),
+                "version_stdout_sha256": digest(version_results["systemd_analyze"].stdout),
+                "version_stderr_sha256": digest(version_results["systemd_analyze"].stderr),
+            },
+        }
+        tool_versions = {
+            name: {
+                "command": [request["tools"][name]["path"], version_flags[name]],
+                "actual_command": [held[name], version_flags[name]],
+                "executable": request["tools"][name],
+                "returncode": 0,
+                "stdout_sha256": digest(version_results[name].stdout),
+                "stderr_sha256": digest(version_results[name].stderr),
+            }
+            for name in version_flags
         }
         for name, fd in tool_fd_by_name.items():
             _verify_held_tool(fd, request["tools"][name])
@@ -499,19 +735,42 @@ def execute(
             "store_manifest": manifest,
             "store_manifest_sha256": digest(manifest),
             "rendered_artifacts": rendered,
+            "tool_versions": tool_versions,
             "verifiers": verifiers,
             "isolation": {
-                "schema": "tgw-nixos-a3-successor-isolation/v1",
-                "kind": "fresh-network-namespace-per-command",
-                "tool": request["tools"]["unshare"],
-                "command_count": 5 + 2 * len(request["input_closure"]["paths"]) + len(manifest),
+                "schema": "tgw-nixos-a3-local-isolation-summary/v1",
+                "kind": "root-launcher-fresh-netns-per-command",
+                "composition_sha256": attestations[0]["composition_sha256"] if attestations else digest({"fixture_only": True}),
+                "command_count": len(attestations),
+                "attestations_sha256": digest(attestations),
+                "launcher_attested": bool(attestations),
                 "network_observed": False,
             },
+            "launcher_attestations": list(attestations),
             "effects": {"build": True, **{name: False for name in FORBIDDEN_EFFECTS}},
             "cleanup": "REMOVED",
             "deployable": request["integration"]["status"] == "REVIEWED_EXECUTABLE" and request["credentials"]["final"] is True,
         }
+    except A3KnownFailure:
+        raise
+    except A3EvaluationError as exc:
+        raise A3KnownFailure(
+            str(exc),
+            stage="post-build" if build_started else "prebuild-validation",
+            step="contract-validation",
+            cleanup="REMOVED",
+        ) from exc
     finally:
+        for fd in verifier_input_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        for rendered_hold in rendered_holds:
+            try:
+                os.close(rendered_hold.fd)
+            except OSError:
+                pass
         for fd in tool_fds:
             os.close(fd)
         try:
@@ -534,3 +793,23 @@ def json_loads(raw: bytes) -> Any:
 
 def re_fullmatch_sha256(value: str) -> bool:
     return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _nar_hash_hex(value: Any) -> str:
+    if isinstance(value, str) and value.startswith("sha256:") and re_fullmatch_sha256(value[7:]):
+        return value
+    if isinstance(value, str) and value.startswith("sha256-"):
+        try:
+            raw = base64.b64decode(value[7:], validate=True)
+        except ValueError as exc:
+            raise A3EvaluationError("Nix narHash encoding is invalid") from exc
+        if len(raw) == 32:
+            return "sha256:" + raw.hex()
+    raise A3EvaluationError("Nix narHash is not exact SHA-256")
+
+
+def _store_path(value: str) -> bool:
+    if not value.startswith("/nix/store/") or "\n" in value or "\r" in value:
+        return False
+    name = value.removeprefix("/nix/store/")
+    return len(name) >= 34 and name[32] == "-" and all(char in "0123456789abcdfghijklmnpqrsvwxyz" for char in name[:32])
