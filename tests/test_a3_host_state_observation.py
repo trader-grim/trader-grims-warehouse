@@ -429,19 +429,19 @@ def _grant_and_roots(tmp_path: Path, request: dict):
         "plan_authority": {
             "path": "/protected/plan.json",
             "sha256": _sha("plan-file"),
-            "identity": [1],
+            "identity": [1, 2, 0, 0, 0o444, 1, 10, 1, 1],
         },
         "sshd_parity_authority": {
             "path": "/protected/parity.json",
             "sha256": request["prerequisites"]["sshd_parity_sha256"],
-            "identity": [1],
-            "evidence_identities": {role: [2] for role in module._PARITY_EVIDENCE_ROLES},
+            "identity": [1, 3, 0, 0, 0o444, 1, 10, 1, 1],
+            "evidence_identities": {role: [1, 4 + index, 0, 0, 0o444, 1, 10, 1, 1] for index, role in enumerate(sorted(module._PARITY_EVIDENCE_ROLES))},
         },
         "artifacts": {
             field: {
                 "path": f"/protected/{field}",
                 "sha256": request["transport"][field],
-                "identity": [3],
+                "identity": [1, 20, 0, 0, 0o444, 1, 10, 1, 1],
             }
             for field in artifact_fields
         },

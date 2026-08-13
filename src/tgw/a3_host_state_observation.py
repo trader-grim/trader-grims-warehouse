@@ -105,6 +105,12 @@ def _strict_positive_int(value: Any, label: str) -> int:
     return value
 
 
+def _validate_inode_identity_list(value: Any, label: str) -> list[int]:
+    if not isinstance(value, list) or len(value) != 9 or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in value) or value[5] < 1:
+        raise HostStateError(f"{label} inode identity is invalid")
+    return value
+
+
 def _parse_time(value: Any, label: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -1368,6 +1374,10 @@ def _validate_composition_value(
         or any(not isinstance(identity, list) for identity in parity["evidence_identities"].values())
     ):
         raise HostStateError("host-state composition authority evidence differs")
+    _validate_inode_identity_list(plan["identity"], "composition Plan authority")
+    _validate_inode_identity_list(parity["identity"], "composition parity authority")
+    for role, identity in parity["evidence_identities"].items():
+        _validate_inode_identity_list(identity, f"composition parity {role}")
     artifacts = _exact(
         composition["artifacts"],
         {
@@ -1384,6 +1394,7 @@ def _validate_composition_value(
         item = _exact(artifact, {"path", "sha256", "identity"}, f"composition {field}")
         if item["sha256"] != request["transport"][field] or not isinstance(item["path"], str) or not item["path"].startswith("/") or not isinstance(item["identity"], list):
             raise HostStateError("host-state composition artifact differs")
+        _validate_inode_identity_list(item["identity"], f"composition {field}")
     version = _exact(composition["ssh_version"], {"value", "sha256", "b64"}, "composition SSH version")
     try:
         version_raw = base64.b64decode(str(version["b64"]), validate=True)
