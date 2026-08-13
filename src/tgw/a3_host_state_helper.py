@@ -38,6 +38,7 @@ _STORE = re.compile(r"^/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+$")
 HOST_NOT_READY_DIAGNOSTICS = frozenset(
     {
         "HELD_TOOL_ANCESTOR_NOT_TRUSTED",
+        "HELD_TOOL_ABSENT",
         "HELD_TOOL_METADATA_NOT_TRUSTED",
         "HELPER_INTERPRETER_IDENTITY_MISMATCH",
         "REPOSITORY_BRANCH_MISMATCH",
@@ -147,7 +148,7 @@ def _validate_request(value: Any, now: datetime) -> dict[str, Any]:
         "port": 22,
         "system": "x86_64-linux",
         "remote_python": "/run/current-system/sw/bin/python3",
-        "remote_git": "/usr/bin/git",
+        "remote_git": "/run/current-system/sw/bin/git",
         "repository": "/home/db/tgw-flake",
         "expected_branch": "main",
     }
@@ -205,11 +206,25 @@ def _read_fd(fd: int) -> bytes:
     return bytes(raw)
 
 
+def _trusted_tool_ancestor(path: Path, item: os.stat_result) -> bool:
+    mode = stat.S_IMODE(item.st_mode)
+    nix_store_root = path == Path("/nix/store") and mode == 0o1775
+    return bool(
+        stat.S_ISDIR(item.st_mode)
+        and not stat.S_ISLNK(item.st_mode)
+        and item.st_uid == 0
+        and (not mode & 0o022 or nix_store_root)
+    )
+
+
 def _held_executable(path: Path) -> tuple[int, bytes, dict[str, Any]]:
-    resolved = path.resolve(strict=True)
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError:
+        raise HelperHold("HELD_TOOL_ABSENT") from None
     for ancestor in (resolved.parent, *resolved.parents):
         item = os.lstat(ancestor)
-        if not stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode) or item.st_uid != 0 or stat.S_IMODE(item.st_mode) & 0o022:
+        if not _trusted_tool_ancestor(ancestor, item):
             raise HelperHold("HELD_TOOL_ANCESTOR_NOT_TRUSTED")
         if ancestor == Path("/"):
             break

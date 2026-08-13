@@ -435,7 +435,7 @@ def validate_request(
         "port": 22,
         "system": "x86_64-linux",
         "remote_python": "/run/current-system/sw/bin/python3",
-        "remote_git": "/usr/bin/git",
+        "remote_git": "/run/current-system/sw/bin/git",
         "repository": "/home/db/tgw-flake",
         "expected_branch": "main",
     }
@@ -899,6 +899,7 @@ _HOST_NOT_READY_DIAGNOSTICS = frozenset(
     {
         b"HelperHold",  # Historical v1 evidence emitted only the exception class.
         b"HELD_TOOL_ANCESTOR_NOT_TRUSTED",
+        b"HELD_TOOL_ABSENT",
         b"HELD_TOOL_METADATA_NOT_TRUSTED",
         b"HELPER_INTERPRETER_IDENTITY_MISMATCH",
         b"REPOSITORY_BRANCH_MISMATCH",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import os
+import stat
 import sys
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -58,7 +59,7 @@ def _request(*, now: datetime | None = None, transport: dict | None = None) -> d
             "port": 22,
             "system": "x86_64-linux",
             "remote_python": "/run/current-system/sw/bin/python3",
-            "remote_git": "/usr/bin/git",
+            "remote_git": "/run/current-system/sw/bin/git",
             "repository": "/home/db/tgw-flake",
             "expected_branch": "main",
         },
@@ -367,6 +368,14 @@ def test_streamed_helper_resolves_and_postchecks_bounded_profile_link_chain(tmp_
     generation.symlink_to(tmp_path / "different")
     with pytest.raises(a3_host_state_helper.HelperError, match="chain changed"):
         a3_host_state_helper._postcheck_link_chain(chain)
+
+
+def test_streamed_helper_accepts_only_the_sticky_nix_store_writable_ancestor() -> None:
+    store = os.stat_result((stat.S_IFDIR | 0o1775, 1, 1, 1, 0, 30000, 0, 0, 0, 0))
+    ordinary = os.stat_result((stat.S_IFDIR | 0o0755, 1, 1, 1, 0, 0, 0, 0, 0, 0))
+    assert a3_host_state_helper._trusted_tool_ancestor(Path("/nix/store"), store)
+    assert a3_host_state_helper._trusted_tool_ancestor(Path("/nix"), ordinary)
+    assert not a3_host_state_helper._trusted_tool_ancestor(Path("/other/store"), store)
 
 
 def test_streamed_helper_rejects_link_cycle_and_excessive_depth(tmp_path: Path) -> None:
