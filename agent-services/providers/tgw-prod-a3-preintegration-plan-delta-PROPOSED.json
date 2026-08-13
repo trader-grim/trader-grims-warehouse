@@ -1,0 +1,11 @@
+{
+  "schema": "tgw-plan-delta-proposal/v1",
+  "status": "PROPOSED_NOT_APPROVED",
+  "approved_plan_commit": "fb9fee3e",
+  "effect_kind": "tgw-prod-a3-preintegration-observation",
+  "handler_id": "tgw-prod-a3-preintegration-observation@1",
+  "capability": "read-only:tgw-prod-flake-identity-observation",
+  "requires_plan_review": true,
+  "dispatchable": false,
+  "authority_consumption": "distinct-read-only-observation-grant-only"
+}

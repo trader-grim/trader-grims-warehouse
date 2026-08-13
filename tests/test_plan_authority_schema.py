@@ -5,7 +5,10 @@ import pytest
 from tgw.plan_authority_schema import REQUIRED_TABLES, apply_plan_authority_schema, require_plan_authority_schema
 
 
-def _connection(rows=(), constraint="CHECK effect_kind IN ('nixos-a3-successor-evaluation')"):
+def _connection(
+    rows=(),
+    constraint="CHECK effect_kind IN ('nixos-a3-successor-evaluation','tgw-prod-a3-preintegration-observation')",
+):
     cursor = MagicMock()
     cursor.__enter__.return_value = cursor
     cursor.fetchall.return_value = list(rows)
