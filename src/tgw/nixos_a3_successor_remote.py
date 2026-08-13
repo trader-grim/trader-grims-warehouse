@@ -648,7 +648,12 @@ def execute(
                 metadata = info[path]
             except Exception as exc:
                 raise A3EvaluationError("recursive Nix store metadata entry is invalid") from exc
-            if not isinstance(metadata, Mapping) or not isinstance(metadata.get("narSize"), int) or metadata["narSize"] <= 0:
+            if (
+                not isinstance(metadata, Mapping)
+                or isinstance(metadata.get("narSize"), bool)
+                or not isinstance(metadata.get("narSize"), int)
+                or metadata["narSize"] <= 0
+            ):
                 raise A3EvaluationError("recursive Nix store metadata entry is invalid")
             observed = (
                 _run_exact(

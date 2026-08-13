@@ -14,6 +14,7 @@ import os
 import re
 import stat
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -247,6 +248,12 @@ def _sha(value: Any, label: str) -> str:
     return value
 
 
+def _strict_int(value: Any, label: str, *, minimum: int = 0, maximum: int = 2**63 - 1) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise A3EvaluationError(f"{label} is not an integer in the closed range {minimum}..{maximum}")
+    return value
+
+
 def _no_secret_fields(value: Any, trail: tuple[str, ...] = ()) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
@@ -267,12 +274,27 @@ def validate_file_identity(value: Any, *, label: str) -> dict[str, Any]:
     if not isinstance(path, str) or not path.startswith("/") or ".." in Path(path).parts:
         raise A3EvaluationError(f"{label} path is not absolute and normalized")
     _sha(item["sha256"], f"{label}.sha256")
-    if not isinstance(item["size"], int) or item["size"] <= 0:
-        raise A3EvaluationError(f"{label} size is invalid")
-    if not isinstance(item["uid"], int) or not isinstance(item["gid"], int):
-        raise A3EvaluationError(f"{label} ownership is invalid")
-    if not isinstance(item["mode"], int) or item["mode"] & 0o022 or not item["mode"] & 0o111:
+    _strict_int(item["size"], f"{label} size", minimum=1)
+    _strict_int(item["uid"], f"{label} uid")
+    _strict_int(item["gid"], f"{label} gid")
+    _strict_int(item["mode"], f"{label} mode", maximum=0o7777)
+    if item["mode"] & 0o022 or not item["mode"] & 0o111:
         raise A3EvaluationError(f"{label} must be a non-writable executable")
+    return item
+
+
+def validate_data_identity(value: Any, *, label: str) -> dict[str, Any]:
+    item = dict(_exact(value, {"path", "sha256", "size", "uid", "gid", "mode"}, label))
+    path = item["path"]
+    if not isinstance(path, str) or not path.startswith("/") or ".." in Path(path).parts:
+        raise A3EvaluationError(f"{label} path is not absolute and normalized")
+    _sha(item["sha256"], f"{label}.sha256")
+    _strict_int(item["size"], f"{label} size", minimum=1)
+    _strict_int(item["uid"], f"{label} uid")
+    _strict_int(item["gid"], f"{label} gid")
+    _strict_int(item["mode"], f"{label} mode", maximum=0o7777)
+    if item["mode"] not in {0o400, 0o440, 0o444}:
+        raise A3EvaluationError(f"{label} must be non-writable data")
     return item
 
 
@@ -350,14 +372,12 @@ def validate_integration_contract(value: Any, *, allow_fixture: bool = False) ->
         _sha(contract["flake_lock_sha256"], "integration flake.lock")
         if not isinstance(contract["archive_ref"], str) or contract["archive_ref"] != "artifact:" + contract["archive_sha256"]:
             raise A3EvaluationError("integration archive reference is not content-addressed")
-        if not isinstance(contract["archive_size"], int) or contract["archive_size"] <= 0:
-            raise A3EvaluationError("integration archive size is invalid")
+        _strict_int(contract["archive_size"], "integration archive size", minimum=1)
         if contract["closure_final"] is not True or contract["public_credentials_final"] is not True:
             raise A3EvaluationError("executable integration is not deployable-final")
         for name, identity in public_files.items():
             _sha(identity["sha256"], f"integration public file {name}")
-            if not isinstance(identity["size"], int) or identity["size"] <= 0:
-                raise A3EvaluationError("executable integration public file identity is incomplete")
+            _strict_int(identity["size"], "executable integration public file size", minimum=1)
     elif status == "TEST_FIXTURE_NON_DEPLOYABLE" and allow_fixture:
         if contract["closure_final"] is not False or contract["public_credentials_final"] is not False:
             raise A3EvaluationError("test integration must remain non-deployable")
@@ -365,12 +385,12 @@ def validate_integration_contract(value: Any, *, allow_fixture: bool = False) ->
             raise A3EvaluationError("test integration identities are invalid")
         _sha(contract["archive_sha256"], "test integration archive")
         _sha(contract["flake_lock_sha256"], "test integration lock")
-        if contract["archive_ref"] != "artifact:" + contract["archive_sha256"] or not isinstance(contract["archive_size"], int) or contract["archive_size"] <= 0:
+        if contract["archive_ref"] != "artifact:" + contract["archive_sha256"]:
             raise A3EvaluationError("test integration archive binding is invalid")
+        _strict_int(contract["archive_size"], "test integration archive size", minimum=1)
         for name, identity in public_files.items():
             _sha(identity["sha256"], f"test integration public file {name}")
-            if not isinstance(identity["size"], int) or identity["size"] <= 0:
-                raise A3EvaluationError("test integration public file identity is incomplete")
+            _strict_int(identity["size"], "test integration public file size", minimum=1)
     elif status != "NOT_EXECUTABLE":
         raise A3EvaluationError("integration status is not closed")
     elif any(identity["sha256"] is not None or identity["size"] is not None for identity in public_files.values()):
@@ -392,6 +412,7 @@ def validate_request(value: Any, *, allow_fixture: bool = False) -> dict[str, An
         "credentials",
         "expected_rendered",
         "expected_verifiers",
+        "validation_authority",
         "policy",
         "request_sha256",
     }
@@ -406,8 +427,9 @@ def validate_request(value: Any, *, allow_fixture: bool = False) -> dict[str, An
     source_fixed = {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "archive_sha256": SOURCE_ARCHIVE_SHA256, "candidate_identity": SOURCE_CANDIDATE, "catalog_sha256": SOURCE_CATALOG}
     if any(source.get(key) != expected for key, expected in source_fixed.items()):
         raise A3EvaluationError("request does not name the admitted immutable product source")
-    if source["archive_ref"] != "artifact:" + SOURCE_ARCHIVE_SHA256 or not isinstance(source["archive_size"], int) or source["archive_size"] <= 0:
+    if source["archive_ref"] != "artifact:" + SOURCE_ARCHIVE_SHA256:
         raise A3EvaluationError("product archive reference or size is invalid")
+    _strict_int(source["archive_size"], "product archive size", minimum=1)
     if source["a3_identities"] != A3_SOURCE_IDENTITIES:
         raise A3EvaluationError("the exact eleven A3 source identities are incomplete")
     integration = validate_integration_contract(request["integration"], allow_fixture=allow_fixture)
@@ -431,8 +453,7 @@ def validate_request(value: Any, *, allow_fixture: bool = False) -> dict[str, An
         if not _STORE.fullmatch(str(item["path"])):
             raise A3EvaluationError("input closure contains a non-store path")
         _sha(item["nar_sha256"], "input NAR")
-        if not isinstance(item["nar_size"], int) or item["nar_size"] <= 0:
-            raise A3EvaluationError("input NAR size is invalid")
+        _strict_int(item["nar_size"], "input NAR size", minimum=1)
         normalized.append(item)
     if normalized != sorted(normalized, key=lambda item: item["path"]) or len({item["path"] for item in normalized}) != len(normalized):
         raise A3EvaluationError("input closure paths are not strictly sorted and unique")
@@ -463,8 +484,7 @@ def validate_request(value: Any, *, allow_fixture: bool = False) -> dict[str, An
         if relative != RENDERED_RELATIVE_PATHS[name]:
             raise A3EvaluationError("expected rendered path is not the exact A3 package layout")
         _sha(item["sha256"], f"expected rendered {name}")
-        if not isinstance(item["size"], int) or item["size"] <= 0:
-            raise A3EvaluationError("expected rendered size is invalid")
+        _strict_int(item["size"], "expected rendered size", minimum=1)
     if integration["status"] != "NOT_EXECUTABLE":
         if (
             integration["public_files"]["authorized-key-codex"]["sha256"] != credentials["authorized_public_key_sha256"]
@@ -483,6 +503,25 @@ def validate_request(value: Any, *, allow_fixture: bool = False) -> dict[str, An
         item = _exact(expected_verifiers[name], {"stdout_sha256", "stderr_sha256"}, f"expected {name} output")
         _sha(item["stdout_sha256"], f"expected {name} stdout")
         _sha(item["stderr_sha256"], f"expected {name} stderr")
+    authority = _exact(request["validation_authority"], {"attestation_public_key", "replay_root", "trusted_uid", "child_uid", "child_gid"}, "validation authority")
+    public_identity = validate_data_identity(authority["attestation_public_key"], label="attestation public key authority")
+    _strict_int(authority["trusted_uid"], "validation authority trusted uid")
+    _strict_int(authority["child_uid"], "validation authority child uid", minimum=1)
+    _strict_int(authority["child_gid"], "validation authority child gid", minimum=1)
+    replay_root = _exact(authority["replay_root"], {"path", "dev", "ino", "uid", "gid", "mode"}, "replay authority root")
+    for field in ("dev", "ino"):
+        _strict_int(replay_root[field], f"replay root {field}", minimum=1)
+    for field in ("uid", "gid"):
+        _strict_int(replay_root[field], f"replay root {field}")
+    _strict_int(replay_root["mode"], "replay root mode", maximum=0o7777)
+    if (
+        public_identity["mode"] not in {0o400, 0o440, 0o444}
+        or public_identity["uid"] != authority["trusted_uid"]
+        or public_identity["sha256"] != credentials["attestation_public_key_sha256"]
+        or replay_root["uid"] != authority["trusted_uid"]
+        or replay_root["mode"] != 0o700
+    ):
+        raise A3EvaluationError("validation authority is not exact trusted non-writable public material")
     policy = _exact(
         request["policy"],
         {
@@ -506,12 +545,12 @@ def validate_request(value: Any, *, allow_fixture: bool = False) -> dict[str, An
     if any(policy.get(key) != expected for key, expected in fixed_policy.items()):
         raise A3EvaluationError("evaluation policy enables an impure or activating operation")
     bounds = (policy["max_seconds"], policy["max_output_bytes"], policy["max_archive_bytes"], policy["max_unpacked_bytes"], policy["max_files"])
-    if any(not isinstance(item, int) for item in bounds) or not (
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in bounds) or not (
         1 <= bounds[0] <= 1800 and 1024 <= bounds[1] <= 64 * 1024 * 1024 and 1024 <= bounds[2] <= 256 * 1024 * 1024 and bounds[2] <= bounds[3] <= 1024 * 1024 * 1024 and 1 <= bounds[4] <= 200_000
     ):
         raise A3EvaluationError("evaluation resource bounds are outside the closed range")
     archive_sizes = (source["archive_size"], integration["archive_size"])
-    if any(not isinstance(size, int) or size <= 0 or size > policy["max_archive_bytes"] for size in archive_sizes) or sum(archive_sizes) > policy["max_archive_bytes"]:
+    if any(isinstance(size, bool) or not isinstance(size, int) or size <= 0 or size > policy["max_archive_bytes"] for size in archive_sizes) or sum(archive_sizes) > policy["max_archive_bytes"]:
         raise A3EvaluationError("individual or total archive size exceeds the closed bound")
     if integration["status"] == "REVIEWED_EXECUTABLE" and credentials["final"] is not True:
         raise A3EvaluationError("reviewed executable request lacks final public credential identities")
@@ -521,6 +560,8 @@ def validate_request(value: Any, *, allow_fixture: bool = False) -> dict[str, An
 
 
 def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
+    allow_fixture = isinstance(request.get("integration"), Mapping) and request["integration"].get("status") == "TEST_FIXTURE_NON_DEPLOYABLE"
+    request = validate_request(request, allow_fixture=allow_fixture)
     fields = {
         "schema",
         "outcome",
@@ -565,8 +606,9 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
         raise A3EvaluationError("recursive store manifest is absent")
     for entry in manifest:
         item = _exact(entry, {"path", "nar_sha256", "nar_size"}, "store manifest entry")
-        if not _STORE.fullmatch(str(item["path"])) or not _SHA256.fullmatch(str(item["nar_sha256"])) or not isinstance(item["nar_size"], int) or item["nar_size"] <= 0:
+        if not _STORE.fullmatch(str(item["path"])) or not _SHA256.fullmatch(str(item["nar_sha256"])):
             raise A3EvaluationError("store manifest entry is invalid")
+        _strict_int(item["nar_size"], "store manifest NAR size", minimum=1)
     manifest_paths = [item["path"] for item in manifest]
     if manifest_paths != sorted(set(manifest_paths)) or result["output_path"] not in manifest_paths or result["store_manifest_sha256"] != digest(manifest):
         raise A3EvaluationError("recursive store manifest is incomplete or tampered")
@@ -579,6 +621,7 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
             not isinstance(item["path"], str)
             or not item["path"].startswith(result["output_path"] + "/")
             or not _SHA256.fullmatch(str(item["sha256"]))
+            or isinstance(item["size"], bool)
             or not isinstance(item["size"], int)
             or item["size"] <= 0
         ):
@@ -594,7 +637,7 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
         if (
             not isinstance(identity["resolved_path"], str)
             or not identity["resolved_path"].startswith("/nix/store/")
-            or any(not isinstance(identity[key], int) for key in ("dev", "ino", "uid", "gid", "mode", "nlink"))
+            or any(isinstance(identity[key], bool) or not isinstance(identity[key], int) for key in ("dev", "ino", "uid", "gid", "mode", "nlink"))
             or identity["nlink"] < 1
         ):
             raise A3EvaluationError("rendered A3 held identity is invalid")
@@ -606,6 +649,7 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
         if (
             version["command"] != expected_command
             or version["executable"] != request["tools"][name]
+            or isinstance(version["returncode"], bool)
             or version["returncode"] != 0
             or not isinstance(version["actual_command"], list)
             or len(version["actual_command"]) != 2
@@ -637,7 +681,7 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
             },
             f"{name} verifier",
         )
-        if item["command"] != command or item["executable"] != request["tools"][name] or item["returncode"] != 0:
+        if item["command"] != command or item["executable"] != request["tools"][name] or isinstance(item["returncode"], bool) or item["returncode"] != 0:
             raise A3EvaluationError("static verifier provenance or result is invalid")
         expected_version = [request["tools"][name]["path"], "-V" if name == "sshd" else "--version"]
         actual_version = item["actual_version_command"]
@@ -690,11 +734,22 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise A3EvaluationError("launcher evidence set is incomplete or tampered")
     observed_challenges: set[tuple[str, str]] = set()
+    from tgw.nixos_a3_successor_transport import DurableNonceReplayStore, _read_held, validate_launcher_attestation
+
+    authority = request["validation_authority"]
+    public_key_raw, _ = _read_held(authority["attestation_public_key"], label="durable attestation public key", executable=False)
+    if len(public_key_raw) != 32:
+        raise A3EvaluationError("durable attestation authority is not raw Ed25519")
     for envelope_value in attestations:
         envelope = _exact(
             envelope_value,
-            {"schema", "signed_attestation", "replay_claim", "replay_claim_ref"},
+            {"schema", "challenge", "signed_attestation", "replay_claim", "replay_claim_ref"},
             "launcher evidence envelope",
+        )
+        challenge = _exact(
+            envelope["challenge"],
+            {"packet_sha256", "composition_sha256", "request_sha256", "launch_nonce", "attempt_id", "issued_at", "expires_at"},
+            "launcher challenge",
         )
         attestation = _exact(
             envelope["signed_attestation"],
@@ -729,7 +784,19 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
             },
             "launcher replay claim",
         )
-        claim_ref = _exact(envelope["replay_claim_ref"], {"schema", "name", "sha256", "size"}, "launcher replay claim ref")
+        claim_ref = _exact(
+            envelope["replay_claim_ref"],
+            {"schema", "name", "claim_sha256", "file_sha256", "size"},
+            "launcher replay claim ref",
+        )
+        replay_store = DurableNonceReplayStore(
+            authority["replay_root"],
+            _test_uid=authority["trusted_uid"] if request["integration"]["status"] == "TEST_FIXTURE_NON_DEPLOYABLE" else None,
+        )
+        try:
+            durable_claim = replay_store.read(claim_ref)
+        finally:
+            replay_store.close()
         netns = _exact(attestation["netns"], {"start_inode", "end_inode", "lo_only", "routes_empty", "link_sha256", "route_sha256"}, "signed netns")
         child = _exact(attestation["child"], {"pid", "starttime", "exe", "uid", "gid", "capabilities", "no_new_privs"}, "signed child")
         probes = _exact(attestation["probes"], {"pre", "post"}, "signed probes")
@@ -739,10 +806,11 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
                 probe = _exact(probe_value, {"attempted", "connected", "evidence_sha256"}, f"signed probe {phase}.{probe_name}")
                 if probe["attempted"] is not True or probe["connected"] is not False or not _SHA256.fullmatch(str(probe["evidence_sha256"])):
                     raise A3EvaluationError("signed launcher probe is not exact negative evidence")
-        challenge = (str(attestation["launch_nonce"]), str(attestation["attempt_id"]))
+        challenge_identity = (str(attestation["launch_nonce"]), str(attestation["attempt_id"]))
         timestamp_values = [attestation[name] for name in ("issued_at", "started_at", "ended_at", "expires_at")]
         if (
             envelope["schema"] != LAUNCH_EVIDENCE_SCHEMA
+            or any(challenge[field] != attestation[field] for field in challenge)
             or attestation["schema"] != ATTESTATION_SCHEMA
             or attestation["request_sha256"] != request["request_sha256"]
             or attestation["composition_sha256"] != isolation["composition_sha256"]
@@ -779,13 +847,30 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
             or claim["claim_sha256"] != self_hash({key: item for key, item in claim.items() if key != "claim_sha256"})
             or claim_ref["schema"] != REPLAY_CLAIM_REF_SCHEMA
             or claim_ref["name"] != digest({"launch_nonce": attestation["launch_nonce"]}).removeprefix("sha256:") + ".json"
-            or claim_ref["sha256"] != claim["claim_sha256"]
+            or durable_claim != claim
+            or claim_ref["claim_sha256"] != claim["claim_sha256"]
+            or claim_ref["file_sha256"] != digest(canonical(claim))
             or isinstance(claim_ref["size"], bool)
             or claim_ref["size"] != len(canonical(claim))
-            or challenge in observed_challenges
+            or challenge_identity in observed_challenges
         ):
             raise A3EvaluationError("signed launcher/replay evidence is structurally invalid or unbound")
-        observed_challenges.add(challenge)
+        validate_launcher_attestation(
+            attestation,
+            packet_sha256=challenge["packet_sha256"],
+            composition_sha256=challenge["composition_sha256"],
+            request_sha256=challenge["request_sha256"],
+            launch_nonce=challenge["launch_nonce"],
+            attempt_id=challenge["attempt_id"],
+            issued_at=challenge["issued_at"],
+            expires_at=challenge["expires_at"],
+            public_key_raw=public_key_raw,
+            uid=authority["child_uid"],
+            gid=authority["child_gid"],
+            now=datetime.strptime(attestation["ended_at"], "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC),
+            max_duration_seconds=request["policy"]["max_seconds"],
+        )
+        observed_challenges.add(challenge_identity)
     effects = _exact(result["effects"], {"build", *FORBIDDEN_EFFECTS}, "effect observation")
     if effects["build"] is not True or any(effects[name] is not False for name in FORBIDDEN_EFFECTS):
         raise A3EvaluationError("receipt reports a forbidden operational effect")

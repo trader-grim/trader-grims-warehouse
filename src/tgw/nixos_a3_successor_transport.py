@@ -61,6 +61,12 @@ def _sha(value: Any, label: str) -> str:
     return value
 
 
+def _strict_int(value: Any, label: str, *, minimum: int = 0, maximum: int = 2**63 - 1) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise A3EvaluationError(f"{label} is not an integer in the closed range")
+    return value
+
+
 def _exact(value: Any, keys: set[str], label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping) or set(value) != keys:
         raise A3EvaluationError(f"{label} must contain exactly {sorted(keys)}")
@@ -73,11 +79,11 @@ def _validate_data_identity(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(path, str) or not path.startswith("/") or ".." in Path(path).parts:
         raise A3EvaluationError(f"{label} path is not absolute and normalized")
     _sha(item["sha256"], f"{label}.sha256")
-    if not isinstance(item["size"], int) or item["size"] <= 0:
-        raise A3EvaluationError(f"{label} size is invalid")
-    if not isinstance(item["uid"], int) or not isinstance(item["gid"], int):
-        raise A3EvaluationError(f"{label} ownership is invalid")
-    if not isinstance(item["mode"], int) or item["mode"] & 0o022 or item["mode"] & 0o777 not in {0o400, 0o440, 0o444}:
+    _strict_int(item["size"], f"{label} size", minimum=1)
+    _strict_int(item["uid"], f"{label} uid")
+    _strict_int(item["gid"], f"{label} gid")
+    _strict_int(item["mode"], f"{label} mode", maximum=0o7777)
+    if item["mode"] & 0o022 or item["mode"] & 0o777 not in {0o400, 0o440, 0o444}:
         raise A3EvaluationError(f"{label} must be non-writable data")
     return item
 
@@ -86,8 +92,11 @@ def _validate_directory_identity(value: Any, label: str, *, trusted_uid: int = 0
     item = dict(_exact(value, {"path", "dev", "ino", "uid", "gid", "mode"}, label))
     if not isinstance(item["path"], str) or not item["path"].startswith("/") or ".." in Path(item["path"]).parts:
         raise A3EvaluationError(f"{label} path is invalid")
-    if any(not isinstance(item[key], int) for key in ("dev", "ino", "uid", "gid", "mode")) or item["dev"] <= 0 or item["ino"] <= 0:
-        raise A3EvaluationError(f"{label} metadata is invalid")
+    for key in ("dev", "ino"):
+        _strict_int(item[key], f"{label} {key}", minimum=1)
+    for key in ("uid", "gid"):
+        _strict_int(item[key], f"{label} {key}")
+    _strict_int(item["mode"], f"{label} mode", maximum=0o7777)
     if item["uid"] != trusted_uid or item["mode"] != 0o700:
         raise A3EvaluationError(f"{label} must be trusted-owner mode 0700")
     return item
@@ -95,7 +104,18 @@ def _validate_directory_identity(value: Any, label: str, *, trusted_uid: int = 0
 
 def _read_held(value: Mapping[str, Any], *, label: str, executable: bool) -> tuple[bytes, os.stat_result]:
     identity = validate_file_identity(value, label=label) if executable else _validate_data_identity(value, label)
-    fd = os.open(identity["path"], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    parent_path = Path(identity["path"]).parent
+    parent_metadata = os.stat(parent_path, follow_symlinks=False)
+    parent_identity = {
+        "path": str(parent_path),
+        "dev": parent_metadata.st_dev,
+        "ino": parent_metadata.st_ino,
+        "uid": parent_metadata.st_uid,
+        "gid": parent_metadata.st_gid,
+        "mode": stat.S_IMODE(parent_metadata.st_mode),
+    }
+    parent_fd = _open_live_directory(parent_identity, f"{label} parent", trusted_uid=identity["uid"], require_mode_0700=False)
+    fd = os.open(Path(identity["path"]).name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
     try:
         before = os.fstat(fd)
         raw = bytearray()
@@ -105,9 +125,10 @@ def _read_held(value: Mapping[str, Any], *, label: str, executable: bool) -> tup
                 break
             raw.extend(block)
         after = os.fstat(fd)
-        named = os.stat(identity["path"], follow_symlinks=False)
+        named = os.stat(Path(identity["path"]).name, dir_fd=parent_fd, follow_symlinks=False)
     finally:
         os.close(fd)
+        os.close(parent_fd)
     observed = {
         "sha256": digest(bytes(raw)),
         "size": len(raw),
@@ -125,8 +146,18 @@ def _read_held(value: Mapping[str, Any], *, label: str, executable: bool) -> tup
     return bytes(raw), before
 
 
-def _open_live_directory(identity: Mapping[str, Any], label: str, *, trusted_uid: int = 0) -> int:
-    item = _validate_directory_identity(identity, label, trusted_uid=trusted_uid)
+def _open_live_directory(identity: Mapping[str, Any], label: str, *, trusted_uid: int = 0, require_mode_0700: bool = True) -> int:
+    if require_mode_0700:
+        item = _validate_directory_identity(identity, label, trusted_uid=trusted_uid)
+    else:
+        item = dict(_exact(identity, {"path", "dev", "ino", "uid", "gid", "mode"}, label))
+        if not isinstance(item["path"], str) or not item["path"].startswith("/") or ".." in Path(item["path"]).parts:
+            raise A3EvaluationError(f"{label} path is invalid")
+        for key in ("dev", "ino"):
+            _strict_int(item[key], f"{label} {key}", minimum=1)
+        for key in ("uid", "gid"):
+            _strict_int(item[key], f"{label} {key}")
+        _strict_int(item["mode"], f"{label} mode", maximum=0o7777)
     parent_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         for component in Path(item["path"]).parts[1:]:
@@ -159,6 +190,11 @@ def _open_live_directory(identity: Mapping[str, Any], label: str, *, trusted_uid
             }.items()
         ):
             raise A3EvaluationError(f"{label} live identity changed")
+        final_mode = stat.S_IMODE(metadata.st_mode)
+        if not require_mode_0700 and metadata.st_uid not in {0, trusted_uid}:
+            raise A3EvaluationError(f"{label} final directory owner is unsafe")
+        if not require_mode_0700 and final_mode & 0o022 and not (metadata.st_uid == 0 and final_mode & stat.S_ISVTX):
+            raise A3EvaluationError(f"{label} final directory is writable")
         result = parent_fd
         parent_fd = -1
         return result
@@ -174,12 +210,58 @@ def _validate_live_directory(identity: Mapping[str, Any], label: str) -> Path:
     return Path(item["path"])
 
 
-def _observe_current_cas(identity: Mapping[str, Any], expected: str) -> dict[str, Any]:
-    """Execute the held, no-argument, read-only current-system observer."""
-    validate_file_identity(identity, label="current-CAS observer")
-    fd = os.open(identity["path"], os.O_RDONLY | os.O_NOFOLLOW)
+def _open_held_executable(identity: Mapping[str, Any], label: str, *, _after_open: Any = None) -> tuple[int, int, os.stat_result, bytes]:
+    item = validate_file_identity(identity, label=label)
+    parent_path = Path(item["path"]).parent
+    parent_metadata = os.stat(parent_path, follow_symlinks=False)
+    parent_identity = {
+        "path": str(parent_path),
+        "dev": parent_metadata.st_dev,
+        "ino": parent_metadata.st_ino,
+        "uid": parent_metadata.st_uid,
+        "gid": parent_metadata.st_gid,
+        "mode": stat.S_IMODE(parent_metadata.st_mode),
+    }
+    parent_fd = _open_live_directory(parent_identity, f"{label} parent", trusted_uid=item["uid"], require_mode_0700=False)
+    try:
+        fd = os.open(Path(item["path"]).name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    except Exception:
+        os.close(parent_fd)
+        raise
     try:
         before = os.fstat(fd)
+        if _after_open is not None:
+            _after_open(Path(item["path"]))
+        raw = os.read(fd, item["size"] + 1)
+        os.lseek(fd, 0, os.SEEK_SET)
+        named = os.stat(Path(item["path"]).name, dir_fd=parent_fd, follow_symlinks=False)
+    except Exception as exc:
+        os.close(fd)
+        os.close(parent_fd)
+        if isinstance(exc, A3EvaluationError):
+            raise
+        raise A3EvaluationError(f"{label} held/named execution identity could not be proven") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or len(raw) != item["size"]
+        or digest(raw) != item["sha256"]
+        or before.st_uid != item["uid"]
+        or before.st_gid != item["gid"]
+        or stat.S_IMODE(before.st_mode) != item["mode"]
+        or (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino)
+    ):
+        os.close(fd)
+        os.close(parent_fd)
+        raise A3EvaluationError(f"{label} exact held execution identity mismatch")
+    return parent_fd, fd, before, raw
+
+
+def _observe_current_cas(identity: Mapping[str, Any], expected: str, *, _after_open: Any = None) -> dict[str, Any]:
+    """Execute the held, no-argument, read-only current-system observer."""
+    parent_fd, fd, before, observer_raw = _open_held_executable(identity, "current-CAS observer")
+    try:
+        if _after_open is not None:
+            _after_open(Path(identity["path"]))
         process = subprocess.Popen(
             [f"/proc/{os.getpid()}/fd/{fd}"],
             env={"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": ""},
@@ -196,14 +278,21 @@ def _observe_current_cas(identity: Mapping[str, Any], expected: str) -> dict[str
             _terminate_group(process)
             raise A3EvaluationError("current-CAS observer timed out") from exc
         after = os.fstat(fd)
-        named = os.stat(identity["path"], follow_symlinks=False)
+        os.lseek(fd, 0, os.SEEK_SET)
+        after_raw = os.read(fd, identity["size"] + 1)
+        try:
+            named = os.stat(Path(identity["path"]).name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise A3EvaluationError("current-CAS observer named identity disappeared") from exc
     finally:
         os.close(fd)
+        os.close(parent_fd)
     if (
         process.returncode != 0
         or len(stdout) + len(stderr) > 4096
         or stderr
         or stdout != (expected + "\n").encode()
+        or after_raw != observer_raw
         or (before.st_dev, before.st_ino, before.st_size, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_ctime_ns)
         or (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino)
     ):
@@ -442,14 +531,23 @@ def validate_launcher_attestation(
     if not issued <= started <= ended <= expires or expires - issued > timedelta(seconds=max_duration_seconds) or observed_now < issued - skew or observed_now > expires + skew:
         raise A3EvaluationError("launcher attestation is stale, future-dated, or outside its duration")
     netns = _exact(attestation["netns"], {"start_inode", "end_inode", "lo_only", "routes_empty", "link_sha256", "route_sha256"}, "launcher netns")
-    if not isinstance(netns["start_inode"], int) or netns["start_inode"] <= 0 or netns["end_inode"] != netns["start_inode"] or netns["lo_only"] is not True or netns["routes_empty"] is not True:
+    if (
+        isinstance(netns["start_inode"], bool)
+        or not isinstance(netns["start_inode"], int)
+        or netns["start_inode"] <= 0
+        or netns["end_inode"] != netns["start_inode"]
+        or netns["lo_only"] is not True
+        or netns["routes_empty"] is not True
+    ):
         raise A3EvaluationError("launcher did not prove one loopback-only route-free namespace")
     _sha(netns["link_sha256"], "launcher link evidence")
     _sha(netns["route_sha256"], "launcher route evidence")
     child = _exact(attestation["child"], {"pid", "starttime", "exe", "uid", "gid", "capabilities", "no_new_privs"}, "launcher child")
     if (
-        not isinstance(child["pid"], int)
+        isinstance(child["pid"], bool)
+        or not isinstance(child["pid"], int)
         or child["pid"] <= 1
+        or isinstance(child["starttime"], bool)
         or not isinstance(child["starttime"], int)
         or child["starttime"] <= 0
         or not isinstance(child["exe"], str)
@@ -540,7 +638,14 @@ def validate_local_composition(composition: A3LocalProductionComposition, reques
     launcher_config_raw, _ = _read_held(composition.launcher_config, label="launcher config", executable=False)
     prerequisite_raw, _ = _read_held(composition.netns_prerequisite, label="netns prerequisite receipt", executable=False)
     public_key_raw, _ = _read_held(composition.attestation_public_key, label="launcher attestation public key", executable=False)
-    if len(public_key_raw) != 32:
+    authority = request["validation_authority"]
+    if (
+        len(public_key_raw) != 32
+        or composition.attestation_public_key != authority["attestation_public_key"]
+        or composition.receipt_roots["replay"] != authority["replay_root"]
+        or composition.codex_identity != {"uid": authority["child_uid"], "gid": authority["child_gid"]}
+        or authority["trusted_uid"] != 0
+    ):
         raise A3EvaluationError("launcher attestation public key is not exact raw Ed25519")
     if composition.prerequisite_status != "EXTERNAL_PREREQUISITE":
         raise A3EvaluationError("raw kernel isolation implementation must remain an explicit external prerequisite")
@@ -589,7 +694,7 @@ def validate_local_composition(composition: A3LocalProductionComposition, reques
     ):
         raise A3EvaluationError("launcher signing identity must remain an external root 0400 reference")
     codex = _exact(composition.codex_identity, {"uid", "gid"}, "codex identity")
-    if not isinstance(codex["uid"], int) or codex["uid"] <= 0 or not isinstance(codex["gid"], int) or codex["gid"] <= 0:
+    if isinstance(codex["uid"], bool) or not isinstance(codex["uid"], int) or codex["uid"] <= 0 or isinstance(codex["gid"], bool) or not isinstance(codex["gid"], int) or codex["gid"] <= 0:
         raise A3EvaluationError("codex uid/gid are invalid")
     bounds = _exact(composition.bounds, {"timeout_seconds", "max_output_bytes", "term_grace_seconds", "max_processes", "max_memory_bytes"}, "local bounds")
     if bounds != {
@@ -621,6 +726,7 @@ def validate_local_composition(composition: A3LocalProductionComposition, reques
         or observation["observer_sha256"] != composition.current_cas_observer["sha256"]
         or observation["expected_current"] != request["target"]["expected_current"]
         or observation["observed_current"] != request["target"]["expected_current"]
+        or isinstance(observation["returncode"], bool)
         or observation["returncode"] != 0
         or observation["receipt_sha256"] != digest({key: item for key, item in observation.items() if key != "receipt_sha256"})
     ):
@@ -705,7 +811,11 @@ class DurableNonceReplayStore:
             os.fsync(self._root_fd)
             named = os.stat(name, dir_fd=self._root_fd, follow_symlinks=False)
             root = os.fstat(self._root_fd)
-            named_root = os.stat(self.identity["path"], follow_symlinks=False)
+            reopened_root_fd = _open_live_directory(self.identity, "nonce replay root", trusted_uid=self.identity["uid"])
+            try:
+                named_root = os.fstat(reopened_root_fd)
+            finally:
+                os.close(reopened_root_fd)
             if (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino) or (
                 root.st_dev,
                 root.st_ino,
@@ -723,11 +833,12 @@ class DurableNonceReplayStore:
             valid = True
             return {
                 "claim": value,
-            "ref": {
-                "schema": REPLAY_CLAIM_REF_SCHEMA,
-                "name": name,
-                "sha256": value["claim_sha256"],
-                "size": len(raw),
+                "ref": {
+                    "schema": REPLAY_CLAIM_REF_SCHEMA,
+                    "name": name,
+                    "claim_sha256": value["claim_sha256"],
+                    "file_sha256": digest(raw),
+                    "size": len(raw),
                 },
             }
         finally:
@@ -738,6 +849,60 @@ class DurableNonceReplayStore:
                     os.fsync(self._root_fd)
                 except OSError as exc:
                     raise A3EvaluationError("replay claim cleanup is ambiguous") from exc
+
+    def read(self, reference: Mapping[str, Any]) -> dict[str, Any]:
+        ref = _exact(reference, {"schema", "name", "claim_sha256", "file_sha256", "size"}, "replay claim reference")
+        _sha(ref["claim_sha256"], "replay claim self hash")
+        _sha(ref["file_sha256"], "replay claim file hash")
+        if (
+            ref["schema"] != REPLAY_CLAIM_REF_SCHEMA
+            or not isinstance(ref["name"], str)
+            or not ref["name"].endswith(".json")
+            or "/" in ref["name"]
+            or isinstance(ref["size"], bool)
+            or not isinstance(ref["size"], int)
+            or not 1 <= ref["size"] <= 16_384
+        ):
+            raise A3EvaluationError("replay claim reference is invalid")
+        try:
+            fd = os.open(ref["name"], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self._root_fd)
+        except OSError as exc:
+            raise A3EvaluationError("durable replay claim artifact is absent or unsafe") from exc
+        try:
+            before = os.fstat(fd)
+            raw = os.read(fd, ref["size"] + 1)
+            after = os.fstat(fd)
+            named = os.stat(ref["name"], dir_fd=self._root_fd, follow_symlinks=False)
+        finally:
+            os.close(fd)
+        root = os.fstat(self._root_fd)
+        reopened_root_fd = _open_live_directory(self.identity, "nonce replay root", trusted_uid=self.identity["uid"])
+        try:
+            named_root = os.fstat(reopened_root_fd)
+        finally:
+            os.close(reopened_root_fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != 0o400
+            or before.st_uid != self.identity["uid"]
+            or before.st_nlink != 1
+            or len(raw) != ref["size"]
+            or digest(raw) != ref["file_sha256"]
+            or (before.st_dev, before.st_ino, before.st_size, before.st_ctime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_ctime_ns)
+            or (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino)
+            or (root.st_dev, root.st_ino) != (named_root.st_dev, named_root.st_ino)
+            or (root.st_dev, root.st_ino, root.st_uid, root.st_gid, stat.S_IMODE(root.st_mode))
+            != (self.identity["dev"], self.identity["ino"], self.identity["uid"], self.identity["gid"], self.identity["mode"])
+        ):
+            raise A3EvaluationError("durable replay claim/root identity changed")
+        try:
+            claim = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise A3EvaluationError("durable replay claim is invalid JSON") from exc
+        if canonical(claim) != raw or not isinstance(claim, dict):
+            raise A3EvaluationError("durable replay claim is not canonical")
+        return claim
 
 
 class ExactSubprocessRunner:
@@ -760,10 +925,10 @@ class ExactSubprocessRunner:
     ) -> Completed:
         if timeout != self._composition.bounds["timeout_seconds"] or max_output != self._composition.bounds["max_output_bytes"]:
             raise A3EvaluationError("logical subprocess bounds differ from sealed composition")
-        launcher_raw, _ = _read_held(self._composition.root_launcher, label="root launcher", executable=True)
         config_raw, _ = _read_held(self._composition.launcher_config, label="launcher config", executable=False)
         prerequisite_raw, _ = _read_held(self._composition.netns_prerequisite, label="netns prerequisite receipt", executable=False)
         public_raw, _ = _read_held(self._composition.attestation_public_key, label="launcher attestation public key", executable=False)
+        launcher_parent_fd, launcher_fd, launcher_before, launcher_raw = _open_held_executable(self._composition.root_launcher, "root launcher")
         issued = datetime.now(UTC)
         expires = issued + timedelta(seconds=timeout)
         issued_at = issued.strftime(_RFC3339_FORMAT)
@@ -790,7 +955,6 @@ class ExactSubprocessRunner:
         }
         packet["packet_sha256"] = digest(packet)
         packet_raw = canonical(packet)
-        launcher_fd = os.open(self._composition.root_launcher["path"], os.O_RDONLY | os.O_NOFOLLOW)
         try:
             launcher_path = f"/proc/{os.getpid()}/fd/{launcher_fd}"
             try:
@@ -823,8 +987,19 @@ class ExactSubprocessRunner:
                 max_output=max_output * 2 + 131_072,
             )
             after = os.fstat(launcher_fd)
-            named = os.stat(self._composition.root_launcher["path"], follow_symlinks=False)
-            if (after.st_dev, after.st_ino) != (named.st_dev, named.st_ino):
+            os.lseek(launcher_fd, 0, os.SEEK_SET)
+            launcher_after_raw = os.read(launcher_fd, self._composition.root_launcher["size"] + 1)
+            try:
+                named = os.stat(Path(self._composition.root_launcher["path"]).name, dir_fd=launcher_parent_fd, follow_symlinks=False)
+            except OSError:
+                named = None
+            if (
+                (after.st_dev, after.st_ino, after.st_size, after.st_ctime_ns)
+                != (launcher_before.st_dev, launcher_before.st_ino, launcher_before.st_size, launcher_before.st_ctime_ns)
+                or launcher_after_raw != launcher_raw
+                or named is None
+                or (after.st_dev, after.st_ino) != (named.st_dev, named.st_ino)
+            ):
                 raise StepFailure(
                     "root launcher named identity changed",
                     step="launcher-identity",
@@ -836,6 +1011,7 @@ class ExactSubprocessRunner:
                 )
         finally:
             os.close(launcher_fd)
+            os.close(launcher_parent_fd)
         if rc != 0:
             raise StepFailure(
                 "root launcher refused the fixed packet",
@@ -867,6 +1043,7 @@ class ExactSubprocessRunner:
         if (
             response["schema"] != LAUNCH_RESPONSE_SCHEMA
             or response["packet_sha256"] != packet["packet_sha256"]
+            or isinstance(response["returncode"], bool)
             or not isinstance(response["returncode"], int)
             or response["process_state"] != "REAPED"
             or response["cleanup"] != "REMOVED"
@@ -904,7 +1081,8 @@ class ExactSubprocessRunner:
             "launcher process facts",
         )
         if (
-            not isinstance(process_facts["launcher_pid"], int)
+            isinstance(process_facts["launcher_pid"], bool)
+            or not isinstance(process_facts["launcher_pid"], int)
             or process_facts["launcher_pid"] <= 1
             or process_facts["child_pid"] != child["pid"]
             or process_facts["child_starttime"] != child["starttime"]
@@ -922,6 +1100,10 @@ class ExactSubprocessRunner:
         )
         evidence = {
             "schema": LAUNCH_EVIDENCE_SCHEMA,
+            "challenge": {
+                key: packet[key]
+                for key in ("packet_sha256", "composition_sha256", "request_sha256", "launch_nonce", "attempt_id", "issued_at", "expires_at")
+            },
             "signed_attestation": attestation,
             "replay_claim": replay_claim["claim"],
             "replay_claim_ref": replay_claim["ref"],
