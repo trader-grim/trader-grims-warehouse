@@ -7,16 +7,16 @@
   "solution_sha256": "sha256:da79baa90916ba0fbe3af76365c8d25012ec0a38af4917bc57abaa44e21fb740",
   "closure_sha256": "sha256:3ef92c5a2c8ccf72ebb271ed4fec2c1fbe9fa7fe47c0311ad39b34ae2f4c31b9",
   "outcome": "IMPLEMENTED_PENDING_INDEPENDENT_ADMISSION",
-  "supersedes_evidence_commit": "12efd0504c35a2d9865d3c867acf768379269bff",
+  "supersedes_evidence_commit": "076c42d947382284a04256ccef2292f7903d5945",
   "implementation": {
-    "commit": "18dc524c342c26ee36ff5ae35f750e561e46731a",
-    "tree": "b9dadd6cf1bbf02c9a4b609509d45a6bdfe9e80f",
-    "parent": "12efd0504c35a2d9865d3c867acf768379269bff",
-    "controller_sha256": "sha256:c28356aa1b3916938adf7b4d402666d4a0cc6e40dc4579095a2c6cfda0c71100",
+    "commit": "3671fa93bfc637c5389d6c52886a1ca22f801ccd",
+    "tree": "e4d788c899057871baad5abb478d7f77685e81a4",
+    "parent": "076c42d947382284a04256ccef2292f7903d5945",
+    "controller_sha256": "sha256:e1c5615d362e53db88dad804418554d69c15c4c326d0e2ddb3fd18e55a33a6a8",
     "stdlib_helper_sha256": "sha256:275d294f1e36c4646dc80480f9ea3fcd0f4a2355bf4fca249ce39ff5ddb4199b",
-    "tests_sha256": "sha256:7d0b4c59d5e8c5419d40c92730c5711f272121ab0a7fab21760a0fd73a7659ee",
-    "provider_descriptor_file_sha256": "sha256:5c1bf340a691c3994c2e2257a9249c62d09c14e92da87d56d50eeee94650c62d",
-    "provider_descriptor_self_sha256": "sha256:3fa44871e63d52828117d27d7c222cc84576b2bc9286ac17e25c066a2db1f8ab"
+    "tests_sha256": "sha256:cc8deed5c0b8ad642b52499c11504295ab474465c815d080f1dcd1d4d2a8229d",
+    "provider_descriptor_file_sha256": "sha256:533665c41334c10a61c85769d4cf068de8dbddef59117e7e718b9f84c5a71f22",
+    "provider_descriptor_self_sha256": "sha256:7fbb7a37a4f6b258fe51df6d257620d1a76df59c119735deae357eb61e05dc06"
   },
   "gates": {
     "focused": {
@@ -34,7 +34,7 @@
       "passed": 3930,
       "skipped": 5,
       "failed": 0,
-      "elapsed_seconds": 146.46
+      "elapsed_seconds": 142.44
     },
     "ruff": "PASS",
     "py_compile": "PASS",
@@ -58,7 +58,7 @@
     "authenticated framed remote HOLD/FAILED terminals and durable post-dispatch failure persistence"
   ],
   "remaining_admission_gates": [
-    "independent review of source commit 18dc524c342c26ee36ff5ae35f750e561e46731a",
+    "independent review of source commit 3671fa93bfc637c5389d6c52886a1ca22f801ccd",
     "approved executable A3O02 production solution",
     "real OpenSSH-server correct-key and ambient-key/config/agent rejection parity receipt",
     "root-protected dedicated public identity and known-hosts artifacts",
@@ -80,5 +80,5 @@
   "dispatchable": false,
   "grant": null,
   "request": null,
-  "result_sha256": "sha256:fc85993f2e93668c825c3d2ff99c2dbab85d657ec2e3db36f535e7ac38170f37"
+  "result_sha256": "sha256:2c0fae1764ebc739d0230496d517bb2fbe80d03b0be1c46c124cb7acb66838a3"
 }
