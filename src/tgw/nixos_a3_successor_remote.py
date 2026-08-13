@@ -26,7 +26,6 @@ from tgw.nixos_a3_successor_evaluation import (
     TARGET_ATTR,
     A3EvaluationError,
     A3KnownFailure,
-    canonical,
     digest,
     self_hash,
     validate_request,
@@ -40,6 +39,7 @@ class Completed:
     stderr: bytes
     attestation: Mapping[str, Any] | None = None
     process_state: str = "REAPED"
+    process_facts: Mapping[str, Any] | None = None
 
 
 Runner = Callable[..., Completed]
@@ -354,6 +354,7 @@ def _run_exact(
     attestations: list[Mapping[str, Any]],
     allow_fixture: bool,
 ) -> Completed:
+    stage = "nix-build" if "build" in argv else "static-verification" if ("-T" in argv or "verify" in argv) else "evaluation"
     try:
         result = runner(list(argv), cwd=cwd, env=dict(env), timeout=timeout, max_output=max_output, pass_fds=tuple(pass_fds))
     except A3KnownFailure as exc:
@@ -361,19 +362,25 @@ def _run_exact(
             exc.stage = "nix-build" if "build" in argv else "static-verification" if ("-T" in argv or "verify" in argv) else "evaluation"
         raise
     if not isinstance(result, Completed) or len(result.stdout) + len(result.stderr) > max_output:
-        raise A3KnownFailure("subprocess result violates its closed output contract", stage="subprocess", step="output-contract")
+        raise A3KnownFailure("subprocess result violates its closed output contract", stage=stage, step="output-contract", returncode=-1)
     if result.process_state != "REAPED":
-        raise A3KnownFailure("subprocess process group is not proven reaped", stage="subprocess", step="process-state", cleanup="UNKNOWN")
+        raise A3KnownFailure(
+            "subprocess process group is not proven reaped",
+            stage=stage,
+            step="process-state",
+            returncode=result.returncode or -1,
+            cleanup="UNKNOWN",
+        )
     if result.attestation is None:
         if not allow_fixture:
-            raise A3KnownFailure("local root launcher omitted signed isolation evidence", stage="local-launcher", step="attestation")
+            raise A3KnownFailure("local root launcher omitted signed isolation evidence", stage=stage, step="attestation", returncode=result.returncode or -1)
     else:
         attestations.append(result.attestation)
     if result.returncode != 0:
         raise A3KnownFailure(
             "fixed non-activating evaluation step failed",
-            stage="nix-build" if "build" in argv else "static-verification" if "-T" in argv else "evaluation",
-            step=next((item for item in ("build", "eval", "path-info", "hash", "derivation", "-T") if item in argv), "subprocess"),
+            stage=stage,
+            step=next((item for item in ("build", "eval", "path-info", "hash", "derivation", "-T", "verify") if item in argv), "subprocess"),
             returncode=result.returncode,
             stdout=result.stdout,
             stderr=result.stderr,
@@ -636,24 +643,7 @@ def execute(
             return fd, f"/proc/{os.getpid()}/fd/{fd}"
 
         _, sshd_proc = materialize("sshd-verifier.conf", rendered_bytes["sshd-config"])
-        unit_raw = canonical(
-            {
-                "schema": "tgw-nixos-a3-systemd-verifier-input/v1",
-                "wrapper_path": rendered["system-wrapper"]["path"],
-                "wrapper_sha256": digest(rendered_bytes["system-wrapper"]),
-            }
-        )
-        # The installed unit is not invented here.  This closed transient unit
-        # asks systemd-analyze to parse the exact admitted wrapper as ExecStart.
-        unit_text = (
-            b"[Unit]\nDescription=TGW A3 successor rendered wrapper static check\n"
-            b"[Service]\nType=oneshot\nExecStart="
-            + rendered["system-wrapper"]["path"].encode()
-            + b"\n# binding="
-            + digest(unit_raw).encode()
-            + b"\n"
-        )
-        _, systemd_proc = materialize("a3-successor-rendered.service", unit_text)
+        _, systemd_proc = materialize("sshd.service", rendered_bytes["sshd-service"])
         sshd_command = [held["sshd"], "-T", "-C", "user=codex,host=tgw-prod,addr=127.0.0.1", "-f", sshd_proc]
         systemd_command = [held["systemd_analyze"], "verify", "--man=no", systemd_proc]
         sshd_result = _run_exact(runner, sshd_command, **common)
@@ -682,7 +672,7 @@ def execute(
             os.close(fd)
             verifier_input_fds.remove(fd)
         logical_sshd_command = [request["tools"]["sshd"]["path"], "-T", "-C", "user=codex,host=tgw-prod,addr=127.0.0.1", "-f", rendered["sshd-config"]["path"]]
-        logical_systemd_command = [request["tools"]["systemd_analyze"]["path"], "verify", "--man=no", "a3-successor-rendered.service"]
+        logical_systemd_command = [request["tools"]["systemd_analyze"]["path"], "verify", "--man=no", "sshd.service"]
         verifiers = {
             "sshd": {
                 "command": logical_sshd_command,

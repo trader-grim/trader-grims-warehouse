@@ -25,6 +25,65 @@ INTEGRATION_SCHEMA = "tgw-nixos-a3-successor-integration/v1"
 SUCCESS_SCHEMA = "tgw-nixos-a3-successor-evaluation-success/v1"
 TERMINAL_SCHEMA = "tgw-nixos-a3-successor-evaluation-terminal/v1"
 STORE_REF_SCHEMA = "tgw-nixos-a3-successor-evaluation-store-ref/v1"
+_PROVIDER_SEAL = object()
+
+TERMINAL_STATE_TABLE: Mapping[tuple[str, str], Mapping[str, Any]] = {
+    ("FAILED", "composition-readiness"): {"steps": {"provider-mount", "request"}, "codes": {"A3KnownFailure"}, "cleanup": "NOT_CREATED", "build": False, "rc": "none"},
+    ("FAILED", "stdin-or-provider"): {"steps": {"stdin-parse-or-dispatch"}, "codes": {"InputOrProviderFailure"}, "cleanup": "NOT_CREATED", "build": False, "rc": "none"},
+    ("FAILED", "prebuild-validation"): {"steps": {"contract-validation"}, "codes": {"A3KnownFailure"}, "cleanup": "REMOVED", "build": False, "rc": "none"},
+    ("FAILED", "evaluation"): {
+        "steps": {"eval", "path-info", "hash", "derivation", "subprocess", "output-contract", "process-state", "attestation", "timeout", "output-bound", "process-group"},
+        "codes": {"A3KnownFailure", "StepFailure"},
+        "cleanup": "REMOVED",
+        "build": False,
+        "rc": "subprocess",
+    },
+    ("FAILED", "subprocess"): {"steps": {"output-contract", "process-state"}, "codes": {"A3KnownFailure", "StepFailure"}, "cleanup": "REMOVED", "build": False, "rc": "subprocess"},
+    ("FAILED", "nix-build"): {
+        "steps": {"build", "timeout", "output-bound", "process-group", "output-contract", "process-state", "attestation"},
+        "codes": {"A3KnownFailure", "StepFailure"},
+        "cleanup": "REMOVED",
+        "build": True,
+        "rc": "subprocess",
+    },
+    ("FAILED", "post-build"): {"steps": {"contract-validation", "success-validation"}, "codes": {"A3KnownFailure"}, "cleanup": "REMOVED", "build": True, "rc": "none"},
+    ("FAILED", "static-verification"): {
+        "steps": {"-T", "verify", "timeout", "output-bound", "process-group", "output-contract", "process-state", "attestation"},
+        "codes": {"A3KnownFailure", "StepFailure"},
+        "cleanup": "REMOVED",
+        "build": True,
+        "rc": "subprocess",
+    },
+    ("AMBIGUOUS", "evaluation-or-success-persistence"): {"steps": {"unknown"}, "codes": {"UnknownExternalState"}, "cleanup": "UNKNOWN", "build": True, "rc": "none"},
+    ("AMBIGUOUS", "stdin-or-provider"): {
+        "steps": {"stdin-parse-or-dispatch"},
+        "codes": {"ReceiptStoreUnavailable", "ReceiptStorePersistenceFailure"},
+        "cleanup": "UNKNOWN",
+        "build": False,
+        "rc": "none",
+    },
+    ("AMBIGUOUS", "evaluation"): {
+        "steps": {"timeout", "output-bound", "process-group", "process-state", "attestation"},
+        "codes": {"StepFailure"},
+        "cleanup": "UNKNOWN",
+        "build": False,
+        "rc": "any",
+    },
+    ("AMBIGUOUS", "nix-build"): {
+        "steps": {"timeout", "output-bound", "process-group", "process-state", "attestation"},
+        "codes": {"StepFailure"},
+        "cleanup": "UNKNOWN",
+        "build": True,
+        "rc": "any",
+    },
+    ("AMBIGUOUS", "static-verification"): {
+        "steps": {"timeout", "output-bound", "process-group", "process-state", "attestation"},
+        "codes": {"StepFailure"},
+        "cleanup": "UNKNOWN",
+        "build": True,
+        "rc": "any",
+    },
+}
 
 PLAN_COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
 PLAN_SOLUTION = "sha256:d28650c26c6a3d26d6c943597ccb7abd7c6670b1703d9ce941ac5ed7a2d73a4d"
@@ -73,6 +132,7 @@ RENDERED_ARTIFACTS = (
     "sudoers",
     "authorized-key-codex",
     "sshd-config",
+    "sshd-service",
 )
 RENDERED_RELATIVE_PATHS = {
     "system-wrapper": "sw/bin/tgw-nix-observer-render-wrapper",
@@ -83,6 +143,7 @@ RENDERED_RELATIVE_PATHS = {
     "sudoers": "etc/sudoers",
     "authorized-key-codex": "etc/ssh/authorized_keys.d/codex",
     "sshd-config": "etc/ssh/sshd_config",
+    "sshd-service": "etc/systemd/system/sshd.service",
 }
 FORBIDDEN_EFFECTS = (
     "activate",
@@ -537,7 +598,7 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
     verifiers = _exact(result["verifiers"], {"sshd", "systemd_analyze"}, "static verifiers")
     expected_commands = {
         "sshd": [request["tools"]["sshd"]["path"], "-T", "-C", "user=codex,host=tgw-prod,addr=127.0.0.1", "-f", rendered["sshd-config"]["path"]],
-        "systemd_analyze": [request["tools"]["systemd_analyze"]["path"], "verify", "--man=no", "a3-successor-rendered.service"],
+        "systemd_analyze": [request["tools"]["systemd_analyze"]["path"], "verify", "--man=no", "sshd.service"],
     }
     for name, command in expected_commands.items():
         item = _exact(
@@ -699,20 +760,23 @@ def validate_terminal(value: Any, *, request_sha256: str, provider_sha256: str) 
     effects = _exact(terminal["effects"], {"build", *FORBIDDEN_EFFECTS}, "terminal effects")
     if any(effects[name] is not False for name in FORBIDDEN_EFFECTS) or effects["build"] not in {True, False}:
         raise A3EvaluationError("terminal receipt reports a forbidden effect")
-    if terminal["outcome"] == "FAILED" and terminal["cleanup"] == "UNKNOWN":
-        raise A3EvaluationError("known failure cannot claim unknown cleanup")
-    if terminal["outcome"] == "AMBIGUOUS" and terminal["cleanup"] != "UNKNOWN":
-        raise A3EvaluationError("ambiguous terminal must report unknown cleanup/external state")
     if any(len(terminal[key]) > 128 for key in ("stage", "step", "code")):
         raise A3EvaluationError("terminal diagnostics are unbounded")
-    prebuild_stages = {"composition-readiness", "prebuild-validation", "evaluation", "stdin-or-provider"}
-    built_stages = {"nix-build", "post-build", "static-verification"}
-    if terminal["outcome"] == "FAILED" and (
-        (terminal["stage"] in prebuild_stages and effects["build"] is not False)
-        or (terminal["stage"] in built_stages and effects["build"] is not True)
-        or terminal["stage"] not in prebuild_stages | built_stages | {"subprocess"}
+    row = TERMINAL_STATE_TABLE.get((terminal["outcome"], terminal["stage"]))
+    if (
+        row is None
+        or terminal["step"] not in row["steps"]
+        or terminal["code"] not in row["codes"]
+        or terminal["cleanup"] != row["cleanup"]
+        or effects["build"] is not row["build"]
     ):
-        raise A3EvaluationError("terminal stage/build relation is invalid")
+        raise A3EvaluationError("terminal tuple is outside the exact state table")
+    rc_rule = row["rc"]
+    if (
+        (rc_rule == "none" and terminal["returncode"] is not None)
+        or (rc_rule == "subprocess" and (not isinstance(terminal["returncode"], int) or terminal["returncode"] == 0))
+    ):
+        raise A3EvaluationError("terminal returncode relation is outside the exact state table")
     if terminal["receipt_sha256"] != self_hash({key: item for key, item in terminal.items() if key != "evidence"}):
         raise A3EvaluationError("terminal receipt self-hash mismatch")
     if terminal["evidence"] != ["nixos-a3-successor-evaluation-terminal:" + terminal["receipt_sha256"]]:
@@ -741,11 +805,16 @@ class A3EvaluationComposition:
                 "allow_fixture": self.allow_fixture,
                 "transport_kind": type(self.runner).__name__,
                 "transport_sha256": transport_sha256,
+                "receipt_store_identity": getattr(
+                    self.receipt_store,
+                    "identity",
+                    {"schema": "tgw-nixos-a3-fixture-store/v1", "kind": type(self.receipt_store).__name__},
+                ),
             }
         )
 
 
-class A3SuccessorEvaluationProvider:
+class _A3SuccessorEvaluationProviderCore:
     def __init__(self, composition: A3EvaluationComposition):
         self.composition = composition
         validate_integration_contract(composition.integration, allow_fixture=composition.allow_fixture)
@@ -798,12 +867,12 @@ class A3SuccessorEvaluationProvider:
                 outcome="AMBIGUOUS" if ambiguous else "FAILED",
                 stage=exc.stage,
                 step=exc.step,
-                code=type(exc).__name__,
+                code="StepFailure" if type(exc).__name__ == "StepFailure" else "A3KnownFailure",
                 returncode=exc.returncode,
                 stdout=exc.stdout,
                 stderr=exc.stderr,
                 cleanup=exc.cleanup,
-                effects={"build": exc.stage in {"nix-build", "post-build"}, **{name: False for name in FORBIDDEN_EFFECTS}},
+                effects={"build": exc.stage in {"nix-build", "post-build", "static-verification"}, **{name: False for name in FORBIDDEN_EFFECTS}},
                 observation={"detail": str(exc)},
             )
             try:
@@ -847,7 +916,7 @@ class A3SuccessorEvaluationProvider:
                 provider_sha256=self.composition.receipt_sha256,
                 stage="evaluation-or-success-persistence",
                 step="unknown",
-                code=type(exc).__name__,
+                code="UnknownExternalState",
                 returncode=None,
                 stdout=b"",
                 stderr=b"",
@@ -883,6 +952,24 @@ class A3SuccessorEvaluationProvider:
             }
             raise A3EvaluationAmbiguous("immutable store returned an invalid reference", observation)
         return {"evidence": ["nixos-a3-successor-evaluation:" + result["receipt_sha256"]], "terminal": result, "store_ref": reference}
+
+
+class A3SuccessorEvaluationProvider(_A3SuccessorEvaluationProviderCore):
+    """Production provider; only the sealed local factory may construct it."""
+
+    def __init__(self, composition: A3EvaluationComposition, *, _token: object | None = None):
+        if _token is not _PROVIDER_SEAL or composition.allow_fixture:
+            raise TypeError("production A3 provider must be constructed by build_local_production_provider")
+        super().__init__(composition)
+
+
+class A3TestSuccessorEvaluationProvider(_A3SuccessorEvaluationProviderCore):
+    """Distinct fixture provider that cannot satisfy production composition wiring."""
+
+    def __init__(self, composition: A3EvaluationComposition):
+        if not composition.allow_fixture:
+            raise TypeError("test A3 provider requires allow_fixture=True")
+        super().__init__(composition)
 
 
 class ImmutableEvaluationStore:
@@ -938,6 +1025,14 @@ class ImmutableEvaluationStore:
             self.close()
             raise A3EvaluationError("receipt root must be one held trusted mode-0700 directory")
         self._root_identity = (held.st_dev, held.st_ino, held.st_uid, stat.S_IMODE(held.st_mode))
+        self.identity = {
+            "path": str(self.root),
+            "dev": held.st_dev,
+            "ino": held.st_ino,
+            "uid": held.st_uid,
+            "gid": held.st_gid,
+            "mode": stat.S_IMODE(held.st_mode),
+        }
 
     def close(self) -> None:
         for name in ("_root_fd", "_parent_fd"):
@@ -1057,7 +1152,9 @@ def build_local_production_provider(
     transport.validate_sealed(request)
     receipt_root = Path(transport.composition.receipt_roots["terminal"]["path"])
     store = ImmutableEvaluationStore(receipt_root, trusted_uid=0)
-    return A3SuccessorEvaluationProvider(A3EvaluationComposition(request["integration"], store, transport))
+    if store.identity != transport.composition.receipt_roots["terminal"]:
+        raise A3EvaluationError("provider receipt store differs from sealed local composition")
+    return A3SuccessorEvaluationProvider(A3EvaluationComposition(request["integration"], store, transport), _token=_PROVIDER_SEAL)
 
 
 def main(
@@ -1103,7 +1200,7 @@ def main(
             outcome="FAILED",
             stage="stdin-or-provider",
             step="stdin-parse-or-dispatch",
-            code=type(exc).__name__,
+            code="InputOrProviderFailure",
             returncode=None,
             stdout=b"",
             stderr=b"",
@@ -1117,15 +1214,17 @@ def main(
             fallback["cleanup"] = "UNKNOWN"
             fallback["receipt_sha256"] = self_hash({key: item for key, item in fallback.items() if key != "evidence"})
             fallback["evidence"] = ["nixos-a3-successor-evaluation-terminal:" + fallback["receipt_sha256"]]
+            validate_terminal(fallback, request_sha256=request_sha256, provider_sha256=fallback["provider_sha256"])
         else:
             try:
                 receipt_store.persist(fallback)
-            except Exception as store_exc:
+            except Exception:
                 fallback["outcome"] = "AMBIGUOUS"
-                fallback["code"] = type(store_exc).__name__
+                fallback["code"] = "ReceiptStorePersistenceFailure"
                 fallback["cleanup"] = "UNKNOWN"
                 fallback["receipt_sha256"] = self_hash({key: item for key, item in fallback.items() if key != "evidence"})
                 fallback["evidence"] = ["nixos-a3-successor-evaluation-terminal:" + fallback["receipt_sha256"]]
+                validate_terminal(fallback, request_sha256=request_sha256, provider_sha256=fallback["provider_sha256"])
         sink.write(canonical(fallback).decode() + "\n")
         return 1
     sink.write(canonical(result).decode() + "\n")

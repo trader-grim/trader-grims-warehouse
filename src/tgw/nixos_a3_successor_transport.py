@@ -15,12 +15,14 @@ from __future__ import annotations
 import base64
 import json
 import os
+import secrets
 import selectors
 import signal
 import stat
 import subprocess
 import time
 from dataclasses import dataclass, fields
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -47,6 +49,7 @@ ATTESTATION_SCHEMA = "tgw-nixos-a3-local-netns-attestation/v1"
 _HEX64 = set("0123456789abcdef")
 _SEAL = object()
 _PROBE_NAMES = ("direct", "dns", "private", "metadata")
+_RFC3339_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
 
 def _sha(value: Any, label: str) -> str:
@@ -76,14 +79,14 @@ def _validate_data_identity(value: Any, label: str) -> dict[str, Any]:
     return item
 
 
-def _validate_directory_identity(value: Any, label: str) -> dict[str, Any]:
+def _validate_directory_identity(value: Any, label: str, *, trusted_uid: int = 0) -> dict[str, Any]:
     item = dict(_exact(value, {"path", "dev", "ino", "uid", "gid", "mode"}, label))
     if not isinstance(item["path"], str) or not item["path"].startswith("/") or ".." in Path(item["path"]).parts:
         raise A3EvaluationError(f"{label} path is invalid")
     if any(not isinstance(item[key], int) for key in ("dev", "ino", "uid", "gid", "mode")) or item["dev"] <= 0 or item["ino"] <= 0:
         raise A3EvaluationError(f"{label} metadata is invalid")
-    if item["uid"] != 0 or item["mode"] != 0o700:
-        raise A3EvaluationError(f"{label} must be root-owned mode 0700")
+    if item["uid"] != trusted_uid or item["mode"] != 0o700:
+        raise A3EvaluationError(f"{label} must be trusted-owner mode 0700")
     return item
 
 
@@ -119,20 +122,52 @@ def _read_held(value: Mapping[str, Any], *, label: str, executable: bool) -> tup
     return bytes(raw), before
 
 
+def _open_live_directory(identity: Mapping[str, Any], label: str, *, trusted_uid: int = 0) -> int:
+    item = _validate_directory_identity(identity, label, trusted_uid=trusted_uid)
+    parent_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for component in Path(item["path"]).parts[1:]:
+            before = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            held = os.fstat(next_fd)
+            after = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            mode = stat.S_IMODE(held.st_mode)
+            sticky_root = held.st_uid == 0 and bool(mode & stat.S_ISVTX)
+            if (
+                not stat.S_ISDIR(held.st_mode)
+                or held.st_uid not in {0, trusted_uid}
+                or (mode & 0o022 and not sticky_root)
+                or (before.st_dev, before.st_ino) != (held.st_dev, held.st_ino)
+                or (after.st_dev, after.st_ino) != (held.st_dev, held.st_ino)
+            ):
+                os.close(next_fd)
+                raise A3EvaluationError(f"{label} component walk found an unsafe ancestor")
+            os.close(parent_fd)
+            parent_fd = next_fd
+        metadata = os.fstat(parent_fd)
+        if any(
+            item[key] != observed
+            for key, observed in {
+                "dev": metadata.st_dev,
+                "ino": metadata.st_ino,
+                "uid": metadata.st_uid,
+                "gid": metadata.st_gid,
+                "mode": stat.S_IMODE(metadata.st_mode),
+            }.items()
+        ):
+            raise A3EvaluationError(f"{label} live identity changed")
+        result = parent_fd
+        parent_fd = -1
+        return result
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
 def _validate_live_directory(identity: Mapping[str, Any], label: str) -> Path:
+    fd = _open_live_directory(identity, label)
+    os.close(fd)
     item = _validate_directory_identity(identity, label)
-    metadata = os.stat(item["path"], follow_symlinks=False)
-    if not stat.S_ISDIR(metadata.st_mode) or any(
-        item[key] != observed
-        for key, observed in {
-            "dev": metadata.st_dev,
-            "ino": metadata.st_ino,
-            "uid": metadata.st_uid,
-            "gid": metadata.st_gid,
-            "mode": stat.S_IMODE(metadata.st_mode),
-        }.items()
-    ):
-        raise A3EvaluationError(f"{label} live identity changed")
     return Path(item["path"])
 
 
@@ -199,23 +234,65 @@ class StepFailure(A3KnownFailure):
         self.process_state = process_state
 
 
-def _terminate_group(process: subprocess.Popen[bytes], *, grace_seconds: float = 2.0) -> tuple[int | None, str, str]:
-    """Terminate the exact child session and prove it has been reaped."""
+def _group_empty(pgid: int) -> bool:
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def _wait_group_empty(pgid: int, deadline: float) -> bool:
+    while time.monotonic() < deadline:
+        if _group_empty(pgid):
+            return True
+        time.sleep(0.01)
+    return _group_empty(pgid)
+
+
+def _terminate_group(process: subprocess.Popen[bytes], *, grace_seconds: float = 2.0) -> tuple[int | None, str, str]:
+    """Terminate and reap the leader, then prove the entire group is empty."""
+    pgid = process.pid
+    try:
+        os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
         pass
     try:
-        return process.wait(timeout=grace_seconds), "REAPED_AFTER_TERM", "REMOVED"
+        returncode = process.wait(timeout=grace_seconds)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         try:
-            return process.wait(timeout=grace_seconds), "REAPED_AFTER_KILL", "REMOVED"
+            returncode = process.wait(timeout=grace_seconds)
         except subprocess.TimeoutExpired:
             return None, "UNKNOWN", "UNKNOWN"
+    if _wait_group_empty(pgid, time.monotonic() + grace_seconds):
+        return returncode, "REAPED_GROUP_EMPTY", "REMOVED"
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if _wait_group_empty(pgid, time.monotonic() + grace_seconds):
+        return returncode, "REAPED_GROUP_EMPTY", "REMOVED"
+    return returncode, "UNKNOWN", "UNKNOWN"
+
+
+def _finish_group(process: subprocess.Popen[bytes], *, grace_seconds: float = 2.0) -> tuple[int, str, str]:
+    """After normal leader exit, kill any surviving descendants and prove ESRCH."""
+    returncode = process.wait()
+    if _group_empty(process.pid):
+        return returncode, "REAPED_GROUP_EMPTY", "REMOVED"
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if _wait_group_empty(process.pid, time.monotonic() + grace_seconds):
+        return returncode, "REAPED_GROUP_EMPTY", "REMOVED"
+    return returncode, "UNKNOWN", "UNKNOWN"
 
 
 def _stream_bounded(
@@ -224,7 +301,7 @@ def _stream_bounded(
     input_bytes: bytes,
     timeout: int,
     max_output: int,
-) -> tuple[int, bytes, bytes]:
+) -> tuple[int, bytes, bytes, str]:
     assert process.stdin is not None and process.stdout is not None and process.stderr is not None
     try:
         process.stdin.write(input_bytes)
@@ -268,7 +345,18 @@ def _stream_bounded(
                     )
     finally:
         selector.close()
-    return process.wait(), bytes(output["stdout"]), bytes(output["stderr"])
+    returncode, process_state, cleanup = _finish_group(process)
+    if cleanup != "REMOVED":
+        raise StepFailure(
+            "local launcher process group could not be proven empty",
+            step="process-group",
+            returncode=returncode,
+            stdout=bytes(output["stdout"]),
+            stderr=bytes(output["stderr"]),
+            process_state=process_state,
+            cleanup=cleanup,
+        )
+    return returncode, bytes(output["stdout"]), bytes(output["stderr"]), process_state
 
 
 def _probe_set(value: Any, label: str) -> Mapping[str, Any]:
@@ -281,20 +369,75 @@ def _probe_set(value: Any, label: str) -> Mapping[str, Any]:
     return probes
 
 
-def validate_launcher_attestation(value: Any, *, packet_sha256: str, composition_sha256: str, public_key_raw: bytes, uid: int, gid: int) -> dict[str, Any]:
+def _parse_rfc3339(value: Any, label: str) -> datetime:
+    if not isinstance(value, str):
+        raise A3EvaluationError(f"{label} is not an RFC3339 UTC timestamp")
+    try:
+        parsed = datetime.strptime(value, _RFC3339_FORMAT).replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise A3EvaluationError(f"{label} is not an RFC3339 UTC timestamp") from exc
+    if parsed.strftime(_RFC3339_FORMAT) != value:
+        raise A3EvaluationError(f"{label} is not canonical RFC3339 UTC")
+    return parsed
+
+
+def validate_launcher_attestation(
+    value: Any,
+    *,
+    packet_sha256: str,
+    composition_sha256: str,
+    request_sha256: str,
+    launch_nonce: str,
+    attempt_id: str,
+    issued_at: str,
+    expires_at: str,
+    public_key_raw: bytes,
+    uid: int,
+    gid: int,
+    now: datetime | None = None,
+    max_duration_seconds: int = 1800,
+) -> dict[str, Any]:
     attestation = dict(
         _exact(
             value,
-            {"schema", "packet_sha256", "composition_sha256", "nonce", "started_at", "ended_at", "netns", "child", "probes", "signature"},
+            {
+                "schema",
+                "packet_sha256",
+                "composition_sha256",
+                "request_sha256",
+                "launch_nonce",
+                "attempt_id",
+                "issued_at",
+                "started_at",
+                "ended_at",
+                "expires_at",
+                "netns",
+                "child",
+                "probes",
+                "signature",
+            },
             "launcher attestation",
         )
     )
-    if attestation["schema"] != ATTESTATION_SCHEMA or attestation["packet_sha256"] != packet_sha256 or attestation["composition_sha256"] != composition_sha256:
+    if (
+        attestation["schema"] != ATTESTATION_SCHEMA
+        or attestation["packet_sha256"] != packet_sha256
+        or attestation["composition_sha256"] != composition_sha256
+        or attestation["request_sha256"] != request_sha256
+        or attestation["launch_nonce"] != launch_nonce
+        or attestation["attempt_id"] != attempt_id
+        or attestation["issued_at"] != issued_at
+        or attestation["expires_at"] != expires_at
+    ):
         raise A3EvaluationError("launcher attestation binding mismatch")
-    if not isinstance(attestation["nonce"], str) or len(attestation["nonce"]) != 64 or any(char not in _HEX64 for char in attestation["nonce"]):
-        raise A3EvaluationError("launcher attestation nonce is invalid")
-    if not all(isinstance(attestation[name], str) and attestation[name].endswith("Z") for name in ("started_at", "ended_at")) or attestation["started_at"] >= attestation["ended_at"]:
-        raise A3EvaluationError("launcher attestation time interval is invalid")
+    issued = _parse_rfc3339(attestation["issued_at"], "launcher issued_at")
+    started = _parse_rfc3339(attestation["started_at"], "launcher started_at")
+    ended = _parse_rfc3339(attestation["ended_at"], "launcher ended_at")
+    expires = _parse_rfc3339(attestation["expires_at"], "launcher expires_at")
+    observed_now = datetime.now(UTC) if now is None else now.astimezone(UTC)
+    skew = timedelta(seconds=5)
+    if not issued <= started <= ended <= expires or expires - issued > timedelta(seconds=max_duration_seconds) or observed_now < issued - skew or observed_now > expires + skew:
+        raise A3EvaluationError("launcher attestation is stale, future-dated, or outside its duration")
     netns = _exact(attestation["netns"], {"start_inode", "end_inode", "lo_only", "routes_empty", "link_sha256", "route_sha256"}, "launcher netns")
     if not isinstance(netns["start_inode"], int) or netns["start_inode"] <= 0 or netns["end_inode"] != netns["start_inode"] or netns["lo_only"] is not True or netns["routes_empty"] is not True:
         raise A3EvaluationError("launcher did not prove one loopback-only route-free namespace")
@@ -347,8 +490,10 @@ class A3LocalProductionComposition:
     tools: Mapping[str, Any]
     tool_versions: Mapping[str, Any]
     root_launcher: Mapping[str, Any]
+    launcher_source: Mapping[str, Any]
     launcher_config: Mapping[str, Any]
     netns_prerequisite: Mapping[str, Any]
+    prerequisite_status: str
     attestation_public_key: Mapping[str, Any]
     signing_key_ref: str
     codex_identity: Mapping[str, Any]
@@ -387,12 +532,52 @@ def validate_local_composition(composition: A3LocalProductionComposition, reques
     for name, identity in composition.tools.items():
         _read_held(identity, label=f"composition tool {name}", executable=True)
     _read_held(composition.root_launcher, label="root launcher", executable=True)
+    launcher_source_raw, _ = _read_held(composition.launcher_source, label="audited launcher source", executable=False)
     _read_held(composition.current_cas_observer, label="current-CAS observer", executable=True)
-    _read_held(composition.launcher_config, label="launcher config", executable=False)
-    _read_held(composition.netns_prerequisite, label="netns prerequisite receipt", executable=False)
+    launcher_config_raw, _ = _read_held(composition.launcher_config, label="launcher config", executable=False)
+    prerequisite_raw, _ = _read_held(composition.netns_prerequisite, label="netns prerequisite receipt", executable=False)
     public_key_raw, _ = _read_held(composition.attestation_public_key, label="launcher attestation public key", executable=False)
     if len(public_key_raw) != 32:
         raise A3EvaluationError("launcher attestation public key is not exact raw Ed25519")
+    if composition.prerequisite_status != "EXTERNAL_PREREQUISITE":
+        raise A3EvaluationError("raw kernel isolation implementation must remain an explicit external prerequisite")
+    try:
+        prerequisite = json.loads(prerequisite_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise A3EvaluationError("external launcher prerequisite receipt is invalid") from exc
+    prerequisite_fields = {
+        "schema",
+        "status",
+        "prerequisite",
+        "launcher_source_sha256",
+        "launcher_executable_sha256",
+        "launcher_config_sha256",
+        "attestation_public_key_sha256",
+        "packet_schema",
+        "response_schema",
+        "attestation_schema",
+        "raw_evidence_schema",
+        "raw_evidence_signed_by",
+        "receipt_sha256",
+    }
+    if (
+        canonical(prerequisite) != prerequisite_raw
+        or set(prerequisite) != prerequisite_fields
+        or prerequisite["schema"] != "tgw-nixos-a3-local-launcher-prerequisite/v1"
+        or prerequisite["status"] != "SATISFIED"
+        or prerequisite["prerequisite"] != "EXTERNAL_PREREQUISITE"
+        or prerequisite["launcher_source_sha256"] != digest(launcher_source_raw)
+        or prerequisite["launcher_executable_sha256"] != composition.root_launcher["sha256"]
+        or prerequisite["launcher_config_sha256"] != digest(launcher_config_raw)
+        or prerequisite["attestation_public_key_sha256"] != digest(public_key_raw)
+        or prerequisite["packet_schema"] != LAUNCH_PACKET_SCHEMA
+        or prerequisite["response_schema"] != LAUNCH_RESPONSE_SCHEMA
+        or prerequisite["attestation_schema"] != ATTESTATION_SCHEMA
+        or prerequisite["raw_evidence_schema"] != "tgw-nixos-a3-raw-link-route-probes/v1"
+        or prerequisite["raw_evidence_signed_by"] != digest(public_key_raw)
+        or prerequisite["receipt_sha256"] != digest({key: item for key, item in prerequisite.items() if key != "receipt_sha256"})
+    ):
+        raise A3EvaluationError("external launcher prerequisite is absent or not bound to the audited implementation/protocol")
     if (
         not isinstance(composition.signing_key_ref, str)
         or not composition.signing_key_ref.startswith("external-root-0400:sha256:")
@@ -413,8 +598,9 @@ def validate_local_composition(composition: A3LocalProductionComposition, reques
     }:
         raise A3EvaluationError("local process/resource bounds are not exact")
     _validate_live_directory(composition.scratch_root, "scratch root")
-    roots = _exact(composition.receipt_roots, {"terminal", "readiness"}, "receipt roots")
+    roots = _exact(composition.receipt_roots, {"terminal", "readiness", "replay"}, "receipt roots")
     _validate_live_directory(roots["terminal"], "terminal receipt root")
+    _validate_live_directory(roots["replay"], "nonce replay root")
     readiness_raw, _ = _read_held(roots["readiness"], label="transport readiness receipt", executable=False)
     try:
         readiness = json.loads(readiness_raw)
@@ -445,12 +631,102 @@ def validate_local_composition(composition: A3LocalProductionComposition, reques
     return request
 
 
+class DurableNonceReplayStore:
+    """One-use launch-challenge claims in an exact held immutable root."""
+
+    def __init__(self, identity: Mapping[str, Any], *, _test_uid: int | None = None):
+        self.identity = _validate_directory_identity(identity, "nonce replay root", trusted_uid=0 if _test_uid is None else _test_uid)
+        self._root_fd = _open_live_directory(self.identity, "nonce replay root", trusted_uid=0 if _test_uid is None else _test_uid)
+        metadata = os.fstat(self._root_fd)
+        observed = {
+            "path": self.identity["path"],
+            "dev": metadata.st_dev,
+            "ino": metadata.st_ino,
+            "uid": metadata.st_uid,
+            "gid": metadata.st_gid,
+            "mode": stat.S_IMODE(metadata.st_mode),
+        }
+        if observed != self.identity:
+            os.close(self._root_fd)
+            raise A3EvaluationError("nonce replay root held identity changed")
+
+    def close(self) -> None:
+        if self._root_fd >= 0:
+            os.close(self._root_fd)
+            self._root_fd = -1
+
+    def claim(self, *, launch_nonce: str, attempt_id: str, request_sha256: str, attestation_sha256: str) -> str:
+        value = {
+            "schema": "tgw-nixos-a3-launch-replay-claim/v1",
+            "launch_nonce": launch_nonce,
+            "attempt_id": attempt_id,
+            "request_sha256": request_sha256,
+            "attestation_sha256": attestation_sha256,
+        }
+        value["claim_sha256"] = digest(value)
+        raw = canonical(value)
+        name = digest({"launch_nonce": launch_nonce}).removeprefix("sha256:") + ".json"
+        try:
+            fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=self._root_fd)
+        except FileExistsError as exc:
+            raise A3EvaluationError("launcher challenge was already consumed") from exc
+        valid = False
+        try:
+            offset = 0
+            while offset < len(raw):
+                count = os.write(fd, raw[offset:])
+                if count <= 0:
+                    raise OSError("short replay claim write")
+                offset += count
+            os.fsync(fd)
+            held = os.fstat(fd)
+            os.lseek(fd, 0, os.SEEK_SET)
+            if os.read(fd, len(raw) + 1) != raw:
+                raise A3EvaluationError("replay claim held readback mismatch")
+            named_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self._root_fd)
+            try:
+                named = os.fstat(named_fd)
+                if (named.st_dev, named.st_ino, named.st_size) != (held.st_dev, held.st_ino, len(raw)) or os.read(named_fd, len(raw) + 1) != raw:
+                    raise A3EvaluationError("replay claim named readback mismatch")
+            finally:
+                os.close(named_fd)
+            os.fsync(self._root_fd)
+            named = os.stat(name, dir_fd=self._root_fd, follow_symlinks=False)
+            root = os.fstat(self._root_fd)
+            named_root = os.stat(self.identity["path"], follow_symlinks=False)
+            if (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino) or (
+                root.st_dev,
+                root.st_ino,
+                root.st_uid,
+                root.st_gid,
+                stat.S_IMODE(root.st_mode),
+            ) != (
+                self.identity["dev"],
+                self.identity["ino"],
+                self.identity["uid"],
+                self.identity["gid"],
+                self.identity["mode"],
+            ) or (named_root.st_dev, named_root.st_ino) != (root.st_dev, root.st_ino):
+                raise A3EvaluationError("replay claim/root changed during commit")
+            valid = True
+            return value["claim_sha256"]
+        finally:
+            os.close(fd)
+            if not valid:
+                try:
+                    os.unlink(name, dir_fd=self._root_fd)
+                    os.fsync(self._root_fd)
+                except OSError as exc:
+                    raise A3EvaluationError("replay claim cleanup is ambiguous") from exc
+
+
 class ExactSubprocessRunner:
     """Invoke only the sealed no-argv root launcher and validate its response."""
 
     def __init__(self, composition: A3LocalProductionComposition):
         self._composition = composition
         self.attestations: list[dict[str, Any]] = []
+        self._replay_store = DurableNonceReplayStore(composition.receipt_roots["replay"])
 
     def __call__(
         self,
@@ -468,9 +744,20 @@ class ExactSubprocessRunner:
         config_raw, _ = _read_held(self._composition.launcher_config, label="launcher config", executable=False)
         prerequisite_raw, _ = _read_held(self._composition.netns_prerequisite, label="netns prerequisite receipt", executable=False)
         public_raw, _ = _read_held(self._composition.attestation_public_key, label="launcher attestation public key", executable=False)
+        issued = datetime.now(UTC)
+        expires = issued + timedelta(seconds=timeout)
+        issued_at = issued.strftime(_RFC3339_FORMAT)
+        expires_at = expires.strftime(_RFC3339_FORMAT)
+        launch_nonce = secrets.token_hex(32)
+        attempt_id = "attempt:" + secrets.token_hex(32)
         packet = {
             "schema": LAUNCH_PACKET_SCHEMA,
             "composition_sha256": self._composition.composition_sha256,
+            "request_sha256": self._composition.request_sha256,
+            "launch_nonce": launch_nonce,
+            "attempt_id": attempt_id,
+            "issued_at": issued_at,
+            "expires_at": expires_at,
             "logical_argv": list(argv),
             "cwd": str(cwd),
             "env": dict(sorted(env.items())),
@@ -498,7 +785,7 @@ class ExactSubprocessRunner:
                 pass_fds=tuple((*pass_fds, launcher_fd)),
                 start_new_session=True,
             )
-            rc, response_raw, launcher_stderr = _stream_bounded(
+            rc, response_raw, launcher_stderr, outer_process_state = _stream_bounded(
                 process,
                 input_bytes=packet_raw,
                 timeout=timeout,
@@ -529,7 +816,11 @@ class ExactSubprocessRunner:
                 cleanup="REMOVED",
             )
         try:
-            response = _exact(json.loads(response_raw), {"schema", "packet_sha256", "returncode", "stdout_b64", "stderr_b64", "process_state", "cleanup", "attestation"}, "launcher response")
+            response = _exact(
+                json.loads(response_raw),
+                {"schema", "packet_sha256", "returncode", "stdout_b64", "stderr_b64", "process_state", "cleanup", "process", "attestation"},
+                "launcher response",
+            )
             stdout = base64.b64decode(response["stdout_b64"], validate=True)
             stderr = base64.b64decode(response["stderr_b64"], validate=True)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
@@ -548,6 +839,7 @@ class ExactSubprocessRunner:
             or not isinstance(response["returncode"], int)
             or response["process_state"] != "REAPED"
             or response["cleanup"] != "REMOVED"
+            or outer_process_state != "REAPED_GROUP_EMPTY"
             or len(stdout) + len(stderr) > max_output
         ):
             raise StepFailure(
@@ -563,12 +855,42 @@ class ExactSubprocessRunner:
             response["attestation"],
             packet_sha256=packet["packet_sha256"],
             composition_sha256=self._composition.composition_sha256,
+            request_sha256=self._composition.request_sha256,
+            launch_nonce=launch_nonce,
+            attempt_id=attempt_id,
+            issued_at=issued_at,
+            expires_at=expires_at,
             public_key_raw=public_raw,
             uid=self._composition.codex_identity["uid"],
             gid=self._composition.codex_identity["gid"],
+            now=datetime.now(UTC),
+            max_duration_seconds=timeout,
         )
+        child = attestation["child"]
+        process_facts = _exact(
+            response["process"],
+            {"launcher_pid", "child_pid", "child_starttime", "child_exe", "child_reaped", "process_group_empty"},
+            "launcher process facts",
+        )
+        if (
+            not isinstance(process_facts["launcher_pid"], int)
+            or process_facts["launcher_pid"] <= 1
+            or process_facts["child_pid"] != child["pid"]
+            or process_facts["child_starttime"] != child["starttime"]
+            or process_facts["child_exe"] != child["exe"]
+            or process_facts["child_reaped"] is not True
+            or process_facts["process_group_empty"] is not True
+        ):
+            raise A3EvaluationError("signed child identity differs from launched/reaped process facts")
+        replay_claim = self._replay_store.claim(
+            launch_nonce=launch_nonce,
+            attempt_id=attempt_id,
+            request_sha256=self._composition.request_sha256,
+            attestation_sha256=digest(attestation),
+        )
+        attestation["replay_claim_sha256"] = replay_claim
         self.attestations.append(attestation)
-        return Completed(response["returncode"], stdout, stderr, attestation=attestation, process_state="REAPED")
+        return Completed(response["returncode"], stdout, stderr, attestation=attestation, process_state="REAPED", process_facts=dict(process_facts))
 
 
 class A3LocalProductionTransport:
@@ -614,13 +936,77 @@ class A3TestTransport:
         return self._callable(request_value)
 
 
-def load_local_production_transport(path: Path) -> A3LocalProductionTransport:
-    """Load one immutable canonical composition manifest and seal its instance."""
+def _load_local_production_transport(path: Path, *, _test_uid: int | None = None, _after_read: Any = None) -> A3LocalProductionTransport:
     manifest_path = Path(path)
-    metadata = manifest_path.lstat()
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != 0o400:
-        raise A3EvaluationError("local production composition manifest must be root-owned mode 0400")
-    raw = manifest_path.read_bytes()
+    trusted_uid = 0 if _test_uid is None else _test_uid
+    if not manifest_path.is_absolute() or ".." in manifest_path.parts:
+        raise A3EvaluationError("local production composition manifest path is not absolute and normalized")
+    parent_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    components: list[tuple[int, str, tuple[int, int, int, int]]] = []
+    manifest_fd = -1
+    try:
+        for component in manifest_path.parent.parts[1:]:
+            before = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            held = os.fstat(next_fd)
+            after = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            identity = (held.st_dev, held.st_ino, held.st_uid, stat.S_IMODE(held.st_mode))
+            sticky_root = held.st_uid == 0 and bool(stat.S_IMODE(held.st_mode) & stat.S_ISVTX)
+            if (
+                not stat.S_ISDIR(held.st_mode)
+                or held.st_uid not in {0, trusted_uid}
+                or (stat.S_IMODE(held.st_mode) & 0o022 and not sticky_root)
+                or (before.st_dev, before.st_ino) != identity[:2]
+                or (after.st_dev, after.st_ino) != identity[:2]
+            ):
+                os.close(next_fd)
+                raise A3EvaluationError("local composition component walk found an unsafe ancestor")
+            components.append((parent_fd, component, (before.st_dev, before.st_ino, before.st_uid, stat.S_IMODE(before.st_mode))))
+            parent_fd = next_fd
+        named_before = os.stat(manifest_path.name, dir_fd=parent_fd, follow_symlinks=False)
+        manifest_parent_before = os.fstat(parent_fd)
+        manifest_fd = os.open(manifest_path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        held_before = os.fstat(manifest_fd)
+        raw_buffer = bytearray()
+        while len(raw_buffer) <= 16 * 1024 * 1024:
+            block = os.read(manifest_fd, min(1024 * 1024, 16 * 1024 * 1024 + 1 - len(raw_buffer)))
+            if not block:
+                break
+            raw_buffer.extend(block)
+        raw = bytes(raw_buffer)
+        if _after_read is not None:
+            if _test_uid is None:
+                raise A3EvaluationError("manifest test hook is forbidden in production")
+            _after_read(manifest_path)
+        held_after = os.fstat(manifest_fd)
+        named_after = os.stat(manifest_path.name, dir_fd=parent_fd, follow_symlinks=False)
+        manifest_parent_after = os.fstat(parent_fd)
+        if (
+            len(raw) > 16 * 1024 * 1024
+            or not stat.S_ISREG(held_before.st_mode)
+            or held_before.st_uid != trusted_uid
+            or stat.S_IMODE(held_before.st_mode) != 0o400
+            or (held_before.st_dev, held_before.st_ino, held_before.st_size, held_before.st_ctime_ns)
+            != (held_after.st_dev, held_after.st_ino, held_after.st_size, held_after.st_ctime_ns)
+            or (named_before.st_dev, named_before.st_ino) != (held_before.st_dev, held_before.st_ino)
+            or (named_after.st_dev, named_after.st_ino) != (held_before.st_dev, held_before.st_ino)
+            or (manifest_parent_before.st_dev, manifest_parent_before.st_ino, manifest_parent_before.st_mtime_ns, manifest_parent_before.st_ctime_ns)
+            != (manifest_parent_after.st_dev, manifest_parent_after.st_ino, manifest_parent_after.st_mtime_ns, manifest_parent_after.st_ctime_ns)
+        ):
+            raise A3EvaluationError("local production composition manifest held/named identity changed")
+        for ancestor_fd, component, identity in components:
+            observed = os.stat(component, dir_fd=ancestor_fd, follow_symlinks=False)
+            if (observed.st_dev, observed.st_ino, observed.st_uid, stat.S_IMODE(observed.st_mode)) != identity:
+                raise A3EvaluationError("local production composition ancestor changed during use")
+    finally:
+        if manifest_fd >= 0:
+            os.close(manifest_fd)
+        os.close(parent_fd)
+        for ancestor_fd, _, _ in components:
+            try:
+                os.close(ancestor_fd)
+            except OSError:
+                pass
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -631,6 +1017,11 @@ def load_local_production_transport(path: Path) -> A3LocalProductionTransport:
     if composition.schema != COMPOSITION_SCHEMA or composition.composition_sha256 != digest(composition.unsigned()):
         raise A3EvaluationError("local production composition self identity is invalid")
     return A3LocalProductionTransport(composition, _token=_SEAL)
+
+
+def load_local_production_transport(path: Path) -> A3LocalProductionTransport:
+    """Load one immutable root-owned canonical composition manifest and seal it."""
+    return _load_local_production_transport(path)
 
 
 __all__ = [
