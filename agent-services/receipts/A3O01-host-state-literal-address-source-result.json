@@ -1,0 +1,49 @@
+{
+  "change": {
+    "reason": "bind strict known-host verification and SSH destination to the literal operator-approved production address",
+    "remote_python": "/run/current-system/sw/bin/python3",
+    "target_host": "100.107.99.66"
+  },
+  "dispatchable": false,
+  "effects": {
+    "deployment": false,
+    "grant_consumed": false,
+    "grant_issued": false,
+    "nix": false,
+    "production_remote_connection": false,
+    "remote_write": false,
+    "repository_access": false,
+    "service": false
+  },
+  "gates": {
+    "archive_reproduction": "PASS",
+    "diff_check": "PASS",
+    "focused": "94 PASS / 0 FAIL",
+    "py_compile": "PASS",
+    "real_sshd_loopback_parity": "PASS",
+    "ruff": "PASS",
+    "tracked_full": "3943 PASS / 5 SKIP / 0 FAIL"
+  },
+  "grant": null,
+  "parity": {
+    "attempt": "a3o01-real-sshd-parity-20260813-r9",
+    "harness_sha256": "sha256:9dcc9c7911d60b0a9628d26941d5937107517c4e2c97acda859457fa243bde3a",
+    "production_remote_connection": false,
+    "receipt_file_sha256": "sha256:fb45d869de55e375dc84959f611243fa24ba3b834a218d621bf09f0aea44c409",
+    "receipt_self_sha256": "sha256:2376488aa3463cdc645ff25b46d321e14703acc62bcad464575a677804e06c78"
+  },
+  "receipt_sha256": "sha256:ba4f886f5e079e0312688a7fce177fc0456059b3a7833dd0bd3ce645a3881ffe",
+  "request": null,
+  "review_id": "A3O01-host-state-literal-address-source-20260813",
+  "schema": "tgw-reviewed-source-result/v1",
+  "source": {
+    "archive_path": "/opt/TGW/evidence/codex/sha256/109aeefb03579b9f8d9b7d8166a14a56f03bee777d2e2bfbac3cd2afb902323c.tar",
+    "archive_sha256": "sha256:109aeefb03579b9f8d9b7d8166a14a56f03bee777d2e2bfbac3cd2afb902323c",
+    "archive_size": 12810240,
+    "commit": "70f86f338fe6b4c8200c9d9e250bc83656e4e77a",
+    "controller_sha256": "sha256:ca72d4a19d42fc271c59e959ecc309d6c200c073d3bc4f6ca8b4605109ddfb70",
+    "helper_sha256": "sha256:28fed3d327f05a4fab4421dac6dfb7654516a3cd1e0a263961d8f206f5a393ee",
+    "tree": "fb137be8c90f2cd3d0ba7da24f3b8ff43904d330"
+  },
+  "status": "PASS"
+}

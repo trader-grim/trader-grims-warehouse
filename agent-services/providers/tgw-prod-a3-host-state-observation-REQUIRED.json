@@ -15,8 +15,8 @@
     }
   },
   "source": {
-    "base_commit": "74ad0597219987ef7c1f36e70c16859b49d4261a",
-    "base_tree": "feeddcc486732c72385468777bc5794a001014f1",
+    "base_commit": "70f86f338fe6b4c8200c9d9e250bc83656e4e77a",
+    "base_tree": "fb137be8c90f2cd3d0ba7da24f3b8ff43904d330",
     "controller_path": "src/tgw/a3_host_state_observation.py",
     "controller_sha256": "sha256:ca72d4a19d42fc271c59e959ecc309d6c200c073d3bc4f6ca8b4605109ddfb70",
     "stdlib_helper_path": "src/tgw/a3_host_state_helper.py",
@@ -54,9 +54,9 @@
     "deploy": false,
     "platform_bootstrap_grant_consumption": false
   },
-  "reason": "the production target is corrected to the literal approved address; exact-address real-sshd parity must be re-admitted before a fresh one-attempt SSH observation grant may be issued",
+  "reason": "the literal-address production source and exact-address real-sshd parity are complete; the A3O02 solution must be refreshed against these identities before a fresh one-attempt SSH observation grant is issued",
   "grant": null,
   "request": null,
   "dispatchable": false,
-  "descriptor_sha256": "sha256:69fb37aa5e6a35924342abea3659bcdcbdc85cf23d260f5e3112d77506db6e09"
+  "descriptor_sha256": "sha256:0308f37ea5b2e633a7d69fc0c27c65eda40fa65bee3a88e374626bcca232de80"
 }
