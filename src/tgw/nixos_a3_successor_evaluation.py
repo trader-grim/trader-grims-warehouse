@@ -56,30 +56,26 @@ A3_SOURCE_IDENTITIES: Mapping[str, Mapping[str, Any]] = {
     "remote_bootstrap": {"path": "src/tgw/nix_observer_render_remote.py", "sha256": "sha256:36214b1ab1fd617c41bf5b45acab353f25c68b2a5417721f385ed98bf2c36980", "size": 2201},
 }
 
-TOOL_NAMES = ("git", "tar", "nix", "nix_store", "systemd_analyze", "sshd")
+TOOL_NAMES = ("nix", "sshd", "unshare")
 RENDERED_ARTIFACTS = (
-    "a3-package",
-    "a3-module",
-    "native-wrapper",
-    "remote-helper",
+    "system-wrapper",
     "wrapper-config",
     "render-composition",
+    "prerequisite-receipt",
+    "attestation-public-key",
     "sudoers",
-    "authorized-key",
-    "systemd-unit",
-    "sshd-effective-config",
+    "authorized-key-codex",
+    "sshd-config",
 )
 RENDERED_RELATIVE_PATHS = {
-    "a3-package": "share/tgw/a3/a3-platform-bootstrap-package.nix",
-    "a3-module": "share/tgw/a3/a3-platform-bootstrap.nix",
-    "native-wrapper": "libexec/tgw-nix-observer-render-transport",
-    "remote-helper": "libexec/tgw-nix-observer-render-remote",
-    "wrapper-config": "etc/tgw/a3/wrapper.conf",
-    "render-composition": "etc/tgw/a3/render-composition.json",
-    "sudoers": "etc/sudoers.d/tgw-a3-platform-bootstrap",
-    "authorized-key": "etc/ssh/authorized_keys.d/tgw-a3-bootstrap",
-    "systemd-unit": "etc/systemd/system/tgw-a3-platform-bootstrap.service",
-    "sshd-effective-config": "etc/ssh/sshd_config",
+    "system-wrapper": "sw/bin/tgw-nix-observer-render-wrapper",
+    "wrapper-config": "etc/tgw/nix-observer-render-wrapper.conf",
+    "render-composition": "etc/tgw/nix-observer-render-composition.json",
+    "prerequisite-receipt": "etc/tgw/nix-observer-render-prerequisite.json",
+    "attestation-public-key": "etc/tgw/nix-observer-render-attestation.pub",
+    "sudoers": "etc/sudoers",
+    "authorized-key-codex": "etc/ssh/authorized_keys.d/codex",
+    "sshd-config": "etc/ssh/sshd_config",
 }
 FORBIDDEN_EFFECTS = (
     "activate",
@@ -100,6 +96,27 @@ class A3EvaluationError(ValueError):
 
 class A3EvaluationHold(A3EvaluationError):
     """The reviewed production integration is deliberately not executable."""
+
+
+class A3KnownFailure(A3EvaluationError):
+    def __init__(self, message: str, *, stage: str, step: str, returncode: int | None = None, stdout: bytes = b"", stderr: bytes = b"", cleanup: str = "REMOVED"):
+        super().__init__(message)
+        self.stage = stage
+        self.step = step
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.cleanup = cleanup
+
+
+class A3EvaluationFailure(A3EvaluationError):
+    def __init__(self, message: str, terminal: Mapping[str, Any]):
+        super().__init__(message)
+        self.terminal = dict(terminal)
+
+    @property
+    def evidence(self) -> tuple[str, ...]:
+        return ("nixos-a3-successor-evaluation-terminal:" + self.terminal["receipt_sha256"],)
 
 
 class A3EvaluationAmbiguous(A3EvaluationError):
@@ -207,13 +224,26 @@ def validate_integration_contract(value: Any, *, allow_fixture: bool = False) ->
     if any(contract.get(key) != expected for key, expected in fixed.items()):
         raise A3EvaluationError("integration contract broadens the exact tgw-prod A3 import")
     expected_options = {
-        "tgw.a3PlatformBootstrap.enable": True,
-        "tgw.a3PlatformBootstrap.authorizedPublicKeyRef": "external:root-owned-a3-authorized-ed25519-public-key",
-        "tgw.a3PlatformBootstrap.attestationPublicKeyRef": "external:a3-attestation-ed25519-public-verifier",
+        "services.tgw-a3-platform-bootstrap.enable": True,
+        "services.tgw-a3-platform-bootstrap.package": "inputs.tgw-lib.packages.x86_64-linux.a3-platform-bootstrap",
+        "services.tgw-a3-platform-bootstrap.wrapperConfig": "../../a3-public/nix-observer-render-wrapper.conf",
+        "services.tgw-a3-platform-bootstrap.composition": "../../a3-public/nix-observer-render-composition.json",
+        "services.tgw-a3-platform-bootstrap.prerequisiteReceipt": "../../a3-public/nix-observer-render-prerequisite.json",
+        "services.tgw-a3-platform-bootstrap.attestationPublicKey": "../../a3-public/nix-observer-render-attestation.pub",
+        "services.tgw-a3-platform-bootstrap.sshAuthorizedPublicKey": "../../a3-public/codex-authorized-key.txt",
     }
     if contract["exact_options"] != expected_options:
         raise A3EvaluationError("integration options are not the exact reviewed A3 option set")
-    if contract["changed_paths"] != ["flake.lock", "flake.nix", "hosts/tgw-prod/a3-platform-bootstrap.nix"]:
+    if contract["changed_paths"] != [
+        "a3-public/codex-authorized-key.txt",
+        "a3-public/nix-observer-render-attestation.pub",
+        "a3-public/nix-observer-render-composition.json",
+        "a3-public/nix-observer-render-prerequisite.json",
+        "a3-public/nix-observer-render-wrapper.conf",
+        "flake.lock",
+        "flake.nix",
+        "hosts/tgw-prod/a3-platform-bootstrap.nix",
+    ]:
         raise A3EvaluationError("integration changed-path set is not exact")
     manifest_payload = {key: item for key, item in contract.items() if key not in {"manifest_ref", "manifest_sha256"}}
     if contract["manifest_sha256"] != digest(manifest_payload) or contract["manifest_ref"] != "manifest:" + contract["manifest_sha256"]:
@@ -276,8 +306,15 @@ def validate_request(value: Any, *, allow_fixture: bool = False) -> dict[str, An
     if source["a3_identities"] != A3_SOURCE_IDENTITIES:
         raise A3EvaluationError("the exact eleven A3 source identities are incomplete")
     integration = validate_integration_contract(request["integration"], allow_fixture=allow_fixture)
-    target = _exact(request["target"], {"host", "system", "attribute", "expected_current"}, "target")
-    if target["host"] != "tgw-prod" or target["system"] != "x86_64-linux" or target["attribute"] != TARGET_ATTR or not _STORE.fullmatch(str(target["expected_current"])):
+    target = _exact(request["target"], {"host", "system", "attribute", "expected_current", "expected_successor"}, "target")
+    if (
+        target["host"] != "tgw-prod"
+        or target["system"] != "x86_64-linux"
+        or target["attribute"] != TARGET_ATTR
+        or not _STORE.fullmatch(str(target["expected_current"]))
+        or not _OUTPUT.fullmatch(str(target["expected_successor"]))
+        or target["expected_current"] == target["expected_successor"]
+    ):
         raise A3EvaluationError("target host/system/attribute/CAS is outside the fixed bound")
     closure = _exact(request["input_closure"], {"manifest_ref", "manifest_sha256", "paths"}, "input closure")
     paths = closure["paths"]
@@ -318,8 +355,8 @@ def validate_request(value: Any, *, allow_fixture: bool = False) -> dict[str, An
         _sha(item["sha256"], f"expected rendered {name}")
         if not isinstance(item["size"], int) or item["size"] <= 0:
             raise A3EvaluationError("expected rendered size is invalid")
-    expected_verifiers = _exact(request["expected_verifiers"], {"systemd_analyze", "sshd"}, "expected verifier outputs")
-    for name in ("systemd_analyze", "sshd"):
+    expected_verifiers = _exact(request["expected_verifiers"], {"sshd"}, "expected verifier outputs")
+    for name in ("sshd",):
         item = _exact(expected_verifiers[name], {"stdout_sha256", "stderr_sha256"}, f"expected {name} output")
         _sha(item["stdout_sha256"], f"expected {name} stdout")
         _sha(item["stderr_sha256"], f"expected {name} stderr")
@@ -350,6 +387,9 @@ def validate_request(value: Any, *, allow_fixture: bool = False) -> dict[str, An
         1 <= bounds[0] <= 1800 and 1024 <= bounds[1] <= 64 * 1024 * 1024 and 1024 <= bounds[2] <= 256 * 1024 * 1024 and bounds[2] <= bounds[3] <= 1024 * 1024 * 1024 and 1 <= bounds[4] <= 200_000
     ):
         raise A3EvaluationError("evaluation resource bounds are outside the closed range")
+    archive_sizes = (source["archive_size"], integration["archive_size"])
+    if any(not isinstance(size, int) or size <= 0 or size > policy["max_archive_bytes"] for size in archive_sizes) or sum(archive_sizes) > policy["max_archive_bytes"]:
+        raise A3EvaluationError("individual or total archive size exceeds the closed bound")
     if integration["status"] == "REVIEWED_EXECUTABLE" and credentials["final"] is not True:
         raise A3EvaluationError("reviewed executable request lacks final public credential identities")
     if request["request_sha256"] != self_hash(request, "request_sha256"):
@@ -372,6 +412,7 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
         "store_manifest_sha256",
         "rendered_artifacts",
         "verifiers",
+        "isolation",
         "effects",
         "cleanup",
         "deployable",
@@ -392,7 +433,7 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
         raise A3EvaluationError("success receipt is not bound to the exact request")
     if not isinstance(result["derivation"], str) or not _STORE.fullmatch(result["derivation"]) or not result["derivation"].endswith(".drv"):
         raise A3EvaluationError("success derivation is invalid")
-    if not isinstance(result["output_path"], str) or not _OUTPUT.fullmatch(result["output_path"]):
+    if result["output_path"] != request["target"]["expected_successor"] or not _OUTPUT.fullmatch(result["output_path"]):
         raise A3EvaluationError("success output is not the exact tgw-prod NixOS successor")
     manifest = result["store_manifest"]
     if not isinstance(manifest, list) or not manifest or len(manifest) > 100_000:
@@ -408,7 +449,7 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(rendered, Mapping) or tuple(sorted(rendered)) != tuple(sorted(RENDERED_ARTIFACTS)):
         raise A3EvaluationError("rendered A3 artifact set is incomplete or broadened")
     for name in RENDERED_ARTIFACTS:
-        item = _exact(rendered[name], {"path", "sha256", "size"}, f"rendered {name}")
+        item = _exact(rendered[name], {"path", "sha256", "size", "file_identity"}, f"rendered {name}")
         if (
             not isinstance(item["path"], str)
             or not item["path"].startswith(result["output_path"] + "/")
@@ -418,21 +459,39 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
         ):
             raise A3EvaluationError("rendered A3 artifact identity is invalid")
         expected = request["expected_rendered"][name]
-        if item != {
+        if {key: item[key] for key in ("path", "sha256", "size")} != {
             "path": result["output_path"] + "/" + expected["relative_path"],
             "sha256": expected["sha256"],
             "size": expected["size"],
         }:
             raise A3EvaluationError("rendered A3 artifact differs from its admitted identity")
-    verifiers = _exact(result["verifiers"], {"systemd_analyze", "sshd"}, "static verifiers")
+        identity = _exact(item["file_identity"], {"resolved_path", "dev", "ino", "uid", "gid", "mode", "nlink"}, f"rendered {name} held identity")
+        if (
+            not isinstance(identity["resolved_path"], str)
+            or not identity["resolved_path"].startswith("/nix/store/")
+            or any(not isinstance(identity[key], int) for key in ("dev", "ino", "uid", "gid", "mode", "nlink"))
+            or identity["nlink"] < 1
+        ):
+            raise A3EvaluationError("rendered A3 held identity is invalid")
+    verifiers = _exact(result["verifiers"], {"sshd"}, "static verifiers")
     expected_commands = {
-        "systemd_analyze": [request["tools"]["systemd_analyze"]["path"], "verify", "--root", result["output_path"], "tgw-a3-platform-bootstrap.service"],
-        "sshd": [request["tools"]["sshd"]["path"], "-T", "-C", "user=tgw-a3-bootstrap,host=tgw-prod,addr=127.0.0.1", "-f", rendered["sshd-effective-config"]["path"]],
+        "sshd": [request["tools"]["sshd"]["path"], "-T", "-C", "user=codex,host=tgw-prod,addr=127.0.0.1", "-f", rendered["sshd-config"]["path"]],
     }
     for name, command in expected_commands.items():
-        item = _exact(verifiers[name], {"command", "executable", "returncode", "stdout_sha256", "stderr_sha256"}, f"{name} verifier")
+        item = _exact(verifiers[name], {"command", "actual_command", "executable", "returncode", "stdout_sha256", "stderr_sha256"}, f"{name} verifier")
         if item["command"] != command or item["executable"] != request["tools"][name] or item["returncode"] != 0:
             raise A3EvaluationError("static verifier provenance or result is invalid")
+        actual = item["actual_command"]
+        if (
+            not isinstance(actual, list)
+            or len(actual) != len(command) + 3
+            or actual[1:3] != ["--net", "--"]
+            or not re.fullmatch(r"/proc/[1-9][0-9]*/fd/[1-9][0-9]*", str(actual[0]))
+            or not re.fullmatch(r"/proc/[1-9][0-9]*/fd/[1-9][0-9]*", str(actual[3]))
+            or not re.fullmatch(r"/proc/[1-9][0-9]*/fd/[1-9][0-9]*", str(actual[-1]))
+            or actual[4:-1] != command[1:-1]
+        ):
+            raise A3EvaluationError("static verifier actual held-fd command is invalid")
         _sha(item["stdout_sha256"], f"{name} stdout")
         _sha(item["stderr_sha256"], f"{name} stderr")
         if {
@@ -440,6 +499,16 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
             "stderr_sha256": item["stderr_sha256"],
         } != request["expected_verifiers"][name]:
             raise A3EvaluationError("static verifier output differs from the admitted result")
+    isolation = _exact(result["isolation"], {"schema", "kind", "tool", "command_count", "network_observed"}, "isolation evidence")
+    if (
+        isolation["schema"] != "tgw-nixos-a3-successor-isolation/v1"
+        or isolation["kind"] != "fresh-network-namespace-per-command"
+        or isolation["tool"] != request["tools"]["unshare"]
+        or not isinstance(isolation["command_count"], int)
+        or isolation["command_count"] < 1
+        or isolation["network_observed"] is not False
+    ):
+        raise A3EvaluationError("network isolation evidence is invalid")
     effects = _exact(result["effects"], {"build", *FORBIDDEN_EFFECTS}, "effect observation")
     if effects["build"] is not True or any(effects[name] is not False for name in FORBIDDEN_EFFECTS):
         raise A3EvaluationError("receipt reports a forbidden operational effect")
@@ -455,21 +524,84 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def terminal_receipt(*, request_sha256: str, outcome: str, stage: str, code: str, cleanup: str, observation: Mapping[str, Any]) -> dict[str, Any]:
+def terminal_receipt(
+    *,
+    request_sha256: str,
+    provider_sha256: str,
+    outcome: str,
+    stage: str,
+    step: str,
+    code: str,
+    returncode: int | None,
+    stdout: bytes,
+    stderr: bytes,
+    cleanup: str,
+    effects: Mapping[str, bool],
+    observation: Mapping[str, Any],
+) -> dict[str, Any]:
     if outcome not in {"FAILED", "AMBIGUOUS"} or cleanup not in {"NOT_CREATED", "REMOVED", "UNKNOWN"}:
         raise A3EvaluationError("terminal classification is invalid")
     value: dict[str, Any] = {
         "schema": TERMINAL_SCHEMA,
         "outcome": outcome,
         "request_sha256": request_sha256,
+        "provider_sha256": provider_sha256,
         "stage": stage,
+        "step": step,
         "code": code,
+        "returncode": returncode,
+        "stdout_sha256": digest(stdout),
+        "stderr_sha256": digest(stderr),
         "cleanup": cleanup,
+        "effects": dict(effects),
         "observation_sha256": digest(observation),
     }
     value["receipt_sha256"] = self_hash(value)
     value["evidence"] = ["nixos-a3-successor-evaluation-terminal:" + value["receipt_sha256"]]
-    return value
+    return validate_terminal(value, request_sha256=request_sha256, provider_sha256=provider_sha256)
+
+
+def validate_terminal(value: Any, *, request_sha256: str, provider_sha256: str) -> dict[str, Any]:
+    fields = {
+        "schema",
+        "outcome",
+        "request_sha256",
+        "provider_sha256",
+        "stage",
+        "step",
+        "code",
+        "returncode",
+        "stdout_sha256",
+        "stderr_sha256",
+        "cleanup",
+        "effects",
+        "observation_sha256",
+        "receipt_sha256",
+        "evidence",
+    }
+    terminal = dict(_exact(value, fields, "A3 successor terminal receipt"))
+    if (
+        terminal["schema"] != TERMINAL_SCHEMA
+        or terminal["outcome"] not in {"FAILED", "AMBIGUOUS"}
+        or terminal["request_sha256"] != request_sha256
+        or terminal["provider_sha256"] != provider_sha256
+        or terminal["cleanup"] not in {"NOT_CREATED", "REMOVED", "UNKNOWN"}
+        or not all(isinstance(terminal[key], str) and terminal[key] for key in ("stage", "step", "code"))
+        or (terminal["returncode"] is not None and not isinstance(terminal["returncode"], int))
+    ):
+        raise A3EvaluationError("terminal receipt classification or binding is invalid")
+    for key in ("stdout_sha256", "stderr_sha256", "observation_sha256"):
+        _sha(terminal[key], key)
+    effects = _exact(terminal["effects"], {"build", *FORBIDDEN_EFFECTS}, "terminal effects")
+    if any(effects[name] is not False for name in FORBIDDEN_EFFECTS) or effects["build"] not in {True, False}:
+        raise A3EvaluationError("terminal receipt reports a forbidden effect")
+    if terminal["outcome"] == "FAILED" and terminal["cleanup"] == "UNKNOWN":
+        raise A3EvaluationError("known failure cannot claim unknown cleanup")
+    if terminal["receipt_sha256"] != self_hash({key: item for key, item in terminal.items() if key != "evidence"}):
+        raise A3EvaluationError("terminal receipt self-hash mismatch")
+    if terminal["evidence"] != ["nixos-a3-successor-evaluation-terminal:" + terminal["receipt_sha256"]]:
+        raise A3EvaluationError("terminal receipt evidence is invalid")
+    return terminal
 
 
 @dataclass(frozen=True)
@@ -493,20 +625,58 @@ class A3SuccessorEvaluationProvider:
         self.composition = composition
         validate_integration_contract(composition.integration, allow_fixture=composition.allow_fixture)
 
+    def ready(self, request_value: Mapping[str, Any]) -> None:
+        """Fail before authority consumption unless the exact composition can run."""
+        request = validate_request(request_value, allow_fixture=self.composition.allow_fixture)
+        if request["integration"] != self.composition.integration:
+            raise A3EvaluationHold("request integration differs from the mounted composition")
+        if self.composition.status == "NOT_EXECUTABLE":
+            raise A3EvaluationHold("reviewed tgw-flake integration archive/closure/public identities are not final")
+        if not self.composition.allow_fixture and getattr(self.composition.runner, "production_transport", False) is not True:
+            raise A3EvaluationHold("production composition does not mount the exact bounded transport")
+
     def __call__(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         if not isinstance(effect, Mapping) or set(effect) != {"kind", "generation", "parameters"} or effect["kind"] != EFFECT_KIND:
             raise A3EvaluationError("provider accepts only the distinct A3 successor effect envelope")
+        self.ready(effect["parameters"])
         request = validate_request(effect["parameters"], allow_fixture=self.composition.allow_fixture)
-        if request["integration"] != self.composition.integration:
-            raise A3EvaluationError("request integration differs from the mounted composition")
-        if self.composition.status == "NOT_EXECUTABLE":
-            raise A3EvaluationHold("reviewed tgw-flake integration archive/closure/public identities are not final")
         try:
             untrusted = self.composition.runner(request)
             result = validate_success(untrusted, request)
             reference = self.composition.receipt_store.persist(result)
         except A3EvaluationHold:
             raise
+        except A3KnownFailure as exc:
+            terminal = terminal_receipt(
+                request_sha256=request["request_sha256"],
+                provider_sha256=self.composition.receipt_sha256,
+                outcome="FAILED",
+                stage=exc.stage,
+                step=exc.step,
+                code=type(exc).__name__,
+                returncode=exc.returncode,
+                stdout=exc.stdout,
+                stderr=exc.stderr,
+                cleanup=exc.cleanup,
+                effects={"build": exc.stage in {"nix-build", "post-build"}, **{name: False for name in FORBIDDEN_EFFECTS}},
+                observation={"detail": str(exc)},
+            )
+            try:
+                reference = self.composition.receipt_store.persist(terminal)
+            except Exception as store_exc:
+                observation = {
+                    "schema": "tgw-nixos-a3-successor-evaluation-observation/v1",
+                    "request_sha256": request["request_sha256"],
+                    "generation": effect["generation"],
+                    "type": type(store_exc).__name__,
+                    "detail": str(store_exc),
+                    "composition_sha256": self.composition.receipt_sha256,
+                    "terminal_sha256": terminal["receipt_sha256"],
+                }
+                raise A3EvaluationAmbiguous("known failure receipt persistence is ambiguous", observation) from store_exc
+            if reference != {"schema": STORE_REF_SCHEMA, "sha256": terminal["receipt_sha256"], "size": len(canonical(terminal))}:
+                raise A3EvaluationAmbiguous("known failure store reference is invalid", {"terminal_sha256": terminal["receipt_sha256"], "reference_sha256": digest(reference)})
+            raise A3EvaluationFailure(str(exc), terminal) from exc
         except Exception as exc:
             observation = {
                 "schema": "tgw-nixos-a3-successor-evaluation-observation/v1",
@@ -519,9 +689,15 @@ class A3SuccessorEvaluationProvider:
             terminal = terminal_receipt(
                 request_sha256=request["request_sha256"],
                 outcome="AMBIGUOUS",
+                provider_sha256=self.composition.receipt_sha256,
                 stage="evaluation-or-success-persistence",
+                step="unknown",
                 code=type(exc).__name__,
+                returncode=None,
+                stdout=b"",
+                stderr=b"",
                 cleanup="UNKNOWN",
+                effects={"build": True, **{name: False for name in FORBIDDEN_EFFECTS}},
                 observation=observation,
             )
             try:
@@ -555,14 +731,78 @@ class A3SuccessorEvaluationProvider:
 
 
 class ImmutableEvaluationStore:
-    """Minimal content-addressed receipt store; existing names never overwrite."""
+    """Held-root, same-inode, read-after-fsync immutable receipt store."""
 
     def __init__(self, root: Path, *, trusted_uid: int | None = None):
         self.root = Path(root)
-        metadata = self.root.lstat()
         uid = os.getuid() if trusted_uid is None else trusted_uid
-        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != uid or stat.S_IMODE(metadata.st_mode) != 0o700:
-            raise A3EvaluationError("receipt root must be a trusted mode-0700 directory")
+        self._parent_fd = os.open(self.root.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        named_before = os.stat(self.root.name, dir_fd=self._parent_fd, follow_symlinks=False)
+        self._root_fd = os.open(self.root.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self._parent_fd)
+        held = os.fstat(self._root_fd)
+        named_after = os.stat(self.root.name, dir_fd=self._parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(held.st_mode)
+            or held.st_uid != uid
+            or stat.S_IMODE(held.st_mode) != 0o700
+            or (named_before.st_dev, named_before.st_ino) != (held.st_dev, held.st_ino)
+            or (named_after.st_dev, named_after.st_ino) != (held.st_dev, held.st_ino)
+        ):
+            self.close()
+            raise A3EvaluationError("receipt root must be one held trusted mode-0700 directory")
+        self._root_identity = (held.st_dev, held.st_ino, held.st_uid, stat.S_IMODE(held.st_mode))
+
+    def close(self) -> None:
+        for name in ("_root_fd", "_parent_fd"):
+            fd = getattr(self, name, -1)
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, name, -1)
+
+    def __del__(self) -> None:
+        self.close()
+
+    def _verify_root(self) -> None:
+        held = os.fstat(self._root_fd)
+        named = os.stat(self.root.name, dir_fd=self._parent_fd, follow_symlinks=False)
+        observed = (held.st_dev, held.st_ino, held.st_uid, stat.S_IMODE(held.st_mode))
+        if observed != self._root_identity or (named.st_dev, named.st_ino) != observed[:2]:
+            raise A3EvaluationError("immutable receipt root identity changed")
+
+    @staticmethod
+    def _read_held(fd: int, maximum: int) -> bytes:
+        os.lseek(fd, 0, os.SEEK_SET)
+        value = bytearray()
+        while len(value) <= maximum:
+            block = os.read(fd, min(1024 * 1024, maximum + 1 - len(value)))
+            if not block:
+                break
+            value.extend(block)
+        if len(value) > maximum:
+            raise A3EvaluationError("immutable receipt exceeds its exact size")
+        return bytes(value)
+
+    def _verify_named(self, name: str, raw: bytes, expected_inode: tuple[int, int] | None = None) -> tuple[int, int]:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self._root_fd)
+        try:
+            metadata = os.fstat(fd)
+            identity = (metadata.st_dev, metadata.st_ino)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != self._root_identity[2]
+                or stat.S_IMODE(metadata.st_mode) != 0o400
+                or metadata.st_size != len(raw)
+                or metadata.st_nlink != 1
+                or (expected_inode is not None and identity != expected_inode)
+                or self._read_held(fd, len(raw)) != raw
+            ):
+                raise A3EvaluationError("immutable receipt named readback mismatch")
+            return identity
+        finally:
+            os.close(fd)
 
     def persist(self, receipt: Mapping[str, Any]) -> Mapping[str, Any]:
         raw = canonical(receipt)
@@ -570,9 +810,14 @@ class ImmutableEvaluationStore:
         if sha != self_hash({key: item for key, item in receipt.items() if key != "evidence"}):
             raise A3EvaluationError("refusing to persist a non-self-hashed receipt")
         name = str(sha).removeprefix("sha256:") + ".json"
-        root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self._verify_root()
         try:
-            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=root_fd)
+            fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=self._root_fd)
+        except FileExistsError:
+            self._verify_named(name, raw)
+            return {"schema": STORE_REF_SCHEMA, "sha256": sha, "size": len(raw)}
+        created = True
+        try:
             try:
                 offset = 0
                 while offset < len(raw):
@@ -581,11 +826,23 @@ class ImmutableEvaluationStore:
                         raise OSError("short immutable receipt write")
                     offset += count
                 os.fsync(fd)
+                held = os.fstat(fd)
+                if self._read_held(fd, len(raw)) != raw:
+                    raise A3EvaluationError("immutable receipt held readback mismatch")
             finally:
                 os.close(fd)
-            os.fsync(root_fd)
+            inode = self._verify_named(name, raw, (held.st_dev, held.st_ino))
+            os.fsync(self._root_fd)
+            self._verify_root()
+            self._verify_named(name, raw, inode)
+            created = False
         finally:
-            os.close(root_fd)
+            if created:
+                try:
+                    os.unlink(name, dir_fd=self._root_fd)
+                    os.fsync(self._root_fd)
+                except OSError:
+                    pass
         return {"schema": STORE_REF_SCHEMA, "sha256": sha, "size": len(raw)}
 
 
@@ -595,6 +852,7 @@ def main(
     input_stream: io.TextIOBase | None = None,
     output_stream: io.TextIOBase | None = None,
     provider: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    receipt_store: ReceiptStore | None = None,
 ) -> int:
     """Read exactly one effect envelope from stdin; no generic CLI arguments."""
     import sys
@@ -604,13 +862,52 @@ def main(
     sink = sys.stdout if output_stream is None else output_stream
     if arguments:
         raise SystemExit("nixos-a3-successor-evaluation accepts no arguments")
-    if provider is None:
-        raise A3EvaluationHold("production A3 successor evaluation provider is not mounted")
+    request_sha256 = "sha256:" + "0" * 64
     try:
         value = json.load(source)
+        if isinstance(value, Mapping) and isinstance(value.get("parameters"), Mapping):
+            candidate = value["parameters"].get("request_sha256")
+            if isinstance(candidate, str) and _SHA256.fullmatch(candidate):
+                request_sha256 = candidate
+        if provider is None:
+            raise A3KnownFailure(
+                "production A3 successor evaluation provider is not mounted",
+                stage="composition-readiness",
+                step="provider-mount",
+                cleanup="NOT_CREATED",
+            )
         result = provider(value)
+    except A3EvaluationFailure as exc:
+        sink.write(canonical(exc.terminal).decode() + "\n")
+        return 1
     except Exception as exc:
-        fallback = terminal_receipt(request_sha256="sha256:" + "0" * 64, outcome="FAILED", stage="stdin-or-provider", code=type(exc).__name__, cleanup="NOT_CREATED", observation={"detail": str(exc)})
+        fallback = terminal_receipt(
+            request_sha256=request_sha256,
+            provider_sha256=digest({"provider": "unmounted" if provider is None else type(provider).__name__}),
+            outcome="FAILED",
+            stage="stdin-or-provider",
+            step="stdin-parse-or-dispatch",
+            code=type(exc).__name__,
+            returncode=None,
+            stdout=b"",
+            stderr=b"",
+            cleanup="NOT_CREATED",
+            effects={"build": False, **{name: False for name in FORBIDDEN_EFFECTS}},
+            observation={"detail": str(exc)},
+        )
+        if receipt_store is None:
+            fallback["outcome"] = "AMBIGUOUS"
+            fallback["code"] = "ReceiptStoreUnavailable"
+            fallback["receipt_sha256"] = self_hash({key: item for key, item in fallback.items() if key != "evidence"})
+            fallback["evidence"] = ["nixos-a3-successor-evaluation-terminal:" + fallback["receipt_sha256"]]
+        else:
+            try:
+                receipt_store.persist(fallback)
+            except Exception as store_exc:
+                fallback["outcome"] = "AMBIGUOUS"
+                fallback["code"] = type(store_exc).__name__
+                fallback["receipt_sha256"] = self_hash({key: item for key, item in fallback.items() if key != "evidence"})
+                fallback["evidence"] = ["nixos-a3-successor-evaluation-terminal:" + fallback["receipt_sha256"]]
         sink.write(canonical(fallback).decode() + "\n")
         return 1
     sink.write(canonical(result).decode() + "\n")

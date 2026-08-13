@@ -27,7 +27,8 @@ ALTER TABLE plan_authority_requests
         'authority-canary',
         'approval-platform-bootstrap-deployment',
         'nixos-reviewed-evaluation',
-        'nixos-observer-render-evaluation'
+        'nixos-observer-render-evaluation',
+        'nixos-a3-successor-evaluation'
     ));
 
 CREATE TABLE IF NOT EXISTS plan_authority_decisions (

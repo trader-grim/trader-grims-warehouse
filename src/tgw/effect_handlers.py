@@ -21,6 +21,7 @@ from tgw.nixos_a3_successor_evaluation import (
 )
 from tgw.nixos_a3_successor_evaluation import (
     A3EvaluationAmbiguous,
+    A3EvaluationFailure,
     A3EvaluationHold,
 )
 from tgw.nixos_a3_successor_evaluation import (
@@ -86,9 +87,7 @@ def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
 
 
-def _observer_memory_evidence(
-    *, reason: str, generation: str, request: Mapping[str, Any], composition_sha256: str, observed: Any
-) -> tuple[str, ...]:
+def _observer_memory_evidence(*, reason: str, generation: str, request: Mapping[str, Any], composition_sha256: str, observed: Any) -> tuple[str, ...]:
     observation = {
         "schema": "tgw-nixos-observer-render-handler-observation/v1",
         "reason": reason,
@@ -194,6 +193,7 @@ class TypedEffectHandlerRegistry:
             ),
         }
         self._bootstrap_validate = bootstrap_validate
+        self._a3_successor_binding = nixos_a3_successor_evaluation
         self._a3_successor_allow_fixture = bool(getattr(getattr(nixos_a3_successor_evaluation, "composition", None), "allow_fixture", False))
 
     @staticmethod
@@ -230,6 +230,8 @@ class TypedEffectHandlerRegistry:
                 raise HeldEffect(str(exc), evidence=("nixos-a3-successor-composition:" + composition.receipt_sha256,)) from exc
             except A3EvaluationAmbiguous as exc:
                 raise AmbiguousEffect(str(exc), evidence=exc.evidence) from exc
+            except A3EvaluationFailure as exc:
+                raise EffectHandlerError(str(exc), evidence=exc.evidence) from exc
             if not isinstance(result, Mapping) or set(result) != {"evidence", "terminal", "store_ref"}:
                 raise AmbiguousEffect(
                     "A3 successor provider returned a malformed post-build envelope",
@@ -283,10 +285,7 @@ class TypedEffectHandlerRegistry:
                 else:
                     outcome = EffectHandlerError
                 refs = (exc.attempt_ref, exc.transport_ref, exc.terminal_ref)
-                evidence = tuple(
-                    f"nixos-observer-render-{label}:{ref['sha256']}"
-                    for label, ref in zip(("attempt", "transport", "terminal"), refs, strict=True)
-                )
+                evidence = tuple(f"nixos-observer-render-{label}:{ref['sha256']}" for label, ref in zip(("attempt", "transport", "terminal"), refs, strict=True))
                 raise outcome(str(exc), evidence=evidence) from exc
             try:
                 validated = validate_handler_success(result, request=request, composition=composition)
@@ -592,7 +591,17 @@ class TypedEffectHandlerRegistry:
             if any(parameters[key] is not False for key in ("activate", "profile_write", "home_db_write")):
                 raise ValueError("observer render contains a forbidden activation or write effect")
         elif effect.kind is EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION:
+            if self._a3_successor_binding is None:
+                raise HeldEffect("A3 successor evaluation provider is not mounted")
             parameters = validate_a3_successor_request(effect.parameters, allow_fixture=self._a3_successor_allow_fixture)
+            ready = getattr(self._a3_successor_binding, "ready", None)
+            if not callable(ready):
+                raise HeldEffect("A3 successor evaluation provider has no readiness boundary")
+            try:
+                ready(parameters)
+            except A3EvaluationHold as exc:
+                composition = self._a3_successor_binding.composition
+                raise HeldEffect(str(exc), evidence=("nixos-a3-successor-composition:" + composition.receipt_sha256,)) from exc
         else:  # pragma: no cover - EffectKind is closed above
             raise ValueError("effect kind has no registered parameter validator")
         handler_id, handler, rollback = self._providers[effect.kind]
@@ -651,9 +660,7 @@ class AuthorityEffectController:
             return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, evidence, detail=str(exc))
         except BootstrapStateAmbiguous as exc:
             if not exc.rollback_required:
-                return self._receipt(
-                    request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc)
-                )
+                return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc))
             if rollback is not None:
                 try:
                     rolled_back = rollback(parameters)
@@ -689,9 +696,7 @@ class AuthorityEffectController:
                         exc.evidence,
                         detail=f"effect={exc}; rollback={rollback_exc}",
                     )
-            return self._receipt(
-                request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc)
-            )
+            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc))
         except Exception as exc:
             if rollback is not None:
                 try:

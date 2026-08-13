@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import io
 import json
+import os
+import stat
 import subprocess
 import tarfile
 from pathlib import Path
@@ -10,7 +12,7 @@ from typing import Any, Mapping
 
 import pytest
 
-from tgw.effect_handlers import TypedEffectHandlerRegistry
+from tgw.effect_handlers import AuthorityEffectController, EffectOutcome, TypedEffectHandlerRegistry
 from tgw.nixos_a3_successor_evaluation import (
     A3_SOURCE_IDENTITIES,
     INTEGRATION_SCHEMA,
@@ -29,6 +31,8 @@ from tgw.nixos_a3_successor_evaluation import (
     A3EvaluationAmbiguous,
     A3EvaluationComposition,
     A3EvaluationError,
+    A3EvaluationFailure,
+    A3KnownFailure,
     A3SuccessorEvaluationProvider,
     ImmutableEvaluationStore,
     canonical,
@@ -83,14 +87,33 @@ def _integration(tmp_path: Path) -> tuple[dict[str, Any], bytes]:
     _git("config", "user.email", "fixture@example.invalid", cwd=repository)
     (repository / "flake.lock").write_text('{"version":7}\n')
     (repository / "flake.nix").write_text("{ inputs, ... }: { }\n")
+    public = repository / "a3-public"
+    public.mkdir()
+    public_values = {
+        "codex-authorized-key.txt": (
+            'restrict,command="/run/wrappers/bin/sudo -n -- /run/current-system/sw/bin/tgw-nix-observer-render-wrapper" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFIXTUREONLY00000000000000000000000000000\n'
+        ),
+        "nix-observer-render-attestation.pub": "fixture-public-attestation\n",
+        "nix-observer-render-composition.json": "{}\n",
+        "nix-observer-render-prerequisite.json": "{}\n",
+        "nix-observer-render-wrapper.conf": "fixture=true\n",
+    }
+    for name, content in public_values.items():
+        (public / name).write_text(content)
     module = repository / "hosts/tgw-prod"
     module.mkdir(parents=True)
     (module / "a3-platform-bootstrap.nix").write_text(
         """{ inputs, ... }: {
   imports = [ inputs.tgw-lib.nixosModules.a3-platform-bootstrap ];
-  tgw.a3PlatformBootstrap.enable = true;
-  tgw.a3PlatformBootstrap.authorizedPublicKeyRef = "external:root-owned-a3-authorized-ed25519-public-key";
-  tgw.a3PlatformBootstrap.attestationPublicKeyRef = "external:a3-attestation-ed25519-public-verifier";
+  services.tgw-a3-platform-bootstrap = {
+    enable = true;
+    package = inputs.tgw-lib.packages.x86_64-linux.a3-platform-bootstrap;
+    wrapperConfig = ../../a3-public/nix-observer-render-wrapper.conf;
+    composition = ../../a3-public/nix-observer-render-composition.json;
+    prerequisiteReceipt = ../../a3-public/nix-observer-render-prerequisite.json;
+    attestationPublicKey = ../../a3-public/nix-observer-render-attestation.pub;
+    sshAuthorizedPublicKey = builtins.readFile ../../a3-public/codex-authorized-key.txt;
+  };
 }
 """
     )
@@ -113,11 +136,24 @@ def _integration(tmp_path: Path) -> tuple[dict[str, Any], bytes]:
         "flake_lock_sha256": digest((repository / "flake.lock").read_bytes()),
         "module_import": "inputs.tgw-lib.nixosModules.a3-platform-bootstrap",
         "exact_options": {
-            "tgw.a3PlatformBootstrap.enable": True,
-            "tgw.a3PlatformBootstrap.authorizedPublicKeyRef": "external:root-owned-a3-authorized-ed25519-public-key",
-            "tgw.a3PlatformBootstrap.attestationPublicKeyRef": "external:a3-attestation-ed25519-public-verifier",
+            "services.tgw-a3-platform-bootstrap.enable": True,
+            "services.tgw-a3-platform-bootstrap.package": "inputs.tgw-lib.packages.x86_64-linux.a3-platform-bootstrap",
+            "services.tgw-a3-platform-bootstrap.wrapperConfig": "../../a3-public/nix-observer-render-wrapper.conf",
+            "services.tgw-a3-platform-bootstrap.composition": "../../a3-public/nix-observer-render-composition.json",
+            "services.tgw-a3-platform-bootstrap.prerequisiteReceipt": "../../a3-public/nix-observer-render-prerequisite.json",
+            "services.tgw-a3-platform-bootstrap.attestationPublicKey": "../../a3-public/nix-observer-render-attestation.pub",
+            "services.tgw-a3-platform-bootstrap.sshAuthorizedPublicKey": "../../a3-public/codex-authorized-key.txt",
         },
-        "changed_paths": ["flake.lock", "flake.nix", "hosts/tgw-prod/a3-platform-bootstrap.nix"],
+        "changed_paths": [
+            "a3-public/codex-authorized-key.txt",
+            "a3-public/nix-observer-render-attestation.pub",
+            "a3-public/nix-observer-render-composition.json",
+            "a3-public/nix-observer-render-prerequisite.json",
+            "a3-public/nix-observer-render-wrapper.conf",
+            "flake.lock",
+            "flake.nix",
+            "hosts/tgw-prod/a3-platform-bootstrap.nix",
+        ],
         "unrelated_diff": False,
         "public_credentials_final": False,
         "closure_final": False,
@@ -146,7 +182,7 @@ def _tool(path: Path) -> dict[str, Any]:
 
 def request_fixture(tmp_path: Path) -> tuple[dict[str, Any], bytes]:
     integration, integration_archive = _integration(tmp_path)
-    tools = {name: _tool(tmp_path / name.replace("_", "-")) for name in ("git", "tar", "nix", "nix_store", "systemd_analyze", "sshd")}
+    tools = {name: _tool(tmp_path / name.replace("_", "-")) for name in ("nix", "sshd", "unshare")}
     closure_paths = [{"path": f"/nix/store/{'1' * 32}-nixpkgs", "nar_sha256": "sha256:" + "2" * 64, "nar_size": 1024}]
     value: dict[str, Any] = {
         "schema": REQUEST_SCHEMA,
@@ -163,7 +199,7 @@ def request_fixture(tmp_path: Path) -> tuple[dict[str, Any], bytes]:
             "a3_identities": A3_SOURCE_IDENTITIES,
         },
         "integration": integration,
-        "target": {"host": "tgw-prod", "system": "x86_64-linux", "attribute": TARGET_ATTR, "expected_current": f"/nix/store/{'3' * 32}-nixos-system-tgw-prod-26.07"},
+        "target": {"host": "tgw-prod", "system": "x86_64-linux", "attribute": TARGET_ATTR, "expected_current": f"/nix/store/{'3' * 32}-nixos-system-tgw-prod-26.07", "expected_successor": OUTPUT},
         "input_closure": {"manifest_ref": "", "manifest_sha256": digest(closure_paths), "paths": closure_paths},
         "tools": tools,
         "credentials": {
@@ -181,10 +217,7 @@ def request_fixture(tmp_path: Path) -> tuple[dict[str, Any], bytes]:
             }
             for name in RENDERED_ARTIFACTS
         },
-        "expected_verifiers": {
-            "systemd_analyze": {"stdout_sha256": digest(b""), "stderr_sha256": digest(b"")},
-            "sshd": {"stdout_sha256": digest(b""), "stderr_sha256": digest(b"")},
-        },
+        "expected_verifiers": {"sshd": {"stdout_sha256": digest(b""), "stderr_sha256": digest(b"")}},
         "policy": {
             "offline": True,
             "nix_remote": "local",
@@ -218,11 +251,19 @@ def success_fixture(request: Mapping[str, Any]) -> dict[str, Any]:
             "path": OUTPUT + "/" + request["expected_rendered"][name]["relative_path"],
             "sha256": request["expected_rendered"][name]["sha256"],
             "size": request["expected_rendered"][name]["size"],
+            "file_identity": {
+                "resolved_path": "/nix/store/" + "9" * 32 + "-rendered/" + name,
+                "dev": 1,
+                "ino": index,
+                "uid": 0,
+                "gid": 0,
+                "mode": 0o444,
+                "nlink": 1,
+            },
         }
-        for name in RENDERED_ARTIFACTS
+        for index, name in enumerate(RENDERED_ARTIFACTS, 1)
     }
-    systemd_command = [request["tools"]["systemd_analyze"]["path"], "verify", "--root", OUTPUT, "tgw-a3-platform-bootstrap.service"]
-    sshd_command = [request["tools"]["sshd"]["path"], "-T", "-C", "user=tgw-a3-bootstrap,host=tgw-prod,addr=127.0.0.1", "-f", rendered["sshd-effective-config"]["path"]]
+    sshd_command = [request["tools"]["sshd"]["path"], "-T", "-C", "user=codex,host=tgw-prod,addr=127.0.0.1", "-f", rendered["sshd-config"]["path"]]
     result: dict[str, Any] = {
         "schema": SUCCESS_SCHEMA,
         "outcome": "SUCCEEDED",
@@ -237,8 +278,28 @@ def success_fixture(request: Mapping[str, Any]) -> dict[str, Any]:
         "store_manifest_sha256": digest(manifest),
         "rendered_artifacts": rendered,
         "verifiers": {
-            "systemd_analyze": {"command": systemd_command, "executable": request["tools"]["systemd_analyze"], "returncode": 0, "stdout_sha256": digest(b""), "stderr_sha256": digest(b"")},
-            "sshd": {"command": sshd_command, "executable": request["tools"]["sshd"], "returncode": 0, "stdout_sha256": digest(b""), "stderr_sha256": digest(b"")},
+            "sshd": {
+                "command": sshd_command,
+                "actual_command": [
+                    "/proc/123/fd/10",
+                    "--net",
+                    "--",
+                    "/proc/123/fd/11",
+                    *sshd_command[1:-1],
+                    "/proc/123/fd/12",
+                ],
+                "executable": request["tools"]["sshd"],
+                "returncode": 0,
+                "stdout_sha256": digest(b""),
+                "stderr_sha256": digest(b""),
+            },
+        },
+        "isolation": {
+            "schema": "tgw-nixos-a3-successor-isolation/v1",
+            "kind": "fresh-network-namespace-per-command",
+            "tool": request["tools"]["unshare"],
+            "command_count": 8,
+            "network_observed": False,
         },
         "effects": {
             "build": True,
@@ -280,6 +341,7 @@ def _mutate(value: Mapping[str, Any], path: tuple[str, ...], replacement: Any) -
         (("policy", "offline"), False),
         (("policy", "builders"), ["ssh://host"]),
         (("policy", "allow_ifd"), True),
+        (("policy", "max_archive_bytes"), 9_600_000),
         (("credentials", "authorized_public_key_ref"), "-----BEGIN OPENSSH PRIVATE KEY-----"),
     ],
 )
@@ -294,6 +356,27 @@ def test_integration_contract_not_executable_fixture_is_source_truth() -> None:
     contract = json.loads(Path("agent-services/providers/nixos-a3-successor-integration-NOT-EXECUTABLE.json").read_text())
     assert validate_integration_contract(contract)["status"] == "NOT_EXECUTABLE"
     assert contract["commit"] is None and contract["archive_ref"] is None
+
+
+def test_contract_matches_actual_admitted_module_and_outputs() -> None:
+    module = Path("nix/a3-platform-bootstrap.nix").read_text()
+    fixture = Path("nix/review-fixtures/tgw-prod-a3-successor-integration.nix").read_text()
+    assert "options.services.tgw-a3-platform-bootstrap" in module
+    assert "services.tgw-a3-platform-bootstrap" in fixture
+    for option in ("package", "wrapperConfig", "composition", "prerequisiteReceipt", "attestationPublicKey", "sshAuthorizedPublicKey"):
+        assert f"{option} =" in fixture
+    assert "tgw.a3PlatformBootstrap" not in fixture
+    assert "tgw-a3-platform-bootstrap.service" not in module
+    assert set(RENDERED_PATHS.values()) == {
+        "sw/bin/tgw-nix-observer-render-wrapper",
+        "etc/tgw/nix-observer-render-wrapper.conf",
+        "etc/tgw/nix-observer-render-composition.json",
+        "etc/tgw/nix-observer-render-prerequisite.json",
+        "etc/tgw/nix-observer-render-attestation.pub",
+        "etc/sudoers",
+        "etc/ssh/authorized_keys.d/codex",
+        "etc/ssh/sshd_config",
+    }
 
 
 @pytest.mark.parametrize(
@@ -342,16 +425,158 @@ def test_immutable_store_accepts_success_and_ambiguity_receipts(tmp_path: Path) 
     assert raised.value.evidence[0].startswith("nixos-a3-successor-evaluation-terminal:sha256:")
 
 
+def test_immutable_store_rejects_short_write_and_root_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    request, _ = request_fixture(tmp_path)
+    root = tmp_path / "receipts"
+    root.mkdir(mode=0o700)
+    store = ImmutableEvaluationStore(root)
+    real_write = os.write
+    monkeypatch.setattr(os, "write", lambda fd, raw: 0 if raw else real_write(fd, raw))
+    with pytest.raises(OSError, match="short"):
+        store.persist(success_fixture(request))
+    monkeypatch.setattr(os, "write", real_write)
+    root.rename(tmp_path / "held-receipts")
+    root.mkdir(mode=0o777)
+    root.chmod(0o777)
+    with pytest.raises(A3EvaluationError, match="root identity changed"):
+        store.persist(success_fixture(request))
+
+
+def test_immutable_store_rejects_named_replacement_during_fsync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    request, _ = request_fixture(tmp_path)
+    root = tmp_path / "receipts"
+    root.mkdir(mode=0o700)
+    store = ImmutableEvaluationStore(root)
+    real_fsync = os.fsync
+    replaced = False
+
+    def attacking_fsync(fd: int) -> None:
+        nonlocal replaced
+        metadata = os.fstat(fd)
+        if stat.S_ISREG(metadata.st_mode) and not replaced:
+            replaced = True
+            names = list(root.iterdir())
+            assert len(names) == 1
+            names[0].rename(root / "displaced")
+            (root / names[0].name).write_bytes(b"replacement")
+            (root / names[0].name).chmod(0o400)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", attacking_fsync)
+    with pytest.raises(A3EvaluationError, match="named readback mismatch"):
+        store.persist(success_fixture(request))
+
+
 def test_default_registry_has_distinct_unavailable_handler(tmp_path: Path) -> None:
     request, _ = request_fixture(tmp_path)
     request["integration"] = json.loads(Path("agent-services/providers/nixos-a3-successor-integration-NOT-EXECUTABLE.json").read_text())
     request["request_sha256"] = self_hash(request, "request_sha256")
     registry = TypedEffectHandlerRegistry(release_install=lambda _: {}, release_rollback=lambda _: {}, flake_push=lambda _: {}, flake_switch_record=lambda _: {}, dependency_resubmit=lambda _: {})
-    handler_id, parameters, handler, rollback = registry.prepare(TypedEffect(EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION, "g1", request))
-    assert handler_id == "nixos-a3-successor-evaluation@1"
-    assert rollback is None and parameters["generation"] == "g1"
-    with pytest.raises(Exception, match="no immutable composition binding"):
-        handler(parameters)
+    with pytest.raises(Exception, match="not mounted"):
+        registry.prepare(TypedEffect(EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION, "g1", request))
+
+
+def test_unready_successor_never_consumes_authority(tmp_path: Path) -> None:
+    request, _ = request_fixture(tmp_path)
+    request["integration"] = json.loads(Path("agent-services/providers/nixos-a3-successor-integration-NOT-EXECUTABLE.json").read_text())
+    request["request_sha256"] = self_hash(request, "request_sha256")
+    consume_calls: list[str] = []
+    registry = TypedEffectHandlerRegistry(
+        release_install=lambda _: {},
+        release_rollback=lambda _: {},
+        flake_push=lambda _: {},
+        flake_switch_record=lambda _: {},
+        dependency_resubmit=lambda _: {},
+    )
+    controller = AuthorityEffectController(registry, lambda request_id, **_: consume_calls.append(request_id))
+    with pytest.raises(Exception, match="not mounted"):
+        controller.execute(
+            request_id="request-1",
+            effect=TypedEffect(EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION, "g1", request),
+        )
+    assert consume_calls == []
+
+
+def test_mounted_not_executable_successor_never_consumes_authority(tmp_path: Path) -> None:
+    request, _ = request_fixture(tmp_path)
+    contract = json.loads(Path("agent-services/providers/nixos-a3-successor-integration-NOT-EXECUTABLE.json").read_text())
+    request["integration"] = contract
+    request["request_sha256"] = self_hash(request, "request_sha256")
+    provider = A3SuccessorEvaluationProvider(A3EvaluationComposition(contract, MemoryStore(), lambda _: success_fixture(request)))
+    registry = TypedEffectHandlerRegistry(
+        release_install=lambda _: {},
+        release_rollback=lambda _: {},
+        flake_push=lambda _: {},
+        flake_switch_record=lambda _: {},
+        dependency_resubmit=lambda _: {},
+        nixos_a3_successor_evaluation=provider,
+    )
+    consumed: list[str] = []
+    controller = AuthorityEffectController(registry, lambda request_id, **_: consumed.append(request_id))
+    with pytest.raises(Exception, match="archive size|not final"):
+        controller.execute(
+            request_id="request-1",
+            effect=TypedEffect(EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION, "g1", request),
+        )
+    assert consumed == []
+
+
+def test_known_failure_is_persisted_failed_and_store_loss_is_ambiguous(tmp_path: Path) -> None:
+    request, _ = request_fixture(tmp_path)
+    store = MemoryStore()
+
+    def known(_: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise A3KnownFailure(
+            "nix refused",
+            stage="nix-build",
+            step="build",
+            returncode=17,
+            stdout=b"known stdout",
+            stderr=b"known stderr",
+        )
+
+    provider = A3SuccessorEvaluationProvider(A3EvaluationComposition(request["integration"], store, known, allow_fixture=True))
+    with pytest.raises(A3EvaluationFailure) as raised:
+        provider({"kind": EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION.value, "generation": "g1", "parameters": request})
+    terminal = raised.value.terminal
+    assert terminal["outcome"] == "FAILED" and terminal["returncode"] == 17
+    assert terminal["stdout_sha256"] == digest(b"known stdout")
+    assert terminal["effects"]["build"] is True
+
+    registry = TypedEffectHandlerRegistry(
+        release_install=lambda _: {},
+        release_rollback=lambda _: {},
+        flake_push=lambda _: {},
+        flake_switch_record=lambda _: {},
+        dependency_resubmit=lambda _: {},
+        nixos_a3_successor_evaluation=provider,
+    )
+    controller = AuthorityEffectController(
+        registry,
+        lambda _request_id, **_: {"receipt_id": "authority-receipt-1"},
+    )
+    execution = controller.execute(
+        request_id="request-1",
+        effect=TypedEffect(EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION, "g1", request),
+    )
+    assert execution.outcome is EffectOutcome.FAILED
+    assert execution.evidence[0].startswith("nixos-a3-successor-evaluation-terminal:sha256:")
+
+    class RefusingStore:
+        def persist(self, receipt: Mapping[str, Any]) -> Mapping[str, Any]:
+            raise OSError("store unavailable")
+
+    lost = A3SuccessorEvaluationProvider(A3EvaluationComposition(request["integration"], RefusingStore(), lambda _: success_fixture(request), allow_fixture=True))
+    with pytest.raises(A3EvaluationAmbiguous) as ambiguous:
+        lost({"kind": EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION.value, "generation": "g1", "parameters": request})
+    assert ambiguous.value.evidence[0].startswith("nixos-a3-successor-evaluation-memory:sha256:")
+
+
+def test_sql_migration_admits_only_exact_successor_kind() -> None:
+    sql = Path("src/tgw/plan_authority.sql").read_text()
+    assert sql.count("'nixos-a3-successor-evaluation'") == 1
+    assert "nixos-a3-successor-evaluation@1" not in sql
+    assert "generic" not in sql
 
 
 def test_cli_reads_stdin_only_and_emits_handler_evidence(tmp_path: Path) -> None:
@@ -363,6 +588,23 @@ def test_cli_reads_stdin_only_and_emits_handler_evidence(tmp_path: Path) -> None
     assert json.loads(output.getvalue())["terminal"]["schema"] == SUCCESS_SCHEMA
     with pytest.raises(SystemExit):
         main(["--command", "switch"], input_stream=io.StringIO("{}"), output_stream=io.StringIO(), provider=provider)
+
+
+def test_cli_missing_provider_persists_exact_request_failed_receipt(tmp_path: Path) -> None:
+    request, _ = request_fixture(tmp_path)
+    envelope = {
+        "kind": EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION.value,
+        "generation": "g1",
+        "parameters": request,
+    }
+    store = MemoryStore()
+    output = io.StringIO()
+    assert main([], input_stream=io.StringIO(json.dumps(envelope)), output_stream=output, receipt_store=store) == 1
+    terminal = json.loads(output.getvalue())
+    assert terminal["outcome"] == "FAILED"
+    assert terminal["request_sha256"] == request["request_sha256"]
+    assert terminal["stage"] == "stdin-or-provider"
+    assert store.values == [terminal]
 
 
 def test_archive_rejects_links_and_wrong_commit(tmp_path: Path) -> None:
@@ -396,6 +638,7 @@ def test_remote_fake_nix_systemd_sshd_e2e(tmp_path: Path) -> None:
     def runner(argv: list[str], **kwargs: Any) -> Completed:
         env = kwargs["env"]
         seen.append((argv, env))
+        assert argv[0].startswith("/proc/") and argv[1:3] == ["--net", "--"]
         assert env["NIX_REMOTE"] == "local" and env["PATH"] == ""
         assert "substituters =\n" in env["NIX_CONFIG"] and "builders =\n" in env["NIX_CONFIG"]
         joined = " ".join(argv)
@@ -405,8 +648,12 @@ def test_remote_fake_nix_systemd_sshd_e2e(tmp_path: Path) -> None:
         if " build " in f" {joined} ":
             assert "--no-link" in argv and "--offline" in argv and "--no-write-lock-file" in argv
             return Completed(0, (OUTPUT + "\n").encode(), b"")
+        if " derivation show " in f" {joined} ":
+            return Completed(0, json.dumps({DRV: {"outputs": {"out": {"path": OUTPUT}}}}).encode(), b"")
         if " path-info " in f" {joined} ":
-            return Completed(0, json.dumps({OUTPUT: {"narHash": "sha256-fixture", "narSize": 4096}}).encode(), b"")
+            path = OUTPUT if OUTPUT in argv else request["input_closure"]["paths"][0]["path"]
+            size = 4096 if path == OUTPUT else 1024
+            return Completed(0, json.dumps({path: {"narHash": "sha256-fixture", "narSize": size}}).encode(), b"")
         if " hash path " in f" {joined} ":
             return Completed(0, (("6" if OUTPUT in argv else "2") * 64 + "\n").encode(), b"")
         return Completed(0, b"", b"")
@@ -420,10 +667,14 @@ def test_remote_fake_nix_systemd_sshd_e2e(tmp_path: Path) -> None:
         allow_fixture=True,
         output_resolver=lambda _: output_root,
     )
-    validate_success(result, request)
+    # The fixture uses a mutable tmp output resolver, so production validation
+    # correctly refuses its non-store inode identity.  The executor still proves
+    # the fake Nix command, isolation, archive, closure, and cleanup flow.
+    with pytest.raises(A3EvaluationError, match="held identity"):
+        validate_success(result, request)
     assert result["deployable"] is False and result["effects"]["build"] is True
     assert all(result["effects"][name] is False for name in result["effects"] if name != "build")
-    assert len(seen) == 7
+    assert len(seen) == 8
 
 
 def test_remote_cleanup_failure_is_never_success(tmp_path: Path) -> None:
@@ -438,6 +689,45 @@ def test_remote_cleanup_failure_is_never_success(tmp_path: Path) -> None:
             allow_fixture=True,
             cleanup=lambda _: (_ for _ in ()).throw(OSError("refuse")),
         )
+
+
+def test_remote_refuses_input_nar_size_before_build(tmp_path: Path) -> None:
+    request, integration_archive = request_fixture(tmp_path)
+    request["input_closure"]["paths"][0]["nar_size"] = 2048
+    request["input_closure"]["manifest_sha256"] = digest(request["input_closure"]["paths"])
+    request["input_closure"]["manifest_ref"] = "manifest:" + request["input_closure"]["manifest_sha256"]
+    request["request_sha256"] = self_hash(request, "request_sha256")
+    product_archive = subprocess.run(
+        [
+            "git",
+            "-c",
+            "safe.directory=/opt/TGW/tgw-lib/src/trader-grims-warehouse",
+            "archive",
+            "--format=tar",
+            "--prefix=trader-grims-warehouse/",
+            SOURCE_COMMIT,
+        ],
+        cwd=Path.cwd(),
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: Any) -> Completed:
+        calls.append(argv)
+        path = request["input_closure"]["paths"][0]["path"]
+        return Completed(0, json.dumps({path: {"narSize": 1024}}).encode(), b"")
+
+    with pytest.raises(A3EvaluationError, match="NAR size mismatch"):
+        execute(
+            request,
+            tgw_archive=product_archive,
+            integration_archive=integration_archive,
+            runner=runner,
+            scratch_parent=tmp_path,
+            allow_fixture=True,
+        )
+    assert len(calls) == 1 and "build" not in calls[0]
 
 
 def test_live_nix_gate_is_explicit_and_not_claimed() -> None:

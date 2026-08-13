@@ -23,6 +23,7 @@ from tgw.nixos_a3_successor_evaluation import (
     SUCCESS_SCHEMA,
     TARGET_ATTR,
     A3EvaluationError,
+    A3KnownFailure,
     digest,
     self_hash,
     validate_request,
@@ -83,7 +84,7 @@ def verify_git_archive(
     expected_tree: str,
     max_files: int,
     max_bytes: int,
-) -> None:
+) -> tuple[int, int]:
     """Verify Git/PAX identities and extract only regular files/directories."""
     if not raw or len(raw) > max_bytes:
         raise A3EvaluationError("archive byte bound exceeded")
@@ -137,6 +138,7 @@ def verify_git_archive(
             entries[relative] = (member.mode, content)
     if not entries or _git_tree(entries) != expected_tree:
         raise A3EvaluationError("archive content does not reproduce the exact Git tree")
+    return len(entries), total
 
 
 def _held_tool(value: Mapping[str, Any]) -> tuple[int, str]:
@@ -162,6 +164,73 @@ def _held_tool(value: Mapping[str, Any]) -> tuple[int, str]:
     return fd, f"/proc/{os.getpid()}/fd/{fd}"
 
 
+def _verify_held_tool(fd: int, value: Mapping[str, Any]) -> None:
+    metadata = os.fstat(fd)
+    os.lseek(fd, 0, os.SEEK_SET)
+    raw = bytearray()
+    while True:
+        block = os.read(fd, 1024 * 1024)
+        if not block:
+            break
+        raw.extend(block)
+    named = os.stat(value["path"], follow_symlinks=False)
+    if not stat.S_ISREG(named.st_mode) or (named.st_dev, named.st_ino) != (metadata.st_dev, metadata.st_ino) or digest(bytes(raw)) != value["sha256"] or len(raw) != value["size"]:
+        raise A3EvaluationError("held executable changed during evaluation")
+
+
+def _read_rendered(path: Path, *, logical_path: str, expected: Mapping[str, Any], allow_fixture: bool) -> tuple[dict[str, Any], bytes]:
+    """Hold the resolved store file and prove every named component is unchanged."""
+    components: list[tuple[Path, os.stat_result, str | None]] = []
+    current = path
+    while True:
+        metadata = current.lstat()
+        link = os.readlink(current) if stat.S_ISLNK(metadata.st_mode) else None
+        components.append((current, metadata, link))
+        if not stat.S_ISLNK(metadata.st_mode):
+            break
+        current = (current.parent / link).resolve(strict=True)
+    resolved = path.resolve(strict=True)
+    if not allow_fixture and not str(resolved).startswith("/nix/store/"):
+        raise A3EvaluationError("rendered artifact does not resolve to a bounded store fixture")
+    fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(fd)
+        raw = bytearray()
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(fd)
+        if (before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size):
+            raise A3EvaluationError("rendered artifact changed while held")
+    finally:
+        os.close(fd)
+    for named, metadata, link in components:
+        observed = named.lstat()
+        if (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_size) != (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size) or (
+            link is not None and os.readlink(named) != link
+        ):
+            raise A3EvaluationError("rendered artifact named identity changed")
+    content = bytes(raw)
+    if digest(content) != expected["sha256"] or len(content) != expected["size"]:
+        raise A3EvaluationError("rendered artifact content differs from the admitted identity")
+    return {
+        "path": logical_path,
+        "sha256": digest(content),
+        "size": len(content),
+        "file_identity": {
+            "resolved_path": str(resolved),
+            "dev": before.st_dev,
+            "ino": before.st_ino,
+            "uid": before.st_uid,
+            "gid": before.st_gid,
+            "mode": stat.S_IMODE(before.st_mode),
+            "nlink": before.st_nlink,
+        },
+    }, content
+
+
 def _run_exact(
     runner: Runner,
     argv: Sequence[str],
@@ -171,12 +240,21 @@ def _run_exact(
     timeout: int,
     max_output: int,
     pass_fds: Sequence[int],
+    isolation: str,
 ) -> Completed:
-    result = runner(list(argv), cwd=cwd, env=dict(env), timeout=timeout, max_output=max_output, pass_fds=tuple(pass_fds))
+    actual = [isolation, "--net", "--", *argv]
+    result = runner(actual, cwd=cwd, env=dict(env), timeout=timeout, max_output=max_output, pass_fds=tuple(pass_fds))
     if not isinstance(result, Completed) or len(result.stdout) + len(result.stderr) > max_output:
-        raise A3EvaluationError("subprocess result violates its closed output contract")
+        raise A3KnownFailure("subprocess result violates its closed output contract", stage="subprocess", step="output-contract")
     if result.returncode != 0:
-        raise A3EvaluationError("fixed non-activating evaluation step failed")
+        raise A3KnownFailure(
+            "fixed non-activating evaluation step failed",
+            stage="nix-build" if "build" in argv else "static-verification" if "-T" in argv else "evaluation",
+            step=next((item for item in ("build", "eval", "path-info", "hash", "derivation", "-T") if item in argv), "subprocess"),
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
     return result
 
 
@@ -203,13 +281,14 @@ def execute(
     source.mkdir(mode=0o700)
     integration.mkdir(mode=0o700)
     tool_fds: list[int] = []
+    tool_fd_by_name: dict[str, int] = {}
     cleanup_state = "UNKNOWN"
     try:
         if digest(tgw_archive) != request["source"]["archive_sha256"] or len(tgw_archive) != request["source"]["archive_size"]:
             raise A3EvaluationError("product archive bytes do not match the request")
         if digest(integration_archive) != request["integration"]["archive_sha256"] or len(integration_archive) != request["integration"]["archive_size"]:
             raise A3EvaluationError("integration archive bytes do not match the request")
-        verify_git_archive(
+        source_counts = verify_git_archive(
             tgw_archive,
             source,
             expected_root="trader-grims-warehouse",
@@ -218,7 +297,7 @@ def execute(
             max_files=policy["max_files"],
             max_bytes=policy["max_unpacked_bytes"],
         )
-        verify_git_archive(
+        integration_counts = verify_git_archive(
             integration_archive,
             integration,
             expected_root="tgw-flake",
@@ -227,6 +306,8 @@ def execute(
             max_files=policy["max_files"],
             max_bytes=policy["max_unpacked_bytes"],
         )
+        if source_counts[0] + integration_counts[0] > policy["max_files"] or source_counts[1] + integration_counts[1] > policy["max_unpacked_bytes"]:
+            raise A3EvaluationError("combined archive unpack bounds exceeded")
         lock = integration / "flake.lock"
         if not lock.is_file() or digest(lock.read_bytes()) != request["integration"]["flake_lock_sha256"]:
             raise A3EvaluationError("reviewed integration flake.lock identity mismatch")
@@ -236,9 +317,14 @@ def execute(
         module_text = module.read_text()
         required_integration_lines = (
             "imports = [ inputs.tgw-lib.nixosModules.a3-platform-bootstrap ];",
-            "tgw.a3PlatformBootstrap.enable = true;",
-            'tgw.a3PlatformBootstrap.authorizedPublicKeyRef = "external:root-owned-a3-authorized-ed25519-public-key";',
-            'tgw.a3PlatformBootstrap.attestationPublicKeyRef = "external:a3-attestation-ed25519-public-verifier";',
+            "services.tgw-a3-platform-bootstrap = {",
+            "enable = true;",
+            "package = inputs.tgw-lib.packages.x86_64-linux.a3-platform-bootstrap;",
+            "wrapperConfig = ../../a3-public/nix-observer-render-wrapper.conf;",
+            "composition = ../../a3-public/nix-observer-render-composition.json;",
+            "prerequisiteReceipt = ../../a3-public/nix-observer-render-prerequisite.json;",
+            "attestationPublicKey = ../../a3-public/nix-observer-render-attestation.pub;",
+            "sshAuthorizedPublicKey = builtins.readFile ../../a3-public/codex-authorized-key.txt;",
         )
         if any(module_text.count(line) != 1 for line in required_integration_lines):
             raise A3EvaluationError("reviewed integration module does not implement the exact A3 contract")
@@ -246,6 +332,7 @@ def execute(
         for name, value in request["tools"].items():
             fd, path = _held_tool(value)
             tool_fds.append(fd)
+            tool_fd_by_name[name] = fd
             held[name] = path
         env = {
             "HOME": str(run_root / "home"),
@@ -289,8 +376,23 @@ def execute(
         ]
         flake_flags = ["--no-write-lock-file", "--override-input", "tgw-lib", "path:" + str(source)]
         flake_target = f"{integration}#{TARGET_ATTR}"
-        common = {"cwd": integration, "env": env, "timeout": policy["max_seconds"], "max_output": policy["max_output_bytes"], "pass_fds": tool_fds}
+        common = {
+            "cwd": integration,
+            "env": env,
+            "timeout": policy["max_seconds"],
+            "max_output": policy["max_output_bytes"],
+            "pass_fds": tool_fds,
+            "isolation": held["unshare"],
+        }
         for expected in request["input_closure"]["paths"]:
+            path_info = _run_exact(runner, [*base, "path-info", "--json", expected["path"]], **common).stdout
+            try:
+                input_info = json_loads(path_info)
+            except Exception as exc:
+                raise A3EvaluationError("offline input closure size evidence is invalid") from exc
+            metadata = input_info.get(expected["path"]) if isinstance(input_info, Mapping) else None
+            if not isinstance(metadata, Mapping) or metadata.get("narSize") != expected["nar_size"]:
+                raise A3EvaluationError("offline input closure NAR size mismatch")
             observed = (
                 _run_exact(
                     runner,
@@ -304,8 +406,16 @@ def execute(
                 raise A3EvaluationError("offline input closure NAR identity mismatch")
         drv = _run_exact(runner, [*base, "eval", *flake_flags, "--raw", flake_target + ".drvPath"], **common).stdout.decode().strip()
         output = _run_exact(runner, [*base, "build", *flake_flags, "--no-link", "--print-out-paths", flake_target], **common).stdout.decode().strip()
-        if "\n" in drv or "\n" in output:
+        if "\n" in drv or "\n" in output or output != request["target"]["expected_successor"]:
             raise A3EvaluationError("Nix returned multiple derivations or outputs")
+        derivation_raw = _run_exact(runner, [*base, "derivation", "show", drv], **common).stdout
+        try:
+            derivation = json_loads(derivation_raw)
+            outputs = derivation[drv]["outputs"]
+        except Exception as exc:
+            raise A3EvaluationError("derivation output relation is invalid") from exc
+        if outputs != {"out": {"path": output}}:
+            raise A3EvaluationError("derivation does not bind the exact singleton successor output")
         path_info = _run_exact(runner, [*base, "path-info", "--json", "--recursive", output], **common).stdout
         try:
             info = json_loads(path_info)
@@ -330,38 +440,52 @@ def execute(
                 raise A3EvaluationError("recursive Nix store NAR hash is invalid")
             manifest.append({"path": path, "nar_sha256": "sha256:" + observed, "nar_size": metadata["narSize"]})
         rendered: dict[str, dict[str, Any]] = {}
+        rendered_bytes: dict[str, bytes] = {}
         output_root = output_resolver(output)
         for name in RENDERED_ARTIFACTS:
             path = output_root / RENDERED_RELATIVE_PATHS[name]
-            metadata = path.lstat()
-            if not stat.S_ISREG(metadata.st_mode):
-                raise A3EvaluationError("rendered A3 artifact is not regular")
-            raw = path.read_bytes()
-            rendered[name] = {
-                "path": str(Path(output) / RENDERED_RELATIVE_PATHS[name]),
-                "sha256": digest(raw),
-                "size": len(raw),
-            }
-        systemd_command = [held["systemd_analyze"], "verify", "--root", output, "tgw-a3-platform-bootstrap.service"]
-        sshd_command = [held["sshd"], "-T", "-C", "user=tgw-a3-bootstrap,host=tgw-prod,addr=127.0.0.1", "-f", rendered["sshd-effective-config"]["path"]]
-        systemd_result = _run_exact(runner, systemd_command, **common)
+            rendered[name], rendered_bytes[name] = _read_rendered(
+                path,
+                logical_path=str(Path(output) / RENDERED_RELATIVE_PATHS[name]),
+                expected=request["expected_rendered"][name],
+                allow_fixture=allow_fixture,
+            )
+        verifier_path = run_root / "sshd-verifier.conf"
+        verifier_fd = os.open(verifier_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+        verifier_raw = rendered_bytes["sshd-config"]
+        offset = 0
+        while offset < len(verifier_raw):
+            count = os.write(verifier_fd, verifier_raw[offset:])
+            if count <= 0:
+                raise A3EvaluationError("short verifier-input write")
+            offset += count
+        os.fsync(verifier_fd)
+        common["pass_fds"].append(verifier_fd)
+        verifier_proc = f"/proc/{os.getpid()}/fd/{verifier_fd}"
+        sshd_command = [held["sshd"], "-T", "-C", "user=codex,host=tgw-prod,addr=127.0.0.1", "-f", verifier_proc]
         sshd_result = _run_exact(runner, sshd_command, **common)
+        os.lseek(verifier_fd, 0, os.SEEK_SET)
+        if os.read(verifier_fd, len(verifier_raw) + 1) != verifier_raw:
+            raise A3EvaluationError("verifier input changed while held")
+        verifier_metadata = os.fstat(verifier_fd)
+        named_verifier = verifier_path.lstat()
+        if (verifier_metadata.st_dev, verifier_metadata.st_ino) != (named_verifier.st_dev, named_verifier.st_ino):
+            raise A3EvaluationError("verifier input named identity changed")
+        os.close(verifier_fd)
+        common["pass_fds"].remove(verifier_fd)
+        logical_sshd_command = [request["tools"]["sshd"]["path"], "-T", "-C", "user=codex,host=tgw-prod,addr=127.0.0.1", "-f", rendered["sshd-config"]["path"]]
         verifiers = {
-            "systemd_analyze": {
-                "command": [request["tools"]["systemd_analyze"]["path"], *systemd_command[1:]],
-                "executable": request["tools"]["systemd_analyze"],
-                "returncode": 0,
-                "stdout_sha256": digest(systemd_result.stdout),
-                "stderr_sha256": digest(systemd_result.stderr),
-            },
             "sshd": {
-                "command": [request["tools"]["sshd"]["path"], *sshd_command[1:]],
+                "command": logical_sshd_command,
+                "actual_command": [held["unshare"], "--net", "--", *sshd_command],
                 "executable": request["tools"]["sshd"],
                 "returncode": 0,
                 "stdout_sha256": digest(sshd_result.stdout),
                 "stderr_sha256": digest(sshd_result.stderr),
             },
         }
+        for name, fd in tool_fd_by_name.items():
+            _verify_held_tool(fd, request["tools"][name])
         receipt: dict[str, Any] = {
             "schema": SUCCESS_SCHEMA,
             "outcome": "SUCCEEDED",
@@ -376,6 +500,13 @@ def execute(
             "store_manifest_sha256": digest(manifest),
             "rendered_artifacts": rendered,
             "verifiers": verifiers,
+            "isolation": {
+                "schema": "tgw-nixos-a3-successor-isolation/v1",
+                "kind": "fresh-network-namespace-per-command",
+                "tool": request["tools"]["unshare"],
+                "command_count": 5 + 2 * len(request["input_closure"]["paths"]) + len(manifest),
+                "network_observed": False,
+            },
             "effects": {"build": True, **{name: False for name in FORBIDDEN_EFFECTS}},
             "cleanup": "REMOVED",
             "deployable": request["integration"]["status"] == "REVIEWED_EXECUTABLE" and request["credentials"]["final"] is True,

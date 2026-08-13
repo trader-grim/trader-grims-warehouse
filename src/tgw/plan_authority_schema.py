@@ -8,10 +8,14 @@ from typing import Any, Callable
 
 import psycopg2
 
-REQUIRED_TABLES = frozenset({
-    "plan_authority_requests", "plan_authority_decisions",
-    "plan_authority_effect_receipts", "plan_authority_events",
-})
+REQUIRED_TABLES = frozenset(
+    {
+        "plan_authority_requests",
+        "plan_authority_decisions",
+        "plan_authority_effect_receipts",
+        "plan_authority_events",
+    }
+)
 
 
 def _sql() -> str:
@@ -34,6 +38,10 @@ def require_plan_authority_schema(dsn: str, *, connect: Callable[..., Any] = psy
     with connect(dsn) as con, con.cursor() as cur:
         cur.execute("SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname=current_schema() AND tablename = ANY(%s)", (sorted(REQUIRED_TABLES),))
         present = {row[0] for row in cur.fetchall()}
+        cur.execute("SELECT pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint WHERE conrelid='plan_authority_requests'::regclass AND conname='plan_authority_requests_effect_kind_check'")
+        constraint = cur.fetchone()
     missing = REQUIRED_TABLES - present
     if missing:
         raise RuntimeError(f"PlanAuthority schema is incomplete: {sorted(missing)}")
+    if not constraint or "nixos-a3-successor-evaluation" not in str(constraint[0]):
+        raise RuntimeError("PlanAuthority effect-kind constraint is stale")

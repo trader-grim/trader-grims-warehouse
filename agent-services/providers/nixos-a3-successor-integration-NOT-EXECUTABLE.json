@@ -3,6 +3,11 @@
   "archive_sha256": null,
   "archive_size": null,
   "changed_paths": [
+    "a3-public/codex-authorized-key.txt",
+    "a3-public/nix-observer-render-attestation.pub",
+    "a3-public/nix-observer-render-composition.json",
+    "a3-public/nix-observer-render-prerequisite.json",
+    "a3-public/nix-observer-render-wrapper.conf",
     "flake.lock",
     "flake.nix",
     "hosts/tgw-prod/a3-platform-bootstrap.nix"
@@ -10,14 +15,18 @@
   "closure_final": false,
   "commit": null,
   "exact_options": {
-    "tgw.a3PlatformBootstrap.attestationPublicKeyRef": "external:a3-attestation-ed25519-public-verifier",
-    "tgw.a3PlatformBootstrap.authorizedPublicKeyRef": "external:root-owned-a3-authorized-ed25519-public-key",
-    "tgw.a3PlatformBootstrap.enable": true
+    "services.tgw-a3-platform-bootstrap.attestationPublicKey": "../../a3-public/nix-observer-render-attestation.pub",
+    "services.tgw-a3-platform-bootstrap.composition": "../../a3-public/nix-observer-render-composition.json",
+    "services.tgw-a3-platform-bootstrap.enable": true,
+    "services.tgw-a3-platform-bootstrap.package": "inputs.tgw-lib.packages.x86_64-linux.a3-platform-bootstrap",
+    "services.tgw-a3-platform-bootstrap.prerequisiteReceipt": "../../a3-public/nix-observer-render-prerequisite.json",
+    "services.tgw-a3-platform-bootstrap.sshAuthorizedPublicKey": "../../a3-public/codex-authorized-key.txt",
+    "services.tgw-a3-platform-bootstrap.wrapperConfig": "../../a3-public/nix-observer-render-wrapper.conf"
   },
   "flake_lock_sha256": null,
   "live_gate": "external:tgw-prod-flake-import-build-and-sshd-T",
-  "manifest_ref": "manifest:sha256:83b965fb269aba45cbf327ef36f161a36c2fe09f757a1b881a03e381a53e40bc",
-  "manifest_sha256": "sha256:83b965fb269aba45cbf327ef36f161a36c2fe09f757a1b881a03e381a53e40bc",
+  "manifest_ref": "manifest:sha256:64bf1f3acf6b282245f1f9fba246fbac3ccecca35820d0353d4ac6a2a2550b89",
+  "manifest_sha256": "sha256:64bf1f3acf6b282245f1f9fba246fbac3ccecca35820d0353d4ac6a2a2550b89",
   "module_import": "inputs.tgw-lib.nixosModules.a3-platform-bootstrap",
   "public_credentials_final": false,
   "repository_id": "tgw-flake",
