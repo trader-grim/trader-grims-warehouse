@@ -136,6 +136,17 @@ SOURCE_CANDIDATE = "candidate:sha256:8ff4d73162a3458dce5e048df3a3586c4917f58b2fc
 SOURCE_CATALOG = "sha256:24313e9eafaadf1180bf45b27369e6162b26109eecdf8bab36498441575a21f2"
 TARGET_ATTR = "nixosConfigurations.tgw-prod.config.system.build.toplevel"
 
+
+def _fixture_reviewed_source() -> dict[str, str]:
+    """Legacy identities exist only for explicitly non-deployable test fixtures."""
+    return {
+        "commit": SOURCE_COMMIT,
+        "tree": SOURCE_TREE,
+        "archive_sha256": SOURCE_ARCHIVE_SHA256,
+        "candidate_identity": SOURCE_CANDIDATE,
+        "catalog_sha256": SOURCE_CATALOG,
+    }
+
 _SHA1 = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,255}$")
@@ -446,23 +457,15 @@ def validate_request(value: Any, *, allow_fixture: bool = False, reviewed_source
     source = _exact(request["source"], {"commit", "tree", "archive_ref", "archive_sha256", "archive_size", "candidate_identity", "catalog_sha256", "a3_identities"}, "source binding")
     if reviewed_source is None and not allow_fixture:
         raise A3EvaluationError("production request validator has no mounted reviewed-source descriptor")
-    source_fixed = dict(
-        reviewed_source
-        or {
-            "commit": SOURCE_COMMIT,
-            "tree": SOURCE_TREE,
-            "archive_sha256": SOURCE_ARCHIVE_SHA256,
-            "candidate_identity": SOURCE_CANDIDATE,
-            "catalog_sha256": SOURCE_CATALOG,
-        }
-    )
+    if reviewed_source is not None:
+        source_fixed = dict(_exact(reviewed_source, {"commit", "tree", "archive_sha256", "candidate_identity", "catalog_sha256", "a3_identities"}, "reviewed source descriptor"))
+    else:
+        source_fixed = {**_fixture_reviewed_source(), "a3_identities": A3_SOURCE_IDENTITIES}
     if any(source.get(key) != expected for key, expected in source_fixed.items()):
         raise A3EvaluationError("request does not name the admitted immutable product source")
     if source["archive_ref"] != "artifact:" + source_fixed["archive_sha256"]:
         raise A3EvaluationError("product archive reference or size is invalid")
     _strict_int(source["archive_size"], "product archive size", minimum=1)
-    if source["a3_identities"] != A3_SOURCE_IDENTITIES:
-        raise A3EvaluationError("the exact eleven A3 source identities are incomplete")
     integration = validate_integration_contract(request["integration"], allow_fixture=allow_fixture)
     target = _exact(request["target"], {"host", "system", "attribute", "expected_current", "expected_successor"}, "target")
     if (

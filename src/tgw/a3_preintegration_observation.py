@@ -337,14 +337,20 @@ def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_
     if repo != repository or not repo.is_dir():
         raise ObservationError("repository path is not a stable directory")
     component_identity = _verify_repository_components(repo, request, enforce_owner=enforce_owner)
-    git_path = git_path or shutil.which("git")
+    git_path = os.path.realpath(git_path or shutil.which("git") or "")
     if not git_path:
         raise ObservationError("Git executable is unavailable")
+    git_fd = os.open(git_path, os.O_RDONLY | os.O_NOFOLLOW)
+    git_stat = os.fstat(git_fd)
+    if not stat.S_ISREG(git_stat.st_mode) or not git_stat.st_mode & 0o111:
+        os.close(git_fd)
+        raise ObservationError("Git executable is not a held regular executable")
+    held_git = f"/proc/{os.getpid()}/fd/{git_fd}"
     env = {"PATH": "/nonexistent", "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0", "HOME": "/nonexistent"}
 
     def git(*argv: str, binary: bool = False) -> bytes | str:
-        closed = [git_path, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false", "-c", "extensions.objectFormat=sha1", "-c", "protocol.file.allow=never"]
-        result = subprocess.run([*closed, *argv], cwd=repo, env=env, capture_output=True, timeout=request["bounds"]["timeout_seconds"], check=False, start_new_session=True)
+        closed = [held_git, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false", "-c", "extensions.objectFormat=sha1", "-c", "protocol.file.allow=never"]
+        result = subprocess.run([*closed, *argv], cwd=repo, env=env, capture_output=True, timeout=request["bounds"]["timeout_seconds"], check=False, start_new_session=True, pass_fds=(git_fd,))
         if result.returncode != 0:
             raise ObservationError("read-only Git observation failed")
         return result.stdout if binary else result.stdout.decode().strip()
@@ -359,26 +365,20 @@ def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_
         raise ObservationHold("production flake branch differs")
     if not _GIT.fullmatch(str(commit)) or not _GIT.fullmatch(str(tree)):
         raise ObservationError("Git identities are invalid")
-    lock = repo / "flake.lock"
-    fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW)
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > request["bounds"]["max_output_bytes"]:
-            raise ObservationError("flake.lock is invalid")
-        lock_raw = os.read(fd, st.st_size + 1)
-        archive = git("archive", "--format=tar", "--prefix=tgw-flake/", str(commit), binary=True)
-        os.lseek(fd, 0, os.SEEK_SET)
-        lock_after = os.read(fd, st.st_size + 1)
-        st_after = os.fstat(fd)
-    finally:
-        os.close(fd)
+    lock_raw = git("show", f"{commit}:flake.lock", binary=True)
+    assert isinstance(lock_raw, bytes)
+    if len(lock_raw) > request["bounds"]["max_output_bytes"]:
+        raise ObservationError("flake.lock is invalid")
+    archive = git("archive", "--format=tar", "--prefix=tgw-flake/", str(commit), binary=True)
     assert isinstance(archive, bytes)
-    if lock_after != lock_raw or (st.st_dev, st.st_ino, st.st_size) != (st_after.st_dev, st_after.st_ino, st_after.st_size):
-        raise ObservationHold("flake.lock changed during observation")
     if git("rev-parse", "HEAD") != commit or git("rev-parse", "HEAD^{tree}") != tree or git("status", "--porcelain=v1", "--untracked-files=all"):
         raise ObservationHold("repository changed during observation")
     if _verify_repository_components(repo, request, enforce_owner=enforce_owner) != component_identity:
         raise ObservationHold("repository components changed during observation")
+    if _inode_identity(os.fstat(git_fd)) != _inode_identity(git_stat):
+        os.close(git_fd)
+        raise ObservationHold("held Git executable identity changed")
+    os.close(git_fd)
     if len(archive) > request["bounds"]["max_archive_bytes"]:
         raise ObservationError("archive exceeds bound")
     receipt: dict[str, Any] = {
