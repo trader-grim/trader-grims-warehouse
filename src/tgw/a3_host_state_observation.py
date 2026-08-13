@@ -430,7 +430,7 @@ def validate_request(
         if dict(plan) != expected:
             raise HostStateError("host-state Plan request differs from mounted authority")
     target = {
-        "host": "tgw-prod",
+        "host": "100.107.99.66",
         "user": "codex",
         "port": 22,
         "system": "x86_64-linux",

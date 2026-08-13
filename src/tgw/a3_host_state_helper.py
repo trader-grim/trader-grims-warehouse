@@ -117,7 +117,7 @@ def _validate_request(value: Any, now: datetime) -> dict[str, Any]:
     if request["schema"] != REQUEST_SCHEMA:
         raise HelperError("request schema differs")
     target = {
-        "host": "tgw-prod",
+        "host": "100.107.99.66",
         "user": "codex",
         "port": 22,
         "system": "x86_64-linux",

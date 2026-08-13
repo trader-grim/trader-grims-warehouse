@@ -18,9 +18,9 @@
     "base_commit": "74ad0597219987ef7c1f36e70c16859b49d4261a",
     "base_tree": "feeddcc486732c72385468777bc5794a001014f1",
     "controller_path": "src/tgw/a3_host_state_observation.py",
-    "controller_sha256": "sha256:bfdc706d4c8d416cf247ab56ba87303227ea3a77f8a7c4dd124f880a4d8b7022",
+    "controller_sha256": "sha256:ca72d4a19d42fc271c59e959ecc309d6c200c073d3bc4f6ca8b4605109ddfb70",
     "stdlib_helper_path": "src/tgw/a3_host_state_helper.py",
-    "stdlib_helper_sha256": "sha256:0bed27307faf352d1fa53a9991b5b9c58e436655331e43574af65f93eb74cc87"
+    "stdlib_helper_sha256": "sha256:28fed3d327f05a4fab4421dac6dfb7654516a3cd1e0a263961d8f206f5a393ee"
   },
   "facts": [
     "current-system-cas",
@@ -54,9 +54,9 @@
     "deploy": false,
     "platform_bootstrap_grant_consumption": false
   },
-  "reason": "the approved source path is implemented and fail-closed, and dedicated root-protected credentials plus real-sshd parity are admitted; host authorized-key provisioning, an executable A3O02 solution, and a fresh one-attempt SSH observation grant remain incomplete",
+  "reason": "the production target is corrected to the literal approved address; exact-address real-sshd parity must be re-admitted before a fresh one-attempt SSH observation grant may be issued",
   "grant": null,
   "request": null,
   "dispatchable": false,
-  "descriptor_sha256": "sha256:286555cc382bcee2c11c5e3670364dd1422e67949aee3074abe65925fe2bb6af"
+  "descriptor_sha256": "sha256:69fb37aa5e6a35924342abea3659bcdcbdc85cf23d260f5e3112d77506db6e09"
 }

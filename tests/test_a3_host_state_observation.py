@@ -53,7 +53,7 @@ def _request(*, now: datetime | None = None, transport: dict | None = None) -> d
             "authority_sha256": _sha("authority"),
         },
         "target": {
-            "host": "tgw-prod",
+            "host": "100.107.99.66",
             "user": "codex",
             "port": 22,
             "system": "x86_64-linux",
@@ -1156,7 +1156,7 @@ def test_fixture_ssh_path_uses_exact_argv_framing_and_group_cleanup(tmp_path: Pa
     helper = tmp_path / "helper.py"
     ssh.write_text(f"#!/usr/bin/python3\nimport os,sys\nwhile os.read(0,65536): pass\nos.write(1,{frame!r})\n")
     keygen.write_text(f"#!/usr/bin/python3\nimport os\nassert 'LD_PRELOAD' not in os.environ\nprint({initial_request['transport']['identity_public']!r})\n")
-    hosts.write_text("tgw-prod ssh-ed25519 QUFBQQ==\n")
+    hosts.write_text("100.107.99.66 ssh-ed25519 QUFBQQ==\n")
     identity.write_text("fixture-private-material\n")
     identity_public.write_text(initial_request["transport"]["identity_public"] + "\n")
     helper.write_bytes(Path(a3_host_state_helper.__file__).read_bytes())
