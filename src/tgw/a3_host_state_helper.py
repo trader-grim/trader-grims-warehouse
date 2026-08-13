@@ -121,7 +121,7 @@ def _validate_request(value: Any, now: datetime) -> dict[str, Any]:
         "user": "codex",
         "port": 22,
         "system": "x86_64-linux",
-        "remote_python": "/usr/bin/python3",
+        "remote_python": "/run/current-system/sw/bin/python3",
         "remote_git": "/usr/bin/git",
         "repository": "/home/db/tgw-flake",
         "expected_branch": "main",

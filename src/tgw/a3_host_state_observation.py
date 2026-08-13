@@ -434,7 +434,7 @@ def validate_request(
         "user": "codex",
         "port": 22,
         "system": "x86_64-linux",
-        "remote_python": "/usr/bin/python3",
+        "remote_python": "/run/current-system/sw/bin/python3",
         "remote_git": "/usr/bin/git",
         "repository": "/home/db/tgw-flake",
         "expected_branch": "main",
@@ -673,6 +673,10 @@ def observe_host_state(
     python_fd, _python_raw, python_identity = _trusted_executable(expected_python, trusted_uid=trusted_uid)
     git_fd, _git_raw, git_identity = _trusted_executable(expected_git, trusted_uid=trusted_uid)
     try:
+        if allow_fixture and python_path is not None:
+            python_identity["path"] = request["target"]["remote_python"]
+        if allow_fixture and git_path is not None:
+            git_identity["path"] = request["target"]["remote_git"]
         proc_self = os.stat("/proc/self/exe")
         if (proc_self.st_dev, proc_self.st_ino) != (os.fstat(python_fd).st_dev, os.fstat(python_fd).st_ino):
             raise ObservationHold("remote helper interpreter differs from observed Python")

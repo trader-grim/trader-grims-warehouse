@@ -18,9 +18,9 @@
     "base_commit": "74ad0597219987ef7c1f36e70c16859b49d4261a",
     "base_tree": "feeddcc486732c72385468777bc5794a001014f1",
     "controller_path": "src/tgw/a3_host_state_observation.py",
-    "controller_sha256": "sha256:bcc4726968384aec4f13435737ef915b94d310f1d990686bfb7011569deab387",
+    "controller_sha256": "sha256:bfdc706d4c8d416cf247ab56ba87303227ea3a77f8a7c4dd124f880a4d8b7022",
     "stdlib_helper_path": "src/tgw/a3_host_state_helper.py",
-    "stdlib_helper_sha256": "sha256:938f71c9eb46c58c0b01d2952a72481276f478c646549bc93bfa197d32253786"
+    "stdlib_helper_sha256": "sha256:0bed27307faf352d1fa53a9991b5b9c58e436655331e43574af65f93eb74cc87"
   },
   "facts": [
     "current-system-cas",
@@ -54,9 +54,9 @@
     "deploy": false,
     "platform_bootstrap_grant_consumption": false
   },
-  "reason": "the approved source path is implemented and fail-closed, but real-sshd parity evidence, dedicated root-protected credential artifacts, an executable A3O02 solution, and a fresh one-attempt SSH observation grant are not yet admitted",
+  "reason": "the approved source path is implemented and fail-closed, and dedicated root-protected credentials plus real-sshd parity are admitted; host authorized-key provisioning, an executable A3O02 solution, and a fresh one-attempt SSH observation grant remain incomplete",
   "grant": null,
   "request": null,
   "dispatchable": false,
-  "descriptor_sha256": "sha256:74e515e3c024e2eee30ae4dfd0f8571177e573fc310d18953d91a2e3b1abe4b6"
+  "descriptor_sha256": "sha256:286555cc382bcee2c11c5e3670364dd1422e67949aee3074abe65925fe2bb6af"
 }
