@@ -18,9 +18,9 @@
     "base_commit": "74ad0597219987ef7c1f36e70c16859b49d4261a",
     "base_tree": "feeddcc486732c72385468777bc5794a001014f1",
     "controller_path": "src/tgw/a3_host_state_observation.py",
-    "controller_sha256": "sha256:b36cd2d7070f7233e1e8c821015d9e4caaffa497ffe21981df389c5bd2869d7f",
+    "controller_sha256": "sha256:c28356aa1b3916938adf7b4d402666d4a0cc6e40dc4579095a2c6cfda0c71100",
     "stdlib_helper_path": "src/tgw/a3_host_state_helper.py",
-    "stdlib_helper_sha256": "sha256:90b12d9313f640adc84a55e1faa802cd602cda148621f20342bb044a54a148f3"
+    "stdlib_helper_sha256": "sha256:275d294f1e36c4646dc80480f9ea3fcd0f4a2355bf4fca249ce39ff5ddb4199b"
   },
   "facts": [
     "current-system-cas",
@@ -29,7 +29,11 @@
     "git-path-sha256-version",
     "repository-main-branch-identity",
     "ssh-path-sha256-version",
-    "known-hosts-path-sha256-mode-owner"
+    "known-hosts-path-sha256-mode-owner",
+    "dedicated-public-private-identity-crossmatch",
+    "fresh-root-protected-real-sshd-parity",
+    "sealed-composition-and-local-ssh-version-argv-policy",
+    "content-addressed-pass-failure-terminal-evidence"
   ],
   "admission_requirements": {
     "mounted_plan_authority": "REQUIRED",
@@ -47,9 +51,9 @@
     "deploy": false,
     "platform_bootstrap_grant_consumption": false
   },
-  "reason": "source is implemented, but the production Plan authority, real-sshd parity evidence, dedicated credential authority, and one-attempt SSH observation grant are not admitted",
+  "reason": "the approved source path is implemented and fail-closed, but real-sshd parity evidence, dedicated root-protected credential artifacts, an executable A3O02 solution, and a fresh one-attempt SSH observation grant are not yet admitted",
   "grant": null,
   "request": null,
   "dispatchable": false,
-  "descriptor_sha256": "sha256:9eb859629867dc7e56fafec93088bf78959c68de3bbcb0de1409df40f8e377b2"
+  "descriptor_sha256": "sha256:3fa44871e63d52828117d27d7c222cc84576b2bc9286ac17e25c066a2db1f8ab"
 }
