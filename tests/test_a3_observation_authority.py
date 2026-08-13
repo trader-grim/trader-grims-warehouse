@@ -1,4 +1,6 @@
+import subprocess
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -8,7 +10,7 @@ from tgw.a3_observation_authority import (
     ReadOnlyObservationController,
     ReadOnlyObservationGrant,
 )
-from tgw.a3_preintegration_observation import ObservationHold, make_request
+from tgw.a3_preintegration_observation import ImmutableEvidenceStore, ObservationHold, digest, make_request, observe_repository
 
 
 def _request():
@@ -29,8 +31,8 @@ def _grant(request):
 
 
 class Provider:
-    def __init__(self, *, ready=True, fail=False):
-        self.is_ready, self.fail, self.calls = ready, fail, 0
+    def __init__(self, *, ready=True, fail=False, result=None):
+        self.is_ready, self.fail, self.calls, self.result = ready, fail, 0, result
 
     def ready(self, request):
         return self.is_ready
@@ -39,7 +41,7 @@ class Provider:
         self.calls += 1
         if self.fail:
             raise RuntimeError("after dispatch")
-        return {"evidence": ["observed"]}
+        return self.result
 
 
 def test_hold_before_ready_does_not_consume() -> None:
@@ -51,11 +53,27 @@ def test_hold_before_ready_does_not_consume() -> None:
     assert controller.consumed is False and provider.calls == 0
 
 
-def test_first_dispatch_consumes_exactly_once() -> None:
+def test_first_dispatch_consumes_exactly_once(tmp_path: Path) -> None:
     request = _request()
-    provider = Provider()
-    controller = ReadOnlyObservationController(grant=_grant(request), provider=provider, composition_sha256="sha256:" + "2" * 64)
-    assert controller.execute(request) == {"evidence": ["observed"]}
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "fixture@example.invalid"], cwd=repo, check=True)
+    (repo / "flake.lock").write_text('{"version":7,"root":"root","nodes":{"root":{}}}\n')
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "x"], cwd=repo, check=True)
+    receipt, archive = observe_repository(repo, request)
+    provider = Provider(result={"receipt": receipt, "archive": archive})
+    controller = ReadOnlyObservationController(
+        grant=_grant(request),
+        provider=provider,
+        composition_sha256="sha256:" + "2" * 64,
+        evidence_store=ImmutableEvidenceStore(tmp_path / "evidence"),
+    )
+    result = controller.execute(request)
+    assert result["terminal"]["outcome"] == "PASS"
+    assert result["archive_sha256"] == digest(archive)
     with pytest.raises(ObservationAlreadyConsumed):
         controller.execute(request)
     assert provider.calls == 1

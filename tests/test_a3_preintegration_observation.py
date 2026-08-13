@@ -84,6 +84,14 @@ def test_repository_rejects_replace_refs(tmp_path: Path) -> None:
         observe_repository(repo, make_request(operation_id="replace", transport=_transport()))
 
 
+def test_repository_rejects_gitfile_worktree_indirection(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    linked = tmp_path / "linked"
+    subprocess.run(["git", "worktree", "add", "-q", str(linked)], cwd=repo, check=True)
+    with pytest.raises(ObservationError, match=".git is not a directory"):
+        observe_repository(linked, make_request(operation_id="gitfile", transport=_transport()))
+
+
 @pytest.mark.parametrize(("field", "value"), [("identity_sha256", "ambient"), ("helper_sha256", "sha256:0")])
 def test_transport_identity_is_closed(field: str, value: str) -> None:
     request = make_request(operation_id="closed", transport=_transport())
@@ -142,7 +150,7 @@ def test_mounted_source_descriptor_rejects_independent_identity_mutation() -> No
 @pytest.mark.parametrize(
     ("outcome", "stage", "code", "dispatched"),
     [
-        ("PASS", "complete", "NONE", False),
+        ("PASS", "complete", "NONE", True),
         ("HOLD", "predispatch", "PROVIDER_NOT_READY", False),
         ("FAILED", "helper", "HELPER_INVALID", True),
         ("AMBIGUOUS", "dispatch", "POSTDISPATCH_UNCERTAIN", True),

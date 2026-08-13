@@ -328,7 +328,7 @@ def replay_archive(archive: bytes, receipt: Mapping[str, Any], request: Mapping[
 
 
 _TERMINALS = {
-    ("PASS", "complete", "NONE", False),
+    ("PASS", "complete", "NONE", True),
     ("HOLD", "predispatch", "PROVIDER_NOT_READY", False),
     ("HOLD", "repository", "REPOSITORY_DIRTY", False),
     ("HOLD", "freshness", "REQUEST_EXPIRED", False),

@@ -9,7 +9,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Protocol
 
-from tgw.a3_preintegration_observation import ObservationHold, validate_request
+from tgw.a3_preintegration_observation import (
+    EvidencePersistenceAmbiguous,
+    ImmutableEvidenceStore,
+    ObservationHold,
+    persist_evidence,
+    terminal,
+    validate_receipt,
+    validate_request,
+)
 
 GRANT_SCHEMA = "tgw-read-only-observation-grant/v1"
 
@@ -90,10 +98,11 @@ class ReadOnlyObservationGrant:
 class ReadOnlyObservationController:
     """Checks readiness before atomically consuming the distinct observation token."""
 
-    def __init__(self, *, grant: ReadOnlyObservationGrant, provider: ObservationProvider, composition_sha256: str):
+    def __init__(self, *, grant: ReadOnlyObservationGrant, provider: ObservationProvider, composition_sha256: str, evidence_store: ImmutableEvidenceStore | None = None):
         self.grant = grant
         self.provider = provider
         self.composition_sha256 = composition_sha256
+        self.evidence_store = evidence_store
         self._lock = threading.Lock()
         self._consumed = False
 
@@ -117,6 +126,36 @@ class ReadOnlyObservationController:
                 raise ObservationAlreadyConsumed("read-only observation attempt already consumed")
             self._consumed = True
         try:
-            return self.provider.observe(request)
+            result = self.provider.observe(request)
         except Exception as exc:
             raise ObservationDispatchAmbiguous("observation failed after SSH dispatch") from exc
+        if not isinstance(result, Mapping) or set(result) != {"receipt", "archive"}:
+            raise ObservationDispatchAmbiguous("observation provider result is malformed")
+        receipt = validate_receipt(result["receipt"], request)
+        if self.evidence_store is None:
+            raise ObservationDispatchAmbiguous("observation evidence store is not mounted")
+        try:
+            paths = persist_evidence(
+                self.evidence_store,
+                request=request,
+                receipt=receipt,
+                archive=result["archive"],
+                observed_at=now.isoformat(),
+            )
+        except EvidencePersistenceAmbiguous as exc:
+            raise ObservationDispatchAmbiguous("observation persistence is ambiguous") from exc
+        completed = terminal(
+            outcome="PASS",
+            stage="complete",
+            code="NONE",
+            dispatched=True,
+            request_sha256=request["request_sha256"],
+            observed_at=now.isoformat(),
+        )
+        return {
+            "schema": "tgw-prod-a3-preintegration-observation-result/v1",
+            "terminal": completed,
+            "receipt": receipt,
+            "archive_sha256": receipt["repository"]["archive_sha256"],
+            "evidence": ["observation:" + completed["terminal_sha256"], *["file:" + str(path) for path in paths]],
+        }

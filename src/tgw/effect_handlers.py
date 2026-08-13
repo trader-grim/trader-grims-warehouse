@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Any, Callable, Mapping
 
 from tgw.a3_preintegration_observation import ObservationHold
+from tgw.a3_preintegration_observation import validate_receipt as validate_a3_observation_receipt
 from tgw.a3_preintegration_observation import validate_request as validate_a3_observation_request
 from tgw.bootstrap_authority import BootstrapConsumptionAmbiguous
 from tgw.nix_observer_render_evaluation import validate_request as validate_render_request
@@ -230,9 +231,20 @@ class TypedEffectHandlerRegistry:
             request = {key: value for key, value in parameters.items() if key != "generation"}
             validate_a3_observation_request(request)
             try:
-                return provider(request)
+                result = provider(request)
             except ObservationHold as exc:
                 raise HeldEffect(str(exc)) from exc
+            if not isinstance(result, Mapping) or set(result) != {"schema", "terminal", "receipt", "archive_sha256", "evidence"}:
+                raise AmbiguousEffect("A3 observation provider result is malformed")
+            receipt = validate_a3_observation_receipt(result["receipt"], request)
+            if (
+                result["schema"] != "tgw-prod-a3-preintegration-observation-result/v1"
+                or result["archive_sha256"] != receipt["repository"]["archive_sha256"]
+                or not isinstance(result["evidence"], list)
+                or not result["evidence"]
+            ):
+                raise AmbiguousEffect("A3 observation provider evidence is not exact")
+            return result
         return invoke
 
     @staticmethod
