@@ -6,35 +6,66 @@
   "approval_sha256": "sha256:9e524ddae0ebdd2a34b1a96487df6f3cec714e4c378409705910c11b528f3e80",
   "solution_sha256": "sha256:da79baa90916ba0fbe3af76365c8d25012ec0a38af4917bc57abaa44e21fb740",
   "closure_sha256": "sha256:3ef92c5a2c8ccf72ebb271ed4fec2c1fbe9fa7fe47c0311ad39b34ae2f4c31b9",
-  "outcome": "IMPLEMENTED_PENDING_INDEPENDENT_ADMISSION",
-  "supersedes_evidence_commit": "15e7d07220294a20a2d46e53eeac817451f0d5a6",
+  "outcome": "SOURCE_REVIEW_PASS_IMPLEMENTED_NOT_EXECUTABLE",
+  "supersedes_evidence_commit": "226d79771ee88145dc7203b1f3f182877144d728",
   "implementation": {
-    "commit": "a1515d0de44240c44051f6deb3b0900e00aaf1c8",
-    "tree": "af87efb8918bb7de325e47e2d5f06df96b7d8bae",
-    "parent": "15e7d07220294a20a2d46e53eeac817451f0d5a6",
-    "controller_sha256": "sha256:df565c20420d00ca06f0f6d26371423969a3b592ab7b109fd0ecc9a687b33f95",
-    "stdlib_helper_sha256": "sha256:275d294f1e36c4646dc80480f9ea3fcd0f4a2355bf4fca249ce39ff5ddb4199b",
-    "tests_sha256": "sha256:3ca44664e86d3c1a7e2e6a6ab22bbbfd64543ec86fd44eaa664b093587259fbc",
-    "provider_descriptor_file_sha256": "sha256:59e67ced3e56489a099b971af4dd1253f8291907596ad31991b7bab0ed0e7f8b",
-    "provider_descriptor_self_sha256": "sha256:849c2c08b61b54f63925e973ee72c784bd25a5e58d0da309cf3f091cf69de7f6"
+    "commit": "43ee866b7e5acfce3189e23ee40c0772f63f1d8e",
+    "tree": "51fe68dcdedeab988be5946f25dcd2a1d0a69590",
+    "parent": "be09b8e97fa2631bd00c07de2648d61b116dfe75",
+    "controller_sha256": "sha256:bcc4726968384aec4f13435737ef915b94d310f1d990686bfb7011569deab387",
+    "stdlib_helper_sha256": "sha256:938f71c9eb46c58c0b01d2952a72481276f478c646549bc93bfa197d32253786",
+    "evidence_store_source_sha256": "sha256:ff2f147d5c2f258560821f63fb3f86ab5044f609f4250cd2d3d3afec74eed814",
+    "tests_sha256": "sha256:1ebbcb8b3dedca87e191a8414b71267391a1bc0145d2d8716fd17c9c121fac54",
+    "provider_descriptor_file_sha256": "sha256:ffbd294f6d748c3cb94ea7df1bc0f17a9d7dfc4095f4ef38305793f3d91ecdb7",
+    "provider_descriptor_self_sha256": "sha256:74e515e3c024e2eee30ae4dfd0f8571177e573fc310d18953d91a2e3b1abe4b6"
+  },
+  "independent_review": {
+    "origin": "team-agent-message",
+    "reviewer": "/root/runtime_facilities",
+    "verdict": "PASS",
+    "source_commit": "43ee866b7e5acfce3189e23ee40c0772f63f1d8e",
+    "source_tree": "51fe68dcdedeab988be5946f25dcd2a1d0a69590",
+    "archive_matrix": {
+      "passed": 327,
+      "git_metadata_dependent_passed": 4,
+      "effective_passed": 331,
+      "failed": 0
+    },
+    "focused": {
+      "passed": 49,
+      "failed": 0
+    },
+    "findings": [
+      "foreign persistence composition, evidence, token and mounted-grant authorities are rejected",
+      "mounted grant state is sealed, immutable, content-addressed and postchecked by held and named inode plus byte hash",
+      "wrong grant and token types close owned composition, evidence, token and mounted-grant resources",
+      "every publication contains grant-authority.json and repeats the same grant observation before atomic publication",
+      "grant mutation and publication uncertainty produce typed PERSISTENCE_UNCERTAIN rather than false success",
+      "no deterministic source lifecycle or cross-binding blocker remains"
+    ]
   },
   "gates": {
     "focused": {
       "status": "PASS",
-      "passed": 40,
+      "passed": 49,
       "failed": 0
     },
     "observer_authority_runtime_matrix": {
       "status": "PASS",
-      "passed": 261,
+      "passed": 274,
       "failed": 0
     },
     "tracked_full": {
       "status": "PASS",
-      "passed": 3934,
+      "passed": 3943,
       "skipped": 5,
       "failed": 0,
-      "elapsed_seconds": 156.38
+      "elapsed_seconds": 142.41
+    },
+    "independent_archive_matrix": {
+      "status": "PASS",
+      "effective_passed": 331,
+      "failed": 0
     },
     "ruff": "PASS",
     "py_compile": "PASS",
@@ -50,17 +81,16 @@
     "durable one-attempt observation token",
     "atomic attempt-directory evidence publication",
     "fresh current/profile CAS and Python/Git/repository-main identities",
-    "closed PASS/HOLD/AMBIGUOUS terminal and dependency projection",
-    "sealed production-only composition with pre-grant held artifact and authority FDs",
-    "fresh typed real-sshd parity authority with role-addressed protected evidence",
-    "root-protected public identity plus held private/public key cross-match",
-    "self-hashed result and same-bundle composition/grant/token/terminal evidence validation",
-    "authenticated framed remote HOLD/FAILED terminals and durable post-dispatch failure persistence",
-    "controller-produced result terminal allowlist with impossible prelaunch/persistence result rejection",
-    "real-sshd parity bound to exact SSH argv with no global host-key or ambient authentication fallback"
+    "closed PASS/HOLD/FAILED/AMBIGUOUS terminal and dependency projection",
+    "sealed production-only composition with held artifact and authority FDs",
+    "authenticated framed remote HOLD/FAILED terminals",
+    "controller-produced result terminal allowlist",
+    "fixed local process environment and exact SSH argv policy",
+    "immutable content-addressed mounted grant authority",
+    "same-observation grant identity check immediately before atomic publication",
+    "durable grant-authority provenance and typed persistence ambiguity context"
   ],
   "remaining_admission_gates": [
-    "independent review of source commit a1515d0de44240c44051f6deb3b0900e00aaf1c8",
     "approved executable A3O02 production solution",
     "real OpenSSH-server correct-key and ambient-key/config/agent rejection parity receipt",
     "root-protected dedicated public identity and known-hosts artifacts",
@@ -82,5 +112,5 @@
   "dispatchable": false,
   "grant": null,
   "request": null,
-  "result_sha256": "sha256:573a09a371a79f8825e9a39a1a401ce35018c2cc62a4e59edb994804a8e566e3"
+  "result_sha256": "sha256:26366f58a9303dc77eace5a109d6d43cd54a89530f90835e2b56856ace501eae"
 }
