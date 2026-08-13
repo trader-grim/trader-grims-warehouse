@@ -804,8 +804,23 @@ def _bounded_stream_readonly(process: subprocess.Popen[bytes], *, stdout_limit: 
     return bytes(outputs["stdout"]), bytes(outputs["stderr"])
 
 
-def _run_held_bounded(argv: list[str], *, pass_fds: tuple[int, ...], timeout: int, limit: int) -> tuple[int, bytes, bytes]:
-    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, pass_fds=pass_fds)
+def _run_held_bounded(
+    argv: list[str],
+    *,
+    pass_fds: tuple[int, ...],
+    timeout: int,
+    limit: int,
+    env: Mapping[str, str] | None = None,
+) -> tuple[int, bytes, bytes]:
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        pass_fds=pass_fds,
+        env=None if env is None else dict(env),
+    )
     failure: Exception | None = None
     try:
         stdout, stderr = _bounded_stream_readonly(process, stdout_limit=limit, stderr_limit=limit, timeout=timeout)

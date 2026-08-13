@@ -22,6 +22,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+_TOOL_ENVIRONMENT = {
+    "HOME": "/nonexistent",
+    "LANG": "C",
+    "LC_ALL": "C",
+    "PATH": "/usr/bin:/bin",
+    "TZ": "UTC",
+}
+
 REQUEST_SCHEMA = "tgw-prod-a3-host-state-observation-request/v1"
 RECEIPT_SCHEMA = "tgw-prod-a3-host-state-observation-receipt/v1"
 TERMINAL_SCHEMA = "tgw-prod-a3-host-state-observation-terminal/v1"
@@ -230,6 +238,7 @@ def _version(fd: int, timeout: int = 10, limit: int = 65536) -> tuple[str, str, 
         stderr=subprocess.PIPE,
         start_new_session=True,
         pass_fds=(fd,),
+        env=dict(_TOOL_ENVIRONMENT),
     )
     assert process.stdout and process.stderr
     selector = selectors.DefaultSelector()

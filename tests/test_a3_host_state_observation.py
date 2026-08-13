@@ -18,6 +18,7 @@ from tgw.a3_host_state_observation import (
     HostStateEvidenceStore,
     HostStateObservationController,
     HostStateObservationGrant,
+    HostStatePersistenceAmbiguous,
     ObservationHold,
     build_host_state_production_composition,
     decode_helper_response,
@@ -278,6 +279,26 @@ def test_streamed_helper_terminal_is_closed_and_fresh() -> None:
     assert decode_helper_response(encode_helper_response(remote), request, now=now) == remote
     with pytest.raises(HostStateError, match="stale"):
         decode_helper_response(encode_helper_response(remote), request, now=now + timedelta(minutes=11))
+    for controller_only in (
+        terminal(
+            outcome="AMBIGUOUS",
+            stage="authority",
+            code="TOKEN_UNCERTAIN",
+            dispatched=False,
+            request_sha256=request["request_sha256"],
+            observed_at=now.isoformat(),
+        ),
+        terminal(
+            outcome="PASS",
+            stage="complete",
+            code="NONE",
+            dispatched=True,
+            request_sha256=request["request_sha256"],
+            observed_at=now.isoformat(),
+        ),
+    ):
+        with pytest.raises(HostStateError, match="non-remote"):
+            decode_helper_response(encode_helper_response(controller_only), request, now=now)
 
 
 @pytest.mark.parametrize(
@@ -354,6 +375,7 @@ def test_sshd_parity_is_typed_and_fresh() -> None:
         "framing_verified": True,
         "process_group_verified": True,
         "ssh_argv_policy": module._ssh_argv_policy(_request()),
+        "local_process_environment": module._local_process_environment(),
         "evidence": {
             role: {
                 "path": f"/protected/{role}",
@@ -467,6 +489,7 @@ def _grant_and_roots(tmp_path: Path, request: dict):
             "b64": "T3BlblNTSCBmaXh0dXJlCg==",
         },
         "ssh_argv_policy": module._ssh_argv_policy(request),
+        "local_process_environment": module._local_process_environment(),
         "token_root_identity": _identity(token_root),
         "evidence_root_identity": store.identity,
     }
@@ -604,6 +627,62 @@ def test_evidence_store_rejects_symlink_ancestor(tmp_path: Path) -> None:
         HostStateEvidenceStore(alias / "evidence")
 
 
+@pytest.mark.parametrize("success_path", [False, True])
+def test_post_publish_validation_failure_is_typed_ambiguous(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    success_path: bool,
+) -> None:
+    import tgw.a3_host_state_observation as host_state
+
+    request, receipt = _observe(tmp_path / "host")
+    grant, token, store, composition, composition_value = _grant_and_roots(
+        tmp_path / "authority", request
+    )
+    token.consume()
+    terminal_value = terminal(
+        outcome="PASS" if success_path else "FAILED",
+        stage="complete" if success_path else "remote",
+        code="NONE" if success_path else "HELPER_FAILED",
+        dispatched=True,
+        request_sha256=request["request_sha256"],
+        observed_at=receipt["observed_at"],
+    )
+
+    def fail_after_publication(_paths: tuple[Path, ...]) -> tuple[dict, ...]:
+        raise HostStateError("injected post-publication validation failure")
+
+    monkeypatch.setattr(host_state, "_validate_evidence_paths", fail_after_publication)
+    with pytest.raises(HostStatePersistenceAmbiguous) as caught:
+        if success_path:
+            store.persist(
+                request=request,
+                receipt=receipt,
+                terminal_value=terminal_value,
+                grant=grant.value,
+                token_identity=token.identity,
+                dependency=dependency_projection(
+                    receipt,
+                    request,
+                    ssh_sha256=request["transport"]["ssh_sha256"],
+                    descriptor_sha256=composition,
+                ),
+                composition_value=composition_value,
+            )
+        else:
+            store.persist_terminal(
+                request=request,
+                terminal_value=terminal_value,
+                grant=grant.value,
+                token_identity=token.identity,
+                composition_sha256=composition,
+                composition_value=composition_value,
+            )
+    assert caught.value.terminal["stage"] == "persistence"
+    assert caught.value.terminal["dispatched"] is True
+    assert any(path.is_dir() and not path.name.startswith(".attempt-") for path in store.root.iterdir())
+
+
 def test_grant_rejects_bool_attempt_and_foreign_plan(tmp_path: Path) -> None:
     request = _request()
     grant, _token, _store, _composition, _composition_value = _grant_and_roots(tmp_path, request)
@@ -716,6 +795,13 @@ def test_ssh_policy_closes_global_host_and_ambient_auth_fallbacks() -> None:
         "-T",
     ):
         assert option in policy
+    assert host_state._local_process_environment() == {
+        "HOME": "/nonexistent",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+        "TZ": "UTC",
+    }
 
 
 def test_production_provider_cannot_be_subclassed() -> None:
@@ -772,7 +858,12 @@ def test_fixture_ssh_path_uses_exact_argv_framing_and_group_cleanup(tmp_path: Pa
     identity_public = tmp_path / "identity.pub"
     helper = tmp_path / "helper.py"
     ssh.write_text(f"#!/usr/bin/python3\nimport os,sys\nwhile os.read(0,65536): pass\nos.write(1,{frame!r})\n")
-    keygen.write_text(f"#!/usr/bin/python3\nprint({initial_request['transport']['identity_public']!r})\n")
+    keygen.write_text(
+        "#!/usr/bin/python3\n"
+        "import os\n"
+        "assert 'LD_PRELOAD' not in os.environ\n"
+        f"print({initial_request['transport']['identity_public']!r})\n"
+    )
     hosts.write_text("tgw-prod ssh-ed25519 QUFBQQ==\n")
     identity.write_text("fixture-private-material\n")
     identity_public.write_text(initial_request["transport"]["identity_public"] + "\n")
@@ -815,7 +906,13 @@ def test_fixture_ssh_path_uses_exact_argv_framing_and_group_cleanup(tmp_path: Pa
     frame_path = tmp_path / "frame"
     frame_path.write_bytes(encode_helper_response(receipt))
     frame_path.chmod(0o444)
-    ssh.write_text(f"#!/usr/bin/python3\nimport os\nwhile os.read(0,65536): pass\nfd=os.open({str(frame_path)!r},os.O_RDONLY);os.write(1,os.read(fd,1048576));os.close(fd)\n")
+    ssh.write_text(
+        "#!/usr/bin/python3\n"
+        "import os\n"
+        "assert 'LD_PRELOAD' not in os.environ\n"
+        "while os.read(0,65536): pass\n"
+        f"fd=os.open({str(frame_path)!r},os.O_RDONLY);os.write(1,os.read(fd,1048576));os.close(fd)\n"
+    )
     ssh.chmod(0o755)
     request["transport"]["ssh_sha256"] = digest(ssh.read_bytes())
     request["request_sha256"] = digest(__import__("tgw.a3_host_state_observation", fromlist=["canonical"]).canonical({key: value for key, value in request.items() if key != "request_sha256"}))
@@ -824,6 +921,7 @@ def test_fixture_ssh_path_uses_exact_argv_framing_and_group_cleanup(tmp_path: Pa
     frame_path.chmod(0o644)
     frame_path.write_bytes(encode_helper_response(receipt))
     frame_path.chmod(0o444)
+    monkeypatch.setenv("LD_PRELOAD", "/ambient/not-admitted.so")
     provider = SshHostStateProvider.fixture(
         request=request,
         ssh_path=ssh,

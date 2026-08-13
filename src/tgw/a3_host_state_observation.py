@@ -73,6 +73,18 @@ _PARITY_EVIDENCE_ROLES = {
     "framing_log",
     "process_group_log",
 }
+_LOCAL_PROCESS_ENVIRONMENT = {
+    "HOME": "/nonexistent",
+    "LANG": "C",
+    "LC_ALL": "C",
+    "PATH": "/usr/bin:/bin",
+    "TZ": "UTC",
+}
+
+
+def _local_process_environment() -> dict[str, str]:
+    """Return the exact environment admitted for local SSH/tool processes."""
+    return dict(_LOCAL_PROCESS_ENVIRONMENT)
 
 
 class HostStateError(ObservationError):
@@ -258,6 +270,7 @@ def validate_sshd_parity(
         "framing_verified",
         "process_group_verified",
         "ssh_argv_policy",
+        "local_process_environment",
         "evidence",
         "receipt_sha256",
     }
@@ -289,6 +302,8 @@ def validate_sshd_parity(
         raise HostStateError("sshd parity identity is invalid")
     if not isinstance(receipt["ssh_argv_policy"], list) or not receipt["ssh_argv_policy"] or any(not isinstance(item, str) or not item for item in receipt["ssh_argv_policy"]):
         raise HostStateError("sshd parity SSH argv policy is invalid")
+    if receipt["local_process_environment"] != _local_process_environment():
+        raise HostStateError("sshd parity local process environment differs")
     if digest((receipt["identity_public"] + "\n").encode()) != receipt["identity_public_sha256"]:
         raise HostStateError("sshd parity public identity hash differs")
     observed_at = _parse_time(receipt["observed_at"], "sshd parity observed_at")
@@ -613,7 +628,13 @@ def _read_branch(repository: Path, expected: str, *, logical_path: str | None = 
 
 
 def _tool_version(fd: int, label: str) -> tuple[str, str, str]:
-    rc, stdout, stderr = _run_held_bounded([f"/proc/{os.getpid()}/fd/{fd}", "--version"], pass_fds=(fd,), timeout=10, limit=65536)
+    rc, stdout, stderr = _run_held_bounded(
+        [f"/proc/{os.getpid()}/fd/{fd}", "--version"],
+        pass_fds=(fd,),
+        timeout=10,
+        limit=65536,
+        env=_local_process_environment(),
+    )
     raw = stdout or stderr
     if rc or not raw or len(raw) > 65536:
         raise HostStateError(f"{label} version observation failed")
@@ -831,7 +852,15 @@ def decode_helper_response(raw: bytes, request: Mapping[str, Any], *, now: datet
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HostStateError("host-state response is malformed") from exc
     if isinstance(value, Mapping) and value.get("schema") == TERMINAL_SCHEMA:
-        return validate_terminal(value, request_sha256=request["request_sha256"], now=now)
+        remote_terminal = validate_terminal(value, request_sha256=request["request_sha256"], now=now)
+        if (
+            remote_terminal["outcome"],
+            remote_terminal["stage"],
+            remote_terminal["code"],
+            remote_terminal["dispatched"],
+        ) not in _REMOTE_TERMINALS:
+            raise HostStateError("host-state helper returned a non-remote terminal")
+        return remote_terminal
     return validate_receipt(value, request, now=now)
 
 
@@ -845,6 +874,10 @@ _TERMINALS = {
     ("AMBIGUOUS", "dispatch", "DISPATCH_UNCERTAIN", True),
     ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", False),
     ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", True),
+}
+_REMOTE_TERMINALS = {
+    ("HOLD", "remote", "HOST_NOT_READY", True),
+    ("FAILED", "remote", "HELPER_FAILED", True),
 }
 
 
@@ -1113,6 +1146,7 @@ class HostStateEvidenceStore:
         }
         try:
             paths = self._store.persist(validated_receipt, b"", validated_request, attachments)
+            return _validate_evidence_paths(paths)
         except Exception as exc:
             ambiguous = terminal(
                 outcome="AMBIGUOUS",
@@ -1124,7 +1158,6 @@ class HostStateEvidenceStore:
                 diagnostic=type(exc).__name__.encode(),
             )
             raise HostStatePersistenceAmbiguous(ambiguous) from exc
-        return _validate_evidence_paths(paths)
 
     def persist_terminal(
         self,
@@ -1162,6 +1195,7 @@ class HostStateEvidenceStore:
         }
         try:
             paths = self._store.persist(failure, b"", validated_request, attachments)
+            return _validate_evidence_paths(paths)
         except Exception as exc:
             ambiguous = terminal(
                 outcome="AMBIGUOUS",
@@ -1173,7 +1207,6 @@ class HostStateEvidenceStore:
                 diagnostic=type(exc).__name__.encode(),
             )
             raise HostStatePersistenceAmbiguous(ambiguous) from exc
-        return _validate_evidence_paths(paths)
 
 
 def _verify_evidence_bundle(
@@ -1364,6 +1397,7 @@ def _validate_composition_value(
                 "artifacts",
                 "ssh_version",
                 "ssh_argv_policy",
+                "local_process_environment",
                 "token_root_identity",
                 "evidence_root_identity",
             },
@@ -1430,6 +1464,8 @@ def _validate_composition_value(
         raise HostStateError("host-state composition SSH version differs")
     if composition["ssh_argv_policy"] != _ssh_argv_policy(request):
         raise HostStateError("host-state composition SSH argv policy differs")
+    if composition["local_process_environment"] != _local_process_environment():
+        raise HostStateError("host-state composition local process environment differs")
     _root_identity(composition["token_root_identity"], "composition token root")
     evidence_root = _root_identity(composition["evidence_root_identity"], "composition evidence root")
     if not _same_root_authority(evidence_root, expected_evidence_root):
@@ -1557,6 +1593,7 @@ class SshHostStateProvider:
                 pass_fds=(opened[1], opened[3]),
                 timeout=5,
                 limit=8192,
+                env=_local_process_environment(),
             )
             if rc or stdout.decode("utf-8", errors="strict").strip() != request["transport"]["identity_public"]:
                 raise ObservationHold("sealed private/public identity differs")
@@ -1569,6 +1606,7 @@ class SshHostStateProvider:
                     pass_fds=(opened[0],),
                     timeout=5,
                     limit=8192,
+                    env=_local_process_environment(),
                 )
                 version_raw = version_out or version_err
                 if version_rc or not version_raw:
@@ -1650,6 +1688,7 @@ class SshHostStateProvider:
                     stderr=subprocess.PIPE,
                     start_new_session=True,
                     pass_fds=(ssh_fd, sealed_hosts, sealed_identity),
+                    env=_local_process_environment(),
                 )
                 stream_error: Exception | None = None
                 try:
@@ -1833,6 +1872,7 @@ class HostStateProductionComposition:
             "artifacts": artifacts,
             "ssh_version": launch.ssh_version,
             "ssh_argv_policy": _ssh_argv_policy(provider.request),
+            "local_process_environment": _local_process_environment(),
             "token_root_identity": fixed_token_root,
             "evidence_root_identity": fixed_evidence_root,
         }
@@ -1970,10 +2010,56 @@ class HostStateObservationController:
                 expected_evidence_root_identity=evidence_store.identity,
             )
             return result
+        except Exception as exc:
+            try:
+                launch.close()
+            except Exception as close_exc:
+                raise HostStateDispatchAmbiguous(
+                    "host-state predispatch cleanup is uncertain"
+                ) from close_exc
+            raise ObservationHold("host-state authority could not be consumed before dispatch") from exc
+
+        def persistence_result(exc: HostStatePersistenceAmbiguous) -> dict[str, Any]:
+            persistence_terminal = validate_terminal(
+                exc.terminal,
+                request_sha256=validated["request_sha256"],
+            )
+            if (
+                persistence_terminal["outcome"],
+                persistence_terminal["stage"],
+                persistence_terminal["code"],
+                persistence_terminal["dispatched"],
+            ) != ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", True):
+                raise HostStateError("host-state persistence terminal differs")
+            result = {
+                "schema": RESULT_SCHEMA,
+                "composition_sha256": composition_sha256,
+                "evidence_root_identity": evidence_store.identity,
+                "terminal": persistence_terminal,
+                "receipt": None,
+                "dependency": None,
+                "evidence": [],
+            }
+            result["result_sha256"] = _hash(result)
+            validate_result(
+                result,
+                validated,
+                expected_composition_sha256=composition_sha256,
+                expected_evidence_root_identity=evidence_store.identity,
+            )
+            return result
+
         try:
             untrusted = launch()
             if untrusted.get("schema") == TERMINAL_SCHEMA:
                 remote_terminal = validate_terminal(untrusted, request_sha256=validated["request_sha256"])
+                if (
+                    remote_terminal["outcome"],
+                    remote_terminal["stage"],
+                    remote_terminal["code"],
+                    remote_terminal["dispatched"],
+                ) not in _REMOTE_TERMINALS:
+                    raise HostStateError("host-state launch returned a non-remote terminal")
                 evidence = evidence_store.persist_terminal(
                     request=validated,
                     terminal_value=remote_terminal,
@@ -2000,8 +2086,8 @@ class HostStateObservationController:
                 )
                 return result
             receipt = validate_receipt(untrusted, validated, now=datetime.now(timezone.utc))
-        except HostStatePersistenceAmbiguous:
-            raise
+        except HostStatePersistenceAmbiguous as exc:
+            return persistence_result(exc)
         except Exception as exc:
             ambiguous = terminal(
                 outcome="AMBIGUOUS",
@@ -2012,14 +2098,17 @@ class HostStateObservationController:
                 observed_at=datetime.now(timezone.utc).isoformat(),
                 diagnostic=type(exc).__name__.encode(),
             )
-            evidence = evidence_store.persist_terminal(
-                request=validated,
-                terminal_value=ambiguous,
-                grant=fixed_grant,
-                token_identity=token.identity,
-                composition_sha256=composition_sha256,
-                composition_value=composition.value,
-            )
+            try:
+                evidence = evidence_store.persist_terminal(
+                    request=validated,
+                    terminal_value=ambiguous,
+                    grant=fixed_grant,
+                    token_identity=token.identity,
+                    composition_sha256=composition_sha256,
+                    composition_value=composition.value,
+                )
+            except HostStatePersistenceAmbiguous as persistence_exc:
+                return persistence_result(persistence_exc)
             result = {
                 "schema": RESULT_SCHEMA,
                 "composition_sha256": composition_sha256,
@@ -2051,15 +2140,18 @@ class HostStateObservationController:
             ssh_sha256=validated["transport"]["ssh_sha256"],
             descriptor_sha256=composition_sha256,
         )
-        evidence = evidence_store.persist(
-            request=validated,
-            receipt=receipt,
-            terminal_value=success,
-            grant=fixed_grant,
-            token_identity=token.identity,
-            dependency=dependency,
-            composition_value=composition.value,
-        )
+        try:
+            evidence = evidence_store.persist(
+                request=validated,
+                receipt=receipt,
+                terminal_value=success,
+                grant=fixed_grant,
+                token_identity=token.identity,
+                dependency=dependency,
+                composition_value=composition.value,
+            )
+        except HostStatePersistenceAmbiguous as exc:
+            return persistence_result(exc)
         result = {
             "schema": RESULT_SCHEMA,
             "composition_sha256": composition_sha256,
@@ -2122,6 +2214,7 @@ def validate_result(
         ("FAILED", "remote", "HELPER_FAILED", True),
         ("AMBIGUOUS", "authority", "TOKEN_UNCERTAIN", False),
         ("AMBIGUOUS", "dispatch", "DISPATCH_UNCERTAIN", True),
+        ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", True),
     }:
         raise HostStateError("host-state result terminal is not controller-produced")
     root = Path(str(expected_evidence_root_identity["path"]))
