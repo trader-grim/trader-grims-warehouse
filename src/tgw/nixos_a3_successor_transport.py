@@ -605,8 +605,8 @@ class A3LocalProductionComposition:
         return {field.name: getattr(self, field.name) for field in fields(self) if field.name != "composition_sha256"}
 
 
-def validate_local_composition(composition: A3LocalProductionComposition, request_value: Mapping[str, Any]) -> dict[str, Any]:
-    request = validate_request(request_value)
+def validate_local_composition(composition: A3LocalProductionComposition, request_value: Mapping[str, Any], *, reviewed_source: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    request = validate_request(request_value, reviewed_source=reviewed_source)
     if composition.schema != COMPOSITION_SCHEMA or composition.request_sha256 != request["request_sha256"] or composition.composition_sha256 != digest(composition.unsigned()):
         raise A3EvaluationError("local production composition identity is invalid")
     if composition.target != {"host": "tgw-prod", "system": "x86_64-linux", "expected_current": request["target"]["expected_current"]}:
@@ -816,19 +816,24 @@ class DurableNonceReplayStore:
                 named_root = os.fstat(reopened_root_fd)
             finally:
                 os.close(reopened_root_fd)
-            if (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino) or (
-                root.st_dev,
-                root.st_ino,
-                root.st_uid,
-                root.st_gid,
-                stat.S_IMODE(root.st_mode),
-            ) != (
-                self.identity["dev"],
-                self.identity["ino"],
-                self.identity["uid"],
-                self.identity["gid"],
-                self.identity["mode"],
-            ) or (named_root.st_dev, named_root.st_ino) != (root.st_dev, root.st_ino):
+            if (
+                (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino)
+                or (
+                    root.st_dev,
+                    root.st_ino,
+                    root.st_uid,
+                    root.st_gid,
+                    stat.S_IMODE(root.st_mode),
+                )
+                != (
+                    self.identity["dev"],
+                    self.identity["ino"],
+                    self.identity["uid"],
+                    self.identity["gid"],
+                    self.identity["mode"],
+                )
+                or (named_root.st_dev, named_root.st_ino) != (root.st_dev, root.st_ino)
+            ):
                 raise A3EvaluationError("replay claim/root changed during commit")
             valid = True
             return {
@@ -888,8 +893,7 @@ class DurableNonceReplayStore:
             or before.st_nlink != 1
             or len(raw) != ref["size"]
             or digest(raw) != ref["file_sha256"]
-            or (before.st_dev, before.st_ino, before.st_size, before.st_ctime_ns)
-            != (after.st_dev, after.st_ino, after.st_size, after.st_ctime_ns)
+            or (before.st_dev, before.st_ino, before.st_size, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_ctime_ns)
             or (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino)
             or (root.st_dev, root.st_ino) != (named_root.st_dev, named_root.st_ino)
             or (root.st_dev, root.st_ino, root.st_uid, root.st_gid, stat.S_IMODE(root.st_mode))
@@ -994,8 +998,7 @@ class ExactSubprocessRunner:
             except OSError:
                 named = None
             if (
-                (after.st_dev, after.st_ino, after.st_size, after.st_ctime_ns)
-                != (launcher_before.st_dev, launcher_before.st_ino, launcher_before.st_size, launcher_before.st_ctime_ns)
+                (after.st_dev, after.st_ino, after.st_size, after.st_ctime_ns) != (launcher_before.st_dev, launcher_before.st_ino, launcher_before.st_size, launcher_before.st_ctime_ns)
                 or launcher_after_raw != launcher_raw
                 or named is None
                 or (after.st_dev, after.st_ino) != (named.st_dev, named.st_ino)
@@ -1100,10 +1103,7 @@ class ExactSubprocessRunner:
         )
         evidence = {
             "schema": LAUNCH_EVIDENCE_SCHEMA,
-            "challenge": {
-                key: packet[key]
-                for key in ("packet_sha256", "composition_sha256", "request_sha256", "launch_nonce", "attempt_id", "issued_at", "expires_at")
-            },
+            "challenge": {key: packet[key] for key in ("packet_sha256", "composition_sha256", "request_sha256", "launch_nonce", "attempt_id", "issued_at", "expires_at")},
             "signed_attestation": attestation,
             "replay_claim": replay_claim["claim"],
             "replay_claim_ref": replay_claim["ref"],
@@ -1115,22 +1115,23 @@ class ExactSubprocessRunner:
 class A3LocalProductionTransport:
     """Final sealed production transport; instances come only from the factory."""
 
-    __slots__ = ("composition", "_runner")
+    __slots__ = ("composition", "_runner", "reviewed_source")
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         raise TypeError("A3LocalProductionTransport is final")
 
-    def __init__(self, composition: A3LocalProductionComposition, *, _token: object) -> None:
+    def __init__(self, composition: A3LocalProductionComposition, *, _token: object, reviewed_source: Mapping[str, Any] | None = None) -> None:
         if _token is not _SEAL:
             raise TypeError("use load_local_production_transport")
         self.composition = composition
+        self.reviewed_source = dict(reviewed_source) if reviewed_source is not None else None
         self._runner = ExactSubprocessRunner(composition)
 
     def validate_sealed(self, request_value: Mapping[str, Any]) -> None:
-        validate_local_composition(self.composition, request_value)
+        validate_local_composition(self.composition, request_value, reviewed_source=self.reviewed_source)
 
     def __call__(self, request_value: Mapping[str, Any]) -> Mapping[str, Any]:
-        request = validate_local_composition(self.composition, request_value)
+        request = validate_local_composition(self.composition, request_value, reviewed_source=self.reviewed_source)
         source, _ = _read_held(self.composition.product_archive, label="product archive", executable=False)
         integration, _ = _read_held(self.composition.integration_archive, label="integration archive", executable=False)
         return remote.execute(
@@ -1205,8 +1206,7 @@ def _load_local_production_transport(path: Path, *, _test_uid: int | None = None
             or not stat.S_ISREG(held_before.st_mode)
             or held_before.st_uid != trusted_uid
             or stat.S_IMODE(held_before.st_mode) != 0o400
-            or (held_before.st_dev, held_before.st_ino, held_before.st_size, held_before.st_ctime_ns)
-            != (held_after.st_dev, held_after.st_ino, held_after.st_size, held_after.st_ctime_ns)
+            or (held_before.st_dev, held_before.st_ino, held_before.st_size, held_before.st_ctime_ns) != (held_after.st_dev, held_after.st_ino, held_after.st_size, held_after.st_ctime_ns)
             or (named_before.st_dev, named_before.st_ino) != (held_before.st_dev, held_before.st_ino)
             or (named_after.st_dev, named_after.st_ino) != (held_before.st_dev, held_before.st_ino)
             or (manifest_parent_before.st_dev, manifest_parent_before.st_ino, manifest_parent_before.st_mtime_ns, manifest_parent_before.st_ctime_ns)
@@ -1238,9 +1238,11 @@ def _load_local_production_transport(path: Path, *, _test_uid: int | None = None
     return A3LocalProductionTransport(composition, _token=_SEAL)
 
 
-def load_local_production_transport(path: Path) -> A3LocalProductionTransport:
+def load_local_production_transport(path: Path, *, reviewed_source: Mapping[str, Any] | None = None) -> A3LocalProductionTransport:
     """Load one immutable root-owned canonical composition manifest and seal it."""
-    return _load_local_production_transport(path)
+    transport = _load_local_production_transport(path)
+    transport.reviewed_source = dict(reviewed_source) if reviewed_source is not None else None
+    return transport
 
 
 __all__ = [

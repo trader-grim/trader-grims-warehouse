@@ -238,7 +238,7 @@ class TypedEffectHandlerRegistry:
                     evidence=("nixos-a3-successor-handler-memory:" + hashlib.sha256(_canonical(result)).hexdigest(),),
                 )
             try:
-                terminal = validate_a3_successor_success(result["terminal"], request)
+                terminal = validate_a3_successor_success(result["terminal"], request, reviewed_source=composition.reviewed_source)
             except Exception as exc:
                 raise AmbiguousEffect(
                     "A3 successor provider returned invalid post-build evidence",

@@ -200,6 +200,9 @@ def test_sealed_transport_uses_exact_identity_and_frame(tmp_path: Path) -> None:
     identity = tmp_path / "identity"
     identity.write_text("identity\n")
     identity.chmod(0o400)
+    keygen = tmp_path / "ssh-keygen"
+    keygen.write_text("#!/bin/sh\necho 'ssh-ed25519 a2V5'\n")
+    keygen.chmod(0o755)
     helper = tmp_path / "helper"
     helper.write_bytes(Path("src/tgw/a3_preintegration_observation.py").read_bytes())
     helper.chmod(0o444)
@@ -208,8 +211,10 @@ def test_sealed_transport_uses_exact_identity_and_frame(tmp_path: Path) -> None:
     source["descriptor_sha256"] = digest(canonical({k: v for k, v in source.items() if k != "descriptor_sha256"}))
     transport = {
         "ssh_sha256": digest(fake.read_bytes()),
+        "ssh_keygen_sha256": digest(keygen.read_bytes()),
         "known_hosts_sha256": digest(hosts.read_bytes()),
         "identity_sha256": digest(identity.read_bytes()),
+        "identity_public": "ssh-ed25519 a2V5",
         "helper_sha256": digest(helper.read_bytes()),
         "python_sha256": "sha256:" + "5" * 64,
         "git_sha256": "sha256:" + "6" * 64,
@@ -217,7 +222,7 @@ def test_sealed_transport_uses_exact_identity_and_frame(tmp_path: Path) -> None:
     request = make_request(operation_id="ssh-frame", transport=transport, source=source)
     receipt, archive = observe_repository(repo, request)
     response_path.write_bytes(encode_helper_response(receipt, archive))
-    provider = SshObservationProvider(request, fake, hosts, identity, helper, "/usr/bin/python3", request["source"])
+    provider = SshObservationProvider(request, fake, hosts, identity, helper, "/usr/bin/python3", request["source"], keygen)
     assert provider.ready(request)
     result = provider.observe(request, on_dispatch=lambda: None)
     assert result["receipt"]["repository"]["archive_sha256"] == digest(result["archive"])
@@ -236,6 +241,15 @@ def test_production_provider_rejects_self_consistent_descriptor_xy(tmp_path: Pat
     changed["catalog_sha256"] = "sha256:" + "8" * 64
     changed["descriptor_sha256"] = digest(canonical({k: v for k, v in changed.items() if k != "descriptor_sha256"}))
     provider = SshObservationProvider(request, tmp_path / "ssh", tmp_path / "hosts", tmp_path / "key", tmp_path / "helper", "/usr/bin/python3", changed)
+    assert provider.ready(request) is False
+
+
+def test_provider_rejects_private_public_key_mismatch(tmp_path: Path) -> None:
+    request = make_request(operation_id="key-mismatch", transport=_transport())
+    request["transport"]["identity_public"] = "ssh-ed25519 d3Jvbmc="
+    request["request_sha256"] = digest(canonical({k: v for k, v in request.items() if k != "request_sha256"}))
+    missing = tmp_path / "missing"
+    provider = SshObservationProvider(request, missing, missing, missing, missing, "/usr/bin/python3", request["source"], missing)
     assert provider.ready(request) is False
 
 

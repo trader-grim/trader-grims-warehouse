@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import selectors
 import shlex
 import shutil
 import signal
@@ -151,9 +152,21 @@ def validate_request(value: Any, *, now: datetime | None = None) -> dict[str, An
         raise ObservationError("host state dependency is not exact and executable")
     if request["target"] != {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "main", "system": "x86_64-linux", "user": "codex", "port": 22}:
         raise ObservationError("target is not exact")
-    transport = _exact(request["transport"], {"ssh_sha256", "known_hosts_sha256", "identity_sha256", "helper_sha256", "python_sha256", "git_sha256"}, "transport")
-    if any(not isinstance(item, str) or not _SHA.fullmatch(item) for item in transport.values()):
+    transport_fields = {
+        "ssh_sha256",
+        "ssh_keygen_sha256",
+        "known_hosts_sha256",
+        "identity_sha256",
+        "identity_public",
+        "helper_sha256",
+        "python_sha256",
+        "git_sha256",
+    }
+    transport = _exact(request["transport"], transport_fields, "transport")
+    if any(not isinstance(transport[key], str) or not _SHA.fullmatch(transport[key]) for key in transport if key != "identity_public"):
         raise ObservationError("transport identities are invalid")
+    if not isinstance(transport["identity_public"], str) or len(transport["identity_public"].split()) < 2:
+        raise ObservationError("dedicated identity public key is invalid")
     if transport["helper_sha256"] != request["source"]["helper_sha256"]:
         raise ObservationError("mounted helper differs from reviewed source descriptor")
     bounds = _exact(request["bounds"], {"timeout_seconds", "max_output_bytes", "max_archive_bytes", "max_members", "max_file_bytes", "max_unpacked_bytes"}, "bounds")
@@ -184,6 +197,8 @@ def make_request(*, operation_id: str, transport: Mapping[str, str], source: Map
     source = dict(source or _fixture_source_descriptor())
     transport = dict(transport)
     transport["helper_sha256"] = source["helper_sha256"]
+    transport.setdefault("ssh_keygen_sha256", "sha256:" + "8" * 64)
+    transport.setdefault("identity_public", "ssh-ed25519 a2V5")
     value = {
         "schema": REQUEST_SCHEMA,
         "operation_id": operation_id,
@@ -530,6 +545,45 @@ def _group_empty_or_kill(pgid: int) -> bool:
     return False
 
 
+def _bounded_stream(process: subprocess.Popen[bytes], stdin: bytes, *, stdout_limit: int, stderr_limit: int, timeout: int) -> tuple[bytes, bytes]:
+    selector = selectors.DefaultSelector()
+    assert process.stdin and process.stdout and process.stderr
+    for stream in (process.stdin, process.stdout, process.stderr):
+        os.set_blocking(stream.fileno(), False)
+    selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    outputs = {"stdout": bytearray(), "stderr": bytearray()}
+    offset = 0
+    deadline = datetime.now(timezone.utc).timestamp() + timeout
+    while selector.get_map():
+        remaining = deadline - datetime.now(timezone.utc).timestamp()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        for key, _ in selector.select(min(remaining, 0.25)):
+            if key.data == "stdin":
+                if offset == len(stdin):
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                try:
+                    offset += os.write(key.fd, stdin[offset : offset + 65536])
+                except BrokenPipeError:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+            else:
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                outputs[key.data].extend(chunk)
+                limit = stdout_limit if key.data == "stdout" else stderr_limit
+                if len(outputs[key.data]) > limit:
+                    raise ObservationError(f"SSH observation {key.data} exceeded bound")
+    process.wait(timeout=max(0.1, deadline - datetime.now(timezone.utc).timestamp()))
+    return bytes(outputs["stdout"]), bytes(outputs["stderr"])
+
+
 @dataclass(frozen=True)
 class SshObservationProvider:
     request: Mapping[str, Any]
@@ -539,6 +593,7 @@ class SshObservationProvider:
     helper_path: Path
     python_path: str
     mounted_source: Mapping[str, Any] | None = None
+    ssh_keygen_path: Path | None = None
 
     def ready(self, request: Mapping[str, Any]) -> bool:
         try:
@@ -549,6 +604,7 @@ class SshObservationProvider:
             fds = []
             for path, identity, executable, modes in (
                 (self.ssh_path, "ssh_sha256", True, {0o555, 0o755}),
+                (self.ssh_keygen_path, "ssh_keygen_sha256", True, {0o555, 0o755}),
                 (self.known_hosts_path, "known_hosts_sha256", False, {0o400, 0o444}),
                 (self.identity_path, "identity_sha256", False, {0o400}),
                 (self.helper_path, "helper_sha256", False, {0o400, 0o444}),
@@ -571,6 +627,17 @@ class SshObservationProvider:
                     except ValueError as exc:
                         raise ObservationError("known-hosts key encoding is invalid") from exc
                 fds.append(fd)
+            keygen_fd = fds[1]
+            identity_fd = fds[3]
+            derived = subprocess.run(
+                [f"/proc/{os.getpid()}/fd/{keygen_fd}", "-y", "-f", f"/proc/{os.getpid()}/fd/{identity_fd}"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+                pass_fds=(keygen_fd, identity_fd),
+            )
+            if derived.returncode or derived.stdout.decode().strip() != request["transport"]["identity_public"]:
+                raise ObservationError("dedicated private/public key identity differs")
             for fd in fds:
                 os.close(fd)
             return True
@@ -608,17 +675,21 @@ class SshObservationProvider:
             on_dispatch()
             process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, pass_fds=(ssh_fd, sealed_hosts, sealed_identity))
             try:
-                stdout, stderr = process.communicate(canonical(request), timeout=request["bounds"]["timeout_seconds"])
+                stdout, stderr = _bounded_stream(
+                    process,
+                    canonical(request),
+                    stdout_limit=request["bounds"]["max_archive_bytes"] + request["bounds"]["max_output_bytes"] + 16,
+                    stderr_limit=request["bounds"]["max_output_bytes"],
+                    timeout=request["bounds"]["timeout_seconds"],
+                )
             except subprocess.TimeoutExpired as exc:
                 os.killpg(process.pid, signal.SIGTERM)
                 try:
-                    process.communicate(timeout=2)
+                    process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid, signal.SIGKILL)
-                    process.communicate()
+                    process.wait()
                 raise ObservationError("SSH observation timed out and process group was terminated") from exc
-            if len(stdout) > request["bounds"]["max_archive_bytes"] + request["bounds"]["max_output_bytes"] + 16 or len(stderr) > request["bounds"]["max_output_bytes"]:
-                raise ObservationError("SSH observation output exceeded bound")
             if process.returncode != 0:
                 raise ObservationError("SSH observation helper failed")
             if not _group_empty_or_kill(process.pid):

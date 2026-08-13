@@ -36,75 +36,82 @@ _PROVIDER_SEAL = object()
 # row fixes cleanup, build observation and return-code semantics.  Keeping the
 # command step in the key prevents a new subprocess path from silently gaining
 # authority merely because it happens to share a broad stage name.
-TERMINAL_STATE_TABLE: Mapping[tuple[str, str, str, str], Mapping[str, Any]] = {
-    ("FAILED", "composition-readiness", step, "A3KnownFailure"): {"cleanup": "NOT_CREATED", "build": False, "rc": "none"}
-    for step in ("provider-mount", "request")
-} | {
-    ("FAILED", "stdin-or-provider", "stdin-parse-or-dispatch", "InputOrProviderFailure"): {
-        "cleanup": "NOT_CREATED",
-        "build": False,
-        "rc": "none",
-    },
-} | {
-    ("AMBIGUOUS", "stdin-or-provider", "stdin-parse-or-dispatch", code): {
-        "cleanup": "UNKNOWN",
-        "build": False,
-        "rc": "none",
+TERMINAL_STATE_TABLE: Mapping[tuple[str, str, str, str], Mapping[str, Any]] = (
+    {("FAILED", "composition-readiness", step, "A3KnownFailure"): {"cleanup": "NOT_CREATED", "build": False, "rc": "none"} for step in ("provider-mount", "request")}
+    | {
+        ("FAILED", "stdin-or-provider", "stdin-parse-or-dispatch", "InputOrProviderFailure"): {
+            "cleanup": "NOT_CREATED",
+            "build": False,
+            "rc": "none",
+        },
     }
-    for code in ("ReceiptStoreUnavailable", "ReceiptStorePersistenceFailure")
-} | {
-    ("FAILED", "prebuild-validation", "contract-validation", "A3KnownFailure"): {"cleanup": "REMOVED", "build": False, "rc": "none"},
-} | {
-    ("FAILED", "post-build", step, "A3KnownFailure"): {"cleanup": "REMOVED", "build": True, "rc": "none"}
-    for step in ("contract-validation", "success-validation", "tool-identity")
-} | {
-    ("FAILED", stage, step, "A3KnownFailure"): {"cleanup": "REMOVED", "build": built, "rc": "nonzero"}
-    for stage, built, steps in (
-        ("evaluation", False, ("nix-version", "nix-store-version", "sshd-version", "systemd-version", "path-info", "nix-hash", "nix-eval")),
-        ("nix-build", True, ("nix-build",)),
-        ("post-build", True, ("nix-store", "path-info", "nix-hash")),
-        ("static-verification", True, ("sshd-verify", "systemd-verify")),
-    )
-    for step in steps
-} | {
-    ("FAILED", stage, step, "StepFailure"): {"cleanup": "REMOVED", "build": built, "rc": rc_rule}
-    for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
-    for step, rc_rule in (
-        ("launcher", "nonzero"),
-        ("launcher-identity", "none"),
-        ("timeout", "bounded-optional"),
-        ("output-bound", "bounded-optional"),
-    )
-} | {
-    ("AMBIGUOUS", stage, step, "StepFailure"): {"cleanup": "UNKNOWN", "build": built, "rc": "bounded-optional"}
-    for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
-    for step in ("response", "response-contract", "timeout", "output-bound", "process-group", "process-state")
-} | {
-    ("FAILED", stage, "output-contract", "A3KnownFailure"): {"cleanup": "REMOVED", "build": built, "rc": "none"}
-    for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
-} | {
-    ("FAILED", stage, "attestation", "A3KnownFailure"): {"cleanup": "REMOVED", "build": built, "rc": "none"}
-    for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
-} | {
-    ("AMBIGUOUS", "evaluation-or-success-persistence", "unknown", "UnknownExternalState"): {
-        "cleanup": "UNKNOWN",
-        "build": True,
-        "rc": "none",
-    },
-    ("AMBIGUOUS", "prebuild-terminal-classification", "unknown", "UnknownFailureTuple"): {
-        "cleanup": "UNKNOWN",
-        "build": False,
-        "rc": "none",
-    },
-    ("AMBIGUOUS", "postbuild-terminal-classification", "unknown", "UnknownFailureTuple"): {
-        "cleanup": "UNKNOWN",
-        "build": True,
-        "rc": "none",
-    },
-} | {
-    ("AMBIGUOUS", stage, "process-state", "A3KnownFailure"): {"cleanup": "UNKNOWN", "build": built, "rc": "bounded-optional"}
-    for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
-}
+    | {
+        ("AMBIGUOUS", "stdin-or-provider", "stdin-parse-or-dispatch", code): {
+            "cleanup": "UNKNOWN",
+            "build": False,
+            "rc": "none",
+        }
+        for code in ("ReceiptStoreUnavailable", "ReceiptStorePersistenceFailure")
+    }
+    | {
+        ("FAILED", "prebuild-validation", "contract-validation", "A3KnownFailure"): {"cleanup": "REMOVED", "build": False, "rc": "none"},
+    }
+    | {("FAILED", "post-build", step, "A3KnownFailure"): {"cleanup": "REMOVED", "build": True, "rc": "none"} for step in ("contract-validation", "success-validation", "tool-identity")}
+    | {
+        ("FAILED", stage, step, "A3KnownFailure"): {"cleanup": "REMOVED", "build": built, "rc": "nonzero"}
+        for stage, built, steps in (
+            ("evaluation", False, ("nix-version", "nix-store-version", "sshd-version", "systemd-version", "path-info", "nix-hash", "nix-eval")),
+            ("nix-build", True, ("nix-build",)),
+            ("post-build", True, ("nix-store", "path-info", "nix-hash")),
+            ("static-verification", True, ("sshd-verify", "systemd-verify")),
+        )
+        for step in steps
+    }
+    | {
+        ("FAILED", stage, step, "StepFailure"): {"cleanup": "REMOVED", "build": built, "rc": rc_rule}
+        for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
+        for step, rc_rule in (
+            ("launcher", "nonzero"),
+            ("launcher-identity", "none"),
+            ("timeout", "bounded-optional"),
+            ("output-bound", "bounded-optional"),
+        )
+    }
+    | {
+        ("AMBIGUOUS", stage, step, "StepFailure"): {"cleanup": "UNKNOWN", "build": built, "rc": "bounded-optional"}
+        for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
+        for step in ("response", "response-contract", "timeout", "output-bound", "process-group", "process-state")
+    }
+    | {
+        ("FAILED", stage, "output-contract", "A3KnownFailure"): {"cleanup": "REMOVED", "build": built, "rc": "none"}
+        for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
+    }
+    | {
+        ("FAILED", stage, "attestation", "A3KnownFailure"): {"cleanup": "REMOVED", "build": built, "rc": "none"}
+        for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
+    }
+    | {
+        ("AMBIGUOUS", "evaluation-or-success-persistence", "unknown", "UnknownExternalState"): {
+            "cleanup": "UNKNOWN",
+            "build": True,
+            "rc": "none",
+        },
+        ("AMBIGUOUS", "prebuild-terminal-classification", "unknown", "UnknownFailureTuple"): {
+            "cleanup": "UNKNOWN",
+            "build": False,
+            "rc": "none",
+        },
+        ("AMBIGUOUS", "postbuild-terminal-classification", "unknown", "UnknownFailureTuple"): {
+            "cleanup": "UNKNOWN",
+            "build": True,
+            "rc": "none",
+        },
+    }
+    | {
+        ("AMBIGUOUS", stage, "process-state", "A3KnownFailure"): {"cleanup": "UNKNOWN", "build": built, "rc": "bounded-optional"}
+        for stage, built in (("evaluation", False), ("nix-build", True), ("post-build", True), ("static-verification", True))
+    }
+)
 
 PLAN_COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
 PLAN_SOLUTION = "sha256:d28650c26c6a3d26d6c943597ccb7abd7c6670b1703d9ce941ac5ed7a2d73a4d"
@@ -575,6 +582,7 @@ def validate_success(
     request: Mapping[str, Any],
     *,
     _now: datetime | None = None,
+    reviewed_source: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     # Observe the controller clock independently of every untrusted receipt
     # field.  The private override exists only to make boundary tests
@@ -584,7 +592,7 @@ def validate_success(
         raise A3EvaluationError("success validation clock is not timezone-aware")
     observed_now = observed_now.astimezone(UTC)
     allow_fixture = isinstance(request.get("integration"), Mapping) and request["integration"].get("status") == "TEST_FIXTURE_NON_DEPLOYABLE"
-    request = validate_request(request, allow_fixture=allow_fixture)
+    request = validate_request(request, allow_fixture=allow_fixture, reviewed_source=reviewed_source)
     fields = {
         "schema",
         "outcome",
@@ -750,11 +758,7 @@ def validate_success(
     ):
         raise A3EvaluationError("network isolation evidence is invalid")
     attestations = result["launcher_evidence"]
-    if (
-        not isinstance(attestations, list)
-        or len(attestations) != isolation["command_count"]
-        or digest(attestations) != isolation["launch_evidence_sha256"]
-    ):
+    if not isinstance(attestations, list) or len(attestations) != isolation["command_count"] or digest(attestations) != isolation["launch_evidence_sha256"]:
         raise A3EvaluationError("launcher evidence set is incomplete or tampered")
     observed_challenges: set[tuple[str, str]] = set()
     from tgw.nixos_a3_successor_transport import DurableNonceReplayStore, _read_held, validate_launcher_attestation
@@ -972,14 +976,7 @@ def validate_terminal(value: Any, *, request_sha256: str, provider_sha256: str) 
         or terminal["provider_sha256"] != provider_sha256
         or terminal["cleanup"] not in {"NOT_CREATED", "REMOVED", "UNKNOWN"}
         or not all(isinstance(terminal[key], str) and terminal[key] for key in ("stage", "step", "code"))
-        or (
-            terminal["returncode"] is not None
-            and (
-                isinstance(terminal["returncode"], bool)
-                or not isinstance(terminal["returncode"], int)
-                or not -255 <= terminal["returncode"] <= 255
-            )
-        )
+        or (terminal["returncode"] is not None and (isinstance(terminal["returncode"], bool) or not isinstance(terminal["returncode"], int) or not -255 <= terminal["returncode"] <= 255))
     ):
         raise A3EvaluationError("terminal receipt classification or binding is invalid")
     for key in ("stdout_sha256", "stderr_sha256", "observation_sha256"):
@@ -990,16 +987,11 @@ def validate_terminal(value: Any, *, request_sha256: str, provider_sha256: str) 
     if any(len(terminal[key]) > 128 for key in ("stage", "step", "code")):
         raise A3EvaluationError("terminal diagnostics are unbounded")
     row = TERMINAL_STATE_TABLE.get((terminal["outcome"], terminal["stage"], terminal["step"], terminal["code"]))
-    if (
-        row is None
-        or terminal["cleanup"] != row["cleanup"]
-        or effects["build"] is not row["build"]
-    ):
+    if row is None or terminal["cleanup"] != row["cleanup"] or effects["build"] is not row["build"]:
         raise A3EvaluationError("terminal tuple is outside the exact state table")
     rc_rule = row["rc"]
-    if (
-        (rc_rule == "none" and terminal["returncode"] is not None)
-        or (rc_rule == "nonzero" and (not isinstance(terminal["returncode"], int) or isinstance(terminal["returncode"], bool) or terminal["returncode"] == 0))
+    if (rc_rule == "none" and terminal["returncode"] is not None) or (
+        rc_rule == "nonzero" and (not isinstance(terminal["returncode"], int) or isinstance(terminal["returncode"], bool) or terminal["returncode"] == 0)
     ):
         raise A3EvaluationError("terminal returncode relation is outside the exact state table")
     if terminal["receipt_sha256"] != self_hash({key: item for key, item in terminal.items() if key != "evidence"}):
@@ -1028,6 +1020,7 @@ class A3EvaluationComposition:
             {
                 "schema": COMPOSITION_SCHEMA,
                 "integration": self.integration,
+                "reviewed_source": self.reviewed_source,
                 "allow_fixture": self.allow_fixture,
                 "transport_kind": type(self.runner).__name__,
                 "transport_sha256": transport_sha256,
@@ -1072,7 +1065,7 @@ class _A3SuccessorEvaluationProviderCore:
         try:
             untrusted = self.composition.runner(request)
             try:
-                result = validate_success(untrusted, request)
+                result = validate_success(untrusted, request, reviewed_source=self.composition.reviewed_source)
                 if not self.composition.allow_fixture and result["isolation"]["composition_sha256"] != self.composition.runner.composition.composition_sha256:
                     raise A3EvaluationError("success isolation evidence differs from mounted local composition")
             except A3EvaluationError as exc:
@@ -1296,11 +1289,7 @@ class ImmutableEvaluationStore:
         held = os.fstat(self._root_fd)
         named = os.stat(self.root.name, dir_fd=self._parent_fd, follow_symlinks=False)
         observed = (held.st_dev, held.st_ino, held.st_uid, stat.S_IMODE(held.st_mode))
-        if (
-            (parent.st_dev, parent.st_ino, parent.st_uid, stat.S_IMODE(parent.st_mode)) != self._parent_identity
-            or observed != self._root_identity
-            or (named.st_dev, named.st_ino) != observed[:2]
-        ):
+        if (parent.st_dev, parent.st_ino, parent.st_uid, stat.S_IMODE(parent.st_mode)) != self._parent_identity or observed != self._root_identity or (named.st_dev, named.st_ino) != observed[:2]:
             raise A3EvaluationError("immutable receipt root identity changed")
 
     @staticmethod
@@ -1387,18 +1376,22 @@ def build_local_production_provider(
     request_value: Mapping[str, Any],
     *,
     composition_path: Path = Path("/etc/tgw/a3-successor-local-composition.json"),
+    reviewed_source: Mapping[str, Any],
 ) -> A3SuccessorEvaluationProvider:
     """Build the only production provider from the fixed local manifest."""
     from tgw.nixos_a3_successor_transport import load_local_production_transport
 
-    request = validate_request(request_value)
-    transport = load_local_production_transport(composition_path)
+    request = validate_request(request_value, reviewed_source=reviewed_source)
+    transport = load_local_production_transport(composition_path, reviewed_source=reviewed_source)
     transport.validate_sealed(request)
     receipt_root = Path(transport.composition.receipt_roots["terminal"]["path"])
     store = ImmutableEvaluationStore(receipt_root, trusted_uid=0)
     if store.identity != transport.composition.receipt_roots["terminal"]:
         raise A3EvaluationError("provider receipt store differs from sealed local composition")
-    return A3SuccessorEvaluationProvider(A3EvaluationComposition(request["integration"], store, transport), _token=_PROVIDER_SEAL)
+    return A3SuccessorEvaluationProvider(
+        A3EvaluationComposition(request["integration"], store, transport, reviewed_source=reviewed_source),
+        _token=_PROVIDER_SEAL,
+    )
 
 
 def main(
