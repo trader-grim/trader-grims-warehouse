@@ -1,6 +1,6 @@
 {
   "actual_execve_argv": [
-    "/proc/2637415/fd/4",
+    "/proc/2668445/fd/4",
     "-Wall",
     "-Wextra",
     "-Werror",
@@ -8,7 +8,7 @@
     "/tmp/tgw-freeze-f3cefe5-gates/native-werror",
     "-x",
     "c",
-    "/proc/2637415/fd/5",
+    "/proc/2668445/fd/5",
     "-x",
     "none",
     "-lcrypto"
@@ -16,14 +16,14 @@
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
   "descriptor_execution": {
     "executable_fd": 4,
-    "parent_pid": 2637415,
+    "parent_pid": 2668445,
     "pass_fds": [
       4,
       5
     ]
   },
-  "duration_ns": 264438117,
-  "ended_at": "2026-08-12T23:45:43.880718Z",
+  "duration_ns": 247963957,
+  "ended_at": "2026-08-13T00:15:45.706840Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -38,7 +38,7 @@
     }
   },
   "executable": {
-    "actual_fd_path": "/proc/2637415/fd/4",
+    "actual_fd_path": "/proc/2668445/fd/4",
     "after": {
       "ctime_ns": 1785206623981702377,
       "dev": 2050,
@@ -66,30 +66,42 @@
     "component_safe_open": true,
     "held_fd": 4,
     "logical_path": "/usr/bin/x86_64-linux-gnu-gcc-14",
+    "named_after": {
+      "ctime_ns": 1785206623981702377,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2099060,
+      "mode": "0755",
+      "mtime_ns": 1742003262000000000,
+      "nlink": 1,
+      "sha256": "sha256:a23ecab8ff08f09ad8c80602c2c5df7f49e09c25905cb8975902e101bf72635f",
+      "size": 1162264,
+      "uid": 0
+    },
     "unchanged": true
   },
   "gate_id": "native_gcc_werror",
   "generated_artifacts": [
     {
       "after": {
-        "ctime_ns": 1786578343876024355,
+        "ctime_ns": 1786580145702055456,
         "dev": 35,
         "gid": 1004,
-        "inode": 5744238,
+        "inode": 5949242,
         "mode": "0775",
-        "mtime_ns": 1786578343876024355,
+        "mtime_ns": 1786580145702055456,
         "nlink": 1,
         "sha256": "sha256:17aa782d18d947154e7b51c4995d9600293853fbb32222773b8e41f471eea1e9",
         "size": 41552,
         "uid": 1004
       },
       "before": {
-        "ctime_ns": 1786578343876024355,
+        "ctime_ns": 1786580145702055456,
         "dev": 35,
         "gid": 1004,
-        "inode": 5744238,
+        "inode": 5949242,
         "mode": "0775",
-        "mtime_ns": 1786578343876024355,
+        "mtime_ns": 1786580145702055456,
         "nlink": 1,
         "sha256": "sha256:17aa782d18d947154e7b51c4995d9600293853fbb32222773b8e41f471eea1e9",
         "size": 41552,
@@ -97,12 +109,12 @@
       },
       "bytes": 41552,
       "named_after": {
-        "ctime_ns": 1786578343876024355,
+        "ctime_ns": 1786580145702055456,
         "dev": 35,
         "gid": 1004,
-        "inode": 5744238,
+        "inode": 5949242,
         "mode": "0775",
-        "mtime_ns": 1786578343876024355,
+        "mtime_ns": 1786580145702055456,
         "nlink": 1,
         "sha256": "sha256:17aa782d18d947154e7b51c4995d9600293853fbb32222773b8e41f471eea1e9",
         "size": 41552,
@@ -118,7 +130,7 @@
   "input_trees": [],
   "inputs": [
     {
-      "actual_fd_path": "/proc/2637415/fd/5",
+      "actual_fd_path": "/proc/2668445/fd/5",
       "after": {
         "ctime_ns": 1786576304245023984,
         "dev": 35,
@@ -131,7 +143,7 @@
         "size": 31341,
         "uid": 1004
       },
-      "argv_substituted_when_exact": true,
+      "argv_substituted": true,
       "before": {
         "ctime_ns": 1786576304245023984,
         "dev": 35,
@@ -187,7 +199,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:45:43.616252Z",
+  "started_at": "2026-08-13T00:15:45.458847Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -199,5 +211,5 @@
     "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:b0851b1b5c6213d1fc6164934093281aff151cd7c853ff21ff14a4c539e52c46"
+  "unsigned_sha256": "sha256:058cd2ee7b067daa0aa751be8b7727ab8a5a25d2e68a3b62a79bf66076e0f6ea"
 }

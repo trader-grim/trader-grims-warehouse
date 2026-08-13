@@ -1,6 +1,6 @@
 {
   "actual_execve_argv": [
-    "/proc/2637415/fd/4",
+    "/proc/2668445/fd/4",
     "-Wall",
     "-Wextra",
     "-Werror",
@@ -12,7 +12,7 @@
     "-DTGW_RENDER_WRAPPER_CONFIG=\"/tmp/tgw-freeze-f3cefe5-gates/native-positive.conf\"",
     "-o",
     "/tmp/tgw-freeze-f3cefe5-gates/native-sanitizer-positive",
-    "/proc/2637415/fd/5",
+    "/proc/2668445/fd/5",
     "-x",
     "none",
     "-lcrypto"
@@ -20,15 +20,15 @@
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
   "descriptor_execution": {
     "executable_fd": 4,
-    "parent_pid": 2637415,
+    "parent_pid": 2668445,
     "pass_fds": [
       4,
       5,
       6
     ]
   },
-  "duration_ns": 434454294,
-  "ended_at": "2026-08-12T23:45:44.458247Z",
+  "duration_ns": 429491023,
+  "ended_at": "2026-08-13T00:15:46.270183Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -43,7 +43,7 @@
     }
   },
   "executable": {
-    "actual_fd_path": "/proc/2637415/fd/4",
+    "actual_fd_path": "/proc/2668445/fd/4",
     "after": {
       "ctime_ns": 1785206623981702377,
       "dev": 2050,
@@ -71,51 +71,63 @@
     "component_safe_open": true,
     "held_fd": 4,
     "logical_path": "/usr/bin/x86_64-linux-gnu-gcc-14",
+    "named_after": {
+      "ctime_ns": 1785206623981702377,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2099060,
+      "mode": "0755",
+      "mtime_ns": 1742003262000000000,
+      "nlink": 1,
+      "sha256": "sha256:a23ecab8ff08f09ad8c80602c2c5df7f49e09c25905cb8975902e101bf72635f",
+      "size": 1162264,
+      "uid": 0
+    },
     "unchanged": true
   },
   "gate_id": "native_asan_ubsan_build_positive",
   "generated_artifacts": [
     {
       "after": {
-        "ctime_ns": 1786578344452018526,
+        "ctime_ns": 1786580146262049892,
         "dev": 35,
         "gid": 1004,
-        "inode": 5744247,
+        "inode": 5949251,
         "mode": "0775",
-        "mtime_ns": 1786578344452018526,
+        "mtime_ns": 1786580146262049892,
         "nlink": 1,
-        "sha256": "sha256:b28b061e8219860e5d4ce2c156aaabe40fe32eb3055e8e9670eb387fb6900456",
+        "sha256": "sha256:279a0638e40a6a7bd830ac81ddf11c3eb2dcdac891c8c3e2d0e9ff7ea40fec6b",
         "size": 237968,
         "uid": 1004
       },
       "before": {
-        "ctime_ns": 1786578344452018526,
+        "ctime_ns": 1786580146262049892,
         "dev": 35,
         "gid": 1004,
-        "inode": 5744247,
+        "inode": 5949251,
         "mode": "0775",
-        "mtime_ns": 1786578344452018526,
+        "mtime_ns": 1786580146262049892,
         "nlink": 1,
-        "sha256": "sha256:b28b061e8219860e5d4ce2c156aaabe40fe32eb3055e8e9670eb387fb6900456",
+        "sha256": "sha256:279a0638e40a6a7bd830ac81ddf11c3eb2dcdac891c8c3e2d0e9ff7ea40fec6b",
         "size": 237968,
         "uid": 1004
       },
       "bytes": 237968,
       "named_after": {
-        "ctime_ns": 1786578344452018526,
+        "ctime_ns": 1786580146262049892,
         "dev": 35,
         "gid": 1004,
-        "inode": 5744247,
+        "inode": 5949251,
         "mode": "0775",
-        "mtime_ns": 1786578344452018526,
+        "mtime_ns": 1786580146262049892,
         "nlink": 1,
-        "sha256": "sha256:b28b061e8219860e5d4ce2c156aaabe40fe32eb3055e8e9670eb387fb6900456",
+        "sha256": "sha256:279a0638e40a6a7bd830ac81ddf11c3eb2dcdac891c8c3e2d0e9ff7ea40fec6b",
         "size": 237968,
         "uid": 1004
       },
-      "ref": "artifact:sha256:b28b061e8219860e5d4ce2c156aaabe40fe32eb3055e8e9670eb387fb6900456",
+      "ref": "artifact:sha256:279a0638e40a6a7bd830ac81ddf11c3eb2dcdac891c8c3e2d0e9ff7ea40fec6b",
       "role": "native-sanitizer-positive",
-      "sha256": "sha256:b28b061e8219860e5d4ce2c156aaabe40fe32eb3055e8e9670eb387fb6900456",
+      "sha256": "sha256:279a0638e40a6a7bd830ac81ddf11c3eb2dcdac891c8c3e2d0e9ff7ea40fec6b",
       "source_path": "/tmp/tgw-freeze-f3cefe5-gates/native-sanitizer-positive",
       "unchanged": true
     }
@@ -123,7 +135,7 @@
   "input_trees": [],
   "inputs": [
     {
-      "actual_fd_path": "/proc/2637415/fd/5",
+      "actual_fd_path": "/proc/2668445/fd/5",
       "after": {
         "ctime_ns": 1786576304245023984,
         "dev": 35,
@@ -136,7 +148,7 @@
         "size": 31341,
         "uid": 1004
       },
-      "argv_substituted_when_exact": true,
+      "argv_substituted": true,
       "before": {
         "ctime_ns": 1786576304245023984,
         "dev": 35,
@@ -166,27 +178,27 @@
       "unchanged": true
     },
     {
-      "actual_fd_path": "/proc/2637415/fd/6",
+      "actual_fd_path": "/proc/2668445/fd/6",
       "after": {
-        "ctime_ns": 1786578344012022978,
+        "ctime_ns": 1786580145830054184,
         "dev": 35,
         "gid": 1004,
         "inode": 5540023,
         "mode": "0444",
-        "mtime_ns": 1786578344012022978,
+        "mtime_ns": 1786580145830054184,
         "nlink": 1,
         "sha256": "sha256:72c7e1598efc1d9b5414a3da5d8743882945a333a017c311d5a1fdf1a9f70b7d",
         "size": 25472,
         "uid": 1004
       },
-      "argv_substituted_when_exact": true,
+      "argv_substituted": false,
       "before": {
-        "ctime_ns": 1786578344012022978,
+        "ctime_ns": 1786580145830054184,
         "dev": 35,
         "gid": 1004,
         "inode": 5540023,
         "mode": "0444",
-        "mtime_ns": 1786578344012022978,
+        "mtime_ns": 1786580145830054184,
         "nlink": 1,
         "sha256": "sha256:72c7e1598efc1d9b5414a3da5d8743882945a333a017c311d5a1fdf1a9f70b7d",
         "size": 25472,
@@ -195,12 +207,12 @@
       "held_fd": 6,
       "logical_path": "/tmp/tgw-freeze-f3cefe5-gates/native-positive.conf",
       "named_after": {
-        "ctime_ns": 1786578344012022978,
+        "ctime_ns": 1786580145830054184,
         "dev": 35,
         "gid": 1004,
         "inode": 5540023,
         "mode": "0444",
-        "mtime_ns": 1786578344012022978,
+        "mtime_ns": 1786580145830054184,
         "nlink": 1,
         "sha256": "sha256:72c7e1598efc1d9b5414a3da5d8743882945a333a017c311d5a1fdf1a9f70b7d",
         "size": 25472,
@@ -239,7 +251,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:45:44.023755Z",
+  "started_at": "2026-08-13T00:15:45.840659Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -251,5 +263,5 @@
     "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:5cc8bc3b92c961f06a9127e88f43371ca5cedc932dc9737005d1c692e4c42c58"
+  "unsigned_sha256": "sha256:fddc6c6b420b60c4e927723f8af25b97f997fa82bb53e4690e58908870f8081d"
 }

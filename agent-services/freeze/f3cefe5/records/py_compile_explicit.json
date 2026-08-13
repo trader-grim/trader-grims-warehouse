@@ -1,6 +1,6 @@
 {
   "actual_execve_argv": [
-    "/proc/2637415/fd/4",
+    "/proc/2668445/fd/4",
     "-m",
     "py_compile",
     "/tmp/tgw-freeze-f3cefe5-source/src/tgw/nix_observer_render_helper.py",
@@ -14,13 +14,13 @@
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
   "descriptor_execution": {
     "executable_fd": 4,
-    "parent_pid": 2637415,
+    "parent_pid": 2668445,
     "pass_fds": [
       4
     ]
   },
-  "duration_ns": 110001967,
-  "ended_at": "2026-08-12T23:45:43.387136Z",
+  "duration_ns": 112822733,
+  "ended_at": "2026-08-13T00:15:45.183913Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -35,7 +35,7 @@
     }
   },
   "executable": {
-    "actual_fd_path": "/proc/2637415/fd/4",
+    "actual_fd_path": "/proc/2668445/fd/4",
     "after": {
       "ctime_ns": 1785206623509726712,
       "dev": 2050,
@@ -63,6 +63,18 @@
     "component_safe_open": true,
     "held_fd": 4,
     "logical_path": "/usr/bin/python3.13",
+    "named_after": {
+      "ctime_ns": 1785206623509726712,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2098567,
+      "mode": "0755",
+      "mtime_ns": 1784147140000000000,
+      "nlink": 1,
+      "sha256": "sha256:17b78e0a93175e86f9ac03141924fd7a7f0c0c52e66b34bfa0de20ffef989df1",
+      "size": 6812336,
+      "uid": 0
+    },
     "unchanged": true
   },
   "gate_id": "py_compile_explicit",
@@ -93,7 +105,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:45:43.277104Z",
+  "started_at": "2026-08-13T00:15:45.071063Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -105,5 +117,5 @@
     "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:ff3ac667f1ad93cd02b51b804a9d7b43cc137f46f601f1e73d42b064d21fe2f2"
+  "unsigned_sha256": "sha256:69b72892137e8dc4ccb69f244bd5eb938fcaa1ebb69453185bdd03a980fbb86b"
 }

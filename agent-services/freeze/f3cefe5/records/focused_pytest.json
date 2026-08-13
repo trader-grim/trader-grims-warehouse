@@ -1,6 +1,6 @@
 {
   "actual_execve_argv": [
-    "/proc/2637415/fd/3",
+    "/proc/2668445/fd/3",
     "-q",
     "tests/test_platform_bootstrap.py",
     "tests/test_bootstrap_authority.py",
@@ -11,13 +11,13 @@
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
   "descriptor_execution": {
     "executable_fd": 3,
-    "parent_pid": 2637415,
+    "parent_pid": 2668445,
     "pass_fds": [
       3
     ]
   },
-  "duration_ns": 16900461379,
-  "ended_at": "2026-08-12T23:45:42.785733Z",
+  "duration_ns": 16332667693,
+  "ended_at": "2026-08-13T00:15:44.455036Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -32,7 +32,7 @@
     }
   },
   "executable": {
-    "actual_fd_path": "/proc/2637415/fd/3",
+    "actual_fd_path": "/proc/2668445/fd/3",
     "after": {
       "ctime_ns": 1786230571967034482,
       "dev": 39,
@@ -60,6 +60,18 @@
     "component_safe_open": true,
     "held_fd": 3,
     "logical_path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/pytest",
+    "named_after": {
+      "ctime_ns": 1786230571967034482,
+      "dev": 39,
+      "gid": 983,
+      "inode": 6648890,
+      "mode": "0775",
+      "mtime_ns": 1785259085949021152,
+      "nlink": 1,
+      "sha256": "sha256:4183e6b1b6247763e4adeb2abea2324040e591fa8196c267f46200cf8cc4da02",
+      "size": 358,
+      "uid": 1000
+    },
     "unchanged": true
   },
   "gate_id": "focused_pytest",
@@ -79,7 +91,7 @@
   "schema": "tgw-freeze-execution-record/v2",
   "semantic": {
     "passed": 148,
-    "reported_seconds": 16.43,
+    "reported_seconds": 15.85,
     "skipped": 1,
     "status": "PASS"
   },
@@ -88,7 +100,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:45:25.885238Z",
+  "started_at": "2026-08-13T00:15:28.122342Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -96,9 +108,9 @@
   },
   "stdout": {
     "bytes": 272,
-    "ref": "artifact:sha256:5a405da592d44ff997d304aaeabf9a71cdb451333b6fd0eb15f8f9a68d063117",
-    "sha256": "sha256:5a405da592d44ff997d304aaeabf9a71cdb451333b6fd0eb15f8f9a68d063117"
+    "ref": "artifact:sha256:b71cc44d944a92c47a4f7f989265b1e45c1052922b0327628f354a08cc03004f",
+    "sha256": "sha256:b71cc44d944a92c47a4f7f989265b1e45c1052922b0327628f354a08cc03004f"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:df9e06625a424f6049868e09b702951d3b79fe81a48edf206a6c03cbf586677a"
+  "unsigned_sha256": "sha256:3e92dd9f346ff77befe204ac0fc7997a0de773f9f788c1891f052d006b3f1eca"
 }

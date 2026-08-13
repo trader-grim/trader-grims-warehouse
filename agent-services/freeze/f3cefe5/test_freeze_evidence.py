@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -91,7 +92,7 @@ def test_closed_documents_contain_no_private_key_or_grant_material():
         assert not any(marker in raw for marker in forbidden), path
 
 
-def test_swapped_executable_path_runs_and_records_the_held_inode(tmp_path):
+def test_swapped_executable_path_is_fail_closed_without_a_record(tmp_path):
     runner = _runner(tmp_path)
     executable = tmp_path / "gate.sh"
     replacement = tmp_path / "replacement.sh"
@@ -105,20 +106,17 @@ def test_swapped_executable_path_runs_and_records_the_held_inode(tmp_path):
         executable.rename(held_name)
         replacement.rename(executable)
 
-    record = runner.run(
-        "held-executable-swap", executable, [], cwd=tmp_path,
-        env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"},
-        semantic=lambda out, err, _gen: {
-            "status": "PASS" if out == b"HELD\n" and not err else "FAIL"
-        },
-        after_executable_open=swap,
-    )
-    assert record["executable"]["before"] == record["executable"]["after"]
-    assert record["executable"]["before"]["inode"] == held_name.stat().st_ino
-    assert record["executable"]["before"]["inode"] != executable.stat().st_ino
-    assert record["actual_execve_argv"][0].startswith(
-        f"/proc/{record['descriptor_execution']['parent_pid']}/fd/"
-    )
+    with pytest.raises(RuntimeError, match="(executable .*changed|named executable)"):
+        runner.run(
+            "held-executable-swap", executable, [], cwd=tmp_path,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"},
+            semantic=lambda out, err, _gen: {
+                "status": "PASS" if out == b"HELD\n" and not err else "FAIL"
+            },
+            after_executable_open=swap,
+        )
+    assert held_name.stat().st_ino != executable.stat().st_ino
+    assert not (runner.records / "held-executable-swap.json").exists()
 
 
 def test_post_use_executable_mutation_is_refused(tmp_path):
@@ -173,3 +171,61 @@ def test_input_and_generated_path_replacements_are_refused(tmp_path):
             semantic=lambda _out, _err, _gen: {"status": "PASS"}, generated=[generated],
             after_generated_open=swap_generated,
         )
+
+
+def test_protected_tree_transient_replace_read_restore_is_impossible(tmp_path):
+    runner = _runner(tmp_path)
+    attack_root = Path("/tmp/tgw-freeze-f3cefe5-tree-attack")
+    cleanup = (
+        "import os,shutil,stat,sys; p=sys.argv[1]; "
+        "assert p == '/tmp/tgw-freeze-f3cefe5-tree-attack'; "
+        "s=os.lstat(p); assert stat.S_ISDIR(s.st_mode); shutil.rmtree(p)"
+    )
+    if attack_root.exists():
+        subprocess.run(
+            ["sudo", "-n", "/usr/bin/python3", "-c", cleanup, str(attack_root)],
+            check=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"},
+        )
+    attack_root.mkdir()
+    runner.store = attack_root / "store"
+    runner.store.mkdir(parents=True)
+    source_tree = tmp_path / "source-tree"
+    source_tree.mkdir()
+    (source_tree / "entry").write_text("HELD-TREE\n")
+    protected, before = runner.protect_tree(source_tree)
+    entry = protected / "entry"
+    replacement = tmp_path / "replacement-entry"
+    replacement.write_text("REPLACED-TREE\n")
+    attempt: dict[str, str] = {}
+
+    def attack() -> None:
+        try:
+            os.replace(replacement, entry)
+        except OSError as exc:
+            attempt["result"] = type(exc).__name__
+        else:
+            attempt["result"] = "UNEXPECTED_SUCCESS"
+
+    sleeper = tmp_path / "reader.py"
+    sleeper.write_text(
+        "import pathlib,sys,time\n"
+        "time.sleep(0.2)\n"
+        "sys.stdout.buffer.write((pathlib.Path(sys.argv[1])/'entry').read_bytes())\n"
+    )
+    record = runner.run(
+        "protected-tree-attack", Path(__import__("sys").executable),
+        [str(sleeper), str(protected)], cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"},
+        semantic=lambda out, err, _gen: {
+            "status": "PASS" if out == b"HELD-TREE\n" and not err else "FAIL",
+            "attack_result": attempt.get("result"),
+        },
+        inputs=[sleeper], input_trees=[protected], during_child=attack,
+    )
+    assert attempt["result"] in {"PermissionError", "OSError"}
+    assert record["input_trees"][0]["before"] == record["input_trees"][0]["after"]
+    assert record["input_trees"][0]["before"]["tree_hash"] == before["tree_hash"]
+    subprocess.run(
+        ["sudo", "-n", "/usr/bin/python3", "-c", cleanup, str(attack_root)],
+        check=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"},
+    )

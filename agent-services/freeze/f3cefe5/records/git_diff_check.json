@@ -1,6 +1,6 @@
 {
   "actual_execve_argv": [
-    "/proc/2637415/fd/4",
+    "/proc/2668445/fd/4",
     "-c",
     "safe.directory=/tmp/tgw-freeze-f3cefe5-source",
     "diff",
@@ -23,13 +23,13 @@
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
   "descriptor_execution": {
     "executable_fd": 4,
-    "parent_pid": 2637415,
+    "parent_pid": 2668445,
     "pass_fds": [
       4
     ]
   },
-  "duration_ns": 4251518,
-  "ended_at": "2026-08-12T23:45:43.516207Z",
+  "duration_ns": 5018052,
+  "ended_at": "2026-08-13T00:15:45.339856Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -44,7 +44,7 @@
     }
   },
   "executable": {
-    "actual_fd_path": "/proc/2637415/fd/4",
+    "actual_fd_path": "/proc/2668445/fd/4",
     "after": {
       "ctime_ns": 1785206623273738880,
       "dev": 2050,
@@ -72,6 +72,18 @@
     "component_safe_open": true,
     "held_fd": 4,
     "logical_path": "/usr/bin/git",
+    "named_after": {
+      "ctime_ns": 1785206623273738880,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2097736,
+      "mode": "0755",
+      "mtime_ns": 1753899052000000000,
+      "nlink": 1,
+      "sha256": "sha256:356db14e102d68a1a37d8a1ac577dfd678d45d46e92f468bef8b7154e7bfdc60",
+      "size": 4082768,
+      "uid": 0
+    },
     "unchanged": true
   },
   "gate_id": "git_diff_check",
@@ -111,7 +123,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:45:43.511925Z",
+  "started_at": "2026-08-13T00:15:45.334799Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -123,5 +135,5 @@
     "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:2d1e20936ffd52fefb95d7796cf1225016ab925aee0594b18fc40456506c4af1"
+  "unsigned_sha256": "sha256:2235b4bff7a3c6340be43040f8571ceafb7fd1051dbbe934a8f9ce39ecea76f8"
 }

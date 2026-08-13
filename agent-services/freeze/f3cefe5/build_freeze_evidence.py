@@ -13,6 +13,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 SOURCE = Path("/tmp/tgw-freeze-f3cefe5-source")
 STORE = Path("/opt/TGW/evidence/codex/sha256")
+TREE_STORE = Path("/opt/TGW/evidence/codex/trees/sha256")
 SOURCE_COMMIT = "f3cefe544a9f81422b57707c4289f2974c6dca51"
 SOURCE_TREE = "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
 ARCHIVE = "72f3ed988e1fdc132d6da19d6332321389d41e22c114a7b4fa14e95755c5889f"
@@ -97,6 +98,35 @@ def directory_identity(path: Path) -> dict[str, Any]:
     }
 
 
+def tree_identity(path: Path) -> dict[str, Any]:
+    path = path.resolve(strict=True)
+    entries = []
+    for entry in [path, *sorted(path.rglob("*"))]:
+        observed = entry.lstat()
+        assert not stat.S_ISLNK(observed.st_mode)
+        relative = "." if entry == path else entry.relative_to(path).as_posix()
+        common = {
+            "path": relative, "dev": observed.st_dev, "inode": observed.st_ino,
+            "uid": observed.st_uid, "gid": observed.st_gid,
+            "mode": f"{stat.S_IMODE(observed.st_mode):04o}", "nlink": observed.st_nlink,
+            "mtime_ns": observed.st_mtime_ns, "ctime_ns": observed.st_ctime_ns,
+        }
+        if entry.is_dir():
+            entries.append({**common, "type": "directory"})
+        else:
+            held = identity(entry)
+            entries.append({**common, "type": "file", "sha256": held["sha256"],
+                            "size": held["size"]})
+    content_entries = [
+        {key: item[key] for key in ("path", "type", "mode", "sha256", "size") if key in item}
+        for item in entries
+    ]
+    return {"path": str(path),
+            "tree_hash": sha(canonical({"schema": "tgw-protected-tree-content/v1",
+                                         "entries": content_entries})),
+            "entries": entries, "content_entries": content_entries}
+
+
 def source_identities() -> dict[str, dict[str, Any]]:
     result = {}
     for name, relative in A3_PATHS.items():
@@ -117,7 +147,7 @@ def main() -> int:
         "native_asan_ubsan_build_negative", "native_sanitizer_positive",
         "native_sanitizer_negative", "plan_graph_generation", "plan_solution_generation",
         "plan_solution_verification", "luet_version", "luet_raw_package_list",
-        "luet_derived_tgw_receipt",
+        "luet_derived_tgw_receipt", "freeze_integrity_adversarial_tests",
     }
     assert required <= records.keys()
     for name in required:
@@ -149,6 +179,26 @@ def main() -> int:
         if not item["roles"]:
             item["roles"].append("preserved_prior_raw_input")
 
+    tree_records: dict[str, dict[str, Any]] = {}
+    for name, ref in records.items():
+        value = json.loads((REPO / ref["path"]).read_text())
+        for tree in value.get("input_trees", []):
+            assert tree["before"] == tree["after"] and tree["unchanged"] is True
+            path = tree["logical_path"]
+            prior = tree_records.setdefault(path, {"manifest": tree["before"], "roles": []})
+            assert prior["manifest"] == tree["before"]
+            prior["roles"].append(f"{name}:protected_input_tree")
+    on_disk_trees = sorted(str(path.resolve()) for path in TREE_STORE.iterdir() if path.is_dir())
+    for path in on_disk_trees:
+        if path not in tree_records:
+            tree_records[path] = {
+                "manifest": tree_identity(Path(path)),
+                "roles": ["preserved_prior_protected_tree_raw_input"],
+            }
+    protected_trees = [
+        {"path": path, **tree_records[path]} for path in sorted(tree_records)
+    ]
+
     a3 = source_identities()
     audit = {
         "schema": "tgw-f3cefe5-source-audit-matrix/v1",
@@ -169,7 +219,16 @@ def main() -> int:
             {"id": "strict-ssh-and-sudo-identity", "result": "PASS"},
             {"id": "secret-exclusion", "result": "PASS"},
             {"id": "install-disabled-by-default", "result": "PASS"},
+            {"id": "held-executable-rename-fail-closed-no-record", "result": "PASS"},
+            {"id": "protected-tree-transient-replacement-impossible", "result": "PASS"},
         ],
+        "exact_test_results": {
+            "full": json.loads((HERE / "records/full_pytest_junit.json").read_text())["semantic"],
+            "focused": json.loads((HERE / "records/focused_pytest.json").read_text())["semantic"],
+            "integrity_adversarial": json.loads(
+                (HERE / "records/freeze_integrity_adversarial_tests.json").read_text()
+            )["semantic"],
+        },
         "finding_count": 0, "verdict": "PASS",
         "gate_records": records,
         "external_live_gates": {
@@ -187,9 +246,12 @@ def main() -> int:
     root = directory_identity(STORE)
     readiness = {
         "schema": "tgw-protected-store-readiness/v2", "artifact_root": root,
+        "protected_tree_root": directory_identity(TREE_STORE),
         "policy": {"owner_uid": 0, "owner_gid": 0, "mode": "0444", "nlink": 1,
                    "filename": "lowercase_sha256", "overwrite": False},
-        "artifact_count": len(artifacts), "artifacts": artifacts, "status": "PASS",
+        "artifact_count": len(artifacts), "artifacts": artifacts,
+        "protected_tree_count": len(protected_trees), "protected_trees": protected_trees,
+        "status": "PASS",
     }
     readiness_ref = write_self(REPO / "agent-services/receipts/f3cefe5-closed-store-readiness.json", readiness)
 
@@ -201,6 +263,7 @@ def main() -> int:
         "a3_source_identities": a3, "gate_records": records,
         "protected_store_readiness": readiness_ref, "source_audit": audit_ref,
         "protected_artifacts": artifacts,
+        "protected_trees": protected_trees,
         "constraints": {"remote": False, "production_build": False, "install": False,
                         "grant": False, "key_generation": False,
                         "native_test_compile_only": True},
@@ -222,6 +285,7 @@ def main() -> int:
             "98b815c125f75e35b91ba8f92b22c653171464fc",
             "d11e1c00960ed151a4e04d213110e61bf7dd83d6",
             "a33bba3d0c3a7ff9cd151d05057043367dfbfc7c",
+            "5f924377b2397e403b4c190ec81b2b9f319c2ccb",
         ], "prior_manifests_are_raw_inputs_only": True},
         "descriptor_path": "agent-services/candidates/platform-bootstrap-prerequisite-f3cefe5-CLOSED-NOT-EXECUTABLE.json",
         "status": "PREPARED_NOT_EXECUTABLE", "dispatchable": False,

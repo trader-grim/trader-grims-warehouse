@@ -35,19 +35,23 @@ def main() -> int:
     graph.add_argument("--plan-commit", required=True)
     graph.add_argument("--catalog", type=Path, required=True)
     graph.add_argument("--output", type=Path, required=True)
+    graph.add_argument("--runtime-source-tree", type=Path, required=True)
 
     tree = commands.add_parser("generate-luet-tree")
     tree.add_argument("--graph", type=Path, required=True)
     tree.add_argument("--output", type=Path, required=True)
+    tree.add_argument("--runtime-source-tree", type=Path, required=True)
 
     verify = commands.add_parser("verify-solution")
     verify.add_argument("--solution", type=Path, required=True)
     verify.add_argument("--plan-commit", required=True)
+    verify.add_argument("--runtime-source-tree", type=Path, required=True)
 
     solution = commands.add_parser("generate-solution")
     solution.add_argument("--graph", type=Path, required=True)
     solution.add_argument("--luet", type=Path, required=True)
     solution.add_argument("--output", type=Path, required=True)
+    solution.add_argument("--runtime-source-tree", type=Path, required=True)
 
     receipt = commands.add_parser("derive-luet-receipt")
     receipt.add_argument("--graph", type=Path, required=True)
@@ -55,8 +59,11 @@ def main() -> int:
     receipt.add_argument("--luet-sha256", required=True)
     receipt.add_argument("--source-commit", required=True)
     receipt.add_argument("--source-tree", required=True)
+    receipt.add_argument("--runtime-source-tree", type=Path, required=True)
 
     args = parser.parse_args()
+    if not args.runtime_source_tree.is_dir():
+        raise SystemExit("protected runtime source tree absent")
     if args.command == "generate-graph":
         value = _graph(args.execution, args.catalog, args.plan_commit)
         args.output.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")

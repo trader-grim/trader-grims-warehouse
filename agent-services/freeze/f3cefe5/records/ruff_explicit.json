@@ -1,6 +1,6 @@
 {
   "actual_execve_argv": [
-    "/proc/2637415/fd/3",
+    "/proc/2668445/fd/3",
     "check",
     "src/tgw/nix_observer_render_helper.py",
     "src/tgw/nix_observer_render_remote.py",
@@ -18,13 +18,13 @@
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
   "descriptor_execution": {
     "executable_fd": 3,
-    "parent_pid": 2637415,
+    "parent_pid": 2668445,
     "pass_fds": [
       3
     ]
   },
-  "duration_ns": 12175955,
-  "ended_at": "2026-08-12T23:45:43.028104Z",
+  "duration_ns": 14324998,
+  "ended_at": "2026-08-13T00:15:44.703640Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -39,7 +39,7 @@
     }
   },
   "executable": {
-    "actual_fd_path": "/proc/2637415/fd/3",
+    "actual_fd_path": "/proc/2668445/fd/3",
     "after": {
       "ctime_ns": 1786230571967034482,
       "dev": 39,
@@ -67,6 +67,18 @@
     "component_safe_open": true,
     "held_fd": 3,
     "logical_path": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/ruff",
+    "named_after": {
+      "ctime_ns": 1786230571967034482,
+      "dev": 39,
+      "gid": 983,
+      "inode": 6651285,
+      "mode": "0775",
+      "mtime_ns": 1785259086029020324,
+      "nlink": 1,
+      "sha256": "sha256:096c13aa6293c464c9e187e622f993e91cdb75bbc795e9d8ae629645dc336182",
+      "size": 27835968,
+      "uid": 1000
+    },
     "unchanged": true
   },
   "gate_id": "ruff_explicit",
@@ -113,7 +125,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:45:43.015894Z",
+  "started_at": "2026-08-13T00:15:44.689282Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -125,5 +137,5 @@
     "sha256": "sha256:82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:245489a79f32ca35b84faea7753a327719d1e6262822bfb4b9cfdbd7c8d7a6df"
+  "unsigned_sha256": "sha256:2ca34e03e1298f44ebfc2f205effcc041c33c43cffc8afe24240ac4431fd45c2"
 }

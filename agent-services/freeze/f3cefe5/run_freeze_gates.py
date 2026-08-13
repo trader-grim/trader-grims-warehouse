@@ -9,10 +9,12 @@ Generated outputs are parsed and protected from one held descriptor.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -100,6 +102,46 @@ def _require_unchanged(before: dict[str, Any], after: dict[str, Any], label: str
         raise RuntimeError(f"{label} changed while held: {','.join(changed)}")
 
 
+def _snapshot_tree(root: Path, *, require_protected: bool) -> dict[str, Any]:
+    resolved = root.resolve(strict=True)
+    entries: list[dict[str, Any]] = []
+    for path in [resolved, *sorted(resolved.rglob("*"))]:
+        observed = path.lstat()
+        relative = "." if path == resolved else path.relative_to(resolved).as_posix()
+        if stat.S_ISLNK(observed.st_mode):
+            raise RuntimeError(f"tree symlink refused: {path}")
+        common = {
+            "path": relative, "dev": observed.st_dev, "inode": observed.st_ino,
+            "uid": observed.st_uid, "gid": observed.st_gid,
+            "mode": f"{stat.S_IMODE(observed.st_mode):04o}", "nlink": observed.st_nlink,
+            "mtime_ns": observed.st_mtime_ns, "ctime_ns": observed.st_ctime_ns,
+        }
+        if stat.S_ISDIR(observed.st_mode):
+            if require_protected and (observed.st_uid != 0 or observed.st_gid != 0 or stat.S_IMODE(observed.st_mode) != 0o555):
+                raise RuntimeError(f"protected tree directory identity invalid: {path}")
+            entries.append({**common, "type": "directory"})
+        elif stat.S_ISREG(observed.st_mode):
+            _, held = _open_component_safe(path)
+            try:
+                file_meta, _ = _snapshot_fd(held)
+            finally:
+                os.close(held)
+            if require_protected and (observed.st_uid != 0 or observed.st_gid != 0 or stat.S_IMODE(observed.st_mode) != 0o444):
+                raise RuntimeError(f"protected tree file identity invalid: {path}")
+            entries.append({**common, "type": "file", "sha256": file_meta["sha256"],
+                            "size": file_meta["size"]})
+        else:
+            raise RuntimeError(f"tree special file refused: {path}")
+    content_entries = [
+        {key: item[key] for key in ("path", "type", "mode", "sha256", "size") if key in item}
+        for item in entries
+    ]
+    tree_hash = "sha256:" + digest(canonical({"schema": "tgw-protected-tree-content/v1",
+                                                "entries": content_entries}))
+    return {"path": str(resolved), "tree_hash": tree_hash, "entries": entries,
+            "content_entries": content_entries}
+
+
 _PROTECT = r'''import hashlib,os,stat,sys
 src,root,want=sys.argv[1:]
 raw=open(src,'rb').read()
@@ -129,6 +171,45 @@ finally:
     os.close(rootfd)
 '''
 
+_PROTECT_TREE = r'''import base64,ctypes,json,os,shutil,stat,sys
+payload=json.load(sys.stdin)
+root=payload['root']; want=payload['tree_hash'].removeprefix('sha256:')
+os.makedirs(root,mode=0o755,exist_ok=True)
+for parent in (os.path.dirname(root),root):
+    s=os.lstat(parent)
+    assert stat.S_ISDIR(s.st_mode) and s.st_uid==0 and s.st_gid==0 and not stat.S_ISLNK(s.st_mode)
+os.chmod(root,0o555)
+target=os.path.join(root,want)
+if not os.path.exists(target):
+    temporary=os.path.join(root,'.incoming-'+str(os.getpid())+'-'+want)
+    os.mkdir(temporary,0o700)
+    try:
+        for entry in payload['files']:
+            relative=entry['path']; assert relative and not relative.startswith('/') and '..' not in relative.split('/')
+            destination=os.path.join(temporary,relative)
+            os.makedirs(os.path.dirname(destination),mode=0o755,exist_ok=True)
+            raw=base64.b64decode(entry['content'],validate=True)
+            fd=os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o444)
+            view=memoryview(raw)
+            while view:
+                count=os.write(fd,view); assert count>0; view=view[count:]
+            os.fsync(fd); os.fchmod(fd,0o444); os.fchown(fd,0,0); os.close(fd)
+        for directory,subdirs,_files in os.walk(temporary,topdown=False):
+            for name in subdirs:
+                path=os.path.join(directory,name); os.chown(path,0,0); os.chmod(path,0o555)
+            os.chown(directory,0,0); os.chmod(directory,0o555)
+        libc=ctypes.CDLL(None,use_errno=True)
+        result=libc.syscall(316,-100,temporary.encode(),-100,target.encode(),1)
+        if result != 0:
+            error=ctypes.get_errno()
+            if error != 17: raise OSError(error,os.strerror(error))
+            shutil.rmtree(temporary)
+    except BaseException:
+        if os.path.exists(temporary):
+            os.chmod(temporary,0o700); shutil.rmtree(temporary)
+        raise
+'''
+
 
 class FreezeRunner:
     def __init__(self, source: Path, plan: Path, repo: Path, output: Path, store: Path, luet: Path):
@@ -156,6 +237,40 @@ class FreezeRunner:
         temporary.unlink()
         return {"ref": "artifact:sha256:" + want, "sha256": "sha256:" + want, "bytes": len(raw)}
 
+    def protect_tree(self, source: Path) -> tuple[Path, dict[str, Any]]:
+        files = []
+        content_entries = [{"path": ".", "type": "directory", "mode": "0555"}]
+        directories = sorted(path for path in source.rglob("*") if path.is_dir())
+        for directory in directories:
+            if directory.is_symlink():
+                raise RuntimeError(f"tree symlink refused: {directory}")
+            content_entries.append({"path": directory.relative_to(source).as_posix(),
+                                    "type": "directory", "mode": "0555"})
+        for path in sorted(source.rglob("*")):
+            if path.is_symlink():
+                raise RuntimeError(f"tree symlink refused: {path}")
+            if path.is_file():
+                raw = path.read_bytes()
+                relative = path.relative_to(source).as_posix()
+                content_entries.append({"path": relative, "type": "file", "mode": "0444",
+                                        "sha256": "sha256:" + digest(raw), "size": len(raw)})
+                files.append({"path": relative, "content": base64.b64encode(raw).decode("ascii")})
+        content_entries.sort(key=lambda item: (item["path"], item["type"]))
+        tree_hash = "sha256:" + digest(canonical({"schema": "tgw-protected-tree-content/v1",
+                                                   "entries": content_entries}))
+        tree_root = self.store.parent / "trees/sha256"
+        payload = {"root": str(tree_root), "tree_hash": tree_hash, "files": files}
+        subprocess.run(
+            ["sudo", "-n", "/usr/bin/python3", "-c", _PROTECT_TREE],
+            input=json.dumps(payload).encode(), check=True,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"},
+        )
+        target = tree_root / tree_hash.removeprefix("sha256:")
+        snapshot = _snapshot_tree(target, require_protected=True)
+        if snapshot["tree_hash"] != tree_hash:
+            raise RuntimeError("protected tree content hash mismatch")
+        return target, snapshot
+
     def env(self, **extra: str) -> dict[str, str]:
         value = {
             "HOME": str(self.home), "LC_ALL": "C.UTF-8", "NO_COLOR": "1",
@@ -172,10 +287,12 @@ class FreezeRunner:
         semantic: Callable[[bytes, bytes, dict[str, bytes]], dict[str, Any]],
         inputs: list[Path] | None = None, generated: list[Path] | None = None,
         input_trees: list[Path] | None = None,
+        substitute_input_argv: bool = True,
         after_executable_open: Callable[[Path, int], None] | None = None,
         after_inputs_open: Callable[[list[dict[str, Any]]], None] | None = None,
         after_child_exit: Callable[[Path, int], None] | None = None,
         after_generated_open: Callable[[Path, int], None] | None = None,
+        during_child: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         executable, exe_fd = _open_component_safe(executable)
         parent_pid = os.getpid()
@@ -196,43 +313,57 @@ class FreezeRunner:
                     "before": before_meta,
                 })
             for tree in input_trees or []:
-                resolved_tree = tree.resolve(strict=True)
-                entries: list[dict[str, Any]] = []
-                for entry in sorted(resolved_tree.rglob("*")):
-                    if entry.is_symlink():
-                        raise RuntimeError(f"input tree symlink refused: {entry}")
-                    if entry.is_file():
-                        resolved, input_fd = _open_component_safe(entry)
-                        before_meta, _ = _snapshot_fd(input_fd)
-                        held_inputs.append({
-                            "logical_path": str(resolved), "held_fd": input_fd,
-                            "actual_fd_path": f"/proc/{parent_pid}/fd/{input_fd}",
-                            "before": before_meta, "tree": str(resolved_tree),
-                        })
-                        entries.append({"path": str(entry.relative_to(resolved_tree)),
-                                        "before": before_meta})
-                tree_inputs.append({"path": str(resolved_tree), "entries": entries})
+                tree_before = _snapshot_tree(tree, require_protected=True)
+                tree_inputs.append({"logical_path": str(tree.resolve(strict=True)),
+                                    "before": tree_before})
             if after_inputs_open:
                 after_inputs_open(held_inputs)
             substitutions: dict[str, str] = {}
-            for item in held_inputs:
-                substitutions[item["logical_path"]] = item["actual_fd_path"]
+            if substitute_input_argv:
+                for item in held_inputs:
+                    substitutions[item["logical_path"]] = item["actual_fd_path"]
+            for item in tree_inputs:
+                substitutions[item["logical_path"]] = item["logical_path"]
             actual_args = [substitutions.get(str(Path(arg).resolve()), arg) if arg.startswith("/") else arg
                            for arg in args]
             pass_fds = tuple([exe_fd, *(item["held_fd"] for item in held_inputs)])
             before = timestamp()
             started = time.monotonic_ns()
-            completed = subprocess.run(
-                [actual_executable, *actual_args], cwd=cwd, env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-                pass_fds=pass_fds, timeout=300,
-            )
+            if during_child is None:
+                completed = subprocess.run(
+                    [actual_executable, *actual_args], cwd=cwd, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                    pass_fds=pass_fds, timeout=300,
+                )
+            else:
+                process = subprocess.Popen(
+                    [actual_executable, *actual_args], cwd=cwd, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=pass_fds,
+                )
+                try:
+                    during_child()
+                    child_stdout, child_stderr = process.communicate(timeout=300)
+                except BaseException:
+                    process.kill()
+                    process.wait()
+                    raise
+                completed = subprocess.CompletedProcess(
+                    [actual_executable, *actual_args], process.returncode,
+                    child_stdout, child_stderr,
+                )
             ended = time.monotonic_ns()
             after = timestamp()
             if after_child_exit:
                 after_child_exit(executable, exe_fd)
             exe_after, _ = _snapshot_fd(exe_fd)
             _require_unchanged(exe_before, exe_after, f"gate {gate_id} executable")
+            named_executable_path, named_executable_fd = _open_component_safe(executable)
+            try:
+                exe_named_after, _ = _snapshot_fd(named_executable_fd)
+            finally:
+                os.close(named_executable_fd)
+            _require_unchanged(exe_before, exe_named_after,
+                               f"gate {gate_id} named executable {named_executable_path}")
 
             input_records = []
             for item in held_inputs:
@@ -251,9 +382,20 @@ class FreezeRunner:
                     "actual_fd_path": item["actual_fd_path"],
                     "held_fd": item["held_fd"], "before": item["before"],
                     "after": input_after, "named_after": named_after,
-                    "unchanged": True, "argv_substituted_when_exact": True,
+                    "unchanged": True,
+                    "argv_substituted": substitute_input_argv and item["logical_path"] in args,
                     **({"tree": item["tree"]} if "tree" in item else {}),
                 })
+            tree_records = []
+            for item in tree_inputs:
+                tree_after = _snapshot_tree(Path(item["logical_path"]), require_protected=True)
+                if item["before"] != tree_after:
+                    raise RuntimeError(f"gate {gate_id} protected input tree changed")
+                tree_records.append({"logical_path": item["logical_path"],
+                                     "actual_argv_path": item["logical_path"],
+                                     "before": item["before"], "after": tree_after,
+                                     "unchanged": True, "protected": True,
+                                     "argv_substituted": False})
 
             generated_bytes: dict[str, bytes] = {}
             generated_refs = []
@@ -296,7 +438,8 @@ class FreezeRunner:
                 "executable": {
                     "logical_path": str(executable), "actual_fd_path": actual_executable,
                     "held_fd": exe_fd, "before": exe_before, "after": exe_after,
-                    "unchanged": True, "component_safe_open": True,
+                    "named_after": exe_named_after, "unchanged": True,
+                    "component_safe_open": True,
                 },
                 "actual_execve_argv": [actual_executable, *actual_args],
                 "logical_replay_argv": [str(executable), *args],
@@ -307,7 +450,7 @@ class FreezeRunner:
                 "environment": {"clear_inherited": True, "values": env}, "cwd": str(cwd),
                 "started_at": before, "ended_at": after, "duration_ns": ended - started,
                 "rc": completed.returncode, "stdout": stdout, "stderr": stderr,
-                "inputs": input_records, "input_trees": tree_inputs,
+                "inputs": input_records, "input_trees": tree_records,
                 "generated_artifacts": generated_refs, "semantic": result,
             }
             record["unsigned_sha256"] = "sha256:" + digest(canonical(record))
@@ -451,17 +594,21 @@ class FreezeRunner:
 
         graph = self.work / "plan-graph.json"
         solution = self.work / "plan-solution.json"
+        protected_runtime_source, _ = self.protect_tree(self.source / "src")
+        plan_env = self.env(PYTHONPATH=str(protected_runtime_source))
         self.run("plan_graph_generation", python,
                  [str(helper), "generate-graph", "--execution",
                   str(self.plan / "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml"),
                   "--plan-commit", PLAN_COMMIT,
                   "--catalog", str(self.source / "agent-services/catalogs/governed-execution-platform-v1.json"),
-                  "--output", str(graph)], cwd=self.source, env=self.env(),
+                  "--output", str(graph), "--runtime-source-tree", str(protected_runtime_source)],
+                 cwd=self.source, env=plan_env,
                  semantic=lambda _o, _e, gen: {
                      "status": "PASS" if json.loads(gen["plan-graph.json"])["plan_commit"] == PLAN_COMMIT else "FAIL",
                                           "plan_commit": PLAN_COMMIT},
                  inputs=[helper, self.plan / "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml",
                          self.source / "agent-services/catalogs/governed-execution-platform-v1.json"],
+                 input_trees=[protected_runtime_source],
                  generated=[graph])
         protected_luet = self.store / LUET_SHA256
         luet_exec = self.work / "luet-protected-exec"
@@ -478,38 +625,78 @@ class FreezeRunner:
                                              "version": out.decode().strip()}, inputs=[protected_luet])
         luet_tree = self.work / "luet-tree"
         self.run("plan_luet_tree_generation", python,
-                 [str(helper), "generate-luet-tree", "--graph", str(graph), "--output", str(luet_tree)],
-                 cwd=self.source, env=self.env(), semantic=self.pass_empty, inputs=[helper, graph])
+                 [str(helper), "generate-luet-tree", "--graph", str(graph), "--output", str(luet_tree),
+                  "--runtime-source-tree", str(protected_runtime_source)],
+                 cwd=self.source, env=plan_env, semantic=self.pass_empty, inputs=[helper, graph],
+                 input_trees=[protected_runtime_source])
+        protected_luet_tree, _ = self.protect_tree(luet_tree)
         raw = self.run("luet_raw_package_list", loader,
-                 [str(protected_luet), "tree", "pkglist", "--tree", str(luet_tree), "--deps",
+                 [str(protected_luet), "tree", "pkglist", "--tree", str(protected_luet_tree), "--deps",
                   "--matches", "^tgw-target/closure$", "--output", "json"], cwd=self.source, env=self.env(),
                  semantic=lambda out, _err, _gen: {"status": "PASS" if isinstance(json.loads(out).get("packages"), list) else "FAIL",
                                              "package_count": len(json.loads(out).get("packages", [])),
                                              "raw_cli": True}, inputs=[protected_luet],
-                 input_trees=[luet_tree])
+                 input_trees=[protected_luet_tree])
         self.run("plan_solution_generation", python,
                  [str(helper), "generate-solution", "--graph", str(graph),
-                  "--luet", str(luet_exec), "--output", str(solution)], cwd=self.source, env=self.env(),
+                  "--luet", str(luet_exec), "--output", str(solution),
+                  "--runtime-source-tree", str(protected_runtime_source)],
+                 cwd=self.source, env=plan_env,
                  semantic=lambda _o, _e, gen: {
                      "status": "PASS" if json.loads(gen["plan-solution.json"]).get("solution_hash") == PLAN_SOLUTION else "FAIL",
                      "solution_hash": json.loads(gen["plan-solution.json"]).get("solution_hash"),
                      "closure_hash": json.loads(gen["plan-solution.json"]).get("closure_hash")},
                  inputs=[helper, luet_exec, protected_luet, graph],
+                 input_trees=[protected_runtime_source],
                  generated=[solution])
         self.run("plan_solution_verification", python,
-                 [str(helper), "verify-solution", "--solution", str(solution), "--plan-commit", PLAN_COMMIT],
-                 cwd=self.source, env=self.env(),
+                 [str(helper), "verify-solution", "--solution", str(solution), "--plan-commit", PLAN_COMMIT,
+                  "--runtime-source-tree", str(protected_runtime_source)],
+                 cwd=self.source, env=plan_env,
                  semantic=lambda out, _err, _gen: {"status": "PASS" if json.loads(out).get("status") == "PASS" else "FAIL",
-                                             **json.loads(out)}, inputs=[helper, solution])
+                                             **json.loads(out)}, inputs=[helper, solution],
+                 input_trees=[protected_runtime_source])
         self.run("luet_derived_tgw_receipt", python,
                  [str(helper), "derive-luet-receipt", "--graph", str(graph),
                   "--luet", str(luet_exec), "--luet-sha256", "sha256:" + LUET_SHA256,
-                  "--source-commit", SOURCE_COMMIT, "--source-tree", SOURCE_TREE],
-                 cwd=self.source, env=self.env(),
+                  "--source-commit", SOURCE_COMMIT, "--source-tree", SOURCE_TREE,
+                  "--runtime-source-tree", str(protected_runtime_source)],
+                 cwd=self.source, env=plan_env,
                  semantic=lambda out, _err, _gen: {"status": "PASS" if json.loads(out).get("status") == "AGREEMENT" else "FAIL",
                                              "conformance": json.loads(out).get("status"),
                                              "raw_cli_record": raw["unsigned_sha256"]},
-                 inputs=[helper, luet_exec, protected_luet, graph])
+                 inputs=[helper, luet_exec, protected_luet, graph],
+                 input_trees=[protected_runtime_source])
+        integrity_tests = self.repo / "agent-services/freeze/f3cefe5/test_freeze_evidence.py"
+        integrity_snapshot_source = self.work / "integrity-test-snapshot-source"
+        if integrity_snapshot_source.exists():
+            for prior in sorted(integrity_snapshot_source.iterdir()):
+                prior.chmod(0o644)
+                prior.unlink()
+        else:
+            integrity_snapshot_source.mkdir()
+        integrity_snapshot_test = integrity_snapshot_source / "test_freeze_evidence.py"
+        integrity_snapshot_runner = integrity_snapshot_source / "run_freeze_gates.py"
+        integrity_snapshot_test.write_bytes(integrity_tests.read_bytes())
+        integrity_snapshot_runner.write_bytes(Path(__file__).resolve().read_bytes())
+        protected_integrity_tree, _ = self.protect_tree(integrity_snapshot_source)
+        protected_integrity_test = protected_integrity_tree / "test_freeze_evidence.py"
+        integrity_env = self.env(PYTHONPATH=str(protected_runtime_source))
+        integrity_basetemp = self.tmp / "integrity-basetemp"
+        if integrity_basetemp.exists():
+            shutil.rmtree(integrity_basetemp)
+        integrity_expression = (
+            "swapped_executable_path_is_fail_closed or post_use_executable_mutation "
+            "or input_and_generated_path_replacements or protected_tree_transient"
+        )
+        self.run(
+            "freeze_integrity_adversarial_tests", pytest,
+            ["-q", str(protected_integrity_test), "--override-ini", f"cache_dir={self.tmp}/integrity-cache",
+             "--basetemp", str(integrity_basetemp),
+             "-k", integrity_expression],
+            cwd=self.repo, env=integrity_env, semantic=self.pytest_semantic,
+            input_trees=[protected_integrity_tree, protected_runtime_source],
+        )
 
 
 def main() -> int:

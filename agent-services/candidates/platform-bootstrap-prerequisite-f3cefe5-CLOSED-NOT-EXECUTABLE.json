@@ -1,27 +1,27 @@
 {
   "candidate": {
-    "candidate_identity": "candidate:sha256:169363fdfa7525f465046d1fd85946fb90d3610f419d24212835335d796c90af",
-    "file_sha256": "sha256:eecfebffcc9d8fb84e302fbb021a4ebb2b196490c25ea5dea8401c06ead34ded",
+    "candidate_identity": "candidate:sha256:8ff4d73162a3458dce5e048df3a3586c4917f58b2fc905b008ee9359d667c761",
+    "file_sha256": "sha256:2df183f7bf085ec4e32c06267d2fe58c5f0de9442d37df5744abdc4c8d4d21fd",
     "path": "agent-services/candidates/integrated-f3cefe5-CLOSED-FREEZE.json"
   },
   "dispatchable": false,
   "evidence": {
     "catalog": {
-      "file_sha256": "sha256:acc353323611d3d0ac7165db94e9cbeb295f5f2a6d75e94802d8c3f76eb9a4b3",
+      "file_sha256": "sha256:24313e9eafaadf1180bf45b27369e6162b26109eecdf8bab36498441575a21f2",
       "path": "agent-services/catalogs/f3cefe5-closed-freeze-evidence.json",
-      "unsigned_sha256": "sha256:adef8669a59b6255fc347185e0c354a31e5b143c5e4a59d5380f9db72c14981c"
+      "unsigned_sha256": "sha256:c6c7c45afad54a78f512228c4a1dec0d898db78ee8dd8576e0340e3779c5b3ff"
     },
     "independent_verifier": "agent-services/freeze/f3cefe5/verify_freeze_evidence.py",
     "literal_replay_test": "agent-services/freeze/f3cefe5/test_freeze_evidence.py",
     "source_audit": {
-      "file_sha256": "sha256:6dbd518334c6fe867f438b8ea6df545db3d94b48a0ef5410e83c7d3673c1c91e",
+      "file_sha256": "sha256:3cdec50b1c3885117f3f136faa331be64ca47b930017a3147571a2bc2fe804b4",
       "path": "agent-services/receipts/source-audit-f3cefe5-closed-freeze.json",
-      "unsigned_sha256": "sha256:88a5c9e620badcac714491d10fa506eb5e2379be512346c4dfd5e26dad8840e6"
+      "unsigned_sha256": "sha256:efc48a5e1ebd2c850cecab7c7578ff1207e44035022aa4d33a3d2b79dcdd469b"
     },
     "store_readiness": {
-      "file_sha256": "sha256:f90dad614f90d6085d641ebb20c1c4cb65fb7d613d726423f256ad75935badab",
+      "file_sha256": "sha256:13a4c3f9e961b9bdfc5fdcadda2ee0bde91fd130d3b772bf2765545656314351",
       "path": "agent-services/receipts/f3cefe5-closed-store-readiness.json",
-      "unsigned_sha256": "sha256:89eb8b354615fbfe18f356c9098e916b5fbaedc8c8136826e8f1af3d42796cad"
+      "unsigned_sha256": "sha256:048dbe9378526729bc108a2dadc67c560f2d8a0df090f2c2a0d0e5bd89bdbc33"
     }
   },
   "grant": null,
@@ -130,5 +130,5 @@
     }
   ],
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in parent document",
-  "unsigned_sha256": "sha256:d414597ae7ff91ecc3ead33dbdc0d9cccde6782fe53d5cd9e6da42efea942e81"
+  "unsigned_sha256": "sha256:b03b1b3e3b45f98577cd885b1f8580562d1c2ae69add0a617b3806c1bdcac9fb"
 }

@@ -1,20 +1,20 @@
 {
   "actual_execve_argv": [
-    "/proc/2637415/fd/3",
-    "/proc/2637415/fd/4",
+    "/proc/2668445/fd/3",
+    "/proc/2668445/fd/4",
     "--version"
   ],
   "cwd": "/tmp/tgw-freeze-f3cefe5-source",
   "descriptor_execution": {
     "executable_fd": 3,
-    "parent_pid": 2637415,
+    "parent_pid": 2668445,
     "pass_fds": [
       3,
       4
     ]
   },
-  "duration_ns": 23700592,
-  "ended_at": "2026-08-12T23:45:45.994976Z",
+  "duration_ns": 25189604,
+  "ended_at": "2026-08-13T00:15:48.156064Z",
   "environment": {
     "clear_inherited": true,
     "values": {
@@ -29,7 +29,7 @@
     }
   },
   "executable": {
-    "actual_fd_path": "/proc/2637415/fd/3",
+    "actual_fd_path": "/proc/2668445/fd/3",
     "after": {
       "ctime_ns": 1785206632593263800,
       "dev": 2050,
@@ -57,6 +57,18 @@
     "component_safe_open": true,
     "held_fd": 3,
     "logical_path": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    "named_after": {
+      "ctime_ns": 1785206632593263800,
+      "dev": 2050,
+      "gid": 0,
+      "inode": 2238373,
+      "mode": "0755",
+      "mtime_ns": 1777320562000000000,
+      "nlink": 1,
+      "sha256": "sha256:438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0",
+      "size": 225672,
+      "uid": 0
+    },
     "unchanged": true
   },
   "gate_id": "luet_version",
@@ -64,7 +76,7 @@
   "input_trees": [],
   "inputs": [
     {
-      "actual_fd_path": "/proc/2637415/fd/4",
+      "actual_fd_path": "/proc/2668445/fd/4",
       "after": {
         "ctime_ns": 1786576287569188807,
         "dev": 39,
@@ -77,7 +89,7 @@
         "size": 48513496,
         "uid": 0
       },
-      "argv_substituted_when_exact": true,
+      "argv_substituted": true,
       "before": {
         "ctime_ns": 1786576287569188807,
         "dev": 39,
@@ -123,7 +135,7 @@
     "status": "CLEAN_DETACHED",
     "tree": "2c6cc6199827aa8ce87686c02cdccb1c0373cca3"
   },
-  "started_at": "2026-08-12T23:45:45.971249Z",
+  "started_at": "2026-08-13T00:15:48.130848Z",
   "stderr": {
     "bytes": 0,
     "ref": "artifact:sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -135,5 +147,5 @@
     "sha256": "sha256:44bed564c44e6343c5dd19abfd140864f5c536b7441f060e9742640dc82a8749"
   },
   "unsigned_hash_scheme": "sha256 of canonical JSON excluding unsigned_sha256; final file sha256 is external in catalog",
-  "unsigned_sha256": "sha256:a899524eb7f829e7a9aa9a873060b825c51cd6cf2338f8c0df38bafa19677bc6"
+  "unsigned_sha256": "sha256:ac1b9684e327a9af6ae3e6eabc13c1738bf1db7f5c149690c1683cca84aa09b1"
 }
