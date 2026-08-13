@@ -1,17 +1,55 @@
 {
-  "schema": "tgw-prod-a3-host-state-observation-dependency/v1",
-  "status": "REQUIRED_NOT_EXECUTABLE",
+  "schema": "tgw-prod-a3-host-state-observation-provider/v1",
+  "status": "IMPLEMENTED_NOT_EXECUTABLE",
+  "handler_id": "tgw-prod-a3-host-state-observation@1",
   "consumer": "tgw-prod-a3-preintegration-observation@1",
+  "plan": {
+    "approved_proposal_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+    "approval_sha256": "sha256:9e524ddae0ebdd2a34b1a96487df6f3cec714e4c378409705910c11b528f3e80",
+    "implementation_solution_sha256": "sha256:da79baa90916ba0fbe3af76365c8d25012ec0a38af4917bc57abaa44e21fb740",
+    "implementation_closure_sha256": "sha256:3ef92c5a2c8ccf72ebb271ed4fec2c1fbe9fa7fe47c0311ad39b34ae2f4c31b9",
+    "production_solution_required": {
+      "root": "A3O02",
+      "profile": "production",
+      "minimum_state": "operationally_verified"
+    }
+  },
+  "source": {
+    "base_commit": "74ad0597219987ef7c1f36e70c16859b49d4261a",
+    "base_tree": "feeddcc486732c72385468777bc5794a001014f1",
+    "controller_path": "src/tgw/a3_host_state_observation.py",
+    "controller_sha256": "sha256:b36cd2d7070f7233e1e8c821015d9e4caaffa497ffe21981df389c5bd2869d7f",
+    "stdlib_helper_path": "src/tgw/a3_host_state_helper.py",
+    "stdlib_helper_sha256": "sha256:90b12d9313f640adc84a55e1faa802cd602cda148621f20342bb044a54a148f3"
+  },
   "facts": [
     "current-system-cas",
     "resolved-system-profile-cas",
     "python-path-sha256-version",
     "git-path-sha256-version",
+    "repository-main-branch-identity",
     "ssh-path-sha256-version",
     "known-hosts-path-sha256-mode-owner"
   ],
-  "reason": "host state is a distinct zero-effect freshness observation and has no admitted dedicated SSH composition",
+  "admission_requirements": {
+    "mounted_plan_authority": "REQUIRED",
+    "real_sshd_parity_receipt": "REQUIRED",
+    "dedicated_public_identity_and_known_hosts": "REQUIRED",
+    "one_attempt_observation_grant": "REQUIRED",
+    "independent_source_audit": "REQUIRED"
+  },
+  "effects": {
+    "remote_write": false,
+    "repository_write": false,
+    "nix": false,
+    "build": false,
+    "install": false,
+    "deploy": false,
+    "platform_bootstrap_grant_consumption": false
+  },
+  "reason": "source is implemented, but the production Plan authority, real-sshd parity evidence, dedicated credential authority, and one-attempt SSH observation grant are not admitted",
   "grant": null,
   "request": null,
-  "dispatchable": false
+  "dispatchable": false,
+  "descriptor_sha256": "sha256:9eb859629867dc7e56fafec93088bf78959c68de3bbcb0de1409df40f8e377b2"
 }
