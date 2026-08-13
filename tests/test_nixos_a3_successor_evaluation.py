@@ -1581,21 +1581,15 @@ def test_cli_reads_stdin_only_and_emits_handler_evidence(tmp_path: Path) -> None
         main(["--command", "switch"], input_stream=io.StringIO("{}"), output_stream=io.StringIO(), provider=provider)
 
 
-def test_cli_missing_provider_persists_exact_request_failed_receipt(tmp_path: Path) -> None:
+def test_cli_missing_provider_requires_mounted_reviewed_source(tmp_path: Path) -> None:
     request, _ = request_fixture(tmp_path)
     envelope = {
         "kind": EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION.value,
         "generation": "g1",
         "parameters": request,
     }
-    store = MemoryStore()
-    output = io.StringIO()
-    assert main([], input_stream=io.StringIO(json.dumps(envelope)), output_stream=output, receipt_store=store) == 1
-    terminal = json.loads(output.getvalue())
-    assert terminal["outcome"] == "FAILED"
-    assert terminal["request_sha256"] == request["request_sha256"]
-    assert terminal["stage"] == "stdin-or-provider"
-    assert store.values == [terminal]
+    with pytest.raises(SystemExit, match="requires --reviewed-source"):
+        main([], input_stream=io.StringIO(json.dumps(envelope)), output_stream=io.StringIO(), receipt_store=MemoryStore())
 
 
 def test_archive_rejects_links_and_wrong_commit(tmp_path: Path) -> None:

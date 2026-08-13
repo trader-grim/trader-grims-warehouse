@@ -32,6 +32,19 @@ REPLAY_CLAIM_SCHEMA = "tgw-nixos-a3-launch-replay-claim/v1"
 REPLAY_CLAIM_REF_SCHEMA = "tgw-nixos-a3-launch-replay-claim-ref/v1"
 _PROVIDER_SEAL = object()
 
+
+def _read_bounded_fd(fd: int, limit: int, label: str) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(fd, min(65536, limit + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            raise ValueError(f"{label} exceeds bound")
+
 # Exact terminal tuples.  The key names the complete classification and the
 # row fixes cleanup, build observation and return-code semantics.  Keeping the
 # command step in the key prevents a new subprocess path from silently gaining
@@ -1408,8 +1421,19 @@ def main(
     arguments = list(sys.argv[1:] if argv is None else argv)
     source = sys.stdin if input_stream is None else input_stream
     sink = sys.stdout if output_stream is None else output_stream
-    if arguments:
-        raise SystemExit("nixos-a3-successor-evaluation accepts no arguments")
+    reviewed_source: Mapping[str, Any] | None = None
+    if provider is None:
+        if len(arguments) != 2 or arguments[0] != "--reviewed-source":
+            raise SystemExit("nixos-a3-successor-evaluation requires --reviewed-source PATH")
+        descriptor_path = Path(arguments[1])
+        descriptor_fd = os.open(descriptor_path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            descriptor_raw = _read_bounded_fd(descriptor_fd, 1_048_576, "reviewed source descriptor")
+            reviewed_source = json.loads(descriptor_raw)
+        finally:
+            os.close(descriptor_fd)
+    elif arguments:
+        raise SystemExit("injected evaluation provider accepts no arguments")
     request_sha256 = "sha256:" + "0" * 64
     try:
         value = json.load(source)
@@ -1425,7 +1449,8 @@ def main(
                     step="request",
                     cleanup="NOT_CREATED",
                 )
-            provider = build_local_production_provider(value["parameters"])
+            assert reviewed_source is not None
+            provider = build_local_production_provider(value["parameters"], reviewed_source=reviewed_source)
         result = provider(value)
     except A3EvaluationFailure as exc:
         sink.write(canonical(exc.terminal).decode() + "\n")

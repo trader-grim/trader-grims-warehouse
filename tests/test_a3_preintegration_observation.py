@@ -23,6 +23,7 @@ from tgw.a3_preintegration_observation import (
     make_request,
     observe_repository,
     persist_evidence,
+    replay_archive,
     terminal,
     validate_receipt,
     validate_request,
@@ -261,6 +262,25 @@ def test_repository_rejects_common_and_shallow_state(tmp_path: Path, relative: s
     path.write_text("external\n")
     with pytest.raises(ObservationHold):
         observe_repository(repo, make_request(operation_id="common-state", transport=_transport()))
+
+
+@pytest.mark.parametrize("relative,content", [("config.worktree", "[core]\n\tbare = false\n"), ("config", "[extensions]\n\tworktreeConfig = true\n")])
+def test_repository_rejects_worktree_specific_config(tmp_path: Path, relative: str, content: str) -> None:
+    repo = _repo(tmp_path)
+    (repo / ".git" / relative).write_text(content)
+    with pytest.raises(ObservationHold):
+        observe_repository(repo, make_request(operation_id="worktree-config", transport=_transport()))
+
+
+def test_archive_replay_rejects_missing_lock_root_node(tmp_path: Path) -> None:
+    request = make_request(operation_id="missing-lock-root", transport=_transport())
+    repo = _repo(tmp_path)
+    (repo / "flake.lock").write_text('{"version":7,"root":"missing","nodes":{"root":{}}}\n')
+    subprocess.run(["git", "add", "-f", "flake.lock"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "bad lock"], cwd=repo, check=True)
+    receipt, archive = observe_repository(repo, request)
+    with pytest.raises(ObservationError, match="input graph"):
+        replay_archive(archive, receipt, request)
 
 
 def test_transport_kills_term_ignoring_descendant_group(tmp_path: Path) -> None:

@@ -8,6 +8,7 @@ and testable without touching a production host.
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
 import json
 import os
@@ -68,6 +69,20 @@ def canonical(value: object) -> bytes:
 
 def digest(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _rename_noreplace(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise ObservationError("atomic no-replace publication is unavailable")
+    if renameat2(src_dir_fd, src.encode(), dst_dir_fd, dst.encode(), 1) != 0:  # RENAME_NOREPLACE
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), dst)
+
+
+def _inode_identity(st: os.stat_result) -> tuple[int, ...]:
+    return (st.st_dev, st.st_ino, st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode), st.st_nlink)
 
 
 def _exact(value: Any, keys: set[str], label: str) -> Mapping[str, Any]:
@@ -302,8 +317,11 @@ def _verify_repository_components(repo: Path, request: Mapping[str, Any], *, enf
     config = git_dir / "config"
     if config.exists():
         text = config.read_text(errors="replace").lower()
-        if "include.path" in text or "[include" in text or "submodule" in text:
+        if "include.path" in text or "[include" in text or "submodule" in text or "worktreeconfig" in text:
             raise ObservationHold("repository config includes external or submodule state")
+    worktree_config = git_dir / "config.worktree"
+    if worktree_config.exists() or worktree_config.is_symlink():
+        raise ObservationHold("repository uses worktree-specific config")
     for path in repo.rglob(".gitmodules"):
         if path.is_file():
             raise ObservationHold("repository contains submodule configuration")
@@ -464,7 +482,12 @@ def replay_archive(archive: bytes, receipt: Mapping[str, Any], request: Mapping[
             lock = json.loads(lock_raw)
         except json.JSONDecodeError as exc:
             raise ObservationError("flake.lock JSON is invalid") from exc
-        if not isinstance(lock, dict) or not isinstance(lock.get("nodes"), dict) or not isinstance(lock.get("root"), str):
+        if (
+            not isinstance(lock, dict)
+            or not isinstance(lock.get("nodes"), dict)
+            or not isinstance(lock.get("root"), str)
+            or lock["root"] not in lock["nodes"]
+        ):
             raise ObservationError("flake.lock input graph is invalid")
         return {"tree": output, "lock_sha256": digest(lock_raw), "lock_nodes": sorted(lock["nodes"])}
 
@@ -576,20 +599,23 @@ def _sealed(name: str, raw: bytes) -> int:
 
 
 def _group_empty_or_kill(pgid: int) -> bool:
+    import time
+
+    for sent in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sent)
+        except ProcessLookupError:
+            return True
+        for _ in range(200):
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return True
+            time.sleep(0.01)
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
         return True
-    os.killpg(pgid, signal.SIGTERM)
-    for _ in range(20):
-        try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            return False
-        import time
-
-        time.sleep(0.01)
-    os.killpg(pgid, signal.SIGKILL)
     return False
 
 
@@ -692,12 +718,16 @@ class SshObservationProvider:
         except Exception:
             return False
 
-    def observe(self, request: Mapping[str, Any], *, on_dispatch: Any) -> Mapping[str, Any]:
+    def observe(self, request: Mapping[str, Any], *, on_dispatch: Any, _held: tuple[Any, ...] | None = None) -> Mapping[str, Any]:
         request = validate_request(request, now=datetime.now(timezone.utc))
-        ssh_fd, _ = _held_regular(self.ssh_path, request["transport"]["ssh_sha256"], executable=True)
-        hosts_fd, hosts = _held_regular(self.known_hosts_path, request["transport"]["known_hosts_sha256"])
-        identity_fd, identity = _held_regular(self.identity_path, request["transport"]["identity_sha256"])
-        helper_fd, helper = _held_regular(self.helper_path, request["transport"]["helper_sha256"])
+        if _held is None:
+            ssh_fd, _ = _held_regular(self.ssh_path, request["transport"]["ssh_sha256"], executable=True)
+            hosts_fd, hosts = _held_regular(self.known_hosts_path, request["transport"]["known_hosts_sha256"])
+            identity_fd, identity = _held_regular(self.identity_path, request["transport"]["identity_sha256"])
+            helper_fd, helper = _held_regular(self.helper_path, request["transport"]["helper_sha256"])
+            initial = tuple(os.fstat(fd) for fd in (ssh_fd, hosts_fd, identity_fd, helper_fd))
+        else:
+            ssh_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, initial = _held
         sealed_hosts = _sealed("a3-observation-hosts", hosts)
         sealed_identity = _sealed("a3-observation-identity", identity)
         try:
@@ -722,29 +752,32 @@ class SshObservationProvider:
             ]
             on_dispatch()
             process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, pass_fds=(ssh_fd, sealed_hosts, sealed_identity))
+            stream_error: Exception | None = None
             try:
-                stdout, stderr = _bounded_stream(
+                stdout, _stderr = _bounded_stream(
                     process,
                     canonical(request),
                     stdout_limit=request["bounds"]["max_archive_bytes"] + request["bounds"]["max_output_bytes"] + 16,
                     stderr_limit=request["bounds"]["max_output_bytes"],
                     timeout=request["bounds"]["timeout_seconds"],
                 )
-            except subprocess.TimeoutExpired as exc:
-                os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
-                raise ObservationError("SSH observation timed out and process group was terminated") from exc
+            except Exception as exc:
+                stream_error = exc
+                stdout = b""
+            group_empty = _group_empty_or_kill(process.pid)
+            if stream_error is not None:
+                if not group_empty:
+                    raise ObservationError("SSH observation timed out or failed with a surviving process group") from stream_error
+                raise ObservationError("SSH observation timed out or stream failed and process group was terminated") from stream_error
             if process.returncode != 0:
                 raise ObservationError("SSH observation helper failed")
-            if not _group_empty_or_kill(process.pid):
+            if not group_empty:
                 raise ObservationError("SSH leader exited with surviving process-group members")
             receipt, archive = decode_helper_response(stdout, request)
             return {"receipt": receipt, "archive": archive}
         finally:
+            if any(_inode_identity(os.fstat(fd)) != _inode_identity(before) for fd, before in zip((ssh_fd, hosts_fd, identity_fd, helper_fd), initial, strict=True)):
+                raise ObservationError("held SSH artifact identity changed during launch")
             for fd in (sealed_identity, sealed_hosts, helper_fd, identity_fd, hosts_fd, ssh_fd):
                 os.close(fd)
 
@@ -753,6 +786,11 @@ class SshObservationProvider:
         validated = validate_request(request, now=datetime.now(timezone.utc))
         if not self.ready(validated):
             raise ObservationHold("sealed SSH composition is not ready")
+        ssh_fd, _ = _held_regular(self.ssh_path, validated["transport"]["ssh_sha256"], executable=True)
+        hosts_fd, hosts = _held_regular(self.known_hosts_path, validated["transport"]["known_hosts_sha256"])
+        identity_fd, identity = _held_regular(self.identity_path, validated["transport"]["identity_sha256"])
+        helper_fd, helper = _held_regular(self.helper_path, validated["transport"]["helper_sha256"])
+        held = (ssh_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, tuple(os.fstat(fd) for fd in (ssh_fd, hosts_fd, identity_fd, helper_fd)))
         used = False
 
         def launch() -> Mapping[str, Any]:
@@ -760,8 +798,16 @@ class SshObservationProvider:
             if used:
                 raise ObservationError("sealed observation launch was invoked more than once")
             used = True
-            return self.observe(validated, on_dispatch=lambda: None)
+            return self.observe(validated, on_dispatch=lambda: None, _held=held)
 
+        def close() -> None:
+            nonlocal used
+            if not used:
+                used = True
+                for fd in (helper_fd, identity_fd, hosts_fd, ssh_fd):
+                    os.close(fd)
+
+        launch.close = close  # type: ignore[attr-defined]
         return launch
 
 
@@ -769,10 +815,12 @@ class ImmutableEvidenceStore:
     def __init__(self, root: Path, *, trusted_uid: int | None = None):
         self.root = root
         self.trusted_uid = os.getuid() if trusted_uid is None else trusted_uid
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 
     @property
     def identity(self) -> dict[str, Any]:
-        st = os.lstat(self.root)
+        st = os.fstat(self._root_fd)
         return {"path": str(self.root), "uid": st.st_uid, "gid": st.st_gid, "mode": stat.S_IMODE(st.st_mode), "dev": st.st_dev, "ino": st.st_ino, "nlink": st.st_nlink}
 
     def persist(
@@ -782,11 +830,9 @@ class ImmutableEvidenceStore:
         request: Mapping[str, Any] | None = None,
         attachments: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> tuple[Path, ...]:
-        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        root_fd = self._root_fd
         root_stat = os.fstat(root_fd)
         if root_stat.st_uid != self.trusted_uid or stat.S_IMODE(root_stat.st_mode) != 0o700:
-            os.close(root_fd)
             raise ObservationError("evidence root ownership or mode is invalid")
         identity = str(receipt["receipt_sha256"]).split(":", 1)[1]
         request_raw = canonical(request or {"request_sha256": receipt["request_sha256"]})
@@ -846,7 +892,7 @@ class ImmutableEvidenceStore:
             os.fsync(attempt_fd)
             os.close(attempt_fd)
             attempt_fd = -1
-            os.rename(attempt, identity, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+            _rename_noreplace(root_fd, attempt, root_fd, identity)
             os.fsync(root_fd)
         except Exception:
             if attempt_fd >= 0:
@@ -862,7 +908,8 @@ class ImmutableEvidenceStore:
                 pass
             raise
         finally:
-            os.close(root_fd)
+            if _inode_identity(os.fstat(root_fd))[:-1] != _inode_identity(root_stat)[:-1]:
+                raise ObservationError("evidence root identity changed during persistence")
         return tuple(paths)
 
 

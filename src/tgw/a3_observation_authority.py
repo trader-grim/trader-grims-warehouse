@@ -49,22 +49,23 @@ class ObservationProvider(Protocol):
 class DurableObservationToken:
     def __init__(self, root: str, grant_sha256: str):
         self.root, self.grant_sha256 = root, grant_sha256
+        self._root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 
     def ready(self) -> bool:
         try:
-            st = os.lstat(self.root)
+            st = os.fstat(self._root_fd)
             return stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode) and stat.S_IMODE(st.st_mode) == 0o700
         except OSError:
             return False
 
     @property
     def identity(self) -> dict[str, Any]:
-        st = os.lstat(self.root)
+        st = os.fstat(self._root_fd)
         return {"path": self.root, "uid": st.st_uid, "gid": st.st_gid, "mode": stat.S_IMODE(st.st_mode), "dev": st.st_dev, "ino": st.st_ino, "nlink": st.st_nlink}
 
     def consume(self) -> None:
         name = self.grant_sha256.split(":", 1)[1] + ".consumed"
-        root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        root_fd = self._root_fd
         try:
             fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=root_fd)
             try:
@@ -89,7 +90,8 @@ class DurableObservationToken:
         except FileExistsError as exc:
             raise ObservationAlreadyConsumed("read-only observation attempt already consumed") from exc
         finally:
-            os.close(root_fd)
+            if os.fstat(root_fd) != os.fstat(self._root_fd):
+                raise ObservationAuthorityError("observation token root identity changed")
 
 
 @dataclass(frozen=True)
@@ -224,7 +226,13 @@ class ReadOnlyObservationController:
             launch = self.provider.prepare_launch(request)
             if not callable(launch):
                 raise ObservationAuthorityError("provider did not prepare a sealed launch")
-            consume()
+            try:
+                consume()
+            except Exception:
+                close = getattr(launch, "close", None)
+                if callable(close):
+                    close()
+                raise
             result = launch()
         except ObservationAlreadyConsumed:
             raise
