@@ -53,6 +53,7 @@ PERSISTENCE_CONTEXT_SCHEMA = "tgw-prod-a3-host-state-observation-persistence-con
 PLAN_AUTHORITY_SCHEMA = "tgw-prod-a3-host-state-plan-authority/v1"
 PARITY_SCHEMA = "tgw-prod-a3-host-state-sshd-parity/v1"
 GRANT_SCHEMA = "tgw-prod-a3-host-state-observation-grant/v1"
+GRANT_OBSERVATION_SCHEMA = "tgw-prod-a3-host-state-mounted-grant-observation/v1"
 DEPENDENCY_SCHEMA = "tgw-prod-a3-host-state-observation-dependency/v1"
 COMPOSITION_SCHEMA = "tgw-prod-a3-host-state-observation-composition/v1"
 
@@ -1105,7 +1106,14 @@ class HostStateObservationGrant:
 
 
 class MountedHostStateObservationGrant:
-    __slots__ = ("fd", "grant", "identity", "path", "sha256")
+    __slots__ = (
+        "_fd",
+        "_grant_raw",
+        "_identity",
+        "_path",
+        "_sealed",
+        "_sha256",
+    )
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         raise TypeError("MountedHostStateObservationGrant is sealed")
@@ -1129,17 +1137,80 @@ class MountedHostStateObservationGrant:
         except Exception:
             os.close(fd)
             raise
-        self.fd = fd
-        self.grant = grant
-        self.identity = _inode_identity(os.fstat(fd))
-        self.path = path
-        self.sha256 = expected_sha256
+        object.__setattr__(self, "_sealed", False)
+        object.__setattr__(self, "_fd", fd)
+        object.__setattr__(self, "_grant_raw", canonical(grant))
+        object.__setattr__(self, "_identity", _inode_identity(os.fstat(fd)))
+        object.__setattr__(self, "_path", path)
+        object.__setattr__(self, "_sha256", expected_sha256)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("MountedHostStateObservationGrant is immutable")
+        object.__setattr__(self, name, value)
+
+    @property
+    def fd(self) -> int:
+        return self._fd
+
+    @property
+    def grant(self) -> dict[str, Any]:
+        return dict(json.loads(self._grant_raw))
+
+    @property
+    def identity(self) -> tuple[int, ...]:
+        return tuple(self._identity)
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
+    def sha256(self) -> str:
+        return self._sha256
+
+    @property
+    def authority(self) -> dict[str, Any]:
+        return {
+            "path": str(self._path),
+            "sha256": self._sha256,
+            "grant_sha256": self.grant["grant_sha256"],
+            "identity": list(self._identity),
+        }
+
+    def observation(self) -> dict[str, Any]:
+        held_identity: list[int] | None = None
+        named_identity: list[int] | None = None
+        held_sha256: str | None = None
+        try:
+            held = os.fstat(self._fd)
+            held_identity = list(_inode_identity(held))
+            held_sha256 = digest(os.pread(self._fd, held.st_size + 1, 0))
+        except OSError:
+            pass
+        try:
+            named_identity = list(_inode_identity(os.stat(self._path, follow_symlinks=False)))
+        except OSError:
+            pass
+        status = "PASS" if held_identity == list(self._identity) and named_identity == list(self._identity) and held_sha256 == self._sha256 else "FAILED"
+        value = {
+            "schema": GRANT_OBSERVATION_SCHEMA,
+            **self.authority,
+            "held_identity": held_identity,
+            "named_identity": named_identity,
+            "held_sha256": held_sha256,
+            "postcheck": status,
+        }
+        value["observation_sha256"] = _hash(value)
+        return value
+
+    def assert_observation(self, expected: Mapping[str, Any]) -> None:
+        if self.observation() != expected:
+            raise HostStateError("mounted host-state grant changed before publication")
 
     def postcheck(self) -> None:
-        held = os.fstat(self.fd)
-        named = os.stat(self.path, follow_symlinks=False)
-        raw = os.pread(self.fd, held.st_size + 1, 0)
-        if _inode_identity(held) != self.identity or _inode_identity(named) != self.identity or digest(raw) != self.sha256:
+        if self.observation()["postcheck"] != "PASS":
             raise HostStateError("mounted host-state grant changed")
 
     def read(
@@ -1149,12 +1220,15 @@ class MountedHostStateObservationGrant:
         now: datetime,
     ) -> dict[str, Any]:
         self.postcheck()
-        held = os.fstat(self.fd)
-        raw = os.pread(self.fd, held.st_size + 1, 0)
+        held = os.fstat(self._fd)
+        raw = os.pread(self._fd, held.st_size + 1, 0)
         parsed = HostStateObservationGrant.validate(json.loads(raw), request=request, now=now)
         if raw != canonical(parsed):
             raise HostStateError("mounted host-state grant is not canonical")
         return parsed
+
+    def close(self) -> None:
+        os.close(self._fd)
 
 
 def load_host_state_observation_grant(
@@ -1172,6 +1246,75 @@ def load_host_state_observation_grant(
         now=observed,
         _token=_GRANT_SEAL,
     )
+
+
+def _validate_grant_authority(
+    value: Any,
+    *,
+    grant: Mapping[str, Any],
+) -> dict[str, Any]:
+    authority = dict(
+        _exact(
+            value,
+            {"path", "sha256", "grant_sha256", "identity"},
+            "mounted host-state grant authority",
+        )
+    )
+    if (
+        not isinstance(authority["path"], str)
+        or not authority["path"].startswith("/")
+        or not isinstance(authority["sha256"], str)
+        or not _SHA.fullmatch(authority["sha256"])
+        or authority["grant_sha256"] != grant["grant_sha256"]
+        or not isinstance(authority["identity"], list)
+    ):
+        raise HostStateError("mounted host-state grant authority differs")
+    _validate_inode_identity_list(authority["identity"], "mounted host-state grant authority")
+    return authority
+
+
+def _validate_grant_observation(
+    value: Any,
+    *,
+    grant: Mapping[str, Any],
+    expected_authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "schema",
+        "path",
+        "sha256",
+        "grant_sha256",
+        "identity",
+        "held_identity",
+        "named_identity",
+        "held_sha256",
+        "postcheck",
+        "observation_sha256",
+    }
+    observation = dict(_exact(value, fields, "mounted host-state grant observation"))
+    claimed = observation.pop("observation_sha256")
+    if observation["schema"] != GRANT_OBSERVATION_SCHEMA or claimed != _hash(observation):
+        raise HostStateError("mounted host-state grant observation identity differs")
+    observation["observation_sha256"] = claimed
+    authority = _validate_grant_authority(
+        {field: observation[field] for field in ("path", "sha256", "grant_sha256", "identity")},
+        grant=grant,
+    )
+    if authority != _validate_grant_authority(
+        expected_authority,
+        grant=grant,
+    ):
+        raise HostStateError("mounted host-state grant authority is not expected")
+    for field in ("held_identity", "named_identity"):
+        identity = observation[field]
+        if identity is not None:
+            _validate_inode_identity_list(identity, f"mounted host-state grant {field}")
+    if observation["held_sha256"] is not None and (not isinstance(observation["held_sha256"], str) or not _SHA.fullmatch(observation["held_sha256"])):
+        raise HostStateError("mounted host-state grant held hash is invalid")
+    passed = observation["held_identity"] == authority["identity"] and observation["named_identity"] == authority["identity"] and observation["held_sha256"] == authority["sha256"]
+    if observation["postcheck"] != ("PASS" if passed else "FAILED"):
+        raise HostStateError("mounted host-state grant postcheck differs")
+    return observation
 
 
 class HostStateEvidenceStore:
@@ -1275,14 +1418,21 @@ class HostStateEvidenceStore:
         receipt: Mapping[str, Any],
         terminal_value: Mapping[str, Any],
         grant: Mapping[str, Any],
+        grant_observation: Mapping[str, Any],
         token_identity: Mapping[str, Any],
         dependency: Mapping[str, Any],
         composition_value: Mapping[str, Any],
+        before_publish: Any | None = None,
     ) -> tuple[dict[str, Any], ...]:
         validated_request = validate_request(request, allow_fixture=True)
         validated_receipt = validate_receipt(receipt, validated_request)
         validated_terminal = validate_terminal(terminal_value, request_sha256=validated_request["request_sha256"])
         validated_grant = HostStateObservationGrant.validate(grant, request=validated_request)
+        validated_grant_observation = _validate_grant_observation(
+            grant_observation,
+            grant=validated_grant,
+            expected_authority={field: grant_observation[field] for field in ("path", "sha256", "grant_sha256", "identity")},
+        )
         _validate_composition_value(
             composition_value,
             validated_request,
@@ -1294,12 +1444,19 @@ class HostStateEvidenceStore:
         attachments = {
             "terminal.json": validated_terminal,
             "grant.json": validated_grant,
+            "grant-authority.json": validated_grant_observation,
             "token-root.json": _root_identity(token_identity, "token root"),
             "dependency.json": dict(dependency),
             "composition.json": dict(composition_value),
         }
         try:
-            paths = self._store.persist(validated_receipt, b"", validated_request, attachments)
+            paths = self._store.persist(
+                validated_receipt,
+                b"",
+                validated_request,
+                attachments,
+                before_publish=before_publish,
+            )
             return _validate_evidence_paths(paths)
         except Exception as exc:
             ambiguous = terminal(
@@ -1327,13 +1484,20 @@ class HostStateEvidenceStore:
         request: Mapping[str, Any],
         terminal_value: Mapping[str, Any],
         grant: Mapping[str, Any],
+        grant_observation: Mapping[str, Any],
         token_identity: Mapping[str, Any],
         composition_sha256: str,
         composition_value: Mapping[str, Any],
+        before_publish: Any | None = None,
     ) -> tuple[dict[str, Any], ...]:
         validated_request = validate_request(request, allow_fixture=True)
         validated_terminal = validate_terminal(terminal_value, request_sha256=validated_request["request_sha256"])
         validated_grant = HostStateObservationGrant.validate(grant, request=validated_request)
+        validated_grant_observation = _validate_grant_observation(
+            grant_observation,
+            grant=validated_grant,
+            expected_authority={field: grant_observation[field] for field in ("path", "sha256", "grant_sha256", "identity")},
+        )
         if composition_sha256 != validated_grant["composition_sha256"]:
             raise HostStateError("persisted failure composition differs")
         _validate_composition_value(
@@ -1352,11 +1516,18 @@ class HostStateEvidenceStore:
         attachments = {
             "terminal.json": validated_terminal,
             "grant.json": validated_grant,
+            "grant-authority.json": validated_grant_observation,
             "token-root.json": _root_identity(token_identity, "token root"),
             "composition.json": dict(composition_value),
         }
         try:
-            paths = self._store.persist(failure, b"", validated_request, attachments)
+            paths = self._store.persist(
+                failure,
+                b"",
+                validated_request,
+                attachments,
+                before_publish=before_publish,
+            )
             return _validate_evidence_paths(paths)
         except Exception as exc:
             ambiguous = terminal(
@@ -1429,7 +1600,16 @@ def _verify_evidence_bundle(
     names = {Path(ref["path"]).name for ref in refs}
     if len(names) != len(refs):
         raise HostStateError("persisted evidence contains duplicate names")
-    required = {"request.json", "receipt.json", "archive.tar", "terminal.json", "grant.json", "token-root.json", "manifest.json"}
+    required = {
+        "request.json",
+        "receipt.json",
+        "archive.tar",
+        "terminal.json",
+        "grant.json",
+        "grant-authority.json",
+        "token-root.json",
+        "manifest.json",
+    }
     if not required <= names or not ({"dependency.json", "composition.json"} & names):
         raise HostStateError("persisted evidence bundle is incomplete")
     manifest = _exact(
@@ -2092,7 +2272,9 @@ def _validate_persistence_context(
     value: Any,
     *,
     request: Mapping[str, Any],
+    expected_composition_sha256: str,
     evidence_root: Mapping[str, Any],
+    expected_grant_authority: Mapping[str, Any],
     persistence_terminal: Mapping[str, Any],
 ) -> dict[str, Any]:
     fields = {
@@ -2139,6 +2321,7 @@ def _validate_persistence_context(
     common_names = {
         "terminal.json",
         "grant.json",
+        "grant-authority.json",
         "token-root.json",
         "composition.json",
     }
@@ -2146,15 +2329,27 @@ def _validate_persistence_context(
     if set(attachments) != expected_names or attachments["terminal.json"] != original:
         raise HostStateError("host-state persistence attachment set differs")
     grant = HostStateObservationGrant.validate(attachments["grant.json"], request=request)
+    grant_observation = _validate_grant_observation(
+        attachments["grant-authority.json"],
+        grant=grant,
+        expected_authority=expected_grant_authority,
+    )
     token_root = _root_identity(attachments["token-root.json"], "persistence token root")
-    if not _same_root_authority(token_root, grant["token_root_identity"]):
-        raise HostStateError("host-state persistence token authority differs")
-    _validate_composition_value(
+    composition = _validate_composition_value(
         attachments["composition.json"],
         request,
-        expected_sha256=grant["composition_sha256"],
+        expected_sha256=expected_composition_sha256,
         expected_evidence_root=evidence_root,
     )
+    if (
+        grant["composition_sha256"] != expected_composition_sha256
+        or not _same_root_authority(grant["evidence_root_identity"], evidence_root)
+        or not _same_root_authority(token_root, grant["token_root_identity"])
+        or not _same_root_authority(token_root, composition["token_root_identity"])
+    ):
+        raise HostStateError("host-state persistence authority differs")
+    if original["outcome"] != "AMBIGUOUS" and grant_observation["postcheck"] != "PASS":
+        raise HostStateError("host-state persistence grant was not stable")
     attempted_receipt = context["attempted_receipt"]
     if not isinstance(attempted_receipt, Mapping):
         raise HostStateError("host-state persistence attempted receipt differs")
@@ -2220,9 +2415,10 @@ class HostStateObservationController:
         grant: MountedHostStateObservationGrant,
         token: DurableObservationToken,
     ) -> dict[str, Any]:
-        if type(grant) is not MountedHostStateObservationGrant:
-            raise HostStateError("production host-state grant is not mounted")
+        cleanup_errors: list[Exception] = []
         try:
+            if type(grant) is not MountedHostStateObservationGrant:
+                raise HostStateError("production host-state grant is not mounted")
             if type(token) is not DurableObservationToken:
                 raise HostStateError("production host-state token is not sealed")
             return self._execute(
@@ -2232,18 +2428,31 @@ class HostStateObservationController:
                 token=token,
             )
         finally:
+            if type(composition) is HostStateProductionComposition:
+                try:
+                    composition.close()
+                except Exception as exc:
+                    cleanup_errors.append(exc)
             try:
                 if type(composition) is HostStateProductionComposition and type(composition.evidence_store) is HostStateEvidenceStore:
                     composition.evidence_store.close()
-            finally:
+            except Exception as exc:
+                cleanup_errors.append(exc)
+            try:
+                if type(token) is DurableObservationToken:
+                    token.close()
+            except Exception as exc:
+                cleanup_errors.append(exc)
+            try:
+                if type(grant) is MountedHostStateObservationGrant:
+                    grant.close()
+            except Exception as exc:
+                cleanup_errors.append(exc)
+            if cleanup_errors:
                 try:
-                    if type(token) is DurableObservationToken:
-                        token.close()
+                    raise HostStateDispatchAmbiguous("host-state controller authority cleanup is uncertain") from cleanup_errors[0]
                 finally:
-                    try:
-                        grant.postcheck()
-                    finally:
-                        os.close(grant.fd)
+                    cleanup_errors.clear()
 
     def _execute(
         self,
@@ -2280,6 +2489,7 @@ class HostStateObservationController:
             )
             composition.authority_check()
             fixed_grant = grant.read(request=validated, now=observed)
+            expected_grant_authority = grant.authority
             if fixed_grant["composition_sha256"] != composition_sha256:
                 raise HostStateError("host-state grant composition differs")
             if (
@@ -2332,8 +2542,20 @@ class HostStateObservationController:
                 validated,
                 expected_composition_sha256=composition_sha256,
                 expected_evidence_root_identity=evidence_store.identity,
+                expected_grant_authority=expected_grant_authority,
             )
             return result
+
+        def grant_observation(*, require_pass: bool) -> dict[str, Any]:
+            observation = grant.observation()
+            _validate_grant_observation(
+                observation,
+                grant=fixed_grant,
+                expected_authority=expected_grant_authority,
+            )
+            if require_pass and observation["postcheck"] != "PASS":
+                raise HostStateDispatchAmbiguous("mounted host-state grant changed after dispatch")
+            return observation
 
         try:
             token.consume()
@@ -2352,13 +2574,16 @@ class HostStateObservationController:
                 diagnostic=type(exc).__name__.encode(),
             )
             try:
+                authority_observation = grant_observation(require_pass=False)
                 evidence = evidence_store.persist_terminal(
                     request=validated,
                     terminal_value=ambiguous,
                     grant=fixed_grant,
+                    grant_observation=authority_observation,
                     token_identity=token.identity,
                     composition_sha256=composition_sha256,
                     composition_value=composition.value,
+                    before_publish=lambda: grant.assert_observation(authority_observation),
                 )
             except HostStatePersistenceAmbiguous as persistence_exc:
                 return persistence_result(persistence_exc)
@@ -2378,6 +2603,7 @@ class HostStateObservationController:
                 validated,
                 expected_composition_sha256=composition_sha256,
                 expected_evidence_root_identity=evidence_store.identity,
+                expected_grant_authority=expected_grant_authority,
             )
             return result
         except Exception as exc:
@@ -2398,13 +2624,16 @@ class HostStateObservationController:
                     remote_terminal["dispatched"],
                 ) not in _REMOTE_TERMINALS:
                     raise HostStateError("host-state launch returned a non-remote terminal")
+                authority_observation = grant_observation(require_pass=True)
                 evidence = evidence_store.persist_terminal(
                     request=validated,
                     terminal_value=remote_terminal,
                     grant=fixed_grant,
+                    grant_observation=authority_observation,
                     token_identity=token.identity,
                     composition_sha256=composition_sha256,
                     composition_value=composition.value,
+                    before_publish=lambda: grant.assert_observation(authority_observation),
                 )
                 result = {
                     "schema": RESULT_SCHEMA,
@@ -2422,9 +2651,11 @@ class HostStateObservationController:
                     validated,
                     expected_composition_sha256=composition_sha256,
                     expected_evidence_root_identity=evidence_store.identity,
+                    expected_grant_authority=expected_grant_authority,
                 )
                 return result
             receipt = validate_receipt(untrusted, validated, now=datetime.now(timezone.utc))
+            authority_observation = grant_observation(require_pass=True)
         except HostStatePersistenceAmbiguous as exc:
             return persistence_result(exc)
         except Exception as exc:
@@ -2438,13 +2669,16 @@ class HostStateObservationController:
                 diagnostic=type(exc).__name__.encode(),
             )
             try:
+                authority_observation = grant_observation(require_pass=False)
                 evidence = evidence_store.persist_terminal(
                     request=validated,
                     terminal_value=ambiguous,
                     grant=fixed_grant,
+                    grant_observation=authority_observation,
                     token_identity=token.identity,
                     composition_sha256=composition_sha256,
                     composition_value=composition.value,
+                    before_publish=lambda: grant.assert_observation(authority_observation),
                 )
             except HostStatePersistenceAmbiguous as persistence_exc:
                 return persistence_result(persistence_exc)
@@ -2464,6 +2698,7 @@ class HostStateObservationController:
                 validated,
                 expected_composition_sha256=composition_sha256,
                 expected_evidence_root_identity=evidence_store.identity,
+                expected_grant_authority=expected_grant_authority,
             )
             return result
         success = terminal(
@@ -2486,9 +2721,11 @@ class HostStateObservationController:
                 receipt=receipt,
                 terminal_value=success,
                 grant=fixed_grant,
+                grant_observation=authority_observation,
                 token_identity=token.identity,
                 dependency=dependency,
                 composition_value=composition.value,
+                before_publish=lambda: grant.assert_observation(authority_observation),
             )
         except HostStatePersistenceAmbiguous as exc:
             return persistence_result(exc)
@@ -2508,6 +2745,7 @@ class HostStateObservationController:
             validated,
             expected_composition_sha256=composition_sha256,
             expected_evidence_root_identity=evidence_store.identity,
+            expected_grant_authority=expected_grant_authority,
         )
         return result
 
@@ -2518,6 +2756,7 @@ def validate_result(
     *,
     expected_composition_sha256: str,
     expected_evidence_root_identity: Mapping[str, Any],
+    expected_grant_authority: Mapping[str, Any],
 ) -> dict[str, Any]:
     request = validate_request(request_value, allow_fixture=True)
     result = dict(
@@ -2579,7 +2818,9 @@ def validate_result(
         _validate_persistence_context(
             result["persistence"],
             request=request,
+            expected_composition_sha256=expected_composition_sha256,
             evidence_root=expected_evidence_root_identity,
+            expected_grant_authority=expected_grant_authority,
             persistence_terminal=terminal_value,
         )
     elif result["persistence"] is not None:
@@ -2608,6 +2849,11 @@ def validate_result(
             persisted_request = json.loads(evidence_contents["request.json"])
             persisted_terminal = json.loads(evidence_contents["terminal.json"])
             persisted_grant = HostStateObservationGrant.validate(json.loads(evidence_contents["grant.json"]), request=request)
+            persisted_grant_observation = _validate_grant_observation(
+                json.loads(evidence_contents["grant-authority.json"]),
+                grant=persisted_grant,
+                expected_authority=expected_grant_authority,
+            )
             persisted_token_root = _root_identity(json.loads(evidence_contents["token-root.json"]), "persisted token root")
             persisted_composition = json.loads(evidence_contents["composition.json"])
         except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -2626,6 +2872,8 @@ def validate_result(
             )
         ):
             raise HostStateError("host-state durable authority evidence differs")
+        if terminal_value["outcome"] != "AMBIGUOUS" and persisted_grant_observation["postcheck"] != "PASS":
+            raise HostStateError("host-state durable grant was not stable")
         _validate_composition_value(
             persisted_composition,
             request,

@@ -505,6 +505,40 @@ def _grant_and_roots(tmp_path: Path, request: dict):
     return grant, token, store, composition, composition_value
 
 
+def _grant_authority(grant: HostStateObservationGrant) -> dict:
+    return {
+        "path": "/protected/host-state-grant.json",
+        "sha256": _sha("mounted-grant-file"),
+        "grant_sha256": grant.value["grant_sha256"],
+        "identity": [1, 97, 0, 0, 0o444, 1, 1024, 1, 1],
+    }
+
+
+def _grant_observation(grant: HostStateObservationGrant) -> dict:
+    import tgw.a3_host_state_observation as host_state
+
+    authority = _grant_authority(grant)
+    value = {
+        "schema": host_state.GRANT_OBSERVATION_SCHEMA,
+        **authority,
+        "held_identity": list(authority["identity"]),
+        "named_identity": list(authority["identity"]),
+        "held_sha256": authority["sha256"],
+        "postcheck": "PASS",
+    }
+    value["observation_sha256"] = digest(host_state.canonical(value))
+    return value
+
+
+def _unbound_grant_authority() -> dict:
+    return {
+        "path": "/protected/unbound-host-state-grant.json",
+        "sha256": _sha("unbound-mounted-grant-file"),
+        "grant_sha256": _sha("unbound-grant"),
+        "identity": [1, 98, 0, 0, 0o444, 1, 1024, 1, 1],
+    }
+
+
 def test_controller_holds_before_consuming_authority(tmp_path: Path) -> None:
     request = _request()
     grant, token, store, composition, _composition_value = _grant_and_roots(tmp_path, request)
@@ -536,6 +570,7 @@ def test_controller_consumes_once_and_persists_atomic_result(tmp_path: Path) -> 
         receipt=receipt,
         terminal_value=success,
         grant=grant.value,
+        grant_observation=_grant_observation(grant),
         token_identity=token.identity,
         dependency=dependency,
         composition_value=composition_value,
@@ -558,6 +593,7 @@ def test_controller_consumes_once_and_persists_atomic_result(tmp_path: Path) -> 
             request,
             expected_composition_sha256=composition,
             expected_evidence_root_identity=store.identity,
+            expected_grant_authority=_grant_authority(grant),
         )
         == result
     )
@@ -572,6 +608,7 @@ def test_controller_consumes_once_and_persists_atomic_result(tmp_path: Path) -> 
             request,
             expected_composition_sha256=composition,
             expected_evidence_root_identity=store.identity,
+            expected_grant_authority=_grant_authority(grant),
         )
     with pytest.raises(ObservationAlreadyConsumed):
         token.consume()
@@ -594,6 +631,7 @@ def test_failed_terminal_is_durably_bound_to_composition(tmp_path: Path) -> None
         request=request,
         terminal_value=failed,
         grant=grant.value,
+        grant_observation=_grant_observation(grant),
         token_identity=token.identity,
         composition_sha256=composition,
         composition_value=composition_value,
@@ -615,6 +653,7 @@ def test_failed_terminal_is_durably_bound_to_composition(tmp_path: Path) -> None
             request,
             expected_composition_sha256=composition,
             expected_evidence_root_identity=store.identity,
+            expected_grant_authority=_grant_authority(grant),
         )
         == result
     )
@@ -660,6 +699,7 @@ def test_post_publish_validation_failure_is_typed_ambiguous(
                 receipt=receipt,
                 terminal_value=terminal_value,
                 grant=grant.value,
+                grant_observation=_grant_observation(grant),
                 token_identity=token.identity,
                 dependency=dependency_projection(
                     receipt,
@@ -674,6 +714,7 @@ def test_post_publish_validation_failure_is_typed_ambiguous(
                 request=request,
                 terminal_value=terminal_value,
                 grant=grant.value,
+                grant_observation=_grant_observation(grant),
                 token_identity=token.identity,
                 composition_sha256=composition,
                 composition_value=composition_value,
@@ -683,6 +724,40 @@ def test_post_publish_validation_failure_is_typed_ambiguous(
     assert caught.value.context["original_terminal"] == terminal_value
     assert caught.value.context["status"] == "UNVERIFIED_NOT_DURABLE"
     assert any(path.is_dir() and not path.name.startswith(".attempt-") for path in store.root.iterdir())
+
+
+def test_grant_prepublication_change_is_typed_and_not_published(
+    tmp_path: Path,
+) -> None:
+    request = _request()
+    grant, token, store, composition, composition_value = _grant_and_roots(tmp_path, request)
+    token.consume()
+    failed = terminal(
+        outcome="FAILED",
+        stage="remote",
+        code="HELPER_FAILED",
+        dispatched=True,
+        request_sha256=request["request_sha256"],
+        observed_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    def changed_before_publish() -> None:
+        raise HostStateError("mounted grant changed")
+
+    with pytest.raises(HostStatePersistenceAmbiguous) as caught:
+        store.persist_terminal(
+            request=request,
+            terminal_value=failed,
+            grant=grant.value,
+            grant_observation=_grant_observation(grant),
+            token_identity=token.identity,
+            composition_sha256=composition,
+            composition_value=composition_value,
+            before_publish=changed_before_publish,
+        )
+    assert caught.value.terminal["stage"] == "persistence"
+    assert caught.value.context["attempted_attachments"]["grant-authority.json"]["postcheck"] == "PASS"
+    assert not any(path.is_dir() and not path.name.startswith(".attempt-") for path in store.root.iterdir())
 
 
 def test_grant_rejects_bool_attempt_and_foreign_plan(tmp_path: Path) -> None:
@@ -726,6 +801,101 @@ def test_production_authority_types_and_clock_seam_are_sealed() -> None:
         HostStateObservationGrant({}, _token=object())
 
 
+def test_mounted_grant_state_is_immutable() -> None:
+    import tgw.a3_host_state_observation as host_state
+
+    mounted = object.__new__(host_state.MountedHostStateObservationGrant)
+    object.__setattr__(mounted, "_sealed", False)
+    object.__setattr__(mounted, "_fd", -1)
+    object.__setattr__(mounted, "_grant_raw", b"{}")
+    object.__setattr__(mounted, "_identity", (1, 2, 0, 0, 0o444, 1, 2, 1, 1))
+    object.__setattr__(mounted, "_path", Path("/protected/grant.json"))
+    object.__setattr__(mounted, "_sha256", _sha("grant"))
+    object.__setattr__(mounted, "_sealed", True)
+    assert not hasattr(mounted, "__dict__")
+    for field in ("fd", "grant", "identity", "path", "sha256", "_fd", "_grant_raw"):
+        with pytest.raises(AttributeError, match="immutable"):
+            setattr(mounted, field, object())
+
+
+def test_controller_closes_prepared_authorities_on_type_rejection(
+    tmp_path: Path,
+) -> None:
+    import tgw.a3_host_state_observation as host_state
+
+    request = _request()
+    grant, token, store, _composition, _composition_value = _grant_and_roots(tmp_path, request)
+    closed: list[bool] = []
+
+    def launch() -> None:
+        raise AssertionError("launch must not run")
+
+    launch.close = lambda: closed.append(True)  # type: ignore[attr-defined]
+    composition = object.__new__(host_state.HostStateProductionComposition)
+    composition.provider = None
+    composition.evidence_store = store
+    composition.launch = launch
+    composition.authority_check = lambda: None
+    composition.value = {}
+    composition.receipt_sha256 = _sha("composition")
+    composition.used = False
+    with pytest.raises(HostStateError, match="grant is not mounted"):
+        HostStateObservationController().execute(
+            request=request,
+            composition=composition,
+            grant=grant,
+            token=token,
+        )
+    assert closed == [True]
+    assert store.ready() is False
+    assert token.ready() is False
+
+
+def test_controller_closes_composition_and_grant_on_token_type_rejection(
+    tmp_path: Path,
+) -> None:
+    import tgw.a3_host_state_observation as host_state
+
+    request = _request()
+    grant, _token, store, _composition, _composition_value = _grant_and_roots(tmp_path, request)
+    grant_path = tmp_path / "mounted-grant.json"
+    grant_path.write_bytes(host_state.canonical(grant.value))
+    grant_fd = os.open(grant_path, os.O_RDONLY | os.O_NOFOLLOW)
+    mounted = object.__new__(host_state.MountedHostStateObservationGrant)
+    object.__setattr__(mounted, "_sealed", False)
+    object.__setattr__(mounted, "_fd", grant_fd)
+    object.__setattr__(mounted, "_grant_raw", host_state.canonical(grant.value))
+    object.__setattr__(mounted, "_identity", host_state._inode_identity(os.fstat(grant_fd)))
+    object.__setattr__(mounted, "_path", grant_path)
+    object.__setattr__(mounted, "_sha256", digest(grant_path.read_bytes()))
+    object.__setattr__(mounted, "_sealed", True)
+    closed: list[bool] = []
+
+    def launch() -> None:
+        raise AssertionError("launch must not run")
+
+    launch.close = lambda: closed.append(True)  # type: ignore[attr-defined]
+    composition = object.__new__(host_state.HostStateProductionComposition)
+    composition.provider = None
+    composition.evidence_store = store
+    composition.launch = launch
+    composition.authority_check = lambda: None
+    composition.value = {}
+    composition.receipt_sha256 = _sha("composition")
+    composition.used = False
+    with pytest.raises(HostStateError, match="token is not sealed"):
+        HostStateObservationController().execute(
+            request=request,
+            composition=composition,
+            grant=mounted,
+            token=object(),
+        )
+    assert closed == [True]
+    assert store.ready() is False
+    with pytest.raises(OSError):
+        os.fstat(grant_fd)
+
+
 def test_result_rejects_forged_terminal_and_evidence(tmp_path: Path) -> None:
     request, receipt = _observe(tmp_path)
     success = terminal(
@@ -757,6 +927,7 @@ def test_result_rejects_forged_terminal_and_evidence(tmp_path: Path) -> None:
             request,
             expected_composition_sha256=_sha("composition"),
             expected_evidence_root_identity=root_identity,
+            expected_grant_authority=_unbound_grant_authority(),
         )
 
 
@@ -803,6 +974,7 @@ def test_result_rejects_terminal_not_emitted_by_controller(
             request,
             expected_composition_sha256=_sha("composition"),
             expected_evidence_root_identity=root_identity,
+            expected_grant_authority=_unbound_grant_authority(),
         )
 
 
@@ -836,6 +1008,7 @@ def test_result_accepts_controller_persistence_uncertainty_without_refs(
             request=request,
             terminal_value=original_terminal,
             grant=grant.value,
+            grant_observation=_grant_observation(grant),
             token_identity=token.identity,
             composition_sha256=composition,
             composition_value=composition_value,
@@ -859,9 +1032,19 @@ def test_result_accepts_controller_persistence_uncertainty_without_refs(
             request,
             expected_composition_sha256=composition,
             expected_evidence_root_identity=root_identity,
+            expected_grant_authority=_grant_authority(grant),
         )
         == result
     )
+    with pytest.raises(HostStateError):
+        host_state._validate_persistence_context(
+            caught.value.context,
+            request=request,
+            expected_composition_sha256=_sha("foreign-composition"),
+            evidence_root=root_identity,
+            expected_grant_authority=_grant_authority(grant),
+            persistence_terminal=terminal_value,
+        )
     changed = deepcopy(result)
     changed["persistence"]["attempt_name"] = "0" * 64
     changed["persistence"]["context_sha256"] = digest(
@@ -874,6 +1057,7 @@ def test_result_accepts_controller_persistence_uncertainty_without_refs(
             request,
             expected_composition_sha256=composition,
             expected_evidence_root_identity=root_identity,
+            expected_grant_authority=_grant_authority(grant),
         )
     store.root.rename(tmp_path / "displaced-evidence")
     assert (
@@ -882,6 +1066,7 @@ def test_result_accepts_controller_persistence_uncertainty_without_refs(
             request,
             expected_composition_sha256=composition,
             expected_evidence_root_identity=root_identity,
+            expected_grant_authority=_grant_authority(grant),
         )
         == result
     )

@@ -554,12 +554,7 @@ def replay_archive(archive: bytes, receipt: Mapping[str, Any], request: Mapping[
             lock = json.loads(lock_raw)
         except json.JSONDecodeError as exc:
             raise ObservationError("flake.lock JSON is invalid") from exc
-        if (
-            not isinstance(lock, dict)
-            or not isinstance(lock.get("nodes"), dict)
-            or not isinstance(lock.get("root"), str)
-            or lock["root"] not in lock["nodes"]
-        ):
+        if not isinstance(lock, dict) or not isinstance(lock.get("nodes"), dict) or not isinstance(lock.get("root"), str) or lock["root"] not in lock["nodes"]:
             raise ObservationError("flake.lock input graph is invalid")
         for node_name, node in lock["nodes"].items():
             if not isinstance(node_name, str) or not node_name or not isinstance(node, dict) or any(key not in {"inputs", "locked", "original", "flake"} for key in node):
@@ -573,8 +568,10 @@ def replay_archive(archive: bytes, receipt: Mapping[str, Any], request: Mapping[
             if not isinstance(inputs, dict):
                 raise ObservationError("flake.lock inputs are invalid")
             for input_name, target in inputs.items():
-                if not isinstance(input_name, str) or not input_name or not (
-                    isinstance(target, str) or (isinstance(target, list) and target and all(isinstance(part, str) and part for part in target))
+                if (
+                    not isinstance(input_name, str)
+                    or not input_name
+                    or not (isinstance(target, str) or (isinstance(target, list) and target and all(isinstance(part, str) and part for part in target)))
                 ):
                     raise ObservationError("flake.lock input edge is invalid")
                 if isinstance(target, list):
@@ -1025,8 +1022,7 @@ class SshObservationProvider:
         modes = ({0o555, 0o755}, {0o555, 0o755}, {0o400, 0o444}, {0o400}, {0o400, 0o444})
         try:
             invalid_metadata = any(
-                os.fstat(fd).st_uid != os.getuid() or os.fstat(fd).st_nlink != 1 or stat.S_IMODE(os.fstat(fd).st_mode) not in admitted
-                for fd, admitted in zip(held_fds, modes, strict=True)
+                os.fstat(fd).st_uid != os.getuid() or os.fstat(fd).st_nlink != 1 or stat.S_IMODE(os.fstat(fd).st_mode) not in admitted for fd, admitted in zip(held_fds, modes, strict=True)
             )
             lines = hosts.decode().splitlines()
         except Exception:
@@ -1125,6 +1121,8 @@ class ImmutableEvidenceStore:
         archive: bytes,
         request: Mapping[str, Any] | None = None,
         attachments: Mapping[str, Mapping[str, Any]] | None = None,
+        *,
+        before_publish: Any | None = None,
     ) -> tuple[Path, ...]:
         root_fd = self._root_fd
         root_stat = os.fstat(root_fd)
@@ -1188,6 +1186,8 @@ class ImmutableEvidenceStore:
             os.fsync(attempt_fd)
             os.close(attempt_fd)
             attempt_fd = -1
+            if before_publish is not None:
+                before_publish()
             _rename_noreplace(root_fd, attempt, root_fd, identity)
             os.fsync(root_fd)
         except Exception:
