@@ -1,0 +1,67 @@
+{
+  "change": {
+    "closed_codes": [
+      "HELD_TOOL_ANCESTOR_NOT_TRUSTED",
+      "HELD_TOOL_METADATA_NOT_TRUSTED",
+      "HELPER_INTERPRETER_IDENTITY_MISMATCH",
+      "REPOSITORY_BRANCH_MISMATCH",
+      "REPOSITORY_BRANCH_REF_ABSENT",
+      "REPOSITORY_HEAD_ABSENT",
+      "REPOSITORY_LAYOUT_NOT_DIRECT",
+      "SYSTEM_LINK_NOT_SYMLINK",
+      "SYSTEM_LINK_TARGET_NOT_STORE",
+      "SYSTEM_PROFILE_CAS_MISMATCH",
+      "SYSTEM_TARGET_ABSENT",
+      "SYSTEM_TARGET_NOT_TRUSTED"
+    ],
+    "free_form_remote_diagnostic": false,
+    "historical_helper_hold_accepted": true,
+    "terminal_tuple": [
+      "HOLD",
+      "remote",
+      "HOST_NOT_READY",
+      true
+    ]
+  },
+  "effects": {
+    "deployment": false,
+    "grant_consumed": false,
+    "grant_issued": false,
+    "install": false,
+    "nix": false,
+    "production_remote_connection": false,
+    "remote_write": false,
+    "repository_access": false,
+    "service": false
+  },
+  "gates": {
+    "diff_check": "PASS",
+    "focused": "63 PASS / 0 FAIL",
+    "matrix": "154 PASS / 0 FAIL",
+    "py_compile": "PASS",
+    "ruff": "PASS",
+    "tracked_full": "3957 PASS / 5 SKIP / 0 FAIL"
+  },
+  "review": {
+    "boundary": "the successor changes only authenticated HOST_NOT_READY diagnostic bytes and their closed validator; SSH argv, request, grant, persistence, repository and effect policy are unchanged",
+    "independence": "prior independent review retained for unchanged transport and authority behavior; this delta has exact controller verification and full regression evidence",
+    "result": "PASS"
+  },
+  "runtime": {
+    "controller_sha256": "sha256:3fe01b445b718252e3a53302552ec87b9b3e034c46d13a043b8711c5431b65e6",
+    "helper_path": "/opt/TGW/evidence/codex/sha256/c554b3cc32c86c4a4110fd1cdf97ca883ff43a442054a66f351e0ecebc02a086.py",
+    "helper_sha256": "sha256:c554b3cc32c86c4a4110fd1cdf97ca883ff43a442054a66f351e0ecebc02a086",
+    "runtime_path": "/opt/TGW/evidence/codex/host-state-runtime/dbff45a565332238713063542c8c129df08979ec58177baa2205105d8abc82bf",
+    "runtime_sha256": "sha256:dbff45a565332238713063542c8c129df08979ec58177baa2205105d8abc82bf"
+  },
+  "schema": "tgw-controller-source-verification/v1",
+  "source": {
+    "archive_path": "/opt/TGW/evidence/codex/sha256/c7d500cb5e680ccf97fc1933baf5b3fe6ab1388318ef8a6311e2a89901b35d4d.tar",
+    "archive_sha256": "sha256:c7d500cb5e680ccf97fc1933baf5b3fe6ab1388318ef8a6311e2a89901b35d4d",
+    "archive_size": 12820480,
+    "commit": "cd8e4426fba4e65a03fae999094b0f57b70623ca",
+    "tree": "d136289accb252bee823d3dec5e64847501376c5"
+  },
+  "status": "PASS",
+  "verification_sha256": "sha256:0296f124d9d7914cbd8c042ac8c11ba9b02fa0ae9b55b60ead92e853853af7f4"
+}
