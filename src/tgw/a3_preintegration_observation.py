@@ -740,32 +740,38 @@ def _bounded_stream(process: subprocess.Popen[bytes], stdin: bytes, *, stdout_li
     outputs = {"stdout": bytearray(), "stderr": bytearray()}
     offset = 0
     deadline = datetime.now(timezone.utc).timestamp() + timeout
-    while selector.get_map():
-        remaining = deadline - datetime.now(timezone.utc).timestamp()
-        if remaining <= 0:
-            raise subprocess.TimeoutExpired(process.args, timeout)
-        for key, _ in selector.select(min(remaining, 0.25)):
-            if key.data == "stdin":
-                if offset == len(stdin):
-                    selector.unregister(key.fileobj)
-                    key.fileobj.close()
-                    continue
-                try:
-                    offset += os.write(key.fd, stdin[offset : offset + 65536])
-                except BrokenPipeError:
-                    selector.unregister(key.fileobj)
-                    key.fileobj.close()
-            else:
-                chunk = os.read(key.fd, 65536)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                outputs[key.data].extend(chunk)
-                limit = stdout_limit if key.data == "stdout" else stderr_limit
-                if len(outputs[key.data]) > limit:
-                    raise ObservationError(f"SSH observation {key.data} exceeded bound")
-    process.wait(timeout=max(0.1, deadline - datetime.now(timezone.utc).timestamp()))
-    return bytes(outputs["stdout"]), bytes(outputs["stderr"])
+    try:
+        while selector.get_map():
+            remaining = deadline - datetime.now(timezone.utc).timestamp()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, timeout)
+            for key, _ in selector.select(min(remaining, 0.25)):
+                if key.data == "stdin":
+                    if offset == len(stdin):
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    try:
+                        offset += os.write(key.fd, stdin[offset : offset + 65536])
+                    except BrokenPipeError:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                else:
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    outputs[key.data].extend(chunk)
+                    limit = stdout_limit if key.data == "stdout" else stderr_limit
+                    if len(outputs[key.data]) > limit:
+                        raise ObservationError(f"SSH observation {key.data} exceeded bound")
+        process.wait(timeout=max(0.1, deadline - datetime.now(timezone.utc).timestamp()))
+        return bytes(outputs["stdout"]), bytes(outputs["stderr"])
+    finally:
+        selector.close()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
 
 
 def _bounded_stream_readonly(process: subprocess.Popen[bytes], *, stdout_limit: int, stderr_limit: int, timeout: int) -> tuple[bytes, bytes]:
@@ -792,6 +798,9 @@ def _bounded_stream_readonly(process: subprocess.Popen[bytes], *, stdout_limit: 
                     raise ObservationError(f"Git {key.data} exceeded bound")
     finally:
         selector.close()
+        for stream in (process.stdout, process.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
     return bytes(outputs["stdout"]), bytes(outputs["stderr"])
 
 
@@ -999,11 +1008,20 @@ class SshObservationProvider:
             raise
         held_fds = (ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd)
         modes = ({0o555, 0o755}, {0o555, 0o755}, {0o400, 0o444}, {0o400}, {0o400, 0o444})
-        if any(os.fstat(fd).st_uid != os.getuid() or os.fstat(fd).st_nlink != 1 or stat.S_IMODE(os.fstat(fd).st_mode) not in admitted for fd, admitted in zip(held_fds, modes, strict=True)):
+        try:
+            invalid_metadata = any(
+                os.fstat(fd).st_uid != os.getuid() or os.fstat(fd).st_nlink != 1 or stat.S_IMODE(os.fstat(fd).st_mode) not in admitted
+                for fd, admitted in zip(held_fds, modes, strict=True)
+            )
+            lines = hosts.decode().splitlines()
+        except Exception:
+            for fd in reversed(opened):
+                os.close(fd)
+            raise
+        if invalid_metadata:
             for fd in held_fds:
                 os.close(fd)
             raise ObservationHold("sealed SSH artifact metadata is not admitted")
-        lines = hosts.decode().splitlines()
         if len(lines) != 1 or len(lines[0].split()) != 3 or lines[0].split()[0] != validated["target"]["host"]:
             for fd in held_fds:
                 os.close(fd)
