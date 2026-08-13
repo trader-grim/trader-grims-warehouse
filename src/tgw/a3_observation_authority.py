@@ -15,6 +15,7 @@ from tgw.a3_preintegration_observation import (
     EvidencePersistenceAmbiguous,
     ImmutableEvidenceStore,
     ObservationHold,
+    SshObservationProvider,
     persist_evidence,
     terminal,
     validate_receipt,
@@ -49,7 +50,10 @@ class ObservationProvider(Protocol):
 class DurableObservationToken:
     def __init__(self, root: str, grant_sha256: str):
         self.root, self.grant_sha256 = root, grant_sha256
-        self._root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        root_path = os.path.abspath(root)
+        self._root_name = os.path.basename(root_path)
+        self._parent_fd = os.open(os.path.dirname(root_path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self._root_fd = os.open(self._root_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self._parent_fd)
 
     def ready(self) -> bool:
         try:
@@ -90,7 +94,8 @@ class DurableObservationToken:
         except FileExistsError as exc:
             raise ObservationAlreadyConsumed("read-only observation attempt already consumed") from exc
         finally:
-            if os.fstat(root_fd) != os.fstat(self._root_fd):
+            named = os.stat(self._root_name, dir_fd=self._parent_fd, follow_symlinks=False)
+            if (named.st_dev, named.st_ino) != (os.fstat(self._root_fd).st_dev, os.fstat(self._root_fd).st_ino):
                 raise ObservationAuthorityError("observation token root identity changed")
 
 
@@ -181,12 +186,15 @@ class ReadOnlyObservationController:
         composition_sha256: str,
         evidence_store: ImmutableEvidenceStore | None = None,
         token: DurableObservationToken | None = None,
+        allow_test_provider: bool = False,
     ):
         self.grant = grant
         self.provider = provider
         self.composition_sha256 = composition_sha256
         self.evidence_store = evidence_store
         self.token = token
+        if not allow_test_provider and not isinstance(provider, SshObservationProvider):
+            raise ObservationAuthorityError("production controller requires the sealed SSH observation provider")
         self._lock = threading.Lock()
         self._consumed = False
 
@@ -212,7 +220,7 @@ class ReadOnlyObservationController:
             raise ObservationHold("observation token root differs from grant")
         if self.evidence_store is not None and grant["evidence_root_identity"] != self.evidence_store.identity:
             raise ObservationHold("observation evidence root differs from grant")
-        if self.evidence_store is None or self.token is None or not self.token.ready() or not self.provider.ready(request):
+        if self.evidence_store is None or self.token is None or not self.token.ready():
             raise ObservationHold("observation provider is not ready")
 
         def consume() -> None:
@@ -236,7 +244,13 @@ class ReadOnlyObservationController:
             result = launch()
         except ObservationAlreadyConsumed:
             raise
+        except ObservationHold:
+            if not self._consumed:
+                raise
+            raise ObservationDispatchAmbiguous("observation held after SSH dispatch")
         except Exception as exc:
+            if not self._consumed:
+                raise ObservationHold("observation launch preparation failed before dispatch") from exc
             raise ObservationDispatchAmbiguous("observation failed after SSH dispatch") from exc
         if not isinstance(result, Mapping) or set(result) != {"receipt", "archive"}:
             raise ObservationDispatchAmbiguous("observation provider result is malformed")

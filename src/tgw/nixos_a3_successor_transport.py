@@ -1240,9 +1240,8 @@ def _load_local_production_transport(path: Path, *, _test_uid: int | None = None
 
 def load_local_production_transport(path: Path, *, reviewed_source: Mapping[str, Any] | None = None) -> A3LocalProductionTransport:
     """Load one immutable root-owned canonical composition manifest and seal it."""
-    transport = _load_local_production_transport(path)
-    transport.reviewed_source = dict(reviewed_source) if reviewed_source is not None else None
-    return transport
+    loaded = _load_local_production_transport(path)
+    return A3LocalProductionTransport(loaded.composition, _token=_SEAL, reviewed_source=reviewed_source)
 
 
 __all__ = [

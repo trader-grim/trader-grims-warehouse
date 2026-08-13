@@ -489,6 +489,22 @@ def replay_archive(archive: bytes, receipt: Mapping[str, Any], request: Mapping[
             or lock["root"] not in lock["nodes"]
         ):
             raise ObservationError("flake.lock input graph is invalid")
+        for node_name, node in lock["nodes"].items():
+            if not isinstance(node_name, str) or not node_name or not isinstance(node, dict) or any(key not in {"inputs", "locked", "original", "flake"} for key in node):
+                raise ObservationError("flake.lock node schema is invalid")
+            if "flake" in node and not isinstance(node["flake"], bool):
+                raise ObservationError("flake.lock node flake flag is invalid")
+            for identity_key in ("locked", "original"):
+                if identity_key in node and (not isinstance(node[identity_key], dict) or any(not isinstance(k, str) or not isinstance(v, (str, int, bool)) for k, v in node[identity_key].items())):
+                    raise ObservationError("flake.lock source identity is invalid")
+            inputs = node.get("inputs", {})
+            if not isinstance(inputs, dict):
+                raise ObservationError("flake.lock inputs are invalid")
+            for input_name, target in inputs.items():
+                if not isinstance(input_name, str) or not input_name or not (
+                    isinstance(target, str) or (isinstance(target, list) and target and all(isinstance(part, str) and part for part in target))
+                ):
+                    raise ObservationError("flake.lock input edge is invalid")
         return {"tree": output, "lock_sha256": digest(lock_raw), "lock_nodes": sorted(lock["nodes"])}
 
 
@@ -598,25 +614,26 @@ def _sealed(name: str, raw: bytes) -> int:
     return fd
 
 
-def _group_empty_or_kill(pgid: int) -> bool:
+def _group_empty_or_kill(pgid: int) -> dict[str, bool]:
     import time
 
     for sent in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pgid, sent)
         except ProcessLookupError:
-            return True
+            return {"had_survivor": sent == signal.SIGTERM and False, "removed": True, "reaped": True}
+        had_survivor = True
         for _ in range(200):
             try:
                 os.killpg(pgid, 0)
             except ProcessLookupError:
-                return True
+                return {"had_survivor": had_survivor, "removed": True, "reaped": True}
             time.sleep(0.01)
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
-        return True
-    return False
+        return {"had_survivor": True, "removed": True, "reaped": True}
+    return {"had_survivor": True, "removed": False, "reaped": False}
 
 
 def _bounded_stream(process: subprocess.Popen[bytes], stdin: bytes, *, stdout_limit: int, stderr_limit: int, timeout: int) -> tuple[bytes, bytes]:
@@ -727,7 +744,7 @@ class SshObservationProvider:
             helper_fd, helper = _held_regular(self.helper_path, request["transport"]["helper_sha256"])
             initial = tuple(os.fstat(fd) for fd in (ssh_fd, hosts_fd, identity_fd, helper_fd))
         else:
-            ssh_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, initial = _held
+            ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, initial = _held
         sealed_hosts = _sealed("a3-observation-hosts", hosts)
         sealed_identity = _sealed("a3-observation-identity", identity)
         try:
@@ -764,33 +781,59 @@ class SshObservationProvider:
             except Exception as exc:
                 stream_error = exc
                 stdout = b""
-            group_empty = _group_empty_or_kill(process.pid)
+            group_state = _group_empty_or_kill(process.pid)
+            try:
+                process.wait(timeout=1)
+                group_state["reaped"] = True
+            except subprocess.TimeoutExpired:
+                group_state["reaped"] = False
             if stream_error is not None:
-                if not group_empty:
+                if not group_state["removed"] or not group_state["reaped"]:
                     raise ObservationError("SSH observation timed out or failed with a surviving process group") from stream_error
                 raise ObservationError("SSH observation timed out or stream failed and process group was terminated") from stream_error
             if process.returncode != 0:
                 raise ObservationError("SSH observation helper failed")
-            if not group_empty:
+            if group_state["had_survivor"] or not group_state["removed"] or not group_state["reaped"]:
                 raise ObservationError("SSH leader exited with surviving process-group members")
             receipt, archive = decode_helper_response(stdout, request)
             return {"receipt": receipt, "archive": archive}
         finally:
             if any(_inode_identity(os.fstat(fd)) != _inode_identity(before) for fd, before in zip((ssh_fd, hosts_fd, identity_fd, helper_fd), initial, strict=True)):
                 raise ObservationError("held SSH artifact identity changed during launch")
-            for fd in (sealed_identity, sealed_hosts, helper_fd, identity_fd, hosts_fd, ssh_fd):
+            for fd in (sealed_identity, sealed_hosts, helper_fd, identity_fd, hosts_fd, *((keygen_fd,) if _held is not None else ()), ssh_fd):
                 os.close(fd)
 
     def prepare_launch(self, request: Mapping[str, Any]) -> Any:
         """Return the single controller-invoked launch; no provider callback can skip consumption."""
         validated = validate_request(request, now=datetime.now(timezone.utc))
-        if not self.ready(validated):
-            raise ObservationHold("sealed SSH composition is not ready")
         ssh_fd, _ = _held_regular(self.ssh_path, validated["transport"]["ssh_sha256"], executable=True)
+        keygen_fd, _ = _held_regular(self.ssh_keygen_path, validated["transport"]["ssh_keygen_sha256"], executable=True)
         hosts_fd, hosts = _held_regular(self.known_hosts_path, validated["transport"]["known_hosts_sha256"])
         identity_fd, identity = _held_regular(self.identity_path, validated["transport"]["identity_sha256"])
         helper_fd, helper = _held_regular(self.helper_path, validated["transport"]["helper_sha256"])
-        held = (ssh_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, tuple(os.fstat(fd) for fd in (ssh_fd, hosts_fd, identity_fd, helper_fd)))
+        held_fds = (ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd)
+        modes = ({0o555, 0o755}, {0o555, 0o755}, {0o400, 0o444}, {0o400}, {0o400, 0o444})
+        if any(os.fstat(fd).st_uid != os.getuid() or os.fstat(fd).st_nlink != 1 or stat.S_IMODE(os.fstat(fd).st_mode) not in admitted for fd, admitted in zip(held_fds, modes, strict=True)):
+            for fd in held_fds:
+                os.close(fd)
+            raise ObservationHold("sealed SSH artifact metadata is not admitted")
+        lines = hosts.decode().splitlines()
+        if len(lines) != 1 or len(lines[0].split()) != 3 or lines[0].split()[0] != validated["target"]["host"]:
+            for fd in held_fds:
+                os.close(fd)
+            raise ObservationHold("sealed known-host authority is invalid")
+        derived = subprocess.run(
+            [f"/proc/{os.getpid()}/fd/{keygen_fd}", "-y", "-f", f"/proc/{os.getpid()}/fd/{identity_fd}"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+            pass_fds=(keygen_fd, identity_fd),
+        )
+        if derived.returncode or derived.stdout.decode().strip() != validated["transport"]["identity_public"]:
+            for fd in held_fds:
+                os.close(fd)
+            raise ObservationHold("sealed private/public authority differs")
+        held = (ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, tuple(os.fstat(fd) for fd in (ssh_fd, hosts_fd, identity_fd, helper_fd)))
         used = False
 
         def launch() -> Mapping[str, Any]:
@@ -804,7 +847,7 @@ class SshObservationProvider:
             nonlocal used
             if not used:
                 used = True
-                for fd in (helper_fd, identity_fd, hosts_fd, ssh_fd):
+                for fd in (helper_fd, identity_fd, hosts_fd, keygen_fd, ssh_fd):
                     os.close(fd)
 
         launch.close = close  # type: ignore[attr-defined]
@@ -816,7 +859,9 @@ class ImmutableEvidenceStore:
         self.root = root
         self.trusted_uid = os.getuid() if trusted_uid is None else trusted_uid
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self._root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self._root_name = self.root.name
+        self._parent_fd = os.open(self.root.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self._root_fd = os.open(self._root_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self._parent_fd)
 
     @property
     def identity(self) -> dict[str, Any]:
@@ -895,6 +940,11 @@ class ImmutableEvidenceStore:
             _rename_noreplace(root_fd, attempt, root_fd, identity)
             os.fsync(root_fd)
         except Exception:
+            if attempt_fd < 0:
+                try:
+                    attempt_fd = os.open(attempt, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+                except FileNotFoundError:
+                    attempt_fd = -1
             if attempt_fd >= 0:
                 for name in reversed(created_names):
                     try:
@@ -908,7 +958,8 @@ class ImmutableEvidenceStore:
                 pass
             raise
         finally:
-            if _inode_identity(os.fstat(root_fd))[:-1] != _inode_identity(root_stat)[:-1]:
+            named = os.stat(self._root_name, dir_fd=self._parent_fd, follow_symlinks=False)
+            if (named.st_dev, named.st_ino) != (root_stat.st_dev, root_stat.st_ino) or _inode_identity(os.fstat(root_fd))[:-1] != _inode_identity(root_stat)[:-1]:
                 raise ObservationError("evidence root identity changed during persistence")
         return tuple(paths)
 
