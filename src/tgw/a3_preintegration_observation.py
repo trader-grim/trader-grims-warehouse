@@ -408,6 +408,7 @@ def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_
                 process.wait(timeout=1)
             except subprocess.TimeoutExpired as cleanup_exc:
                 raise ObservationError("Git leader could not be reaped") from cleanup_exc
+            state = _post_reap_group_state(process.pid, state)
             if not state["removed"] or not state["reaped"]:
                 raise ObservationError("Git process group cleanup is uncertain") from failure
             raise ObservationError("read-only Git observation exceeded a bound or timed out") from failure
@@ -720,6 +721,14 @@ def _group_empty_or_kill(pgid: int) -> dict[str, bool]:
     return {"had_survivor": True, "removed": False, "reaped": False}
 
 
+def _post_reap_group_state(pgid: int, prior: Mapping[str, bool]) -> dict[str, bool]:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return {"had_survivor": prior["had_survivor"], "removed": True, "reaped": True}
+    return {"had_survivor": prior["had_survivor"], "removed": False, "reaped": True}
+
+
 def _bounded_stream(process: subprocess.Popen[bytes], stdin: bytes, *, stdout_limit: int, stderr_limit: int, timeout: int) -> tuple[bytes, bytes]:
     selector = selectors.DefaultSelector()
     assert process.stdin and process.stdout and process.stderr
@@ -784,6 +793,29 @@ def _bounded_stream_readonly(process: subprocess.Popen[bytes], *, stdout_limit: 
     finally:
         selector.close()
     return bytes(outputs["stdout"]), bytes(outputs["stderr"])
+
+
+def _run_held_bounded(argv: list[str], *, pass_fds: tuple[int, ...], timeout: int, limit: int) -> tuple[int, bytes, bytes]:
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, pass_fds=pass_fds)
+    failure: Exception | None = None
+    try:
+        stdout, stderr = _bounded_stream_readonly(process, stdout_limit=limit, stderr_limit=limit, timeout=timeout)
+        process.wait(timeout=0.25)
+    except Exception as exc:
+        failure = exc
+        stdout = stderr = b""
+    if failure is not None:
+        state = _group_empty_or_kill(process.pid)
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired as exc:
+            raise ObservationError("bounded helper leader could not be reaped") from exc
+        state = _post_reap_group_state(process.pid, state)
+    else:
+        state = _group_empty_or_kill(process.pid)
+    if failure is not None or not state["removed"] or state["had_survivor"]:
+        raise ObservationError("bounded helper timed out or left descendants") from failure
+    return process.returncode, stdout, stderr
 
 
 @dataclass(frozen=True)
@@ -974,17 +1006,16 @@ class SshObservationProvider:
             (helper_fd, helper),
         )
         initial = tuple((os.fstat(fd), digest(raw)) for fd, raw in initial_raw)
-        derived = subprocess.run(
+        derived_rc, derived_stdout, _derived_stderr = _run_held_bounded(
             [f"/proc/{os.getpid()}/fd/{keygen_fd}", "-y", "-f", f"/proc/{os.getpid()}/fd/{identity_fd}"],
-            capture_output=True,
             timeout=5,
-            check=False,
             pass_fds=(keygen_fd, identity_fd),
+            limit=8192,
         )
         keygen_before, keygen_hash = initial[1]
         if (
-            derived.returncode
-            or derived.stdout.decode().strip() != validated["transport"]["identity_public"]
+            derived_rc
+            or derived_stdout.decode().strip() != validated["transport"]["identity_public"]
             or _inode_identity(os.fstat(keygen_fd)) != _inode_identity(keygen_before)
             or digest(os.pread(keygen_fd, keygen_before.st_size + 1, 0)) != keygen_hash
             or _inode_identity(os.stat(self.ssh_keygen_path, follow_symlinks=False)) != named[1][1]
