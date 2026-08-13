@@ -814,6 +814,16 @@ def test_result_accepts_controller_persistence_uncertainty_without_refs(
         )
         == result
     )
+    evidence_root.rename(tmp_path / "displaced-evidence")
+    assert (
+        validate_result(
+            result,
+            request,
+            expected_composition_sha256=_sha("composition"),
+            expected_evidence_root_identity=root_identity,
+        )
+        == result
+    )
 
 
 def test_ssh_policy_closes_global_host_and_ambient_auth_fallbacks() -> None:

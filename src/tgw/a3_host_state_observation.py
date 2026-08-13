@@ -2217,20 +2217,28 @@ def validate_result(
         ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", True),
     }:
         raise HostStateError("host-state result terminal is not controller-produced")
+    persistence_uncertain_without_refs = (
+        produced_terminal
+        == ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", True)
+        and not result["evidence"]
+    )
     root = Path(str(expected_evidence_root_identity["path"]))
-    _reject_symlink_ancestors(root)
-    current_root = os.stat(root, follow_symlinks=False)
-    current_root_identity = {
-        "path": str(root),
-        "uid": current_root.st_uid,
-        "gid": current_root.st_gid,
-        "mode": stat.S_IMODE(current_root.st_mode),
-        "dev": current_root.st_dev,
-        "ino": current_root.st_ino,
-        "nlink": current_root.st_nlink,
-    }
-    if not _same_root_authority(current_root_identity, expected_evidence_root_identity):
-        raise HostStateError("host-state evidence root current identity differs")
+    if not persistence_uncertain_without_refs:
+        _reject_symlink_ancestors(root)
+        current_root = os.stat(root, follow_symlinks=False)
+        current_root_identity = {
+            "path": str(root),
+            "uid": current_root.st_uid,
+            "gid": current_root.st_gid,
+            "mode": stat.S_IMODE(current_root.st_mode),
+            "dev": current_root.st_dev,
+            "ino": current_root.st_ino,
+            "nlink": current_root.st_nlink,
+        }
+        if not _same_root_authority(
+            current_root_identity, expected_evidence_root_identity
+        ):
+            raise HostStateError("host-state evidence root current identity differs")
     refs, evidence_contents = _validate_evidence_refs(result["evidence"]) if result["evidence"] else ([], {})
     if any(Path(ref["path"]).parent.parent != root for ref in refs):
         raise HostStateError("host-state evidence ref is outside the admitted root")
@@ -2288,8 +2296,7 @@ def validate_result(
     elif (
         terminal_value["dispatched"]
         and not result["evidence"]
-        and produced_terminal
-        != ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", True)
+        and not persistence_uncertain_without_refs
     ):
         raise HostStateError("post-dispatch host-state result lacks durable evidence")
     elif refs:
