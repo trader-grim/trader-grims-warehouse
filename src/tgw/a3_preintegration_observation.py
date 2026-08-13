@@ -834,12 +834,12 @@ class SshObservationProvider:
         raise TypeError("SshObservationProvider is sealed")
 
     def ready(self, request: Mapping[str, Any]) -> bool:
+        fds: list[int] = []
         try:
             if validate_request(request)["request_sha256"] != validate_request(self.request)["request_sha256"]:
                 return False
             if self.mounted_source is None or validate_source_descriptor(self.mounted_source) != request["source"]:
                 return False
-            fds = []
             for path, identity, executable, modes in (
                 (self.ssh_path, "ssh_sha256", True, {0o555, 0o755}),
                 (self.ssh_keygen_path, "ssh_keygen_sha256", True, {0o555, 0o755}),
@@ -848,6 +848,7 @@ class SshObservationProvider:
                 (self.helper_path, "helper_sha256", False, {0o400, 0o444}),
             ):
                 fd, raw = _held_regular(path, request["transport"][identity], executable=executable)
+                fds.append(fd)
                 st = os.fstat(fd)
                 if st.st_uid != os.getuid() or st.st_nlink != 1 or stat.S_IMODE(st.st_mode) not in modes:
                     raise ObservationError("held SSH artifact ownership/mode/link count is invalid")
@@ -864,23 +865,22 @@ class SshObservationProvider:
                         base64.b64decode(lines[0].split()[2], validate=True)
                     except ValueError as exc:
                         raise ObservationError("known-hosts key encoding is invalid") from exc
-                fds.append(fd)
             keygen_fd = fds[1]
             identity_fd = fds[3]
-            derived = subprocess.run(
+            derived_rc, derived_stdout, _derived_stderr = _run_held_bounded(
                 [f"/proc/{os.getpid()}/fd/{keygen_fd}", "-y", "-f", f"/proc/{os.getpid()}/fd/{identity_fd}"],
-                capture_output=True,
                 timeout=5,
-                check=False,
                 pass_fds=(keygen_fd, identity_fd),
+                limit=8192,
             )
-            if derived.returncode or derived.stdout.decode().strip() != request["transport"]["identity_public"]:
+            if derived_rc or derived_stdout.decode().strip() != request["transport"]["identity_public"]:
                 raise ObservationError("dedicated private/public key identity differs")
-            for fd in fds:
-                os.close(fd)
             return True
         except Exception:
             return False
+        finally:
+            for fd in reversed(fds):
+                os.close(fd)
 
     def observe(self, request: Mapping[str, Any], *, on_dispatch: Any, _held: tuple[Any, ...] | None = None) -> Mapping[str, Any]:
         request = validate_request(request, now=datetime.now(timezone.utc))
@@ -981,11 +981,22 @@ class SshObservationProvider:
             or self.mounted_source.descriptor != validated["source"]
         ):
             raise ObservationHold("sealed provider request or source authority differs")
-        ssh_fd, _ = _held_regular(self.ssh_path, validated["transport"]["ssh_sha256"], executable=True)
-        keygen_fd, _ = _held_regular(self.ssh_keygen_path, validated["transport"]["ssh_keygen_sha256"], executable=True)
-        hosts_fd, hosts = _held_regular(self.known_hosts_path, validated["transport"]["known_hosts_sha256"])
-        identity_fd, identity = _held_regular(self.identity_path, validated["transport"]["identity_sha256"])
-        helper_fd, helper = _held_regular(self.helper_path, validated["transport"]["helper_sha256"])
+        opened: list[int] = []
+        try:
+            ssh_fd, _ = _held_regular(self.ssh_path, validated["transport"]["ssh_sha256"], executable=True)
+            opened.append(ssh_fd)
+            keygen_fd, _ = _held_regular(self.ssh_keygen_path, validated["transport"]["ssh_keygen_sha256"], executable=True)
+            opened.append(keygen_fd)
+            hosts_fd, hosts = _held_regular(self.known_hosts_path, validated["transport"]["known_hosts_sha256"])
+            opened.append(hosts_fd)
+            identity_fd, identity = _held_regular(self.identity_path, validated["transport"]["identity_sha256"])
+            opened.append(identity_fd)
+            helper_fd, helper = _held_regular(self.helper_path, validated["transport"]["helper_sha256"])
+            opened.append(helper_fd)
+        except Exception:
+            for fd in reversed(opened):
+                os.close(fd)
+            raise
         held_fds = (ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd)
         modes = ({0o555, 0o755}, {0o555, 0o755}, {0o400, 0o444}, {0o400}, {0o400, 0o444})
         if any(os.fstat(fd).st_uid != os.getuid() or os.fstat(fd).st_nlink != 1 or stat.S_IMODE(os.fstat(fd).st_mode) not in admitted for fd, admitted in zip(held_fds, modes, strict=True)):
@@ -997,21 +1008,31 @@ class SshObservationProvider:
             for fd in held_fds:
                 os.close(fd)
             raise ObservationHold("sealed known-host authority is invalid")
-        named = tuple((path, _inode_identity(os.stat(path, follow_symlinks=False))) for path in (self.ssh_path, self.ssh_keygen_path, self.known_hosts_path, self.identity_path, self.helper_path))
-        initial_raw = (
-            (ssh_fd, os.pread(ssh_fd, os.fstat(ssh_fd).st_size, 0)),
-            (keygen_fd, os.pread(keygen_fd, os.fstat(keygen_fd).st_size, 0)),
-            (hosts_fd, hosts),
-            (identity_fd, identity),
-            (helper_fd, helper),
-        )
-        initial = tuple((os.fstat(fd), digest(raw)) for fd, raw in initial_raw)
-        derived_rc, derived_stdout, _derived_stderr = _run_held_bounded(
-            [f"/proc/{os.getpid()}/fd/{keygen_fd}", "-y", "-f", f"/proc/{os.getpid()}/fd/{identity_fd}"],
-            timeout=5,
-            pass_fds=(keygen_fd, identity_fd),
-            limit=8192,
-        )
+        try:
+            named = tuple((path, _inode_identity(os.stat(path, follow_symlinks=False))) for path in (self.ssh_path, self.ssh_keygen_path, self.known_hosts_path, self.identity_path, self.helper_path))
+            initial_raw = (
+                (ssh_fd, os.pread(ssh_fd, os.fstat(ssh_fd).st_size, 0)),
+                (keygen_fd, os.pread(keygen_fd, os.fstat(keygen_fd).st_size, 0)),
+                (hosts_fd, hosts),
+                (identity_fd, identity),
+                (helper_fd, helper),
+            )
+            initial = tuple((os.fstat(fd), digest(raw)) for fd, raw in initial_raw)
+        except Exception:
+            for fd in reversed(opened):
+                os.close(fd)
+            raise
+        try:
+            derived_rc, derived_stdout, _derived_stderr = _run_held_bounded(
+                [f"/proc/{os.getpid()}/fd/{keygen_fd}", "-y", "-f", f"/proc/{os.getpid()}/fd/{identity_fd}"],
+                timeout=5,
+                pass_fds=(keygen_fd, identity_fd),
+                limit=8192,
+            )
+        except Exception:
+            for fd in reversed(opened):
+                os.close(fd)
+            raise
         keygen_before, keygen_hash = initial[1]
         if (
             derived_rc
