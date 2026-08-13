@@ -205,7 +205,7 @@ class ReadOnlyObservationController:
         self.token = token
         if not allow_test_provider and type(provider) is not SshObservationProvider:
             raise ObservationAuthorityError("production controller requires the sealed SSH observation provider")
-        if not allow_test_provider and not isinstance(provider.mounted_source, MountedSourceAuthority):
+        if not allow_test_provider and type(provider.mounted_source) is not MountedSourceAuthority:
             raise ObservationAuthorityError("production controller requires a sealed source authority digest")
         self._lock = threading.Lock()
         self._consumed = False
@@ -253,7 +253,7 @@ class ReadOnlyObservationController:
                 close = getattr(launch, "close", None)
                 if callable(close):
                     close()
-                raise ObservationDispatchAmbiguous("token persistence is ambiguous before SSH dispatch")
+                raise ObservationDispatchAmbiguous("prelaunch authority persistence is ambiguous; SSH was not dispatched")
             except Exception:
                 close = getattr(launch, "close", None)
                 if callable(close):

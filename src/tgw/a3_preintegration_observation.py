@@ -132,6 +132,9 @@ class MountedSourceAuthority:
 
     __slots__ = ("descriptor", "fd", "identity", "sha256")
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        raise TypeError("MountedSourceAuthority is sealed")
+
     def __init__(self, path: Path, expected_sha256: str, *, _token: object) -> None:
         if _token is not _SOURCE_AUTHORITY_SEAL or path.name != expected_sha256.removeprefix("sha256:") + ".json":
             raise ObservationError("source authority locator is not content addressed")
@@ -384,10 +387,25 @@ def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_
 
     def git(*argv: str, binary: bool = False) -> bytes | str:
         closed = [held_git, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false", "-c", "extensions.objectFormat=sha1", "-c", "protocol.file.allow=never"]
-        result = subprocess.run([*closed, *argv], cwd=repo, env=env, capture_output=True, timeout=request["bounds"]["timeout_seconds"], check=False, start_new_session=True, pass_fds=(git_fd,))
-        if result.returncode != 0:
+        process = subprocess.Popen([*closed, *argv], cwd=repo, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, pass_fds=(git_fd,))
+        try:
+            output, _error = _bounded_stream_readonly(
+                process,
+                stdout_limit=request["bounds"]["max_archive_bytes"],
+                stderr_limit=request["bounds"]["max_output_bytes"],
+                timeout=request["bounds"]["timeout_seconds"],
+            )
+        except Exception as exc:
+            state = _group_empty_or_kill(process.pid)
+            process.wait(timeout=1)
+            if not state["removed"]:
+                raise ObservationError("Git process group cleanup is uncertain") from exc
+            raise ObservationError("read-only Git observation exceeded a bound") from exc
+        process.wait(timeout=1)
+        state = _group_empty_or_kill(process.pid)
+        if process.returncode != 0 or state["had_survivor"] or not state["removed"]:
             raise ObservationError("read-only Git observation failed")
-        return result.stdout if binary else result.stdout.decode().strip()
+        return output if binary else output.decode().strip()
 
     status = git("status", "--porcelain=v1", "--untracked-files=all")
     if status:
@@ -732,6 +750,33 @@ def _bounded_stream(process: subprocess.Popen[bytes], stdin: bytes, *, stdout_li
     return bytes(outputs["stdout"]), bytes(outputs["stderr"])
 
 
+def _bounded_stream_readonly(process: subprocess.Popen[bytes], *, stdout_limit: int, stderr_limit: int, timeout: int) -> tuple[bytes, bytes]:
+    selector = selectors.DefaultSelector()
+    assert process.stdout and process.stderr
+    outputs = {"stdout": bytearray(), "stderr": bytearray()}
+    for stream, name in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ, name)
+    deadline = datetime.now(timezone.utc).timestamp() + timeout
+    try:
+        while selector.get_map():
+            remaining = deadline - datetime.now(timezone.utc).timestamp()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, timeout)
+            for key, _ in selector.select(min(remaining, 0.25)):
+                block = os.read(key.fd, 65536)
+                if not block:
+                    selector.unregister(key.fileobj)
+                    continue
+                outputs[key.data].extend(block)
+                limit = stdout_limit if key.data == "stdout" else stderr_limit
+                if len(outputs[key.data]) > limit:
+                    raise ObservationError(f"Git {key.data} exceeded bound")
+    finally:
+        selector.close()
+    return bytes(outputs["stdout"]), bytes(outputs["stderr"])
+
+
 @dataclass(frozen=True)
 class SshObservationProvider:
     request: Mapping[str, Any]
@@ -864,7 +909,11 @@ class SshObservationProvider:
             try:
                 if any(
                     _inode_identity(os.fstat(fd)) != _inode_identity(before) or digest(os.pread(fd, before.st_size + 1, 0)) != before_hash
-                    for fd, (before, before_hash) in zip((ssh_fd, hosts_fd, identity_fd, helper_fd), initial, strict=True)
+                    for fd, (before, before_hash) in zip(
+                        (ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd) if _held is not None else (ssh_fd, hosts_fd, identity_fd, helper_fd),
+                        initial,
+                        strict=True,
+                    )
                 ):
                     post_error = ObservationError("held SSH artifact identity changed during launch")
                 elif any(_inode_identity(os.stat(path, follow_symlinks=False)) != identity_before for path, identity_before in named):
@@ -886,7 +935,7 @@ class SshObservationProvider:
             validated != configured
             or self.mounted_source is None
             or self.source_authority_sha256 is None
-            or not isinstance(self.mounted_source, MountedSourceAuthority)
+            or type(self.mounted_source) is not MountedSourceAuthority
             or self.source_authority_sha256 != self.mounted_source.sha256
             or self.mounted_source.descriptor != validated["source"]
         ):
@@ -918,8 +967,15 @@ class SshObservationProvider:
             for fd in held_fds:
                 os.close(fd)
             raise ObservationHold("sealed private/public authority differs")
-        named = tuple((path, _inode_identity(os.stat(path, follow_symlinks=False))) for path in (self.ssh_path, self.known_hosts_path, self.identity_path, self.helper_path))
-        initial = tuple((os.fstat(fd), digest(raw)) for fd, raw in ((ssh_fd, os.pread(ssh_fd, os.fstat(ssh_fd).st_size, 0)), (hosts_fd, hosts), (identity_fd, identity), (helper_fd, helper)))
+        named = tuple((path, _inode_identity(os.stat(path, follow_symlinks=False))) for path in (self.ssh_path, self.ssh_keygen_path, self.known_hosts_path, self.identity_path, self.helper_path))
+        initial_raw = (
+            (ssh_fd, os.pread(ssh_fd, os.fstat(ssh_fd).st_size, 0)),
+            (keygen_fd, os.pread(keygen_fd, os.fstat(keygen_fd).st_size, 0)),
+            (hosts_fd, hosts),
+            (identity_fd, identity),
+            (helper_fd, helper),
+        )
+        initial = tuple((os.fstat(fd), digest(raw)) for fd, raw in initial_raw)
         held = (ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, initial, named)
         used = False
 
