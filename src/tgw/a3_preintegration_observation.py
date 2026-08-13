@@ -82,7 +82,7 @@ def _rename_noreplace(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str) -> N
 
 
 def _inode_identity(st: os.stat_result) -> tuple[int, ...]:
-    return (st.st_dev, st.st_ino, st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode), st.st_nlink)
+    return (st.st_dev, st.st_ino, st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode), st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
 def _exact(value: Any, keys: set[str], label: str) -> Mapping[str, Any]:
@@ -508,6 +508,15 @@ def replay_archive(archive: bytes, receipt: Mapping[str, Any], request: Mapping[
                 target_node = target if isinstance(target, str) else target[0]
                 if target_node not in lock["nodes"]:
                     raise ObservationError("flake.lock input edge target is absent")
+                if isinstance(target, list):
+                    current = target_node
+                    visited = {current}
+                    for edge in target[1:]:
+                        nested = lock["nodes"][current].get("inputs", {}).get(edge)
+                        if not isinstance(nested, str) or nested not in lock["nodes"] or nested in visited:
+                            raise ObservationError("flake.lock follows path is missing or cyclic")
+                        visited.add(nested)
+                        current = nested
         return {"tree": output, "lock_sha256": digest(lock_raw), "lock_nodes": sorted(lock["nodes"])}
 
 
@@ -688,6 +697,7 @@ class SshObservationProvider:
     python_path: str
     mounted_source: Mapping[str, Any] | None = None
     ssh_keygen_path: Path | None = None
+    source_authority_sha256: str | None = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         raise TypeError("SshObservationProvider is sealed")
@@ -748,7 +758,7 @@ class SshObservationProvider:
             hosts_fd, hosts = _held_regular(self.known_hosts_path, request["transport"]["known_hosts_sha256"])
             identity_fd, identity = _held_regular(self.identity_path, request["transport"]["identity_sha256"])
             helper_fd, helper = _held_regular(self.helper_path, request["transport"]["helper_sha256"])
-            initial = tuple(os.fstat(fd) for fd in (ssh_fd, hosts_fd, identity_fd, helper_fd))
+            initial = tuple((os.fstat(fd), digest(raw)) for fd, raw in ((ssh_fd, os.pread(ssh_fd, os.fstat(ssh_fd).st_size, 0)), (hosts_fd, hosts), (identity_fd, identity), (helper_fd, helper)))
             named = tuple((path, _inode_identity(os.stat(path, follow_symlinks=False))) for path in (self.ssh_path, self.known_hosts_path, self.identity_path, self.helper_path))
         else:
             ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, initial, named = _held
@@ -805,18 +815,35 @@ class SshObservationProvider:
             receipt, archive = decode_helper_response(stdout, request)
             return {"receipt": receipt, "archive": archive}
         finally:
-            if any(_inode_identity(os.fstat(fd)) != _inode_identity(before) for fd, before in zip((ssh_fd, hosts_fd, identity_fd, helper_fd), initial, strict=True)):
-                raise ObservationError("held SSH artifact identity changed during launch")
-            if any(_inode_identity(os.stat(path, follow_symlinks=False)) != identity_before for path, identity_before in named):
-                raise ObservationError("named SSH artifact identity changed during launch")
-            for fd in (sealed_identity, sealed_hosts, helper_fd, identity_fd, hosts_fd, *((keygen_fd,) if _held is not None else ()), ssh_fd):
-                os.close(fd)
+            post_error: Exception | None = None
+            try:
+                if any(
+                    _inode_identity(os.fstat(fd)) != _inode_identity(before) or digest(os.pread(fd, before.st_size + 1, 0)) != before_hash
+                    for fd, (before, before_hash) in zip((ssh_fd, hosts_fd, identity_fd, helper_fd), initial, strict=True)
+                ):
+                    post_error = ObservationError("held SSH artifact identity changed during launch")
+                elif any(_inode_identity(os.stat(path, follow_symlinks=False)) != identity_before for path, identity_before in named):
+                    post_error = ObservationError("named SSH artifact identity changed during launch")
+            except Exception as exc:
+                post_error = ObservationError("SSH artifact postcheck failed")
+                post_error.__cause__ = exc
+            finally:
+                for fd in (sealed_identity, sealed_hosts, helper_fd, identity_fd, hosts_fd, *((keygen_fd,) if _held is not None else ()), ssh_fd):
+                    os.close(fd)
+            if post_error is not None:
+                raise post_error
 
     def prepare_launch(self, request: Mapping[str, Any]) -> Any:
         """Return the single controller-invoked launch; no provider callback can skip consumption."""
         validated = validate_request(request, now=datetime.now(timezone.utc))
         configured = validate_request(self.request)
-        if validated != configured or self.mounted_source is None or validate_source_descriptor(self.mounted_source) != validated["source"]:
+        if (
+            validated != configured
+            or self.mounted_source is None
+            or self.source_authority_sha256 is None
+            or self.source_authority_sha256 != validated["source"]["descriptor_sha256"]
+            or validate_source_descriptor(self.mounted_source) != validated["source"]
+        ):
             raise ObservationHold("sealed provider request or source authority differs")
         ssh_fd, _ = _held_regular(self.ssh_path, validated["transport"]["ssh_sha256"], executable=True)
         keygen_fd, _ = _held_regular(self.ssh_keygen_path, validated["transport"]["ssh_keygen_sha256"], executable=True)
@@ -846,7 +873,8 @@ class SshObservationProvider:
                 os.close(fd)
             raise ObservationHold("sealed private/public authority differs")
         named = tuple((path, _inode_identity(os.stat(path, follow_symlinks=False))) for path in (self.ssh_path, self.known_hosts_path, self.identity_path, self.helper_path))
-        held = (ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, tuple(os.fstat(fd) for fd in (ssh_fd, hosts_fd, identity_fd, helper_fd)), named)
+        initial = tuple((os.fstat(fd), digest(raw)) for fd, raw in ((ssh_fd, os.pread(ssh_fd, os.fstat(ssh_fd).st_size, 0)), (hosts_fd, hosts), (identity_fd, identity), (helper_fd, helper)))
+        held = (ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, initial, named)
         used = False
 
         def launch() -> Mapping[str, Any]:
@@ -972,7 +1000,7 @@ class ImmutableEvidenceStore:
             raise
         finally:
             named = os.stat(self._root_name, dir_fd=self._parent_fd, follow_symlinks=False)
-            if (named.st_dev, named.st_ino) != (root_stat.st_dev, root_stat.st_ino) or _inode_identity(os.fstat(root_fd))[:-1] != _inode_identity(root_stat)[:-1]:
+            if (named.st_dev, named.st_ino) != (root_stat.st_dev, root_stat.st_ino) or _inode_identity(os.fstat(root_fd))[:5] != _inode_identity(root_stat)[:5]:
                 raise ObservationError("evidence root identity changed during persistence")
         return tuple(paths)
 

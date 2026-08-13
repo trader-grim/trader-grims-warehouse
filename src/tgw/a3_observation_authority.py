@@ -97,16 +97,15 @@ class DurableObservationToken:
             finally:
                 os.close(check_fd)
             os.fsync(root_fd)
+            named = os.stat(self._root_name, dir_fd=self._parent_fd, follow_symlinks=False)
+            if (named.st_dev, named.st_ino) != (os.fstat(self._root_fd).st_dev, os.fstat(self._root_fd).st_ino):
+                raise ObservationAuthorityError("observation token root identity changed")
         except FileExistsError as exc:
             raise ObservationAlreadyConsumed("read-only observation attempt already consumed") from exc
         except Exception as exc:
             if created:
                 raise ObservationTokenPersistenceAmbiguous("observation token durable state is uncertain") from exc
             raise
-        finally:
-            named = os.stat(self._root_name, dir_fd=self._parent_fd, follow_symlinks=False)
-            if (named.st_dev, named.st_ino) != (os.fstat(self._root_fd).st_dev, os.fstat(self._root_fd).st_ino):
-                raise ObservationAuthorityError("observation token root identity changed")
 
 
 @dataclass(frozen=True)
@@ -205,6 +204,8 @@ class ReadOnlyObservationController:
         self.token = token
         if not allow_test_provider and type(provider) is not SshObservationProvider:
             raise ObservationAuthorityError("production controller requires the sealed SSH observation provider")
+        if not allow_test_provider and provider.source_authority_sha256 is None:
+            raise ObservationAuthorityError("production controller requires a sealed source authority digest")
         self._lock = threading.Lock()
         self._consumed = False
 
