@@ -388,6 +388,7 @@ def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_
     def git(*argv: str, binary: bool = False) -> bytes | str:
         closed = [held_git, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false", "-c", "extensions.objectFormat=sha1", "-c", "protocol.file.allow=never"]
         process = subprocess.Popen([*closed, *argv], cwd=repo, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, pass_fds=(git_fd,))
+        failure: Exception | None = None
         try:
             output, _error = _bounded_stream_readonly(
                 process,
@@ -395,13 +396,21 @@ def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_
                 stderr_limit=request["bounds"]["max_output_bytes"],
                 timeout=request["bounds"]["timeout_seconds"],
             )
+            try:
+                process.wait(timeout=0.25)
+            except subprocess.TimeoutExpired as exc:
+                failure = exc
         except Exception as exc:
+            failure = exc
+        if failure is not None:
             state = _group_empty_or_kill(process.pid)
-            process.wait(timeout=1)
-            if not state["removed"]:
-                raise ObservationError("Git process group cleanup is uncertain") from exc
-            raise ObservationError("read-only Git observation exceeded a bound") from exc
-        process.wait(timeout=1)
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired as cleanup_exc:
+                raise ObservationError("Git leader could not be reaped") from cleanup_exc
+            if not state["removed"] or not state["reaped"]:
+                raise ObservationError("Git process group cleanup is uncertain") from failure
+            raise ObservationError("read-only Git observation exceeded a bound or timed out") from failure
         state = _group_empty_or_kill(process.pid)
         if process.returncode != 0 or state["had_survivor"] or not state["removed"]:
             raise ObservationError("read-only Git observation failed")
@@ -956,17 +965,6 @@ class SshObservationProvider:
             for fd in held_fds:
                 os.close(fd)
             raise ObservationHold("sealed known-host authority is invalid")
-        derived = subprocess.run(
-            [f"/proc/{os.getpid()}/fd/{keygen_fd}", "-y", "-f", f"/proc/{os.getpid()}/fd/{identity_fd}"],
-            capture_output=True,
-            timeout=5,
-            check=False,
-            pass_fds=(keygen_fd, identity_fd),
-        )
-        if derived.returncode or derived.stdout.decode().strip() != validated["transport"]["identity_public"]:
-            for fd in held_fds:
-                os.close(fd)
-            raise ObservationHold("sealed private/public authority differs")
         named = tuple((path, _inode_identity(os.stat(path, follow_symlinks=False))) for path in (self.ssh_path, self.ssh_keygen_path, self.known_hosts_path, self.identity_path, self.helper_path))
         initial_raw = (
             (ssh_fd, os.pread(ssh_fd, os.fstat(ssh_fd).st_size, 0)),
@@ -976,6 +974,24 @@ class SshObservationProvider:
             (helper_fd, helper),
         )
         initial = tuple((os.fstat(fd), digest(raw)) for fd, raw in initial_raw)
+        derived = subprocess.run(
+            [f"/proc/{os.getpid()}/fd/{keygen_fd}", "-y", "-f", f"/proc/{os.getpid()}/fd/{identity_fd}"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+            pass_fds=(keygen_fd, identity_fd),
+        )
+        keygen_before, keygen_hash = initial[1]
+        if (
+            derived.returncode
+            or derived.stdout.decode().strip() != validated["transport"]["identity_public"]
+            or _inode_identity(os.fstat(keygen_fd)) != _inode_identity(keygen_before)
+            or digest(os.pread(keygen_fd, keygen_before.st_size + 1, 0)) != keygen_hash
+            or _inode_identity(os.stat(self.ssh_keygen_path, follow_symlinks=False)) != named[1][1]
+        ):
+            for fd in held_fds:
+                os.close(fd)
+            raise ObservationHold("sealed private/public authority differs")
         held = (ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, initial, named)
         used = False
 

@@ -248,12 +248,12 @@ class ReadOnlyObservationController:
                 raise ObservationAuthorityError("provider did not prepare a sealed launch")
             try:
                 consume()
-            except ObservationTokenPersistenceAmbiguous:
+            except ObservationTokenPersistenceAmbiguous as exc:
                 self._consumed = True
                 close = getattr(launch, "close", None)
                 if callable(close):
                     close()
-                raise ObservationDispatchAmbiguous("prelaunch authority persistence is ambiguous; SSH was not dispatched")
+                raise ObservationTokenPersistenceAmbiguous("prelaunch-authority AMBIGUOUS; consumed=true; SSH dispatched=false") from exc
             except Exception:
                 close = getattr(launch, "close", None)
                 if callable(close):
@@ -261,6 +261,8 @@ class ReadOnlyObservationController:
                 raise
             result = launch()
         except ObservationAlreadyConsumed:
+            raise
+        except ObservationTokenPersistenceAmbiguous:
             raise
         except ObservationHold:
             if not self._consumed:
