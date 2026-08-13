@@ -11,6 +11,9 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -111,7 +114,7 @@ def validate_request(value: Any, *, now: datetime | None = None) -> dict[str, An
     validate_source_descriptor(request["source"])
     if request["target"] != {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "main", "system": "x86_64-linux", "user": "codex", "port": 22}:
         raise ObservationError("target is not exact")
-    transport = _exact(request["transport"], {"ssh_sha256", "known_hosts_sha256", "identity_sha256", "helper_sha256"}, "transport")
+    transport = _exact(request["transport"], {"ssh_sha256", "known_hosts_sha256", "identity_sha256", "helper_sha256", "python_sha256", "git_sha256"}, "transport")
     if any(not isinstance(item, str) or not _SHA.fullmatch(item) for item in transport.values()):
         raise ObservationError("transport identities are invalid")
     if transport["helper_sha256"] != request["source"]["helper_sha256"]:
@@ -160,15 +163,38 @@ def make_request(*, operation_id: str, transport: Mapping[str, str], source: Map
     return validate_request(value)
 
 
-def observe_repository(repository: Path, request: Mapping[str, Any]) -> tuple[dict[str, Any], bytes]:
+def _verify_repository_components(repo: Path, request: Mapping[str, Any], *, enforce_owner: bool) -> None:
+    expectation = request["repo_expectation"]
+    repo_stat = os.lstat(repo)
+    if not stat.S_ISDIR(repo_stat.st_mode) or stat.S_ISLNK(repo_stat.st_mode):
+        raise ObservationError("repository root is not a held directory")
+    if enforce_owner and (repo_stat.st_uid, repo_stat.st_gid, stat.S_IMODE(repo_stat.st_mode)) != (expectation["uid"], expectation["gid"], expectation["mode"]):
+        raise ObservationHold("repository ownership or mode differs")
+    git_dir = repo / expectation["git_dir"]
+    git_stat = os.lstat(git_dir)
+    if not stat.S_ISDIR(git_stat.st_mode) or stat.S_ISLNK(git_stat.st_mode):
+        raise ObservationError("repository .git is not a directory")
+    forbidden_files = (git_dir / "objects/info/alternates", git_dir / "info/grafts")
+    if any(path.exists() or path.is_symlink() for path in forbidden_files):
+        raise ObservationHold("repository uses alternates or grafts")
+    replace = git_dir / "refs/replace"
+    if replace.exists() and (not replace.is_dir() or any(replace.iterdir())):
+        raise ObservationHold("repository uses replacement objects")
+
+
+def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_owner: bool = False, git_path: str | None = None) -> tuple[dict[str, Any], bytes]:
     request = validate_request(request)
     repo = repository.resolve(strict=True)
     if repo != repository or not repo.is_dir():
         raise ObservationError("repository path is not a stable directory")
-    env = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0", "HOME": "/nonexistent"}
+    _verify_repository_components(repo, request, enforce_owner=enforce_owner)
+    git_path = git_path or shutil.which("git")
+    if not git_path:
+        raise ObservationError("Git executable is unavailable")
+    env = {"PATH": "/nonexistent", "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0", "HOME": "/nonexistent"}
 
     def git(*argv: str, binary: bool = False) -> bytes | str:
-        closed = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false", "-c", "extensions.objectFormat=sha1", "-c", "protocol.file.allow=never"]
+        closed = [git_path, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false", "-c", "extensions.objectFormat=sha1", "-c", "protocol.file.allow=never"]
         result = subprocess.run([*closed, *argv], cwd=repo, env=env, capture_output=True, timeout=request["bounds"]["timeout_seconds"], check=False, start_new_session=True)
         if result.returncode != 0:
             raise ObservationError("read-only Git observation failed")
@@ -178,6 +204,8 @@ def observe_repository(repository: Path, request: Mapping[str, Any]) -> tuple[di
     if status:
         raise ObservationHold("production flake is not clean")
     commit, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+    if git("symbolic-ref", "--short", "HEAD") != request["target"]["branch"]:
+        raise ObservationHold("production flake branch differs")
     if not _GIT.fullmatch(str(commit)) or not _GIT.fullmatch(str(tree)):
         raise ObservationError("Git identities are invalid")
     lock = repo / "flake.lock"
@@ -365,6 +393,112 @@ class Composition:
         raise ObservationHold(self.reason)
 
 
+def _held_regular(path: Path, expected_sha256: str, *, executable: bool = False) -> tuple[int, bytes]:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or (executable and not st.st_mode & 0o111):
+            raise ObservationError("held artifact type or mode is invalid")
+        raw = b""
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            raw += chunk
+        if digest(raw) != expected_sha256:
+            raise ObservationError("held artifact digest differs")
+        os.lseek(fd, 0, os.SEEK_SET)
+        return fd, raw
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _sealed(name: str, raw: bytes) -> int:
+    import fcntl
+
+    fd = os.memfd_create(name, os.MFD_ALLOW_SEALING)
+    os.write(fd, raw)
+    fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+    os.lseek(fd, 0, os.SEEK_SET)
+    return fd
+
+
+@dataclass(frozen=True)
+class SshObservationProvider:
+    request: Mapping[str, Any]
+    ssh_path: Path
+    known_hosts_path: Path
+    identity_path: Path
+    helper_path: Path
+    python_path: str
+
+    def ready(self, request: Mapping[str, Any]) -> bool:
+        try:
+            if validate_request(request)["request_sha256"] != validate_request(self.request)["request_sha256"]:
+                return False
+            fds = [
+                _held_regular(self.ssh_path, request["transport"]["ssh_sha256"], executable=True)[0],
+                _held_regular(self.known_hosts_path, request["transport"]["known_hosts_sha256"])[0],
+                _held_regular(self.identity_path, request["transport"]["identity_sha256"])[0],
+                _held_regular(self.helper_path, request["transport"]["helper_sha256"])[0],
+            ]
+            for fd in fds:
+                os.close(fd)
+            return True
+        except Exception:
+            return False
+
+    def observe(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        request = validate_request(request, now=datetime.now(timezone.utc))
+        ssh_fd, _ = _held_regular(self.ssh_path, request["transport"]["ssh_sha256"], executable=True)
+        hosts_fd, hosts = _held_regular(self.known_hosts_path, request["transport"]["known_hosts_sha256"])
+        identity_fd, identity = _held_regular(self.identity_path, request["transport"]["identity_sha256"])
+        helper_fd, helper = _held_regular(self.helper_path, request["transport"]["helper_sha256"])
+        sealed_hosts = _sealed("a3-observation-hosts", hosts)
+        sealed_identity = _sealed("a3-observation-identity", identity)
+        try:
+            bootstrap = "ns={'__name__':'tgw_remote_helper'};exec(compile(" + repr(helper.decode()) + ",'a3-helper','exec'),ns);raise SystemExit(ns['helper_main']())"
+            remote = shlex.join([self.python_path, "-I", "-c", bootstrap])
+            argv = [
+                f"/proc/{os.getpid()}/fd/{ssh_fd}",
+                "-F",
+                "/dev/null",
+                "-p",
+                str(request["target"]["port"]),
+                "-oBatchMode=yes",
+                "-oIdentitiesOnly=yes",
+                "-oIdentityAgent=none",
+                "-oClearAllForwardings=yes",
+                "-oStrictHostKeyChecking=yes",
+                f"-oUserKnownHostsFile=/proc/{os.getpid()}/fd/{sealed_hosts}",
+                f"-oIdentityFile=/proc/{os.getpid()}/fd/{sealed_identity}",
+                "-oPasswordAuthentication=no",
+                f"{request['target']['user']}@{request['target']['host']}",
+                remote,
+            ]
+            process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, pass_fds=(ssh_fd, sealed_hosts, sealed_identity))
+            try:
+                stdout, stderr = process.communicate(canonical(request), timeout=request["bounds"]["timeout_seconds"])
+            except subprocess.TimeoutExpired as exc:
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate()
+                raise ObservationError("SSH observation timed out and process group was terminated") from exc
+            if len(stdout) > request["bounds"]["max_archive_bytes"] + request["bounds"]["max_output_bytes"] + 16 or len(stderr) > request["bounds"]["max_output_bytes"]:
+                raise ObservationError("SSH observation output exceeded bound")
+            if process.returncode != 0:
+                raise ObservationError("SSH observation helper failed")
+            receipt, archive = decode_helper_response(stdout, request)
+            return {"receipt": receipt, "archive": archive}
+        finally:
+            for fd in (sealed_identity, sealed_hosts, helper_fd, identity_fd, hosts_fd, ssh_fd):
+                os.close(fd)
+
+
 class ImmutableEvidenceStore:
     def __init__(self, root: Path, *, trusted_uid: int | None = None):
         self.root = root
@@ -472,8 +606,16 @@ def helper_main() -> int:
     try:
         if len(request_raw) > 1_048_576:
             raise ObservationError("request exceeds helper bound")
-        request = validate_request(json.loads(request_raw))
-        receipt, archive = observe_repository(Path("/home/db/tgw-flake"), request)
+        request = validate_request(json.loads(request_raw), now=datetime.now(timezone.utc))
+        python_real = Path(sys.executable).resolve(strict=True)
+        git_real = Path("/run/current-system/sw/bin/git").resolve(strict=True)
+        for path, expected in (
+            (python_real, request["transport"]["python_sha256"]),
+            (git_real, request["transport"]["git_sha256"]),
+        ):
+            fd, _ = _held_regular(path, expected, executable=True)
+            os.close(fd)
+        receipt, archive = observe_repository(Path("/home/db/tgw-flake"), request, enforce_owner=True, git_path=str(git_real))
         sys.stdout.buffer.write(encode_helper_response(receipt, archive))
         return 0
     except ObservationHold:

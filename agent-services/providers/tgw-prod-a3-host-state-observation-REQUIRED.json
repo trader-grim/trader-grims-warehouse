@@ -1,0 +1,17 @@
+{
+  "schema": "tgw-prod-a3-host-state-observation-dependency/v1",
+  "status": "REQUIRED_NOT_EXECUTABLE",
+  "consumer": "tgw-prod-a3-preintegration-observation@1",
+  "facts": [
+    "current-system-cas",
+    "resolved-system-profile-cas",
+    "python-path-sha256-version",
+    "git-path-sha256-version",
+    "ssh-path-sha256-version",
+    "known-hosts-path-sha256-mode-owner"
+  ],
+  "reason": "host state is a distinct zero-effect freshness observation and has no admitted dedicated SSH composition",
+  "grant": null,
+  "request": null,
+  "dispatchable": false
+}

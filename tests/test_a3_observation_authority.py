@@ -14,7 +14,7 @@ from tgw.a3_preintegration_observation import ObservationHold, make_request
 def _request():
     return make_request(
         operation_id="authority",
-        transport={name: "sha256:" + "1" * 64 for name in ("ssh_sha256", "known_hosts_sha256", "identity_sha256", "helper_sha256")},
+        transport={name: "sha256:" + "1" * 64 for name in ("ssh_sha256", "known_hosts_sha256", "identity_sha256", "helper_sha256", "python_sha256", "git_sha256")},
     )
 
 
