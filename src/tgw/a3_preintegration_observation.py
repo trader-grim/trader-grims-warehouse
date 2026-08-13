@@ -1051,15 +1051,22 @@ class SshObservationProvider:
             for fd in reversed(opened):
                 os.close(fd)
             raise
-        keygen_before, keygen_hash = initial[1]
-        if (
-            derived_rc
-            or derived_stdout.decode().strip() != validated["transport"]["identity_public"]
-            or _inode_identity(os.fstat(keygen_fd)) != _inode_identity(keygen_before)
-            or digest(os.pread(keygen_fd, keygen_before.st_size + 1, 0)) != keygen_hash
-            or _inode_identity(os.stat(self.ssh_keygen_path, follow_symlinks=False)) != named[1][1]
-        ):
-            for fd in held_fds:
+        try:
+            keygen_before, keygen_hash = initial[1]
+            keygen_public = derived_stdout.decode("utf-8", errors="strict").strip()
+            keygen_invalid = (
+                bool(derived_rc)
+                or keygen_public != validated["transport"]["identity_public"]
+                or _inode_identity(os.fstat(keygen_fd)) != _inode_identity(keygen_before)
+                or digest(os.pread(keygen_fd, keygen_before.st_size + 1, 0)) != keygen_hash
+                or _inode_identity(os.stat(self.ssh_keygen_path, follow_symlinks=False)) != named[1][1]
+            )
+        except (UnicodeDecodeError, OSError, ValueError) as exc:
+            for fd in reversed(opened):
+                os.close(fd)
+            raise ObservationHold("sealed keygen output or postcheck is invalid") from exc
+        if keygen_invalid:
+            for fd in reversed(opened):
                 os.close(fd)
             raise ObservationHold("sealed private/public authority differs")
         held = (ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, initial, named)
