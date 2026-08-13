@@ -895,6 +895,23 @@ _REMOTE_TERMINALS = {
     ("HOLD", "remote", "HOST_NOT_READY", True),
     ("FAILED", "remote", "HELPER_FAILED", True),
 }
+_HOST_NOT_READY_DIAGNOSTICS = frozenset(
+    {
+        b"HelperHold",  # Historical v1 evidence emitted only the exception class.
+        b"HELD_TOOL_ANCESTOR_NOT_TRUSTED",
+        b"HELD_TOOL_METADATA_NOT_TRUSTED",
+        b"HELPER_INTERPRETER_IDENTITY_MISMATCH",
+        b"REPOSITORY_BRANCH_MISMATCH",
+        b"REPOSITORY_BRANCH_REF_ABSENT",
+        b"REPOSITORY_HEAD_ABSENT",
+        b"REPOSITORY_LAYOUT_NOT_DIRECT",
+        b"SYSTEM_LINK_NOT_SYMLINK",
+        b"SYSTEM_LINK_TARGET_NOT_STORE",
+        b"SYSTEM_PROFILE_CAS_MISMATCH",
+        b"SYSTEM_TARGET_ABSENT",
+        b"SYSTEM_TARGET_NOT_TRUSTED",
+    }
+)
 
 
 def terminal(*, outcome: str, stage: str, code: str, dispatched: bool, request_sha256: str, observed_at: str, diagnostic: bytes = b"") -> dict[str, Any]:
@@ -946,6 +963,19 @@ def validate_terminal(
         or len(diagnostic) > 256
     ):
         raise HostStateError("host-state terminal diagnostic differs")
+    terminal_tuple = (
+        result["outcome"],
+        result["stage"],
+        result["code"],
+        result["dispatched"],
+    )
+    if terminal_tuple == (
+        "HOLD",
+        "remote",
+        "HOST_NOT_READY",
+        True,
+    ) and diagnostic not in _HOST_NOT_READY_DIAGNOSTICS:
+        raise HostStateError("host-state readiness diagnostic is not admitted")
     claimed = result.pop("terminal_sha256")
     if claimed != _hash(result):
         raise HostStateError("host-state terminal hash differs")

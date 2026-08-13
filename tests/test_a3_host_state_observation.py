@@ -301,6 +301,57 @@ def test_streamed_helper_terminal_is_closed_and_fresh() -> None:
             decode_helper_response(encode_helper_response(controller_only), request, now=now)
 
 
+@pytest.mark.parametrize("diagnostic", sorted(a3_host_state_helper.HOST_NOT_READY_DIAGNOSTICS))
+def test_streamed_helper_hold_reports_only_admitted_readiness_code(diagnostic: str) -> None:
+    request = _request()
+    now = datetime.now(timezone.utc)
+    remote = a3_host_state_helper._terminal(
+        outcome="HOLD",
+        stage="remote",
+        code="HOST_NOT_READY",
+        request_sha256=request["request_sha256"],
+        now=now,
+        diagnostic=diagnostic.encode("ascii"),
+    )
+    assert decode_helper_response(encode_helper_response(remote), request, now=now) == remote
+
+
+def test_streamed_helper_hold_rejects_free_form_diagnostic() -> None:
+    request = _request()
+    now = datetime.now(timezone.utc)
+    remote = a3_host_state_helper._terminal(
+        outcome="HOLD",
+        stage="remote",
+        code="HOST_NOT_READY",
+        request_sha256=request["request_sha256"],
+        now=now,
+        diagnostic=b"repository branch differs",
+    )
+    with pytest.raises(HostStateError, match="readiness diagnostic"):
+        decode_helper_response(encode_helper_response(remote), request, now=now)
+    with pytest.raises(ValueError, match="not admitted"):
+        a3_host_state_helper.HelperHold("repository branch differs")
+
+
+def test_controller_readiness_codes_match_helper_and_retain_legacy_evidence() -> None:
+    module = __import__("tgw.a3_host_state_observation", fromlist=["_HOST_NOT_READY_DIAGNOSTICS"])
+    controller_codes = set(module._HOST_NOT_READY_DIAGNOSTICS)
+    assert controller_codes - {b"HelperHold"} == {
+        code.encode("ascii") for code in a3_host_state_helper.HOST_NOT_READY_DIAGNOSTICS
+    }
+    request = _request()
+    now = datetime.now(timezone.utc)
+    legacy = a3_host_state_helper._terminal(
+        outcome="HOLD",
+        stage="remote",
+        code="HOST_NOT_READY",
+        request_sha256=request["request_sha256"],
+        now=now,
+        diagnostic=b"HelperHold",
+    )
+    assert decode_helper_response(encode_helper_response(legacy), request, now=now) == legacy
+
+
 @pytest.mark.parametrize(
     "tuple_value",
     list(
@@ -317,6 +368,11 @@ def test_streamed_helper_terminal_is_closed_and_fresh() -> None:
     ),
 )
 def test_terminal_state_table(tuple_value: tuple[str, str, str, bool]) -> None:
+    diagnostic = (
+        b"REPOSITORY_BRANCH_MISMATCH"
+        if tuple_value == ("HOLD", "remote", "HOST_NOT_READY", True)
+        else b""
+    )
     value = terminal(
         outcome=tuple_value[0],
         stage=tuple_value[1],
@@ -324,6 +380,7 @@ def test_terminal_state_table(tuple_value: tuple[str, str, str, bool]) -> None:
         dispatched=tuple_value[3],
         request_sha256=_sha("request"),
         observed_at=datetime.now(timezone.utc).isoformat(),
+        diagnostic=diagnostic,
     )
     assert validate_terminal(value) == value
     changed = deepcopy(value)
@@ -1258,6 +1315,17 @@ def test_streamed_helper_is_stdlib_only_and_validates_exact_request() -> None:
     imports = {alias.name.split(".", 1)[0] for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
     imports.update(node.module.split(".", 1)[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module)
     assert "tgw" not in imports
+    hold_codes = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "HelperHold"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+    }
+    assert hold_codes == a3_host_state_helper.HOST_NOT_READY_DIAGNOSTICS
     request = _request()
     assert a3_host_state_helper._validate_request(request, datetime.now(timezone.utc))["request_sha256"] == request["request_sha256"]
 

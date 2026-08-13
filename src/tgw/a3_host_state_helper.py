@@ -35,6 +35,22 @@ RECEIPT_SCHEMA = "tgw-prod-a3-host-state-observation-receipt/v1"
 TERMINAL_SCHEMA = "tgw-prod-a3-host-state-observation-terminal/v1"
 _SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
 _STORE = re.compile(r"^/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+$")
+HOST_NOT_READY_DIAGNOSTICS = frozenset(
+    {
+        "HELD_TOOL_ANCESTOR_NOT_TRUSTED",
+        "HELD_TOOL_METADATA_NOT_TRUSTED",
+        "HELPER_INTERPRETER_IDENTITY_MISMATCH",
+        "REPOSITORY_BRANCH_MISMATCH",
+        "REPOSITORY_BRANCH_REF_ABSENT",
+        "REPOSITORY_HEAD_ABSENT",
+        "REPOSITORY_LAYOUT_NOT_DIRECT",
+        "SYSTEM_LINK_NOT_SYMLINK",
+        "SYSTEM_LINK_TARGET_NOT_STORE",
+        "SYSTEM_PROFILE_CAS_MISMATCH",
+        "SYSTEM_TARGET_ABSENT",
+        "SYSTEM_TARGET_NOT_TRUSTED",
+    }
+)
 
 
 class HelperError(RuntimeError):
@@ -42,7 +58,13 @@ class HelperError(RuntimeError):
 
 
 class HelperHold(HelperError):
-    pass
+    __slots__ = ("code",)
+
+    def __init__(self, code: str) -> None:
+        if code not in HOST_NOT_READY_DIAGNOSTICS:
+            raise ValueError("host-state readiness diagnostic is not admitted")
+        self.code = code
+        super().__init__(code)
 
 
 def _canonical(value: object) -> bytes:
@@ -185,14 +207,14 @@ def _held_executable(path: Path) -> tuple[int, bytes, dict[str, Any]]:
     for ancestor in (resolved.parent, *resolved.parents):
         item = os.lstat(ancestor)
         if not stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode) or item.st_uid != 0 or stat.S_IMODE(item.st_mode) & 0o022:
-            raise HelperHold("tool ancestor is mutable")
+            raise HelperHold("HELD_TOOL_ANCESTOR_NOT_TRUSTED")
         if ancestor == Path("/"):
             break
     fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or not st.st_mode & 0o111 or st.st_nlink != 1:
-            raise HelperHold("tool metadata differs")
+            raise HelperHold("HELD_TOOL_METADATA_NOT_TRUSTED")
         raw = _read_fd(fd)
         return (
             fd,
@@ -294,18 +316,18 @@ def _version(fd: int, timeout: int = 10, limit: int = 65536) -> tuple[str, str, 
 def _link(path: Path) -> tuple[os.stat_result, str, dict[str, int]]:
     before = os.lstat(path)
     if not stat.S_ISLNK(before.st_mode):
-        raise HelperHold("system identity is not a symlink")
+        raise HelperHold("SYSTEM_LINK_NOT_SYMLINK")
     target = os.readlink(path)
     if not _STORE.fullmatch(target):
-        raise HelperHold("system identity is not a Nix store path")
+        raise HelperHold("SYSTEM_LINK_TARGET_NOT_STORE")
     if _inode(os.lstat(path)) != _inode(before) or os.readlink(path) != target:
         raise HelperError("system identity changed")
     try:
         target_st = os.stat(target, follow_symlinks=True)
     except FileNotFoundError as exc:
-        raise HelperHold("system target is absent") from exc
+        raise HelperHold("SYSTEM_TARGET_ABSENT") from exc
     if not stat.S_ISDIR(target_st.st_mode) or target_st.st_uid != 0 or stat.S_IMODE(target_st.st_mode) & 0o022:
-        raise HelperHold("system target is not an immutable root-owned directory")
+        raise HelperHold("SYSTEM_TARGET_NOT_TRUSTED")
     return (
         before,
         target,
@@ -323,25 +345,25 @@ def _repository(path: Path, expected_branch: str) -> tuple[dict[str, Any], tuple
     repo_st = os.lstat(path)
     git_st = os.lstat(path / ".git")
     if not stat.S_ISDIR(repo_st.st_mode) or stat.S_ISLNK(repo_st.st_mode) or not stat.S_ISDIR(git_st.st_mode) or stat.S_ISLNK(git_st.st_mode):
-        raise HelperHold("repository or .git is not a direct directory")
+        raise HelperHold("REPOSITORY_LAYOUT_NOT_DIRECT")
     head = path / ".git/HEAD"
     ref = path / ".git/refs/heads" / expected_branch
     try:
         fd = os.open(head, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError as exc:
-        raise HelperHold("repository HEAD is absent") from exc
+        raise HelperHold("REPOSITORY_HEAD_ABSENT") from exc
     ref_fd = -1
     try:
         try:
             ref_fd = os.open(ref, os.O_RDONLY | os.O_NOFOLLOW)
         except FileNotFoundError as exc:
-            raise HelperHold("repository main ref is absent") from exc
+            raise HelperHold("REPOSITORY_BRANCH_REF_ABSENT") from exc
         head_st = os.fstat(fd)
         raw = os.read(fd, 4097)
         if not stat.S_ISREG(head_st.st_mode) or head_st.st_nlink != 1 or len(raw) > 4096:
             raise HelperError("repository HEAD metadata differs")
         if raw.decode("ascii", errors="strict").strip() != "ref: refs/heads/" + expected_branch:
-            raise HelperHold("repository branch differs")
+            raise HelperHold("REPOSITORY_BRANCH_MISMATCH")
         if _inode(os.fstat(fd)) != _inode(head_st) or _inode(os.stat(head, follow_symlinks=False)) != _inode(head_st):
             raise HelperError("repository HEAD changed")
         ref_st = os.fstat(ref_fd)
@@ -377,13 +399,13 @@ def observe(request: Mapping[str, Any], now: datetime) -> dict[str, Any]:
     current_st, current, current_identity = _link(Path("/run/current-system"))
     profile_st, profile, profile_identity = _link(Path("/nix/var/nix/profiles/system"))
     if current != profile or current_identity != profile_identity:
-        raise HelperHold("current and profile CAS differ")
+        raise HelperHold("SYSTEM_PROFILE_CAS_MISMATCH")
     python_fd, python_raw, python_identity = _held_executable(Path(request["target"]["remote_python"]))
     git_fd, git_raw, git_identity = _held_executable(Path(request["target"]["remote_git"]))
     try:
         proc = os.stat("/proc/self/exe")
         if (proc.st_dev, proc.st_ino) != (os.fstat(python_fd).st_dev, os.fstat(python_fd).st_ino):
-            raise HelperHold("helper interpreter differs from observed Python")
+            raise HelperHold("HELPER_INTERPRETER_IDENTITY_MISMATCH")
         (
             python_identity["version"],
             python_identity["version_sha256"],
@@ -466,7 +488,7 @@ def helper_main() -> int:
                 code="HOST_NOT_READY",
                 request_sha256=request["request_sha256"],
                 now=now,
-                diagnostic=type(exc).__name__.encode(),
+                diagnostic=exc.code.encode("ascii"),
             )
         )
     except Exception as exc:

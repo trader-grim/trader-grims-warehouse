@@ -18,9 +18,9 @@
     "base_commit": "70f86f338fe6b4c8200c9d9e250bc83656e4e77a",
     "base_tree": "fb137be8c90f2cd3d0ba7da24f3b8ff43904d330",
     "controller_path": "src/tgw/a3_host_state_observation.py",
-    "controller_sha256": "sha256:ca72d4a19d42fc271c59e959ecc309d6c200c073d3bc4f6ca8b4605109ddfb70",
+    "controller_sha256": "sha256:3fe01b445b718252e3a53302552ec87b9b3e034c46d13a043b8711c5431b65e6",
     "stdlib_helper_path": "src/tgw/a3_host_state_helper.py",
-    "stdlib_helper_sha256": "sha256:28fed3d327f05a4fab4421dac6dfb7654516a3cd1e0a263961d8f206f5a393ee"
+    "stdlib_helper_sha256": "sha256:c554b3cc32c86c4a4110fd1cdf97ca883ff43a442054a66f351e0ecebc02a086"
   },
   "facts": [
     "current-system-cas",
@@ -36,7 +36,8 @@
     "content-addressed-pass-failure-terminal-evidence",
     "remote-only-helper-terminal-origin",
     "exact-local-tool-and-ssh-process-environment",
-    "typed-post-publication-evidence-ambiguity"
+    "typed-post-publication-evidence-ambiguity",
+    "closed-non-secret-host-readiness-diagnostic"
   ],
   "admission_requirements": {
     "mounted_plan_authority": "REQUIRED",
@@ -58,5 +59,5 @@
   "grant": null,
   "request": null,
   "dispatchable": false,
-  "descriptor_sha256": "sha256:0308f37ea5b2e633a7d69fc0c27c65eda40fa65bee3a88e374626bcca232de80"
+  "descriptor_sha256": "sha256:bbf6329f8b8b742f059cfbe117cae12ce76688d02ddc70213f430358bf17b250"
 }
