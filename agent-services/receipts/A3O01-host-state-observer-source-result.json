@@ -1,0 +1,78 @@
+{
+  "schema": "tgw-execution-card-result/v1",
+  "card_id": "A3O01-host-state-observer-source",
+  "card_hash": "sha256:7f2dd0f5e4ecb96f75203ffb7c3ba7c9071220805cbc753c0392b94321e05f3c",
+  "plan_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+  "approval_sha256": "sha256:9e524ddae0ebdd2a34b1a96487df6f3cec714e4c378409705910c11b528f3e80",
+  "solution_sha256": "sha256:da79baa90916ba0fbe3af76365c8d25012ec0a38af4917bc57abaa44e21fb740",
+  "closure_sha256": "sha256:3ef92c5a2c8ccf72ebb271ed4fec2c1fbe9fa7fe47c0311ad39b34ae2f4c31b9",
+  "outcome": "IMPLEMENTED_NOT_ADMITTED",
+  "implementation": {
+    "commit": "714f891eb033cfc3c9d1e2111a1f78bdbfbf06e2",
+    "tree": "27639e5de21f1b3c03fb81d88b30410d916daddc",
+    "parent": "74ad0597219987ef7c1f36e70c16859b49d4261a",
+    "controller_sha256": "sha256:b36cd2d7070f7233e1e8c821015d9e4caaffa497ffe21981df389c5bd2869d7f",
+    "stdlib_helper_sha256": "sha256:90b12d9313f640adc84a55e1faa802cd602cda148621f20342bb044a54a148f3",
+    "tests_sha256": "sha256:b6b9e7f5c0f2ecbebb13a244aa02d6036e4a8e36f27914daf48a8549fba0ae13",
+    "provider_descriptor_file_sha256": "sha256:b7bb9907ae162b6bb04e114300b6faa4cb73e3a5a6140fdd10384f2f7474a2a7",
+    "provider_descriptor_self_sha256": "sha256:9eb859629867dc7e56fafec93088bf78959c68de3bbcb0de1409df40f8e377b2"
+  },
+  "gates": {
+    "focused": {
+      "status": "PASS",
+      "passed": 26,
+      "failed": 0
+    },
+    "observer_authority_runtime_matrix": {
+      "status": "PASS",
+      "passed": 121,
+      "failed": 0
+    },
+    "tracked_full": {
+      "status": "PASS",
+      "passed": 3920,
+      "skipped": 5,
+      "failed": 0,
+      "elapsed_seconds": 137.64
+    },
+    "ruff": "PASS",
+    "py_compile": "PASS",
+    "diff_check": "PASS"
+  },
+  "implemented_boundaries": [
+    "mounted executable Plan authority",
+    "mounted real-sshd parity authority",
+    "root-protected dedicated SSH artifact cross-binding",
+    "stdlib-only bounded no-argument remote helper",
+    "held SSH and ssh-keygen execution",
+    "bounded streaming and complete process-group cleanup",
+    "durable one-attempt observation token",
+    "atomic attempt-directory evidence publication",
+    "fresh current/profile CAS and Python/Git/repository-main identities",
+    "closed PASS/HOLD/AMBIGUOUS terminal and dependency projection"
+  ],
+  "remaining_admission_gates": [
+    "independent source review",
+    "approved executable A3O02 production solution",
+    "real OpenSSH-server correct-key and ambient-key/config/agent rejection parity receipt",
+    "root-protected dedicated public identity and known-hosts artifacts",
+    "fresh exact one-attempt read-only SSH observation grant"
+  ],
+  "effects": {
+    "remote_connection": false,
+    "remote_write": false,
+    "repository_write": false,
+    "nix": false,
+    "build": false,
+    "install": false,
+    "profile": false,
+    "service": false,
+    "deploy": false,
+    "key_generation": false,
+    "platform_bootstrap_grant_consumption": false
+  },
+  "dispatchable": false,
+  "grant": null,
+  "request": null,
+  "result_sha256": "sha256:cff43f05c6388d06d1c0af06ea91b5c67d6206508a971919aa66a59c5bfbab31"
+}
