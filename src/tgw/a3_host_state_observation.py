@@ -2285,7 +2285,12 @@ def validate_result(
             raise HostStateError("PASS host-state durable evidence differs")
     elif result["receipt"] is not None or result["dependency"] is not None:
         raise HostStateError("non-PASS host-state result has success receipt")
-    elif terminal_value["dispatched"] and not result["evidence"]:
+    elif (
+        terminal_value["dispatched"]
+        and not result["evidence"]
+        and produced_terminal
+        != ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", True)
+    ):
         raise HostStateError("post-dispatch host-state result lacks durable evidence")
     elif refs:
         try:

@@ -775,6 +775,47 @@ def test_result_rejects_terminal_not_emitted_by_controller(
         )
 
 
+def test_result_accepts_controller_persistence_uncertainty_without_refs(
+    tmp_path: Path,
+) -> None:
+    request = _request()
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    root_identity = _identity(evidence_root)
+    terminal_value = terminal(
+        outcome="AMBIGUOUS",
+        stage="persistence",
+        code="PERSISTENCE_UNCERTAIN",
+        dispatched=True,
+        request_sha256=request["request_sha256"],
+        observed_at=datetime.now(timezone.utc).isoformat(),
+        diagnostic=b"HostStateError",
+    )
+    result = {
+        "schema": "tgw-prod-a3-host-state-observation-result/v1",
+        "composition_sha256": _sha("composition"),
+        "evidence_root_identity": root_identity,
+        "terminal": terminal_value,
+        "receipt": None,
+        "dependency": None,
+        "evidence": [],
+    }
+    result["result_sha256"] = digest(
+        __import__(
+            "tgw.a3_host_state_observation", fromlist=["canonical"]
+        ).canonical(result)
+    )
+    assert (
+        validate_result(
+            result,
+            request,
+            expected_composition_sha256=_sha("composition"),
+            expected_evidence_root_identity=root_identity,
+        )
+        == result
+    )
+
+
 def test_ssh_policy_closes_global_host_and_ambient_auth_fallbacks() -> None:
     import tgw.a3_host_state_observation as host_state
 
