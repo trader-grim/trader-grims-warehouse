@@ -1,0 +1,47 @@
+{
+  "schema": "tgw-controller-source-verification/v1",
+  "status": "PASS",
+  "source": {
+    "commit": "93da2b425e5fd9021266dfdbdebc5e188054925b",
+    "tree": "8f16709c8a7c76f5f0f837bd96ce6ccbd639219b",
+    "archive_path": "/opt/TGW/evidence/codex/sha256/65bd4923c86cf70e5f2eae795ba1882a693813ee04d1ef106aae3a6e3299a26c.tar",
+    "archive_sha256": "sha256:65bd4923c86cf70e5f2eae795ba1882a693813ee04d1ef106aae3a6e3299a26c",
+    "archive_size": 12830720
+  },
+  "change": {
+    "boundary": "resolve and postcheck the complete root-owned current-system and system-profile symlink chains to one exact immutable Nix store directory",
+    "maximum_symlink_hops": 8,
+    "cycle_detection": true,
+    "trusted_owner_uid": 0,
+    "writable_ancestor_accepted": false,
+    "same_inode_postcheck": true,
+    "remote_write": false
+  },
+  "gates": {
+    "focused": "68 PASS / 0 FAIL",
+    "authority_matrix": "147 PASS / 0 FAIL",
+    "tracked_full": "3962 PASS / 5 SKIP / 0 FAIL",
+    "ruff": "PASS",
+    "py_compile": "PASS",
+    "diff_check": "PASS"
+  },
+  "runtime": {
+    "runtime_path": "/opt/TGW/evidence/codex/host-state-runtime/0c6e73a29c025c9db2e257c5763da9ab9c4e87bbb17ddb6c38c3c19b089b4d27",
+    "runtime_sha256": "sha256:0c6e73a29c025c9db2e257c5763da9ab9c4e87bbb17ddb6c38c3c19b089b4d27",
+    "controller_sha256": "sha256:e6cef97f2e6de400d34b8627e54442f4abc1895c3789b4ad312c6685bbcf167a",
+    "helper_path": "/opt/TGW/evidence/codex/sha256/b46b59c3f18a2ec8f935af4f2f3ae07d04155f53b609c93ddaab57f100b5a88d.py",
+    "helper_sha256": "sha256:b46b59c3f18a2ec8f935af4f2f3ae07d04155f53b609c93ddaab57f100b5a88d"
+  },
+  "effects": {
+    "production_remote_connection": false,
+    "grant_issued": false,
+    "grant_consumed": false,
+    "remote_write": false,
+    "repository_access": false,
+    "nix": false,
+    "install": false,
+    "service": false,
+    "deployment": false
+  },
+  "verification_sha256": "sha256:c4ce7b4f44f0a5cecb9a14ff0a5685817f7db1e32429816580e177bfd9964140"
+}
