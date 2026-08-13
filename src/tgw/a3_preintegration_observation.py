@@ -505,6 +505,9 @@ def replay_archive(archive: bytes, receipt: Mapping[str, Any], request: Mapping[
                     isinstance(target, str) or (isinstance(target, list) and target and all(isinstance(part, str) and part for part in target))
                 ):
                     raise ObservationError("flake.lock input edge is invalid")
+                target_node = target if isinstance(target, str) else target[0]
+                if target_node not in lock["nodes"]:
+                    raise ObservationError("flake.lock input edge target is absent")
         return {"tree": output, "lock_sha256": digest(lock_raw), "lock_nodes": sorted(lock["nodes"])}
 
 
@@ -686,6 +689,9 @@ class SshObservationProvider:
     mounted_source: Mapping[str, Any] | None = None
     ssh_keygen_path: Path | None = None
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        raise TypeError("SshObservationProvider is sealed")
+
     def ready(self, request: Mapping[str, Any]) -> bool:
         try:
             if validate_request(request)["request_sha256"] != validate_request(self.request)["request_sha256"]:
@@ -743,8 +749,9 @@ class SshObservationProvider:
             identity_fd, identity = _held_regular(self.identity_path, request["transport"]["identity_sha256"])
             helper_fd, helper = _held_regular(self.helper_path, request["transport"]["helper_sha256"])
             initial = tuple(os.fstat(fd) for fd in (ssh_fd, hosts_fd, identity_fd, helper_fd))
+            named = tuple((path, _inode_identity(os.stat(path, follow_symlinks=False))) for path in (self.ssh_path, self.known_hosts_path, self.identity_path, self.helper_path))
         else:
-            ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, initial = _held
+            ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, initial, named = _held
         sealed_hosts = _sealed("a3-observation-hosts", hosts)
         sealed_identity = _sealed("a3-observation-identity", identity)
         try:
@@ -800,12 +807,17 @@ class SshObservationProvider:
         finally:
             if any(_inode_identity(os.fstat(fd)) != _inode_identity(before) for fd, before in zip((ssh_fd, hosts_fd, identity_fd, helper_fd), initial, strict=True)):
                 raise ObservationError("held SSH artifact identity changed during launch")
+            if any(_inode_identity(os.stat(path, follow_symlinks=False)) != identity_before for path, identity_before in named):
+                raise ObservationError("named SSH artifact identity changed during launch")
             for fd in (sealed_identity, sealed_hosts, helper_fd, identity_fd, hosts_fd, *((keygen_fd,) if _held is not None else ()), ssh_fd):
                 os.close(fd)
 
     def prepare_launch(self, request: Mapping[str, Any]) -> Any:
         """Return the single controller-invoked launch; no provider callback can skip consumption."""
         validated = validate_request(request, now=datetime.now(timezone.utc))
+        configured = validate_request(self.request)
+        if validated != configured or self.mounted_source is None or validate_source_descriptor(self.mounted_source) != validated["source"]:
+            raise ObservationHold("sealed provider request or source authority differs")
         ssh_fd, _ = _held_regular(self.ssh_path, validated["transport"]["ssh_sha256"], executable=True)
         keygen_fd, _ = _held_regular(self.ssh_keygen_path, validated["transport"]["ssh_keygen_sha256"], executable=True)
         hosts_fd, hosts = _held_regular(self.known_hosts_path, validated["transport"]["known_hosts_sha256"])
@@ -833,7 +845,8 @@ class SshObservationProvider:
             for fd in held_fds:
                 os.close(fd)
             raise ObservationHold("sealed private/public authority differs")
-        held = (ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, tuple(os.fstat(fd) for fd in (ssh_fd, hosts_fd, identity_fd, helper_fd)))
+        named = tuple((path, _inode_identity(os.stat(path, follow_symlinks=False))) for path in (self.ssh_path, self.known_hosts_path, self.identity_path, self.helper_path))
+        held = (ssh_fd, keygen_fd, hosts_fd, identity_fd, helper_fd, hosts, identity, helper, tuple(os.fstat(fd) for fd in (ssh_fd, hosts_fd, identity_fd, helper_fd)), named)
         used = False
 
         def launch() -> Mapping[str, Any]:
@@ -915,6 +928,7 @@ class ImmutableEvidenceStore:
             attempt_fd = os.open(attempt, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
             for name, raw in items:
                 fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=attempt_fd)
+                created_names.append(name)
                 try:
                     view = memoryview(raw)
                     while view:
@@ -926,7 +940,6 @@ class ImmutableEvidenceStore:
                     os.lseek(fd, 0, os.SEEK_SET)
                 finally:
                     os.close(fd)
-                created_names.append(name)
                 check_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=attempt_fd)
                 try:
                     if digest(os.read(check_fd, len(raw) + 1)) != digest(raw):

@@ -1141,6 +1141,7 @@ class A3LocalProductionTransport:
             runner=self._runner,
             scratch_parent=Path(self.composition.scratch_root["path"]),
             allow_fixture=False,
+            reviewed_source=self.reviewed_source,
         )
 
 

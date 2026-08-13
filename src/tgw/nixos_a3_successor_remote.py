@@ -410,12 +410,13 @@ def execute(
     runner: Runner,
     scratch_parent: Path,
     allow_fixture: bool = False,
+    reviewed_source: Mapping[str, Any] | None = None,
     cleanup: Callable[[Path], None] = shutil.rmtree,
     output_resolver: Callable[[str], Path] = Path,
 ) -> dict[str, Any]:
     if output_resolver is not Path and not allow_fixture:
         raise A3EvaluationError("output path substitution is available only to a non-deployable test fixture")
-    request = validate_request(request_value, allow_fixture=allow_fixture)
+    request = validate_request(request_value, allow_fixture=allow_fixture, reviewed_source=reviewed_source)
     policy = request["policy"]
     scratch_parent = Path(scratch_parent)
     run_root = Path(tempfile.mkdtemp(prefix="a3-successor-", dir=scratch_parent)).resolve(strict=True)

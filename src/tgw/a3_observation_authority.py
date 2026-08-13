@@ -42,6 +42,10 @@ class ObservationDispatchAmbiguous(ObservationAuthorityError):
     pass
 
 
+class ObservationTokenPersistenceAmbiguous(ObservationAuthorityError):
+    pass
+
+
 class ObservationProvider(Protocol):
     def ready(self, request: Mapping[str, Any]) -> bool: ...
     def prepare_launch(self, request: Mapping[str, Any]) -> Any: ...
@@ -70,8 +74,10 @@ class DurableObservationToken:
     def consume(self) -> None:
         name = self.grant_sha256.split(":", 1)[1] + ".consumed"
         root_fd = self._root_fd
+        created = False
         try:
             fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=root_fd)
+            created = True
             try:
                 raw = self.grant_sha256.encode()
                 view = memoryview(raw)
@@ -93,6 +99,10 @@ class DurableObservationToken:
             os.fsync(root_fd)
         except FileExistsError as exc:
             raise ObservationAlreadyConsumed("read-only observation attempt already consumed") from exc
+        except Exception as exc:
+            if created:
+                raise ObservationTokenPersistenceAmbiguous("observation token durable state is uncertain") from exc
+            raise
         finally:
             named = os.stat(self._root_name, dir_fd=self._parent_fd, follow_symlinks=False)
             if (named.st_dev, named.st_ino) != (os.fstat(self._root_fd).st_dev, os.fstat(self._root_fd).st_ino):
@@ -193,7 +203,7 @@ class ReadOnlyObservationController:
         self.composition_sha256 = composition_sha256
         self.evidence_store = evidence_store
         self.token = token
-        if not allow_test_provider and not isinstance(provider, SshObservationProvider):
+        if not allow_test_provider and type(provider) is not SshObservationProvider:
             raise ObservationAuthorityError("production controller requires the sealed SSH observation provider")
         self._lock = threading.Lock()
         self._consumed = False
@@ -236,6 +246,12 @@ class ReadOnlyObservationController:
                 raise ObservationAuthorityError("provider did not prepare a sealed launch")
             try:
                 consume()
+            except ObservationTokenPersistenceAmbiguous:
+                self._consumed = True
+                close = getattr(launch, "close", None)
+                if callable(close):
+                    close()
+                raise ObservationDispatchAmbiguous("token persistence is ambiguous before SSH dispatch")
             except Exception:
                 close = getattr(launch, "close", None)
                 if callable(close):

@@ -593,7 +593,12 @@ class TypedEffectHandlerRegistry:
         elif effect.kind is EffectKind.NIXOS_A3_SUCCESSOR_EVALUATION:
             if self._a3_successor_binding is None:
                 raise HeldEffect("A3 successor evaluation provider is not mounted")
-            parameters = validate_a3_successor_request(effect.parameters, allow_fixture=self._a3_successor_allow_fixture)
+            composition = self._a3_successor_binding.composition
+            parameters = validate_a3_successor_request(
+                effect.parameters,
+                allow_fixture=self._a3_successor_allow_fixture,
+                reviewed_source=composition.reviewed_source,
+            )
             ready = getattr(self._a3_successor_binding, "ready", None)
             if not callable(ready):
                 raise HeldEffect("A3 successor evaluation provider has no readiness boundary")
