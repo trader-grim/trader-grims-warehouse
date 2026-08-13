@@ -353,6 +353,7 @@ def test_sshd_parity_is_typed_and_fresh() -> None:
         "ambient_config_rejected": True,
         "framing_verified": True,
         "process_group_verified": True,
+        "ssh_argv_policy": module._ssh_argv_policy(_request()),
         "evidence": {
             role: {
                 "path": f"/protected/{role}",
@@ -386,6 +387,21 @@ def test_sshd_parity_is_typed_and_fresh() -> None:
     changed["receipt_sha256"] = digest(module.canonical({key: item for key, item in changed.items() if key != "receipt_sha256"}))
     with pytest.raises(HostStateError):
         validate_sshd_parity(changed)
+    changed = deepcopy(value)
+    changed["ssh_argv_policy"] = ["ambient"]
+    changed["receipt_sha256"] = digest(module.canonical({key: item for key, item in changed.items() if key != "receipt_sha256"}))
+    request = _request()
+    request["prerequisites"] = {
+        "sshd_parity_sha256": digest(module.canonical(changed)),
+        "sshd_parity_receipt_sha256": changed["receipt_sha256"],
+    }
+    request["request_sha256"] = digest(module.canonical({key: item for key, item in request.items() if key != "request_sha256"}))
+    with pytest.raises(HostStateError, match="transport differs"):
+        validate_request(
+            request,
+            parity_authority=changed,
+            allow_fixture=True,
+        )
 
 
 class _FixtureProvider:
@@ -633,6 +649,73 @@ def test_result_rejects_forged_terminal_and_evidence(tmp_path: Path) -> None:
             expected_composition_sha256=_sha("composition"),
             expected_evidence_root_identity=root_identity,
         )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "stage", "code"),
+    [
+        ("HOLD", "prelaunch", "NOT_READY"),
+        ("FAILED", "prelaunch", "VALIDATION_FAILED"),
+        ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN"),
+    ],
+)
+def test_result_rejects_terminal_not_emitted_by_controller(
+    tmp_path: Path,
+    outcome: str,
+    stage: str,
+    code: str,
+) -> None:
+    request = _request()
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    root_identity = _identity(evidence_root)
+    terminal_value = terminal(
+        outcome=outcome,
+        stage=stage,
+        code=code,
+        dispatched=False,
+        request_sha256=request["request_sha256"],
+        observed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    result = {
+        "schema": "tgw-prod-a3-host-state-observation-result/v1",
+        "composition_sha256": _sha("composition"),
+        "evidence_root_identity": root_identity,
+        "terminal": terminal_value,
+        "receipt": None,
+        "dependency": None,
+        "evidence": [],
+    }
+    result["result_sha256"] = digest(__import__("tgw.a3_host_state_observation", fromlist=["canonical"]).canonical(result))
+    with pytest.raises(HostStateError, match="not controller-produced"):
+        validate_result(
+            result,
+            request,
+            expected_composition_sha256=_sha("composition"),
+            expected_evidence_root_identity=root_identity,
+        )
+
+
+def test_ssh_policy_closes_global_host_and_ambient_auth_fallbacks() -> None:
+    import tgw.a3_host_state_observation as host_state
+
+    policy = host_state._ssh_argv_policy(_request())
+    for option in (
+        "-oGlobalKnownHostsFile=/dev/null",
+        "-oPreferredAuthentications=publickey",
+        "-oKbdInteractiveAuthentication=no",
+        "-oGSSAPIAuthentication=no",
+        "-oHostbasedAuthentication=no",
+        "-oControlMaster=no",
+        "-oControlPath=none",
+        "-oUpdateHostKeys=no",
+        "-oVerifyHostKeyDNS=no",
+        "-oPermitLocalCommand=no",
+        "-oForwardAgent=no",
+        "-oForwardX11=no",
+        "-T",
+    ):
+        assert option in policy
 
 
 def test_production_provider_cannot_be_subclassed() -> None:

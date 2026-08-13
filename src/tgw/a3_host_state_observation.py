@@ -257,6 +257,7 @@ def validate_sshd_parity(
         "ambient_config_rejected",
         "framing_verified",
         "process_group_verified",
+        "ssh_argv_policy",
         "evidence",
         "receipt_sha256",
     }
@@ -286,6 +287,8 @@ def validate_sshd_parity(
             raise HostStateError(f"sshd parity {field} is invalid")
     if not isinstance(receipt["identity_public"], str) or len(receipt["identity_public"].split()) < 2:
         raise HostStateError("sshd parity identity is invalid")
+    if not isinstance(receipt["ssh_argv_policy"], list) or not receipt["ssh_argv_policy"] or any(not isinstance(item, str) or not item for item in receipt["ssh_argv_policy"]):
+        raise HostStateError("sshd parity SSH argv policy is invalid")
     if digest((receipt["identity_public"] + "\n").encode()) != receipt["identity_public_sha256"]:
         raise HostStateError("sshd parity public identity hash differs")
     observed_at = _parse_time(receipt["observed_at"], "sshd parity observed_at")
@@ -450,6 +453,7 @@ def validate_request(
             or parity["known_hosts_sha256"] != transport["known_hosts_sha256"]
             or parity["identity_public"] != transport["identity_public"]
             or parity["identity_public_sha256"] != transport["identity_public_sha256"]
+            or parity["ssh_argv_policy"] != _ssh_argv_policy(request)
         ):
             raise HostStateError("host-state transport differs from sshd parity")
     bounds = _exact(request["bounds"], {"timeout_seconds", "max_output_bytes", "max_diagnostic_bytes"}, "host-state bounds")
@@ -1315,13 +1319,27 @@ def _ssh_argv_policy(request: Mapping[str, Any]) -> list[str]:
         "-oIdentityAgent=none",
         "-oClearAllForwardings=yes",
         "-oStrictHostKeyChecking=yes",
+        "-oGlobalKnownHostsFile=/dev/null",
         "-oCanonicalizeHostname=no",
         "-oProxyCommand=none",
         "-oProxyJump=none",
+        "-oPreferredAuthentications=publickey",
+        "-oKbdInteractiveAuthentication=no",
+        "-oGSSAPIAuthentication=no",
+        "-oHostbasedAuthentication=no",
+        "-oPubkeyAuthentication=yes",
+        "-oPermitLocalCommand=no",
+        "-oControlMaster=no",
+        "-oControlPath=none",
+        "-oUpdateHostKeys=no",
+        "-oVerifyHostKeyDNS=no",
+        "-oForwardAgent=no",
+        "-oForwardX11=no",
         f"-oHostKeyAlias={request['target']['host']}",
         "-oUserKnownHostsFile=<held-fd>",
         "-oIdentityFile=<sealed-fd>",
         "-oPasswordAuthentication=no",
+        "-T",
         f"{request['target']['user']}@{request['target']['host']}",
         f"{request['target']['remote_python']} -I -c <held-helper-bootstrap>",
     ]
@@ -1599,13 +1617,27 @@ class SshHostStateProvider:
                     "-oIdentityAgent=none",
                     "-oClearAllForwardings=yes",
                     "-oStrictHostKeyChecking=yes",
+                    "-oGlobalKnownHostsFile=/dev/null",
                     "-oCanonicalizeHostname=no",
                     "-oProxyCommand=none",
                     "-oProxyJump=none",
+                    "-oPreferredAuthentications=publickey",
+                    "-oKbdInteractiveAuthentication=no",
+                    "-oGSSAPIAuthentication=no",
+                    "-oHostbasedAuthentication=no",
+                    "-oPubkeyAuthentication=yes",
+                    "-oPermitLocalCommand=no",
+                    "-oControlMaster=no",
+                    "-oControlPath=none",
+                    "-oUpdateHostKeys=no",
+                    "-oVerifyHostKeyDNS=no",
+                    "-oForwardAgent=no",
+                    "-oForwardX11=no",
                     f"-oHostKeyAlias={request['target']['host']}",
                     f"-oUserKnownHostsFile=/proc/{os.getpid()}/fd/{sealed_hosts}",
                     f"-oIdentityFile=/proc/{os.getpid()}/fd/{sealed_identity}",
                     "-oPasswordAuthentication=no",
+                    "-T",
                     f"{request['target']['user']}@{request['target']['host']}",
                     remote,
                 ]
@@ -2075,6 +2107,20 @@ def validate_result(
     ):
         raise HostStateError("host-state result evidence root differs")
     terminal_value = validate_terminal(result["terminal"], request_sha256=request["request_sha256"])
+    produced_terminal = (
+        terminal_value["outcome"],
+        terminal_value["stage"],
+        terminal_value["code"],
+        terminal_value["dispatched"],
+    )
+    if produced_terminal not in {
+        ("PASS", "complete", "NONE", True),
+        ("HOLD", "remote", "HOST_NOT_READY", True),
+        ("FAILED", "remote", "HELPER_FAILED", True),
+        ("AMBIGUOUS", "authority", "TOKEN_UNCERTAIN", False),
+        ("AMBIGUOUS", "dispatch", "DISPATCH_UNCERTAIN", True),
+    }:
+        raise HostStateError("host-state result terminal is not controller-produced")
     root = Path(str(expected_evidence_root_identity["path"]))
     _reject_symlink_ancestors(root)
     current_root = os.stat(root, follow_symlinks=False)
