@@ -51,6 +51,8 @@ class ReadOnlyObservationGrant:
         expires_at: str,
     ) -> "ReadOnlyObservationGrant":
         request = validate_request(request)
+        if solution_sha256 != request["plan"]["solution_sha256"] or closure_sha256 != request["plan"]["closure_sha256"]:
+            raise ObservationAuthorityError("grant Plan solution or closure differs from request")
         payload = {
             "schema": GRANT_SCHEMA,
             "effect_kind": "tgw-prod-a3-preintegration-observation",

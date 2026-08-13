@@ -9,16 +9,22 @@ import pytest
 
 from tgw.a3_preintegration_observation import (
     Composition,
+    EvidencePersistenceAmbiguous,
     ImmutableEvidenceStore,
     ObservationError,
     ObservationHold,
     decode_helper_response,
     digest,
     encode_helper_response,
+    fixture_source_descriptor,
     make_request,
     observe_repository,
+    persist_evidence,
+    terminal,
     validate_receipt,
     validate_request,
+    validate_source_descriptor,
+    validate_terminal,
 )
 
 
@@ -32,7 +38,7 @@ def _repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "Fixture"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.email", "fixture@example.invalid"], cwd=path, check=True)
-    (path / "flake.lock").write_text('{"version":7}\n')
+    (path / "flake.lock").write_text('{"version":7,"root":"root","nodes":{"root":{}}}\n')
     (path / "flake.nix").write_text("{ outputs = _: {}; }\n")
     subprocess.run(["git", "add", "-A"], cwd=path, check=True)
     subprocess.run(["git", "commit", "-qm", "fixture"], cwd=path, check=True)
@@ -102,3 +108,50 @@ def test_helper_frame_binds_exact_archive_bytes(tmp_path: Path) -> None:
 def test_helper_frame_rejects_truncation_and_bounds(raw: bytes) -> None:
     with pytest.raises(ObservationError):
         decode_helper_response(raw, make_request(operation_id="bad-frame", transport=_transport()))
+
+
+def test_mounted_source_descriptor_rejects_independent_identity_mutation() -> None:
+    source = fixture_source_descriptor()
+    source["helper_sha256"] = "sha256:" + "9" * 64
+    with pytest.raises(ObservationError):
+        validate_source_descriptor(source)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "stage", "code", "dispatched"),
+    [
+        ("PASS", "complete", "NONE", False),
+        ("HOLD", "predispatch", "PROVIDER_NOT_READY", False),
+        ("FAILED", "helper", "HELPER_INVALID", True),
+        ("AMBIGUOUS", "dispatch", "POSTDISPATCH_UNCERTAIN", True),
+        ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", True),
+    ],
+)
+def test_closed_terminal_tuples(outcome: str, stage: str, code: str, dispatched: bool) -> None:
+    value = terminal(
+        outcome=outcome,
+        stage=stage,
+        code=code,
+        dispatched=dispatched,
+        request_sha256="sha256:" + "1" * 64,
+        observed_at="2026-08-13T00:00:00+00:00",
+    )
+    assert validate_terminal(value) == value
+    changed = deepcopy(value)
+    changed["dispatched"] = not dispatched
+    with pytest.raises(ObservationError):
+        validate_terminal(changed)
+
+
+def test_persistence_failure_retains_typed_ambiguity(tmp_path: Path) -> None:
+    request = make_request(operation_id="persist", transport=_transport())
+    receipt, archive = observe_repository(_repo(tmp_path), request)
+
+    class Broken:
+        def persist(self, *args, **kwargs):
+            raise PermissionError("denied")
+
+    with pytest.raises(EvidencePersistenceAmbiguous) as caught:
+        persist_evidence(Broken(), request=request, receipt=receipt, archive=archive, observed_at="2026-08-13T00:00:00+00:00")
+    assert caught.value.terminal["outcome"] == "AMBIGUOUS"
+    assert caught.value.terminal["stage"] == "persistence"

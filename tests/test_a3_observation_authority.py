@@ -21,8 +21,8 @@ def _request():
 def _grant(request):
     return ReadOnlyObservationGrant.issue(
         request=request,
-        solution_sha256="solution:1",
-        closure_sha256="closure:1",
+        solution_sha256="solution:test",
+        closure_sha256="closure:test",
         composition_sha256="sha256:" + "2" * 64,
         expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
     )
@@ -45,9 +45,7 @@ class Provider:
 def test_hold_before_ready_does_not_consume() -> None:
     request = _request()
     provider = Provider(ready=False)
-    controller = ReadOnlyObservationController(
-        grant=_grant(request), provider=provider, composition_sha256="sha256:" + "2" * 64
-    )
+    controller = ReadOnlyObservationController(grant=_grant(request), provider=provider, composition_sha256="sha256:" + "2" * 64)
     with pytest.raises(ObservationHold):
         controller.execute(request)
     assert controller.consumed is False and provider.calls == 0
@@ -56,9 +54,7 @@ def test_hold_before_ready_does_not_consume() -> None:
 def test_first_dispatch_consumes_exactly_once() -> None:
     request = _request()
     provider = Provider()
-    controller = ReadOnlyObservationController(
-        grant=_grant(request), provider=provider, composition_sha256="sha256:" + "2" * 64
-    )
+    controller = ReadOnlyObservationController(grant=_grant(request), provider=provider, composition_sha256="sha256:" + "2" * 64)
     assert controller.execute(request) == {"evidence": ["observed"]}
     with pytest.raises(ObservationAlreadyConsumed):
         controller.execute(request)
@@ -68,9 +64,7 @@ def test_first_dispatch_consumes_exactly_once() -> None:
 def test_postdispatch_failure_is_ambiguous_and_consumed() -> None:
     request = _request()
     provider = Provider(fail=True)
-    controller = ReadOnlyObservationController(
-        grant=_grant(request), provider=provider, composition_sha256="sha256:" + "2" * 64
-    )
+    controller = ReadOnlyObservationController(grant=_grant(request), provider=provider, composition_sha256="sha256:" + "2" * 64)
     with pytest.raises(ObservationDispatchAmbiguous):
         controller.execute(request)
     assert controller.consumed is True and provider.calls == 1
