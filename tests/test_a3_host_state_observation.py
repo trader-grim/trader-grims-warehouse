@@ -757,7 +757,7 @@ def test_fixture_provider_cannot_enter_production_composition(tmp_path: Path) ->
         )
 
 
-def test_fixture_ssh_path_uses_exact_argv_framing_and_group_cleanup(tmp_path: Path) -> None:
+def test_fixture_ssh_path_uses_exact_argv_framing_and_group_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import tgw.a3_host_state_observation as host_state
     from tgw.a3_host_state_observation import SshHostStateProvider
 
@@ -837,6 +837,23 @@ def test_fixture_ssh_path_uses_exact_argv_framing_and_group_cleanup(tmp_path: Pa
         provider.prepare_launch(request)
     launch = provider.prepare_launch(request, _token=host_state._COMPOSITION_SEAL)
     assert launch() == receipt
+
+    before = set(os.listdir("/proc/self/fd"))
+    failing_launch = provider.prepare_launch(request, _token=host_state._COMPOSITION_SEAL)
+    real_sealed = host_state._sealed
+    calls = 0
+
+    def fail_second_seal(name: str, raw: bytes) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected identity seal failure")
+        return real_sealed(name, raw)
+
+    monkeypatch.setattr(host_state, "_sealed", fail_second_seal)
+    with pytest.raises(OSError, match="identity seal failure"):
+        failing_launch()
+    assert set(os.listdir("/proc/self/fd")) == before
 
 
 def test_grant_schema_is_distinct() -> None:

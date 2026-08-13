@@ -1597,9 +1597,11 @@ class SshHostStateProvider:
                 raise HostStateError("sealed host-state launch is not reusable")
             used = True
             ssh_fd, _keygen_fd, hosts_fd, identity_fd, _public_fd, _helper_fd = opened
-            sealed_hosts = _sealed("a3-host-state-hosts", raw_values[2])
-            sealed_identity = _sealed("a3-host-state-identity", raw_values[3])
+            sealed_hosts = -1
+            sealed_identity = -1
             try:
+                sealed_hosts = _sealed("a3-host-state-hosts", raw_values[2])
+                sealed_identity = _sealed("a3-host-state-identity", raw_values[3])
                 bootstrap = (
                     "ns={'__name__':'tgw_remote_helper'};exec(compile("
                     + repr(raw_values[5].decode("utf-8", errors="strict"))
@@ -1687,7 +1689,8 @@ class SshHostStateProvider:
                     post_error = HostStateDispatchAmbiguous("SSH artifact postcheck failed")
                     post_error.__cause__ = exc
                 for fd in (sealed_identity, sealed_hosts, *reversed(opened)):
-                    os.close(fd)
+                    if fd >= 0:
+                        os.close(fd)
                 if post_error is not None:
                     raise post_error
 
