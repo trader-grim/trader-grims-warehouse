@@ -398,7 +398,7 @@ def validate_integration_contract(value: Any, *, allow_fixture: bool = False) ->
     return contract
 
 
-def validate_request(value: Any, *, allow_fixture: bool = False) -> dict[str, Any]:
+def validate_request(value: Any, *, allow_fixture: bool = False, reviewed_source: Mapping[str, Any] | None = None) -> dict[str, Any]:
     fields = {
         "schema",
         "operation_id",
@@ -424,10 +424,21 @@ def validate_request(value: Any, *, allow_fixture: bool = False) -> dict[str, An
     if plan != {"commit": PLAN_COMMIT, "solution_sha256": PLAN_SOLUTION, "closure_sha256": PLAN_CLOSURE}:
         raise A3EvaluationError("request is not bound to the approved Plan solution")
     source = _exact(request["source"], {"commit", "tree", "archive_ref", "archive_sha256", "archive_size", "candidate_identity", "catalog_sha256", "a3_identities"}, "source binding")
-    source_fixed = {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "archive_sha256": SOURCE_ARCHIVE_SHA256, "candidate_identity": SOURCE_CANDIDATE, "catalog_sha256": SOURCE_CATALOG}
+    if reviewed_source is None and not allow_fixture:
+        raise A3EvaluationError("production request validator has no mounted reviewed-source descriptor")
+    source_fixed = dict(
+        reviewed_source
+        or {
+            "commit": SOURCE_COMMIT,
+            "tree": SOURCE_TREE,
+            "archive_sha256": SOURCE_ARCHIVE_SHA256,
+            "candidate_identity": SOURCE_CANDIDATE,
+            "catalog_sha256": SOURCE_CATALOG,
+        }
+    )
     if any(source.get(key) != expected for key, expected in source_fixed.items()):
         raise A3EvaluationError("request does not name the admitted immutable product source")
-    if source["archive_ref"] != "artifact:" + SOURCE_ARCHIVE_SHA256:
+    if source["archive_ref"] != "artifact:" + source_fixed["archive_sha256"]:
         raise A3EvaluationError("product archive reference or size is invalid")
     _strict_int(source["archive_size"], "product archive size", minimum=1)
     if source["a3_identities"] != A3_SOURCE_IDENTITIES:
@@ -1004,6 +1015,7 @@ class A3EvaluationComposition:
     receipt_store: ReceiptStore
     runner: Callable[[Mapping[str, Any]], Mapping[str, Any]]
     allow_fixture: bool = False
+    reviewed_source: Mapping[str, Any] | None = None
 
     @property
     def status(self) -> str:
@@ -1035,7 +1047,7 @@ class _A3SuccessorEvaluationProviderCore:
 
     def ready(self, request_value: Mapping[str, Any]) -> None:
         """Fail before authority consumption unless the exact composition can run."""
-        request = validate_request(request_value, allow_fixture=self.composition.allow_fixture)
+        request = validate_request(request_value, allow_fixture=self.composition.allow_fixture, reviewed_source=self.composition.reviewed_source)
         if request["integration"] != self.composition.integration:
             raise A3EvaluationHold("request integration differs from the mounted composition")
         if self.composition.status == "NOT_EXECUTABLE":
@@ -1056,7 +1068,7 @@ class _A3SuccessorEvaluationProviderCore:
         if not isinstance(effect, Mapping) or set(effect) != {"kind", "generation", "parameters"} or effect["kind"] != EFFECT_KIND:
             raise A3EvaluationError("provider accepts only the distinct A3 successor effect envelope")
         self.ready(effect["parameters"])
-        request = validate_request(effect["parameters"], allow_fixture=self.composition.allow_fixture)
+        request = validate_request(effect["parameters"], allow_fixture=self.composition.allow_fixture, reviewed_source=self.composition.reviewed_source)
         try:
             untrusted = self.composition.runner(request)
             try:

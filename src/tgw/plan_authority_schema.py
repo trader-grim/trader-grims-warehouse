@@ -43,6 +43,5 @@ def require_plan_authority_schema(dsn: str, *, connect: Callable[..., Any] = psy
     missing = REQUIRED_TABLES - present
     if missing:
         raise RuntimeError(f"PlanAuthority schema is incomplete: {sorted(missing)}")
-    required_kinds = {"nixos-a3-successor-evaluation", "tgw-prod-a3-preintegration-observation"}
-    if not constraint or not all(kind in str(constraint[0]) for kind in required_kinds):
+    if not constraint or "nixos-a3-successor-evaluation" not in str(constraint[0]):
         raise RuntimeError("PlanAuthority effect-kind constraint is stale")

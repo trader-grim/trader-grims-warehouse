@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from tgw.a3_observation_authority import (
+    DurableObservationToken,
     ObservationAlreadyConsumed,
     ObservationDispatchAmbiguous,
     ReadOnlyObservationController,
@@ -23,10 +24,8 @@ def _request():
 def _grant(request):
     return ReadOnlyObservationGrant.issue(
         request=request,
-        solution_sha256="solution:test",
-        closure_sha256="closure:test",
         composition_sha256="sha256:" + "2" * 64,
-        expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
     )
 
 
@@ -37,7 +36,8 @@ class Provider:
     def ready(self, request):
         return self.is_ready
 
-    def observe(self, request):
+    def observe(self, request, *, on_dispatch):
+        on_dispatch()
         self.calls += 1
         if self.fail:
             raise RuntimeError("after dispatch")
@@ -47,7 +47,8 @@ class Provider:
 def test_hold_before_ready_does_not_consume() -> None:
     request = _request()
     provider = Provider(ready=False)
-    controller = ReadOnlyObservationController(grant=_grant(request), provider=provider, composition_sha256="sha256:" + "2" * 64)
+    grant = _grant(request)
+    controller = ReadOnlyObservationController(grant=grant, provider=provider, composition_sha256="sha256:" + "2" * 64)
     with pytest.raises(ObservationHold):
         controller.execute(request)
     assert controller.consumed is False and provider.calls == 0
@@ -65,11 +66,15 @@ def test_first_dispatch_consumes_exactly_once(tmp_path: Path) -> None:
     subprocess.run(["git", "commit", "-qm", "x"], cwd=repo, check=True)
     receipt, archive = observe_repository(repo, request)
     provider = Provider(result={"receipt": receipt, "archive": archive})
+    grant = _grant(request)
+    token_root = tmp_path / "tokens"
+    token_root.mkdir(mode=0o700)
     controller = ReadOnlyObservationController(
-        grant=_grant(request),
+        grant=grant,
         provider=provider,
         composition_sha256="sha256:" + "2" * 64,
         evidence_store=ImmutableEvidenceStore(tmp_path / "evidence"),
+        token=DurableObservationToken(str(token_root), grant.value["grant_sha256"]),
     )
     result = controller.execute(request)
     assert result["terminal"]["outcome"] == "PASS"
@@ -79,10 +84,19 @@ def test_first_dispatch_consumes_exactly_once(tmp_path: Path) -> None:
     assert provider.calls == 1
 
 
-def test_postdispatch_failure_is_ambiguous_and_consumed() -> None:
+def test_postdispatch_failure_is_ambiguous_and_consumed(tmp_path: Path) -> None:
     request = _request()
     provider = Provider(fail=True)
-    controller = ReadOnlyObservationController(grant=_grant(request), provider=provider, composition_sha256="sha256:" + "2" * 64)
+    grant = _grant(request)
+    token_root = tmp_path / "tokens"
+    token_root.mkdir(mode=0o700)
+    controller = ReadOnlyObservationController(
+        grant=grant,
+        provider=provider,
+        composition_sha256="sha256:" + "2" * 64,
+        evidence_store=ImmutableEvidenceStore(tmp_path / "evidence"),
+        token=DurableObservationToken(str(token_root), grant.value["grant_sha256"]),
+    )
     with pytest.raises(ObservationDispatchAmbiguous):
         controller.execute(request)
     assert controller.consumed is True and provider.calls == 1

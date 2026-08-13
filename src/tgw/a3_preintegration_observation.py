@@ -31,10 +31,15 @@ REQUEST_SCHEMA = "tgw-prod-a3-preintegration-observation-request/v1"
 RECEIPT_SCHEMA = "tgw-prod-a3-preintegration-observation-receipt/v1"
 TERMINAL_SCHEMA = "tgw-prod-a3-preintegration-observation-terminal/v1"
 COMPOSITION_SCHEMA = "tgw-prod-a3-preintegration-observation-composition/v1"
-PLAN_COMMIT = "fb9fee3e"
+PLAN_COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
+PLAN_SOLUTION = "sha256:d28650c26c6a3d26d6c943597ccb7abd7c6670b1703d9ce941ac5ed7a2d73a4d"
+PLAN_CLOSURE = "sha256:bc0c53b2574fc359c629bd213e078fdd2824e5e1c4a98c0c7a347de869d9e6f8"
 SOURCE_COMMIT = "4ddf0d462c0be20475ddedb97a6234fd0cd28fb6"
 SOURCE_TREE = "c69c73f8e92d831dd2d3c8d44b550336bf908436"
-EVIDENCE_COMMIT = "6d897e4"
+EVIDENCE_COMMIT = "6d897e4a2aea0ea12942ed3c7d769cf3c338da6e"
+SOURCE_ARCHIVE = "sha256:9255ed323c4a175746c24bfc885c42f2af2291797ea0f44ef2fd4f2d203462f4"
+SOURCE_CANDIDATE = "candidate:sha256:7cce5103c8c063ad326b343732046f7ba68812aad1750bbbc94bd8a148e89dd3"
+SOURCE_CATALOG = "sha256:bbf928611111e23d81092ab1f4f61a6613fe1dac21bfc0784b8a9772d566661e"
 _SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT = re.compile(r"^[0-9a-f]{40}$")
 _OPERATION = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -88,16 +93,16 @@ def validate_source_descriptor(value: Any) -> dict[str, Any]:
     return source
 
 
-def fixture_source_descriptor() -> dict[str, Any]:
+def _fixture_source_descriptor() -> dict[str, Any]:
     """Non-production descriptor used only by local tests; production mounts one."""
     value = {
         "schema": SOURCE_DESCRIPTOR_SCHEMA,
         "checkpoint": EVIDENCE_COMMIT,
         "commit": SOURCE_COMMIT,
         "tree": SOURCE_TREE,
-        "archive_sha256": "sha256:" + "1" * 64,
-        "candidate_identity": "candidate:sha256:" + "2" * 64,
-        "catalog_sha256": "sha256:" + "3" * 64,
+        "archive_sha256": SOURCE_ARCHIVE,
+        "candidate_identity": SOURCE_CANDIDATE,
+        "catalog_sha256": SOURCE_CATALOG,
         "helper_sha256": "sha256:" + "4" * 64,
     }
     value["descriptor_sha256"] = digest(canonical(value))
@@ -109,7 +114,7 @@ def validate_request(value: Any, *, now: datetime | None = None) -> dict[str, An
     if request["schema"] != REQUEST_SCHEMA or not isinstance(request["operation_id"], str) or not _OPERATION.fullmatch(request["operation_id"]):
         raise ObservationError("request identity is invalid")
     plan = _exact(request["plan"], {"commit", "solution_sha256", "closure_sha256"}, "Plan")
-    if plan["commit"] != PLAN_COMMIT or any(not isinstance(plan[key], str) or not plan[key] for key in ("solution_sha256", "closure_sha256")):
+    if dict(plan) != {"commit": PLAN_COMMIT, "solution_sha256": PLAN_SOLUTION, "closure_sha256": PLAN_CLOSURE}:
         raise ObservationError("Plan binding is not exact")
     validate_source_descriptor(request["source"])
     if request["target"] != {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "main", "system": "x86_64-linux", "user": "codex", "port": 22}:
@@ -144,13 +149,13 @@ def validate_request(value: Any, *, now: datetime | None = None) -> dict[str, An
 
 def make_request(*, operation_id: str, transport: Mapping[str, str], source: Mapping[str, Any] | None = None, now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
-    source = dict(source or fixture_source_descriptor())
+    source = dict(source or _fixture_source_descriptor())
     transport = dict(transport)
     transport["helper_sha256"] = source["helper_sha256"]
     value = {
         "schema": REQUEST_SCHEMA,
         "operation_id": operation_id,
-        "plan": {"commit": PLAN_COMMIT, "solution_sha256": "solution:test", "closure_sha256": "closure:test"},
+        "plan": {"commit": PLAN_COMMIT, "solution_sha256": PLAN_SOLUTION, "closure_sha256": PLAN_CLOSURE},
         "source": source,
         "target": {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "main", "system": "x86_64-linux", "user": "codex", "port": 22},
         "transport": transport,
@@ -449,7 +454,7 @@ class SshObservationProvider:
         except Exception:
             return False
 
-    def observe(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+    def observe(self, request: Mapping[str, Any], *, on_dispatch: Any = lambda: None) -> Mapping[str, Any]:
         request = validate_request(request, now=datetime.now(timezone.utc))
         ssh_fd, _ = _held_regular(self.ssh_path, request["transport"]["ssh_sha256"], executable=True)
         hosts_fd, hosts = _held_regular(self.known_hosts_path, request["transport"]["known_hosts_sha256"])
@@ -477,6 +482,7 @@ class SshObservationProvider:
                 f"{request['target']['user']}@{request['target']['host']}",
                 remote,
             ]
+            on_dispatch()
             process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, pass_fds=(ssh_fd, sealed_hosts, sealed_identity))
             try:
                 stdout, stderr = process.communicate(canonical(request), timeout=request["bounds"]["timeout_seconds"])

@@ -14,9 +14,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Mapping
 
-from tgw.a3_preintegration_observation import ObservationHold
-from tgw.a3_preintegration_observation import validate_receipt as validate_a3_observation_receipt
-from tgw.a3_preintegration_observation import validate_request as validate_a3_observation_request
 from tgw.bootstrap_authority import BootstrapConsumptionAmbiguous
 from tgw.nix_observer_render_evaluation import validate_request as validate_render_request
 from tgw.nixos_a3_successor_evaluation import (
@@ -167,7 +164,6 @@ class TypedEffectHandlerRegistry:
         nixos_reviewed_evaluation: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         nixos_observer_render_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         nixos_a3_successor_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
-        tgw_prod_a3_preintegration_observation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> None:
         self._providers = {
             EffectKind.CODING_RELEASE: ("immutable-release-installer@1", release_install, release_rollback),
@@ -195,11 +191,6 @@ class TypedEffectHandlerRegistry:
                 self._a3_successor_provider(nixos_a3_successor_evaluation or self._unavailable_a3_successor_evaluation),
                 None,
             ),
-            EffectKind.TGW_PROD_A3_PREINTEGRATION_OBSERVATION: (
-                "tgw-prod-a3-preintegration-observation@1",
-                self._a3_observation_provider(tgw_prod_a3_preintegration_observation or self._unavailable_a3_observation),
-                None,
-            ),
         }
         self._bootstrap_validate = bootstrap_validate
         self._a3_successor_binding = nixos_a3_successor_evaluation
@@ -220,32 +211,6 @@ class TypedEffectHandlerRegistry:
     @staticmethod
     def _unavailable_a3_successor_evaluation(parameters: Mapping[str, Any]) -> Mapping[str, Any]:
         raise HeldEffect("A3 successor evaluation provider is not mounted")
-
-    @staticmethod
-    def _unavailable_a3_observation(parameters: Mapping[str, Any]) -> Mapping[str, Any]:
-        raise HeldEffect("tgw-prod A3 preintegration observation is not executable")
-
-    @staticmethod
-    def _a3_observation_provider(provider: Callable[[Mapping[str, Any]], Mapping[str, Any]]) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
-        def invoke(parameters: Mapping[str, Any]) -> Mapping[str, Any]:
-            request = {key: value for key, value in parameters.items() if key != "generation"}
-            validate_a3_observation_request(request)
-            try:
-                result = provider(request)
-            except ObservationHold as exc:
-                raise HeldEffect(str(exc)) from exc
-            if not isinstance(result, Mapping) or set(result) != {"schema", "terminal", "receipt", "archive_sha256", "evidence"}:
-                raise AmbiguousEffect("A3 observation provider result is malformed")
-            receipt = validate_a3_observation_receipt(result["receipt"], request)
-            if (
-                result["schema"] != "tgw-prod-a3-preintegration-observation-result/v1"
-                or result["archive_sha256"] != receipt["repository"]["archive_sha256"]
-                or not isinstance(result["evidence"], list)
-                or not result["evidence"]
-            ):
-                raise AmbiguousEffect("A3 observation provider evidence is not exact")
-            return result
-        return invoke
 
     @staticmethod
     def _a3_successor_provider(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -14,11 +15,11 @@ from tgw.a3_preintegration_observation import (
     ObservationError,
     ObservationHold,
     SshObservationProvider,
+    _fixture_source_descriptor,
     canonical,
     decode_helper_response,
     digest,
     encode_helper_response,
-    fixture_source_descriptor,
     make_request,
     observe_repository,
     persist_evidence,
@@ -141,7 +142,7 @@ def test_helper_frame_rejects_truncation_and_bounds(raw: bytes) -> None:
 
 
 def test_mounted_source_descriptor_rejects_independent_identity_mutation() -> None:
-    source = fixture_source_descriptor()
+    source = _fixture_source_descriptor()
     source["helper_sha256"] = "sha256:" + "9" * 64
     with pytest.raises(ObservationError):
         validate_source_descriptor(source)
@@ -200,7 +201,7 @@ def test_sealed_transport_uses_exact_identity_and_frame(tmp_path: Path) -> None:
     identity.chmod(0o400)
     helper = tmp_path / "helper"
     helper.write_bytes(Path("src/tgw/a3_preintegration_observation.py").read_bytes())
-    source = fixture_source_descriptor()
+    source = _fixture_source_descriptor()
     source["helper_sha256"] = digest(helper.read_bytes())
     source["descriptor_sha256"] = digest(canonical({k: v for k, v in source.items() if k != "descriptor_sha256"}))
     transport = {
@@ -225,3 +226,43 @@ def test_sealed_transport_rejects_ambient_identity_mutation(tmp_path: Path) -> N
     missing = tmp_path / "missing"
     provider = SshObservationProvider(request, missing, missing, missing, missing, "/usr/bin/python3")
     assert provider.ready(request) is False
+
+
+def test_transport_kills_term_ignoring_descendant_group(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+    fake = tmp_path / "ssh"
+    fake.write_text(
+        "#!/usr/bin/python3\nimport os,signal,subprocess,time\n"
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+        f"p=subprocess.Popen(['/usr/bin/python3','-c','import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)']);open({str(pid_file)!r},'w').write(str(p.pid));time.sleep(60)\n"
+    )
+    fake.chmod(0o755)
+    hosts = tmp_path / "hosts"
+    hosts.write_text("host key\n")
+    identity = tmp_path / "identity"
+    identity.write_text("identity\n")
+    identity.chmod(0o400)
+    helper = tmp_path / "helper"
+    helper.write_bytes(Path("src/tgw/a3_preintegration_observation.py").read_bytes())
+    source = _fixture_source_descriptor()
+    source["helper_sha256"] = digest(helper.read_bytes())
+    source["descriptor_sha256"] = digest(canonical({k: v for k, v in source.items() if k != "descriptor_sha256"}))
+    transport = {
+        "ssh_sha256": digest(fake.read_bytes()),
+        "known_hosts_sha256": digest(hosts.read_bytes()),
+        "identity_sha256": digest(identity.read_bytes()),
+        "helper_sha256": digest(helper.read_bytes()),
+        "python_sha256": "sha256:" + "5" * 64,
+        "git_sha256": "sha256:" + "6" * 64,
+    }
+    request = make_request(operation_id="killpg", transport=transport, source=source)
+    request["bounds"]["timeout_seconds"] = 1
+    request["request_sha256"] = digest(canonical({k: v for k, v in request.items() if k != "request_sha256"}))
+    provider = SshObservationProvider(request, fake, hosts, identity, helper, "/usr/bin/python3")
+    with pytest.raises(ObservationError, match="timed out"):
+        provider.observe(request)
+    for _ in range(20):
+        if pid_file.exists() and not Path("/proc", pid_file.read_text()).exists():
+            break
+        time.sleep(0.05)
+    assert pid_file.exists() and not Path("/proc", pid_file.read_text()).exists()

@@ -43,7 +43,6 @@ class EffectKind(str, Enum):
     NIXOS_REVIEWED_EVALUATION = "nixos-reviewed-evaluation"
     NIXOS_OBSERVER_RENDER_EVALUATION = "nixos-observer-render-evaluation"
     NIXOS_A3_SUCCESSOR_EVALUATION = "nixos-a3-successor-evaluation"
-    TGW_PROD_A3_PREINTEGRATION_OBSERVATION = "tgw-prod-a3-preintegration-observation"
 
 
 @dataclass(frozen=True)

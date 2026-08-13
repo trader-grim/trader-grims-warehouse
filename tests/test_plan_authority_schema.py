@@ -7,7 +7,7 @@ from tgw.plan_authority_schema import REQUIRED_TABLES, apply_plan_authority_sche
 
 def _connection(
     rows=(),
-    constraint="CHECK effect_kind IN ('nixos-a3-successor-evaluation','tgw-prod-a3-preintegration-observation')",
+    constraint="CHECK effect_kind IN ('nixos-a3-successor-evaluation')",
 ):
     cursor = MagicMock()
     cursor.__enter__.return_value = cursor
