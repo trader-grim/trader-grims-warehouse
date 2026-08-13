@@ -81,8 +81,15 @@ def validate_source_descriptor(value: Any) -> dict[str, Any]:
     source = dict(_exact(value, fields, "reviewed source descriptor"))
     if source["schema"] != SOURCE_DESCRIPTOR_SCHEMA or source["checkpoint"] != EVIDENCE_COMMIT:
         raise ObservationError("reviewed source checkpoint is invalid")
-    if not _GIT.fullmatch(str(source["commit"])) or not _GIT.fullmatch(str(source["tree"])):
-        raise ObservationError("reviewed source Git identity is invalid")
+    exact = {
+        "commit": SOURCE_COMMIT,
+        "tree": SOURCE_TREE,
+        "archive_sha256": SOURCE_ARCHIVE,
+        "candidate_identity": SOURCE_CANDIDATE,
+        "catalog_sha256": SOURCE_CATALOG,
+    }
+    if any(source[key] != expected for key, expected in exact.items()):
+        raise ObservationError("reviewed source identity is not the admitted source")
     for key in ("archive_sha256", "catalog_sha256", "helper_sha256"):
         if not _SHA.fullmatch(str(source[key])):
             raise ObservationError(f"reviewed source {key} is invalid")
@@ -142,14 +149,38 @@ def validate_request(value: Any, *, now: datetime | None = None) -> dict[str, An
     if dict(plan) != {"commit": PLAN_COMMIT, "solution_sha256": PLAN_SOLUTION, "closure_sha256": PLAN_CLOSURE}:
         raise ObservationError("Plan binding is not exact")
     validate_source_descriptor(request["source"])
-    dependency = _exact(request["host_state_dependency"], {"schema", "status", "descriptor_sha256", "receipt_sha256"}, "host state dependency")
+    dependency = _exact(
+        request["host_state_dependency"],
+        {"schema", "status", "descriptor_sha256", "receipt_sha256", "observed_at", "current_cas", "profile_cas", "tools", "receipt"},
+        "host state dependency",
+    )
     if (
         dependency["schema"] != "tgw-prod-a3-host-state-observation-dependency/v1"
-        or dependency["status"] != "REQUIRED_NOT_EXECUTABLE"
-        or dependency["receipt_sha256"] is not None
+        or dependency["status"] != "SATISFIED"
+        or not _SHA.fullmatch(str(dependency["receipt_sha256"]))
         or not _SHA.fullmatch(str(dependency["descriptor_sha256"]))
     ):
-        raise ObservationError("host state dependency is not exact and executable")
+        raise ObservationError("host state dependency is not satisfied")
+    if not isinstance(dependency["current_cas"], str) or dependency["current_cas"] != dependency["profile_cas"] or not dependency["current_cas"].startswith("/nix/store/"):
+        raise ObservationError("host state CAS is invalid")
+    tools = _exact(dependency["tools"], {"python_sha256", "git_sha256", "ssh_sha256"}, "host tools")
+    if any(not _SHA.fullmatch(str(item)) for item in tools.values()) or any(tools[key] != request["transport"][key] for key in tools):
+        raise ObservationError("host tool evidence differs from transport")
+    observed = datetime.fromisoformat(str(dependency["observed_at"]).replace("Z", "+00:00"))
+    if observed.tzinfo is None or (now is not None and not timedelta(0) <= now - observed <= timedelta(minutes=10)):
+        raise ObservationError("host state evidence is stale")
+    host_receipt = dict(_exact(dependency["receipt"], {"schema", "observed_at", "current_cas", "profile_cas", "tools", "receipt_sha256"}, "host state receipt"))
+    receipt_hash = host_receipt.pop("receipt_sha256")
+    if (
+        host_receipt["schema"] != "tgw-prod-a3-host-state-observation-receipt/v1"
+        or receipt_hash != digest(canonical(host_receipt))
+        or receipt_hash != dependency["receipt_sha256"]
+        or host_receipt["observed_at"] != dependency["observed_at"]
+        or host_receipt["current_cas"] != dependency["current_cas"]
+        or host_receipt["profile_cas"] != dependency["profile_cas"]
+        or host_receipt["tools"] != tools
+    ):
+        raise ObservationError("host state receipt is not self-hashed and exact")
     if request["target"] != {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "main", "system": "x86_64-linux", "user": "codex", "port": 22}:
         raise ObservationError("target is not exact")
     transport_fields = {
@@ -199,6 +230,14 @@ def make_request(*, operation_id: str, transport: Mapping[str, str], source: Map
     transport["helper_sha256"] = source["helper_sha256"]
     transport.setdefault("ssh_keygen_sha256", "sha256:" + "8" * 64)
     transport.setdefault("identity_public", "ssh-ed25519 a2V5")
+    host_receipt = {
+        "schema": "tgw-prod-a3-host-state-observation-receipt/v1",
+        "observed_at": now.isoformat(),
+        "current_cas": "/nix/store/00000000000000000000000000000000-test-system",
+        "profile_cas": "/nix/store/00000000000000000000000000000000-test-system",
+        "tools": {name: transport[name] for name in ("python_sha256", "git_sha256", "ssh_sha256")},
+    }
+    host_receipt["receipt_sha256"] = digest(canonical(host_receipt))
     value = {
         "schema": REQUEST_SCHEMA,
         "operation_id": operation_id,
@@ -206,9 +245,18 @@ def make_request(*, operation_id: str, transport: Mapping[str, str], source: Map
         "source": source,
         "host_state_dependency": {
             "schema": "tgw-prod-a3-host-state-observation-dependency/v1",
-            "status": "REQUIRED_NOT_EXECUTABLE",
+            "status": "SATISFIED",
             "descriptor_sha256": "sha256:" + "7" * 64,
-            "receipt_sha256": None,
+            "receipt_sha256": host_receipt["receipt_sha256"],
+            "observed_at": now.isoformat(),
+            "current_cas": "/nix/store/00000000000000000000000000000000-test-system",
+            "profile_cas": "/nix/store/00000000000000000000000000000000-test-system",
+            "tools": {
+                "python_sha256": transport["python_sha256"],
+                "git_sha256": transport["git_sha256"],
+                "ssh_sha256": transport["ssh_sha256"],
+            },
+            "receipt": host_receipt,
         },
         "target": {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "main", "system": "x86_64-linux", "user": "codex", "port": 22},
         "transport": transport,
@@ -700,6 +748,22 @@ class SshObservationProvider:
             for fd in (sealed_identity, sealed_hosts, helper_fd, identity_fd, hosts_fd, ssh_fd):
                 os.close(fd)
 
+    def prepare_launch(self, request: Mapping[str, Any]) -> Any:
+        """Return the single controller-invoked launch; no provider callback can skip consumption."""
+        validated = validate_request(request, now=datetime.now(timezone.utc))
+        if not self.ready(validated):
+            raise ObservationHold("sealed SSH composition is not ready")
+        used = False
+
+        def launch() -> Mapping[str, Any]:
+            nonlocal used
+            if used:
+                raise ObservationError("sealed observation launch was invoked more than once")
+            used = True
+            return self.observe(validated, on_dispatch=lambda: None)
+
+        return launch
+
 
 class ImmutableEvidenceStore:
     def __init__(self, root: Path, *, trusted_uid: int | None = None):
@@ -711,7 +775,13 @@ class ImmutableEvidenceStore:
         st = os.lstat(self.root)
         return {"path": str(self.root), "uid": st.st_uid, "gid": st.st_gid, "mode": stat.S_IMODE(st.st_mode), "dev": st.st_dev, "ino": st.st_ino, "nlink": st.st_nlink}
 
-    def persist(self, receipt: Mapping[str, Any], archive: bytes, request: Mapping[str, Any] | None = None) -> tuple[Path, ...]:
+    def persist(
+        self,
+        receipt: Mapping[str, Any],
+        archive: bytes,
+        request: Mapping[str, Any] | None = None,
+        attachments: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> tuple[Path, ...]:
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         root_stat = os.fstat(root_fd)
@@ -721,10 +791,27 @@ class ImmutableEvidenceStore:
         identity = str(receipt["receipt_sha256"]).split(":", 1)[1]
         request_raw = canonical(request or {"request_sha256": receipt["request_sha256"]})
         receipt_raw = canonical(receipt)
-        manifest = {"request_sha256": digest(request_raw), "receipt_sha256": digest(receipt_raw), "archive_sha256": digest(archive), "archive_size": len(archive)}
-        items = (("request.json", request_raw), ("receipt.json", receipt_raw), ("archive.tar", archive), ("manifest.json", canonical(manifest)))
+        raw_attachments = {name: canonical(value) for name, value in (attachments or {}).items()}
+        if any(not name.endswith(".json") or "/" in name or name.startswith(".") for name in raw_attachments):
+            raise ObservationError("evidence attachment name is invalid")
+        manifest = {
+            "request_sha256": digest(request_raw),
+            "receipt_sha256": digest(receipt_raw),
+            "archive_sha256": digest(archive),
+            "archive_size": len(archive),
+            "attachments": {name: {"sha256": digest(raw), "size": len(raw)} for name, raw in sorted(raw_attachments.items())},
+        }
+        items = (
+            ("request.json", request_raw),
+            ("receipt.json", receipt_raw),
+            ("archive.tar", archive),
+            *((name, raw) for name, raw in sorted(raw_attachments.items())),
+            ("manifest.json", canonical(manifest)),
+        )
         paths: list[Path] = []
         attempt = ".attempt-" + identity
+        attempt_fd = -1
+        created_names: list[str] = []
         try:
             try:
                 existing = os.open(identity, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
@@ -748,6 +835,7 @@ class ImmutableEvidenceStore:
                     os.lseek(fd, 0, os.SEEK_SET)
                 finally:
                     os.close(fd)
+                created_names.append(name)
                 check_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=attempt_fd)
                 try:
                     if digest(os.read(check_fd, len(raw) + 1)) != digest(raw):
@@ -757,8 +845,22 @@ class ImmutableEvidenceStore:
                 paths.append(self.root / identity / name)
             os.fsync(attempt_fd)
             os.close(attempt_fd)
+            attempt_fd = -1
             os.rename(attempt, identity, src_dir_fd=root_fd, dst_dir_fd=root_fd)
             os.fsync(root_fd)
+        except Exception:
+            if attempt_fd >= 0:
+                for name in reversed(created_names):
+                    try:
+                        os.unlink(name, dir_fd=attempt_fd)
+                    except FileNotFoundError:
+                        pass
+                os.close(attempt_fd)
+            try:
+                os.rmdir(attempt, dir_fd=root_fd)
+            except FileNotFoundError:
+                pass
+            raise
         finally:
             os.close(root_fd)
         return tuple(paths)
@@ -771,13 +873,14 @@ def persist_evidence(
     receipt: Mapping[str, Any],
     archive: bytes,
     observed_at: str,
+    attachments: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[Path, ...]:
     """Retain validated in-memory facts when durable state becomes uncertain."""
     request = validate_request(request)
     receipt = validate_receipt(receipt, request)
     replay_archive(archive, receipt, request)
     try:
-        return store.persist(receipt, archive, request)
+        return store.persist(receipt, archive, request, attachments)
     except Exception as exc:
         ambiguous = terminal(
             outcome="AMBIGUOUS",

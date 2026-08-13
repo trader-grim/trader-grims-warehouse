@@ -32,7 +32,7 @@ def _grant(request, token_root: Path, evidence_root: Path):
         composition_sha256="sha256:" + "2" * 64,
         token_root_identity=_identity(token_root),
         evidence_root_identity=_identity(evidence_root),
-        host_state_dependency_sha256=request["host_state_dependency"]["descriptor_sha256"],
+        host_state_dependency=request["host_state_dependency"],
         expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
     )
 
@@ -44,12 +44,14 @@ class Provider:
     def ready(self, request):
         return self.is_ready
 
-    def observe(self, request, *, on_dispatch):
-        on_dispatch()
-        self.calls += 1
-        if self.fail:
-            raise RuntimeError("after dispatch")
-        return self.result
+    def prepare_launch(self, request):
+        def launch():
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("after dispatch")
+            return self.result
+
+        return launch
 
 
 def test_hold_before_ready_does_not_consume(tmp_path: Path) -> None:
@@ -127,3 +129,26 @@ def test_grant_rejects_bool_attempts(tmp_path: Path) -> None:
     grant["attempts"] = True
     with pytest.raises(Exception):
         ReadOnlyObservationGrant.validate(grant)
+
+
+def test_provider_cannot_return_without_controller_dispatch(tmp_path: Path) -> None:
+    class SkippingProvider(Provider):
+        def prepare_launch(self, request):
+            return {"receipt": {}, "archive": b"fabricated"}
+
+    request = _request()
+    token_root = tmp_path / "tokens"
+    token_root.mkdir(mode=0o700)
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    grant = _grant(request, token_root, evidence_root)
+    controller = ReadOnlyObservationController(
+        grant=grant,
+        provider=SkippingProvider(),
+        composition_sha256="sha256:" + "2" * 64,
+        evidence_store=ImmutableEvidenceStore(evidence_root),
+        token=DurableObservationToken(str(token_root), grant.value["grant_sha256"]),
+    )
+    with pytest.raises(ObservationDispatchAmbiguous):
+        controller.execute(request)
+    assert controller.consumed is False
