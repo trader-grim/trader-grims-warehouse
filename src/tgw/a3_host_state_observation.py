@@ -49,6 +49,7 @@ REQUEST_SCHEMA = "tgw-prod-a3-host-state-observation-request/v1"
 RECEIPT_SCHEMA = "tgw-prod-a3-host-state-observation-receipt/v1"
 TERMINAL_SCHEMA = "tgw-prod-a3-host-state-observation-terminal/v1"
 RESULT_SCHEMA = "tgw-prod-a3-host-state-observation-result/v1"
+PERSISTENCE_CONTEXT_SCHEMA = "tgw-prod-a3-host-state-observation-persistence-context/v1"
 PLAN_AUTHORITY_SCHEMA = "tgw-prod-a3-host-state-plan-authority/v1"
 PARITY_SCHEMA = "tgw-prod-a3-host-state-sshd-parity/v1"
 GRANT_SCHEMA = "tgw-prod-a3-host-state-observation-grant/v1"
@@ -61,6 +62,7 @@ _OPERATION = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _PLAN_SEAL = object()
 _PARITY_SEAL = object()
 _COMPOSITION_SEAL = object()
+_GRANT_SEAL = object()
 _PARITY_EVIDENCE_ROLES = {
     "sshd_executable",
     "sshd_config",
@@ -92,9 +94,14 @@ class HostStateError(ObservationError):
 
 
 class HostStatePersistenceAmbiguous(HostStateError):
-    def __init__(self, terminal_value: Mapping[str, Any]):
+    def __init__(
+        self,
+        terminal_value: Mapping[str, Any],
+        context: Mapping[str, Any],
+    ):
         super().__init__("host-state evidence persistence is ambiguous")
         self.terminal = dict(terminal_value)
+        self.context = dict(context)
 
 
 class HostStateDispatchAmbiguous(HostStateError):
@@ -706,6 +713,7 @@ def observe_host_state(
             "profile_cas": profile,
             "system_identity": current_identity,
             "tools": {"python": python_identity, "git": git_identity},
+            "tool_environment": _local_process_environment(),
             "repository": repo,
             "effects": {"remote_write": False, "repository_write": False, "nix": False},
         }
@@ -758,6 +766,7 @@ def validate_receipt(value: Any, request_value: Mapping[str, Any], *, now: datet
         "profile_cas",
         "system_identity",
         "tools",
+        "tool_environment",
         "repository",
         "effects",
         "receipt_sha256",
@@ -773,6 +782,8 @@ def validate_receipt(value: Any, request_value: Mapping[str, Any], *, now: datet
     tools = _exact(receipt["tools"], {"python", "git"}, "host-state tools")
     _validate_tool(tools["python"], "Python")
     _validate_tool(tools["git"], "Git")
+    if receipt["tool_environment"] != _local_process_environment():
+        raise HostStateError("host-state tool environment differs")
     system_identity = _exact(
         receipt["system_identity"],
         {"dev", "ino", "uid", "gid", "mode"},
@@ -996,12 +1007,23 @@ def _validate_production_private_root(
     return identity
 
 
-@dataclass(frozen=True)
 class HostStateObservationGrant:
-    value: Mapping[str, Any]
+    __slots__ = ("_value",)
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        raise TypeError("HostStateObservationGrant is sealed")
+
+    def __init__(self, value: Mapping[str, Any], *, _token: object) -> None:
+        if _token is not _GRANT_SEAL:
+            raise HostStateError("host-state grant may only be loaded as authority")
+        self._value = dict(value)
+
+    @property
+    def value(self) -> dict[str, Any]:
+        return dict(self._value)
 
     @classmethod
-    def issue(
+    def _fixture_issue(
         cls,
         *,
         request: Mapping[str, Any],
@@ -1028,7 +1050,10 @@ class HostStateObservationGrant:
             "expires_at": expires_at,
         }
         payload["grant_sha256"] = _hash(payload)
-        return cls(cls.validate(payload, request=validated, now=observed))
+        return cls(
+            cls.validate(payload, request=validated, now=observed),
+            _token=_GRANT_SEAL,
+        )
 
     @staticmethod
     def validate(
@@ -1079,15 +1104,97 @@ class HostStateObservationGrant:
         return grant
 
 
+class MountedHostStateObservationGrant:
+    __slots__ = ("fd", "grant", "identity", "path", "sha256")
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        raise TypeError("MountedHostStateObservationGrant is sealed")
+
+    def __init__(
+        self,
+        path: Path,
+        expected_sha256: str,
+        *,
+        request: Mapping[str, Any],
+        now: datetime,
+        _token: object,
+    ) -> None:
+        if _token is not _GRANT_SEAL or path.name != expected_sha256.removeprefix("sha256:") + ".json":
+            raise HostStateError("host-state grant locator is not content addressed")
+        fd, raw = _protected_file(path, expected_sha256)
+        try:
+            grant = HostStateObservationGrant.validate(json.loads(raw), request=request, now=now)
+            if raw != canonical(grant):
+                raise HostStateError("mounted host-state grant is not canonical")
+        except Exception:
+            os.close(fd)
+            raise
+        self.fd = fd
+        self.grant = grant
+        self.identity = _inode_identity(os.fstat(fd))
+        self.path = path
+        self.sha256 = expected_sha256
+
+    def postcheck(self) -> None:
+        held = os.fstat(self.fd)
+        named = os.stat(self.path, follow_symlinks=False)
+        raw = os.pread(self.fd, held.st_size + 1, 0)
+        if _inode_identity(held) != self.identity or _inode_identity(named) != self.identity or digest(raw) != self.sha256:
+            raise HostStateError("mounted host-state grant changed")
+
+    def read(
+        self,
+        *,
+        request: Mapping[str, Any],
+        now: datetime,
+    ) -> dict[str, Any]:
+        self.postcheck()
+        held = os.fstat(self.fd)
+        raw = os.pread(self.fd, held.st_size + 1, 0)
+        parsed = HostStateObservationGrant.validate(json.loads(raw), request=request, now=now)
+        if raw != canonical(parsed):
+            raise HostStateError("mounted host-state grant is not canonical")
+        return parsed
+
+
+def load_host_state_observation_grant(
+    path: Path,
+    expected_sha256: str,
+    *,
+    request: Mapping[str, Any],
+    now: datetime | None = None,
+) -> MountedHostStateObservationGrant:
+    observed = now or datetime.now(timezone.utc)
+    return MountedHostStateObservationGrant(
+        path,
+        expected_sha256,
+        request=request,
+        now=observed,
+        _token=_GRANT_SEAL,
+    )
+
+
 class HostStateEvidenceStore:
     """Atomic attempt-directory evidence publication using the admitted store primitive."""
+
+    __slots__ = ("_sealed", "_store", "root")
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        raise TypeError("HostStateEvidenceStore is sealed")
 
     def __init__(self, root: Path, *, trusted_uid: int | None = None) -> None:
         if not root.is_absolute():
             raise HostStateError("host-state evidence root is not absolute")
         _reject_symlink_ancestors(root.parent)
-        self._store = _AtomicEvidenceStore(root, trusted_uid=trusted_uid)
-        self.root = root
+        object.__setattr__(self, "_sealed", False)
+        object.__setattr__(self, "_store", _AtomicEvidenceStore(root, trusted_uid=trusted_uid))
+        object.__setattr__(self, "root", root)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("HostStateEvidenceStore is immutable")
+        object.__setattr__(self, name, value)
 
     @property
     def identity(self) -> dict[str, Any]:
@@ -1113,6 +1220,53 @@ class HostStateEvidenceStore:
             )
         except (OSError, HostStateError):
             return False
+
+    def close(self) -> None:
+        os.close(self._store._root_fd)
+        os.close(self._store._parent_fd)
+
+    def _persistence_context(
+        self,
+        *,
+        request: Mapping[str, Any],
+        attempted_receipt: Mapping[str, Any],
+        attachments: Mapping[str, Mapping[str, Any]],
+        original_terminal: Mapping[str, Any],
+        observed_receipt: Mapping[str, Any] | None,
+        observed_dependency: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        request_raw = canonical(request)
+        receipt_raw = canonical(attempted_receipt)
+        attachment_raw = {name: canonical(value) for name, value in sorted(attachments.items())}
+        manifest = {
+            "request_sha256": digest(request_raw),
+            "receipt_sha256": digest(receipt_raw),
+            "archive_sha256": digest(b""),
+            "archive_size": 0,
+            "attachments": {name: {"sha256": digest(raw), "size": len(raw)} for name, raw in attachment_raw.items()},
+        }
+        item_raw = {
+            "request.json": request_raw,
+            "receipt.json": receipt_raw,
+            "archive.tar": b"",
+            **attachment_raw,
+            "manifest.json": canonical(manifest),
+        }
+        attempt_name = str(attempted_receipt["receipt_sha256"]).split(":", 1)[1]
+        context = {
+            "schema": PERSISTENCE_CONTEXT_SCHEMA,
+            "status": "UNVERIFIED_NOT_DURABLE",
+            "attempt_name": attempt_name,
+            "attempt_path": str(self.root / attempt_name),
+            "attempted_receipt": dict(attempted_receipt),
+            "original_terminal": dict(original_terminal),
+            "observed_receipt": (None if observed_receipt is None else dict(observed_receipt)),
+            "observed_dependency": (None if observed_dependency is None else dict(observed_dependency)),
+            "attempted_attachments": {name: dict(value) for name, value in sorted(attachments.items())},
+            "expected_items": {name: {"sha256": digest(raw), "size": len(raw)} for name, raw in sorted(item_raw.items())},
+        }
+        context["context_sha256"] = _hash(context)
+        return context
 
     def persist(
         self,
@@ -1157,7 +1311,15 @@ class HostStateEvidenceStore:
                 observed_at=datetime.now(timezone.utc).isoformat(),
                 diagnostic=type(exc).__name__.encode(),
             )
-            raise HostStatePersistenceAmbiguous(ambiguous) from exc
+            context = self._persistence_context(
+                request=validated_request,
+                attempted_receipt=validated_receipt,
+                attachments=attachments,
+                original_terminal=validated_terminal,
+                observed_receipt=validated_receipt,
+                observed_dependency=dependency,
+            )
+            raise HostStatePersistenceAmbiguous(ambiguous, context) from exc
 
     def persist_terminal(
         self,
@@ -1206,7 +1368,15 @@ class HostStateEvidenceStore:
                 observed_at=datetime.now(timezone.utc).isoformat(),
                 diagnostic=type(exc).__name__.encode(),
             )
-            raise HostStatePersistenceAmbiguous(ambiguous) from exc
+            context = self._persistence_context(
+                request=validated_request,
+                attempted_receipt=failure,
+                attachments=attachments,
+                original_terminal=validated_terminal,
+                observed_receipt=None,
+                observed_dependency=None,
+            )
+            raise HostStatePersistenceAmbiguous(ambiguous, context) from exc
 
 
 def _verify_evidence_bundle(
@@ -1766,6 +1936,7 @@ class HostStateProductionComposition:
             or provider.production_authority is not True
             or type(provider.plan_authority) is not MountedHostStatePlanAuthority
             or type(provider.parity_authority) is not MountedSshdParityAuthority
+            or type(evidence_store) is not HostStateEvidenceStore
         ):
             raise HostStateError("production host-state composition is not sealed")
         fixed_token_root = _validate_production_private_root(
@@ -1917,23 +2088,180 @@ def build_host_state_production_composition(
     )
 
 
+def _validate_persistence_context(
+    value: Any,
+    *,
+    request: Mapping[str, Any],
+    evidence_root: Mapping[str, Any],
+    persistence_terminal: Mapping[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "schema",
+        "status",
+        "attempt_name",
+        "attempt_path",
+        "attempted_receipt",
+        "original_terminal",
+        "observed_receipt",
+        "observed_dependency",
+        "attempted_attachments",
+        "expected_items",
+        "context_sha256",
+    }
+    context = dict(_exact(value, fields, "host-state persistence context"))
+    claimed = context.pop("context_sha256")
+    if context["schema"] != PERSISTENCE_CONTEXT_SCHEMA or context["status"] != "UNVERIFIED_NOT_DURABLE" or claimed != _hash(context):
+        raise HostStateError("host-state persistence context identity differs")
+    context["context_sha256"] = claimed
+    original = validate_terminal(
+        context["original_terminal"],
+        request_sha256=request["request_sha256"],
+    )
+    original_tuple = (
+        original["outcome"],
+        original["stage"],
+        original["code"],
+        original["dispatched"],
+    )
+    if original_tuple not in {
+        ("PASS", "complete", "NONE", True),
+        ("HOLD", "remote", "HOST_NOT_READY", True),
+        ("FAILED", "remote", "HELPER_FAILED", True),
+        ("AMBIGUOUS", "authority", "TOKEN_UNCERTAIN", False),
+        ("AMBIGUOUS", "dispatch", "DISPATCH_UNCERTAIN", True),
+    }:
+        raise HostStateError("host-state persistence origin is not controller-produced")
+    if original["dispatched"] is not persistence_terminal["dispatched"]:
+        raise HostStateError("host-state persistence origin dispatch differs")
+    attachments = context["attempted_attachments"]
+    if not isinstance(attachments, Mapping):
+        raise HostStateError("host-state persistence attachments differ")
+    common_names = {
+        "terminal.json",
+        "grant.json",
+        "token-root.json",
+        "composition.json",
+    }
+    expected_names = common_names | ({"dependency.json"} if original["outcome"] == "PASS" else set())
+    if set(attachments) != expected_names or attachments["terminal.json"] != original:
+        raise HostStateError("host-state persistence attachment set differs")
+    grant = HostStateObservationGrant.validate(attachments["grant.json"], request=request)
+    token_root = _root_identity(attachments["token-root.json"], "persistence token root")
+    if not _same_root_authority(token_root, grant["token_root_identity"]):
+        raise HostStateError("host-state persistence token authority differs")
+    _validate_composition_value(
+        attachments["composition.json"],
+        request,
+        expected_sha256=grant["composition_sha256"],
+        expected_evidence_root=evidence_root,
+    )
+    attempted_receipt = context["attempted_receipt"]
+    if not isinstance(attempted_receipt, Mapping):
+        raise HostStateError("host-state persistence attempted receipt differs")
+    if original["outcome"] == "PASS":
+        observed_receipt = validate_receipt(context["observed_receipt"], request)
+        dependency = context["observed_dependency"]
+        if (
+            attempted_receipt != observed_receipt
+            or not isinstance(dependency, Mapping)
+            or attachments["dependency.json"] != dependency
+            or dependency
+            != dependency_projection(
+                observed_receipt,
+                request,
+                ssh_sha256=request["transport"]["ssh_sha256"],
+                descriptor_sha256=grant["composition_sha256"],
+            )
+        ):
+            raise HostStateError("host-state persistence success origin differs")
+    else:
+        if context["observed_receipt"] is not None or context["observed_dependency"] is not None:
+            raise HostStateError("host-state persistence terminal origin differs")
+        expected_failure = {
+            "schema": "tgw-prod-a3-host-state-observation-failure-evidence/v1",
+            "request_sha256": request["request_sha256"],
+            "terminal_sha256": original["terminal_sha256"],
+            "composition_sha256": grant["composition_sha256"],
+        }
+        expected_failure["receipt_sha256"] = _hash(expected_failure)
+        if attempted_receipt != expected_failure:
+            raise HostStateError("host-state persistence failure origin differs")
+    request_raw = canonical(request)
+    receipt_raw = canonical(attempted_receipt)
+    attachment_raw = {name: canonical(item) for name, item in sorted(attachments.items())}
+    manifest = {
+        "request_sha256": digest(request_raw),
+        "receipt_sha256": digest(receipt_raw),
+        "archive_sha256": digest(b""),
+        "archive_size": 0,
+        "attachments": {name: {"sha256": digest(raw), "size": len(raw)} for name, raw in attachment_raw.items()},
+    }
+    item_raw = {
+        "request.json": request_raw,
+        "receipt.json": receipt_raw,
+        "archive.tar": b"",
+        **attachment_raw,
+        "manifest.json": canonical(manifest),
+    }
+    expected_items = {name: {"sha256": digest(raw), "size": len(raw)} for name, raw in sorted(item_raw.items())}
+    attempt_name = str(attempted_receipt["receipt_sha256"]).split(":", 1)[1]
+    root = Path(str(evidence_root["path"]))
+    if context["attempt_name"] != attempt_name or context["attempt_path"] != str(root / attempt_name) or context["expected_items"] != expected_items:
+        raise HostStateError("host-state persistence attempt identity differs")
+    return context
+
+
 class HostStateObservationController:
     def execute(
         self,
         *,
         request: Mapping[str, Any],
         composition: HostStateProductionComposition,
-        grant: HostStateObservationGrant,
+        grant: MountedHostStateObservationGrant,
         token: DurableObservationToken,
-        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if type(grant) is not MountedHostStateObservationGrant:
+            raise HostStateError("production host-state grant is not mounted")
+        try:
+            if type(token) is not DurableObservationToken:
+                raise HostStateError("production host-state token is not sealed")
+            return self._execute(
+                request=request,
+                composition=composition,
+                grant=grant,
+                token=token,
+            )
+        finally:
+            try:
+                if type(composition) is HostStateProductionComposition and type(composition.evidence_store) is HostStateEvidenceStore:
+                    composition.evidence_store.close()
+            finally:
+                try:
+                    if type(token) is DurableObservationToken:
+                        token.close()
+                finally:
+                    try:
+                        grant.postcheck()
+                    finally:
+                        os.close(grant.fd)
+
+    def _execute(
+        self,
+        *,
+        request: Mapping[str, Any],
+        composition: HostStateProductionComposition,
+        grant: MountedHostStateObservationGrant,
+        token: DurableObservationToken,
     ) -> dict[str, Any]:
         if type(composition) is not HostStateProductionComposition:
             raise HostStateError("production host-state composition is not sealed")
+        if type(composition.evidence_store) is not HostStateEvidenceStore:
+            raise HostStateError("production host-state evidence store is not sealed")
         try:
             provider = composition.provider
             evidence_store = composition.evidence_store
             composition_sha256 = composition.receipt_sha256
-            observed = now or datetime.now(timezone.utc)
+            observed = datetime.now(timezone.utc)
             validated = validate_request(
                 request,
                 now=observed,
@@ -1951,10 +2279,15 @@ class HostStateObservationController:
                 expected_evidence_root=evidence_store.identity,
             )
             composition.authority_check()
-            fixed_grant = HostStateObservationGrant.validate(grant.value, request=validated, now=observed)
+            fixed_grant = grant.read(request=validated, now=observed)
             if fixed_grant["composition_sha256"] != composition_sha256:
                 raise HostStateError("host-state grant composition differs")
-            if token.grant_sha256 != fixed_grant["grant_sha256"] or token.identity != fixed_grant["token_root_identity"] or token.identity != composition.value["token_root_identity"]:
+            if (
+                not token.ready()
+                or token.grant_sha256 != fixed_grant["grant_sha256"]
+                or token.identity != fixed_grant["token_root_identity"]
+                or token.identity != composition.value["token_root_identity"]
+            ):
                 raise HostStateError("host-state token authority differs")
             if (
                 not evidence_store.ready()
@@ -1966,6 +2299,42 @@ class HostStateObservationController:
             composition.close()
             raise
         launch = composition.take_launch()
+
+        def persistence_result(exc: HostStatePersistenceAmbiguous) -> dict[str, Any]:
+            persistence_terminal = validate_terminal(
+                exc.terminal,
+                request_sha256=validated["request_sha256"],
+            )
+            persistence_tuple = (
+                persistence_terminal["outcome"],
+                persistence_terminal["stage"],
+                persistence_terminal["code"],
+                persistence_terminal["dispatched"],
+            )
+            if persistence_tuple not in {
+                ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", False),
+                ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", True),
+            }:
+                raise HostStateError("host-state persistence terminal differs")
+            result = {
+                "schema": RESULT_SCHEMA,
+                "composition_sha256": composition_sha256,
+                "evidence_root_identity": evidence_store.identity,
+                "terminal": persistence_terminal,
+                "receipt": None,
+                "dependency": None,
+                "evidence": [],
+                "persistence": exc.context,
+            }
+            result["result_sha256"] = _hash(result)
+            validate_result(
+                result,
+                validated,
+                expected_composition_sha256=composition_sha256,
+                expected_evidence_root_identity=evidence_store.identity,
+            )
+            return result
+
         try:
             token.consume()
         except ObservationAlreadyConsumed:
@@ -1991,8 +2360,8 @@ class HostStateObservationController:
                     composition_sha256=composition_sha256,
                     composition_value=composition.value,
                 )
-            except HostStatePersistenceAmbiguous:
-                evidence = ()
+            except HostStatePersistenceAmbiguous as persistence_exc:
+                return persistence_result(persistence_exc)
             result = {
                 "schema": RESULT_SCHEMA,
                 "composition_sha256": composition_sha256,
@@ -2001,6 +2370,7 @@ class HostStateObservationController:
                 "receipt": None,
                 "dependency": None,
                 "evidence": list(evidence),
+                "persistence": None,
             }
             result["result_sha256"] = _hash(result)
             validate_result(
@@ -2014,40 +2384,8 @@ class HostStateObservationController:
             try:
                 launch.close()
             except Exception as close_exc:
-                raise HostStateDispatchAmbiguous(
-                    "host-state predispatch cleanup is uncertain"
-                ) from close_exc
+                raise HostStateDispatchAmbiguous("host-state predispatch cleanup is uncertain") from close_exc
             raise ObservationHold("host-state authority could not be consumed before dispatch") from exc
-
-        def persistence_result(exc: HostStatePersistenceAmbiguous) -> dict[str, Any]:
-            persistence_terminal = validate_terminal(
-                exc.terminal,
-                request_sha256=validated["request_sha256"],
-            )
-            if (
-                persistence_terminal["outcome"],
-                persistence_terminal["stage"],
-                persistence_terminal["code"],
-                persistence_terminal["dispatched"],
-            ) != ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", True):
-                raise HostStateError("host-state persistence terminal differs")
-            result = {
-                "schema": RESULT_SCHEMA,
-                "composition_sha256": composition_sha256,
-                "evidence_root_identity": evidence_store.identity,
-                "terminal": persistence_terminal,
-                "receipt": None,
-                "dependency": None,
-                "evidence": [],
-            }
-            result["result_sha256"] = _hash(result)
-            validate_result(
-                result,
-                validated,
-                expected_composition_sha256=composition_sha256,
-                expected_evidence_root_identity=evidence_store.identity,
-            )
-            return result
 
         try:
             untrusted = launch()
@@ -2076,6 +2414,7 @@ class HostStateObservationController:
                     "receipt": None,
                     "dependency": None,
                     "evidence": list(evidence),
+                    "persistence": None,
                 }
                 result["result_sha256"] = _hash(result)
                 validate_result(
@@ -2117,6 +2456,7 @@ class HostStateObservationController:
                 "receipt": None,
                 "dependency": None,
                 "evidence": list(evidence),
+                "persistence": None,
             }
             result["result_sha256"] = _hash(result)
             validate_result(
@@ -2160,6 +2500,7 @@ class HostStateObservationController:
             "receipt": receipt,
             "dependency": dependency,
             "evidence": list(evidence),
+            "persistence": None,
         }
         result["result_sha256"] = _hash(result)
         validate_result(
@@ -2182,7 +2523,17 @@ def validate_result(
     result = dict(
         _exact(
             value,
-            {"schema", "composition_sha256", "evidence_root_identity", "terminal", "receipt", "dependency", "evidence", "result_sha256"},
+            {
+                "schema",
+                "composition_sha256",
+                "evidence_root_identity",
+                "terminal",
+                "receipt",
+                "dependency",
+                "evidence",
+                "persistence",
+                "result_sha256",
+            },
             "host-state result",
         )
     )
@@ -2214,14 +2565,26 @@ def validate_result(
         ("FAILED", "remote", "HELPER_FAILED", True),
         ("AMBIGUOUS", "authority", "TOKEN_UNCERTAIN", False),
         ("AMBIGUOUS", "dispatch", "DISPATCH_UNCERTAIN", True),
+        ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", False),
         ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", True),
     }:
         raise HostStateError("host-state result terminal is not controller-produced")
-    persistence_uncertain_without_refs = (
-        produced_terminal
-        == ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", True)
-        and not result["evidence"]
-    )
+    is_persistence_uncertain = produced_terminal in {
+        ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", False),
+        ("AMBIGUOUS", "persistence", "PERSISTENCE_UNCERTAIN", True),
+    }
+    if is_persistence_uncertain:
+        if result["evidence"]:
+            raise HostStateError("persistence uncertainty claims durable evidence")
+        _validate_persistence_context(
+            result["persistence"],
+            request=request,
+            evidence_root=expected_evidence_root_identity,
+            persistence_terminal=terminal_value,
+        )
+    elif result["persistence"] is not None:
+        raise HostStateError("non-persistence result has persistence context")
+    persistence_uncertain_without_refs = is_persistence_uncertain and not result["evidence"]
     root = Path(str(expected_evidence_root_identity["path"]))
     if not persistence_uncertain_without_refs:
         _reject_symlink_ancestors(root)
@@ -2235,9 +2598,7 @@ def validate_result(
             "ino": current_root.st_ino,
             "nlink": current_root.st_nlink,
         }
-        if not _same_root_authority(
-            current_root_identity, expected_evidence_root_identity
-        ):
+        if not _same_root_authority(current_root_identity, expected_evidence_root_identity):
             raise HostStateError("host-state evidence root current identity differs")
     refs, evidence_contents = _validate_evidence_refs(result["evidence"]) if result["evidence"] else ([], {})
     if any(Path(ref["path"]).parent.parent != root for ref in refs):
@@ -2293,11 +2654,7 @@ def validate_result(
             raise HostStateError("PASS host-state durable evidence differs")
     elif result["receipt"] is not None or result["dependency"] is not None:
         raise HostStateError("non-PASS host-state result has success receipt")
-    elif (
-        terminal_value["dispatched"]
-        and not result["evidence"]
-        and not persistence_uncertain_without_refs
-    ):
+    elif terminal_value["dispatched"] and not result["evidence"] and not persistence_uncertain_without_refs:
         raise HostStateError("post-dispatch host-state result lacks durable evidence")
     elif refs:
         try:

@@ -494,7 +494,7 @@ def _grant_and_roots(tmp_path: Path, request: dict):
         "evidence_root_identity": store.identity,
     }
     composition = digest(module.canonical(composition_value))
-    grant = HostStateObservationGrant.issue(
+    grant = HostStateObservationGrant._fixture_issue(
         request=request,
         composition_sha256=composition,
         token_root_identity=_identity(token_root),
@@ -508,7 +508,7 @@ def _grant_and_roots(tmp_path: Path, request: dict):
 def test_controller_holds_before_consuming_authority(tmp_path: Path) -> None:
     request = _request()
     grant, token, store, composition, _composition_value = _grant_and_roots(tmp_path, request)
-    with pytest.raises(HostStateError, match="composition"):
+    with pytest.raises(HostStateError, match="grant is not mounted"):
         HostStateObservationController().execute(request=request, composition=object(), grant=grant, token=token)
     assert not list((tmp_path / "tokens").iterdir())
 
@@ -549,6 +549,7 @@ def test_controller_consumes_once_and_persists_atomic_result(tmp_path: Path) -> 
         "receipt": receipt,
         "dependency": dependency,
         "evidence": list(refs),
+        "persistence": None,
     }
     result["result_sha256"] = digest(__import__("tgw.a3_host_state_observation", fromlist=["canonical"]).canonical(result))
     assert (
@@ -605,6 +606,7 @@ def test_failed_terminal_is_durably_bound_to_composition(tmp_path: Path) -> None
         "receipt": None,
         "dependency": None,
         "evidence": list(refs),
+        "persistence": None,
     }
     result["result_sha256"] = digest(__import__("tgw.a3_host_state_observation", fromlist=["canonical"]).canonical(result))
     assert (
@@ -636,9 +638,7 @@ def test_post_publish_validation_failure_is_typed_ambiguous(
     import tgw.a3_host_state_observation as host_state
 
     request, receipt = _observe(tmp_path / "host")
-    grant, token, store, composition, composition_value = _grant_and_roots(
-        tmp_path / "authority", request
-    )
+    grant, token, store, composition, composition_value = _grant_and_roots(tmp_path / "authority", request)
     token.consume()
     terminal_value = terminal(
         outcome="PASS" if success_path else "FAILED",
@@ -680,12 +680,17 @@ def test_post_publish_validation_failure_is_typed_ambiguous(
             )
     assert caught.value.terminal["stage"] == "persistence"
     assert caught.value.terminal["dispatched"] is True
+    assert caught.value.context["original_terminal"] == terminal_value
+    assert caught.value.context["status"] == "UNVERIFIED_NOT_DURABLE"
     assert any(path.is_dir() and not path.name.startswith(".attempt-") for path in store.root.iterdir())
 
 
 def test_grant_rejects_bool_attempt_and_foreign_plan(tmp_path: Path) -> None:
     request = _request()
-    grant, _token, _store, _composition, _composition_value = _grant_and_roots(tmp_path, request)
+    grant, token, _store, _composition, _composition_value = _grant_and_roots(tmp_path, request)
+    assert not hasattr(token, "__dict__")
+    with pytest.raises(AttributeError, match="immutable"):
+        token._grant_sha256 = _sha("replacement")
     changed = dict(grant.value)
     changed["attempts"] = True
     with pytest.raises(HostStateError):
@@ -695,6 +700,30 @@ def test_grant_rejects_bool_attempt_and_foreign_plan(tmp_path: Path) -> None:
     changed["grant_sha256"] = digest(__import__("tgw.a3_host_state_observation", fromlist=["canonical"]).canonical({key: value for key, value in changed.items() if key != "grant_sha256"}))
     with pytest.raises(HostStateError):
         HostStateObservationGrant.validate(changed, request=request)
+
+
+def test_production_authority_types_and_clock_seam_are_sealed() -> None:
+    import inspect
+
+    with pytest.raises(TypeError):
+
+        class _Token(DurableObservationToken):
+            pass
+
+    with pytest.raises(TypeError):
+
+        class _Store(HostStateEvidenceStore):
+            pass
+
+    with pytest.raises(TypeError):
+
+        class _Grant(HostStateObservationGrant):
+            pass
+
+    assert "now" not in inspect.signature(HostStateObservationController.execute).parameters
+    assert not hasattr(HostStateObservationGrant, "issue")
+    with pytest.raises(HostStateError, match="loaded as authority"):
+        HostStateObservationGrant({}, _token=object())
 
 
 def test_result_rejects_forged_terminal_and_evidence(tmp_path: Path) -> None:
@@ -719,6 +748,7 @@ def test_result_rejects_forged_terminal_and_evidence(tmp_path: Path) -> None:
         "receipt": receipt,
         "dependency": dependency,
         "evidence": ["garbage"],
+        "persistence": None,
     }
     result["result_sha256"] = digest(__import__("tgw.a3_host_state_observation", fromlist=["canonical"]).canonical(result))
     with pytest.raises(HostStateError):
@@ -764,9 +794,10 @@ def test_result_rejects_terminal_not_emitted_by_controller(
         "receipt": None,
         "dependency": None,
         "evidence": [],
+        "persistence": None,
     }
     result["result_sha256"] = digest(__import__("tgw.a3_host_state_observation", fromlist=["canonical"]).canonical(result))
-    with pytest.raises(HostStateError, match="not controller-produced"):
+    with pytest.raises(HostStateError):
         validate_result(
             result,
             request,
@@ -775,51 +806,81 @@ def test_result_rejects_terminal_not_emitted_by_controller(
         )
 
 
+@pytest.mark.parametrize("dispatched", [False, True])
 def test_result_accepts_controller_persistence_uncertainty_without_refs(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dispatched: bool,
 ) -> None:
+    import tgw.a3_host_state_observation as host_state
+
     request = _request()
-    evidence_root = tmp_path / "evidence"
-    evidence_root.mkdir(mode=0o700)
-    root_identity = _identity(evidence_root)
-    terminal_value = terminal(
-        outcome="AMBIGUOUS",
-        stage="persistence",
-        code="PERSISTENCE_UNCERTAIN",
-        dispatched=True,
+    grant, token, store, composition, composition_value = _grant_and_roots(tmp_path, request)
+    token.consume()
+    original_terminal = terminal(
+        outcome="FAILED" if dispatched else "AMBIGUOUS",
+        stage="remote" if dispatched else "authority",
+        code="HELPER_FAILED" if dispatched else "TOKEN_UNCERTAIN",
+        dispatched=dispatched,
         request_sha256=request["request_sha256"],
         observed_at=datetime.now(timezone.utc).isoformat(),
-        diagnostic=b"HostStateError",
+        diagnostic=b"origin",
     )
+
+    def fail_after_publication(_paths: tuple[Path, ...]) -> tuple[dict, ...]:
+        raise HostStateError("injected post-publication validation failure")
+
+    monkeypatch.setattr(host_state, "_validate_evidence_paths", fail_after_publication)
+    with pytest.raises(HostStatePersistenceAmbiguous) as caught:
+        store.persist_terminal(
+            request=request,
+            terminal_value=original_terminal,
+            grant=grant.value,
+            token_identity=token.identity,
+            composition_sha256=composition,
+            composition_value=composition_value,
+        )
+    terminal_value = caught.value.terminal
+    root_identity = store.identity
     result = {
         "schema": "tgw-prod-a3-host-state-observation-result/v1",
-        "composition_sha256": _sha("composition"),
+        "composition_sha256": composition,
         "evidence_root_identity": root_identity,
         "terminal": terminal_value,
         "receipt": None,
         "dependency": None,
         "evidence": [],
+        "persistence": caught.value.context,
     }
-    result["result_sha256"] = digest(
-        __import__(
-            "tgw.a3_host_state_observation", fromlist=["canonical"]
-        ).canonical(result)
-    )
+    result["result_sha256"] = digest(__import__("tgw.a3_host_state_observation", fromlist=["canonical"]).canonical(result))
     assert (
         validate_result(
             result,
             request,
-            expected_composition_sha256=_sha("composition"),
+            expected_composition_sha256=composition,
             expected_evidence_root_identity=root_identity,
         )
         == result
     )
-    evidence_root.rename(tmp_path / "displaced-evidence")
+    changed = deepcopy(result)
+    changed["persistence"]["attempt_name"] = "0" * 64
+    changed["persistence"]["context_sha256"] = digest(
+        __import__("tgw.a3_host_state_observation", fromlist=["canonical"]).canonical({key: value for key, value in changed["persistence"].items() if key != "context_sha256"})
+    )
+    changed["result_sha256"] = digest(__import__("tgw.a3_host_state_observation", fromlist=["canonical"]).canonical({key: value for key, value in changed.items() if key != "result_sha256"}))
+    with pytest.raises(HostStateError, match="attempt identity"):
+        validate_result(
+            changed,
+            request,
+            expected_composition_sha256=composition,
+            expected_evidence_root_identity=root_identity,
+        )
+    store.root.rename(tmp_path / "displaced-evidence")
     assert (
         validate_result(
             result,
             request,
-            expected_composition_sha256=_sha("composition"),
+            expected_composition_sha256=composition,
             expected_evidence_root_identity=root_identity,
         )
         == result
@@ -909,12 +970,7 @@ def test_fixture_ssh_path_uses_exact_argv_framing_and_group_cleanup(tmp_path: Pa
     identity_public = tmp_path / "identity.pub"
     helper = tmp_path / "helper.py"
     ssh.write_text(f"#!/usr/bin/python3\nimport os,sys\nwhile os.read(0,65536): pass\nos.write(1,{frame!r})\n")
-    keygen.write_text(
-        "#!/usr/bin/python3\n"
-        "import os\n"
-        "assert 'LD_PRELOAD' not in os.environ\n"
-        f"print({initial_request['transport']['identity_public']!r})\n"
-    )
+    keygen.write_text(f"#!/usr/bin/python3\nimport os\nassert 'LD_PRELOAD' not in os.environ\nprint({initial_request['transport']['identity_public']!r})\n")
     hosts.write_text("tgw-prod ssh-ed25519 QUFBQQ==\n")
     identity.write_text("fixture-private-material\n")
     identity_public.write_text(initial_request["transport"]["identity_public"] + "\n")

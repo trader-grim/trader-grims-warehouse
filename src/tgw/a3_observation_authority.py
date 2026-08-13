@@ -53,12 +53,56 @@ class ObservationProvider(Protocol):
 
 
 class DurableObservationToken:
+    __slots__ = (
+        "_parent_fd",
+        "_root_fd",
+        "_root_name",
+        "_root_path",
+        "_grant_sha256",
+        "_sealed",
+    )
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        raise TypeError("DurableObservationToken is sealed")
+
     def __init__(self, root: str, grant_sha256: str):
-        self.root, self.grant_sha256 = root, grant_sha256
         root_path = os.path.abspath(root)
-        self._root_name = os.path.basename(root_path)
-        self._parent_fd = os.open(os.path.dirname(root_path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        self._root_fd = os.open(self._root_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self._parent_fd)
+        object.__setattr__(self, "_sealed", False)
+        object.__setattr__(self, "_root_path", root_path)
+        object.__setattr__(self, "_grant_sha256", grant_sha256)
+        object.__setattr__(self, "_root_name", os.path.basename(root_path))
+        object.__setattr__(
+            self,
+            "_parent_fd",
+            os.open(
+                os.path.dirname(root_path),
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            ),
+        )
+        try:
+            root_fd = os.open(
+                self._root_name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=self._parent_fd,
+            )
+        except Exception:
+            os.close(self._parent_fd)
+            raise
+        object.__setattr__(self, "_root_fd", root_fd)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("DurableObservationToken is immutable")
+        object.__setattr__(self, name, value)
+
+    @property
+    def root(self) -> str:
+        return self._root_path
+
+    @property
+    def grant_sha256(self) -> str:
+        return self._grant_sha256
 
     def ready(self) -> bool:
         try:
@@ -70,17 +114,17 @@ class DurableObservationToken:
     @property
     def identity(self) -> dict[str, Any]:
         st = os.fstat(self._root_fd)
-        return {"path": self.root, "uid": st.st_uid, "gid": st.st_gid, "mode": stat.S_IMODE(st.st_mode), "dev": st.st_dev, "ino": st.st_ino, "nlink": st.st_nlink}
+        return {"path": self._root_path, "uid": st.st_uid, "gid": st.st_gid, "mode": stat.S_IMODE(st.st_mode), "dev": st.st_dev, "ino": st.st_ino, "nlink": st.st_nlink}
 
     def consume(self) -> None:
-        name = self.grant_sha256.split(":", 1)[1] + ".consumed"
+        name = self._grant_sha256.split(":", 1)[1] + ".consumed"
         root_fd = self._root_fd
         created = False
         try:
             fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=root_fd)
             created = True
             try:
-                raw = self.grant_sha256.encode()
+                raw = self._grant_sha256.encode()
                 view = memoryview(raw)
                 while view:
                     written = os.write(fd, view)
@@ -107,6 +151,10 @@ class DurableObservationToken:
             if created:
                 raise ObservationTokenPersistenceAmbiguous("observation token durable state is uncertain") from exc
             raise
+
+    def close(self) -> None:
+        os.close(self._root_fd)
+        os.close(self._parent_fd)
 
 
 @dataclass(frozen=True)

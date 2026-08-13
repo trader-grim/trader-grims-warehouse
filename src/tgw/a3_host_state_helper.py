@@ -428,6 +428,7 @@ def observe(request: Mapping[str, Any], now: datetime) -> dict[str, Any]:
             "profile_cas": profile,
             "system_identity": current_identity,
             "tools": {"python": python_identity, "git": git_identity},
+            "tool_environment": dict(_TOOL_ENVIRONMENT),
             "repository": repository,
             "effects": {"remote_write": False, "repository_write": False, "nix": False},
         }
