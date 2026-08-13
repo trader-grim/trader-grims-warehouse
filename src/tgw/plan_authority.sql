@@ -28,7 +28,8 @@ ALTER TABLE plan_authority_requests
         'approval-platform-bootstrap-deployment',
         'nixos-reviewed-evaluation',
         'nixos-observer-render-evaluation',
-        'nixos-a3-successor-evaluation'
+        'nixos-a3-successor-evaluation',
+        'tgw-prod-a3-preintegration-observation'
     ));
 
 CREATE TABLE IF NOT EXISTS plan_authority_decisions (

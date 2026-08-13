@@ -1,0 +1,15 @@
+{
+  "schema": "tgw-prod-a3-preintegration-observation-composition/v1",
+  "status": "NOT_EXECUTABLE",
+  "reason": "dedicated production SSH authentication identity is not admitted",
+  "effect_kind": "tgw-prod-a3-preintegration-observation",
+  "handler_id": "tgw-prod-a3-preintegration-observation@1",
+  "plan_commit": "fb9fee3e",
+  "source_commit": "4ddf0d462c0be20475ddedb97a6234fd0cd28fb6",
+  "source_tree": "c69c73f8e92d831dd2d3c8d44b550336bf908436",
+  "evidence_commit": "6d897e4",
+  "dedicated_identity": null,
+  "executable_request": null,
+  "authority_consumption": false,
+  "dispatchable": false
+}
