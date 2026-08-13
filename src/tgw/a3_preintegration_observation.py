@@ -510,6 +510,11 @@ class ImmutableEvidenceStore:
         self.root = root
         self.trusted_uid = os.getuid() if trusted_uid is None else trusted_uid
 
+    @property
+    def identity(self) -> dict[str, Any]:
+        st = os.lstat(self.root)
+        return {"path": str(self.root), "uid": st.st_uid, "gid": st.st_gid, "mode": stat.S_IMODE(st.st_mode), "dev": st.st_dev, "ino": st.st_ino, "nlink": st.st_nlink}
+
     def persist(self, receipt: Mapping[str, Any], archive: bytes, request: Mapping[str, Any] | None = None) -> tuple[Path, ...]:
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)

@@ -21,10 +21,18 @@ def _request():
     )
 
 
-def _grant(request):
+def _identity(path: Path):
+    st = path.stat()
+    return {"path": str(path), "uid": st.st_uid, "gid": st.st_gid, "mode": st.st_mode & 0o7777, "dev": st.st_dev, "ino": st.st_ino, "nlink": st.st_nlink}
+
+
+def _grant(request, token_root: Path, evidence_root: Path):
     return ReadOnlyObservationGrant.issue(
         request=request,
         composition_sha256="sha256:" + "2" * 64,
+        token_root_identity=_identity(token_root),
+        evidence_root_identity=_identity(evidence_root),
+        host_state_dependency_sha256="sha256:" + "3" * 64,
         expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
     )
 
@@ -44,10 +52,14 @@ class Provider:
         return self.result
 
 
-def test_hold_before_ready_does_not_consume() -> None:
+def test_hold_before_ready_does_not_consume(tmp_path: Path) -> None:
     request = _request()
     provider = Provider(ready=False)
-    grant = _grant(request)
+    token_root = tmp_path / "tokens"
+    token_root.mkdir(mode=0o700)
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    grant = _grant(request, token_root, evidence_root)
     controller = ReadOnlyObservationController(grant=grant, provider=provider, composition_sha256="sha256:" + "2" * 64)
     with pytest.raises(ObservationHold):
         controller.execute(request)
@@ -66,14 +78,16 @@ def test_first_dispatch_consumes_exactly_once(tmp_path: Path) -> None:
     subprocess.run(["git", "commit", "-qm", "x"], cwd=repo, check=True)
     receipt, archive = observe_repository(repo, request)
     provider = Provider(result={"receipt": receipt, "archive": archive})
-    grant = _grant(request)
     token_root = tmp_path / "tokens"
     token_root.mkdir(mode=0o700)
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    grant = _grant(request, token_root, evidence_root)
     controller = ReadOnlyObservationController(
         grant=grant,
         provider=provider,
         composition_sha256="sha256:" + "2" * 64,
-        evidence_store=ImmutableEvidenceStore(tmp_path / "evidence"),
+        evidence_store=ImmutableEvidenceStore(evidence_root),
         token=DurableObservationToken(str(token_root), grant.value["grant_sha256"]),
     )
     result = controller.execute(request)
@@ -87,14 +101,16 @@ def test_first_dispatch_consumes_exactly_once(tmp_path: Path) -> None:
 def test_postdispatch_failure_is_ambiguous_and_consumed(tmp_path: Path) -> None:
     request = _request()
     provider = Provider(fail=True)
-    grant = _grant(request)
     token_root = tmp_path / "tokens"
     token_root.mkdir(mode=0o700)
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    grant = _grant(request, token_root, evidence_root)
     controller = ReadOnlyObservationController(
         grant=grant,
         provider=provider,
         composition_sha256="sha256:" + "2" * 64,
-        evidence_store=ImmutableEvidenceStore(tmp_path / "evidence"),
+        evidence_store=ImmutableEvidenceStore(evidence_root),
         token=DurableObservationToken(str(token_root), grant.value["grant_sha256"]),
     )
     with pytest.raises(ObservationDispatchAmbiguous):

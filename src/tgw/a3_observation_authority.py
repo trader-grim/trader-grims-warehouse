@@ -57,6 +57,11 @@ class DurableObservationToken:
         except OSError:
             return False
 
+    @property
+    def identity(self) -> dict[str, Any]:
+        st = os.lstat(self.root)
+        return {"path": self.root, "uid": st.st_uid, "gid": st.st_gid, "mode": stat.S_IMODE(st.st_mode), "dev": st.st_dev, "ino": st.st_ino, "nlink": st.st_nlink}
+
     def consume(self) -> None:
         name = self.grant_sha256.split(":", 1)[1] + ".consumed"
         root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -86,6 +91,9 @@ class ReadOnlyObservationGrant:
         *,
         request: Mapping[str, Any],
         composition_sha256: str,
+        token_root_identity: Mapping[str, Any],
+        evidence_root_identity: Mapping[str, Any],
+        host_state_dependency_sha256: str,
         expires_at: str,
         now: datetime | None = None,
     ) -> "ReadOnlyObservationGrant":
@@ -98,6 +106,9 @@ class ReadOnlyObservationGrant:
             "request_sha256": request["request_sha256"],
             "target": request["target"],
             "composition_sha256": composition_sha256,
+            "token_root_identity": dict(token_root_identity),
+            "evidence_root_identity": dict(evidence_root_identity),
+            "host_state_dependency_sha256": host_state_dependency_sha256,
             "attempts": 1,
             "issued_at": now.isoformat(),
             "not_before": now.isoformat(),
@@ -108,11 +119,26 @@ class ReadOnlyObservationGrant:
 
     @staticmethod
     def validate(value: Mapping[str, Any]) -> dict[str, Any]:
-        fields = {"schema", "effect_kind", "plan", "request_sha256", "target", "composition_sha256", "attempts", "issued_at", "not_before", "expires_at", "grant_sha256"}
+        fields = {
+            "schema",
+            "effect_kind",
+            "plan",
+            "request_sha256",
+            "target",
+            "composition_sha256",
+            "token_root_identity",
+            "evidence_root_identity",
+            "host_state_dependency_sha256",
+            "attempts",
+            "issued_at",
+            "not_before",
+            "expires_at",
+            "grant_sha256",
+        }
         if not isinstance(value, Mapping) or set(value) != fields:
             raise ObservationAuthorityError("observation grant fields are not exact")
         result = dict(value)
-        if result["schema"] != GRANT_SCHEMA or result["effect_kind"] != "tgw-prod-a3-preintegration-observation" or result["attempts"] != 1:
+        if result["schema"] != GRANT_SCHEMA or result["effect_kind"] != "tgw-prod-a3-preintegration-observation" or isinstance(result["attempts"], bool) or result["attempts"] != 1:
             raise ObservationAuthorityError("observation grant semantics are invalid")
         plan = result["plan"]
         if not isinstance(plan, Mapping) or set(plan) != {"commit", "solution_sha256", "closure_sha256"} or any(not isinstance(item, str) or not item for item in plan.values()):
@@ -163,6 +189,10 @@ class ReadOnlyObservationController:
             raise ObservationHold("read-only observation grant expired")
         if grant["request_sha256"] != request["request_sha256"] or grant["target"] != request["target"] or grant["composition_sha256"] != self.composition_sha256:
             raise ObservationHold("read-only observation grant binding differs")
+        if self.token is not None and grant["token_root_identity"] != self.token.identity:
+            raise ObservationHold("observation token root differs from grant")
+        if self.evidence_store is not None and grant["evidence_root_identity"] != self.evidence_store.identity:
+            raise ObservationHold("observation evidence root differs from grant")
         if self.evidence_store is None or self.token is None or not self.token.ready() or not self.provider.ready(request):
             raise ObservationHold("observation provider is not ready")
 
