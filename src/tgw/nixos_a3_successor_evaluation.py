@@ -559,7 +559,19 @@ def validate_request(value: Any, *, allow_fixture: bool = False) -> dict[str, An
     return request
 
 
-def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
+def validate_success(
+    value: Any,
+    request: Mapping[str, Any],
+    *,
+    _now: datetime | None = None,
+) -> dict[str, Any]:
+    # Observe the controller clock independently of every untrusted receipt
+    # field.  The private override exists only to make boundary tests
+    # deterministic; production provider/handler paths never pass it.
+    observed_now = datetime.now(UTC) if _now is None else _now
+    if not isinstance(observed_now, datetime) or observed_now.tzinfo is None:
+        raise A3EvaluationError("success validation clock is not timezone-aware")
+    observed_now = observed_now.astimezone(UTC)
     allow_fixture = isinstance(request.get("integration"), Mapping) and request["integration"].get("status") == "TEST_FIXTURE_NON_DEPLOYABLE"
     request = validate_request(request, allow_fixture=allow_fixture)
     fields = {
@@ -867,7 +879,7 @@ def validate_success(value: Any, request: Mapping[str, Any]) -> dict[str, Any]:
             public_key_raw=public_key_raw,
             uid=authority["child_uid"],
             gid=authority["child_gid"],
-            now=datetime.strptime(attestation["ended_at"], "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC),
+            now=observed_now,
             max_duration_seconds=request["policy"]["max_seconds"],
         )
         observed_challenges.add(challenge_identity)

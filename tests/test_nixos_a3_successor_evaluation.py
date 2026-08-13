@@ -454,6 +454,46 @@ def success_fixture(request: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _resign_success_launch(
+    request: Mapping[str, Any],
+    result: dict[str, Any],
+    *,
+    issued: datetime,
+) -> None:
+    """Replace the fixture timeline and rebuild every signed/durable binding."""
+
+    envelope = result["launcher_evidence"][0]
+    signed = envelope["signed_attestation"]
+    timeline = {
+        "issued_at": issued.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "started_at": (issued + timedelta(milliseconds=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "ended_at": (issued + timedelta(milliseconds=2)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "expires_at": (issued + timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+    signed.update(timeline)
+    envelope["challenge"]["issued_at"] = timeline["issued_at"]
+    envelope["challenge"]["expires_at"] = timeline["expires_at"]
+    unsigned = {key: item for key, item in signed.items() if key != "signature"}
+    signed["signature"] = "ed25519:" + _FIXTURE_SIGNING_KEYS[request["request_sha256"]].sign(canonical(unsigned)).hex()
+
+    claim = envelope["replay_claim"]
+    claim["attestation_sha256"] = digest(signed)
+    claim["claim_sha256"] = self_hash({key: item for key, item in claim.items() if key != "claim_sha256"})
+    raw = canonical(claim)
+    reference = envelope["replay_claim_ref"]
+    reference["claim_sha256"] = claim["claim_sha256"]
+    reference["file_sha256"] = digest(raw)
+    reference["size"] = len(raw)
+    claim_path = Path(request["validation_authority"]["replay_root"]["path"]) / reference["name"]
+    claim_path.chmod(0o600)
+    claim_path.write_bytes(raw)
+    claim_path.chmod(0o400)
+
+    result["isolation"]["launch_evidence_sha256"] = digest(result["launcher_evidence"])
+    result["receipt_sha256"] = self_hash({key: item for key, item in result.items() if key != "evidence"})
+    result["evidence"] = ["nixos-a3-successor-evaluation:" + result["receipt_sha256"]]
+
+
 def _mutate(value: Mapping[str, Any], path: tuple[str, ...], replacement: Any) -> dict[str, Any]:
     changed = copy.deepcopy(value)
     cursor = changed
@@ -1182,6 +1222,41 @@ def test_success_cryptographically_rejects_rehashed_signed_mutation(tmp_path: Pa
     result["evidence"] = ["nixos-a3-successor-evaluation:" + result["receipt_sha256"]]
     with pytest.raises(A3EvaluationError, match="signature"):
         validate_success(result, request)
+
+
+@pytest.mark.parametrize(
+    ("age", "accepted"),
+    [(timedelta(days=-3650), False), (timedelta(days=1), False), (timedelta(seconds=-1), True)],
+    ids=("ancient", "future", "fresh"),
+)
+def test_success_freshness_uses_independent_controller_clock_with_real_durable_evidence(
+    tmp_path: Path,
+    age: timedelta,
+    accepted: bool,
+) -> None:
+    observed_now = datetime(2026, 8, 12, 12, 0, 0, tzinfo=UTC)
+    request, _ = request_fixture(tmp_path)
+    result = success_fixture(request)
+    _resign_success_launch(request, result, issued=observed_now + age)
+
+    if accepted:
+        assert validate_success(result, request, _now=observed_now)["outcome"] == "SUCCEEDED"
+    else:
+        with pytest.raises(A3EvaluationError, match="stale, future-dated, or outside"):
+            validate_success(result, request, _now=observed_now)
+
+
+def test_success_receipt_cannot_supply_controller_clock(tmp_path: Path) -> None:
+    observed_now = datetime(2026, 8, 12, 12, 0, 0, tzinfo=UTC)
+    request, _ = request_fixture(tmp_path)
+    result = success_fixture(request)
+    _resign_success_launch(request, result, issued=observed_now - timedelta(seconds=1))
+    result["controller_now"] = "2000-01-01T00:00:00.000000Z"
+    result["receipt_sha256"] = self_hash({key: item for key, item in result.items() if key != "evidence"})
+    result["evidence"] = ["nixos-a3-successor-evaluation:" + result["receipt_sha256"]]
+
+    with pytest.raises(A3EvaluationError, match="must contain exactly"):
+        validate_success(result, request, _now=observed_now)
 
 
 @pytest.mark.parametrize("authority_attack", ["claim-unlink", "public-key-replace"])
