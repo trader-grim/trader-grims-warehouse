@@ -6,34 +6,35 @@
   "approval_sha256": "sha256:9e524ddae0ebdd2a34b1a96487df6f3cec714e4c378409705910c11b528f3e80",
   "solution_sha256": "sha256:da79baa90916ba0fbe3af76365c8d25012ec0a38af4917bc57abaa44e21fb740",
   "closure_sha256": "sha256:3ef92c5a2c8ccf72ebb271ed4fec2c1fbe9fa7fe47c0311ad39b34ae2f4c31b9",
-  "outcome": "IMPLEMENTED_NOT_ADMITTED",
+  "outcome": "IMPLEMENTED_PENDING_INDEPENDENT_ADMISSION",
+  "supersedes_evidence_commit": "12efd0504c35a2d9865d3c867acf768379269bff",
   "implementation": {
-    "commit": "714f891eb033cfc3c9d1e2111a1f78bdbfbf06e2",
-    "tree": "27639e5de21f1b3c03fb81d88b30410d916daddc",
-    "parent": "74ad0597219987ef7c1f36e70c16859b49d4261a",
-    "controller_sha256": "sha256:b36cd2d7070f7233e1e8c821015d9e4caaffa497ffe21981df389c5bd2869d7f",
-    "stdlib_helper_sha256": "sha256:90b12d9313f640adc84a55e1faa802cd602cda148621f20342bb044a54a148f3",
-    "tests_sha256": "sha256:b6b9e7f5c0f2ecbebb13a244aa02d6036e4a8e36f27914daf48a8549fba0ae13",
-    "provider_descriptor_file_sha256": "sha256:b7bb9907ae162b6bb04e114300b6faa4cb73e3a5a6140fdd10384f2f7474a2a7",
-    "provider_descriptor_self_sha256": "sha256:9eb859629867dc7e56fafec93088bf78959c68de3bbcb0de1409df40f8e377b2"
+    "commit": "18dc524c342c26ee36ff5ae35f750e561e46731a",
+    "tree": "b9dadd6cf1bbf02c9a4b609509d45a6bdfe9e80f",
+    "parent": "12efd0504c35a2d9865d3c867acf768379269bff",
+    "controller_sha256": "sha256:c28356aa1b3916938adf7b4d402666d4a0cc6e40dc4579095a2c6cfda0c71100",
+    "stdlib_helper_sha256": "sha256:275d294f1e36c4646dc80480f9ea3fcd0f4a2355bf4fca249ce39ff5ddb4199b",
+    "tests_sha256": "sha256:7d0b4c59d5e8c5419d40c92730c5711f272121ab0a7fab21760a0fd73a7659ee",
+    "provider_descriptor_file_sha256": "sha256:5c1bf340a691c3994c2e2257a9249c62d09c14e92da87d56d50eeee94650c62d",
+    "provider_descriptor_self_sha256": "sha256:3fa44871e63d52828117d27d7c222cc84576b2bc9286ac17e25c066a2db1f8ab"
   },
   "gates": {
     "focused": {
       "status": "PASS",
-      "passed": 26,
+      "passed": 36,
       "failed": 0
     },
     "observer_authority_runtime_matrix": {
       "status": "PASS",
-      "passed": 121,
+      "passed": 257,
       "failed": 0
     },
     "tracked_full": {
       "status": "PASS",
-      "passed": 3920,
+      "passed": 3930,
       "skipped": 5,
       "failed": 0,
-      "elapsed_seconds": 137.64
+      "elapsed_seconds": 146.46
     },
     "ruff": "PASS",
     "py_compile": "PASS",
@@ -49,10 +50,15 @@
     "durable one-attempt observation token",
     "atomic attempt-directory evidence publication",
     "fresh current/profile CAS and Python/Git/repository-main identities",
-    "closed PASS/HOLD/AMBIGUOUS terminal and dependency projection"
+    "closed PASS/HOLD/AMBIGUOUS terminal and dependency projection",
+    "sealed production-only composition with pre-grant held artifact and authority FDs",
+    "fresh typed real-sshd parity authority with role-addressed protected evidence",
+    "root-protected public identity plus held private/public key cross-match",
+    "self-hashed result and same-bundle composition/grant/token/terminal evidence validation",
+    "authenticated framed remote HOLD/FAILED terminals and durable post-dispatch failure persistence"
   ],
   "remaining_admission_gates": [
-    "independent source review",
+    "independent review of source commit 18dc524c342c26ee36ff5ae35f750e561e46731a",
     "approved executable A3O02 production solution",
     "real OpenSSH-server correct-key and ambient-key/config/agent rejection parity receipt",
     "root-protected dedicated public identity and known-hosts artifacts",
@@ -74,5 +80,5 @@
   "dispatchable": false,
   "grant": null,
   "request": null,
-  "result_sha256": "sha256:cff43f05c6388d06d1c0af06ea91b5c67d6206508a971919aa66a59c5bfbab31"
+  "result_sha256": "sha256:fc85993f2e93668c825c3d2ff99c2dbab85d657ec2e3db36f535e7ac38170f37"
 }
