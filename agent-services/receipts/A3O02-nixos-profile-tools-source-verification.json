@@ -1,0 +1,52 @@
+{
+  "schema": "tgw-controller-source-verification/v1",
+  "status": "PASS",
+  "source": {
+    "commit": "9e6acc06c6f29a9dc3c3b18eb31cfa94bc135d79",
+    "tree": "d953b0a11a802942dfc71f8f82f5892050a02ada",
+    "archive_path": "/opt/TGW/evidence/codex/sha256/834218e2975262ab1908bcbc38b55dfc54552f6e2780371f08beb6ec59a5a8cb.tar",
+    "archive_sha256": "sha256:834218e2975262ab1908bcbc38b55dfc54552f6e2780371f08beb6ec59a5a8cb",
+    "archive_size": 12830720
+  },
+  "change": {
+    "boundary": "bind remote Python and Git to the deployed NixOS system profile and admit only the exact sticky root-owned /nix/store ancestor while retaining held-FD content and named-inode postchecks",
+    "remote_python": "/run/current-system/sw/bin/python3",
+    "remote_git": "/run/current-system/sw/bin/git",
+    "nix_store_mode": 1021,
+    "other_writable_ancestor_accepted": false,
+    "tool_absence_is_closed_hold": true
+  },
+  "prior_attempt": {
+    "result_sha256": "sha256:d69db81738da6643c5edd1d5733a2847361683c64c633dbb2ee49a298387b9b4",
+    "terminal_sha256": "sha256:047584b372ba0f94e00ae145371319e25810c95c2aaa7801c22bfe0b031f6d80",
+    "diagnostic": "HELD_TOOL_ANCESTOR_NOT_TRUSTED",
+    "consumed": true
+  },
+  "gates": {
+    "focused": "70 PASS / 0 FAIL",
+    "authority_matrix": "149 PASS / 0 FAIL",
+    "tracked_full": "3964 PASS / 5 SKIP / 0 FAIL",
+    "ruff": "PASS",
+    "py_compile": "PASS",
+    "diff_check": "PASS"
+  },
+  "runtime": {
+    "runtime_path": "/opt/TGW/evidence/codex/host-state-runtime/69dc82609c98cc08b4be9635e9516b99cbe6a3fca811b10f3913bc6ed72cd409",
+    "runtime_sha256": "sha256:69dc82609c98cc08b4be9635e9516b99cbe6a3fca811b10f3913bc6ed72cd409",
+    "controller_sha256": "sha256:29ee6d0dd2c0bc0691805e65d860a3c7b368eb316fd742486c8671c05ce6f135",
+    "helper_path": "/opt/TGW/evidence/codex/sha256/c5cccf19614c20a1e1cc7c3406f1a0caec512147815519a984ef7464e3ceaf4b.py",
+    "helper_sha256": "sha256:c5cccf19614c20a1e1cc7c3406f1a0caec512147815519a984ef7464e3ceaf4b"
+  },
+  "effects": {
+    "production_remote_connection": false,
+    "grant_issued": false,
+    "grant_consumed": false,
+    "remote_write": false,
+    "repository_access": false,
+    "nix": false,
+    "install": false,
+    "service": false,
+    "deployment": false
+  },
+  "verification_sha256": "sha256:acc928b061e59c4bd9587ec1d276e4b998811d96138b1c929c316a0c5db5236e"
+}
