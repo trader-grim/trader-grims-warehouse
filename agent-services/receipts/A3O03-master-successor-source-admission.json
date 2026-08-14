@@ -1,6 +1,7 @@
 {
   "schema": "tgw-a3o03-source-admission/v1",
-  "status": "REVIEWED_FROZEN",
+  "status": "REVIEWED_FROZEN_SUPERSEDED",
+  "superseded_by_source_commit": "d3075140d20d2948791fe7eace9719024fee51f6",
   "supersedes": "agent-services/receipts/A3O03-master-preintegration-source-admission.json",
   "plan": {
     "approved_commit": "29ecfd9c09f9c9a0c288b7a032c21a54145e99de",
@@ -50,5 +51,5 @@
     "deploy": false,
     "key_generation": false
   },
-  "receipt_sha256": "sha256:4bd3707fe032caf39f39972e91e53c2b8f4a16082701d6644a991135728fec18"
+  "receipt_sha256": "sha256:254ef4afd07eab4232397db13f6bcd97add860451f159141c4565f658d51a245"
 }

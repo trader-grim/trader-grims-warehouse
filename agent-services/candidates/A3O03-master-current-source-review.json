@@ -1,0 +1,24 @@
+{
+  "schema": "tgw-a3o03-source-review-candidate/v1",
+  "status": "REVIEW_PENDING",
+  "plan_commit": "29ecfd9c09f9c9a0c288b7a032c21a54145e99de",
+  "implementation": {
+    "commit": "d3075140d20d2948791fe7eace9719024fee51f6",
+    "tree": "aa43a6b4edd500af6abe0987b6c85c501792a705",
+    "controller_sha256": "sha256:81f397854746208e64e85363288a57c1ecd74cdeee9e2551c36e5dd6f657a972",
+    "sudo_parity_receipt_sha256": "sha256:24b43217dc94f7e8a92585f377a571d5e151aa6b9ada772e12b62ba30b512b47"
+  },
+  "changes_since_prior_admission": [
+    "bind request Plan to approved 29ec successor",
+    "run held read-only helper as repository owner db through fixed sudo wrapper",
+    "disable ambient global known-hosts authority",
+    "make readiness require exact mounted source and host-state authorities"
+  ],
+  "prior_review_findings": {
+    "root helper execution": "RESOLVED",
+    "ambient global known hosts": "RESOLVED",
+    "mounted readiness mismatch": "RESOLVED",
+    "sudo db execution parity": "PROVED"
+  },
+  "candidate_sha256": "sha256:12ebec39b28ba2a47a56a51a807087d8ffb92df6b3ce223c9dd17d47a40487c0"
+}
