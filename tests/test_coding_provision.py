@@ -34,6 +34,21 @@ class NativeQueue:
     def enqueue_job(self, queue_name, payload, **kwargs):
         assert queue_name == coding_provision.QUEUE_NAME
         assert kwargs["dedupe_key"].startswith("coding-provision:")
+        if kwargs.get("idempotent"):
+            for job_id, job in self.jobs.items():
+                prior = next(
+                    item for item in self.enqueues
+                    if item["dedupe_key"] == kwargs["dedupe_key"]
+                ) if any(
+                    item["dedupe_key"] == kwargs["dedupe_key"]
+                    for item in self.enqueues
+                ) else None
+                if prior is None or job["state"] not in {"queued", "retry_wait", "leased", "running"}:
+                    continue
+                expected = {"queue_name": queue_name, "payload": payload, **kwargs}
+                if prior != expected:
+                    raise ValueError("active idempotency key has a different request manifest")
+                return job_id
         job_id = f"job-{len(self.jobs) + 1}"
         self.enqueues.append({"queue_name": queue_name, "payload": payload, **kwargs})
         self.jobs[job_id] = {"job_id": job_id, "state": "queued", "payload_json": payload}
@@ -432,25 +447,58 @@ def test_worker_resumes_only_the_exact_request_bound_worktree(tmp_path, monkeypa
     assert result["location"]["worktree"] == str(expected)
 
 
-@pytest.mark.parametrize(
-    ("object_generation", "local_generation", "fragment"),
-    [(None, "gen-a", "expected object generation"), ("gen-a", "gen-b", "generation does not match")],
-)
+def test_worker_resumes_clean_unbound_worktree_after_preclaim_crash(tmp_path):
+    repository = _init_coding_repository(tmp_path)
+    cfg = _config(tmp_path)
+    document = _queued_document()
+
+    first = coding_provision_worker._validate_before_claim(
+        document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker",
+    )
+    second = coding_provision_worker._validate_before_claim(
+        document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker",
+    )
+
+    assert first["attempt_created"] is True
+    assert second["attempt_created"] is False
+    assert second["location"] == first["location"]
+    assert second["location"]["head"] == subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+
+
+def test_existing_unbound_request_worktree_must_still_be_clean(tmp_path):
+    repository = _init_coding_repository(tmp_path)
+    cfg = _config(tmp_path)
+    expected = tmp_path / "worktrees" / "todo-1706-request-1706"
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-b",
+         "coding/todo-1706-request-1706", str(expected), "HEAD"],
+        check=True, capture_output=True, text=True,
+    )
+    (expected / "untrusted").write_text("changed\n")
+
+    with pytest.raises(HardFailure, match="not clean"):
+        coding_provision_worker._validate_before_claim(
+            _queued_document(), cfg["coding"], "tgw-lib-local", "tgw-coding-worker",
+        )
+
+
 def test_existing_request_worktree_without_matching_generation_cannot_claim(
-    tmp_path, monkeypatch, object_generation, local_generation, fragment,
+    tmp_path, monkeypatch,
 ):
     repository = _init_coding_repository(tmp_path)
     cfg = _config(tmp_path)
     expected = tmp_path / "worktrees" / "todo-1706-request-1706"
     subprocess.run(["git", "-C", str(repository), "worktree", "add", "-b", "coding/todo-1706-request-1706", str(expected), "HEAD"], check=True, capture_output=True, text=True)
-    monkeypatch.setattr(coding_provision_worker, "local_snapshot_claim", lambda *_args: {"generation": local_generation})
+    monkeypatch.setattr(coding_provision_worker, "local_snapshot_claim", lambda *_args: {"generation": "gen-b"})
     claimed = False
 
     class Service:
         def get(self, _request_id):
             document = {**_queued_document(), "state": "queued"}
-            if object_generation is not None:
-                document["object_generation"] = object_generation
+            document["object_generation"] = "gen-a"
             return document
 
         def claim(self, *_args):
@@ -458,7 +506,7 @@ def test_existing_request_worktree_without_matching_generation_cannot_claim(
             claimed = True
             return {}
 
-    with pytest.raises(HardFailure, match=fragment):
+    with pytest.raises(HardFailure, match="generation does not match"):
         coding_provision_worker.claim_and_run(
             cfg, request_id="request-1706", local_host="tgw-lib-local", worker_identity="tgw-coding-worker", client=Service(),
         )
@@ -1360,6 +1408,28 @@ def test_create_request_accepts_config_without_tgw_lib_local_paths(tmp_path, nat
         cfg["coding"].pop(field)
     request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
     assert request["state"] == "queued"
+
+
+def test_create_request_retry_returns_exact_active_request(tmp_path, native):
+    cfg = _config(tmp_path)
+    first = coding_provision.create_request(
+        cfg, todo_id=1738, object_generation="gen-a", source_commit="a" * 40,
+    )
+    second = coding_provision.create_request(
+        cfg, todo_id=1738, object_generation="gen-a", source_commit="a" * 40,
+    )
+
+    assert second == first
+    assert len(native.enqueues) == 1
+
+
+def test_create_request_retry_rejects_same_key_with_changed_manifest(tmp_path, native):
+    cfg = _config(tmp_path)
+    coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
+    cfg["coding"]["worker_identity"] = "replacement-worker"
+
+    with pytest.raises(ValueError, match="different request manifest"):
+        coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
 
 
 def test_request_binds_exact_source_commit_through_native_payload(tmp_path, native):

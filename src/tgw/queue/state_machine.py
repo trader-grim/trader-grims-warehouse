@@ -199,6 +199,7 @@ def enqueue_job(
     max_attempts: int = 5,
     debounce: bool = False,
     supersede: bool = False,
+    idempotent: bool = False,
     dedupe_key_exempt: bool = False,
 ) -> str:
     """Insert a new queued job. Returns the job_id (UUID string).
@@ -306,9 +307,9 @@ def enqueue_job(
         raise ValueError(
             "observation_checkpoint is reserved for checkpoint_running_job"
         )
-    if debounce and supersede:
+    if sum(bool(value) for value in (debounce, supersede, idempotent)) > 1:
         raise ValueError(
-            "enqueue_job: debounce=True and supersede=True are mutually "
+            "enqueue_job: debounce=True, supersede=True, and idempotent=True are mutually "
             "exclusive collision-handling modes — pick one."
         )
     if entity_type == 'item' and not entity_id:
@@ -334,6 +335,43 @@ def enqueue_job(
         nb = datetime.fromtimestamp(not_before, tz=timezone.utc)
     with _conn() as con:
         with con.cursor() as cur:
+            if idempotent:
+                if not dedupe_key:
+                    raise ValueError("enqueue_job: idempotent=True requires a dedupe_key")
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (dedupe_key,),
+                )
+                cur.execute(
+                    """
+                    SELECT job_id::text, queue_name, entity_type, entity_id,
+                           operation, handler_family, priority, payload_json,
+                           not_before, max_attempts
+                      FROM queue_jobs
+                     WHERE dedupe_key = %s
+                       AND state IN ('queued', 'retry_wait', 'leased', 'running')
+                    """,
+                    (dedupe_key,),
+                )
+                existing = cur.fetchone()
+                if existing is not None:
+                    expected = (
+                        queue_name,
+                        entity_type,
+                        entity_id,
+                        operation,
+                        handler_family,
+                        priority,
+                        payload,
+                        nb,
+                        max_attempts,
+                    )
+                    actual = tuple(existing[1:])
+                    if actual != expected:
+                        raise ValueError(
+                            "enqueue_job: active idempotency key has a different request manifest"
+                        )
+                    return existing[0]
             if supersede and dedupe_key:
                 # Only preempt rows that are genuinely still *pending* —
                 # 'queued' (incl. future not_before) and 'retry_wait' are the

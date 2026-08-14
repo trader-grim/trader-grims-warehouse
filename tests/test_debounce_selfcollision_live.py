@@ -101,6 +101,29 @@ def _all_rows_for_queue(queue_name):
         con.close()
 
 
+def test_idempotent_enqueue_returns_same_exact_active_row_and_rejects_mismatch():
+    from tgw.queue import state_machine as sm
+
+    manifest = {
+        "queue_name": "coding-provision",
+        "payload": {"kind": "coding-provision/v1", "todo_id": 1738},
+        "entity_type": "coding_provision",
+        "entity_id": "1738",
+        "handler_family": "coding-provision",
+        "dedupe_key": "coding-provision:1738:current:unbound",
+        "max_attempts": 1,
+        "idempotent": True,
+    }
+    first = sm.enqueue_job(**manifest)
+    second = sm.enqueue_job(**manifest)
+
+    assert second == first
+    with pytest.raises(ValueError, match="different request manifest"):
+        sm.enqueue_job(
+            **{**manifest, "payload": {**manifest["payload"], "worker_identity": "changed"}},
+        )
+
+
 def test_self_reschedule_while_running_creates_distinct_row():
     """The exact live incident: a worker calls enqueue_job(debounce=True,
     dedupe_key=<its own key>) from inside its own handle() while its own

@@ -88,6 +88,20 @@ def _verified_source_commit(repository: Path, requested: object) -> str:
     return requested
 
 
+def _require_clean_worktree(worktree: Path) -> None:
+    """Refuse to resume a request worktree with any uncommitted state."""
+    probe = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=worktree,
+        check=False,
+        text=True,
+        capture_output=True,
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+    )
+    if probe.returncode or probe.stdout:
+        raise HardFailure("existing request-bound coding worktree is not clean")
+
+
 def _remove_incomplete_worktree(repository: Path, worktree: Path, branch: str) -> None:
     """Remove only a just-created request-bound worktree and its exact branch."""
     if worktree.is_symlink() or worktree.parent != worktree.parent.resolve():
@@ -136,15 +150,17 @@ def _prepare_request_worktree(document: dict[str, Any], coding: dict[str, Any], 
         location = local_location_identity(todo_id, str(worktree), coding, worker_identity)
         if location["worktree"] != str(worktree) or location["branch"] != branch:
             raise HardFailure("request-bound coding worktree branch is invalid")
-        if created and location["head"] != source_head:
-            raise HardFailure("new request-bound coding worktree HEAD is invalid")
+        if location["head"] != source_head:
+            raise HardFailure("request-bound coding worktree HEAD is invalid")
         if not created:
+            _require_clean_worktree(worktree)
             expected_generation = document.get("object_generation")
-            if not isinstance(expected_generation, str) or not expected_generation:
-                raise HardFailure("existing request-bound coding worktree has no expected object generation")
-            snapshot = local_snapshot_claim({"coding": coding}, str(worktree))
-            if snapshot.get("generation") != expected_generation:
-                raise HardFailure("existing request-bound coding worktree generation does not match request")
+            if expected_generation is not None:
+                if not isinstance(expected_generation, str) or not expected_generation:
+                    raise HardFailure("existing request-bound coding worktree has invalid expected object generation")
+                snapshot = local_snapshot_claim({"coding": coding}, str(worktree))
+                if snapshot.get("generation") != expected_generation:
+                    raise HardFailure("existing request-bound coding worktree generation does not match request")
         return location
     except Exception:
         if created:

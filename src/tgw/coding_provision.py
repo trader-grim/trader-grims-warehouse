@@ -218,6 +218,7 @@ def create_request(
         handler_family=QUEUE_NAME,
         dedupe_key=f"coding-provision:{todo_id}:{source_commit or 'current'}:{generation_key}",
         max_attempts=1,
+        idempotent=True,
     )
     return get_request(config, job_id)
 
