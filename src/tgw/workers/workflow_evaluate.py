@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -16,7 +17,6 @@ from tgw.workflow.item_snapshot import build_item_snapshot
 from tgw.workflow.operator_authority import (
     get_authority,
     listing_content_identity,
-    validate_authority,
 )
 from tgw.workflow.profiles import (
     TGW_EBAY_LEGACY_STAGE_ONBOARDED,
@@ -27,6 +27,16 @@ from tgw.workflow.treatments import LEGACY_STAGE_ONBOARDING_TREATMENTS, TGW_TREA
 
 QUEUE_NAME = "workflow_evaluate"
 EVALUATOR_VERSION = "workflow-evaluate-worker/v1"
+
+_LISTING_CONTINUATION_QUEUES = {
+    "normalize-condition": "normalize_condition",
+    "ai-identify": "ai_identify",
+    "ebay-draft": "ebay_draft",
+    "ebay-price": "ebay_price",
+    "ebay-upload": "ebay_upload",
+    "ebay-stage": "ebay_stage",
+}
+_LISTING_CONTINUATION_SCOPES = frozenset(("upload", "stage", "publish"))
 
 
 def _receipt(outcome: str, **evidence: Any) -> dict[str, Any]:
@@ -42,6 +52,127 @@ def _receipt(outcome: str, **evidence: Any) -> dict[str, Any]:
 def _fail(reason: str, **evidence: Any) -> TreatmentFailure:
     evidence["reason_code"] = reason
     return TreatmentFailure(f"workflow evaluation failed: {reason}", _receipt("failed", **evidence))
+
+
+def _provider_identity(config: Mapping[str, Any]) -> str:
+    migration = config.get("workflow_migration")
+    if migration is None and isinstance(config.get("raw"), Mapping):
+        migration = config["raw"].get("workflow_migration")
+    migration = migration if isinstance(migration, Mapping) else {}
+    value = migration.get("ebay_provider_identity")
+    if (not isinstance(value, str) or not value.strip() or value != value.strip()):
+        raise _fail("INVALID_PROVIDER_IDENTITY")
+    return value
+
+
+def _validate_listing_continuation(
+    *, payload: Mapping[str, Any], origin: Mapping[str, Any], origin_job_id: str,
+    entity_id: str, profile_id: str, profile_version: str,
+    graph: Any, item: Mapping[str, Any], provider_identity: str,
+    origin_lookup: Callable[[str], Mapping[str, Any] | None] | None,
+) -> Any:
+    """Validate one durable operator listing intent, including retry chains.
+
+    A continuation can be retried after its successor authority was committed.
+    In that case the original authority is superseded, so validation follows
+    only its explicit ``superseded_by`` chain and requires the current leaf to
+    be the exact fresh authority for the newly observed generation.  This
+    makes the issue-before-enqueue crash window retryable without accepting an
+    unrelated or newly minted operator intent.
+    """
+    treatment_id = origin.get("treatment_id")
+    queue_name = _LISTING_CONTINUATION_QUEUES.get(treatment_id)
+    authority_id = payload.get("operator_authority_id")
+    if queue_name is None or not isinstance(authority_id, str) or not authority_id:
+        raise _fail("INVALID_OPERATOR_CONTINUATION", origin_job_id=origin_job_id)
+
+    lookup = origin_lookup or state_machine.get_job
+    durable = lookup(origin_job_id)
+    durable_payload = durable.get("payload_json") if isinstance(durable, Mapping) else None
+    durable_result = (durable_payload.get("result")
+                      if isinstance(durable_payload, Mapping) else None)
+    exact_payload = {
+        "operator_authority_id": authority_id,
+        "operator_identity": payload.get("operator_identity"),
+        "operator_surface": payload.get("operator_surface"),
+        "pre_authority_condition_hash": payload.get("pre_authority_condition_hash"),
+        "goal_profile_id": profile_id,
+        "goal_profile_version": profile_version,
+        "graph_id": payload.get("prior_graph_id"),
+        "object_generation": payload.get("prior_object_generation"),
+        "treatment_id": treatment_id,
+        "treatment_version": "1",
+    }
+    if (not isinstance(durable, Mapping)
+            or str(durable.get("job_id")) != origin_job_id
+            or durable.get("state") != "succeeded"
+            or durable.get("queue_name") != queue_name
+            or durable.get("entity_type") != "item"
+            or durable.get("entity_id") != entity_id
+            or not isinstance(durable_payload, Mapping)
+            or durable_payload.get("sku") != entity_id
+            or any(durable_payload.get(key) != value
+                   for key, value in exact_payload.items())
+            or durable_result != origin):
+        raise _fail("UNTRUSTED_OPERATOR_CONTINUATION", origin_job_id=origin_job_id)
+
+    original = get_authority(authority_id)
+    expected_original = (
+        payload.get("operator_identity"), payload.get("operator_surface"), entity_id,
+        profile_id, profile_version, payload.get("prior_object_generation"),
+        payload.get("pre_authority_condition_hash"), provider_identity,
+    )
+    actual_original = (
+        getattr(original, "operator_identity", None), getattr(original, "surface", None),
+        getattr(original, "entity_id", None), getattr(original, "goal_profile_id", None),
+        getattr(original, "goal_profile_version", None),
+        getattr(original, "object_generation", None),
+        getattr(original, "pre_authority_condition_hash", None),
+        getattr(original, "provider_identity", None),
+    )
+    if (original is None or actual_original != expected_original
+            or not _LISTING_CONTINUATION_SCOPES.issubset(set(original.scopes))):
+        raise _fail("INVALID_OPERATOR_CONTINUATION", origin_job_id=origin_job_id)
+
+    now = datetime.now(UTC)
+    if original.superseded_at is None:
+        if now < original.issued_at or now >= original.expires_at:
+            raise _fail("EXPIRED_OPERATOR_CONTINUATION", origin_job_id=origin_job_id)
+        return original
+
+    # A prior attempt may have durably issued the successor before it crashed.
+    # Follow the closed chain, then require its leaf to match current state.
+    seen = {original.authority_id}
+    current = original
+    for _ in range(8):
+        successor_id = current.superseded_by
+        if not isinstance(successor_id, str) or not successor_id or successor_id in seen:
+            raise _fail("INVALID_SUCCESSOR_CONTINUATION", origin_job_id=origin_job_id)
+        seen.add(successor_id)
+        current = get_authority(successor_id)
+        if current is None:
+            raise _fail("INVALID_SUCCESSOR_CONTINUATION", origin_job_id=origin_job_id)
+        if current.superseded_at is None:
+            break
+    else:
+        raise _fail("INVALID_SUCCESSOR_CONTINUATION", origin_job_id=origin_job_id)
+
+    expected_current = (
+        original.operator_identity, original.surface, entity_id, profile_id,
+        profile_version, graph.object_generation, graph.condition_hash,
+        listing_content_identity(item), provider_identity,
+    )
+    actual_current = (
+        current.operator_identity, current.surface, current.entity_id,
+        current.goal_profile_id, current.goal_profile_version,
+        current.object_generation, current.pre_authority_condition_hash,
+        current.content_identity, current.provider_identity,
+    )
+    if (actual_current != expected_current
+            or not _LISTING_CONTINUATION_SCOPES.issubset(set(current.scopes))
+            or now < current.issued_at or now >= current.expires_at):
+        raise _fail("INVALID_SUCCESSOR_CONTINUATION", origin_job_id=origin_job_id)
+    return current
 
 
 def evaluate_event(
@@ -160,65 +291,23 @@ def evaluate_event(
         evaluator_version=EVALUATOR_VERSION,
     )
 
-    # A successful governed stage changes the item generation but not the
-    # operator-reviewed listing content.  Continue the original publish intent
-    # on the server so every API client (not only one browser page) reaches the
-    # publish treatment.  The durable origin row and prior authority are both
-    # revalidated before a fresh authority is issued for the new generation.
+    # Continue an explicit governed listing intent after every predecessor,
+    # local or external.  This lives on the durable server event path so API,
+    # Flutter, and browser callers all get the same upload -> stage -> publish
+    # progression.  The durable origin row and complete authority chain are
+    # revalidated before the next generation is authorized and dispatched.
     authority_id = payload.get("operator_authority_id")
-    if not isolated and origin.get("treatment_id") == "ebay-stage" and authority_id:
-        lookup = origin_lookup or state_machine.get_job
-        durable = lookup(origin_job_id)
-        durable_payload = durable.get("payload_json") if isinstance(durable, Mapping) else None
-        durable_result = (durable_payload.get("result")
-                          if isinstance(durable_payload, Mapping) else None)
-        exact_payload = {
-            "operator_authority_id": authority_id,
-            "operator_identity": payload.get("operator_identity"),
-            "operator_surface": payload.get("operator_surface"),
-            "pre_authority_condition_hash": payload.get("pre_authority_condition_hash"),
-            "goal_profile_id": profile_id,
-            "goal_profile_version": profile_version,
-            "graph_id": payload.get("prior_graph_id"),
-            "object_generation": payload.get("prior_object_generation"),
-            "treatment_id": "ebay-stage",
-            "treatment_version": "1",
-        }
-        if (not isinstance(durable, Mapping)
-                or str(durable.get("job_id")) != origin_job_id
-                or durable.get("state") != "succeeded"
-                or durable.get("queue_name") != "ebay_stage"
-                or durable.get("entity_type") != "item"
-                or durable.get("entity_id") != entity_id
-                or not isinstance(durable_payload, Mapping)
-                or any(durable_payload.get(key) != value
-                       for key, value in exact_payload.items())
-                or durable_result != origin):
-            raise _fail("UNTRUSTED_OPERATOR_CONTINUATION", origin_job_id=origin_job_id)
-
-        migration = config.get("workflow_migration")
-        if migration is None and isinstance(config.get("raw"), Mapping):
-            migration = config["raw"].get("workflow_migration")
-        migration = migration if isinstance(migration, Mapping) else {}
-        provider_identity = migration.get("ebay_provider_identity")
-        authority = get_authority(authority_id)
+    treatment_id = origin.get("treatment_id")
+    if (not isolated and treatment_id in _LISTING_CONTINUATION_QUEUES
+            and isinstance(authority_id, str) and authority_id):
         current_item = json.loads(item_path.read_text(encoding="utf-8"))
-        valid, reason = validate_authority(
-            authority_id, entity_id=entity_id, goal_profile_id=profile_id,
-            goal_profile_version=profile_version,
-            object_generation=payload.get("prior_object_generation"),
-            pre_authority_condition_hash=payload.get("pre_authority_condition_hash"),
-            content_identity=listing_content_identity(current_item),
-            provider_identity=provider_identity, scope="stage",
+        provider_identity = _provider_identity(config)
+        authority = _validate_listing_continuation(
+            payload=payload, origin=origin, origin_job_id=origin_job_id,
+            entity_id=entity_id, profile_id=profile_id,
+            profile_version=profile_version, graph=graph, item=current_item,
+            provider_identity=provider_identity, origin_lookup=origin_lookup,
         )
-        if (authority is None or valid is None
-                or authority.operator_identity != payload.get("operator_identity")
-                or authority.surface != payload.get("operator_surface")
-                or "publish" not in authority.scopes):
-            raise _fail(
-                "INVALID_OPERATOR_CONTINUATION", origin_job_id=origin_job_id,
-                authority_reason=reason,
-            )
 
         from tgw.workflow.listing_migration import (
             authorize_and_dispatch_next_listing_effect,
@@ -237,6 +326,7 @@ def evaluate_event(
             "satisfied", origin_job_id=origin_job_id,
             object_generation=continued.graph.object_generation,
             graph_id=continued.graph.graph_id,
+            continued_from=treatment_id,
             dispatch=("enqueued" if dispatched.enqueued else dispatched.outcome),
             next_treatment=dispatched.treatment_id,
             next_job_id=dispatched.job_id,

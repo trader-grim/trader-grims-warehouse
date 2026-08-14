@@ -11,6 +11,7 @@ from tgw.workflow.listing_migration import (
     approved_authority_scopes,
     authorize_and_dispatch_force_restage,
     authorize_and_dispatch_next_listing_effect,
+    authorize_and_request_item_goal,
     request_item_goal,
 )
 from tgw.workflow.profiles import (
@@ -146,6 +147,29 @@ def test_next_listing_effect_preserves_dispatched_local_remediation(monkeypatch)
     assert result is admitted
     assert dispatched is local
     assert authority_id == "authority-1" and created is True
+
+
+def test_authorized_local_remediation_carries_continuation_identity(tmp_path, monkeypatch):
+    _, path = _item(tmp_path, condition="pre-owned")
+    captured = {}
+    sentinel = GoalRequestResult(
+        graph=SimpleNamespace(), dispatched=None, held_external=(), operator_gates=(),
+    )
+    monkeypatch.setattr(
+        "tgw.workflow.listing_migration.request_item_goal",
+        lambda *args, **kwargs: captured.update(kwargs) or sentinel,
+    )
+
+    result, authority_id, created = authorize_and_request_item_goal(
+        path, TGW_EBAY_LISTABLE, operator_identity="operator:authenticated",
+        surface="http:item-action:ebay-publish", provider_identity="ebay:account",
+        scopes=("upload", "stage", "publish"),
+        issuer=lambda **kwargs: ("authority-1", True),
+    )
+
+    assert result is sentinel and authority_id == "authority-1" and created is True
+    assert captured["operator_identity"] == "operator:authenticated"
+    assert captured["operator_surface"] == "http:item-action:ebay-publish"
 
 
 def test_force_restage_dispatch_is_exact_and_authority_bound(monkeypatch):

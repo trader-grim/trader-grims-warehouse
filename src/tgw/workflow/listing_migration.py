@@ -251,6 +251,7 @@ def authorize_and_request_item_goal(
         item_path, goal, enqueue_fn=enqueue_fn, origin="operator",
         authority_id=authority_id, provider_identity=provider_identity,
         authority_lookup=authority_lookup, stage_receipt_lookup=stage_lookup,
+        operator_identity=operator_identity, operator_surface=surface,
     )
     return result, authority_id, created
 

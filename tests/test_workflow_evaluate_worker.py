@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -10,7 +11,10 @@ from tgw.item_mutation import item_generation
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
 from tgw.workers.normalize_condition import handle_job
-from tgw.workers.workflow_evaluate import evaluate_event
+from tgw.workers.workflow_evaluate import (
+    _validate_listing_continuation,
+    evaluate_event,
+)
 from tgw.workflow.treatments import LEGACY_STAGE_ONBOARDING_TREATMENTS
 
 
@@ -231,7 +235,17 @@ def test_rebuilds_new_generation_and_dispatches_evaluator_selected_local_treatme
     assert enqueue.call_args.kwargs["payload"]["graph_id"] == receipt["evidence"]["graph_id"]
 
 
-def test_successful_governed_stage_durably_continues_to_publish(tmp_path):
+@pytest.mark.parametrize(
+    ("treatment_id", "queue_name"),
+    [
+        ("normalize-condition", "normalize_condition"),
+        ("ebay-upload", "ebay_upload"),
+        ("ebay-stage", "ebay_stage"),
+    ],
+)
+def test_successful_governed_predecessor_durably_continues_listing(
+    tmp_path, treatment_id, queue_name,
+):
     item_root = _item(tmp_path)
     item_path = item_root / "SKU-1" / "SKU-1.json"
     item = json.loads(item_path.read_text())
@@ -245,7 +259,7 @@ def test_successful_governed_stage_durably_continues_to_publish(tmp_path):
     item_path.write_text(json.dumps(item), encoding="utf-8")
     origin = {
         "outcome": "satisfied", "graph_id": "old-graph",
-        "treatment_id": "ebay-stage", "treatment_version": "1",
+        "treatment_id": treatment_id, "treatment_version": "1",
     }
     job, config = _event(
         item_root, origin_receipt=origin,
@@ -262,17 +276,27 @@ def test_successful_governed_stage_durably_continues_to_publish(tmp_path):
         "pre_authority_condition_hash": "pre-condition",
         "goal_profile_id": "tgw.ebay_listable", "goal_profile_version": "1",
         "graph_id": "old-graph", "object_generation": "old-generation",
-        "treatment_id": "ebay-stage", "treatment_version": "1",
+        "treatment_id": treatment_id, "treatment_version": "1",
+        "sku": "SKU-1",
         "result": origin,
     }
     durable = {
-        "job_id": "origin-1", "state": "succeeded", "queue_name": "ebay_stage",
+        "job_id": "origin-1", "state": "succeeded", "queue_name": queue_name,
         "entity_type": "item", "entity_id": "SKU-1", "payload_json": durable_payload,
     }
+    now = datetime.now(UTC)
     authority = SimpleNamespace(
+        authority_id="authority-1",
         operator_identity="operator:authenticated",
         surface="http:item-action:ebay-publish",
-        provider_identity="ebay:account", scopes=("stage", "publish"),
+        entity_id="SKU-1", goal_profile_id="tgw.ebay_listable",
+        goal_profile_version="1", object_generation="old-generation",
+        pre_authority_condition_hash="pre-condition",
+        content_identity="old-content", provider_identity="ebay:account",
+        scopes=("upload", "stage", "publish"),
+        issued_at=now - timedelta(seconds=5),
+        expires_at=now + timedelta(minutes=5), superseded_at=None,
+        superseded_by=None,
     )
     continued = SimpleNamespace(
         graph=SimpleNamespace(object_generation="new-generation", graph_id="new-graph"),
@@ -283,8 +307,6 @@ def test_successful_governed_stage_durably_continues_to_publish(tmp_path):
     )
     enqueue = MagicMock()
     with patch("tgw.workers.workflow_evaluate.get_authority", return_value=authority), \
-         patch("tgw.workers.workflow_evaluate.validate_authority",
-               return_value=(authority, "valid")), \
          patch("tgw.workflow.listing_migration.authorize_and_dispatch_next_listing_effect",
                return_value=(continued, dispatched, "authority-2", True)) as continuation:
         receipt = evaluate_event(
@@ -292,10 +314,73 @@ def test_successful_governed_stage_durably_continues_to_publish(tmp_path):
         )
 
     assert receipt["outcome"] == "satisfied"
+    assert receipt["evidence"]["continued_from"] == treatment_id
     assert receipt["evidence"]["next_treatment"] == "ebay-publish"
     assert receipt["evidence"]["next_job_id"] == "publish-job"
     assert receipt["evidence"]["successor_authority_id"] == "authority-2"
     assert continuation.call_args.kwargs["enqueue_fn"] is enqueue
+
+
+def test_listing_continuation_reuses_exact_committed_successor_after_crash():
+    now = datetime.now(UTC)
+    original = SimpleNamespace(
+        authority_id="authority-1", operator_identity="operator:authenticated",
+        surface="http:item-action:ebay-publish", entity_id="SKU-1",
+        goal_profile_id="tgw.ebay_listable", goal_profile_version="1",
+        object_generation="old-generation",
+        pre_authority_condition_hash="old-condition", content_identity="old-content",
+        provider_identity="ebay:account", scopes=("upload", "stage", "publish"),
+        issued_at=now - timedelta(minutes=2), expires_at=now + timedelta(minutes=3),
+        superseded_at=now - timedelta(seconds=1), superseded_by="authority-2",
+    )
+    item = {"sku": "SKU-1", "condition": "Used", "draft_listing": {"price": 10}}
+    from tgw.workflow.operator_authority import listing_content_identity
+    graph = SimpleNamespace(object_generation="new-generation", condition_hash="new-condition")
+    successor = SimpleNamespace(
+        authority_id="authority-2", operator_identity=original.operator_identity,
+        surface=original.surface, entity_id="SKU-1",
+        goal_profile_id="tgw.ebay_listable", goal_profile_version="1",
+        object_generation=graph.object_generation,
+        pre_authority_condition_hash=graph.condition_hash,
+        content_identity=listing_content_identity(item),
+        provider_identity="ebay:account", scopes=("upload", "stage", "publish"),
+        issued_at=now - timedelta(seconds=1), expires_at=now + timedelta(minutes=5),
+        superseded_at=None, superseded_by=None,
+    )
+    origin = {
+        "outcome": "satisfied", "graph_id": "old-graph",
+        "treatment_id": "ebay-stage", "treatment_version": "1",
+    }
+    payload = {
+        "operator_authority_id": "authority-1",
+        "operator_identity": original.operator_identity,
+        "operator_surface": original.surface,
+        "pre_authority_condition_hash": "old-condition",
+        "prior_graph_id": "old-graph", "prior_object_generation": "old-generation",
+    }
+    durable_payload = {
+        **payload, "graph_id": "old-graph", "object_generation": "old-generation",
+        "goal_profile_id": "tgw.ebay_listable", "goal_profile_version": "1",
+        "treatment_id": "ebay-stage", "treatment_version": "1", "sku": "SKU-1",
+        "result": origin,
+    }
+    durable = {
+        "job_id": "origin-1", "state": "succeeded", "queue_name": "ebay_stage",
+        "entity_type": "item", "entity_id": "SKU-1", "payload_json": durable_payload,
+    }
+    with patch(
+        "tgw.workers.workflow_evaluate.get_authority",
+        side_effect=lambda authority_id: {
+            "authority-1": original, "authority-2": successor,
+        }.get(authority_id),
+    ):
+        selected = _validate_listing_continuation(
+            payload=payload, origin=origin, origin_job_id="origin-1",
+            entity_id="SKU-1", profile_id="tgw.ebay_listable", profile_version="1",
+            graph=graph, item=item, provider_identity="ebay:account",
+            origin_lookup=lambda _job_id: durable,
+        )
+    assert selected is successor
 
 
 def test_governed_stage_continuation_rejects_non_durable_origin(tmp_path):
@@ -311,6 +396,7 @@ def test_governed_stage_continuation_rejects_non_durable_origin(tmp_path):
         operator_surface="http:item-action:ebay-publish",
         pre_authority_condition_hash="pre-condition",
     )
+    config["workflow_migration"] = {"ebay_provider_identity": "ebay:account"}
     with pytest.raises(TreatmentFailure) as caught:
         evaluate_event(
             job, config, enqueue_fn=MagicMock(),
