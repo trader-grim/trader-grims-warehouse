@@ -587,6 +587,47 @@ def test_failed_canonical_claim_removes_new_unbound_attempt_and_retry_reaches_cl
         assert not expected.exists()
 
 
+def test_failed_claim_removes_new_generation_bound_attempt_and_retry_reaches_claim(
+    tmp_path, monkeypatch,
+):
+    """A request generation is not evidence that the service committed a claim."""
+    _init_coding_repository(tmp_path)
+    cfg = _config(tmp_path)
+    expected = tmp_path / "worktrees" / "todo-1706-request-1706"
+
+    class RejectingService:
+        def __init__(self):
+            self.claims = 0
+
+        def get(self, _request_id):
+            return {
+                **_queued_document(), "state": "queued",
+                "object_generation": "prebound-generation",
+            }
+
+        def claim(self, *_args):
+            self.claims += 1
+            raise HardFailure("canonical evaluation rejected claim")
+
+    service = RejectingService()
+    monkeypatch.setattr(
+        coding_provision_worker,
+        "local_snapshot_claim",
+        lambda *_args: {"generation": "prebound-generation"},
+    )
+    for expected_claims in (1, 2):
+        with pytest.raises(HardFailure, match="evaluation rejected"):
+            coding_provision_worker.claim_and_run(
+                cfg,
+                request_id="request-1706",
+                local_host="tgw-lib-local",
+                worker_identity="tgw-coding-worker",
+                client=service,
+            )
+        assert service.claims == expected_claims
+        assert not expected.exists()
+
+
 @pytest.mark.parametrize("claim_response", [{}, None])
 def test_unconfirmed_claim_response_removes_new_unbound_attempt_and_retry_reaches_claim(tmp_path, claim_response):
     """A malformed response is an unconfirmed claim and gets durable reconciliation."""

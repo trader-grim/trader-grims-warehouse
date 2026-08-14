@@ -198,7 +198,6 @@ def _remove_proven_unclaimed_attempt(
         return
     if (
         document.get("state") != "queued"
-        or document.get("object_generation") is not None
         or document.get("location") is not None
     ):
         return
