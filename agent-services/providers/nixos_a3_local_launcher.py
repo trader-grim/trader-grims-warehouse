@@ -34,7 +34,7 @@ RESPONSE_SCHEMA = "tgw-nixos-a3-local-launch-response/v1"
 ATTESTATION_SCHEMA = "tgw-nixos-a3-local-netns-attestation/v1"
 CONFIG_SCHEMA = "tgw-nixos-a3-local-launcher-config/v1"
 RAW_EVIDENCE_SCHEMA = "tgw-nixos-a3-raw-link-route-probes/v1"
-CONFIG_PATH = "/etc/tgw/a3-successor-v3-launcher.json"
+CONFIG_PATH = "/etc/tgw/a3-successor-v4-launcher.json"
 MAX_PACKET_BYTES = 1_048_576
 MAX_DIAGNOSTIC_BYTES = 65_536
 _HEX = set("0123456789abcdef")
@@ -76,6 +76,14 @@ _CONFIG_KEYS = {
 
 class LauncherError(RuntimeError):
     """A fail-closed launcher error safe to report as a bounded diagnostic."""
+
+
+class _CapHeader(ctypes.Structure):
+    _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+
+
+class _CapData(ctypes.Structure):
+    _fields_ = [("effective", ctypes.c_uint32), ("permitted", ctypes.c_uint32), ("inheritable", ctypes.c_uint32)]
 
 
 def canonical(value: Any) -> bytes:
@@ -501,6 +509,10 @@ def _launch(packet: Mapping[str, Any], config: Mapping[str, Any]) -> tuple[int, 
             os.setgroups([])
             os.setgid(config["codex_gid"])
             os.setuid(config["codex_uid"])
+            capability_header = _CapHeader(0x20080522, 0)  # _LINUX_CAPABILITY_VERSION_3
+            capability_data = (_CapData * 2)()
+            if libc.capset(ctypes.byref(capability_header), ctypes.byref(capability_data)) != 0:
+                raise OSError(ctypes.get_errno(), "capset(empty)")
             if libc.prctl(38, 1, 0, 0, 0) != 0:  # PR_SET_NO_NEW_PRIVS
                 raise OSError(ctypes.get_errno(), "PR_SET_NO_NEW_PRIVS")
             os.write(ready_w, b"R")
