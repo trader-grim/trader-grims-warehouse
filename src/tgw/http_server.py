@@ -7403,8 +7403,29 @@ def _render_item_detail_html(
             _line.append(_abtn("List on eBay", "listOnEbay()", "green",
                                title="Save draft, run every needed step, and publish"))
     elif _has_error and not is_active:
-        _line.append(_abtn("Retry", "retryPipeline()", "red",
-                           title="Something failed — retry the failed step"))
+        _retryable_failure = next((
+            j for j in jobs
+            if j.get("state") == "dead_letter"
+            and _after_baseline(j)
+            and not _superseded_by_success(j)
+            and j.get("job_id")
+            and j.get("retry_allowed", True)
+        ), None)
+        if _retryable_failure:
+            _line.append(_abtn(
+                "Retry",
+                f"retryJob({h(_json.dumps(str(_retryable_failure['job_id'])))})",
+                "red",
+                title=f"Retry failed {_retryable_failure.get('queue_name') or 'pipeline'} job",
+            ))
+        else:
+            _line.append(_abtn(
+                "Needs attention",
+                "var j=document.getElementById('jobs-section');"
+                "if(j)j.scrollIntoView({behavior:'smooth'});",
+                "red",
+                title="This failure requires reconciliation rather than a blind retry",
+            ))
     elif _working:
         _line.append(_abtn("Working…", "", "yellow", disabled=True,
                            title="Pipeline is running — refresh to update"))
@@ -7455,6 +7476,15 @@ def _render_item_detail_html(
     else:
         _line.append(_abtn("Prepare Listing", "prepareListing()", "green",
                            title="Run identification and draft the eBay listing"))
+
+    _line.append(_abtn(
+        "AI Reidentify" if item.get("ai_identified") else "AI Identify",
+        "triggerAction('ai_identify')",
+        "blue",
+        title=("Run image identification again using the current photos"
+               if item.get("ai_identified")
+               else "Run image identification using the current photos"),
+    ))
 
     if is_active and not _is_sold:
         # Always operator-accessible on a live item (Dave, s46): this is THE
@@ -8086,7 +8116,7 @@ def _render_item_detail_html(
         f"    body:JSON.stringify({{action:action}})"
         f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
         f"    if(d.ok&&(action==='archive'||action==='ebay_end_listing')){{window.location.href='/form/items';return;}}"
-        f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update'||action==='reset_draft_from_live')){{location.reload();return;}}"
+        f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='ai_identify'||action==='ebay_draft'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update'||action==='reset_draft_from_live')){{location.reload();return;}}"
         f"    alert(d.ok ? 'Action queued: '+action : 'Error: '+(d.detail||'failed'));"
         f"  }}).catch(function(e){{alert('Network error: '+e);}});"
         f"}}"

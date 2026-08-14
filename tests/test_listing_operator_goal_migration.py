@@ -244,6 +244,29 @@ def test_goal_request_is_generation_bound_and_dispatches_one_local(tmp_path):
     assert payload["origin"] == "operator"
 
 
+def test_goal_request_observes_legacy_on_disk_photos_without_json_image_field(
+    tmp_path,
+):
+    """Prepare Listing and the item UI must agree on real SKU photo assets."""
+    _, path = _item(tmp_path)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc.pop("image")
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    (path.parent / "front.jpg").write_bytes(b"photo")
+    calls = []
+
+    result = request_item_goal(
+        path, TGW_EBAY_IDENTIFIED, treatments=(AI_IDENTIFY,),
+        enqueue_fn=lambda **kwargs: calls.append(kwargs) or "job-photo",
+    )
+
+    assert result.dispatched is not None
+    assert result.dispatched.job_id == "job-photo"
+    assert calls[0]["queue_name"] == "ai_identify"
+    fingerprints = {item.condition_id: item.result.value for item in result.graph.fingerprints}
+    assert fingerprints["item_has_photos"] == "true"
+
+
 def test_goal_scope_ceiling_defaults_and_blocks_escalation():
     assert approved_authority_scopes(TGW_EBAY_LISTABLE, ()) == (
         "upload", "stage", "publish",

@@ -6206,6 +6206,37 @@ def test_item_detail_pipeline_log_distinguishes_retry_wait_from_dead_letter():
     assert "#f99" in dead_letter_row
 
 
+def test_item_detail_top_retry_requeues_exact_retryable_dead_letter():
+    item = {"sku": "tgw1", "title": "Failed item", "status": "In Stock"}
+    jobs = [{
+        "queue_name": "ebay_publish",
+        "state": "dead_letter",
+        "job_id": "failed-publish-job",
+        "retry_allowed": True,
+        "error_detail": "provider rejected request",
+    }]
+
+    html = http_server._render_item_detail_html("tgw1", item, [], [], jobs)
+
+    assert 'onclick="retryJob(&quot;failed-publish-job&quot;)"' in html
+    assert 'onclick="retryPipeline()"' not in html
+
+
+def test_item_detail_global_ai_action_is_always_available():
+    first = http_server._render_item_detail_html(
+        "tgw1", {"sku": "tgw1", "title": "New item"}, [], [], [],
+    )
+    identified = http_server._render_item_detail_html(
+        "tgw2", {"sku": "tgw2", "title": "Known item", "ai_identified": True},
+        [], [], [],
+    )
+
+    assert "AI Identify" in first
+    assert "AI Reidentify" in identified
+    assert first.count("triggerAction('ai_identify')") >= 1
+    assert identified.count("triggerAction('ai_identify')") >= 1
+
+
 # ---------------------------------------------------------------------------
 # Invariant C14 fleet-wide clear-value round-trip detector (todo #1468,
 # PP-LISTEDITOR-001).

@@ -96,8 +96,15 @@ def _get_str(item: Dict[str, Any], key: str) -> str:
     return ""
 
 
-def _has_photos(item: Dict[str, Any]) -> bool:
-    """Canonical item evidence identifies at least one local source photo."""
+def _has_photos(item: Dict[str, Any], sku_dir: Path | None = None) -> bool:
+    """Canonical item evidence identifies at least one local source photo.
+
+    Older ItemData documents do not necessarily carry ``image`` or ``_images``
+    even though their SKU directory contains the source photographs.  The HTTP
+    item view has always projected those files at read time; the workflow
+    snapshot must observe the same source or a visible Prepare Listing button
+    can deterministically hold on a false ``no photos`` finding.
+    """
     image = _get_str(item, "image")
     if image:
         return True
@@ -112,6 +119,10 @@ def _has_photos(item: Dict[str, Any]) -> bool:
         for photo in ebay_photos
     ):
         return True
+    if sku_dir is not None:
+        from tgw.assets import ordered_photos
+
+        return bool(ordered_photos(item, sku_dir))
     return False
 
 
@@ -380,7 +391,12 @@ def build_item_snapshot(
             continue
 
         reasons = _ITEM_REASONS.get(condition_id, ("checked", "not met"))
-        if checker(item):
+        met = (
+            checker(item, path.parent)
+            if condition_id == "item_has_photos"
+            else checker(item)
+        )
+        if met:
             assertions.append(_assertion(condition_id, FingerprintResult.TRUE, reasons[0]))
         else:
             assertions.append(_assertion(condition_id, FingerprintResult.FALSE, reasons[1]))
