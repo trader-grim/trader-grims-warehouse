@@ -201,7 +201,7 @@ def validate_request(value: Any, *, now: datetime | None = None) -> dict[str, An
     validate_source_descriptor(request["source"])
     dependency = _exact(
         request["host_state_dependency"],
-        {"schema", "status", "descriptor_sha256", "receipt_sha256", "observed_at", "current_cas", "profile_cas", "tools", "receipt"},
+        {"schema", "status", "descriptor_sha256", "receipt_sha256", "observed_at", "current_cas", "profile_cas", "repository", "tools", "receipt"},
         "host state dependency",
     )
     if (
@@ -213,13 +213,29 @@ def validate_request(value: Any, *, now: datetime | None = None) -> dict[str, An
         raise ObservationError("host state dependency is not satisfied")
     if not isinstance(dependency["current_cas"], str) or dependency["current_cas"] != dependency["profile_cas"] or not dependency["current_cas"].startswith("/nix/store/"):
         raise ObservationError("host state CAS is invalid")
+    repository = _exact(
+        dependency["repository"],
+        {"path", "branch", "uid", "gid", "mode", "dev", "ino", "head_sha256", "ref_sha256", "commit"},
+        "host repository",
+    )
+    if (
+        repository["path"] != "/home/db/tgw-flake"
+        or repository["branch"] != "master"
+        or not _GIT.fullmatch(str(repository["commit"]))
+        or repository["head_sha256"] != digest(b"ref: refs/heads/master\n")
+        or repository["ref_sha256"] != digest((str(repository["commit"]) + "\n").encode())
+    ):
+        raise ObservationError("host repository authority is invalid")
+    for field in ("uid", "gid", "mode", "dev", "ino"):
+        if isinstance(repository[field], bool) or not isinstance(repository[field], int) or repository[field] < 0:
+            raise ObservationError("host repository identity is invalid")
     tools = _exact(dependency["tools"], {"python_sha256", "git_sha256", "ssh_sha256"}, "host tools")
     if any(not _SHA.fullmatch(str(item)) for item in tools.values()) or any(tools[key] != request["transport"][key] for key in tools):
         raise ObservationError("host tool evidence differs from transport")
     observed = datetime.fromisoformat(str(dependency["observed_at"]).replace("Z", "+00:00"))
     if observed.tzinfo is None or (now is not None and not timedelta(0) <= now - observed <= timedelta(minutes=10)):
         raise ObservationError("host state evidence is stale")
-    host_receipt = dict(_exact(dependency["receipt"], {"schema", "observed_at", "current_cas", "profile_cas", "tools", "receipt_sha256"}, "host state receipt"))
+    host_receipt = dict(_exact(dependency["receipt"], {"schema", "observed_at", "current_cas", "profile_cas", "repository", "tools", "receipt_sha256"}, "host state receipt"))
     receipt_hash = host_receipt.pop("receipt_sha256")
     if (
         host_receipt["schema"] != "tgw-prod-a3-host-state-observation-receipt/v1"
@@ -228,10 +244,11 @@ def validate_request(value: Any, *, now: datetime | None = None) -> dict[str, An
         or host_receipt["observed_at"] != dependency["observed_at"]
         or host_receipt["current_cas"] != dependency["current_cas"]
         or host_receipt["profile_cas"] != dependency["profile_cas"]
+        or host_receipt["repository"] != repository
         or host_receipt["tools"] != tools
     ):
         raise ObservationError("host state receipt is not self-hashed and exact")
-    if request["target"] != {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "main", "system": "x86_64-linux", "user": "codex", "port": 22}:
+    if request["target"] != {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "master", "system": "x86_64-linux", "user": "codex", "port": 22}:
         raise ObservationError("target is not exact")
     transport_fields = {
         "ssh_sha256",
@@ -285,6 +302,18 @@ def make_request(*, operation_id: str, transport: Mapping[str, str], source: Map
         "observed_at": now.isoformat(),
         "current_cas": "/nix/store/00000000000000000000000000000000-test-system",
         "profile_cas": "/nix/store/00000000000000000000000000000000-test-system",
+        "repository": {
+            "path": "/home/db/tgw-flake",
+            "branch": "master",
+            "uid": 1001,
+            "gid": 1001,
+            "mode": 0o755,
+            "dev": 1,
+            "ino": 2,
+            "head_sha256": digest(b"ref: refs/heads/master\n"),
+            "ref_sha256": digest(("1" * 40 + "\n").encode()),
+            "commit": "1" * 40,
+        },
         "tools": {name: transport[name] for name in ("python_sha256", "git_sha256", "ssh_sha256")},
     }
     host_receipt["receipt_sha256"] = digest(canonical(host_receipt))
@@ -301,6 +330,7 @@ def make_request(*, operation_id: str, transport: Mapping[str, str], source: Map
             "observed_at": now.isoformat(),
             "current_cas": "/nix/store/00000000000000000000000000000000-test-system",
             "profile_cas": "/nix/store/00000000000000000000000000000000-test-system",
+            "repository": host_receipt["repository"],
             "tools": {
                 "python_sha256": transport["python_sha256"],
                 "git_sha256": transport["git_sha256"],
@@ -308,7 +338,7 @@ def make_request(*, operation_id: str, transport: Mapping[str, str], source: Map
             },
             "receipt": host_receipt,
         },
-        "target": {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "main", "system": "x86_64-linux", "user": "codex", "port": 22},
+        "target": {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "master", "system": "x86_64-linux", "user": "codex", "port": 22},
         "transport": transport,
         "bounds": {
             "timeout_seconds": 60,

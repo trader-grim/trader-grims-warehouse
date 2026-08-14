@@ -18,7 +18,7 @@
     "base_commit": "70f86f338fe6b4c8200c9d9e250bc83656e4e77a",
     "base_tree": "fb137be8c90f2cd3d0ba7da24f3b8ff43904d330",
     "controller_path": "src/tgw/a3_host_state_observation.py",
-    "controller_sha256": "sha256:5d11d8acc6a8d4378d2455d0b2d63ae5eef92115e6449cd8966feb699db6eb10",
+    "controller_sha256": "sha256:f68eaf1ba6144a4f695f15054fef44048653fd5100e8c38f43b7f2bfe0310d77",
     "stdlib_helper_path": "src/tgw/a3_host_state_helper.py",
     "stdlib_helper_sha256": "sha256:c8ac0177bf3d7470a00ae3c2b49d7c073e6bfc71b0cce58694f5c5a3ae580fb9"
   },
@@ -27,7 +27,7 @@
     "resolved-system-profile-cas",
     "python-path-sha256-version",
     "git-path-sha256-version",
-    "repository-main-branch-identity",
+    "repository-master-branch-identity",
     "ssh-path-sha256-version",
     "known-hosts-path-sha256-mode-owner",
     "dedicated-public-private-identity-crossmatch",
@@ -62,5 +62,5 @@
   "grant": null,
   "request": null,
   "dispatchable": false,
-  "descriptor_sha256": "sha256:8665ebc7013f111d3ec1df219a4034de237d016eec94e33a353be5bb35929fd0"
+  "descriptor_sha256": "sha256:931f482fda5de1303671efcdc4965f51e32dd830ae28220bfe5f3f3b13c02fe7"
 }

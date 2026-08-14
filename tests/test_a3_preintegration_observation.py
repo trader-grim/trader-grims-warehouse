@@ -40,7 +40,7 @@ def _repo(tmp_path: Path) -> Path:
     path = tmp_path / "repo"
     path.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
-    subprocess.run(["git", "branch", "-m", "main"], cwd=path, check=True)
+    subprocess.run(["git", "branch", "-m", "master"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "Fixture"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.email", "fixture@example.invalid"], cwd=path, check=True)
     (path / "flake.lock").write_text('{"version":7,"root":"root","nodes":{"root":{}}}\n')
@@ -100,6 +100,24 @@ def test_transport_identity_is_closed(field: str, value: str) -> None:
     request["transport"][field] = value
     with pytest.raises(ObservationError):
         validate_request(request)
+
+
+def test_request_binds_fresh_host_repository_master_authority() -> None:
+    request = make_request(operation_id="master-authority", transport=_transport())
+    assert request["target"]["branch"] == "master"
+    assert request["host_state_dependency"]["repository"]["branch"] == "master"
+
+    changed = deepcopy(request)
+    changed["target"]["branch"] = "main"
+    changed["request_sha256"] = digest(canonical({key: value for key, value in changed.items() if key != "request_sha256"}))
+    with pytest.raises(ObservationError, match="target is not exact"):
+        validate_request(changed)
+
+    changed = deepcopy(request)
+    changed["host_state_dependency"]["repository"]["branch"] = "main"
+    changed["request_sha256"] = digest(canonical({key: value for key, value in changed.items() if key != "request_sha256"}))
+    with pytest.raises(ObservationError, match="host repository authority is invalid"):
+        validate_request(changed)
 
 
 def test_archive_xy_and_receipt_mutations_rejected(tmp_path: Path) -> None:

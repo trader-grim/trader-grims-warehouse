@@ -74,7 +74,7 @@ def test_first_dispatch_consumes_exactly_once(tmp_path: Path) -> None:
     request = _request()
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "init", "-q", "-b", "master"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "fixture@example.invalid"], cwd=repo, check=True)
     (repo / "flake.lock").write_text('{"version":7,"root":"root","nodes":{"root":{}}}\n')

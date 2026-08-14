@@ -857,6 +857,7 @@ def dependency_projection(receipt_value: Mapping[str, Any], request_value: Mappi
         "observed_at": receipt["observed_at"],
         "current_cas": receipt["current_cas"],
         "profile_cas": receipt["profile_cas"],
+        "repository": dict(receipt["repository"]),
         "tools": {
             "python_sha256": receipt["tools"]["python"]["sha256"],
             "git_sha256": receipt["tools"]["git"]["sha256"],
@@ -872,6 +873,7 @@ def dependency_projection(receipt_value: Mapping[str, Any], request_value: Mappi
         "observed_at": compact["observed_at"],
         "current_cas": compact["current_cas"],
         "profile_cas": compact["profile_cas"],
+        "repository": compact["repository"],
         "tools": compact["tools"],
         "receipt": compact,
     }
