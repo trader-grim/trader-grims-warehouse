@@ -35,6 +35,12 @@ def test_standalone_plan_default_and_exact_commit(tmp_path: Path):
     root, commit = _plan(tmp_path)
     assert current_plan_commit(lambda: {"plan_vault_path": root}) == commit
 
+    (root / "README.md").write_text("later Plan state\n")
+    subprocess.run(["git", "-C", str(root), "commit", "-qam", "later"], check=True)
+    assert current_plan_commit(lambda: {
+        "plan_vault_path": root, "plan_approved_commit": commit,
+    }) == commit
+
 
 def test_solution_loader_fails_closed_and_checks_identity(tmp_path: Path):
     root, _ = _plan(tmp_path)
@@ -48,8 +54,12 @@ def test_solution_loader_fails_closed_and_checks_identity(tmp_path: Path):
     directory = root / "plan" / "execution" / "solutions"
     directory.mkdir(parents=True)
     identity = "solution:sha256:abc"
-    (directory / f"{identity}.json").write_text(json.dumps({"solution_hash": identity}))
+    (directory / "governed-platform-solution.json").write_text(json.dumps({"solution_hash": identity}))
     assert load_solution(provider, identity)["solution_hash"] == identity
+
+    (directory / "duplicate.json").write_text(json.dumps({"solution_hash": identity}))
+    with pytest.raises(ValueError, match="ambiguous"):
+        load_solution(provider, identity)
 
 
 def test_configured_mount_is_late_bound_and_reuses_auth_functions():

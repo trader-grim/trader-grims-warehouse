@@ -13,6 +13,7 @@ from tgw.plan_authority import PostgresAuthorityStore
 
 DEFAULT_PLAN_ROOT = Path("/opt/TGW/library/plans")
 _IDENTITY = re.compile(r"^[A-Za-z0-9:._-]+$")
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
 def plan_root(config: Mapping[str, Any]) -> Path:
@@ -20,9 +21,14 @@ def plan_root(config: Mapping[str, Any]) -> Path:
 
 
 def current_plan_commit(config_provider: Callable[[], Mapping[str, Any]]) -> str:
-    root = plan_root(config_provider())
+    config = config_provider()
+    root = plan_root(config)
+    approved = config.get("plan_approved_commit")
+    if approved is not None and (not isinstance(approved, str) or not _COMMIT.fullmatch(approved)):
+        raise RuntimeError("approved standalone Plan commit is invalid")
+    ref = approved or "HEAD"
     result = subprocess.run(
-        ["git", "-c", f"safe.directory={root}", "-C", str(root), "rev-parse", "HEAD"],
+        ["git", "-c", f"safe.directory={root}", "-C", str(root), "rev-parse", "--verify", f"{ref}^{{commit}}"],
         check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     if result.returncode:
@@ -34,13 +40,18 @@ def load_solution(config_provider: Callable[[], Mapping[str, Any]], solution_has
     """Load one exact persisted solution; absence remains an explicit hold."""
     if not _IDENTITY.fullmatch(solution_hash):
         raise ValueError("invalid solution identity")
-    path = plan_root(config_provider()) / "plan" / "execution" / "solutions" / f"{solution_hash}.json"
-    if not path.is_file():
-        raise ValueError(f"persisted Plan solution unavailable: {solution_hash}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping) or payload.get("solution_hash") != solution_hash:
-        raise ValueError("persisted Plan solution identity mismatch")
-    return payload
+    directory = plan_root(config_provider()) / "plan" / "execution" / "solutions"
+    matches: list[Mapping[str, Any]] = []
+    for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid persisted Plan solution: {path.name}") from exc
+        if isinstance(payload, Mapping) and payload.get("solution_hash") == solution_hash:
+            matches.append(payload)
+    if len(matches) != 1:
+        raise ValueError(f"persisted Plan solution unavailable or ambiguous: {solution_hash}")
+    return matches[0]
 
 
 class ConfiguredAuthorityStore:
