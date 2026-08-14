@@ -1,0 +1,52 @@
+{
+  "schema": "tgw-controller-source-verification/v1",
+  "status": "PASS",
+  "source": {
+    "commit": "07c6043046ff9425a59f77e7f6f76f2476b7a76c",
+    "tree": "57d6480c242015ee766137a95bab741363ea413a",
+    "archive_path": "/opt/TGW/evidence/codex/sha256/05475e3076736e8ca18362f302174c6917cc337eab66c8d974b7164eab20fa58.tar",
+    "archive_sha256": "sha256:05475e3076736e8ca18362f302174c6917cc337eab66c8d974b7164eab20fa58",
+    "archive_size": 12830720
+  },
+  "change": {
+    "boundary": "invoke the already-installed content-addressed root-owned read-only helper through sudo -n instead of streaming helper source as unprivileged codex",
+    "remote_command": [
+      "/run/wrappers/bin/sudo",
+      "-n",
+      "/run/current-system/sw/bin/python3",
+      "-I",
+      "/var/lib/tgw-a3-observer/sha256-c5cccf19614c20a1e1cc7c3406f1a0caec512147815519a984ef7464e3ceaf4b.py"
+    ],
+    "helper_sha256": "sha256:c5cccf19614c20a1e1cc7c3406f1a0caec512147815519a984ef7464e3ceaf4b",
+    "install_result_sha256": "sha256:20c386a93009e7c619c304c7356b166aab5fad8cf858a5673aae643c7b8d51b0",
+    "install_manifest_sha256": "sha256:80a6d5fbed50308d55691e6f8ee7a8499c7fc4c629c61bd05024be4e63080d17",
+    "sshd_parity_retained_as_transport_proof": true,
+    "actual_command_bound_in_composition": true
+  },
+  "gates": {
+    "focused": "75 PASS / 0 FAIL",
+    "authority_matrix": "279 PASS / 0 FAIL",
+    "tracked_full": "3964 PASS / 5 SKIP / 0 FAIL",
+    "ruff": "PASS",
+    "py_compile": "PASS",
+    "diff_check": "PASS"
+  },
+  "runtime": {
+    "runtime_path": "/opt/TGW/evidence/codex/host-state-runtime/c04a95b123bad3319002c566494e27176ad48e91e1495d3c1897180ef5bdeced",
+    "runtime_sha256": "sha256:c04a95b123bad3319002c566494e27176ad48e91e1495d3c1897180ef5bdeced",
+    "controller_sha256": "sha256:b9a1d4d0d2e09ec184bad2e62f9a87ac18d436dd3f8e8e6a50b07e056d92521b",
+    "helper_sha256": "sha256:c5cccf19614c20a1e1cc7c3406f1a0caec512147815519a984ef7464e3ceaf4b"
+  },
+  "effects": {
+    "production_remote_connection": false,
+    "grant_issued": false,
+    "grant_consumed": false,
+    "remote_write": false,
+    "repository_access": false,
+    "nix": false,
+    "install": false,
+    "service": false,
+    "deployment": false
+  },
+  "verification_sha256": "sha256:036eecb3f02f1a7e718aff62552a85919485f38f57160ce9aa58e57eff37635b"
+}
