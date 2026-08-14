@@ -34,7 +34,7 @@ RESPONSE_SCHEMA = "tgw-nixos-a3-local-launch-response/v1"
 ATTESTATION_SCHEMA = "tgw-nixos-a3-local-netns-attestation/v1"
 CONFIG_SCHEMA = "tgw-nixos-a3-local-launcher-config/v1"
 RAW_EVIDENCE_SCHEMA = "tgw-nixos-a3-raw-link-route-probes/v1"
-CONFIG_PATH = "/etc/tgw/a3-successor-v2-launcher.json"
+CONFIG_PATH = "/etc/tgw/a3-successor-v3-launcher.json"
 MAX_PACKET_BYTES = 1_048_576
 MAX_DIAGNOSTIC_BYTES = 65_536
 _HEX = set("0123456789abcdef")
@@ -494,10 +494,13 @@ def _launch(packet: Mapping[str, Any], config: Mapping[str, Any]) -> tuple[int, 
             os.close(stderr_w)
             resource.setrlimit(resource.RLIMIT_NPROC, (config["max_processes"], config["max_processes"]))
             resource.setrlimit(resource.RLIMIT_AS, (config["max_memory_bytes"], config["max_memory_bytes"]))
+            libc = ctypes.CDLL(None, use_errno=True)
+            for capability in range(64):
+                if libc.prctl(24, capability, 0, 0, 0) != 0 and ctypes.get_errno() not in {0, 22}:  # PR_CAPBSET_DROP; EINVAL above kernel maximum
+                    raise OSError(ctypes.get_errno(), f"PR_CAPBSET_DROP({capability})")
             os.setgroups([])
             os.setgid(config["codex_gid"])
             os.setuid(config["codex_uid"])
-            libc = ctypes.CDLL(None, use_errno=True)
             if libc.prctl(38, 1, 0, 0, 0) != 0:  # PR_SET_NO_NEW_PRIVS
                 raise OSError(ctypes.get_errno(), "PR_SET_NO_NEW_PRIVS")
             os.write(ready_w, b"R")
