@@ -613,8 +613,9 @@ if not _READONLY:
 # Deterministic parser/retrieval logic lives in tgw.plan_render.plan_brief()
 # (PP-KNOWLEDGE-001 / todo #1439, #1520 follow-up refactor, Tigwa's v1
 # reviewed submission) — this tool is a thin delegate, not a second parser.
-# Paths come from cfg['plan_master_path'] / cfg['plan_vault_path']; no Plan
-# Vault root is hard-coded in this module.
+# Paths come from cfg['plan_master_path'] / cfg['plan_detail_root']; no Plan
+# root is hard-coded in this module.  Mutable inbox/docs state remains under
+# cfg['plan_vault_path'] and is deliberately not a canonical read source.
 # ---------------------------------------------------------------------------
 
 @mcp.tool()

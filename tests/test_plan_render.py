@@ -686,6 +686,27 @@ def test_plan_brief_linked_detail_is_metadata_only_never_inlined(tmp_path):
     assert 'content' not in detail
 
 
+def test_plan_brief_uses_explicit_standalone_detail_root(tmp_path):
+    cfg = _brief_cfg(tmp_path)
+    mutable_detail = cfg['plan_vault_path'] / 'plan' / 'pp' / 'PP-ALPHA-001.md'
+    mutable_detail.parent.mkdir(parents=True)
+    mutable_detail.write_text('stale mutable detail', encoding='utf-8')
+    standalone_detail_root = tmp_path / 'standalone' / 'plan' / 'pp'
+    standalone_detail_root.mkdir(parents=True)
+    canonical_detail = standalone_detail_root / 'PP-ALPHA-001.md'
+    canonical_detail.write_text('canonical detail', encoding='utf-8')
+    cfg['plan_detail_root'] = standalone_detail_root
+    _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
+
+    out = plan_brief(cfg, 'PP-ALPHA-001')
+
+    assert out['ok'] is True
+    assert out['linked_pp_detail']['path'] == str(canonical_detail)
+    assert out['linked_pp_detail']['sha256'] == hashlib.sha256(
+        b'canonical detail'
+    ).hexdigest()
+
+
 def test_plan_brief_never_writes_anything(tmp_path):
     cfg = _brief_cfg(tmp_path)
     plan_path = _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')

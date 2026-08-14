@@ -61,6 +61,11 @@ def test_plan_roots_keep_mutable_and_authority_bindings_separate(tmp_path):
         "/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault"
     )
     assert cfg["standalone_plan_root"] == Path("/opt/TGW/library/plans")
+    assert cfg["plan_inbox_path"] == cfg["plan_vault_path"] / "inbox"
+    assert cfg["plan_master_path"] == (
+        cfg["standalone_plan_root"] / "plan" / "TGW-Master-Plan.md"
+    )
+    assert cfg["plan_detail_root"] == cfg["standalone_plan_root"] / "plan" / "pp"
 
 
 # ---------------------------------------------------------------------------

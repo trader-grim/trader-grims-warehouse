@@ -645,8 +645,14 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
             'warning': 'Exact section exceeds the packet limit; use the canonical source path and anchors.',
         }
 
-    plan_vault_path = Path(cfg['plan_vault_path'])
-    detail_path = plan_vault_path / 'plan' / 'pp' / f'{query_pp}.md'
+    # Linked PP details are canonical Plan material too.  Preserve the legacy
+    # fixture/config fallback, while production config supplies the standalone
+    # detail root explicitly.
+    detail_root = Path(
+        cfg.get('plan_detail_root')
+        or (Path(cfg['plan_vault_path']) / 'plan' / 'pp')
+    )
+    detail_path = detail_root / f'{query_pp}.md'
     detail: Dict[str, Any] = {'path': str(detail_path), 'status': 'absent'}
     warnings: List[str] = []
     if detail_path.is_file():

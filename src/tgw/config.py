@@ -223,7 +223,11 @@ def load_config(path: Path) -> Dict[str, Any]:
         "plan_approved_commit": plan_approved_commit,
         "plan_git_path": plan_git_path,
         "plan_inbox_path": plan_vault_path / "inbox",
-        "plan_master_path": plan_vault_path / "plan" / "TGW-Master-Plan.md",
+        # Canonical Plan intent lives only in the standalone repository.  The
+        # mutable/synced Plan Vault remains the inbox and general docs surface,
+        # but must never become an alternate Master Plan authority.
+        "plan_master_path": standalone_plan_root / "plan" / "TGW-Master-Plan.md",
+        "plan_detail_root": standalone_plan_root / "plan" / "pp",
         "pm_intake_delay_hours": float(raw.get("pm_intake_delay_hours", 4.0)),
         # PP-EDITOR-001 ready-state dole-out: publish pool/divisor items per cycle
         "dole_interval_s": int(raw.get("dole_interval_s", 3600)),
