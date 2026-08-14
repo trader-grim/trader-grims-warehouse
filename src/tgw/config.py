@@ -85,7 +85,7 @@ def load_config(path: Path) -> Dict[str, Any]:
     catalog_root = p("catalog_root", "/opt/TGW/data/ItemCatalog")
     archive_root = p("archive_root", "/opt/TGW/data/ItemArchive")
     incoming_path = p("incoming_path", "/opt/TGW/incoming")
-    plan_vault_path = p("plan_vault_path", "/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault")
+    plan_vault_path = p("plan_vault_path", "/opt/TGW/library/plans")
     plan_approved_commit = raw.get("plan_approved_commit")
     plan_git_path = p("plan_git_path", "git")
 

@@ -55,6 +55,12 @@ def test_full_catalog_path_explicit_override(tmp_path):
     assert cfg["full_catalog_path"] == Path(override)
 
 
+def test_plan_vault_default_is_standalone_authority(tmp_path):
+    cfg_path = _write_cfg(tmp_path, {})
+    cfg = load_config(cfg_path)
+    assert cfg["plan_vault_path"] == Path("/opt/TGW/library/plans")
+
+
 # ---------------------------------------------------------------------------
 # ISS-004 — ebay_sku_migrate in normalised config
 # ---------------------------------------------------------------------------
