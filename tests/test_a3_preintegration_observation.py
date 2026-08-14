@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 import subprocess
 import time
 from copy import deepcopy
@@ -50,9 +52,42 @@ def _repo(tmp_path: Path) -> Path:
     return path
 
 
+def _bind_request_to_repo(request: dict, repo: Path) -> dict:
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    observed = os.lstat(repo)
+    repository = {
+        "path": "/home/db/tgw-flake",
+        "branch": "master",
+        "uid": observed.st_uid,
+        "gid": observed.st_gid,
+        "mode": stat.S_IMODE(observed.st_mode),
+        "dev": observed.st_dev,
+        "ino": observed.st_ino,
+        "head_sha256": digest(b"ref: refs/heads/master\n"),
+        "ref_sha256": digest((commit + "\n").encode()),
+        "commit": commit,
+    }
+    compact = request["host_state_dependency"]["receipt"]
+    compact["repository"] = repository
+    compact["receipt_sha256"] = digest(canonical({key: value for key, value in compact.items() if key != "receipt_sha256"}))
+    dependency = request["host_state_dependency"]
+    dependency["repository"] = repository
+    dependency["receipt_sha256"] = compact["receipt_sha256"]
+    request["repo_expectation"] = {
+        "uid": repository["uid"],
+        "gid": repository["gid"],
+        "mode": repository["mode"],
+        "git_dir": ".git",
+        "lock_file": "flake.lock",
+    }
+    request["request_sha256"] = digest(canonical({key: value for key, value in request.items() if key != "request_sha256"}))
+    return validate_request(request)
+
+
 def test_clean_observation_is_zero_effect_and_archive_bound(tmp_path: Path) -> None:
-    request = make_request(operation_id="observe-1", transport=_transport())
-    receipt, archive = observe_repository(_repo(tmp_path), request)
+    repo = _repo(tmp_path)
+    request = _bind_request_to_repo(make_request(operation_id="observe-1", transport=_transport()), repo)
+    receipt, archive = observe_repository(repo, request)
     assert receipt["outcome"] == "PASS"
     assert receipt["repository"]["archive_sha256"] == digest(archive)
     assert not any(receipt["effects"].values())
@@ -120,9 +155,19 @@ def test_request_binds_fresh_host_repository_master_authority() -> None:
         validate_request(changed)
 
 
+def test_observation_rejects_commit_after_host_state_authority(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    request = _bind_request_to_repo(make_request(operation_id="stale-host-state", transport=_transport()), repo)
+    (repo / "after-host-state").write_text("changed\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "advance master"], cwd=repo, check=True)
+    with pytest.raises(ObservationHold, match="commit differs from fresh host-state authority"):
+        observe_repository(repo, request)
+
 def test_archive_xy_and_receipt_mutations_rejected(tmp_path: Path) -> None:
-    request = make_request(operation_id="xy", transport=_transport())
-    receipt, archive = observe_repository(_repo(tmp_path), request)
+    repo = _repo(tmp_path)
+    request = _bind_request_to_repo(make_request(operation_id="xy", transport=_transport()), repo)
+    receipt, archive = observe_repository(repo, request)
     assert digest(archive + b"x") != receipt["repository"]["archive_sha256"]
     changed = deepcopy(receipt)
     changed["effects"]["nix"] = True
@@ -136,8 +181,9 @@ def test_default_composition_is_fail_closed() -> None:
 
 
 def test_immutable_store_rejects_replay(tmp_path: Path) -> None:
-    request = make_request(operation_id="once", transport=_transport())
-    receipt, archive = observe_repository(_repo(tmp_path), request)
+    repo = _repo(tmp_path)
+    request = _bind_request_to_repo(make_request(operation_id="once", transport=_transport()), repo)
+    receipt, archive = observe_repository(repo, request)
     store = ImmutableEvidenceStore(tmp_path / "evidence")
     store.persist(receipt, archive)
     with pytest.raises(FileExistsError):
@@ -145,8 +191,9 @@ def test_immutable_store_rejects_replay(tmp_path: Path) -> None:
 
 
 def test_helper_frame_binds_exact_archive_bytes(tmp_path: Path) -> None:
-    request = make_request(operation_id="frame", transport=_transport())
-    receipt, archive = observe_repository(_repo(tmp_path), request)
+    repo = _repo(tmp_path)
+    request = _bind_request_to_repo(make_request(operation_id="frame", transport=_transport()), repo)
+    receipt, archive = observe_repository(repo, request)
     assert decode_helper_response(encode_helper_response(receipt, archive), request) == (receipt, archive)
     changed = bytearray(encode_helper_response(receipt, archive))
     changed[-1] ^= 1
@@ -194,8 +241,9 @@ def test_closed_terminal_tuples(outcome: str, stage: str, code: str, dispatched:
 
 
 def test_persistence_failure_retains_typed_ambiguity(tmp_path: Path) -> None:
-    request = make_request(operation_id="persist", transport=_transport())
-    receipt, archive = observe_repository(_repo(tmp_path), request)
+    repo = _repo(tmp_path)
+    request = _bind_request_to_repo(make_request(operation_id="persist", transport=_transport()), repo)
+    receipt, archive = observe_repository(repo, request)
 
     class Broken:
         def persist(self, *args, **kwargs):
@@ -238,7 +286,7 @@ def test_sealed_transport_uses_exact_identity_and_frame(tmp_path: Path) -> None:
         "python_sha256": "sha256:" + "5" * 64,
         "git_sha256": "sha256:" + "6" * 64,
     }
-    request = make_request(operation_id="ssh-frame", transport=transport, source=source)
+    request = _bind_request_to_repo(make_request(operation_id="ssh-frame", transport=transport, source=source), repo)
     receipt, archive = observe_repository(repo, request)
     response_path.write_bytes(encode_helper_response(receipt, archive))
     provider = SshObservationProvider(request, fake, hosts, identity, helper, "/usr/bin/python3", request["source"], keygen)
@@ -291,11 +339,11 @@ def test_repository_rejects_worktree_specific_config(tmp_path: Path, relative: s
 
 
 def test_archive_replay_rejects_missing_lock_root_node(tmp_path: Path) -> None:
-    request = make_request(operation_id="missing-lock-root", transport=_transport())
     repo = _repo(tmp_path)
     (repo / "flake.lock").write_text('{"version":7,"root":"missing","nodes":{"root":{}}}\n')
     subprocess.run(["git", "add", "-f", "flake.lock"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "bad lock"], cwd=repo, check=True)
+    request = _bind_request_to_repo(make_request(operation_id="missing-lock-root", transport=_transport()), repo)
     receipt, archive = observe_repository(repo, request)
     with pytest.raises(ObservationError, match="input graph"):
         replay_archive(archive, receipt, request)

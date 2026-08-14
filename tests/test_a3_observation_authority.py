@@ -1,3 +1,5 @@
+import os
+import stat
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,7 +13,7 @@ from tgw.a3_observation_authority import (
     ReadOnlyObservationController,
     ReadOnlyObservationGrant,
 )
-from tgw.a3_preintegration_observation import ImmutableEvidenceStore, ObservationHold, digest, make_request, observe_repository
+from tgw.a3_preintegration_observation import ImmutableEvidenceStore, ObservationHold, canonical, digest, make_request, observe_repository, validate_request
 
 
 def _request():
@@ -24,6 +26,38 @@ def _request():
 def _identity(path: Path):
     st = path.stat()
     return {"path": str(path), "uid": st.st_uid, "gid": st.st_gid, "mode": st.st_mode & 0o7777, "dev": st.st_dev, "ino": st.st_ino, "nlink": st.st_nlink}
+
+
+def _bind_request_to_repo(request: dict, repo: Path) -> dict:
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    observed = os.lstat(repo)
+    repository = {
+        "path": "/home/db/tgw-flake",
+        "branch": "master",
+        "uid": observed.st_uid,
+        "gid": observed.st_gid,
+        "mode": stat.S_IMODE(observed.st_mode),
+        "dev": observed.st_dev,
+        "ino": observed.st_ino,
+        "head_sha256": digest(b"ref: refs/heads/master\n"),
+        "ref_sha256": digest((commit + "\n").encode()),
+        "commit": commit,
+    }
+    compact = request["host_state_dependency"]["receipt"]
+    compact["repository"] = repository
+    compact["receipt_sha256"] = digest(canonical({key: value for key, value in compact.items() if key != "receipt_sha256"}))
+    dependency = request["host_state_dependency"]
+    dependency["repository"] = repository
+    dependency["receipt_sha256"] = compact["receipt_sha256"]
+    request["repo_expectation"] = {
+        "uid": repository["uid"],
+        "gid": repository["gid"],
+        "mode": repository["mode"],
+        "git_dir": ".git",
+        "lock_file": "flake.lock",
+    }
+    request["request_sha256"] = digest(canonical({key: value for key, value in request.items() if key != "request_sha256"}))
+    return validate_request(request)
 
 
 def _grant(request, token_root: Path, evidence_root: Path):
@@ -80,6 +114,7 @@ def test_first_dispatch_consumes_exactly_once(tmp_path: Path) -> None:
     (repo / "flake.lock").write_text('{"version":7,"root":"root","nodes":{"root":{}}}\n')
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "x"], cwd=repo, check=True)
+    request = _bind_request_to_repo(request, repo)
     receipt, archive = observe_repository(repo, request)
     provider = Provider(result={"receipt": receipt, "archive": archive})
     token_root = tmp_path / "tokens"

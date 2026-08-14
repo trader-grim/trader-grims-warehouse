@@ -274,7 +274,14 @@ def validate_request(value: Any, *, now: datetime | None = None) -> dict[str, An
         raise ObservationError("bounds exceed policy")
     if request["policy"] != {"read_only": True, "nix": False, "network_beyond_ssh": False, "writes": False, "authority_consumption": False}:
         raise ObservationError("zero-effect policy is invalid")
-    if request["repo_expectation"] != {"uid": 1001, "gid": 1001, "mode": 0o755, "git_dir": ".git", "lock_file": "flake.lock"}:
+    repo_expectation = _exact(request["repo_expectation"], {"uid", "gid", "mode", "git_dir", "lock_file"}, "repository expectation")
+    if repo_expectation != {
+        "uid": repository["uid"],
+        "gid": repository["gid"],
+        "mode": repository["mode"],
+        "git_dir": ".git",
+        "lock_file": "flake.lock",
+    }:
         raise ObservationError("repository ownership expectation is invalid")
     freshness = _exact(request["freshness"], {"issued_at", "expires_at"}, "freshness")
     issued = datetime.fromisoformat(str(freshness["issued_at"]).replace("Z", "+00:00"))
@@ -349,7 +356,13 @@ def make_request(*, operation_id: str, transport: Mapping[str, str], source: Map
             "max_unpacked_bytes": 256 * 1024 * 1024,
         },
         "freshness": {"issued_at": now.isoformat(), "expires_at": (now + timedelta(minutes=5)).isoformat()},
-        "repo_expectation": {"uid": 1001, "gid": 1001, "mode": 0o755, "git_dir": ".git", "lock_file": "flake.lock"},
+        "repo_expectation": {
+            "uid": host_receipt["repository"]["uid"],
+            "gid": host_receipt["repository"]["gid"],
+            "mode": host_receipt["repository"]["mode"],
+            "git_dir": ".git",
+            "lock_file": "flake.lock",
+        },
         "policy": {"read_only": True, "nix": False, "network_beyond_ssh": False, "writes": False, "authority_consumption": False},
     }
     value["request_sha256"] = digest(canonical(value))
@@ -451,6 +464,17 @@ def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_
     if status:
         raise ObservationHold("production flake is not clean")
     commit, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+    expected_repository = request["host_state_dependency"]["repository"]
+    if commit != expected_repository["commit"]:
+        raise ObservationHold("production flake commit differs from fresh host-state authority")
+    if enforce_owner and component_identity[0][:5] != (
+        expected_repository["dev"],
+        expected_repository["ino"],
+        expected_repository["mode"],
+        expected_repository["uid"],
+        expected_repository["gid"],
+    ):
+        raise ObservationHold("production flake identity differs from fresh host-state authority")
     if any(line.startswith("160000 ") for line in str(git("ls-files", "--stage")).splitlines()):
         raise ObservationHold("repository contains gitlinks")
     if git("symbolic-ref", "--short", "HEAD") != request["target"]["branch"]:
