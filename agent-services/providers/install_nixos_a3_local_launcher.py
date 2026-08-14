@@ -179,7 +179,7 @@ def install(source: Path) -> dict[str, Any]:
     _ensure_directory(RUNTIME_ROOT, 0o755)
     _ensure_directory(LAUNCHER_PATH.parent, 0o755)
     _ensure_directory(SOURCE_PATH.parent, 0o755)
-    _ensure_directory(CONFIG_PATH.parent, 0o750)
+    _ensure_directory(CONFIG_PATH.parent, 0o755)
     _publish(LAUNCHER_PATH, source_raw, 0o555)
     _publish(SOURCE_PATH, source_raw, 0o444)
     if KEY_PATH.exists():
