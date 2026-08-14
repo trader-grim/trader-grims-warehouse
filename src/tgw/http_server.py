@@ -18,7 +18,6 @@ import sqlite3
 import subprocess
 import time
 import urllib.parse
-import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2992,37 +2991,6 @@ def system_workers() -> Dict[str, Any]:
     return {"ok": True, "workers": workers, "up": up, "total": len(units)}
 
 
-# ---------------------------------------------------------------------------
-# GET /api/jobs/{job_id} — bounded status used by governed action chaining
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/jobs/{job_id}", dependencies=[AUTH])
-def get_job_status(job_id: str) -> Dict[str, Any]:
-    """Return the terminal/progress state of one exact queue job."""
-    try:
-        uuid.UUID(job_id)
-    except (AttributeError, TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="invalid job id") from None
-    with psycopg2.connect(_cfg["postgres_dsn"]) as con:
-        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """SELECT job_id::text, queue_name, state, entity_type, entity_id,
-                          error_code, error_detail, created_at, updated_at, finished_at
-                     FROM queue_jobs WHERE job_id=%s""",
-                (job_id,),
-            )
-            row = cur.fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
-    result = dict(row)
-    for key in ("created_at", "updated_at", "finished_at"):
-        if result.get(key) is not None:
-            result[key] = result[key].isoformat()
-    return {"ok": True, "job": result}
-
-
-# ---------------------------------------------------------------------------
 # POST /api/jobs/{job_id}/requeue — re-enqueue a dead-letter job (Phase 3j)
 # ---------------------------------------------------------------------------
 
@@ -8089,32 +8057,13 @@ def _render_item_detail_html(
         f"  document.querySelectorAll('.dtab-panel').forEach(function(p){{p.style.display=p.dataset.tab===name?'':'none';}});"
         f"  document.querySelectorAll('.dtab-btn').forEach(function(b){{b.classList.toggle('dtab-active',b.dataset.tab===name);}});"
         f"}}"
-        f"function waitForGovernedListingJob(jobId,action,remaining){{"
-        f"  setTimeout(function(){{"
-        f"    fetch('/api/jobs/'+encodeURIComponent(jobId),{{headers:authHeaders()}})"
-        f"    .then(function(r){{return r.json();}}).then(function(d){{"
-        f"      var j=d.job||{{}};"
-        f"      if(!d.ok){{alert('Job status failed: '+(d.detail||'error'));return;}}"
-        f"      if(j.state==='succeeded'){{triggerAction(action,null,remaining);return;}}"
-        f"      if(['dead_letter','failed','cancelled'].indexOf(j.state)>=0){{"
-        f"        alert('eBay '+j.queue_name+' failed: '+(j.error_detail||j.error_code||j.state));return;"
-        f"      }}"
-        f"      waitForGovernedListingJob(jobId,action,remaining);"
-        f"    }}).catch(function(e){{alert('Job status network error: '+e);}});"
-        f"  }},1500);"
-        f"}}"
-        f"function triggerAction(action,confirmMsg,remaining){{"
-        f"  remaining=(remaining===undefined?4:remaining);"
+        f"function triggerAction(action,confirmMsg){{"
         f"  if(confirmMsg&&!confirm(confirmMsg))return;"
         f"  fetch('/api/items/'+_SKU+'/action',{{"
         f"    method:'POST',"
         f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
         f"    body:JSON.stringify({{action:action}})"
         f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
-        f"    if(d.ok&&action==='ebay_publish'&&d.status==='workflow_dispatched'&&d.job_id){{"
-        f"      if(remaining<=0){{alert('Listing stopped after too many workflow steps.');return;}}"
-        f"      waitForGovernedListingJob(d.job_id,action,remaining-1);return;"
-        f"    }}"
         f"    if(d.ok&&(action==='archive'||action==='ebay_end_listing')){{window.location.href='/form/items';return;}}"
         f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update'||action==='reset_draft_from_live')){{location.reload();return;}}"
         f"    alert(d.ok ? 'Action queued: '+action : 'Error: '+(d.detail||'failed'));"

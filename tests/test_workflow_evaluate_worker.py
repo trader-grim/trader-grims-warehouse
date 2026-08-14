@@ -231,6 +231,96 @@ def test_rebuilds_new_generation_and_dispatches_evaluator_selected_local_treatme
     assert enqueue.call_args.kwargs["payload"]["graph_id"] == receipt["evidence"]["graph_id"]
 
 
+def test_successful_governed_stage_durably_continues_to_publish(tmp_path):
+    item_root = _item(tmp_path)
+    item_path = item_root / "SKU-1" / "SKU-1.json"
+    item = json.loads(item_path.read_text())
+    item.update({
+        "product_lookup": {"title": "known"}, "ebay_category_id": "123",
+        "draft_listing": {"title": "Ready", "category_id": "123", "price": 10},
+        "ebay_photos": [{"url": "https://example.invalid/photo.jpg"}],
+        "ebay_offer": {"offer_id": "offer-1", "provider_effect_id": "effect-1",
+                       "stage_content_identity": "content-1"},
+    })
+    item_path.write_text(json.dumps(item), encoding="utf-8")
+    origin = {
+        "outcome": "satisfied", "graph_id": "old-graph",
+        "treatment_id": "ebay-stage", "treatment_version": "1",
+    }
+    job, config = _event(
+        item_root, origin_receipt=origin,
+        operator_authority_id="authority-1",
+        operator_identity="operator:authenticated",
+        operator_surface="http:item-action:ebay-publish",
+        pre_authority_condition_hash="pre-condition",
+    )
+    config["workflow_migration"] = {"ebay_provider_identity": "ebay:account"}
+    durable_payload = {
+        "operator_authority_id": "authority-1",
+        "operator_identity": "operator:authenticated",
+        "operator_surface": "http:item-action:ebay-publish",
+        "pre_authority_condition_hash": "pre-condition",
+        "goal_profile_id": "tgw.ebay_listable", "goal_profile_version": "1",
+        "graph_id": "old-graph", "object_generation": "old-generation",
+        "treatment_id": "ebay-stage", "treatment_version": "1",
+        "result": origin,
+    }
+    durable = {
+        "job_id": "origin-1", "state": "succeeded", "queue_name": "ebay_stage",
+        "entity_type": "item", "entity_id": "SKU-1", "payload_json": durable_payload,
+    }
+    authority = SimpleNamespace(
+        operator_identity="operator:authenticated",
+        surface="http:item-action:ebay-publish",
+        provider_identity="ebay:account", scopes=("stage", "publish"),
+    )
+    continued = SimpleNamespace(
+        graph=SimpleNamespace(object_generation="new-generation", graph_id="new-graph"),
+    )
+    dispatched = SimpleNamespace(
+        enqueued=True, outcome="dispatched", treatment_id="ebay-publish",
+        job_id="publish-job",
+    )
+    enqueue = MagicMock()
+    with patch("tgw.workers.workflow_evaluate.get_authority", return_value=authority), \
+         patch("tgw.workers.workflow_evaluate.validate_authority",
+               return_value=(authority, "valid")), \
+         patch("tgw.workflow.listing_migration.authorize_and_dispatch_next_listing_effect",
+               return_value=(continued, dispatched, "authority-2", True)) as continuation:
+        receipt = evaluate_event(
+            job, config, enqueue_fn=enqueue, origin_lookup=lambda _job_id: durable,
+        )
+
+    assert receipt["outcome"] == "satisfied"
+    assert receipt["evidence"]["next_treatment"] == "ebay-publish"
+    assert receipt["evidence"]["next_job_id"] == "publish-job"
+    assert receipt["evidence"]["successor_authority_id"] == "authority-2"
+    assert continuation.call_args.kwargs["enqueue_fn"] is enqueue
+
+
+def test_governed_stage_continuation_rejects_non_durable_origin(tmp_path):
+    item_root = _item(tmp_path)
+    origin = {
+        "outcome": "satisfied", "graph_id": "old-graph",
+        "treatment_id": "ebay-stage", "treatment_version": "1",
+    }
+    job, config = _event(
+        item_root, origin_receipt=origin,
+        operator_authority_id="authority-1",
+        operator_identity="operator:authenticated",
+        operator_surface="http:item-action:ebay-publish",
+        pre_authority_condition_hash="pre-condition",
+    )
+    with pytest.raises(TreatmentFailure) as caught:
+        evaluate_event(
+            job, config, enqueue_fn=MagicMock(),
+            origin_lookup=lambda _job_id: {"state": "failed"},
+        )
+    assert caught.value.result["evidence"]["reason_code"] == (
+        "UNTRUSTED_OPERATOR_CONTINUATION"
+    )
+
+
 def test_unauthorized_external_candidates_are_not_reported_as_eligible(tmp_path):
     root = tmp_path / "items"
     path = root / "SKU-1" / "SKU-1.json"
@@ -586,7 +676,11 @@ def test_atomic_completion_writes_receipt_then_durable_event():
     cursor.__enter__.return_value = cursor
     cursor.fetchone.side_effect = [
         ("SKU-1", {"goal_profile_id": "tgw.ebay_listable", "goal_profile_version": "1",
-                   "graph_id": "graph-1", "object_generation": "gen-1"}),
+                   "graph_id": "graph-1", "object_generation": "gen-1",
+                   "operator_authority_id": "authority-1",
+                   "operator_identity": "operator:authenticated",
+                   "operator_surface": "http:item-action:ebay-publish",
+                   "pre_authority_condition_hash": "condition-0"}),
         ("event-job",),
     ]
     connection = MagicMock()
@@ -602,6 +696,10 @@ def test_atomic_completion_writes_receipt_then_durable_event():
     inserted = json.loads(cursor.execute.call_args_list[1].args[1][2])
     assert inserted["origin_receipt"] == receipt
     assert inserted["prior_object_generation"] == "gen-1"
+    assert inserted["operator_authority_id"] == "authority-1"
+    assert inserted["operator_identity"] == "operator:authenticated"
+    assert inserted["operator_surface"] == "http:item-action:ebay-publish"
+    assert inserted["pre_authority_condition_hash"] == "condition-0"
 
 
 def test_satisfied_no_change_receipt_is_persisted_without_evaluation_event():

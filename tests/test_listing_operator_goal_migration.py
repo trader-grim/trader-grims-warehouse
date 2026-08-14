@@ -120,6 +120,34 @@ def test_item_publish_workflow_never_enqueues_legacy_generic_jobs(tmp_path, monk
     assert captured["provider_identity"] == "ebay:account"
 
 
+def test_next_listing_effect_preserves_dispatched_local_remediation(monkeypatch):
+    local = DispatchResult(
+        treatment_id="normalize-condition", treatment_version="1",
+        queue_name="normalize_condition", entity_id="SKU-1", enqueued=True,
+        job_id="local-job",
+    )
+    admitted = GoalRequestResult(
+        graph=SimpleNamespace(ownership_conflicts=(), reconciliation_gates=()),
+        dispatched=local, held_external=(), operator_gates=(),
+    )
+    monkeypatch.setattr(
+        "tgw.workflow.listing_migration.authorize_and_request_item_goal",
+        lambda *args, **kwargs: (admitted, "authority-1", True),
+    )
+
+    result, dispatched, authority_id, created = (
+        authorize_and_dispatch_next_listing_effect(
+            "/unused/item.json", operator_identity="operator:test",
+            surface="http:item-action:ebay-publish",
+            provider_identity="ebay:account",
+        )
+    )
+
+    assert result is admitted
+    assert dispatched is local
+    assert authority_id == "authority-1" and created is True
+
+
 def test_force_restage_dispatch_is_exact_and_authority_bound(monkeypatch):
     disposition = SimpleNamespace(treatment_id="ebay-stage", treatment_version="1")
     graph = SimpleNamespace(

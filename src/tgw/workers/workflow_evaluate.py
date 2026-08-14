@@ -13,6 +13,11 @@ from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
 from tgw.workflow.evaluator import evaluate
 from tgw.workflow.item_snapshot import build_item_snapshot
+from tgw.workflow.operator_authority import (
+    get_authority,
+    listing_content_identity,
+    validate_authority,
+)
 from tgw.workflow.profiles import (
     TGW_EBAY_LEGACY_STAGE_ONBOARDED,
     get_profile,
@@ -154,6 +159,89 @@ def evaluate_event(
         snapshot=snapshot, goal=profile, treatments=treatments,
         evaluator_version=EVALUATOR_VERSION,
     )
+
+    # A successful governed stage changes the item generation but not the
+    # operator-reviewed listing content.  Continue the original publish intent
+    # on the server so every API client (not only one browser page) reaches the
+    # publish treatment.  The durable origin row and prior authority are both
+    # revalidated before a fresh authority is issued for the new generation.
+    authority_id = payload.get("operator_authority_id")
+    if not isolated and origin.get("treatment_id") == "ebay-stage" and authority_id:
+        lookup = origin_lookup or state_machine.get_job
+        durable = lookup(origin_job_id)
+        durable_payload = durable.get("payload_json") if isinstance(durable, Mapping) else None
+        durable_result = (durable_payload.get("result")
+                          if isinstance(durable_payload, Mapping) else None)
+        exact_payload = {
+            "operator_authority_id": authority_id,
+            "operator_identity": payload.get("operator_identity"),
+            "operator_surface": payload.get("operator_surface"),
+            "pre_authority_condition_hash": payload.get("pre_authority_condition_hash"),
+            "goal_profile_id": profile_id,
+            "goal_profile_version": profile_version,
+            "graph_id": payload.get("prior_graph_id"),
+            "object_generation": payload.get("prior_object_generation"),
+            "treatment_id": "ebay-stage",
+            "treatment_version": "1",
+        }
+        if (not isinstance(durable, Mapping)
+                or str(durable.get("job_id")) != origin_job_id
+                or durable.get("state") != "succeeded"
+                or durable.get("queue_name") != "ebay_stage"
+                or durable.get("entity_type") != "item"
+                or durable.get("entity_id") != entity_id
+                or not isinstance(durable_payload, Mapping)
+                or any(durable_payload.get(key) != value
+                       for key, value in exact_payload.items())
+                or durable_result != origin):
+            raise _fail("UNTRUSTED_OPERATOR_CONTINUATION", origin_job_id=origin_job_id)
+
+        migration = config.get("workflow_migration")
+        if migration is None and isinstance(config.get("raw"), Mapping):
+            migration = config["raw"].get("workflow_migration")
+        migration = migration if isinstance(migration, Mapping) else {}
+        provider_identity = migration.get("ebay_provider_identity")
+        authority = get_authority(authority_id)
+        current_item = json.loads(item_path.read_text(encoding="utf-8"))
+        valid, reason = validate_authority(
+            authority_id, entity_id=entity_id, goal_profile_id=profile_id,
+            goal_profile_version=profile_version,
+            object_generation=payload.get("prior_object_generation"),
+            pre_authority_condition_hash=payload.get("pre_authority_condition_hash"),
+            content_identity=listing_content_identity(current_item),
+            provider_identity=provider_identity, scope="stage",
+        )
+        if (authority is None or valid is None
+                or authority.operator_identity != payload.get("operator_identity")
+                or authority.surface != payload.get("operator_surface")
+                or "publish" not in authority.scopes):
+            raise _fail(
+                "INVALID_OPERATOR_CONTINUATION", origin_job_id=origin_job_id,
+                authority_reason=reason,
+            )
+
+        from tgw.workflow.listing_migration import (
+            authorize_and_dispatch_next_listing_effect,
+        )
+
+        continued, dispatched, successor_authority_id, _ = (
+            authorize_and_dispatch_next_listing_effect(
+                item_path, operator_identity=authority.operator_identity,
+                surface=authority.surface, provider_identity=authority.provider_identity,
+                enqueue_fn=enqueue_fn,
+            )
+        )
+        if dispatched is None:
+            raise _fail("CONTINUATION_NOT_DISPATCHED", origin_job_id=origin_job_id)
+        return _receipt(
+            "satisfied", origin_job_id=origin_job_id,
+            object_generation=continued.graph.object_generation,
+            graph_id=continued.graph.graph_id,
+            dispatch=("enqueued" if dispatched.enqueued else dispatched.outcome),
+            next_treatment=dispatched.treatment_id,
+            next_job_id=dispatched.job_id,
+            successor_authority_id=successor_authority_id,
+        )
     evidence: dict[str, Any] = {
         "origin_job_id": origin_job_id,
         "object_generation": snapshot.generation,

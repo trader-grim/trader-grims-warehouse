@@ -879,6 +879,13 @@ def complete_treatment_and_enqueue_evaluation(
                 "prior_graph_id": payload.get("graph_id"),
                 "prior_object_generation": payload.get("object_generation"),
             }
+            for key in (
+                "operator_authority_id", "operator_identity", "operator_surface",
+                "pre_authority_condition_hash",
+            ):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    event_payload[key] = value
             cur.execute(
                 """
                 INSERT INTO queue_jobs

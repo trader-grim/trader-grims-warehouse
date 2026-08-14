@@ -324,7 +324,7 @@ def authorize_and_dispatch_next_listing_effect(
         enqueue_fn=enqueue_fn, issuer=issuer, authority_lookup=authority_lookup,
     )
     if result.dispatched is not None:
-        raise RuntimeError("listing admission selected an unexpected local treatment")
+        return result, result.dispatched, authority_id, created
     if result.graph.ownership_conflicts or result.graph.reconciliation_gates:
         raise RuntimeError("listing admission is blocked by reconciliation")
 
