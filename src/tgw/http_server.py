@@ -2149,6 +2149,48 @@ def get_thumbnail(sku: str):
 # ---------------------------------------------------------------------------
 
 
+def _normalize_draft_condition_for_provider(json_path: "Path") -> Dict[str, str] | None:
+    """Persist the nearest honest category-valid condition before dispatch.
+
+    eBay accepts an inventory-item PUT containing a globally valid condition
+    enum, but can reject the later publish because that enum is not valid for
+    the offer's category.  Authorization and staged-content identities must be
+    created *after* this deterministic downgrade, never around content the
+    provider will reject or silently reinterpret.
+    """
+    from .apis.ebay.conditions import (
+        allowed_conditions_for_category,
+        best_condition_for_enum,
+    )
+
+    doc = load_item_doc(json_path)
+    draft = doc.get("draft_listing")
+    if not isinstance(draft, dict):
+        return None
+    category_id = str(draft.get("category_id") or "").strip()
+    current = str(draft.get("condition_enum") or "").strip()
+    if not category_id or not current:
+        return None
+    allowed = allowed_conditions_for_category(_cfg, category_id)
+    if not allowed or any(item.get("condition_enum") == current for item in allowed):
+        return None
+    remap = best_condition_for_enum(_cfg, category_id, current)
+    if remap is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"condition {current!r} is not valid for eBay category "
+                    f"{category_id}; select a category-valid condition"),
+        )
+    updated = dict(draft)
+    updated.update({
+        "condition_id": remap["condition_id"],
+        "condition_label": remap["condition_label"],
+        "condition_enum": remap["condition_enum"],
+    })
+    _apply_patch(json_path, {"draft_listing": updated})
+    return remap
+
+
 @app.post("/api/items/{sku}/action")
 def item_action(
     sku: str, body: ActionBody,
@@ -2166,6 +2208,8 @@ def item_action(
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
 
     try:
+        if action in {"ebay_stage", "ebay_publish", "ebay_update"}:
+            _normalize_draft_condition_for_provider(json_path)
         if action == "approve":
             # Human approval of AI draft — set status=Ready, no job enqueued
             _apply_patch(json_path, {"status": "Ready"})

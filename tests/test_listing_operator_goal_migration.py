@@ -134,6 +134,66 @@ def test_item_publish_workflow_never_enqueues_legacy_generic_jobs(tmp_path, monk
     assert captured["provider_identity"] == "ebay:account"
 
 
+def test_item_publish_remaps_category_invalid_condition_before_authority(
+    tmp_path, monkeypatch,
+):
+    from tgw.workflow import listing_migration
+
+    root, path = _item(
+        tmp_path,
+        draft_listing={
+            "category_id": "171175", "condition_id": "3000",
+            "condition_label": "Used", "condition_enum": "USED_EXCELLENT",
+        },
+    )
+    monkeypatch.setattr(http_server, "_cfg", {
+        "itemdata_root": root,
+        "workflow_migration": {
+            "ebay_publish_provider_effect": "workflow",
+            "ebay_provider_identity": "ebay:account",
+        },
+    })
+    monkeypatch.setattr(
+        "tgw.apis.ebay.conditions.allowed_conditions_for_category",
+        lambda cfg, category_id: [{
+            "condition_id": "5000", "condition_label": "Good",
+            "condition_enum": "USED_GOOD",
+        }],
+    )
+    monkeypatch.setattr(
+        "tgw.apis.ebay.conditions.best_condition_for_enum",
+        lambda cfg, category_id, current: {
+            "condition_id": "5000", "condition_label": "Good",
+            "condition_enum": "USED_GOOD",
+        },
+    )
+    seen = {}
+    dispatched = DispatchResult(
+        treatment_id="ebay-stage", treatment_version="1", queue_name="ebay_stage",
+        entity_id="SKU-1", enqueued=True, job_id="job-1",
+    )
+    graph = SimpleNamespace(graph_id="graph-1", object_generation="generation-1")
+
+    def _authorize(observed_path, **kwargs):
+        seen.update(json.loads(observed_path.read_text(encoding="utf-8")))
+        return SimpleNamespace(graph=graph), dispatched, "authority-1", True
+
+    monkeypatch.setattr(
+        listing_migration, "authorize_and_dispatch_next_listing_effect", _authorize,
+    )
+
+    result = http_server.item_action(
+        "SKU-1", http_server.ActionBody(action="ebay_publish"),
+        operator_identity="operator:authenticated",
+    )
+
+    assert result["ok"] is True
+    assert seen["draft_listing"]["condition_id"] == "5000"
+    assert seen["draft_listing"]["condition_label"] == "Good"
+    assert seen["draft_listing"]["condition_enum"] == "USED_GOOD"
+    assert json.loads(path.read_text(encoding="utf-8"))["draft_listing"] == seen["draft_listing"]
+
+
 def test_next_listing_effect_preserves_dispatched_local_remediation(monkeypatch):
     local = DispatchResult(
         treatment_id="normalize-condition", treatment_version="1",
