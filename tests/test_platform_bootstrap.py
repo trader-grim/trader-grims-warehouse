@@ -803,6 +803,7 @@ def test_nix_leaf_is_disabled_by_default_and_contains_only_fixed_public_material
     assert "remoteAuthorizedKeys.keys == [ cfg.sshAuthorizedPublicKey ]" in module
     assert "remoteAuthorizedKeys.keyFiles == [ ]" in module
     assert "authorizedKeysFiles = [ soleAuthorizedKeysFile ]" in module
+    assert 'environment.pathsToLink = [ "/libexec" ];' in module
     assert 'extraConfig = lib.mkForce ""' in module
     assert 'config.services.openssh.extraConfig == ""' in module
     for closed_source in (

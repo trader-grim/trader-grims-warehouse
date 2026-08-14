@@ -43,6 +43,10 @@ in {
       }
     ];
     environment.systemPackages = [ cfg.package ];
+    # The wrapper's reviewed stable paths include helper/bootstrap artifacts
+    # under /run/current-system/sw/libexec/tgw. buildEnv does not link libexec
+    # by default, so admit that one package subtree explicitly.
+    environment.pathsToLink = [ "/libexec" ];
     environment.etc = {
       "tgw/nix-observer-render-wrapper.conf" = { source = cfg.wrapperConfig; mode = "0400"; user = "root"; group = "root"; };
       "tgw/nix-observer-render-composition.json" = { source = cfg.composition; mode = "0400"; user = "root"; group = "root"; };

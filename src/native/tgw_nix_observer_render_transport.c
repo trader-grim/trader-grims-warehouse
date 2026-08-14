@@ -125,6 +125,21 @@ static int held_regular(const char *path, int require_root, int forbid_write) {
   return fd;
 }
 
+/* Runtime tools are exposed through /run/current-system, whose final path is
+ * deliberately a root-owned symlink into the immutable Nix store. Open the
+ * resolved object once and pin that descriptor; its exact digest is checked
+ * before use. Mutable configuration and key material continue to use
+ * held_regular() and therefore remain O_NOFOLLOW. */
+static int held_runtime_regular(const char *path, int require_root, int forbid_write) {
+  struct stat metadata;
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0 || fstat(fd, &metadata) || !S_ISREG(metadata.st_mode) || (require_root && metadata.st_uid != 0) ||
+      (forbid_write && (metadata.st_mode & 022))) {
+    die("held runtime artifact identity invalid");
+  }
+  return fd;
+}
+
 static void sha256_bytes(const unsigned char *raw, size_t size, char out[72]) {
   EVP_MD_CTX *context = EVP_MD_CTX_new();
   unsigned char digest[EVP_MAX_MD_SIZE];
@@ -156,9 +171,9 @@ static void sha256_fd(int fd, char out[72]) {
 static int pin_fd(const char *path, const char *expected, int target) {
   char observed[72];
 #ifdef TGW_RENDER_TEST_BUILD
-  int source = held_regular(path, 0, 1);
+  int source = held_runtime_regular(path, 0, 1);
 #else
-  int source = held_regular(path, 1, 1);
+  int source = held_runtime_regular(path, 1, 1);
 #endif
   sha256_fd(source, observed);
   if (strcmp(observed, expected) || dup3(source, target, 0) < 0) die("held component pinning failed");
