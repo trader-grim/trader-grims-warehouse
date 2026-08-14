@@ -197,6 +197,8 @@ def test_success_persists_exact_stage_evidence_before_satisfied_receipt(
     assert receipt['condition_hash'] == _payload()['condition_hash']
     assert receipt['entity_id'] == sku
     assert receipt['evidence']['provider_effect_id'] == 'e' * 64
+    assert isinstance(receipt['evidence']['resulting_generation'], str)
+    assert len(receipt['evidence']['resulting_generation']) == 64
 
 
 def test_already_staged_governed_replay_syncs_before_satisfied(

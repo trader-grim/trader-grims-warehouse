@@ -36,6 +36,7 @@ from tgw.ebay.sync import enqueue_post_push_sync, stage_draft
 from tgw.ebay.sync import extract_ebay_error_field as _extract_ebay_error_field
 from tgw.ebay.sync import format_ebay_error as _format_ebay_error
 from tgw.errors import TreatmentFailure
+from tgw.item_mutation import item_generation
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -81,7 +82,8 @@ class EbayStageWorker(QueueWorker):
     @staticmethod
     def _receipt(payload: Dict[str, Any], sku: str, *, outcome: str,
                  effect_id: str, reason_code: str,
-                 result: Dict[str, Any] | None = None) -> Dict[str, Any]:
+                 result: Dict[str, Any] | None = None,
+                 resulting_generation: str | None = None) -> Dict[str, Any]:
         return {
             'receipt_schema_id': 'treatment-receipt/v1',
             'treatment_id': payload['treatment_id'],
@@ -96,7 +98,9 @@ class EbayStageWorker(QueueWorker):
             'artifacts': [f'item:{sku}'],
             'evidence': {'reason_code': reason_code, 'provider': 'ebay',
                          'provider_effect_id': effect_id,
-                         'provider_result': result},
+                         'provider_result': result,
+                         **({'resulting_generation': resulting_generation}
+                            if resulting_generation else {})},
         }
 
     def _stage_with_provider_effect(
@@ -397,6 +401,7 @@ class EbayStageWorker(QueueWorker):
                 return self._receipt(
                     payload, sku, outcome='satisfied', effect_id=effect_id,
                     reason_code='PROVIDER_EFFECT_SUCCEEDED', result=record.result,
+                    resulting_generation=item_generation(item),
                 )
             log.info('ebay_stage: %s already staged (offerId=%s) — skipping',
                      sku, existing_offer_id)
@@ -635,9 +640,13 @@ class EbayStageWorker(QueueWorker):
         )
 
         if effect_mode == 'workflow':
+            resulting_generation = item_generation(json.loads(
+                json_path.read_text(encoding='utf-8')
+            ))
             return self._receipt(
                 payload, sku, outcome='satisfied', effect_id=provider_effect_id,
                 reason_code='PROVIDER_EFFECT_SUCCEEDED', result=result,
+                resulting_generation=resulting_generation,
             )
         return {
             "treatment_id": "ebay-stage",

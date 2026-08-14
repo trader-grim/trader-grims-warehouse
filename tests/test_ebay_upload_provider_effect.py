@@ -81,6 +81,8 @@ def test_workflow_effect_binds_exact_prepared_bytes_and_persists_receipt(
     item = json.loads((tmp_path / sku / f'{sku}.json').read_text())
     assert item['ebay_photos'][0]['provider_effect_id'] == 'effect-1'
     assert receipt['provider_effect_ids'] == ('effect-1',)
+    from tgw.item_mutation import item_generation
+    assert receipt['evidence']['resulting_generation'] == item_generation(item)
 
 
 def test_timeout_after_dispatch_is_ambiguous_and_stops(tmp_path, monkeypatch):

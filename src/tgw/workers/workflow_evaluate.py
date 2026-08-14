@@ -91,6 +91,11 @@ def _validate_listing_continuation(
     durable_payload = durable.get("payload_json") if isinstance(durable, Mapping) else None
     durable_result = (durable_payload.get("result")
                       if isinstance(durable_payload, Mapping) else None)
+    origin_evidence = origin.get("evidence")
+    resulting_generation = (
+        origin_evidence.get("resulting_generation")
+        if isinstance(origin_evidence, Mapping) else None
+    )
     exact_payload = {
         "operator_authority_id": authority_id,
         "operator_identity": payload.get("operator_identity"),
@@ -111,6 +116,9 @@ def _validate_listing_continuation(
             or durable.get("entity_id") != entity_id
             or not isinstance(durable_payload, Mapping)
             or durable_payload.get("sku") != entity_id
+            or not isinstance(resulting_generation, str)
+            or not resulting_generation
+            or resulting_generation != graph.object_generation
             or any(durable_payload.get(key) != value
                    for key, value in exact_payload.items())
             or durable_result != origin):
@@ -321,7 +329,13 @@ def evaluate_event(
             )
         )
         if dispatched is None:
-            raise _fail("CONTINUATION_NOT_DISPATCHED", origin_job_id=origin_job_id)
+            return _receipt(
+                "satisfied", origin_job_id=origin_job_id,
+                object_generation=continued.graph.object_generation,
+                graph_id=continued.graph.graph_id, continued_from=treatment_id,
+                dispatch="none", next_treatment=None, next_job_id=None,
+                successor_authority_id=successor_authority_id,
+            )
         return _receipt(
             "satisfied", origin_job_id=origin_job_id,
             object_generation=continued.graph.object_generation,

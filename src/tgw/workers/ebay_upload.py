@@ -37,6 +37,7 @@ from tgw.ebay.upload import (
     upload_prepared,
 )
 from tgw.errors import TreatmentFailure
+from tgw.item_mutation import item_generation
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.quota import QuotaBudgetExceeded
@@ -151,7 +152,9 @@ class EbayUploadWorker(QueueWorker):
 
     @staticmethod
     def _provider_receipt(payload: Dict[str, Any], sku: str, *, outcome: str,
-                          effect_id: str, reason_code: str) -> Dict[str, Any]:
+                          effect_id: str, reason_code: str,
+                          resulting_generation: str | None = None,
+                          effect_ids: List[str] | None = None) -> Dict[str, Any]:
         return {
             'receipt_schema_id': 'treatment-receipt/v1',
             'treatment_id': payload['treatment_id'],
@@ -162,9 +165,17 @@ class EbayUploadWorker(QueueWorker):
             'object_generation': payload['object_generation'],
             'condition_hash': payload['condition_hash'],
             'entity_id': sku, 'outcome': outcome,
-            'established_conditions': [], 'artifacts': [f'item:{sku}'],
-            'evidence': {'reason_code': reason_code, 'provider': 'ebay',
-                         'provider_effect_id': effect_id},
+            'established_conditions': (['photos_uploaded']
+                                       if outcome == 'satisfied' else []),
+            'artifacts': [f'item:{sku}'],
+            **({'provider_effect_ids': tuple(effect_ids)} if effect_ids else {}),
+            'evidence': {
+                'reason_code': reason_code, 'provider': 'ebay',
+                'provider_effect_id': effect_id,
+                **({'provider_effect_ids': list(effect_ids)} if effect_ids else {}),
+                **({'resulting_generation': resulting_generation}
+                   if resulting_generation else {}),
+            },
         }
 
     def handle(self, job: Dict[str, Any]) -> Dict[str, Any] | None:
@@ -572,6 +583,17 @@ class EbayUploadWorker(QueueWorker):
                               to_attempt=to_attempt)
 
 
+        if provider_effect_mode == 'workflow':
+            resulting_generation = item_generation(json.loads(
+                json_path.read_text(encoding='utf-8')
+            ))
+            return self._provider_receipt(
+                payload, sku, outcome='satisfied',
+                effect_id=(provider_effect_ids[-1] if provider_effect_ids else ''),
+                effect_ids=provider_effect_ids,
+                reason_code='PROVIDER_EFFECT_SUCCEEDED',
+                resulting_generation=resulting_generation,
+            )
         receipt = {
             "treatment_id": "ebay-upload",
             "outcome": "satisfied",
