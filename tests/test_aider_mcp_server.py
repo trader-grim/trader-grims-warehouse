@@ -356,6 +356,36 @@ def test_build_preflight_uses_configured_plan_git(tmp_path, monkeypatch):
     assert 'Standalone Plan commit: fb9fee3' in context
 
 
+def test_plan_runtime_binding_defaults_to_standalone_root(tmp_path, monkeypatch):
+    config_path = tmp_path / 'config.json'
+    config_path.write_text(json.dumps({'secrets_root': str(tmp_path / 'secrets')}))
+    monkeypatch.setenv('TGW_CONFIG', str(config_path))
+    monkeypatch.delenv('TGW_STANDALONE_PLAN_VAULT', raising=False)
+    monkeypatch.delenv('TGW_STANDALONE_PLAN_GIT', raising=False)
+
+    root, git_path = ams._plan_runtime_binding()
+
+    assert root == Path('/opt/TGW/library/plans')
+    assert git_path == 'git'
+
+
+def test_plan_runtime_binding_honors_explicit_config(tmp_path, monkeypatch):
+    config_path = tmp_path / 'config.json'
+    config_path.write_text(json.dumps({
+        'secrets_root': str(tmp_path / 'secrets'),
+        'plan_vault_path': '/srv/tgw/plans',
+        'plan_git_path': '/run/current-system/sw/bin/git',
+    }))
+    monkeypatch.setenv('TGW_CONFIG', str(config_path))
+    monkeypatch.delenv('TGW_STANDALONE_PLAN_VAULT', raising=False)
+    monkeypatch.delenv('TGW_STANDALONE_PLAN_GIT', raising=False)
+
+    root, git_path = ams._plan_runtime_binding()
+
+    assert root == Path('/srv/tgw/plans')
+    assert git_path == '/run/current-system/sw/bin/git'
+
+
 # ---------------------------------------------------------------------------
 # aider_get_log
 # ---------------------------------------------------------------------------
