@@ -47,6 +47,7 @@ _SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT = re.compile(r"^[0-9a-f]{40}$")
 _OPERATION = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 SOURCE_DESCRIPTOR_SCHEMA = "tgw-reviewed-observation-source/v1"
+REMOTE_SUDO = "/run/wrappers/bin/sudo"
 _SOURCE_AUTHORITY_SEAL = object()
 _HOST_STATE_AUTHORITY_SEAL = object()
 
@@ -1076,7 +1077,7 @@ class SshObservationProvider:
         sealed_identity = _sealed("a3-observation-identity", identity)
         try:
             bootstrap = "ns={'__name__':'tgw_remote_helper'};exec(compile(" + repr(helper.decode()) + ",'a3-helper','exec'),ns);raise SystemExit(ns['helper_main']())"
-            remote = shlex.join([self.python_path, "-I", "-c", bootstrap])
+            remote = shlex.join([REMOTE_SUDO, "-n", "--", self.python_path, "-I", "-c", bootstrap])
             argv = [
                 f"/proc/{os.getpid()}/fd/{ssh_fd}",
                 "-F",
