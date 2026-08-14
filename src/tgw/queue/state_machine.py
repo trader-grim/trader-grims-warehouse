@@ -355,19 +355,26 @@ def enqueue_job(
                 )
                 existing = cur.fetchone()
                 if existing is not None:
-                    expected = (
+                    expected_prefix = (
                         queue_name,
                         entity_type,
                         entity_id,
                         operation,
                         handler_family,
                         priority,
-                        payload,
                         nb,
                         max_attempts,
                     )
-                    actual = tuple(existing[1:])
-                    if actual != expected:
+                    actual_payload = existing[7]
+                    actual_prefix = (*existing[1:7], *existing[8:])
+                    payload_matches = (
+                        isinstance(actual_payload, dict)
+                        and all(
+                            key in actual_payload and actual_payload[key] == value
+                            for key, value in payload.items()
+                        )
+                    )
+                    if actual_prefix != expected_prefix or not payload_matches:
                         raise ValueError(
                             "enqueue_job: active idempotency key has a different request manifest"
                         )

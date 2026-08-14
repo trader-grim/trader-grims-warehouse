@@ -167,6 +167,27 @@ def test_idempotent_enqueue_returns_exact_active_manifest():
     assert "state IN" in mock_cur.execute.call_args_list[1].args[0]
 
 
+def test_idempotent_enqueue_accepts_service_extended_active_payload():
+    from tgw.queue import state_machine as sm
+
+    mock_con, mock_cur = _mock_conn_cursor()
+    request = {"kind": "coding-provision/v1", "todo_id": 1738}
+    extended = {**request, "location": {"worktree": "/worktree"}, "lease": "bound"}
+    mock_cur.fetchone.return_value = (
+        "job-id-123", "coding-provision", "coding_provision", "1738",
+        "run", "coding-provision", 100, extended, None, 1,
+    )
+    with patch.object(sm, '_conn', return_value=mock_con):
+        result = sm.enqueue_job(
+            "coding-provision", request,
+            entity_type="coding_provision", entity_id="1738",
+            handler_family="coding-provision", dedupe_key="coding:1738",
+            max_attempts=1, idempotent=True,
+        )
+
+    assert result == "job-id-123"
+
+
 def test_idempotent_enqueue_rejects_active_manifest_mismatch():
     from tgw.queue import state_machine as sm
 

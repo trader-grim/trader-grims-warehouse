@@ -118,6 +118,18 @@ def test_idempotent_enqueue_returns_same_exact_active_row_and_rejects_mismatch()
     second = sm.enqueue_job(**manifest)
 
     assert second == first
+    with sm._conn() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE queue_jobs
+                   SET state = 'leased',
+                       payload_json = payload_json || '{"location":{"worktree":"/worktree"}}'::jsonb
+                 WHERE job_id = %s::uuid
+                """,
+                (first,),
+            )
+    assert sm.enqueue_job(**manifest) == first
     with pytest.raises(ValueError, match="different request manifest"):
         sm.enqueue_job(
             **{**manifest, "payload": {**manifest["payload"], "worker_identity": "changed"}},
