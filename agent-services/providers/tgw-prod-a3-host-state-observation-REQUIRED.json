@@ -18,9 +18,9 @@
     "base_commit": "70f86f338fe6b4c8200c9d9e250bc83656e4e77a",
     "base_tree": "fb137be8c90f2cd3d0ba7da24f3b8ff43904d330",
     "controller_path": "src/tgw/a3_host_state_observation.py",
-    "controller_sha256": "sha256:b9a1d4d0d2e09ec184bad2e62f9a87ac18d436dd3f8e8e6a50b07e056d92521b",
+    "controller_sha256": "sha256:5ff87ba6abfb804f5f27e66e548c1569b8ff2b830cfa675fee4ed8f985b4f320",
     "stdlib_helper_path": "src/tgw/a3_host_state_helper.py",
-    "stdlib_helper_sha256": "sha256:c5cccf19614c20a1e1cc7c3406f1a0caec512147815519a984ef7464e3ceaf4b"
+    "stdlib_helper_sha256": "sha256:c8ac0177bf3d7470a00ae3c2b49d7c073e6bfc71b0cce58694f5c5a3ae580fb9"
   },
   "facts": [
     "current-system-cas",
@@ -62,5 +62,5 @@
   "grant": null,
   "request": null,
   "dispatchable": false,
-  "descriptor_sha256": "sha256:f77733f5adc47c1f34a2d982929d3ec1c432b9370bedf849d5944a6d7b7f1d4d"
+  "descriptor_sha256": "sha256:a3db3f1e2bd5c5898aee468204221401229c9316362f5d1c06ac45d989026f5f"
 }

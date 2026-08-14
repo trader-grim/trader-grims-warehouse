@@ -61,7 +61,7 @@ def _request(*, now: datetime | None = None, transport: dict | None = None) -> d
             "remote_python": "/run/current-system/sw/bin/python3",
             "remote_git": "/run/current-system/sw/bin/git",
             "repository": "/home/db/tgw-flake",
-            "expected_branch": "main",
+            "expected_branch": "master",
         },
         "transport": transport
         or {
@@ -106,9 +106,9 @@ def _fixture_host(tmp_path: Path) -> tuple[Path, Path, Path]:
     profile.symlink_to(cas)
     repo = tmp_path / "tgw-flake"
     (repo / ".git").mkdir(parents=True)
-    (repo / ".git/HEAD").write_text("ref: refs/heads/main\n")
+    (repo / ".git/HEAD").write_text("ref: refs/heads/master\n")
     (repo / ".git/refs/heads").mkdir(parents=True)
-    (repo / ".git/refs/heads/main").write_text("1" * 40 + "\n")
+    (repo / ".git/refs/heads/master").write_text("1" * 40 + "\n")
     return current, profile, repo
 
 
@@ -144,7 +144,7 @@ def _identity(path: Path) -> dict:
 def test_local_host_observation_is_zero_effect_and_dependency_compatible(tmp_path: Path) -> None:
     request, receipt = _observe(tmp_path)
     assert receipt["current_cas"] == receipt["profile_cas"]
-    assert receipt["repository"]["branch"] == "main"
+    assert receipt["repository"]["branch"] == "master"
     assert receipt["effects"] == {"remote_write": False, "repository_write": False, "nix": False}
     projection = dependency_projection(receipt, request, ssh_sha256=request["transport"]["ssh_sha256"], descriptor_sha256=_sha("composition"))
     assert projection["status"] == "SATISFIED"
@@ -180,7 +180,7 @@ def test_store_target_must_exist_in_production_observation(tmp_path: Path) -> No
 def test_wrong_production_branch_holds(tmp_path: Path) -> None:
     request = _request()
     current, profile, repo = _fixture_host(tmp_path)
-    (repo / ".git/HEAD").write_text("ref: refs/heads/master\n")
+    (repo / ".git/HEAD").write_text("ref: refs/heads/main\n")
     with pytest.raises(ObservationHold, match="branch"):
         observe_host_state(
             request,
@@ -197,7 +197,7 @@ def test_wrong_production_branch_holds(tmp_path: Path) -> None:
 def test_missing_production_branch_ref_is_rejected(tmp_path: Path) -> None:
     request = _request()
     current, profile, repo = _fixture_host(tmp_path)
-    (repo / ".git/refs/heads/main").unlink()
+    (repo / ".git/refs/heads/master").unlink()
     with pytest.raises(ObservationHold, match="ref"):
         observe_host_state(
             request,
@@ -214,7 +214,7 @@ def test_missing_production_branch_ref_is_rejected(tmp_path: Path) -> None:
 def test_request_requires_mounted_authorities_in_production() -> None:
     with pytest.raises(HostStateError, match="Plan authority"):
         validate_request(_request())
-    assert validate_request(_request(), allow_fixture=True)["target"]["expected_branch"] == "main"
+    assert validate_request(_request(), allow_fixture=True)["target"]["expected_branch"] == "master"
 
 
 def test_default_composition_is_truthfully_not_executable() -> None:
@@ -229,7 +229,7 @@ def test_default_composition_is_truthfully_not_executable() -> None:
     ("path", "replacement"),
     [
         (("bounds", "timeout_seconds"), True),
-        (("target", "expected_branch"), "master"),
+        (("target", "expected_branch"), "main"),
         (("policy", "nix"), True),
         (("prerequisites", "sshd_parity_sha256"), "ambient"),
     ],

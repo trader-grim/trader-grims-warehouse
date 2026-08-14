@@ -452,7 +452,7 @@ def validate_request(
         "remote_python": "/run/current-system/sw/bin/python3",
         "remote_git": "/run/current-system/sw/bin/git",
         "repository": "/home/db/tgw-flake",
-        "expected_branch": "main",
+        "expected_branch": "master",
     }
     if request["target"] != target:
         raise HostStateError("host-state target is not exact")
@@ -624,7 +624,7 @@ def _read_branch(repository: Path, expected: str, *, logical_path: str | None = 
         text = raw.decode("ascii", errors="strict").strip()
         prefix = "ref: refs/heads/"
         if not text.startswith(prefix) or text[len(prefix) :] != expected:
-            raise ObservationHold("production repository branch differs from approved main")
+            raise ObservationHold("production repository branch differs from approved master")
         if _inode_identity(os.fstat(fd)) != _inode_identity(head_st) or _inode_identity(os.stat(head_path, follow_symlinks=False)) != _inode_identity(head_st):
             raise HostStateError("production repository HEAD changed")
         ref_st = os.fstat(ref_fd)

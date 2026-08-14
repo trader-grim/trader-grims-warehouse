@@ -150,7 +150,7 @@ def _validate_request(value: Any, now: datetime) -> dict[str, Any]:
         "remote_python": "/run/current-system/sw/bin/python3",
         "remote_git": "/run/current-system/sw/bin/git",
         "repository": "/home/db/tgw-flake",
-        "expected_branch": "main",
+        "expected_branch": "master",
     }
     if request["target"] != target:
         raise HelperError("request target differs")
