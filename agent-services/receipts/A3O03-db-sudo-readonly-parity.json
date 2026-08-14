@@ -1,0 +1,39 @@
+{
+  "schema": "tgw-a3o03-db-sudo-readonly-parity/v1",
+  "status": "PASS",
+  "observed_at": "2026-08-14T02:18:30Z",
+  "target": "codex@tgw-prod",
+  "ssh_policy": {
+    "batch_mode": true,
+    "identities_only": true,
+    "identity_agent": "none",
+    "global_known_hosts": "disabled",
+    "request_bound_known_hosts_sha256": "sha256:0fa9556d58503ed99baf63d2c5749dc10c1917b8edb3ce73016e5f9080d388ff"
+  },
+  "remote_argv": [
+    "/run/wrappers/bin/sudo",
+    "-n",
+    "-u",
+    "db",
+    "--",
+    "/run/current-system/sw/bin/python3",
+    "-I",
+    "-c",
+    "bounded stdlib identity/readability probe"
+  ],
+  "result": {
+    "returncode": 0,
+    "euid": 1000,
+    "egid": 100,
+    "repository_readable": true
+  },
+  "scope": {
+    "repository_content_read": false,
+    "repository_write": false,
+    "nix": false,
+    "install": false,
+    "service": false,
+    "deployment": false
+  },
+  "receipt_sha256": "sha256:095c34940ec7acf7375b141c525fab299a858a5f1a2cec3be5f2227a7e9cf2f5"
+}
