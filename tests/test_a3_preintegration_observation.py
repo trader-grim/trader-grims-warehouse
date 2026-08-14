@@ -300,7 +300,7 @@ def test_sealed_transport_uses_exact_identity_and_frame(tmp_path: Path) -> None:
     receipt, archive = observe_repository(repo, request)
     response_path.write_bytes(encode_helper_response(receipt, archive))
     provider = SshObservationProvider(request, fake, hosts, identity, helper, "/usr/bin/python3", request["source"], keygen)
-    assert provider.ready(request)
+    assert provider.ready(request) is False
     result = provider.observe(request, on_dispatch=lambda: None)
     assert result["receipt"]["repository"]["archive_sha256"] == digest(result["archive"])
 

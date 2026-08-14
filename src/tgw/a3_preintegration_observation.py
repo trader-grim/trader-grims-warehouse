@@ -1018,8 +1018,17 @@ class SshObservationProvider:
         try:
             if validate_request(request)["request_sha256"] != validate_request(self.request)["request_sha256"]:
                 return False
-            if self.mounted_source is None or validate_source_descriptor(self.mounted_source) != request["source"]:
+            if (
+                type(self.mounted_source) is not MountedSourceAuthority
+                or self.source_authority_sha256 != self.mounted_source.sha256
+                or self.mounted_source.descriptor != request["source"]
+                or type(self.mounted_host_state) is not MountedHostStateDependency
+                or self.host_state_authority_sha256 != request["host_state_dependency_sha256"]
+                or self.mounted_host_state.sha256 != request["host_state_dependency_sha256"]
+                or self.mounted_host_state.dependency != request["host_state_dependency"]
+            ):
                 return False
+            self.mounted_host_state.postcheck()
             for path, identity, executable, modes in (
                 (self.ssh_path, "ssh_sha256", True, {0o555, 0o755}),
                 (self.ssh_keygen_path, "ssh_keygen_sha256", True, {0o555, 0o755}),
