@@ -483,7 +483,7 @@ def todo_brief(item_id: int, plan_path: Path) -> Dict[str, Any]:
     elif anchor:
         parts += ['## Linked plan section', '',
                   f'(no master-plan heading matched "{anchor}" — read '
-                  f'`docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md` directly)', '']
+                  f'`{plan_path}` directly)', '']
     parts.append(_brief_constraints(str(item['agent'])))
 
     return {'ok': True, 'id': item['id'], 'agent': item['agent'],

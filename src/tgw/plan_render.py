@@ -648,14 +648,28 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
     # Linked PP details are canonical Plan material too.  Preserve the legacy
     # fixture/config fallback, while production config supplies the standalone
     # detail root explicitly.
-    detail_root = Path(
-        cfg.get('plan_detail_root')
-        or (Path(cfg['plan_vault_path']) / 'plan' / 'pp')
-    )
-    detail_path = detail_root / f'{query_pp}.md'
+    configured_roots = cfg.get('plan_detail_roots')
+    if configured_roots is None:
+        configured_roots = (
+            cfg.get('plan_detail_root')
+            or (Path(cfg['plan_vault_path']) / 'plan' / 'pp'),
+        )
+    detail_roots = tuple(Path(root) for root in configured_roots)
+    detail_candidates = tuple(root / f'{query_pp}.md' for root in detail_roots)
+    existing_details = tuple(path for path in detail_candidates if path.is_file())
+    detail_path = existing_details[0] if len(existing_details) == 1 else detail_candidates[0]
     detail: Dict[str, Any] = {'path': str(detail_path), 'status': 'absent'}
     warnings: List[str] = []
-    if detail_path.is_file():
+    if len(existing_details) > 1:
+        detail.update({
+            'status': 'ambiguous',
+            'matches': [str(path) for path in existing_details],
+        })
+        warnings.append(
+            'Multiple canonical PP detail documents have the same identifier; '
+            'no detail was selected.'
+        )
+    elif existing_details:
         detail_stat = detail_path.stat()
         detail.update({
             'sha256': hashlib.sha256(detail_path.read_bytes()).hexdigest(),

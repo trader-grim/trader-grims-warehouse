@@ -750,7 +750,9 @@ class PMIntakeWorker(QueueWorker):
         queued_dir = inbox_dir / 'queued'
         processed_dir = inbox_dir / 'archive'
         vault_path: Path = self.config['plan_vault_path']
-        master_plan_path: Path = self.config['plan_master_path']
+        master_plan_path: Path = self.config.get(
+            'plan_update_master_path', self.config['plan_master_path']
+        )
         processed_dir.mkdir(parents=True, exist_ok=True)
 
         note_path = queued_dir / filename

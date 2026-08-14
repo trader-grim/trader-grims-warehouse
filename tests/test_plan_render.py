@@ -707,6 +707,42 @@ def test_plan_brief_uses_explicit_standalone_detail_root(tmp_path):
     ).hexdigest()
 
 
+def test_plan_brief_uses_secondary_canonical_detail_root(tmp_path):
+    cfg = _brief_cfg(tmp_path)
+    first = tmp_path / 'standalone' / 'plan' / 'pp'
+    second = tmp_path / 'standalone' / 'pp'
+    second.mkdir(parents=True)
+    canonical_detail = second / 'PP-ALPHA-001.md'
+    canonical_detail.write_text('root detail', encoding='utf-8')
+    cfg['plan_detail_roots'] = (first, second)
+    _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
+
+    out = plan_brief(cfg, 'PP-ALPHA-001')
+
+    assert out['linked_pp_detail']['status'] == 'present'
+    assert out['linked_pp_detail']['path'] == str(canonical_detail)
+
+
+def test_plan_brief_refuses_duplicate_canonical_details(tmp_path):
+    cfg = _brief_cfg(tmp_path)
+    first = tmp_path / 'standalone' / 'plan' / 'pp'
+    second = tmp_path / 'standalone' / 'pp'
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    for root in (first, second):
+        (root / 'PP-ALPHA-001.md').write_text(str(root), encoding='utf-8')
+    cfg['plan_detail_roots'] = (first, second)
+    _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
+
+    out = plan_brief(cfg, 'PP-ALPHA-001')
+
+    assert out['linked_pp_detail']['status'] == 'ambiguous'
+    assert out['linked_pp_detail']['matches'] == [
+        str(first / 'PP-ALPHA-001.md'),
+        str(second / 'PP-ALPHA-001.md'),
+    ]
+
+
 def test_plan_brief_never_writes_anything(tmp_path):
     cfg = _brief_cfg(tmp_path)
     plan_path = _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')

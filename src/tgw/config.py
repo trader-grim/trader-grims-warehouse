@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Set
 from urllib.parse import urlsplit
@@ -87,8 +88,39 @@ def load_config(path: Path) -> Dict[str, Any]:
     incoming_path = p("incoming_path", "/opt/TGW/incoming")
     plan_vault_path = p("plan_vault_path", "/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault")
     standalone_plan_root = p("standalone_plan_root", "/opt/TGW/library/plans")
+    plan_repository_root = p("plan_repository_root", str(standalone_plan_root))
     plan_approved_commit = raw.get("plan_approved_commit")
     plan_git_path = p("plan_git_path", "git")
+
+    # If an approved commit is configured, every canonical path below must be
+    # backed by a clean materialization of that exact commit.  The primary
+    # repository may advance with evidence or proposed edits, so production can
+    # bind ``standalone_plan_root`` to a detached approved worktree and
+    # ``plan_repository_root`` to the advancing repository.
+    if plan_approved_commit is not None:
+        if not isinstance(plan_approved_commit, str) or not re.fullmatch(
+            r"[0-9a-f]{40}", plan_approved_commit
+        ):
+            raise ValueError("plan_approved_commit must be a full Git commit")
+        git_argv = [
+            str(plan_git_path), "-c", f"safe.directory={standalone_plan_root}",
+            "-C", str(standalone_plan_root),
+        ]
+        try:
+            head = subprocess.run(
+                [*git_argv, "rev-parse", "--verify", "HEAD^{commit}"],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+            status = subprocess.run(
+                [*git_argv, "status", "--porcelain=v1", "--untracked-files=all"],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("approved standalone Plan materialization is unavailable") from exc
+        if head.returncode or head.stdout.strip() != plan_approved_commit:
+            raise ValueError("standalone Plan materialization does not match approved commit")
+        if status.returncode or status.stdout:
+            raise ValueError("standalone Plan materialization is not clean")
 
     full_catalog_path = p("full_catalog_path", str(catalog_root / "master-catalog.json"))
     search_catalog_path = p("search_catalog_path", str(catalog_root / "search-catalog.json"))
@@ -220,6 +252,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         "newitems_path": incoming_path / "newitems",
         "plan_vault_path": plan_vault_path,
         "standalone_plan_root": standalone_plan_root,
+        "plan_repository_root": plan_repository_root,
         "plan_approved_commit": plan_approved_commit,
         "plan_git_path": plan_git_path,
         "plan_inbox_path": plan_vault_path / "inbox",
@@ -228,6 +261,11 @@ def load_config(path: Path) -> Dict[str, Any]:
         # but must never become an alternate Master Plan authority.
         "plan_master_path": standalone_plan_root / "plan" / "TGW-Master-Plan.md",
         "plan_detail_root": standalone_plan_root / "plan" / "pp",
+        "plan_detail_roots": (
+            standalone_plan_root / "plan" / "pp",
+            standalone_plan_root / "pp",
+        ),
+        "plan_update_master_path": plan_repository_root / "plan" / "TGW-Master-Plan.md",
         "pm_intake_delay_hours": float(raw.get("pm_intake_delay_hours", 4.0)),
         # PP-EDITOR-001 ready-state dole-out: publish pool/divisor items per cycle
         "dole_interval_s": int(raw.get("dole_interval_s", 3600)),

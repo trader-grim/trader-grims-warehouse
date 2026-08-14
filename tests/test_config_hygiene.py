@@ -20,7 +20,10 @@ empty string when the secret file is absent.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from tgw.config import load_config
 
@@ -61,11 +64,49 @@ def test_plan_roots_keep_mutable_and_authority_bindings_separate(tmp_path):
         "/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault"
     )
     assert cfg["standalone_plan_root"] == Path("/opt/TGW/library/plans")
+    assert cfg["plan_repository_root"] == cfg["standalone_plan_root"]
     assert cfg["plan_inbox_path"] == cfg["plan_vault_path"] / "inbox"
     assert cfg["plan_master_path"] == (
         cfg["standalone_plan_root"] / "plan" / "TGW-Master-Plan.md"
     )
     assert cfg["plan_detail_root"] == cfg["standalone_plan_root"] / "plan" / "pp"
+    assert cfg["plan_detail_roots"] == (
+        cfg["standalone_plan_root"] / "plan" / "pp",
+        cfg["standalone_plan_root"] / "pp",
+    )
+    assert cfg["plan_update_master_path"] == cfg["plan_master_path"]
+
+
+def test_approved_plan_content_must_be_exact_clean_commit(tmp_path):
+    root = tmp_path / "approved"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "fixture@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Fixture"], cwd=root, check=True)
+    (root / "plan").mkdir()
+    (root / "plan" / "TGW-Master-Plan.md").write_text("approved\n")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "approved"], cwd=root, check=True)
+    approved = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    config_path = _write_cfg(tmp_path, {
+        "standalone_plan_root": str(root),
+        "plan_repository_root": str(tmp_path / "repository"),
+        "plan_approved_commit": approved,
+        "plan_git_path": "git",
+    })
+
+    cfg = load_config(config_path)
+    assert cfg["plan_master_path"] == root / "plan" / "TGW-Master-Plan.md"
+    assert cfg["plan_update_master_path"] == (
+        tmp_path / "repository" / "plan" / "TGW-Master-Plan.md"
+    )
+
+    (root / "unapproved").write_text("dirty\n")
+    with pytest.raises(ValueError, match="not clean"):
+        load_config(config_path)
 
 
 # ---------------------------------------------------------------------------
