@@ -1085,7 +1085,7 @@ class SshObservationProvider:
         sealed_hosts = _sealed("a3-observation-hosts", hosts)
         sealed_identity = _sealed("a3-observation-identity", identity)
         try:
-            bootstrap = "ns={'__name__':'tgw_remote_helper'};exec(compile(" + repr(helper.decode()) + ",'a3-helper','exec'),ns);raise SystemExit(ns['helper_main']())"
+            bootstrap = _remote_helper_bootstrap(helper)
             remote = shlex.join([REMOTE_SUDO, "-n", "-u", "db", "--", self.python_path, "-I", "-c", bootstrap])
             argv = [
                 f"/proc/{os.getpid()}/fd/{ssh_fd}",
@@ -1446,6 +1446,19 @@ def decode_helper_response(raw: bytes, request: Mapping[str, Any]) -> tuple[dict
         raise ObservationError("helper archive differs from receipt")
     replay_archive(archive, validated, request)
     return validated, archive
+
+
+def _remote_helper_bootstrap(helper: bytes) -> str:
+    """Build the isolated helper command with a registered module identity."""
+    return (
+        "import sys,types;"
+        "module=types.ModuleType('tgw_remote_helper');"
+        "sys.modules[module.__name__]=module;"
+        "exec(compile("
+        + repr(helper.decode())
+        + ",'a3-helper','exec'),module.__dict__);"
+        "raise SystemExit(module.__dict__['helper_main']())"
+    )
 
 
 def helper_main() -> int:

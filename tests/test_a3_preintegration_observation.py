@@ -18,6 +18,7 @@ from tgw.a3_preintegration_observation import (
     ObservationHold,
     SshObservationProvider,
     _fixture_source_descriptor,
+    _remote_helper_bootstrap,
     canonical,
     decode_helper_response,
     digest,
@@ -303,6 +304,19 @@ def test_sealed_transport_uses_exact_identity_and_frame(tmp_path: Path) -> None:
     assert provider.ready(request) is False
     result = provider.observe(request, on_dispatch=lambda: None)
     assert result["receipt"]["repository"]["archive_sha256"] == digest(result["archive"])
+
+
+def test_remote_bootstrap_registers_dataclass_module_before_helper_execution() -> None:
+    helper = Path("src/tgw/a3_preintegration_observation.py").read_bytes()
+    result = subprocess.run(
+        ["/usr/bin/python3", "-I", "-c", _remote_helper_bootstrap(helper)],
+        input=b"{}",
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 65
+    assert b"dataclasses.py" not in result.stderr
+    assert b"AttributeError" not in result.stderr
 
 
 def test_sealed_transport_rejects_ambient_identity_mutation(tmp_path: Path) -> None:
