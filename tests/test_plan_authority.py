@@ -16,6 +16,8 @@ def test_sql_effect_constraint_covers_every_registered_effect():
     sql = Path(__file__).parents[1].joinpath("src/tgw/plan_authority.sql").read_text(encoding="utf-8")
     for kind in EffectKind:
         assert f"'{kind.value}'" in sql
+    assert "DROP CONSTRAINT IF EXISTS plan_authority_requests_effect_kind_check" in sql
+    assert "ADD CONSTRAINT plan_authority_requests_effect_kind_check" in sql
 
 
 def _solution():
