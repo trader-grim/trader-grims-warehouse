@@ -14,6 +14,7 @@ invoked with include_ebay=False inside the tool, so the dead token is off-path.
 from __future__ import annotations
 
 import asyncio
+import builtins
 import hashlib
 import json
 import sys
@@ -48,8 +49,7 @@ def test_sse_entrypoint_applies_service_binding(monkeypatch):
     monkeypatch.setattr(mcp_server.mcp, "run", lambda **kwargs: calls.append(kwargs))
     monkeypatch.setattr(mcp_server.mcp.settings, "host", "127.0.0.1")
     monkeypatch.setattr(mcp_server.mcp.settings, "port", 8000)
-    monkeypatch.setattr(mcp_server.mcp.settings.transport_security, "allowed_hosts", [])
-    monkeypatch.setattr(mcp_server.mcp.settings.transport_security, "allowed_origins", [])
+    monkeypatch.setattr(mcp_server.mcp.settings, "transport_security", None)
 
     mcp_server.main()
 
@@ -60,6 +60,24 @@ def test_sse_entrypoint_applies_service_binding(monkeypatch):
     assert mcp_server.mcp.settings.transport_security.allowed_origins == [
         "http://100.107.99.66:8765",
     ]
+
+
+def test_stdio_entrypoint_does_not_require_transport_security(monkeypatch):
+    calls = []
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "mcp.server.transport_security":
+            raise AssertionError("stdio must not import SSE-only transport security")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    monkeypatch.setattr(sys, "argv", ["tgw-mcp"])
+    monkeypatch.setattr(mcp_server.mcp, "run", lambda **kwargs: calls.append(kwargs))
+
+    mcp_server.main()
+
+    assert calls == [{"transport": "stdio"}]
 
 # ---------------------------------------------------------------------------
 # Fakes

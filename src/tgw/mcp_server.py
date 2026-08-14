@@ -883,11 +883,15 @@ def main() -> None:
     import sys
     sse = '--sse' in sys.argv
     if sse:
+        from mcp.server.transport_security import TransportSecuritySettings
+
         host, port = _sse_binding()
         mcp.settings.host = host
         mcp.settings.port = port
-        mcp.settings.transport_security.allowed_hosts = [f'{host}:{port}']
-        mcp.settings.transport_security.allowed_origins = [f'http://{host}:{port}']
+        mcp.settings.transport_security = TransportSecuritySettings(
+            allowed_hosts=[f'{host}:{port}'],
+            allowed_origins=[f'http://{host}:{port}'],
+        )
         mcp.run(transport='sse')
     else:
         mcp.run(transport='stdio')
