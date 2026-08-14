@@ -148,6 +148,7 @@ def _build_preflight_context(work_dir: Path) -> str:
         packet = live_plan_graph(
             Path(os.environ.get('TGW_STANDALONE_PLAN_VAULT', '/opt/TGW/library/plans')),
             'Aider worktree implementation context', receiver='aider', limit=8,
+            git_path=os.environ.get('TGW_STANDALONE_PLAN_GIT', 'git'),
         )
         lines.extend([
             f"- Standalone Plan commit: {packet['plan_commit']}",

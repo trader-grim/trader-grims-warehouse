@@ -30,9 +30,9 @@ def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _git(root: Path, *args: str) -> str:
+def _git(root: Path, *args: str, git_path: str = "git") -> str:
     proc = subprocess.run(
-        ["git", "-c", f"safe.directory={root}", "-C", str(root), *args],
+        [git_path, "-c", f"safe.directory={root}", "-C", str(root), *args],
         capture_output=True, text=True, timeout=30,
     )
     if proc.returncode:
@@ -55,11 +55,11 @@ def _selected_paths(root: Path) -> list[str]:
     return sorted(paths)
 
 
-def source_envelope(root: Path, allowlist: Path) -> dict[str, Any]:
+def source_envelope(root: Path, allowlist: Path, *, git_path: str = "git") -> dict[str, Any]:
     root = root.resolve(strict=True)
-    head = _git(root, "rev-parse", "HEAD")
-    tree = _git(root, "rev-parse", "HEAD^{tree}")
-    status_text = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
+    head = _git(root, "rev-parse", "HEAD", git_path=git_path)
+    tree = _git(root, "rev-parse", "HEAD^{tree}", git_path=git_path)
+    status_text = _git(root, "status", "--porcelain=v1", "--untracked-files=all", git_path=git_path)
     if status_text:
         raise SourcePreconditionError("source_changed", str(root))
     allow_raw = allowlist.read_bytes()
@@ -89,7 +89,7 @@ def source_envelope(root: Path, allowlist: Path) -> dict[str, Any]:
         "records_sha256": _sha(_canonical(records)), "record_count": len(records),
         # Stable for an exact clean commit so repeated retrieval uses one
         # content-addressed artifact set rather than rebuilding per request.
-        "observed_at": _git(root, "show", "-s", "--format=%cI", "HEAD"),
+        "observed_at": _git(root, "show", "-s", "--format=%cI", "HEAD", git_path=git_path),
         "errors": [],
         "exclusions": ["inbox, archive, research, and runtime state are not Plan intent"],
         "records": records,
@@ -101,6 +101,7 @@ def source_envelope(root: Path, allowlist: Path) -> dict[str, Any]:
 def live_plan_graph(
     plan_root: Path | str = DEFAULT_PLAN_ROOT, task: str = "", *,
     receiver: str = "codex", operation: str = "brief", limit: int = 12,
+    git_path: str = "git",
 ) -> dict[str, Any]:
     """Build and query one exact, clean standalone-Plan snapshot."""
     if not isinstance(task, str) or not task.strip():
@@ -120,7 +121,7 @@ def live_plan_graph(
     paths = _selected_paths(root)
     allowlist = runtime / f"allowlist-{_sha(str(root).encode())}.txt"
     allowlist.write_text("".join(f"{path}\n" for path in paths), encoding="utf-8")
-    envelope = source_envelope(root, allowlist)
+    envelope = source_envelope(root, allowlist, git_path=git_path)
     output = runtime / envelope["envelope_sha256"]
     if not output.exists():
         build(root, allowlist, output, source_envelope=envelope)

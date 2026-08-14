@@ -657,6 +657,7 @@ def tgw_get_plan_graph(
     try:
         return json.dumps(live_plan_graph(
             root, task, receiver=receiver, operation=operation, limit=limit,
+            git_path=str(cfg.get('plan_git_path') or 'git'),
         ), ensure_ascii=False)
     except Exception as exc:
         code = getattr(exc, 'code', None)

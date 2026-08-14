@@ -62,3 +62,12 @@ def test_mcp_plan_graph_uses_configured_standalone_root(tmp_path, monkeypatch):
 def test_live_graph_rejects_unknown_receiver(tmp_path):
     with pytest.raises(ValueError, match='unknown receiver'):
         live_plan_graph(_plan_repo(tmp_path), 'PP-ALPHA-001', receiver='marketplace')
+
+
+def test_live_plan_graph_uses_configured_git_executable(tmp_path):
+    root = _plan_repo(tmp_path)
+    wrapper = tmp_path / 'held-git'
+    wrapper.write_text('#!/bin/sh\nexec git "$@"\n')
+    wrapper.chmod(0o755)
+    result = live_plan_graph(root, 'PP-ALPHA-001', git_path=str(wrapper))
+    assert result['plan_commit']
