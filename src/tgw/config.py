@@ -12,6 +12,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Dict, Set
+from urllib.parse import urlsplit
 
 DEFAULT_CONFIG = Path("/opt/TGW/config/tgw-api-config.json")
 
@@ -285,6 +286,26 @@ def _require_http_endpoint(coding: Dict[str, Any], field: str) -> None:
         raise ValueError(f"coding.{field} must be an http(s) endpoint URL")
 
 
+def validate_worker_endpoint(value: Any) -> str:
+    """Require TLS except for an explicitly loopback-only worker endpoint."""
+    if not isinstance(value, str):
+        raise ValueError("coding.worker_api_endpoint must be a secure endpoint URL")
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ValueError("coding.worker_api_endpoint must be a secure endpoint URL")
+    if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        raise ValueError(
+            "coding.worker_api_endpoint must use HTTPS unless it is loopback-only"
+        )
+    return value
+
+
 def _require_non_empty_string(coding: Dict[str, Any], field: str) -> None:
     value = coding.get(field)
     if not isinstance(value, str) or not value:
@@ -327,7 +348,7 @@ def validate_worker_execution_config(coding: Any) -> Dict[str, Any]:
     """
     if not isinstance(coding, dict):
         raise ValueError("coding configuration must be an object")
-    _require_http_endpoint(coding, "worker_api_endpoint")
+    validate_worker_endpoint(coding.get("worker_api_endpoint"))
     _require_non_empty_string(coding, "host")
     _require_non_empty_string(coding, "worker_identity")
     _require_non_empty_string(coding, "worker_credential_env")

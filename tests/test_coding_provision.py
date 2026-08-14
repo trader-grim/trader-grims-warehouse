@@ -468,6 +468,32 @@ def test_worker_resumes_clean_unbound_worktree_after_preclaim_crash(tmp_path):
     ).stdout.strip()
 
 
+def test_worker_resumes_clean_unbound_worktree_after_repository_head_advances(tmp_path):
+    repository = _init_coding_repository(tmp_path)
+    cfg = _config(tmp_path)
+    document = _queued_document()
+    first = coding_provision_worker._validate_before_claim(
+        document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker",
+    )
+    (repository / "NEXT").write_text("new repository head\n")
+    subprocess.run(["git", "add", "NEXT"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "advance canonical head"], cwd=repository,
+        check=True, text=True, capture_output=True,
+    )
+
+    second = coding_provision_worker._validate_before_claim(
+        document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker",
+    )
+
+    assert second["attempt_created"] is False
+    assert second["location"] == first["location"]
+    assert second["location"]["head"] != subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+
+
 def test_existing_unbound_request_worktree_must_still_be_clean(tmp_path):
     repository = _init_coding_repository(tmp_path)
     cfg = _config(tmp_path)
@@ -556,8 +582,8 @@ def test_worker_does_not_claim_when_request_worktree_preparation_fails(tmp_path)
     assert not claimed
 
 
-def test_failed_canonical_claim_removes_new_unbound_attempt_and_retry_reaches_claim(tmp_path):
-    """A pre-lease rejection cannot leave an unbound worktree that wedges retries."""
+def test_failed_canonical_claim_preserves_reusable_attempt_and_retry_reaches_claim(tmp_path):
+    """A claim error is ambiguous, so retry reuses rather than deletes the attempt."""
     _init_coding_repository(tmp_path)
     cfg = _config(tmp_path)
     expected = tmp_path / "worktrees" / "todo-1706-request-1706"
@@ -584,10 +610,10 @@ def test_failed_canonical_claim_removes_new_unbound_attempt_and_retry_reaches_cl
                 client=service,
             )
         assert service.claims == expected_claims
-        assert not expected.exists()
+        assert expected.is_dir()
 
 
-def test_failed_claim_removes_new_generation_bound_attempt_and_retry_reaches_claim(
+def test_failed_claim_preserves_generation_bound_attempt_and_retry_reaches_claim(
     tmp_path, monkeypatch,
 ):
     """A request generation is not evidence that the service committed a claim."""
@@ -625,12 +651,12 @@ def test_failed_claim_removes_new_generation_bound_attempt_and_retry_reaches_cla
                 client=service,
             )
         assert service.claims == expected_claims
-        assert not expected.exists()
+        assert expected.is_dir()
 
 
 @pytest.mark.parametrize("claim_response", [{}, None])
-def test_unconfirmed_claim_response_removes_new_unbound_attempt_and_retry_reaches_claim(tmp_path, claim_response):
-    """A malformed response is an unconfirmed claim and gets durable reconciliation."""
+def test_unconfirmed_claim_response_preserves_reusable_attempt_and_retry_reaches_claim(tmp_path, claim_response):
+    """A malformed response is ambiguous; retry re-attests the same clean attempt."""
     _init_coding_repository(tmp_path)
     cfg = _config(tmp_path)
     expected = tmp_path / "worktrees" / "todo-1706-request-1706"
@@ -657,7 +683,7 @@ def test_unconfirmed_claim_response_removes_new_unbound_attempt_and_retry_reache
                 client=service,
             )
         assert service.claims == expected_claims
-        assert not expected.exists()
+        assert expected.is_dir()
 
 
 def test_unconfirmed_claim_response_preserves_attempt_when_durable_claim_committed(tmp_path):
@@ -1438,6 +1464,39 @@ def test_configured_client_fails_clearly_on_incomplete_coding_config(tmp_path, f
     del cfg["coding"][field]
     with pytest.raises(ValueError, match=f"coding\\.{field}"):
         coding_provision_worker.configured_client(cfg)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["http://tgw-prod:7373", "http://100.107.99.66:7373", "ftp://127.0.0.1"],
+)
+def test_worker_rejects_insecure_credential_endpoint(tmp_path, monkeypatch, endpoint):
+    cfg = _config(tmp_path)
+    cfg["coding"]["worker_api_endpoint"] = endpoint
+    monkeypatch.setenv("TGW_TEST_CODING_WORKER_CREDENTIAL", "secret")
+
+    with pytest.raises(ValueError, match="HTTPS|secure endpoint"):
+        coding_provision_worker.configured_client(cfg)
+
+
+@pytest.mark.parametrize(
+    "endpoint", ["http://127.0.0.1:7373", "http://localhost:7373", "http://[::1]:7373"],
+)
+def test_worker_allows_explicit_loopback_http_endpoint(tmp_path, monkeypatch, endpoint):
+    cfg = _config(tmp_path)
+    cfg["coding"]["worker_api_endpoint"] = endpoint
+    monkeypatch.setenv("TGW_TEST_CODING_WORKER_CREDENTIAL", "secret")
+
+    client = coding_provision_worker.configured_client(cfg)
+
+    assert client.endpoint == endpoint
+
+
+def test_client_constructor_rejects_insecure_nonloopback_http():
+    with pytest.raises(HardFailure, match="HTTPS"):
+        coding_provision_worker.CodingProvisionClient(
+            "http://tgw-prod:7373", "secret", "worker",
+        )
 
 
 def test_create_request_accepts_config_without_tgw_lib_local_paths(tmp_path, native):

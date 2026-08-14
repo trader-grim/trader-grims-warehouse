@@ -20,7 +20,12 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from tgw.coding_execution import DEFAULT_REPOSITORY_ROOT, execute_authorized_treatment, execution_envelope, validated_coding_worktree
-from tgw.config import DEFAULT_CONFIG, load_coding_worker_config, validate_worker_execution_config
+from tgw.config import (
+    DEFAULT_CONFIG,
+    load_coding_worker_config,
+    validate_worker_endpoint,
+    validate_worker_execution_config,
+)
 from tgw.errors import HardFailure, TreatmentFailure
 from tgw.workflow.coding_snapshot import build_coding_snapshot, serialize_snapshot
 from tgw.workflow.profiles import CODING_READY_FOR_IMPLEMENTATION
@@ -127,10 +132,13 @@ def _prepare_request_worktree(document: dict[str, Any], coding: dict[str, Any], 
     if not isinstance(repository_value, str) or not repository_value.strip():
         raise HardFailure("coding repository root is not configured")
     repository = Path(repository_value).resolve()
-    # Capture the configured repository's actual top-level HEAD before
-    # constructing a fresh child from that exact commit.
-    source_head = _verified_source_commit(repository, document.get("source_commit"))
     worktree, branch = _request_worktree(todo_id, request_id, root)
+    requested_source = document.get("source_commit")
+    source_head = (
+        None
+        if (worktree.exists() and requested_source is None)
+        else _verified_source_commit(repository, requested_source)
+    )
     created = False
     try:
         if worktree.exists() or worktree.is_symlink():
@@ -150,6 +158,8 @@ def _prepare_request_worktree(document: dict[str, Any], coding: dict[str, Any], 
         location = local_location_identity(todo_id, str(worktree), coding, worker_identity)
         if location["worktree"] != str(worktree) or location["branch"] != branch:
             raise HardFailure("request-bound coding worktree branch is invalid")
+        if source_head is None:
+            source_head = _verified_source_commit(repository, location["head"])
         if location["head"] != source_head:
             raise HardFailure("request-bound coding worktree HEAD is invalid")
         if not created:
@@ -178,42 +188,15 @@ def _validate_before_claim(document: dict[str, Any], coding: dict[str, Any], loc
     return {"location": location, "envelope_hash": _hash(location), "attempt_created": attempt_created}
 
 
-def _remove_proven_unclaimed_attempt(
-    service: Any,
-    request_id: str,
-    envelope: dict[str, Any],
-    coding: dict[str, Any],
-) -> None:
-    """Remove this invocation's new attempt only after durable non-claim proof.
-
-    A claim response can be ambiguous: the service may have committed the lease
-    before the client observed a transport failure.  Preserve the worktree
-    unless a fresh service read proves the request is still queued and unbound.
-    """
-    if not envelope.get("attempt_created"):
-        return
-    try:
-        document = service.get(request_id)
-    except Exception:
-        return
-    if (
-        document.get("state") != "queued"
-        or document.get("location") is not None
-    ):
-        return
-    repository = Path(str(coding.get("repository_root", DEFAULT_REPOSITORY_ROOT))).resolve()
-    root = Path(str(coding.get("worktree_root", ""))).resolve()
-    expected, branch = _request_worktree(int(document.get("todo_id", 0)), request_id, root)
-    actual = Path(str(envelope.get("location", {}).get("worktree", ""))).resolve()
-    if actual == expected:
-        _remove_incomplete_worktree(repository, actual, branch)
-
-
 class CodingProvisionClient:
     """Small authenticated client for the canonical coding-provision API."""
 
     def __init__(self, endpoint: str, credential: str, worker_identity: str) -> None:
-        if not endpoint.startswith(("http://", "https://")) or not credential or not worker_identity:
+        try:
+            validate_worker_endpoint(endpoint)
+        except ValueError as exc:
+            raise HardFailure(str(exc)) from exc
+        if not credential or not worker_identity:
             raise HardFailure("coding worker endpoint, credential, and identity are required")
         self.endpoint = endpoint.rstrip("/")
         self.credential = credential
@@ -302,7 +285,9 @@ def claim_and_run(
         if not isinstance(lease_token, str) or not lease_token:
             raise HardFailure("canonical coding service returned no lease token")
     except Exception:
-        _remove_proven_unclaimed_attempt(service, request_id, envelope, coding)
+        # A transport error cannot prove the service did not commit the claim.
+        # Preserve the exact clean request-bound worktree; a queued retry can
+        # safely re-attest and reuse it, while a committed lease still owns it.
         raise
     try:
         authorized = claimed.get("request")
