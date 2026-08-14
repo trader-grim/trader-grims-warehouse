@@ -187,24 +187,79 @@ def test_has_photos_false():
 # ---------------------------------------------------------------------------
 
 
-def test_photos_uploaded_true_via_ebay_photos():
-    item = _make_item(ebay_photos=["https://img.ebay.com/001.jpg"], draft_listing={})
-    snap = _snapshot(item)
-    assert _result(snap, "photos_uploaded") == FingerprintResult.TRUE
-
-
-def test_photos_uploaded_true_via_draft_image_urls():
+def test_photos_uploaded_true_only_for_exact_local_eps_draft_set(tmp_path):
+    photo = tmp_path / "001.jpg"
+    photo.write_bytes(b"photo")
+    url = "https://img.ebay.com/001.jpg"
     item = _make_item(
+        image="001.jpg",
+        photo_order=["001.jpg"],
+        ebay_photos=[{"local": str(photo), "url": url}],
+        draft_listing={"imageUrls": [url]},
+    )
+    snap = _snapshot(item, tmp_path=tmp_path)
+    assert _result(snap, "photos_uploaded") == FingerprintResult.TRUE
+    assertion = next(a for a in snap.assertions if a.condition_id == "photos_uploaded")
+    assert assertion.reasons == ("photo sync complete: 1/1 local photos",)
+    assert assertion.evidence[0].identity.startswith("photo-sync:")
+    assert len(assertion.evidence[0].freshness_identity) == 64
+
+
+def test_photos_uploaded_false_for_draft_urls_without_local_mapping(tmp_path):
+    (tmp_path / "001.jpg").write_bytes(b"photo")
+    item = _make_item(
+        image="001.jpg",
+        photo_order=["001.jpg"],
         ebay_photos=[],
         draft_listing={"imageUrls": ["https://img.example/1.jpg"]},
     )
-    snap = _snapshot(item)
-    assert _result(snap, "photos_uploaded") == FingerprintResult.TRUE
+    snap = _snapshot(item, tmp_path=tmp_path)
+    assert _result(snap, "photos_uploaded") == FingerprintResult.FALSE
 
 
-def test_photos_uploaded_false():
+def test_photos_uploaded_false_when_local_set_is_only_partially_uploaded(tmp_path):
+    first = tmp_path / "001.jpg"
+    second = tmp_path / "002.jpg"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    url = "https://img.example/1.jpg"
+    item = _make_item(
+        image="001.jpg",
+        photo_order=["001.jpg", "002.jpg"],
+        ebay_photos=[{"local": str(first), "url": url}],
+        draft_listing={"imageUrls": [url]},
+    )
+    snap = _snapshot(item, tmp_path=tmp_path)
+    assertion = next(a for a in snap.assertions if a.condition_id == "photos_uploaded")
+    assert assertion.result == FingerprintResult.FALSE
+    assert "1/2 local photos" in assertion.reasons[0]
+    assert "1 missing EPS URL" in assertion.reasons[0]
+
+
+def test_photos_uploaded_false_when_draft_order_differs(tmp_path):
+    first = tmp_path / "001.jpg"
+    second = tmp_path / "002.jpg"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    urls = ["https://img.example/1.jpg", "https://img.example/2.jpg"]
+    item = _make_item(
+        image="001.jpg",
+        photo_order=["001.jpg", "002.jpg"],
+        ebay_photos=[
+            {"local": str(first), "url": urls[0]},
+            {"local": str(second), "url": urls[1]},
+        ],
+        draft_listing={"imageUrls": list(reversed(urls))},
+    )
+    snap = _snapshot(item, tmp_path=tmp_path)
+    assertion = next(a for a in snap.assertions if a.condition_id == "photos_uploaded")
+    assert assertion.result == FingerprintResult.FALSE
+    assert "draft image order is not synchronized" in assertion.reasons[0]
+
+
+def test_photos_uploaded_false_without_local_photos(tmp_path):
     item = _make_item(ebay_photos=[], draft_listing={"imageUrls": []})
-    snap = _snapshot(item)
+    snap = _snapshot(item, tmp_path=tmp_path)
     assert _result(snap, "photos_uploaded") == FingerprintResult.FALSE
 
 

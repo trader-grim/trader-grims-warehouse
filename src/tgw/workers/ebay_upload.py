@@ -63,6 +63,16 @@ def _committed_generation(response: Dict[str, Any]) -> str:
 
 class EbayUploadWorker(QueueWorker):
 
+    @staticmethod
+    def _photo_entry_key(entry: Dict[str, Any], sku_dir: Path) -> str | None:
+        local = entry.get('local')
+        url = entry.get('url')
+        if (not isinstance(local, str) or not local.strip()
+                or not isinstance(url, str) or not url.strip()):
+            return None
+        path = Path(local)
+        return str(path if path.is_absolute() else sku_dir / path)
+
     def _current_workflow_binding(self, sku: str) -> Dict[str, str]:
         """Rebuild the authoritative identity after partial progress writes."""
         from tgw.workflow.evaluator import evaluate
@@ -99,16 +109,18 @@ class EbayUploadWorker(QueueWorker):
         at every exit point (success, quota block, network error, per-photo
         failure) so partial progress is never lost to a retry re-uploading
         photos that already succeeded this run or a prior one."""
-        path_to_entry = {e['local']: e for e in uploaded}
+        sku_dir = photos[0].parent if photos else _cfg_sku_dir(self.config, sku)
+        path_to_entry = {
+            key: entry
+            for entry in uploaded
+            if isinstance(entry, dict)
+            and (key := self._photo_entry_key(entry, sku_dir)) is not None
+        }
         reordered: List[Dict[str, str]] = []
         for p in photos:
             key = str(p)
             if key in path_to_entry:
                 reordered.append(path_to_entry[key])
-        seen_keys = {e['local'] for e in reordered}
-        for e in uploaded:
-            if e['local'] not in seen_keys:
-                reordered.append(e)
         resulting_generation = None
         if reordered:
             fields: Dict[str, Any] = {
@@ -216,6 +228,7 @@ class EbayUploadWorker(QueueWorker):
             self._require_provider_binding(payload)
             if not self._provider_identity().strip():
                 raise HardFailure('workflow upload provider identity is not configured')
+        governed = isinstance(payload.get('treatment_id'), str)
 
         json_path = _cfg_sku_json(self.config, sku)
         if not json_path.exists():
@@ -223,13 +236,25 @@ class EbayUploadWorker(QueueWorker):
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
 
-        # Build set of already-uploaded local paths
-        existing: Set[str] = {e['local'] for e in item.get('ebay_photos', [])}
-
         # Collect photos in photo_order display order
         sku_dir: Path = _cfg_sku_dir(self.config, sku)
         all_photos: List[Path] = ordered_photos(item, sku_dir)
         photos: List[Path] = all_photos
+
+        # Only a complete local→URL mapping is upload evidence.  Historical
+        # malformed/string entries and URL-less partial rows must never cause
+        # a photo to be skipped.
+        prior_entries = item.get('ebay_photos')
+        prior_entries = prior_entries if isinstance(prior_entries, list) else []
+        uploaded: List[Dict[str, str]] = [
+            dict(entry) for entry in prior_entries
+            if isinstance(entry, dict)
+            and self._photo_entry_key(entry, sku_dir) is not None
+        ]
+        existing: Set[str] = {
+            key for entry in uploaded
+            if (key := self._photo_entry_key(entry, sku_dir)) is not None
+        }
 
         if not photos:
             # Invariant C11 (session 43): a skip/guard is a finding, not a log
@@ -256,7 +281,6 @@ class EbayUploadWorker(QueueWorker):
         log.info('ebay_upload: %s — %d photos to upload (%d on disk, %d already uploaded)',
                  sku, to_attempt, expected_total, len(existing))
 
-        uploaded: List[Dict[str, str]] = list(item.get('ebay_photos', []))
         errors: List[str] = []
         provider_effect_ids: List[str] = [
             value for entry in uploaded
@@ -603,14 +627,29 @@ class EbayUploadWorker(QueueWorker):
                               to_attempt=to_attempt)
 
 
-        if provider_effect_mode == 'workflow':
+        if provider_effect_mode == 'workflow' or governed:
+            required_receipt = (
+                'treatment_id', 'treatment_version', 'graph_id',
+                'goal_profile_id', 'goal_profile_version',
+                'object_generation', 'condition_hash',
+            )
+            missing = [key for key in required_receipt
+                       if not isinstance(payload.get(key), str)
+                       or not payload[key].strip()]
+            if missing:
+                raise HardFailure(
+                    'governed upload completion missing receipt binding: '
+                    + ', '.join(missing)
+                )
             if resulting_generation is None:
                 raise HardFailure('upload completion did not commit item generation')
             return self._provider_receipt(
                 payload, sku, outcome='satisfied',
                 effect_id=(provider_effect_ids[-1] if provider_effect_ids else ''),
                 effect_ids=provider_effect_ids,
-                reason_code='PROVIDER_EFFECT_SUCCEEDED',
+                reason_code=('PROVIDER_EFFECT_SUCCEEDED'
+                             if provider_effect_mode == 'workflow'
+                             else 'UPLOAD_SUCCEEDED'),
                 resulting_generation=resulting_generation,
             )
         receipt = {

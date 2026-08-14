@@ -126,16 +126,97 @@ def _has_photos(item: Dict[str, Any], sku_dir: Path | None = None) -> bool:
     return False
 
 
-def _photos_uploaded(item: Dict[str, Any]) -> bool:
-    """ebay_photos list or draft_listing.imageUrls list is non-empty."""
-    ebay_photos = item.get("ebay_photos")
-    if isinstance(ebay_photos, list) and len(ebay_photos) > 0:
-        return True
-    draft = item.get("draft_listing") or {}
-    image_urls = draft.get("imageUrls")
-    if isinstance(image_urls, list) and len(image_urls) > 0:
-        return True
-    return False
+def _photo_sync_state(
+    item: Dict[str, Any], sku_dir: Path,
+) -> tuple[bool, str, str]:
+    """Return exact local→EPS→draft photo convergence evidence.
+
+    A non-empty hosted-photo list is not sufficient: older records commonly
+    contain one successful upload beside several photos that never reached
+    EPS.  Staging must wait until every current local photo has one URL and the
+    draft carries those exact URLs in the same order.  This is intentionally
+    the same local source used by ``ebay_upload``.
+    """
+    from tgw.assets import ordered_photos
+
+    expected = ordered_photos(item, sku_dir)
+    expected_keys = [str(path) for path in expected]
+    entries = item.get("ebay_photos")
+    entries = entries if isinstance(entries, list) else []
+    by_local: dict[str, str] = {}
+    invalid_or_duplicate = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            invalid_or_duplicate += 1
+            continue
+        local = entry.get("local")
+        url = entry.get("url")
+        if (not isinstance(local, str) or not local.strip()
+                or not isinstance(url, str) or not url.strip()):
+            invalid_or_duplicate += 1
+            continue
+        local_path = Path(local)
+        key = str(local_path if local_path.is_absolute() else sku_dir / local_path)
+        if key in by_local:
+            invalid_or_duplicate += 1
+            continue
+        by_local[key] = url.strip()
+
+    ordered_urls = [by_local[key] for key in expected_keys if key in by_local]
+    draft = item.get("draft_listing")
+    draft = draft if isinstance(draft, dict) else {}
+    draft_urls = draft.get("imageUrls")
+    draft_urls = draft_urls if isinstance(draft_urls, list) else []
+    valid_draft_urls = [value for value in draft_urls if isinstance(value, str) and value]
+    missing = [Path(key).name for key in expected_keys if key not in by_local]
+    extras = sorted(Path(key).name for key in set(by_local).difference(expected_keys))
+    exact = bool(expected_keys) and not any((
+        missing,
+        extras,
+        invalid_or_duplicate,
+        valid_draft_urls != ordered_urls,
+        len(valid_draft_urls) != len(draft_urls),
+    ))
+    state = {
+        "local": [Path(key).name for key in expected_keys],
+        "hosted": [
+            {
+                "local": Path(key).name,
+                "url_sha256": hashlib.sha256(by_local[key].encode()).hexdigest(),
+            }
+            for key in expected_keys if key in by_local
+        ],
+        "draft_url_sha256": [
+            hashlib.sha256(value.encode()).hexdigest() for value in valid_draft_urls
+        ],
+        "invalid_or_duplicate": invalid_or_duplicate,
+        "extras": extras,
+    }
+    fingerprint = hashlib.sha256(_canonical(state)).hexdigest()
+    if exact:
+        reason = f"photo sync complete: {len(expected_keys)}/{len(expected_keys)} local photos"
+    elif not expected_keys:
+        reason = "photo sync waiting: no local photos"
+    else:
+        detail = []
+        if missing:
+            detail.append(f"{len(missing)} missing EPS URL(s)")
+        if extras:
+            detail.append(f"{len(extras)} stale hosted photo(s)")
+        if invalid_or_duplicate:
+            detail.append(f"{invalid_or_duplicate} invalid/duplicate mapping(s)")
+        if valid_draft_urls != ordered_urls or len(valid_draft_urls) != len(draft_urls):
+            detail.append("draft image order is not synchronized")
+        reason = (
+            f"photo sync waiting: {len(ordered_urls)}/{len(expected_keys)} local photos; "
+            + "; ".join(detail)
+        )
+    return exact, reason, fingerprint
+
+
+def _photos_uploaded(item: Dict[str, Any], sku_dir: Path | None = None) -> bool:
+    """Every current local photo has exact EPS and draft-listing evidence."""
+    return bool(sku_dir is not None and _photo_sync_state(item, sku_dir)[0])
 
 
 def _ai_identified(item: Dict[str, Any]) -> bool:
@@ -378,6 +459,20 @@ def build_item_snapshot(
                     source_class="provider_receipt",
                     source_generation=generation,
                     freshness_identity=current_content_identity,
+                ),),
+            ))
+            continue
+        if condition_id == "photos_uploaded":
+            met, reason, photo_fingerprint = _photo_sync_state(item, path.parent)
+            assertions.append(EvidenceAssertion(
+                condition_id=condition_id,
+                result=(FingerprintResult.TRUE if met else FingerprintResult.FALSE),
+                reasons=(reason,),
+                evidence=(EvidenceReference(
+                    identity=f"photo-sync:{photo_fingerprint}",
+                    source_class="item_data_and_local_photos",
+                    source_generation=generation,
+                    freshness_identity=photo_fingerprint,
                 ),),
             ))
             continue

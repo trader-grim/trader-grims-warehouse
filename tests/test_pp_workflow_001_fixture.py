@@ -16,24 +16,28 @@ from tgw.workflow.treatments import TGW_TREATMENTS
 
 
 def _item(tmp_path, *, sku="PPWF-001", condition="Used", **changes):
+    path = tmp_path / sku / "item.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    photo = path.parent / "one.jpg"
+    photo.write_bytes(b"synthetic-photo")
+    photo_url = "https://example.invalid/one.jpg"
     value = {
         "sku": sku,
         "condition": condition,
-        "image": "photos/one.jpg",
+        "image": "one.jpg",
+        "photo_order": ["one.jpg"],
         "ebay_category_id": "12345",
         "draft_listing": {
             "title": "Synthetic PP workflow fixture",
             "category_id": "12345",
             "price": 20.0,
-            "imageUrls": ["https://example.invalid/one.jpg"],
+            "imageUrls": [photo_url],
         },
-        "ebay_photos": ["https://example.invalid/one.jpg"],
+        "ebay_photos": [{"local": str(photo), "url": photo_url}],
         "ebay_offer": {"offer_id": "offer-fixture"},
         "ebay_listing": {"status": "Active"},
     }
     value.update(changes)
-    path = tmp_path / sku / "item.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
     return path
 

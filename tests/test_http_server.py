@@ -1054,6 +1054,59 @@ def test_ebay_update_action_survives_dedupe_collision(env, monkeypatch):
     assert r.json() == {"ok": True, "sku": sku, "action": "ebay_update", "job_id": None}
 
 
+def test_resync_photos_queues_upload_for_same_count_but_wrong_photo_set(
+    env, enqueue_calls,
+):
+    """Count equality must not bypass upload when the identities differ.
+
+    Two local photos and two hosted rows fooled the historical count check
+    even when one hosted row belonged to a removed file.  The exact mapping
+    fingerprint must wait and queue upload for the missing current photo.
+    """
+    sku = "tgw20260401000000014"
+    item_dir = env["itemdata_root"] / sku
+    item_dir.mkdir()
+    first = item_dir / "001.jpg"
+    second = item_dir / "002.jpg"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "photo_order": ["001.jpg", "002.jpg"],
+        "ebay_photos": [
+            {"local": str(first), "url": "https://i.ebayimg.com/001.jpg"},
+            {"local": str(item_dir / "removed.jpg"),
+             "url": "https://i.ebayimg.com/removed.jpg"},
+        ],
+        "draft_listing": {
+            "imageUrls": [
+                "https://i.ebayimg.com/001.jpg",
+                "https://i.ebayimg.com/removed.jpg",
+            ],
+        },
+    })
+
+    response = env["client"].post(
+        f"/api/items/{sku}/action",
+        json={"action": "resync_photos"},
+        headers=AUTH_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["upload_queued"] is True
+    assert body["local_photo_count"] == body["hosted_count"] == 2
+    assert len(body["photo_fingerprint"]) == 64
+    assert "1 missing EPS URL" in body["detail"]
+    assert "1 stale hosted photo" in body["detail"]
+    upload = next(
+        call["kwargs"] for call in enqueue_calls
+        if call["kwargs"].get("queue_name") == "ebay_upload"
+    )
+    assert upload["payload"]["sku"] == sku
+    assert upload["dedupe_key"] == f"ebay_upload:{sku}"
+
+
 def test_operator_edit_to_not_yet_live_draft_does_not_auto_enqueue(env, enqueue_calls):
     """No offer_id yet — nothing to push to, so no auto-enqueue at all
     (unchanged pre-#1114 behavior for pre-publish items)."""
@@ -6386,6 +6439,36 @@ def test_item_detail_global_ai_action_is_always_available():
     assert "AI Reidentify" in identified
     assert first.count("triggerAction('ai_identify')") >= 1
     assert identified.count("triggerAction('ai_identify')") >= 1
+
+
+@pytest.mark.parametrize(
+    ("result", "reason", "expected"),
+    (
+        ("true", "photo sync complete: 5/5 local photos", "Photo sync ready"),
+        ("false", "photo sync waiting: 3/5 local photos", "Waiting for photo sync"),
+    ),
+)
+def test_item_detail_workflow_card_shows_photo_sync_fingerprint(
+    result, reason, expected,
+):
+    html = http_server._render_item_detail_html(
+        "tgw1", {"sku": "tgw1", "title": "Photo item"}, [], [], [],
+        workflow_card={
+            "goal": {"id": "tgw.ebay_listable", "version": "1"},
+            "object_generation": "generation-1",
+            "graph_id": "graph-1",
+            "fingerprints": [{
+                "condition_id": "photos_uploaded",
+                "result": result,
+                "reasons": [reason],
+                "evidence": [{"identity": "photo-sync:abc"}],
+            }],
+        },
+    )
+
+    assert 'id="photo-sync-fingerprint"' in html
+    assert expected in html
+    assert reason in html
 
 
 @pytest.mark.parametrize(

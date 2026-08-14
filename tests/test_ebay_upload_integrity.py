@@ -301,6 +301,84 @@ def test_full_success_still_reports_complete(worker, tmp_path, monkeypatch):
     assert len(doc['ebay_photos']) == 2
 
 
+def test_governed_upload_in_legacy_transport_returns_fully_bound_receipt(
+    worker, tmp_path, monkeypatch,
+):
+    """A workflow-dispatched upload remains receipt-bound during migration.
+
+    Production had scheduled this exact governed job while the upload worker's
+    transport selector was still legacy.  The photos uploaded successfully,
+    but the legacy-shaped receipt omitted graph/generation/condition identity
+    and worker_base dead-lettered it after the external success.
+    """
+    sku = 'tgwtest-governed-legacy'
+    d = _write_item(tmp_path, sku)
+    _make_photos(d, ['1.jpg'])
+    monkeypatch.setattr(
+        ebay_upload, 'upload_photo',
+        lambda cfg, photo: f'https://i.ebayimg.com/{photo.name}',
+    )
+
+    receipt = worker.handle(_job(
+        sku,
+        treatment_id='ebay-upload', treatment_version='1',
+        graph_id='graph-1',
+        goal_profile_id='tgw.ebay_listable', goal_profile_version='1',
+        object_generation='generation-1', condition_hash='condition-1',
+        entity_id=sku,
+    ))
+
+    assert receipt['receipt_schema_id'] == 'treatment-receipt/v1'
+    assert receipt['treatment_id'] == 'ebay-upload'
+    assert receipt['graph_id'] == 'graph-1'
+    assert receipt['goal_profile_id'] == 'tgw.ebay_listable'
+    assert receipt['object_generation'] == 'generation-1'
+    assert receipt['condition_hash'] == 'condition-1'
+    assert receipt['entity_id'] == sku
+    assert receipt['outcome'] == 'satisfied'
+    assert receipt['established_conditions'] == ['photos_uploaded']
+    assert receipt['evidence']['reason_code'] == 'UPLOAD_SUCCEEDED'
+    assert len(receipt['evidence']['resulting_generation']) == 64
+    from tgw.queue.worker_base import _treatment_receipt_error
+    queued_job = _job(
+        sku,
+        treatment_id='ebay-upload', treatment_version='1',
+        graph_id='graph-1',
+        goal_profile_id='tgw.ebay_listable', goal_profile_version='1',
+        object_generation='generation-1', condition_hash='condition-1',
+        entity_id=sku,
+    )
+    queued_job.update({
+        'queue_name': 'ebay_upload', 'entity_type': 'item', 'entity_id': sku,
+    })
+    assert _treatment_receipt_error(receipt, queued_job) is None
+
+
+def test_malformed_and_stale_photo_rows_do_not_skip_or_survive_upload(
+    worker, tmp_path, monkeypatch,
+):
+    sku = 'tgwtest-stale-photo-rows'
+    local_photo = tmp_path / sku / '1.jpg'
+    d = _write_item(tmp_path, sku, ebay_photos=[
+        'https://legacy.example/not-a-mapping.jpg',
+        {'local': str(local_photo), 'url': ''},
+        {'local': str(tmp_path / sku / 'removed.jpg'), 'url': 'https://x/stale'},
+    ])
+    _make_photos(d, ['1.jpg'])
+    calls = []
+    monkeypatch.setattr(
+        ebay_upload, 'upload_photo',
+        lambda cfg, photo: calls.append(photo.name) or 'https://x/1.jpg',
+    )
+
+    worker.handle(_job(sku))
+
+    assert calls == ['1.jpg']
+    assert _read(tmp_path, sku)['ebay_photos'] == [
+        {'local': str(tmp_path / sku / '1.jpg'), 'url': 'https://x/1.jpg'},
+    ]
+
+
 def test_no_photos_on_disk_persists_durable_finding(worker, tmp_path):
     """Invariant C11 (todo #1303): the no-photos guard must persist a durable
     finding on the item JSON (queryable by catalog-verify), not just log and

@@ -2452,10 +2452,17 @@ def item_action(
             # back to a directory scan when photo_order is empty) — use
             # the same source so this check can't disagree with upload.
             from tgw.assets import ordered_photos
+            from tgw.workflow.item_snapshot import _photo_sync_state
             doc = load_item_doc(json_path)
             local_photo_count = len(ordered_photos(doc, json_path.parent))
-            hosted_count = len([e for e in (doc.get("ebay_photos") or []) if e.get("url")])
-            if local_photo_count > hosted_count:
+            hosted_count = len([
+                entry for entry in (doc.get("ebay_photos") or [])
+                if isinstance(entry, dict) and entry.get("url")
+            ])
+            photo_ready, photo_reason, photo_fingerprint = _photo_sync_state(
+                doc, json_path.parent,
+            )
+            if not photo_ready:
                 job_id = state_machine.enqueue_job(
                     queue_name="ebay_upload",
                     payload={"sku": sku, "reason": "resync_photos_gap", "origin": "operator"},
@@ -2468,8 +2475,9 @@ def item_action(
                     "ok": True, "sku": sku, "action": "resync_photos",
                     "upload_queued": True, "job_id": job_id,
                     "local_photo_count": local_photo_count, "hosted_count": hosted_count,
-                    "detail": f"{local_photo_count - hosted_count} photo(s) never uploaded to eBay — "
-                              f"upload queued, resync again shortly once it completes",
+                    "photo_fingerprint": photo_fingerprint,
+                    "detail": f"{photo_reason} — upload/synchronization queued; "
+                              f"the workflow will re-evaluate after it completes",
                 }
 
             # Synchronous (not queued) from here: single item, all photos
@@ -6454,6 +6462,23 @@ def _render_item_detail_html(
     if workflow_card:
         goal = workflow_card.get("goal") or {}
         fingerprints = workflow_card.get("fingerprints") or []
+        photo_fingerprint = next((
+            fp for fp in fingerprints
+            if fp.get("condition_id") == "photos_uploaded"
+        ), None)
+        photo_state_html = ""
+        if photo_fingerprint:
+            photo_ready = photo_fingerprint.get("result") == "true"
+            photo_reason = "; ".join(
+                str(reason) for reason in photo_fingerprint.get("reasons", [])
+            )
+            photo_state_html = (
+                f'<div id="photo-sync-fingerprint" style="margin:7px 0;padding:6px 9px;'
+                f'border-radius:5px;background:{"#102a18" if photo_ready else "#30220b"};'
+                f'color:{"#8e8" if photo_ready else "#fd8"}">'
+                f'<strong>{"Photo sync ready" if photo_ready else "Waiting for photo sync"}</strong>'
+                f' — {h(photo_reason)}</div>'
+            )
         fp_html = "".join(
             f'<li><code>{h(str(fp.get("condition_id", "")))}</code>: '
             f'{h(str(fp.get("result", "")))} — '
@@ -6495,7 +6520,7 @@ def _render_item_detail_html(
             f'<div style="font-size:.76em;color:#789">Generation '
             f'{h(str(workflow_card.get("object_generation", "")))[:12]} · graph '
             f'{h(str(workflow_card.get("graph_id", "")))[:12]}</div>'
-            f'{gate_html}<details><summary>Fingerprints ({len(fingerprints)})</summary>'
+            f'{photo_state_html}{gate_html}<details><summary>Fingerprints ({len(fingerprints)})</summary>'
             f'<ul>{fp_html}</ul></details><details><summary>Waits ({len(waits)})</summary>'
             f'<ul>{waits_html}</ul></details><div><strong>Legal actions</strong><ul>{actions_html}</ul></div>'
             f'<details><summary>Active attempts ({len(active)})</summary><ul>{active_html}</ul></details>'
