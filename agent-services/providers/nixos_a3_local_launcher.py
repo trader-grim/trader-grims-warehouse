@@ -34,7 +34,7 @@ RESPONSE_SCHEMA = "tgw-nixos-a3-local-launch-response/v1"
 ATTESTATION_SCHEMA = "tgw-nixos-a3-local-netns-attestation/v1"
 CONFIG_SCHEMA = "tgw-nixos-a3-local-launcher-config/v1"
 RAW_EVIDENCE_SCHEMA = "tgw-nixos-a3-raw-link-route-probes/v1"
-CONFIG_PATH = "/etc/tgw/a3-successor-launcher.json"
+CONFIG_PATH = "/etc/tgw/a3-successor-v2-launcher.json"
 MAX_PACKET_BYTES = 1_048_576
 MAX_DIAGNOSTIC_BYTES = 65_536
 _HEX = set("0123456789abcdef")
@@ -287,7 +287,7 @@ def _parse_packet(raw: bytes, config: Mapping[str, Any], launcher_raw: bytes, co
 
 
 def _load_config(config_path: str) -> tuple[dict[str, Any], bytes, bytes, bytes]:
-    config_fd, _, config_raw = _safe_open(config_path, mode=0o400, label="launcher config")
+    config_fd, _, config_raw = _safe_open(config_path, mode=0o444, label="launcher config")
     try:
         try:
             config = dict(_exact(json.loads(config_raw), _CONFIG_KEYS, "launcher config"))

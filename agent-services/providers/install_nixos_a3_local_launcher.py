@@ -11,13 +11,13 @@ import stat
 from pathlib import Path
 from typing import Any
 
-RUNTIME_ROOT = Path("/opt/TGW/runtime/a3-successor-v1")
+RUNTIME_ROOT = Path("/opt/TGW/runtime/a3-successor-v2")
 LAUNCHER_PATH = RUNTIME_ROOT / "bin/tgw-a3-successor-local-launcher"
 SOURCE_PATH = RUNTIME_ROOT / "share/nixos_a3_local_launcher.py"
-CONFIG_PATH = Path("/etc/tgw/a3-successor-launcher.json")
+CONFIG_PATH = Path("/etc/tgw/a3-successor-v2-launcher.json")
 KEY_PATH = Path("/etc/tgw/a3-successor-attestation.key")
 PUBLIC_PATH = Path("/etc/tgw/a3-successor-attestation.pub")
-PREREQUISITE_PATH = Path("/etc/tgw/a3-successor-launcher-prerequisite.json")
+PREREQUISITE_PATH = Path("/etc/tgw/a3-successor-v2-launcher-prerequisite.json")
 _Q = 2**255 - 19
 _D = -121665 * pow(121666, _Q - 2, _Q) % _Q
 _I = pow(2, (_Q - 1) // 4, _Q)
@@ -80,8 +80,13 @@ def public_key(seed: bytes) -> bytes:
 def _ensure_directory(path: Path, mode: int) -> None:
     path.mkdir(mode=mode, parents=True, exist_ok=True)
     metadata = path.stat(follow_symlinks=False)
-    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != mode or stat.S_IMODE(metadata.st_mode) & 0o022:
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022:
         raise InstallError(f"directory authority differs: {path}")
+    if stat.S_IMODE(metadata.st_mode) != mode:
+        os.chmod(path, mode, follow_symlinks=False)
+        metadata = path.stat(follow_symlinks=False)
+        if stat.S_IMODE(metadata.st_mode) != mode:
+            raise InstallError(f"directory mode could not be made exact: {path}")
 
 
 def _complete_write(fd: int, raw: bytes) -> None:
@@ -199,7 +204,7 @@ def install(source: Path) -> dict[str, Any]:
         "max_memory_bytes": 2_147_483_648,
     }
     config_raw = canonical(config)
-    _publish(CONFIG_PATH, config_raw, 0o400)
+    _publish(CONFIG_PATH, config_raw, 0o444)
     prerequisite = {
         "schema": "tgw-nixos-a3-local-launcher-prerequisite/v1",
         "status": "SATISFIED",
@@ -221,7 +226,7 @@ def install(source: Path) -> dict[str, Any]:
         "schema": "tgw-nixos-a3-local-launcher-install-result/v1",
         "launcher": {"path": str(LAUNCHER_PATH), "sha256": sha(source_raw), "size": len(source_raw), "mode": 0o555},
         "source": {"path": str(SOURCE_PATH), "sha256": sha(source_raw), "size": len(source_raw), "mode": 0o444},
-        "config": {"path": str(CONFIG_PATH), "sha256": sha(config_raw), "size": len(config_raw), "mode": 0o400},
+        "config": {"path": str(CONFIG_PATH), "sha256": sha(config_raw), "size": len(config_raw), "mode": 0o444},
         "public_key": {"path": str(PUBLIC_PATH), "sha256": sha(public), "size": len(public), "mode": 0o444},
         "signing_key_ref": "external-root-0400:" + sha(seed),
         "prerequisite": {"path": str(PREREQUISITE_PATH), "sha256": sha(prerequisite_raw), "size": len(prerequisite_raw), "mode": 0o444},
