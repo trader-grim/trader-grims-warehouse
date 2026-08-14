@@ -1,0 +1,37 @@
+{
+  "schema": "tgw-independent-source-review/v1",
+  "status": "PASS",
+  "reviewer": "runtime_facilities",
+  "reviewed_at": "2026-08-14T04:02:12Z",
+  "candidate": {
+    "commit": "c9a9b434fae638845c50f4c343a3db404e9b8f0d",
+    "tree": "3afde02059f72415a4fc05501a7973fd602da82e",
+    "candidate_sha256": "sha256:e2d1a1df1a5ad3e15fe899ac878dc2767b9d7ce2198eb240e13cfb80895eca92"
+  },
+  "implementation": {
+    "commit": "94a924853316f49e0aa3386639fed9defc3e9ca1",
+    "tree": "b9a7acc9a107b290b4798b64cda3e9236dc8500f",
+    "parent": "691571254291ea5f1a9652d7c91d1c1ecd896394",
+    "controller_sha256": "sha256:84dbf9476f4a3411ac88b127c0d67349a3d447192e60ea9a80a4f479d8f09cea"
+  },
+  "findings": [],
+  "verification": {
+    "old_bootstrap": "rc1 dataclasses AttributeError reproduced",
+    "new_bootstrap": "rc65 normal helper validation with empty request and zero stderr",
+    "sudo_db_python_argv_tokens": 9,
+    "shlex_round_trip": "PASS",
+    "focused_tests": 38,
+    "broader_matrix_tests": 286,
+    "ruff": "PASS",
+    "in_memory_compile": "PASS",
+    "diff_check": "PASS"
+  },
+  "effects": {
+    "ssh": false,
+    "remote_write": false,
+    "nix": false,
+    "installation": false,
+    "deployment": false
+  },
+  "review_sha256": "sha256:399ecae6805adc11125131a9f2a753add098002b32bb76b49e7901ce48a194ed"
+}
