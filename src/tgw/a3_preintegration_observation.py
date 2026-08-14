@@ -467,14 +467,22 @@ def observe_repository(repository: Path, request: Mapping[str, Any], *, enforce_
     expected_repository = request["host_state_dependency"]["repository"]
     if commit != expected_repository["commit"]:
         raise ObservationHold("production flake commit differs from fresh host-state authority")
-    if enforce_owner and component_identity[0][:5] != (
-        expected_repository["dev"],
-        expected_repository["ino"],
-        expected_repository["mode"],
-        expected_repository["uid"],
-        expected_repository["gid"],
-    ):
-        raise ObservationHold("production flake identity differs from fresh host-state authority")
+    if enforce_owner:
+        repo_dev, repo_ino, repo_mode, repo_uid, repo_gid, _repo_nlink = component_identity[0]
+        if (
+            repo_dev,
+            repo_ino,
+            stat.S_IMODE(repo_mode),
+            repo_uid,
+            repo_gid,
+        ) != (
+            expected_repository["dev"],
+            expected_repository["ino"],
+            expected_repository["mode"],
+            expected_repository["uid"],
+            expected_repository["gid"],
+        ):
+            raise ObservationHold("production flake identity differs from fresh host-state authority")
     if any(line.startswith("160000 ") for line in str(git("ls-files", "--stage")).splitlines()):
         raise ObservationHold("repository contains gitlinks")
     if git("symbolic-ref", "--short", "HEAD") != request["target"]["branch"]:

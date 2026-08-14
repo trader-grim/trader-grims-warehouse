@@ -87,7 +87,7 @@ def _bind_request_to_repo(request: dict, repo: Path) -> dict:
 def test_clean_observation_is_zero_effect_and_archive_bound(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     request = _bind_request_to_repo(make_request(operation_id="observe-1", transport=_transport()), repo)
-    receipt, archive = observe_repository(repo, request)
+    receipt, archive = observe_repository(repo, request, enforce_owner=True)
     assert receipt["outcome"] == "PASS"
     assert receipt["repository"]["archive_sha256"] == digest(archive)
     assert not any(receipt["effects"].values())
