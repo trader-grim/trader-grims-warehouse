@@ -3,7 +3,7 @@ import subprocess
 from pathlib import Path
 
 from tgw.candidate_review import generate_review_packet
-from tgw.codex_review_backend import health, run
+from tgw.codex_review_backend import REPORT_SCHEMA, health, run
 from tgw.harness_registry import load_registry, observe_health
 from tgw.review_configuration import configured_review_command
 from tgw.review_runner import snapshot_hash
@@ -144,6 +144,13 @@ def test_backend_uses_ephemeral_read_only_codex_protocol_and_validates_hash(tmp_
     assert observed["command"][observed["command"].index("--sandbox") + 1] == "read-only"
     assert observed["command"][observed["command"].index("-C") + 1] == str(snapshot)
     assert Path(observed["env"]["CODEX_HOME"]) != Path.home() / ".codex"
+
+
+def test_backend_output_schema_declares_types_for_const_and_enum_properties():
+    assert REPORT_SCHEMA["properties"]["schema"]["type"] == "string"
+    assert REPORT_SCHEMA["properties"]["verdict"]["type"] == "string"
+    finding = REPORT_SCHEMA["properties"]["findings"]["items"]["properties"]
+    assert finding["severity"]["type"] == "string"
 
 
 def test_verified_configuration_makes_candidate_packet_executable_without_invocation(tmp_path):

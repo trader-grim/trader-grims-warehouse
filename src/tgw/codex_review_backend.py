@@ -19,8 +19,8 @@ REPORT_SCHEMA = {
     "additionalProperties": False,
     "required": ["schema", "verdict", "snapshot_hash", "summary", "findings"],
     "properties": {
-        "schema": {"const": "tgw-code-review/v1"},
-        "verdict": {"enum": ["PASS", "FAIL"]},
+        "schema": {"type": "string", "const": "tgw-code-review/v1"},
+        "verdict": {"type": "string", "enum": ["PASS", "FAIL"]},
         "snapshot_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
         "findings": {
@@ -31,7 +31,10 @@ REPORT_SCHEMA = {
                 "additionalProperties": False,
                 "required": ["severity", "path", "line", "message"],
                 "properties": {
-                    "severity": {"enum": ["critical", "high", "medium", "low"]},
+                    "severity": {
+                        "type": "string",
+                        "enum": ["critical", "high", "medium", "low"],
+                    },
                     "path": {"type": "string", "minLength": 1, "maxLength": 1000},
                     "line": {"type": "integer", "minimum": 1},
                     "message": {"type": "string", "minLength": 1, "maxLength": 4000},
