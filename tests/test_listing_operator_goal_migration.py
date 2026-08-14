@@ -18,6 +18,7 @@ from tgw.workflow.profiles import (
     TGW_EBAY_DRAFTED,
     TGW_EBAY_IDENTIFIED,
     TGW_EBAY_LISTABLE,
+    TGW_EBAY_PRICED,
     TGW_EBAY_STAGED,
 )
 from tgw.workflow.scheduler import DispatchResult
@@ -528,6 +529,98 @@ def test_item_action_ai_identify_defaults_to_exact_legacy_fanout(tmp_path, monke
         "entity_type": "item", "entity_id": "SKU-1",
         "dedupe_key": "ai_identify:SKU-1", "max_attempts": 3,
     }]
+
+
+@pytest.mark.parametrize(
+    ("action", "goal", "surface", "marker"),
+    (
+        ("ebay_draft", TGW_EBAY_DRAFTED,
+         "http:item-action:ebay-draft", "ai_redraft_requested"),
+        ("ebay_price", TGW_EBAY_PRICED,
+         "http:item-action:ebay-price", None),
+    ),
+)
+def test_manual_local_pipeline_actions_use_current_workflow_generation(
+    tmp_path, monkeypatch, action, goal, surface, marker,
+):
+    from tgw.workflow import listing_migration
+
+    root, path = _item(
+        tmp_path,
+        draft_listing={"title": "Draft", "price": 12.99},
+        ebay_offer={"price": 12.99},
+    )
+    monkeypatch.setattr(http_server, "_cfg", {
+        "itemdata_root": root,
+        "workflow_migration": {"bundle_downstream": "workflow"},
+    })
+    captured = {}
+    dispatched = SimpleNamespace(job_id=f"job-{action}")
+    monkeypatch.setattr(
+        listing_migration, "request_item_goal",
+        lambda *args, **kwargs: captured.update(
+            {"path": args[0], "goal": args[1], **kwargs}
+        ) or SimpleNamespace(dispatched=dispatched),
+    )
+
+    response = http_server.item_action(
+        "SKU-1", http_server.ActionBody(action=action),
+        operator_identity="operator:test",
+    )
+
+    assert response["job_id"] == f"job-{action}"
+    assert captured["goal"] is goal
+    assert captured["origin"] == "operator"
+    assert captured["operator_identity"] == "operator:test"
+    assert captured["operator_surface"] == surface
+    written = json.loads(path.read_text())
+    if marker:
+        assert written[marker] is True
+    else:
+        assert written["draft_listing"]["price"] is None
+        assert written["ebay_offer"]["price"] is None
+
+
+def test_item_update_workflow_dispatches_exact_force_restage(tmp_path, monkeypatch):
+    from tgw.workflow import listing_migration
+
+    root, path = _item(
+        tmp_path,
+        draft_listing={"title": "Draft", "price": 12.99},
+        ebay_offer={"offer_id": "offer-1", "price": 12.99},
+    )
+    monkeypatch.setattr(http_server, "_cfg", {
+        "itemdata_root": root,
+        "workflow_migration": {
+            "item_ebay_stage_fanout": "workflow",
+            "ebay_provider_identity": "ebay:account",
+        },
+    })
+    captured = {}
+    graph = SimpleNamespace(graph_id="graph-1", object_generation="generation-1")
+    dispatched = SimpleNamespace(
+        job_id="job-stage", enqueued=True, treatment_id="ebay-stage",
+    )
+    monkeypatch.setattr(
+        listing_migration, "authorize_and_dispatch_force_restage",
+        lambda *args, **kwargs: captured.update(
+            {"path": args[0], **kwargs}
+        ) or (SimpleNamespace(graph=graph), dispatched, "authority-1", True),
+    )
+
+    response = http_server.item_action(
+        "SKU-1", http_server.ActionBody(action="ebay_update"),
+        operator_identity="operator:test",
+    )
+
+    assert response["status"] == "workflow_dispatched"
+    assert response["job_id"] == "job-stage"
+    assert captured == {
+        "path": path,
+        "operator_identity": "operator:test",
+        "surface": "http:item-action:ebay-update",
+        "provider_identity": "ebay:account",
+    }
 
 
 def test_item_action_workflow_dispatch_failure_preserves_pending_intent(

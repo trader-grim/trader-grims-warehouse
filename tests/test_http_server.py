@@ -743,6 +743,7 @@ def test_get_item_queue_jobs_serialized(env):
 
     created = _dt.datetime(2026, 6, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
     env["queue_rows"].append({
+        "job_id": "job-ai-1",
         "queue_name": "ai_identify",
         "state": "done",
         "attempt_count": 1,
@@ -761,6 +762,7 @@ def test_get_item_queue_jobs_serialized(env):
     assert j["created_at"] == created.isoformat()
     assert j["finished_at"] is None
     assert j["queue_name"] == "ai_identify"
+    assert j["job_id"] == "job-ai-1"
 
 
 def test_get_item_queue_fetch_failure_is_swallowed(env, monkeypatch):
@@ -5089,7 +5091,7 @@ def test_requeue_job_wrong_state(env, monkeypatch):
 
 
 def test_requeue_job_success(env, monkeypatch):
-    """Requeue upgrades a legacy per-SKU row to a canonical item manifest."""
+    """Requeue re-enters the current item dispatcher, never a stale envelope."""
     rows = [{
         "job_id": "dead-job-id-001",
         "queue_name": "ebay_draft",
@@ -5120,13 +5122,15 @@ def test_requeue_job_success(env, monkeypatch):
     assert body["ok"] is True
     assert body["new_job_id"] == "new-job-id-999"
     assert body["queue"] == "ebay_draft"
+    assert body["retry_mode"] == "current_item_action"
     assert enqueued["entity_type"] == "item"
     assert enqueued["entity_id"] == SKU_A
-    assert enqueued["operation"] == "run"
-    assert enqueued["handler_family"] == "ebay_draft"
-    assert enqueued["priority"] == 30
-    assert enqueued["payload"]["operator_retry"] is True
-    assert enqueued["payload"]["retried_from_job"] == "dead-job-id-001"
+    assert enqueued["queue_name"] == "ebay_draft"
+    assert enqueued["payload"] == {"sku": SKU_A, "origin": "operator"}
+    doc = json.loads(
+        (env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text()
+    )
+    assert doc["ai_redraft_requested"] is True
 
 
 def test_every_http_sku_enqueue_uses_canonical_item_identity():
@@ -5162,6 +5166,36 @@ def test_every_http_sku_enqueue_uses_canonical_item_identity():
         ):
             missing.append(call.lineno)
     assert missing == []
+
+
+def test_provider_effect_item_queues_have_one_http_dispatch_authority():
+    """No bulk, retry, or patch endpoint may bypass item_action authority."""
+    source_path = Path(http_server.__file__)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    direct = []
+
+    class Visitor(ast.NodeVisitor):
+        function = "<module>"
+
+        def visit_FunctionDef(self, node):
+            previous = self.function
+            self.function = node.name
+            self.generic_visit(node)
+            self.function = previous
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "enqueue_job":
+                keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+                queue = keywords.get("queue_name")
+                if isinstance(queue, ast.Constant) and queue.value in {
+                    "ebay_stage", "ebay_publish",
+                }:
+                    direct.append((self.function, queue.value, node.lineno))
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    assert direct
+    assert {function for function, _, _ in direct} == {"item_action"}
 
 
 def test_cancel_job_requires_auth(client):
@@ -6345,6 +6379,19 @@ def test_every_rendered_item_onclick_function_is_defined(item):
     definitions = set(re.findall(r"function\s+([A-Za-z_$][\w$]*)\s*\(", html))
     onclick_calls = set(re.findall(r'onclick="([A-Za-z_$][\w$]*)\s*\(', html))
     assert onclick_calls - definitions == set()
+
+
+def test_async_item_actions_wait_for_terminal_state_before_reload():
+    html = http_server._render_item_detail_html(
+        "tgw1",
+        {"sku": "tgw1", "title": "Known", "ai_identified": True},
+        [], [], [],
+    )
+
+    assert "function waitForAction(action,jobId)" in html
+    assert "item.ai_redraft_requested===true" in html
+    assert "j.job_id===jobId" in html
+    assert "waitForAction(action,d.job_id||'')" in html
 
 
 # ---------------------------------------------------------------------------

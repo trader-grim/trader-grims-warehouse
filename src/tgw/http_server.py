@@ -1082,7 +1082,7 @@ def get_item(sku: str) -> Dict[str, Any]:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT queue_name, state, attempt_count,
+                    SELECT job_id::text, queue_name, state, attempt_count,
                            created_at, updated_at, finished_at,
                            error_code, error_detail
                       FROM queue_jobs
@@ -1110,8 +1110,11 @@ def get_item(sku: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@app.patch("/api/items/{sku}", dependencies=[AUTH])
-def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
+@app.patch("/api/items/{sku}")
+def patch_item(
+    sku: str, body: PatchBody, request: Request,
+    operator_identity: str = Depends(_require_auth),
+) -> Dict[str, Any]:
     if "sku" in body.fields:
         raise HTTPException(status_code=400, detail="sku field is immutable")
     if not body.fields:
@@ -1315,15 +1318,11 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
         offer_id = (doc_before.get("ebay_offer") or {}).get("offer_id")
         if offer_id:
             try:
-                state_machine.enqueue_job(
-                    queue_name="ebay_stage",
-                    payload={"sku": sku, "force": True, "origin": "operator"},
-                    entity_type="item",
-                    entity_id=sku,
-                    dedupe_key=f"ebay_stage:{sku}",
-                    max_attempts=2,
+                item_action(
+                    sku, ActionBody(action="ebay_update"),
+                    operator_identity=operator_identity,
                 )
-                log.info("auto-queued ebay_stage (push, no regen) for %s "
+                log.info("auto-dispatched ebay_stage (push, no regen) for %s "
                         "(draft_listing changed, offer_id present)", sku)
             except Exception as _eq:
                 if "unique" not in str(_eq).lower() and "duplicate" not in str(_eq).lower():
@@ -1943,8 +1942,11 @@ _BULK_PIPELINE_ACTIONS = {"ai_identify", "ebay_price", "ebay_draft", "ebay_stage
 _BULK_VALID_ACTIONS = _BULK_PIPELINE_ACTIONS | {"set_ready", "mark_sold", "delete", "approve", "list_now", "ebay_end_listing", "archive"}
 
 
-@app.post("/api/bulk/action", dependencies=[AUTH])
-def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
+@app.post("/api/bulk/action")
+def bulk_action(
+    body: BulkActionBody,
+    operator_identity: str = Depends(_require_auth),
+) -> Dict[str, Any]:
     """Fan out an action across a list of SKUs.
 
     Actions: ai_identify, ebay_price, ebay_draft, ebay_stage, set_ready,
@@ -1981,31 +1983,21 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                 continue
             if body.action == "list_now":
                 try:
-                    state_machine.enqueue_job(
-                        queue_name="ebay_upload",
-                        payload={"sku": sku, "origin": "operator"},
-                        entity_type="item",
-                        entity_id=sku,
-                        dedupe_key=f"ebay_upload:{sku}",
-                        max_attempts=5,
+                    result = item_action(
+                        sku, ActionBody(action="ebay_publish"),
+                        operator_identity=operator_identity,
                     )
-                except Exception:
-                    pass
-                try:
-                    state_machine.enqueue_job(
-                        queue_name="ebay_stage",
-                        payload={"sku": sku, "origin": "operator"},
-                        entity_type="item",
-                        entity_id=sku,
-                        dedupe_key=f"ebay_stage:{sku}",
-                        max_attempts=5,
-                    )
+                    if not result.get("ok"):
+                        errors.append(
+                            f"{sku} (list): {result.get('detail') or result.get('status') or 'held'}"
+                        )
                 except Exception as exc:
-                    err = str(exc)
-                    if "unique" not in err.lower() and "duplicate" not in err.lower():
-                        errors.append(f"{sku} (stage): {err}")
+                    errors.append(f"{sku} (list): {exc}")
         _enqueue_catalog_rebuild(f"bulk_{body.action}")
-        return {"ok": bool(done), "count": len(done), "done": done, "errors": errors}
+        return {
+            "ok": bool(done) and not errors,
+            "count": len(done), "done": done, "errors": errors,
+        }
 
     if body.action in ("mark_sold", "delete", "archive"):
         status_map = {"mark_sold": "Sold", "delete": "deleted", "archive": "archived"}
@@ -2116,24 +2108,27 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
             errors.append(f"{sku}: not found")
             continue
         try:
-            if body.action == "ai_identify":
-                _apply_patch(json_path, {"ai_reidentify": True})
-            state_machine.enqueue_job(
-                queue_name=body.action,
-                payload={"sku": sku, "origin": "operator"},
-                entity_type="item",
-                entity_id=sku,
-                dedupe_key=f"{body.action}:{sku}",
-                max_attempts=5,
+            result = item_action(
+                sku, ActionBody(action=body.action),
+                operator_identity=operator_identity,
             )
-            queued.append(sku)
+            if result.get("ok"):
+                queued.append(sku)
+            else:
+                errors.append(
+                    f"{sku}: {result.get('detail') or result.get('status') or 'held'}"
+                )
         except Exception as exc:
             err = str(exc)
             if "unique" in err.lower() or "duplicate" in err.lower():
                 skipped.append(sku)
             else:
                 errors.append(f"{sku}: {err}")
-    return {"ok": True, "count": len(queued), "queued": queued, "skipped": skipped, "errors": errors}
+    return {
+        "ok": not errors,
+        "count": len(queued), "queued": queued, "skipped": skipped,
+        "errors": errors,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2342,6 +2337,41 @@ def item_action(
             # staging twice... not even close to the same as ui." Same key as
             # the auto-push logic so the redundant attempt coalesces instead
             # of racing.
+            migration = _cfg.get("workflow_migration")
+            if migration is None and isinstance(_cfg.get("raw"), dict):
+                migration = _cfg["raw"].get("workflow_migration")
+            migration = migration if isinstance(migration, dict) else {}
+            mode = migration.get("item_ebay_stage_fanout", "legacy")
+            if mode not in {"legacy", "workflow"}:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"invalid item_ebay_stage_fanout mode {mode!r}",
+                )
+            if mode == "workflow":
+                from .workflow.listing_migration import (
+                    authorize_and_dispatch_force_restage,
+                )
+
+                provider_identity = migration.get("ebay_provider_identity", "")
+                result, dispatched, authority_id, authority_created = (
+                    authorize_and_dispatch_force_restage(
+                        json_path,
+                        operator_identity=operator_identity,
+                        surface="http:item-action:ebay-update",
+                        provider_identity=provider_identity,
+                    )
+                )
+                return {
+                    "ok": True, "sku": sku, "action": action,
+                    "job_id": dispatched.job_id,
+                    "status": ("workflow_dispatched" if dispatched.enqueued
+                               else "already_queued"),
+                    "treatment_id": dispatched.treatment_id,
+                    "graph_id": result.graph.graph_id,
+                    "object_generation": result.graph.object_generation,
+                    "authority_id": authority_id,
+                    "authority_created": authority_created,
+                }
             try:
                 job_id = state_machine.enqueue_job(
                     queue_name="ebay_stage",
@@ -2522,7 +2552,64 @@ def item_action(
                     max_attempts=3,
                 )
 
+        elif action == "ebay_draft":
+            migration = _cfg.get("workflow_migration")
+            if migration is None and isinstance(_cfg.get("raw"), dict):
+                migration = _cfg["raw"].get("workflow_migration")
+            migration = migration if isinstance(migration, dict) else {}
+            mode = migration.get(
+                "item_ebay_draft_fanout",
+                migration.get("bundle_downstream", "legacy"),
+            )
+            if mode not in {"legacy", "workflow"}:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"invalid item_ebay_draft_fanout mode {mode!r}",
+                )
+            _apply_patch(json_path, {"ai_redraft_requested": True})
+            if mode == "workflow":
+                from .workflow.listing_migration import request_item_goal
+                from .workflow.profiles import TGW_EBAY_DRAFTED
+
+                result = request_item_goal(
+                    json_path, TGW_EBAY_DRAFTED, origin="operator",
+                    operator_identity=operator_identity,
+                    operator_surface="http:item-action:ebay-draft",
+                )
+                if result.dispatched is None:
+                    return {
+                        "ok": False, "sku": sku, "action": action,
+                        "status": "held", "job_id": "",
+                        "held_external": list(result.held_external),
+                        "operator_gates": list(result.operator_gates),
+                        "ownership_conflicts": list(result.graph.ownership_conflicts),
+                        "reconciliation_gates": list(result.graph.reconciliation_gates),
+                    }
+                job_id = result.dispatched.job_id
+            else:
+                job_id = state_machine.enqueue_job(
+                    queue_name="ebay_draft",
+                    payload={"sku": sku, "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
+                    dedupe_key=f"ebay_draft:{sku}",
+                    max_attempts=5,
+                )
+
         elif action == "ebay_price":
+            migration = _cfg.get("workflow_migration")
+            if migration is None and isinstance(_cfg.get("raw"), dict):
+                migration = _cfg["raw"].get("workflow_migration")
+            migration = migration if isinstance(migration, dict) else {}
+            mode = migration.get(
+                "item_ebay_price_fanout",
+                migration.get("bundle_downstream", "legacy"),
+            )
+            if mode not in {"legacy", "workflow"}:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"invalid item_ebay_price_fanout mode {mode!r}",
+                )
             # Clear price sub-fields so the worker runs fresh.  _apply_patch is
             # a deep merge, so omitting a key does not remove its old value;
             # explicit nulls are the durable reset representation.
@@ -2534,14 +2621,34 @@ def item_action(
             _dl["price"] = None
             _dl["price_confidence"] = None
             _apply_patch(json_path, {"ebay_offer": _eo, "draft_listing": _dl})
-            job_id = state_machine.enqueue_job(
-                queue_name="ebay_price",
-                payload={"sku": sku, "origin": "operator"},
-                entity_type="item",
-                entity_id=sku,
-                dedupe_key=f"ebay_price:{sku}",
-                max_attempts=5,
-            )
+            if mode == "workflow":
+                from .workflow.listing_migration import request_item_goal
+                from .workflow.profiles import TGW_EBAY_PRICED
+
+                result = request_item_goal(
+                    json_path, TGW_EBAY_PRICED, origin="operator",
+                    operator_identity=operator_identity,
+                    operator_surface="http:item-action:ebay-price",
+                )
+                if result.dispatched is None:
+                    return {
+                        "ok": False, "sku": sku, "action": action,
+                        "status": "held", "job_id": "",
+                        "held_external": list(result.held_external),
+                        "operator_gates": list(result.operator_gates),
+                        "ownership_conflicts": list(result.graph.ownership_conflicts),
+                        "reconciliation_gates": list(result.graph.reconciliation_gates),
+                    }
+                job_id = result.dispatched.job_id
+            else:
+                job_id = state_machine.enqueue_job(
+                    queue_name="ebay_price",
+                    payload={"sku": sku, "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
+                    dedupe_key=f"ebay_price:{sku}",
+                    max_attempts=5,
+                )
 
         elif action == "ebay_stage":
             migration = _cfg.get("workflow_migration")
@@ -3060,8 +3167,11 @@ def system_workers() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/jobs/{job_id}/requeue", dependencies=[AUTH])
-def requeue_job(job_id: str) -> Dict[str, Any]:
+@app.post("/api/jobs/{job_id}/requeue")
+def requeue_job(
+    job_id: str,
+    operator_identity: str = Depends(_require_auth),
+) -> Dict[str, Any]:
     """Re-enqueue a dead-letter job with a fresh dedupe key so it can run again."""
     try:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
@@ -3112,6 +3222,40 @@ def requeue_job(job_id: str) -> Dict[str, Any]:
     else:
         entity_type = row.get("entity_type") or "generic"
         entity_id = row.get("entity_id") or ""
+
+    # A retry is a request to try the operation again *now*, not permission to
+    # replay a stale queue envelope.  Item jobs created before workflow
+    # migration lack the current graph/generation/authority bindings and modern
+    # provider workers must reject them.  Re-enter through the same item action
+    # dispatcher as the visible button so it evaluates current state and issues
+    # a fresh, exactly-bound job (or reports a truthful hold).
+    action_by_queue = {
+        "ai_identify": "ai_identify",
+        "ebay_draft": "ebay_draft",
+        "ebay_upload": "ebay_upload",
+        "ebay_price": "ebay_price",
+        "ebay_stage": "ebay_stage",
+        "ebay_publish": "ebay_publish",
+        "ebay_sync": "sync_from_ebay",
+        "thumbnail_gen": "thumbnail_gen",
+        "catalog_rebuild": "catalog_rebuild",
+    }
+    current_action = action_by_queue.get(str(row["queue_name"])) if sku else None
+    if current_action:
+        result = item_action(
+            sku, ActionBody(action=current_action),
+            operator_identity=operator_identity,
+        )
+        result = dict(result)
+        result["retried_from_job"] = str(job_id)
+        result["retry_mode"] = "current_item_action"
+        result["new_job_id"] = result.get("job_id") or ""
+        result["queue"] = str(row["queue_name"])
+        if not result.get("ok") and "detail" not in result:
+            result["detail"] = (
+                f"current {current_action} dispatch {result.get('status', 'held')}"
+            )
+        return result
 
     try:
         new_job_id = state_machine.enqueue_job(
@@ -8175,7 +8319,8 @@ def _render_item_detail_html(
         f"  if(!confirm('Retry this failed job?'))return;"
         f"  fetch('/api/jobs/'+jobId+'/requeue',{{method:'POST',headers:authHeaders()}})"
         f"  .then(function(r){{return r.json();}}).then(function(d){{"
-        f"    if(d.ok)location.reload();else alert('Retry failed: '+(d.detail||'error'));"
+        f"    if(d.ok)waitForAction(d.action||'',d.new_job_id||d.job_id||'');"
+        f"    else alert('Retry failed: '+(d.detail||'error'));"
         f"  }}).catch(function(e){{alert('Network error: '+e);}});"
         f"}}"
         f"function showTab(name){{"
@@ -8190,9 +8335,28 @@ def _render_item_detail_html(
         f"    body:JSON.stringify({{action:action}})"
         f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
         f"    if(d.ok&&(action==='archive'||action==='ebay_end_listing')){{window.location.href='/form/items';return;}}"
-        f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='ai_identify'||action==='ebay_draft'||action==='ebay_price'||action==='ebay_upload'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update'||action==='reset_draft_from_live')){{location.reload();return;}}"
+        f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='reset_draft_from_live')){{location.reload();return;}}"
+        f"    if(d.ok&&(action==='ai_identify'||action==='ebay_draft'||action==='ebay_price'||action==='ebay_upload'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update')){{waitForAction(action,d.job_id||'');return;}}"
         f"    alert(d.ok ? 'Action queued: '+action : 'Error: '+(d.detail||'failed'));"
         f"  }}).catch(function(e){{alert('Network error: '+e);}});"
+        f"}}"
+        f"function waitForAction(action,jobId){{"
+        f"  var deadline=Date.now()+120000;"
+        f"  var label=document.getElementById('pipeline-action-status');"
+        f"  if(!label){{label=document.createElement('div');label.id='pipeline-action-status';"
+        f"    label.style.cssText='position:fixed;right:16px;bottom:16px;padding:8px 12px;background:#182638;border:1px solid #4878a8;border-radius:5px;color:#bdddff;z-index:9999';document.body.appendChild(label);}}"
+        f"  label.textContent='Working: '+(action||'retry')+'…';"
+        f"  function poll(){{fetch('/api/items/'+_SKU,{{headers:authHeaders()}})"
+        f"    .then(function(r){{return r.json();}}).then(function(d){{"
+        f"      var item=(d&&d.item)||{{}};var jobs=item._queue_jobs||[];"
+        f"      var job=jobId?jobs.find(function(j){{return j.job_id===jobId;}}):null;"
+        f"      var active=job&&['queued','leased','running','retry_wait'].indexOf(job.state)>=0;"
+        f"      var aiPending=(action==='ai_identify'||action==='ebay_draft')&&"
+        f"        (item.ai_reidentify===true||item.ai_redraft_requested===true||jobs.some(function(j){{return ['ai_identify','ebay_draft'].indexOf(j.queue_name)>=0&&['queued','leased','running','retry_wait'].indexOf(j.state)>=0;}}));"
+        f"      if((job&&!active&&!aiPending)||(!jobId&&!aiPending)||Date.now()>=deadline){{location.reload();return;}}"
+        f"      setTimeout(poll,1500);"
+        f"    }}).catch(function(){{if(Date.now()>=deadline)location.reload();else setTimeout(poll,1500);}});}}"
+        f"  setTimeout(poll,750);"
         f"}}"
         f"function publishNow(){{"
         f"  if(!confirm('Publish this item to eBay NOW?\\nIt will go live immediately at the current offer price.'))return;"
