@@ -119,11 +119,15 @@
         rev = "ac62194c3917d5f474c1a844b6fd6da2db95077d";
         narHash = "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w=";
       };
-      packages.${system}.review-egress-systemd-units = reviewEgressSystemdUnits;
-      checks.${system}.review-egress-systemd-units = reviewEgressSystemdUnits;
-      packages.${system}.nix-input-observer-rendered-artifacts = observerRenderedArtifacts;
-      checks.${system}.nix-input-observer-rendered-artifacts = observerRenderedArtifacts;
-      packages.${system}.a3-platform-bootstrap = a3PlatformBootstrap;
-      checks.${system}.a3-platform-bootstrap = a3PlatformBootstrap;
+      packages.${system} = {
+        review-egress-systemd-units = reviewEgressSystemdUnits;
+        nix-input-observer-rendered-artifacts = observerRenderedArtifacts;
+        a3-platform-bootstrap = a3PlatformBootstrap;
+      };
+      checks.${system} = {
+        review-egress-systemd-units = reviewEgressSystemdUnits;
+        nix-input-observer-rendered-artifacts = observerRenderedArtifacts;
+        a3-platform-bootstrap = a3PlatformBootstrap;
+      };
     };
 }

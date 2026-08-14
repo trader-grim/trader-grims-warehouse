@@ -117,3 +117,10 @@ def test_network_evidence_is_typed_and_does_not_claim_the_controller_namespace_i
     assert evidence["schema"] == module.RAW_EVIDENCE_SCHEMA
     assert "lo" in evidence["interfaces"]
     assert not (lo_only and routes_only_lo)
+
+
+def test_flake_declares_each_dynamic_per_system_attrset_once() -> None:
+    flake = Path("flake.nix").read_text()
+    assert flake.count("packages.${system} = {") == 1
+    assert flake.count("checks.${system} = {") == 1
+    assert "packages.${system}.a3-platform-bootstrap" not in flake
