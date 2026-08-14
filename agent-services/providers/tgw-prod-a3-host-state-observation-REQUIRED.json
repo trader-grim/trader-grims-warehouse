@@ -18,7 +18,7 @@
     "base_commit": "70f86f338fe6b4c8200c9d9e250bc83656e4e77a",
     "base_tree": "fb137be8c90f2cd3d0ba7da24f3b8ff43904d330",
     "controller_path": "src/tgw/a3_host_state_observation.py",
-    "controller_sha256": "sha256:29ee6d0dd2c0bc0691805e65d860a3c7b368eb316fd742486c8671c05ce6f135",
+    "controller_sha256": "sha256:b9a1d4d0d2e09ec184bad2e62f9a87ac18d436dd3f8e8e6a50b07e056d92521b",
     "stdlib_helper_path": "src/tgw/a3_host_state_helper.py",
     "stdlib_helper_sha256": "sha256:c5cccf19614c20a1e1cc7c3406f1a0caec512147815519a984ef7464e3ceaf4b"
   },
@@ -37,14 +37,17 @@
     "remote-only-helper-terminal-origin",
     "exact-local-tool-and-ssh-process-environment",
     "typed-post-publication-evidence-ambiguity",
-    "closed-non-secret-host-readiness-diagnostic"
+    "closed-non-secret-host-readiness-diagnostic",
+    "root-owned-content-addressed-installed-helper-and-install-receipt"
   ],
   "admission_requirements": {
     "mounted_plan_authority": "REQUIRED",
     "real_sshd_parity_receipt": "REQUIRED",
     "dedicated_public_identity_and_known_hosts": "REQUIRED",
     "one_attempt_observation_grant": "REQUIRED",
-    "independent_source_audit": "REQUIRED"
+    "independent_source_audit": "REQUIRED",
+    "installed_helper_result": "sha256:20c386a93009e7c619c304c7356b166aab5fad8cf858a5673aae643c7b8d51b0",
+    "installed_helper_manifest": "sha256:80a6d5fbed50308d55691e6f8ee7a8499c7fc4c629c61bd05024be4e63080d17"
   },
   "effects": {
     "remote_write": false,
@@ -55,9 +58,9 @@
     "deploy": false,
     "platform_bootstrap_grant_consumption": false
   },
-  "reason": "the literal-address production source and exact-address real-sshd parity are complete; the A3O02 solution must be refreshed against these identities before a fresh one-attempt SSH observation grant is issued",
+  "reason": "the dedicated credential, real-sshd parity, and root-owned content-addressed helper installation are complete; freeze this provider binding before issuing one fresh A3O02 grant",
   "grant": null,
   "request": null,
   "dispatchable": false,
-  "descriptor_sha256": "sha256:e4944a654ca6a54cb9a945358d64b5a56686b4a6c4d06d79175d822e893dcbba"
+  "descriptor_sha256": "sha256:f77733f5adc47c1f34a2d982929d3ec1c432b9370bedf849d5944a6d7b7f1d4d"
 }

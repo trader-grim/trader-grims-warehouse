@@ -76,6 +76,8 @@ def _request(*, now: datetime | None = None, transport: dict | None = None) -> d
         "prerequisites": {
             "sshd_parity_sha256": _sha("parity-artifact"),
             "sshd_parity_receipt_sha256": _sha("parity-receipt"),
+            "helper_install_result_sha256": __import__("tgw.a3_host_state_observation", fromlist=["HELPER_INSTALL_RESULT_SHA256"]).HELPER_INSTALL_RESULT_SHA256,
+            "helper_install_manifest_sha256": __import__("tgw.a3_host_state_observation", fromlist=["HELPER_INSTALL_MANIFEST_SHA256"]).HELPER_INSTALL_MANIFEST_SHA256,
         },
         "bounds": {"timeout_seconds": 30, "max_output_bytes": 262144, "max_diagnostic_bytes": 65536},
         "freshness": {
@@ -476,7 +478,7 @@ def test_sshd_parity_is_typed_and_fresh() -> None:
         "ambient_config_rejected": True,
         "framing_verified": True,
         "process_group_verified": True,
-        "ssh_argv_policy": module._ssh_argv_policy(_request()),
+        "ssh_argv_policy": module._sshd_parity_argv_policy(_request()),
         "local_process_environment": module._local_process_environment(),
         "evidence": {
             role: {
@@ -518,6 +520,8 @@ def test_sshd_parity_is_typed_and_fresh() -> None:
     request["prerequisites"] = {
         "sshd_parity_sha256": digest(module.canonical(changed)),
         "sshd_parity_receipt_sha256": changed["receipt_sha256"],
+        "helper_install_result_sha256": module.HELPER_INSTALL_RESULT_SHA256,
+        "helper_install_manifest_sha256": module.HELPER_INSTALL_MANIFEST_SHA256,
     }
     request["request_sha256"] = digest(module.canonical({key: item for key, item in request.items() if key != "request_sha256"}))
     with pytest.raises(HostStateError, match="transport differs"):
@@ -1302,8 +1306,9 @@ def test_fixture_ssh_path_uses_exact_argv_framing_and_group_cleanup(tmp_path: Pa
     frame_path.chmod(0o444)
     ssh.write_text(
         "#!/usr/bin/python3\n"
-        "import os\n"
+        "import os,sys\n"
         "assert 'LD_PRELOAD' not in os.environ\n"
+        f"assert sys.argv[-1] == {__import__('shlex').join(host_state._remote_helper_command(request))!r}\n"
         "while os.read(0,65536): pass\n"
         f"fd=os.open({str(frame_path)!r},os.O_RDONLY);os.write(1,os.read(fd,1048576));os.close(fd)\n"
     )

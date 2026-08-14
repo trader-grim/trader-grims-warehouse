@@ -57,6 +57,21 @@ GRANT_OBSERVATION_SCHEMA = "tgw-prod-a3-host-state-mounted-grant-observation/v1"
 DEPENDENCY_SCHEMA = "tgw-prod-a3-host-state-observation-dependency/v1"
 COMPOSITION_SCHEMA = "tgw-prod-a3-host-state-observation-composition/v1"
 
+# Exact, already-installed remote helper authority.  The helper is content
+# addressed and root-owned on tgw-prod; the two evidence identities below bind
+# the successful bounded installation and its immutable manifest.
+REMOTE_SUDO = "/run/wrappers/bin/sudo"
+REMOTE_HELPER = (
+    "/var/lib/tgw-a3-observer/"
+    "sha256-c5cccf19614c20a1e1cc7c3406f1a0caec512147815519a984ef7464e3ceaf4b.py"
+)
+HELPER_INSTALL_RESULT_SHA256 = (
+    "sha256:20c386a93009e7c619c304c7356b166aab5fad8cf858a5673aae643c7b8d51b0"
+)
+HELPER_INSTALL_MANIFEST_SHA256 = (
+    "sha256:80a6d5fbed50308d55691e6f8ee7a8499c7fc4c629c61bd05024be4e63080d17"
+)
+
 _SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
 _STORE = re.compile(r"^/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+$")
 _OPERATION = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -457,7 +472,16 @@ def validate_request(
         raise HostStateError("host-state public identity is invalid")
     if digest((transport["identity_public"] + "\n").encode()) != transport["identity_public_sha256"]:
         raise HostStateError("host-state public identity artifact hash differs")
-    prerequisites = _exact(request["prerequisites"], {"sshd_parity_sha256", "sshd_parity_receipt_sha256"}, "host-state prerequisites")
+    prerequisites = _exact(
+        request["prerequisites"],
+        {
+            "sshd_parity_sha256",
+            "sshd_parity_receipt_sha256",
+            "helper_install_result_sha256",
+            "helper_install_manifest_sha256",
+        },
+        "host-state prerequisites",
+    )
     if any(not isinstance(item, str) or not _SHA.fullmatch(item) for item in prerequisites.values()):
         raise HostStateError("host-state prerequisite identity is invalid")
     mounted_parity = parity_authority.receipt if type(parity_authority) is MountedSshdParityAuthority else parity_authority
@@ -468,6 +492,8 @@ def validate_request(
         expected = {
             "sshd_parity_sha256": parity_authority.sha256 if type(parity_authority) is MountedSshdParityAuthority else digest(canonical(parity)),
             "sshd_parity_receipt_sha256": parity["receipt_sha256"],
+            "helper_install_result_sha256": HELPER_INSTALL_RESULT_SHA256,
+            "helper_install_manifest_sha256": HELPER_INSTALL_MANIFEST_SHA256,
         }
         if dict(prerequisites) != expected:
             raise HostStateError("host-state sshd parity binding differs")
@@ -476,7 +502,7 @@ def validate_request(
             or parity["known_hosts_sha256"] != transport["known_hosts_sha256"]
             or parity["identity_public"] != transport["identity_public"]
             or parity["identity_public_sha256"] != transport["identity_public_sha256"]
-            or parity["ssh_argv_policy"] != _ssh_argv_policy(request)
+            or parity["ssh_argv_policy"] != _sshd_parity_argv_policy(request)
         ):
             raise HostStateError("host-state transport differs from sshd parity")
     bounds = _exact(request["bounds"], {"timeout_seconds", "max_output_bytes", "max_diagnostic_bytes"}, "host-state bounds")
@@ -1729,7 +1755,7 @@ def _known_host(raw: bytes, host: str) -> None:
         raise ObservationHold("known-host authority key is malformed") from exc
 
 
-def _ssh_argv_policy(request: Mapping[str, Any]) -> list[str]:
+def _ssh_transport_argv_policy(request: Mapping[str, Any]) -> list[str]:
     return [
         "-F",
         "/dev/null",
@@ -1762,8 +1788,23 @@ def _ssh_argv_policy(request: Mapping[str, Any]) -> list[str]:
         "-oPasswordAuthentication=no",
         "-T",
         f"{request['target']['user']}@{request['target']['host']}",
-        f"{request['target']['remote_python']} -I -c <held-helper-bootstrap>",
     ]
+
+
+def _sshd_parity_argv_policy(request: Mapping[str, Any]) -> list[str]:
+    """The exact command shape exercised by the admitted real-sshd parity."""
+    return _ssh_transport_argv_policy(request) + [
+        f"{request['target']['remote_python']} -I -c <held-helper-bootstrap>"
+    ]
+
+
+def _remote_helper_command(request: Mapping[str, Any]) -> list[str]:
+    return [REMOTE_SUDO, "-n", request["target"]["remote_python"], "-I", REMOTE_HELPER]
+
+
+def _ssh_argv_policy(request: Mapping[str, Any]) -> list[str]:
+    """The production argv policy after the admitted helper installation."""
+    return _ssh_transport_argv_policy(request) + [shlex.join(_remote_helper_command(request))]
 
 
 def _validate_composition_value(
@@ -2028,12 +2069,11 @@ class SshHostStateProvider:
             try:
                 sealed_hosts = _sealed("a3-host-state-hosts", raw_values[2])
                 sealed_identity = _sealed("a3-host-state-identity", raw_values[3])
-                bootstrap = (
-                    "ns={'__name__':'tgw_remote_helper'};exec(compile("
-                    + repr(raw_values[5].decode("utf-8", errors="strict"))
-                    + ",'a3-host-state-helper','exec'),ns);raise SystemExit(ns['helper_main']())"
-                )
-                remote = shlex.join([request["target"]["remote_python"], "-I", "-c", bootstrap])
+                # The local held helper is still the byte authority used to
+                # validate the content-addressed installed path.  Production
+                # executes that already-installed root-owned file; it no
+                # longer streams privileged source through the SSH command.
+                remote = shlex.join(_remote_helper_command(request))
                 argv = [
                     f"/proc/{os.getpid()}/fd/{ssh_fd}",
                     "-F",
