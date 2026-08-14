@@ -16,12 +16,44 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sys
 
 import pytest
 
 import tgw.mcp_server as mcp_server
 from tgw import resolver
 from tgw.queue import state_machine as sm
+
+
+def test_sse_binding_uses_service_environment(monkeypatch):
+    monkeypatch.setenv("TGW_MCP_HOST", "100.107.99.66")
+    monkeypatch.setenv("TGW_MCP_PORT", "8765")
+
+    assert mcp_server._sse_binding() == ("100.107.99.66", 8765)
+
+
+@pytest.mark.parametrize("port", ["not-a-port", "0", "65536"])
+def test_sse_binding_rejects_invalid_port(monkeypatch, port):
+    monkeypatch.setenv("TGW_MCP_PORT", port)
+
+    with pytest.raises(ValueError, match="TGW_MCP_PORT"):
+        mcp_server._sse_binding()
+
+
+def test_sse_entrypoint_applies_service_binding(monkeypatch):
+    calls = []
+    monkeypatch.setenv("TGW_MCP_HOST", "100.107.99.66")
+    monkeypatch.setenv("TGW_MCP_PORT", "8765")
+    monkeypatch.setattr(sys, "argv", ["tgw-mcp", "--sse"])
+    monkeypatch.setattr(mcp_server.mcp, "run", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(mcp_server.mcp.settings, "host", "127.0.0.1")
+    monkeypatch.setattr(mcp_server.mcp.settings, "port", 8000)
+
+    mcp_server.main()
+
+    assert calls == [{"transport": "sse"}]
+    assert mcp_server.mcp.settings.host == "100.107.99.66"
+    assert mcp_server.mcp.settings.port == 8765
 
 # ---------------------------------------------------------------------------
 # Fakes

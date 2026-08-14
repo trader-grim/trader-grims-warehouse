@@ -864,10 +864,28 @@ def tgw_simple_llm_jobs(
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _sse_binding() -> tuple[str, int]:
+    """Return the explicit production SSE bind configured by the service unit."""
+    host = os.environ.get('TGW_MCP_HOST', '127.0.0.1').strip()
+    if not host:
+        raise ValueError('TGW_MCP_HOST must not be empty')
+    raw_port = os.environ.get('TGW_MCP_PORT', '8000').strip()
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise ValueError('TGW_MCP_PORT must be an integer') from exc
+    if not 1 <= port <= 65535:
+        raise ValueError('TGW_MCP_PORT must be between 1 and 65535')
+    return host, port
+
+
 def main() -> None:
     import sys
     sse = '--sse' in sys.argv
     if sse:
+        host, port = _sse_binding()
+        mcp.settings.host = host
+        mcp.settings.port = port
         mcp.run(transport='sse')
     else:
         mcp.run(transport='stdio')
