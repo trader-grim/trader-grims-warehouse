@@ -10,6 +10,7 @@ from tgw.workflow.listing_migration import (
     _evaluator_authorized_scopes,
     approved_authority_scopes,
     authorize_and_dispatch_force_restage,
+    authorize_and_dispatch_next_listing_effect,
     request_item_goal,
 )
 from tgw.workflow.profiles import (
@@ -18,7 +19,105 @@ from tgw.workflow.profiles import (
     TGW_EBAY_STAGED,
 )
 from tgw.workflow.scheduler import DispatchResult
-from tgw.workflow.treatments import AI_IDENTIFY, TGW_TREATMENTS
+from tgw.workflow.treatments import AI_IDENTIFY, EBAY_PUBLISH, EBAY_STAGE, TGW_TREATMENTS
+
+
+@pytest.mark.parametrize(
+    ("treatment", "scope", "offer_id", "expected_force"),
+    (
+        (EBAY_STAGE, "stage", "offer-1", True),
+        (EBAY_PUBLISH, "publish", "offer-1", False),
+    ),
+)
+def test_next_listing_effect_dispatches_exact_governed_payload(
+    tmp_path, monkeypatch, treatment, scope, offer_id, expected_force,
+):
+    _, path = _item(tmp_path, ebay_offer={"offer_id": offer_id})
+    disposition = SimpleNamespace(
+        treatment_id=treatment.identity, treatment_version=treatment.version,
+    )
+    graph = SimpleNamespace(
+        object_id="SKU-1", object_generation="gen-1",
+        eligible_treatments=(disposition,), ownership_conflicts=(),
+        reconciliation_gates=(), graph_id="graph-1", condition_hash="condition-1",
+        goal_profile_id="tgw.ebay_listable", goal_profile_version="1",
+    )
+    admitted = GoalRequestResult(
+        graph=graph, dispatched=None, held_external=(treatment.identity,),
+        operator_gates=(f"provider_contract_required:{treatment.identity}",),
+    )
+    monkeypatch.setattr(
+        "tgw.workflow.listing_migration.authorize_and_request_item_goal",
+        lambda *args, **kwargs: (admitted, "authority-1", True),
+    )
+    calls = []
+    monkeypatch.setattr(
+        "tgw.workflow.listing_migration.dispatch_treatment",
+        lambda **kwargs: calls.append(kwargs) or DispatchResult(
+            treatment_id=treatment.identity, treatment_version=treatment.version,
+            queue_name=treatment.identity.replace("-", "_"), entity_id="SKU-1",
+            enqueued=True, job_id="job-1", outcome="dispatched",
+        ),
+    )
+    authority = SimpleNamespace(
+        scopes=("upload", "stage", "publish"), entity_id="SKU-1",
+        object_generation="gen-1", pre_authority_condition_hash="pre-hash",
+    )
+
+    _, dispatched, authority_id, created = authorize_and_dispatch_next_listing_effect(
+        path, operator_identity="authenticated:dave",
+        surface="http:item-action:ebay-publish", provider_identity="ebay:account",
+        authority_lookup=lambda value: authority,
+    )
+
+    assert dispatched and dispatched.treatment_id == treatment.identity
+    assert authority_id == "authority-1" and created is True
+    payload = calls[0]["payload_extra"]
+    assert payload["operator_authority_id"] == "authority-1"
+    assert payload["pre_authority_condition_hash"] == "pre-hash"
+    assert (payload.get("force") is True) is expected_force
+    assert scope in authority.scopes
+
+
+def test_item_publish_workflow_never_enqueues_legacy_generic_jobs(tmp_path, monkeypatch):
+    from tgw.workflow import listing_migration
+
+    root, _ = _item(tmp_path)
+    monkeypatch.setattr(http_server, "_cfg", {
+        "itemdata_root": root,
+        "workflow_migration": {
+            "ebay_publish_provider_effect": "workflow",
+            "ebay_provider_identity": "ebay:account",
+        },
+    })
+    graph = SimpleNamespace(graph_id="graph-1", object_generation="gen-1")
+    result = SimpleNamespace(graph=graph)
+    dispatched = DispatchResult(
+        treatment_id="ebay-stage", treatment_version="1", queue_name="ebay_stage",
+        entity_id="SKU-1", enqueued=True, job_id="job-governed",
+    )
+    captured = {}
+    monkeypatch.setattr(
+        listing_migration, "authorize_and_dispatch_next_listing_effect",
+        lambda path, **kwargs: captured.update({"path": path, **kwargs})
+        or (result, dispatched, "authority-1", True),
+    )
+    monkeypatch.setattr(
+        http_server.state_machine, "enqueue_job",
+        lambda **kwargs: pytest.fail(f"legacy enqueue used: {kwargs}"),
+    )
+
+    response = http_server.item_action(
+        "SKU-1", http_server.ActionBody(action="ebay_publish"),
+        operator_identity="operator:authenticated",
+    )
+
+    assert response["ok"] is True
+    assert response["status"] == "workflow_dispatched"
+    assert response["job_id"] == "job-governed"
+    assert response["treatment_id"] == "ebay-stage"
+    assert captured["operator_identity"] == "operator:authenticated"
+    assert captured["provider_identity"] == "ebay:account"
 
 
 def test_force_restage_dispatch_is_exact_and_authority_bound(monkeypatch):

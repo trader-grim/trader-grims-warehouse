@@ -25,7 +25,13 @@ from .operator_authority import (
 )
 from .profiles import TGW_EBAY_IDENTIFIED
 from .scheduler import DispatchResult, dispatch_treatment
-from .treatments import AI_IDENTIFY, EBAY_STAGE, TGW_TREATMENTS
+from .treatments import (
+    AI_IDENTIFY,
+    EBAY_PUBLISH,
+    EBAY_STAGE,
+    EBAY_UPLOAD,
+    TGW_TREATMENTS,
+)
 
 EVALUATOR_VERSION = "pp-workflow-phase3-bundle/v1"
 _GOAL_SCOPE_CEILINGS = {
@@ -293,6 +299,80 @@ def authorize_and_dispatch_force_restage(
     )
     if not dispatched.enqueued and dispatched.outcome != "already_dispatched":
         raise RuntimeError("failed to dispatch governed force-restage")
+    return result, dispatched, authority_id, created
+
+
+def authorize_and_dispatch_next_listing_effect(
+    item_path: str | Path, *, operator_identity: str, surface: str,
+    provider_identity: str, ttl_seconds: int = 300, enqueue_fn=None,
+    issuer=issue_or_reuse_authority, authority_lookup=get_authority,
+) -> tuple[GoalRequestResult, DispatchResult | None, str, bool]:
+    """Authorize and dispatch the next exact external listing treatment.
+
+    A listing action may need upload, stage, and publish in sequence.  Each
+    provider effect changes the canonical item generation, so this function
+    deliberately dispatches only one treatment.  The caller may invoke it
+    again after that job succeeds; the second invocation issues an authority
+    bound to the new generation instead of pre-enqueuing stale future work.
+    """
+    from .profiles import TGW_EBAY_LISTABLE
+
+    result, authority_id, created = authorize_and_request_item_goal(
+        item_path, TGW_EBAY_LISTABLE, operator_identity=operator_identity,
+        surface=surface, provider_identity=provider_identity,
+        scopes=("upload", "stage", "publish"), ttl_seconds=ttl_seconds,
+        enqueue_fn=enqueue_fn, issuer=issuer, authority_lookup=authority_lookup,
+    )
+    if result.dispatched is not None:
+        raise RuntimeError("listing admission selected an unexpected local treatment")
+    if result.graph.ownership_conflicts or result.graph.reconciliation_gates:
+        raise RuntimeError("listing admission is blocked by reconciliation")
+
+    allowed = {
+        (EBAY_UPLOAD.identity, EBAY_UPLOAD.version): "upload",
+        (EBAY_STAGE.identity, EBAY_STAGE.version): "stage",
+        (EBAY_PUBLISH.identity, EBAY_PUBLISH.version): "publish",
+    }
+    dispositions = [
+        disposition for disposition in result.graph.eligible_treatments
+        if (disposition.treatment_id, disposition.treatment_version) in allowed
+    ]
+    if not dispositions:
+        return result, None, authority_id, created
+    if len(dispositions) != 1:
+        names = ", ".join(item.treatment_id for item in dispositions)
+        raise RuntimeError(f"listing admission selected multiple external treatments: {names}")
+
+    disposition = dispositions[0]
+    scope = allowed[(disposition.treatment_id, disposition.treatment_version)]
+    authority = authority_lookup(authority_id)
+    if (authority is None or scope not in authority.scopes
+            or authority.entity_id != result.graph.object_id
+            or authority.object_generation != result.graph.object_generation):
+        raise RuntimeError("listing authority binding changed before dispatch")
+
+    item = json.loads(Path(item_path).read_text(encoding="utf-8"))
+    force = bool(
+        disposition.treatment_id == EBAY_STAGE.identity
+        and (item.get("ebay_offer") or {}).get("offer_id")
+    )
+    dispatched = dispatch_treatment(
+        disposition=disposition, entity_id=result.graph.object_id,
+        graph=result.graph,
+        payload_extra={
+            "origin": "operator",
+            **({"force": True} if force else {}),
+            "operator_identity": operator_identity,
+            "operator_surface": surface,
+            "operator_authority_id": authority_id,
+            "pre_authority_condition_hash": authority.pre_authority_condition_hash,
+        },
+        enqueue_fn=enqueue_fn,
+    )
+    if not dispatched.enqueued and dispatched.outcome != "already_dispatched":
+        raise RuntimeError(
+            f"failed to dispatch governed listing treatment {disposition.treatment_id}"
+        )
     return result, dispatched, authority_id, created
 
 
