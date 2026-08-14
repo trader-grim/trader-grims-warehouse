@@ -109,6 +109,23 @@ def test_approved_plan_content_must_be_exact_clean_commit(tmp_path):
         load_config(config_path)
 
 
+def test_approved_plan_requires_distinct_update_repository(tmp_path):
+    root = tmp_path / "approved"
+    root.mkdir()
+    base = {
+        "standalone_plan_root": str(root),
+        "plan_approved_commit": "a" * 40,
+    }
+    with pytest.raises(ValueError, match="plan_repository_root is required"):
+        load_config(_write_cfg(tmp_path, base))
+
+    with pytest.raises(ValueError, match="must be distinct"):
+        load_config(_write_cfg(tmp_path, {
+            **base,
+            "plan_repository_root": str(root),
+        }))
+
+
 # ---------------------------------------------------------------------------
 # ISS-004 — ebay_sku_migrate in normalised config
 # ---------------------------------------------------------------------------

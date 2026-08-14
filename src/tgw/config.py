@@ -102,6 +102,14 @@ def load_config(path: Path) -> Dict[str, Any]:
             r"[0-9a-f]{40}", plan_approved_commit
         ):
             raise ValueError("plan_approved_commit must be a full Git commit")
+        if "plan_repository_root" not in raw:
+            raise ValueError(
+                "plan_repository_root is required when plan_approved_commit is configured"
+            )
+        if plan_repository_root.resolve() == standalone_plan_root.resolve():
+            raise ValueError(
+                "approved Plan materialization and update repository must be distinct"
+            )
         git_argv = [
             str(plan_git_path), "-c", f"safe.directory={standalone_plan_root}",
             "-C", str(standalone_plan_root),
