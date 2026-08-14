@@ -13,13 +13,13 @@ import stat
 from pathlib import Path
 from typing import Any
 
-RUNTIME_ROOT = Path("/opt/TGW/runtime/a3-successor-v5")
+RUNTIME_ROOT = Path("/opt/TGW/runtime/a3-successor-v6")
 LAUNCHER_PATH = RUNTIME_ROOT / "bin/tgw-a3-successor-local-launcher"
 SOURCE_PATH = RUNTIME_ROOT / "share/nixos_a3_local_launcher.py"
-CONFIG_PATH = Path("/etc/tgw/a3-successor-v5-launcher.json")
+CONFIG_PATH = Path("/etc/tgw/a3-successor-v6-launcher.json")
 KEY_PATH = Path("/etc/tgw/a3-successor-attestation.key")
 PUBLIC_PATH = Path("/etc/tgw/a3-successor-attestation.pub")
-PREREQUISITE_PATH = Path("/etc/tgw/a3-successor-v5-launcher-prerequisite.json")
+PREREQUISITE_PATH = Path("/etc/tgw/a3-successor-v6-launcher-prerequisite.json")
 WRAPPER_KEY_PATH = Path("/etc/tgw/nix-observer-render-attestation.key")
 _Q = 2**255 - 19
 _D = -121665 * pow(121666, _Q - 2, _Q) % _Q

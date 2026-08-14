@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/run/current-system/sw/bin/python3
 """Root-only, no-argument launcher for the local A3 successor evaluator.
 
 This file is deliberately standalone: the installed launcher consumes no
@@ -33,7 +33,7 @@ RESPONSE_SCHEMA = "tgw-nixos-a3-local-launch-response/v1"
 ATTESTATION_SCHEMA = "tgw-nixos-a3-local-netns-attestation/v1"
 CONFIG_SCHEMA = "tgw-nixos-a3-local-launcher-config/v1"
 RAW_EVIDENCE_SCHEMA = "tgw-nixos-a3-raw-link-route-probes/v1"
-CONFIG_PATH = "/etc/tgw/a3-successor-v5-launcher.json"
+CONFIG_PATH = "/etc/tgw/a3-successor-v6-launcher.json"
 CGROUP_ROOT = Path("/sys/fs/cgroup/tgw-a3-successor")
 MAX_PACKET_BYTES = 1_048_576
 MAX_DIAGNOSTIC_BYTES = 65_536
