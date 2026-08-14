@@ -54,6 +54,27 @@ _AUDIT_FIELDS = ['timestamp', 'mode', 'files', 'prompt_excerpt', 'exit_code', 'd
 _TASK_TIMEOUT = 300  # seconds; architect mode can be slow
 _WORKTREES_ROOT = Path('/opt/TGW/var/worktrees')
 
+
+def _plan_runtime_binding() -> tuple[Path, str]:
+    """Load the same standalone Plan root/Git binding as the primary MCP server."""
+    from tgw.config import load_config
+
+    config_path = Path(
+        os.environ.get('TGW_CONFIG', '/opt/TGW/config/tgw-api-config.json')
+    )
+    cfg = load_config(config_path)
+    plan_root = Path(
+        os.environ.get(
+            'TGW_STANDALONE_PLAN_VAULT',
+            str(cfg.get('plan_vault_path') or '/opt/TGW/library/plans'),
+        )
+    )
+    git_path = os.environ.get(
+        'TGW_STANDALONE_PLAN_GIT',
+        str(cfg.get('plan_git_path') or 'git'),
+    )
+    return plan_root, git_path
+
 # ---------------------------------------------------------------------------
 # Secrets + audit helpers
 # ---------------------------------------------------------------------------
@@ -145,10 +166,12 @@ def _build_preflight_context(work_dir: Path) -> str:
     try:
         from tgw.plan_graph import live_plan_graph
 
+        plan_root, git_path = _plan_runtime_binding()
+
         packet = live_plan_graph(
-            Path(os.environ.get('TGW_STANDALONE_PLAN_VAULT', '/opt/TGW/library/plans')),
+            plan_root,
             'Aider worktree implementation context', receiver='aider', limit=8,
-            git_path=os.environ.get('TGW_STANDALONE_PLAN_GIT', 'git'),
+            git_path=git_path,
         )
         lines.extend([
             f"- Standalone Plan commit: {packet['plan_commit']}",

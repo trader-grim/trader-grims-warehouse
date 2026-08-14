@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import json
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import tgw.aider_mcp_server as ams
@@ -325,6 +326,34 @@ def test_build_preflight_context_real(tmp_path, monkeypatch):
     assert 'Plan Vault preflight' in ctx
     assert 'inbox/claude' in ctx
     assert 'tgw plan check' in ctx
+
+
+def test_build_preflight_uses_configured_plan_git(tmp_path, monkeypatch):
+    observed = {}
+
+    monkeypatch.setattr(
+        ams,
+        '_plan_runtime_binding',
+        lambda: (Path('/opt/TGW/library/plans'), '/run/current-system/sw/bin/git'),
+    )
+
+    def fake_live_plan_graph(root, task, **kwargs):
+        observed.update(root=root, task=task, **kwargs)
+        return {
+            'plan_commit': 'fb9fee3',
+            'source_envelope': 'source',
+            'receiver_profile': 'aider',
+            'canonical_authority': '/opt/TGW/library/plans',
+        }
+
+    monkeypatch.setattr('tgw.plan_graph.live_plan_graph', fake_live_plan_graph)
+    monkeypatch.setattr(subprocess, 'run', lambda cmd, **kw: _fake_proc())
+
+    context = ams._build_preflight_context(tmp_path)
+
+    assert observed['git_path'] == '/run/current-system/sw/bin/git'
+    assert observed['root'] == Path('/opt/TGW/library/plans')
+    assert 'Standalone Plan commit: fb9fee3' in context
 
 
 # ---------------------------------------------------------------------------
