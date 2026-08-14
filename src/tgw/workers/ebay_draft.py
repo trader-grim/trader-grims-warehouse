@@ -882,7 +882,12 @@ class EbayDraftWorker(QueueWorker):
         draft['quality'] = score_draft(item, photo_count=photo_count).to_dict()
 
         item['draft_listing'] = draft
-        patch_fields: Dict[str, Any] = {'draft_listing': draft}
+        patch_fields: Dict[str, Any] = {
+            'draft_listing': draft,
+            # AI Identify/Reidentify requests a fresh draft without deleting
+            # the operator's existing draft before replacement is ready.
+            'ai_redraft_requested': None,
+        }
         if governed and photo_findings:
             patch_fields['pipeline_error'] = photo_findings[-1]
         if category_resolved_here:

@@ -241,6 +241,14 @@ def test_draft_generated_true():
     assert _result(snap, "draft_generated") == FingerprintResult.TRUE
 
 
+def test_draft_generated_false_while_ai_redraft_is_pending():
+    snap = _snapshot(_make_item(
+        draft_listing={"title": "Old AI draft", "category_id": "123"},
+        ai_redraft_requested=True,
+    ))
+    assert _result(snap, "draft_generated") == FingerprintResult.FALSE
+
+
 def test_draft_generated_false_no_draft():
     item = _make_item(draft_listing=None)
     snap = _snapshot(item)

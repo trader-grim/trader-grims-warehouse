@@ -15,12 +15,19 @@ from tgw.workflow.listing_migration import (
     request_item_goal,
 )
 from tgw.workflow.profiles import (
+    TGW_EBAY_DRAFTED,
     TGW_EBAY_IDENTIFIED,
     TGW_EBAY_LISTABLE,
     TGW_EBAY_STAGED,
 )
 from tgw.workflow.scheduler import DispatchResult
-from tgw.workflow.treatments import AI_IDENTIFY, EBAY_PUBLISH, EBAY_STAGE, TGW_TREATMENTS
+from tgw.workflow.treatments import (
+    AI_IDENTIFY,
+    EBAY_DRAFT,
+    EBAY_PUBLISH,
+    EBAY_STAGE,
+    TGW_TREATMENTS,
+)
 
 
 @pytest.mark.parametrize(
@@ -426,6 +433,35 @@ def test_force_reidentify_marker_makes_identified_item_dispatchable(tmp_path):
     assert calls[0]["queue_name"] == "ai_identify"
 
 
+def test_force_reidentify_then_regenerates_existing_draft(tmp_path):
+    _, path = _item(
+        tmp_path,
+        product_lookup={"brand": "Old"},
+        ebay_category_id="123",
+        draft_listing={"title": "Old draft", "category_id": "123"},
+        ai_reidentify=True,
+        ai_redraft_requested=True,
+    )
+    calls = []
+    first = request_item_goal(
+        path, TGW_EBAY_DRAFTED, treatments=(AI_IDENTIFY, EBAY_DRAFT),
+        enqueue_fn=lambda **kwargs: calls.append(kwargs) or "job-identify",
+    )
+    assert first.dispatched.treatment_id == "ai-identify"
+
+    after_identify = json.loads(path.read_text())
+    after_identify["ai_reidentify"] = None
+    after_identify["product_lookup"] = {"brand": "Refreshed"}
+    path.write_text(json.dumps(after_identify), encoding="utf-8")
+
+    second = request_item_goal(
+        path, TGW_EBAY_DRAFTED, treatments=(AI_IDENTIFY, EBAY_DRAFT),
+        enqueue_fn=lambda **kwargs: calls.append(kwargs) or "job-draft",
+    )
+    assert second.dispatched.treatment_id == "ebay-draft"
+    assert calls[-1]["queue_name"] == "ebay_draft"
+
+
 def test_item_action_ai_identify_workflow_uses_authenticated_goal_not_direct_fanout(
     tmp_path, monkeypatch,
 ):
@@ -440,11 +476,14 @@ def test_item_action_ai_identify_workflow_uses_authenticated_goal_not_direct_fan
         },
     })
     captured = {}
+    captured_goal = []
     dispatched = SimpleNamespace(job_id="job-workflow")
     goal_result = SimpleNamespace(dispatched=dispatched)
     monkeypatch.setattr(
         listing_migration, "request_item_goal",
-        lambda *args, **kwargs: captured.update(kwargs) or goal_result,
+        lambda *args, **kwargs: (
+            captured_goal.append(args[1]), captured.update(kwargs), goal_result
+        )[-1],
     )
     direct = []
     monkeypatch.setattr(http_server.state_machine, "enqueue_job",
@@ -460,7 +499,12 @@ def test_item_action_ai_identify_workflow_uses_authenticated_goal_not_direct_fan
     assert captured["origin"] == "operator"
     assert captured["operator_identity"] == "operator:test"
     assert captured["operator_surface"] == "http:item-action:ai-identify"
-    assert json.loads(path.read_text())["ai_reidentify"] is True
+    from tgw.workflow.profiles import TGW_EBAY_DRAFTED
+
+    assert captured_goal == [TGW_EBAY_DRAFTED]
+    written = json.loads(path.read_text())
+    assert written["ai_reidentify"] is True
+    assert written["ai_redraft_requested"] is True
 
 
 def test_item_action_ai_identify_defaults_to_exact_legacy_fanout(tmp_path, monkeypatch):
@@ -481,6 +525,7 @@ def test_item_action_ai_identify_defaults_to_exact_legacy_fanout(tmp_path, monke
     assert calls == [{
         "queue_name": "ai_identify",
         "payload": {"sku": "SKU-1", "origin": "operator"},
+        "entity_type": "item", "entity_id": "SKU-1",
         "dedupe_key": "ai_identify:SKU-1", "max_attempts": 3,
     }]
 
@@ -726,9 +771,11 @@ def test_item_stage_defaults_to_exact_legacy_upload_stage_fanout(
     assert calls == [
         {"queue_name": "ebay_upload",
          "payload": {"sku": "SKU-1", "origin": "operator"},
+         "entity_type": "item", "entity_id": "SKU-1",
          "dedupe_key": "ebay_upload:SKU-1", "max_attempts": 5},
         {"queue_name": "ebay_stage",
          "payload": {"sku": "SKU-1", "origin": "operator"},
+         "entity_type": "item", "entity_id": "SKU-1",
          "dedupe_key": "ebay_stage:SKU-1", "max_attempts": 5},
     ]
 

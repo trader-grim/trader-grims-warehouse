@@ -1318,6 +1318,8 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
                 state_machine.enqueue_job(
                     queue_name="ebay_stage",
                     payload={"sku": sku, "force": True, "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
                     dedupe_key=f"ebay_stage:{sku}",
                     max_attempts=2,
                 )
@@ -1413,6 +1415,8 @@ def _maybe_early_identify(json_path: "Path", sku: str, photo_count: int) -> None
         state_machine.enqueue_job(
             queue_name="ai_identify",
             payload={"sku": sku, "origin": "operator"},
+            entity_type="item",
+            entity_id=sku,
             dedupe_key=f"ai_identify:{sku}",
             max_attempts=3,
         )
@@ -1452,6 +1456,8 @@ def _maybe_session_complete_identify(json_path: "Path", sku: str) -> None:
         state_machine.enqueue_job(
             queue_name="ai_identify",
             payload={"sku": sku, "origin": "operator"},
+            entity_type="item",
+            entity_id=sku,
             dedupe_key=f"ai_identify:{sku}",
             max_attempts=3,
         )
@@ -1978,6 +1984,8 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                     state_machine.enqueue_job(
                         queue_name="ebay_upload",
                         payload={"sku": sku, "origin": "operator"},
+                        entity_type="item",
+                        entity_id=sku,
                         dedupe_key=f"ebay_upload:{sku}",
                         max_attempts=5,
                     )
@@ -1987,6 +1995,8 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                     state_machine.enqueue_job(
                         queue_name="ebay_stage",
                         payload={"sku": sku, "origin": "operator"},
+                        entity_type="item",
+                        entity_id=sku,
                         dedupe_key=f"ebay_stage:{sku}",
                         max_attempts=5,
                     )
@@ -2111,6 +2121,8 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
             state_machine.enqueue_job(
                 queue_name=body.action,
                 payload={"sku": sku, "origin": "operator"},
+                entity_type="item",
+                entity_id=sku,
                 dedupe_key=f"{body.action}:{sku}",
                 max_attempts=5,
             )
@@ -2334,6 +2346,8 @@ def item_action(
                 job_id = state_machine.enqueue_job(
                     queue_name="ebay_stage",
                     payload={"sku": sku, "force": True, "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
                     dedupe_key=f"ebay_stage:{sku}",
                     max_attempts=2,
                 )
@@ -2371,6 +2385,8 @@ def item_action(
                 job_id = state_machine.enqueue_job(
                     queue_name="ebay_upload",
                     payload={"sku": sku, "reason": "resync_photos_gap", "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
                     dedupe_key=f"ebay_upload:{sku}",
                     max_attempts=3,
                 )
@@ -2433,6 +2449,8 @@ def item_action(
                     state_machine.enqueue_job(
                         queue_name="ebay_upload",
                         payload={"sku": sku, "origin": "operator"},
+                        entity_type="item",
+                        entity_id=sku,
                         dedupe_key=f"ebay_upload:{sku}",
                         max_attempts=5,
                     )
@@ -2467,13 +2485,16 @@ def item_action(
                 )
             if mode == "workflow":
                 from .workflow.listing_migration import request_item_goal
-                from .workflow.profiles import TGW_EBAY_IDENTIFIED
+                from .workflow.profiles import TGW_EBAY_DRAFTED
 
                 # Durable pending intent: the evaluator and queued treatment
                 # must bind the exact generation visible to a fresh worker.
-                _apply_patch(json_path, {"ai_reidentify": True})
+                _apply_patch(json_path, {
+                    "ai_reidentify": True,
+                    "ai_redraft_requested": True,
+                })
                 result = request_item_goal(
-                    json_path, TGW_EBAY_IDENTIFIED, origin="operator",
+                    json_path, TGW_EBAY_DRAFTED, origin="operator",
                     operator_identity=operator_identity,
                     operator_surface="http:item-action:ai-identify",
                 )
@@ -2488,27 +2509,36 @@ def item_action(
                     }
                 job_id = result.dispatched.job_id
             else:
-                _apply_patch(json_path, {"ai_reidentify": True})
+                _apply_patch(json_path, {
+                    "ai_reidentify": True,
+                    "ai_redraft_requested": True,
+                })
                 job_id = state_machine.enqueue_job(
                     queue_name="ai_identify",
                     payload={"sku": sku, "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
                     dedupe_key=f"ai_identify:{sku}",
                     max_attempts=3,
                 )
 
         elif action == "ebay_price":
-            # Clear price sub-fields so the worker runs fresh (load→strip→patch)
+            # Clear price sub-fields so the worker runs fresh.  _apply_patch is
+            # a deep merge, so omitting a key does not remove its old value;
+            # explicit nulls are the durable reset representation.
             _doc = load_item_doc(json_path)
             _eo = dict(_doc.get("ebay_offer") or {})
             for _k in ("price", "price_comps", "priced_at", "price_source", "target_price"):
-                _eo.pop(_k, None)
+                _eo[_k] = None
             _dl = dict(_doc.get("draft_listing") or {})
-            _dl.pop("price", None)
-            _dl.pop("price_confidence", None)
+            _dl["price"] = None
+            _dl["price_confidence"] = None
             _apply_patch(json_path, {"ebay_offer": _eo, "draft_listing": _dl})
             job_id = state_machine.enqueue_job(
                 queue_name="ebay_price",
                 payload={"sku": sku, "origin": "operator"},
+                entity_type="item",
+                entity_id=sku,
                 dedupe_key=f"ebay_price:{sku}",
                 max_attempts=5,
             )
@@ -2577,6 +2607,8 @@ def item_action(
                     state_machine.enqueue_job(
                         queue_name="ebay_upload",
                         payload={"sku": sku, "origin": "operator"},
+                        entity_type="item",
+                        entity_id=sku,
                         dedupe_key=f"ebay_upload:{sku}",
                         max_attempts=5,
                     )
@@ -2585,6 +2617,8 @@ def item_action(
             job_id = state_machine.enqueue_job(
                 queue_name="ebay_stage",
                 payload={"sku": sku, "origin": "operator"},
+                entity_type="item",
+                entity_id=sku,
                 dedupe_key=f"ebay_stage:{sku}",
                 max_attempts=5,
             )
@@ -2658,6 +2692,8 @@ def item_action(
                         state_machine.enqueue_job(
                             queue_name="ebay_upload",
                             payload={"sku": sku, "origin": "operator"},
+                            entity_type="item",
+                            entity_id=sku,
                             dedupe_key=f"ebay_upload:{sku}",
                             max_attempts=5,
                         )
@@ -2667,6 +2703,8 @@ def item_action(
                     state_machine.enqueue_job(
                         queue_name="ebay_stage",
                         payload={"sku": sku, "origin": "operator"},
+                        entity_type="item",
+                        entity_id=sku,
                         dedupe_key=f"ebay_stage:{sku}",
                         max_attempts=5,
                     )
@@ -2683,6 +2721,8 @@ def item_action(
                     state_machine.enqueue_job(
                         queue_name="ebay_stage",
                         payload={"sku": sku, "force": True, "origin": "operator"},
+                        entity_type="item",
+                        entity_id=sku,
                         dedupe_key=f"ebay_stage:{sku}",
                         max_attempts=5,
                     )
@@ -2691,6 +2731,8 @@ def item_action(
             job_id = state_machine.enqueue_job(
                 queue_name="ebay_publish",
                 payload={"sku": sku, "origin": "operator"},
+                entity_type="item",
+                entity_id=sku,
                 dedupe_key=f"ebay_publish:{sku}",
                 max_attempts=10,
             )
@@ -2699,6 +2741,8 @@ def item_action(
             job_id = state_machine.enqueue_job(
                 queue_name=action,
                 payload={"sku": sku, "origin": "operator"},
+                entity_type="item",
+                entity_id=sku,
                 dedupe_key=f"{action}:{sku}",
                 max_attempts=5,
             )
@@ -3023,7 +3067,13 @@ def requeue_job(job_id: str) -> Dict[str, Any]:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT job_id, queue_name, payload_json, state, max_attempts FROM queue_jobs WHERE job_id = %s",
+                    """
+                    SELECT job_id, queue_name, payload_json, state, max_attempts,
+                           entity_type, entity_id, operation, handler_family,
+                           priority
+                      FROM queue_jobs
+                     WHERE job_id = %s
+                    """,
                     (job_id,),
                 )
                 row = cur.fetchone()
@@ -3040,19 +3090,43 @@ def requeue_job(job_id: str) -> Dict[str, Any]:
         )
 
     payload = dict(row["payload_json"]) if row["payload_json"] else {}
-    sku = payload.get("sku") or job_id[:8]
+    payload_sku = payload.get("sku")
+    sku = payload_sku.strip() if isinstance(payload_sku, str) else ""
+    dedupe_entity = sku or job_id[:8]
     # PP-ACTIONCONSOLE-001 improvement loop: mark operator-triggered retries so
     # the ledger can be mined for "same failure, same manual fix, keeps working"
     # patterns — candidates for automatic retry policy.
     payload["operator_retry"] = True
     payload["origin"] = "operator"
     payload["retried_from_job"] = str(job_id)
-    new_dedupe = f"{row['queue_name']}:{sku}:requeue:{int(time.time())}"
+    new_dedupe = f"{row['queue_name']}:{dedupe_entity}:requeue:{time.time_ns()}"
+
+    # Old dead-letter rows predate the canonical entity manifest.  Re-enqueuing
+    # one with enqueue_job's generic defaults creates a fresh row that modern
+    # workers must reject before doing any useful work.  A payload-bound SKU is
+    # definitive per-item identity, so migrate it at this boundary.  Queue-level
+    # jobs without a SKU retain their recorded manifest instead.
+    if sku:
+        entity_type = "item"
+        entity_id = sku
+    else:
+        entity_type = row.get("entity_type") or "generic"
+        entity_id = row.get("entity_id") or ""
 
     try:
         new_job_id = state_machine.enqueue_job(
             queue_name=row["queue_name"],
             payload=payload,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            operation=row.get("operation") or "run",
+            handler_family=row.get("handler_family") or row["queue_name"],
+            priority=(
+                row.get("priority")
+                if isinstance(row.get("priority"), int)
+                and not isinstance(row.get("priority"), bool)
+                else None
+            ),
             dedupe_key=new_dedupe,
             max_attempts=row.get("max_attempts") or 3,
         )
@@ -8116,7 +8190,7 @@ def _render_item_detail_html(
         f"    body:JSON.stringify({{action:action}})"
         f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
         f"    if(d.ok&&(action==='archive'||action==='ebay_end_listing')){{window.location.href='/form/items';return;}}"
-        f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='ai_identify'||action==='ebay_draft'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update'||action==='reset_draft_from_live')){{location.reload();return;}}"
+        f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='ai_identify'||action==='ebay_draft'||action==='ebay_price'||action==='ebay_upload'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update'||action==='reset_draft_from_live')){{location.reload();return;}}"
         f"    alert(d.ok ? 'Action queued: '+action : 'Error: '+(d.detail||'failed'));"
         f"  }}).catch(function(e){{alert('Network error: '+e);}});"
         f"}}"

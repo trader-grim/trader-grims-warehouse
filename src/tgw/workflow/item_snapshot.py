@@ -152,6 +152,8 @@ def _ai_identified(item: Dict[str, Any]) -> bool:
 
 def _draft_generated(item: Dict[str, Any]) -> bool:
     """draft_listing exists, has a title, and category_id is not '99'."""
+    if item.get("ai_redraft_requested") is True:
+        return False
     draft = item.get("draft_listing")
     if not isinstance(draft, dict):
         return False

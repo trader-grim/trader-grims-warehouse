@@ -16,7 +16,9 @@ No real PostgreSQL, eBay, network, or secrets access occurs.
 
 from __future__ import annotations
 
+import ast
 import json
+import re
 import sqlite3
 import time
 import zipfile
@@ -3937,6 +3939,37 @@ def test_approve_action_requires_auth(client):
     assert r.status_code in (401, 403)
 
 
+def test_ebay_price_action_enqueues_canonical_item_job(env, enqueue_calls):
+    _write_item_with_draft(
+        env["itemdata_root"], SKU_A,
+        {**_DRAFT_LISTING, "price": 14.99, "price_confidence": "old"},
+        extra={"ebay_offer": {"price": 14.99, "target_price": 12.99}},
+    )
+
+    response = env["client"].post(
+        f"/api/items/{SKU_A}/action",
+        json={"action": "ebay_price"},
+        headers=AUTH_HEADERS,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    price_call = next(
+        call["kwargs"] for call in reversed(enqueue_calls)
+        if call["kwargs"].get("queue_name") == "ebay_price"
+    )
+    assert price_call["entity_type"] == "item"
+    assert price_call["entity_id"] == SKU_A
+    assert price_call["payload"] == {"sku": SKU_A, "origin": "operator"}
+    doc = json.loads(
+        (env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text()
+    )
+    assert doc["draft_listing"]["price"] is None
+    assert doc["draft_listing"]["price_confidence"] is None
+    assert doc["ebay_offer"]["price"] is None
+    assert doc["ebay_offer"]["target_price"] is None
+
+
 def test_accept_proposals_persists_item_specifics_edit(env, monkeypatch):
     """POST action=accept_proposals actually writes accepted item_specifics
     into draft_listing.item_specifics (Set B) on disk when item_specifics
@@ -5056,19 +5089,30 @@ def test_requeue_job_wrong_state(env, monkeypatch):
 
 
 def test_requeue_job_success(env, monkeypatch):
-    """Requeue enqueues a new job and returns ok=True."""
+    """Requeue upgrades a legacy per-SKU row to a canonical item manifest."""
     rows = [{
         "job_id": "dead-job-id-001",
         "queue_name": "ebay_draft",
         "payload_json": {"sku": SKU_A},
         "state": "dead_letter",
         "max_attempts": 3,
+        "entity_type": "generic",
+        "entity_id": "ebay_draft",
+        "operation": "run",
+        "handler_family": "ebay_draft",
+        "priority": 30,
     }]
     monkeypatch.setattr(
         http_server.psycopg2, "connect",
         lambda *a, **k: _FakeConn(rows),
     )
-    monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda **k: "new-job-id-999")
+    enqueued = {}
+
+    def _enqueue(**kwargs):
+        enqueued.update(kwargs)
+        return "new-job-id-999"
+
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", _enqueue)
 
     r = env["client"].post("/api/jobs/dead-job-id-001/requeue", headers=AUTH_HEADERS)
     assert r.status_code == 200
@@ -5076,6 +5120,48 @@ def test_requeue_job_success(env, monkeypatch):
     assert body["ok"] is True
     assert body["new_job_id"] == "new-job-id-999"
     assert body["queue"] == "ebay_draft"
+    assert enqueued["entity_type"] == "item"
+    assert enqueued["entity_id"] == SKU_A
+    assert enqueued["operation"] == "run"
+    assert enqueued["handler_family"] == "ebay_draft"
+    assert enqueued["priority"] == 30
+    assert enqueued["payload"]["operator_retry"] is True
+    assert enqueued["payload"]["retried_from_job"] == "dead-job-id-001"
+
+
+def test_every_http_sku_enqueue_uses_canonical_item_identity():
+    """Every literal per-SKU HTTP enqueue obeys the queue manifest."""
+    source_path = Path(http_server.__file__)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    missing = []
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        if not isinstance(call.func, ast.Attribute) or call.func.attr != "enqueue_job":
+            continue
+        keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+        payload = keywords.get("payload")
+        if not isinstance(payload, ast.Dict):
+            continue
+        payload_keys = {
+            key.value for key in payload.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if "sku" not in payload_keys:
+            continue
+        if "entity_type" not in keywords or "entity_id" not in keywords:
+            missing.append(call.lineno)
+            continue
+        entity_type = keywords["entity_type"]
+        entity_id = keywords["entity_id"]
+        if not (
+            isinstance(entity_type, ast.Constant)
+            and entity_type.value == "item"
+            and isinstance(entity_id, ast.Name)
+            and entity_id.id == "sku"
+        ):
+            missing.append(call.lineno)
+    assert missing == []
 
 
 def test_cancel_job_requires_auth(client):
@@ -6235,6 +6321,30 @@ def test_item_detail_global_ai_action_is_always_available():
     assert "AI Reidentify" in identified
     assert first.count("triggerAction('ai_identify')") >= 1
     assert identified.count("triggerAction('ai_identify')") >= 1
+
+
+@pytest.mark.parametrize(
+    "item",
+    (
+        {"sku": "tgw1", "title": "New"},
+        {"sku": "tgw1", "title": "Known", "ai_identified": True},
+        {
+            "sku": "tgw1", "title": "Draft", "ai_identified": True,
+            "draft_listing": {"title": "Draft", "category_id": "123"},
+        },
+        {
+            "sku": "tgw1", "title": "Live", "ai_identified": True,
+            "draft_listing": {"title": "Draft", "category_id": "123"},
+            "ebay_offer": {"offer_id": "offer-1"},
+            "ebay_listing": {"listing_id": "listing-1", "status": "Active"},
+        },
+    ),
+)
+def test_every_rendered_item_onclick_function_is_defined(item):
+    html = http_server._render_item_detail_html("tgw1", item, [], [], [])
+    definitions = set(re.findall(r"function\s+([A-Za-z_$][\w$]*)\s*\(", html))
+    onclick_calls = set(re.findall(r'onclick="([A-Za-z_$][\w$]*)\s*\(', html))
+    assert onclick_calls - definitions == set()
 
 
 # ---------------------------------------------------------------------------
