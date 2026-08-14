@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import ast
 import inspect
+import io
 import json
 import subprocess
 import sys
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 from fastapi.testclient import TestClient
@@ -611,6 +613,53 @@ def test_failed_canonical_claim_preserves_reusable_attempt_and_retry_reaches_cla
             )
         assert service.claims == expected_claims
         assert expected.is_dir()
+
+
+def test_definitive_claim_rejection_removes_only_new_exact_attempt(tmp_path):
+    _init_coding_repository(tmp_path)
+    cfg = _config(tmp_path)
+    expected = tmp_path / "worktrees" / "todo-1706-request-1706"
+
+    class RejectedService:
+        def get(self, _request_id):
+            return {**_queued_document(), "state": "queued"}
+
+        def claim(self, *_args):
+            raise coding_provision_worker.DefinitiveClaimRejected(
+                "canonical service completed a 409 rejection"
+            )
+
+    with pytest.raises(
+        coding_provision_worker.DefinitiveClaimRejected, match="409 rejection",
+    ):
+        coding_provision_worker.claim_and_run(
+            cfg,
+            request_id="request-1706",
+            local_host="tgw-lib-local",
+            worker_identity="tgw-coding-worker",
+            client=RejectedService(),
+        )
+    assert not expected.exists()
+
+
+def test_client_classifies_completed_claim_409_as_definitive(monkeypatch):
+    error = HTTPError(
+        "https://tgw.example/api/coding/worker/requests/request/claim",
+        409,
+        "Conflict",
+        {},
+        io.BytesIO(b'{"detail":"rejected"}'),
+    )
+    monkeypatch.setattr(
+        coding_provision_worker, "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
+    )
+    client = coding_provision_worker.CodingProvisionClient(
+        "https://tgw.example", "secret", "worker",
+    )
+
+    with pytest.raises(coding_provision_worker.DefinitiveClaimRejected):
+        client.claim("request", "host", "hash", {}, {})
 
 
 def test_failed_claim_preserves_generation_bound_attempt_and_retry_reaches_claim(

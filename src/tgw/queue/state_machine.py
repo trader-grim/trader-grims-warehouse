@@ -607,9 +607,19 @@ def record_claim_envelope(job_id: str, lease_owner: str, lease_token: str,
                    SET payload_json = COALESCE(payload_json, '{}'::jsonb) || %s::jsonb
                  WHERE job_id = %s AND state = 'leased' AND lease_owner = %s
                    AND lease_token = %s::uuid
+                   AND lease_expires_at IS NOT NULL AND lease_expires_at > NOW()
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM jsonb_each(%s::jsonb) AS proposed(key, value)
+                        WHERE payload_json ? proposed.key
+                          AND payload_json -> proposed.key IS DISTINCT FROM proposed.value
+                   )
                  RETURNING *
                 """,
-                (json.dumps(envelope), job_id, lease_owner, lease_token),
+                (
+                    json.dumps(envelope), job_id, lease_owner, lease_token,
+                    json.dumps(envelope),
+                ),
             )
             row = cur.fetchone()
             return dict(row) if row is not None else None

@@ -78,6 +78,25 @@ def test_mark_failed_rejects_expired_or_wrong_token_before_state_choice():
     assert params == ("job-1", "owner", TOKEN)
 
 
+def test_claim_envelope_is_lease_fenced_and_cannot_overwrite_existing_fields():
+    connection, cursor = _database(row=None)
+    envelope = {"location": {"worktree": "/exact"}}
+    with patch.object(state_machine, "_conn", return_value=connection):
+        assert state_machine.record_claim_envelope(
+            "job-1", "owner", TOKEN, envelope,
+        ) is None
+
+    sql, params = cursor.execute.call_args.args
+    assert "lease_expires_at IS NOT NULL" in sql
+    assert "lease_expires_at > NOW()" in sql
+    assert "jsonb_each" in sql
+    assert "IS DISTINCT FROM" in sql
+    assert params == (
+        __import__("json").dumps(envelope), "job-1", "owner", TOKEN,
+        __import__("json").dumps(envelope),
+    )
+
+
 def test_timer_insert_failure_rolls_back_token_fenced_completion():
     connection, cursor = _database(row=("item", "SKU-1"))
     cursor.execute.side_effect = [None, RuntimeError("timer insert failed")]

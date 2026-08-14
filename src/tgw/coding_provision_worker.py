@@ -212,7 +212,13 @@ class CodingProvisionClient:
         try:
             with urlopen(request, timeout=15) as response:  # nosec: configured operator endpoint
                 value = json.loads(response.read().decode())
-        except (HTTPError, URLError, json.JSONDecodeError) as exc:
+        except HTTPError as exc:
+            if method == "POST" and path.endswith("/claim") and exc.code == 409:
+                raise DefinitiveClaimRejected(
+                    f"canonical coding service rejected claim: {exc}"
+                ) from exc
+            raise HardFailure(f"canonical coding service request failed: {exc}") from exc
+        except (URLError, json.JSONDecodeError) as exc:
             raise HardFailure(f"canonical coding service request failed: {exc}") from exc
         if not isinstance(value, dict):
             raise HardFailure("canonical coding service returned a non-object response")
@@ -264,6 +270,28 @@ def local_snapshot_claim(
     return serialize_snapshot(snapshot)
 
 
+class DefinitiveClaimRejected(HardFailure):
+    """The canonical service completed a claim request without leasing it."""
+
+
+def _discard_definitively_rejected_attempt(
+    document: dict[str, Any], envelope: dict[str, Any], coding: dict[str, Any],
+) -> None:
+    """Remove only this invocation's exact attempt after a completed 409."""
+    if not envelope.get("attempt_created"):
+        return
+    repository = Path(
+        str(coding.get("repository_root", DEFAULT_REPOSITORY_ROOT))
+    ).resolve()
+    root = Path(str(coding.get("worktree_root", ""))).resolve()
+    expected, branch = _request_worktree(
+        int(document.get("todo_id", 0)), document.get("request_id"), root,
+    )
+    actual = Path(str(envelope.get("location", {}).get("worktree", ""))).resolve()
+    if actual == expected:
+        _remove_incomplete_worktree(repository, actual, branch)
+
+
 def claim_and_run(
     config: dict[str, Any], *, request_id: str, local_host: str, worker_identity: str, provision: Callable[[dict[str, Any]], dict[str, Any]] | None = None, client: CodingProvisionClient | None = None
 ) -> dict[str, Any]:
@@ -284,6 +312,9 @@ def claim_and_run(
         lease_token = claimed.get("lease_token") if isinstance(claimed, dict) else None
         if not isinstance(lease_token, str) or not lease_token:
             raise HardFailure("canonical coding service returned no lease token")
+    except DefinitiveClaimRejected:
+        _discard_definitively_rejected_attempt(document, envelope, coding)
+        raise
     except Exception:
         # A transport error cannot prove the service did not commit the claim.
         # Preserve the exact clean request-bound worktree; a queued retry can
