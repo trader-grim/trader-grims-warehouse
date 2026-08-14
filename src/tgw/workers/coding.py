@@ -130,6 +130,22 @@ class CodingWorker(QueueWorker):
             raise ValueError(f"unsupported coding queue: {queue_name}")
         self._launcher = launcher or self._launch_configured_command
         super().__init__(queue_name=queue_name, config=config)
+        self.lease_seconds = max(
+            self.lease_seconds,
+            self._timeout_seconds() + 300,
+        )
+
+    def _timeout_seconds(self) -> int:
+        raw_timeout = self._coding_config().get("timeout_s", 1800)
+        if isinstance(raw_timeout, bool):
+            raise HardFailure("coding timeout_s must be a positive integer")
+        try:
+            timeout = int(raw_timeout)
+        except (TypeError, ValueError) as exc:
+            raise HardFailure("coding timeout_s must be a positive integer") from exc
+        if timeout < 1:
+            raise HardFailure("coding timeout_s must be a positive integer")
+        return timeout
 
     def _launch_configured_command(
         self, treatment_id: str, payload: dict[str, Any], worktree: Path
@@ -149,7 +165,7 @@ class CodingWorker(QueueWorker):
                 check=False,
                 text=True,
                 capture_output=True,
-                timeout=int(self._coding_config().get("timeout_s", 1800)),
+                timeout=self._timeout_seconds(),
                 env={**os.environ, "TGW_CODING_JOB": json.dumps(payload)},
             )
         except (OSError, subprocess.TimeoutExpired) as exc:

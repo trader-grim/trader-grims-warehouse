@@ -29,6 +29,7 @@ from tgw.workflow.treatments import CODING_TREATMENTS
 
 QUEUE_NAME = "coding-provision"
 UNKNOWN = "unknown"
+LEASE_COMPLETION_GRACE_SECONDS = 300
 
 
 def _todo_lookup(todo_id: int) -> dict[str, Any] | None:
@@ -46,6 +47,19 @@ def _coding(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise HardFailure("coding configuration must be an object")
     return value
+
+
+def _lease_seconds(coding: dict[str, Any]) -> int:
+    raw_timeout = coding.get("timeout_s", 1800)
+    if isinstance(raw_timeout, bool):
+        raise HardFailure("coding timeout_s must be a positive integer")
+    try:
+        timeout = int(raw_timeout)
+    except (TypeError, ValueError) as exc:
+        raise HardFailure("coding timeout_s must be a positive integer") from exc
+    if timeout < 1:
+        raise HardFailure("coding timeout_s must be a positive integer")
+    return max(900, timeout + LEASE_COMPLETION_GRACE_SECONDS)
 
 
 def _hash(value: dict[str, Any]) -> str:
@@ -311,7 +325,12 @@ def claim_request(config: dict[str, Any], *, request_id: str, local_host: str, w
         # so every later worker transition verifies one durable identity.
         "object_generation": execution["object_generation"],
     }
-    job = state_machine.claim_job_with_envelope(request_id, worker_identity, envelope)
+    job = state_machine.claim_job_with_envelope(
+        request_id,
+        worker_identity,
+        envelope,
+        lease_seconds=_lease_seconds(coding),
+    )
     if job is None:
         raise HardFailure("coding provision request is not claimable")
     token = str(job.get("lease_token") or "")

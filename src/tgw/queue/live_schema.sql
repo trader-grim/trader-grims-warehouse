@@ -250,6 +250,8 @@ BEGIN
        AND state = 'running'
        AND lease_owner = p_worker_id
        AND lease_token = p_lease_token
+       AND lease_expires_at IS NOT NULL
+       AND lease_expires_at > NOW()
      RETURNING * INTO v_job;
 
     IF NOT FOUND THEN
@@ -468,6 +470,8 @@ BEGIN
        AND state = 'running'
        AND lease_owner = p_worker_id
        AND lease_token = p_lease_token
+       AND lease_expires_at IS NOT NULL
+       AND lease_expires_at > NOW()
      RETURNING * INTO v_job;
 
     IF NOT FOUND THEN

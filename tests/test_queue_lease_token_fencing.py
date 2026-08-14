@@ -7,6 +7,19 @@ from tgw.queue import state_machine
 TOKEN = "66666666-6666-4666-8666-666666666666"
 
 
+def test_live_schema_terminal_functions_reject_expired_leases():
+    schema = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "src/tgw/queue/live_schema.sql"
+    ).read_text()
+    for function in ("fail_job", "succeed_job"):
+        body = schema.split(f"CREATE FUNCTION public.{function}", 1)[1].split(
+            "$$;", 1
+        )[0]
+        assert "lease_expires_at IS NOT NULL" in body
+        assert "lease_expires_at > NOW()" in body
+
+
 def _database(*, row=None, rowcount=0):
     cursor = MagicMock()
     cursor.__enter__.return_value = cursor

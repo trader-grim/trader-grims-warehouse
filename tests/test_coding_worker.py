@@ -55,6 +55,23 @@ def _worker(treatment_id: str, root: Path, launcher, repository_root: Path | Non
     }}, launcher=launcher)
 
 
+def test_coding_worker_lease_outlives_bounded_launcher_timeout(tmp_path):
+    worker = CodingWorker(
+        "claude-review",
+        {
+            "queue": {"lease_seconds": 60},
+            "coding": {
+                "timeout_s": 2400,
+                "worktree_root": str(tmp_path),
+                "repository_root": str(tmp_path),
+            },
+        },
+        launcher=lambda *_args: {},
+    )
+
+    assert worker.lease_seconds == 2700
+
+
 @pytest.mark.parametrize(
     "treatment_id",
     ("codex-implement", "claude-review", "controller-verify", "hermes-stitch"),

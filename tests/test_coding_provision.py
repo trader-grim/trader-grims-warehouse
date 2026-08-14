@@ -29,6 +29,7 @@ class NativeQueue:
         self.jobs: dict[str, dict] = {}
         self.enqueues: list[dict] = []
         self.claims = 0
+        self.claim_lease_seconds: list[int | None] = []
 
     def enqueue_job(self, queue_name, payload, **kwargs):
         assert queue_name == coding_provision.QUEUE_NAME
@@ -60,6 +61,7 @@ class NativeQueue:
         return dict(job)
 
     def claim_job_with_envelope(self, job_id, lease_owner, envelope, **kwargs):
+        self.claim_lease_seconds.append(kwargs.get("lease_seconds"))
         job = self.claim_job(job_id, lease_owner, **kwargs)
         if job is None:
             return None
@@ -889,6 +891,53 @@ def test_canonical_claim_looks_up_todo_and_derives_contract_bound_envelope(tmp_p
     }
     assert execution["task_spec_hash"] == coding_provision._hash(execution["task_spec"])
     assert native.jobs[request["request_id"]]["payload_json"]["snapshot"] == _snapshot_claim(envelope)
+    assert native.claim_lease_seconds == [2100]
+
+
+def test_canonical_claim_lease_exceeds_configured_execution_timeout(
+    tmp_path, native, envelope
+):
+    cfg = _config(tmp_path)
+    cfg["coding"]["timeout_s"] = 2400
+    request = coding_provision.create_request(
+        cfg, todo_id=1738, object_generation="gen-a"
+    )
+
+    coding_provision.claim_request(
+        cfg,
+        request_id=request["request_id"],
+        local_host="tgw-lib-local",
+        worker_identity="tgw-coding-worker",
+        envelope_hash=coding_provision._hash(envelope),
+        location=envelope,
+        snapshot=_snapshot_claim(envelope),
+    )
+
+    assert native.claim_lease_seconds == [2700]
+
+
+@pytest.mark.parametrize("timeout", [True, 0, "invalid"])
+def test_canonical_claim_rejects_invalid_execution_timeout(
+    tmp_path, native, envelope, timeout
+):
+    cfg = _config(tmp_path)
+    cfg["coding"]["timeout_s"] = timeout
+    request = coding_provision.create_request(
+        cfg, todo_id=1738, object_generation="gen-a"
+    )
+
+    with pytest.raises(HardFailure, match="timeout_s"):
+        coding_provision.claim_request(
+            cfg,
+            request_id=request["request_id"],
+            local_host="tgw-lib-local",
+            worker_identity="tgw-coding-worker",
+            envelope_hash=coding_provision._hash(envelope),
+            location=envelope,
+            snapshot=_snapshot_claim(envelope),
+        )
+
+    assert native.claims == 0
 
 
 def test_canonical_claim_evaluation_failure_leaves_request_unclaimed(tmp_path, native, envelope, monkeypatch):
