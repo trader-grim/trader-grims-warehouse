@@ -6342,6 +6342,37 @@ def test_item_detail_top_retry_requeues_exact_retryable_dead_letter():
     assert 'onclick="retryPipeline()"' not in html
 
 
+def test_item_detail_missing_draft_price_shows_set_price_not_retry():
+    """A pricing worker may correctly refuse to invent a price when it has no
+    positive market evidence.  The empty draft price must still lead the
+    operator to the editor, even when no structured pipeline_error was saved.
+    """
+    item = {
+        "sku": "tgw1",
+        "title": "Identified item",
+        "ai_identified": True,
+        "draft_listing": {"title": "Draft title", "category_id": "177027", "price": None},
+    }
+    jobs = [{
+        "queue_name": "ebay_price",
+        "state": "dead_letter",
+        "job_id": "failed-price-job",
+        "retry_allowed": True,
+        "error_detail": "ebay-price produced no positive price",
+    }]
+
+    html = http_server._render_item_detail_html("tgw1", item, [], [], jobs)
+
+    action_line = re.search(
+        r'<div class="act-row" id="action-line">(.*?)</div>', html,
+    )
+    assert action_line is not None
+    assert ">Set Price</button>" in action_line.group(1)
+    assert ">Retry</button>" not in action_line.group(1)
+    assert ">Needs attention</button>" not in action_line.group(1)
+    assert "AI Reidentify" in html
+
+
 def test_item_detail_global_ai_action_is_always_available():
     first = http_server._render_item_detail_html(
         "tgw1", {"sku": "tgw1", "title": "New item"}, [], [], [],

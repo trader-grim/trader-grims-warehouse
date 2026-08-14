@@ -7578,7 +7578,16 @@ def _render_item_detail_html(
         and not _superseded_by_success(j)
         for j in jobs
     )
-    _needs_price = bool(_pe_norm and _pe_norm.get("code") == "no_price_set")
+    # A missing draft price is itself the actionable state.  Do not depend on
+    # a worker having also persisted the newer ``no_price_set`` finding: older
+    # ebay_price dead letters (and workers which correctly refuse to invent a
+    # price when no positive evidence exists) may leave only the empty draft
+    # field plus the queue ledger.  In that state Retry cannot help; the
+    # operator needs the price editor.
+    _needs_price = bool(
+        (dl.get("title") and dl.get("price") is None)
+        or (_pe_norm and _pe_norm.get("code") == "no_price_set")
+    )
     # Also catches pre-existing findings written by the OLD path (an actual
     # eBay API rejection, code='ebay_rejected', before the ebay_stage.py
     # pre-flight guard existed) whose detail is specifically the 80-char
