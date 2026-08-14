@@ -49,6 +49,7 @@ def _bind_request_to_repo(request: dict, repo: Path) -> dict:
     dependency = request["host_state_dependency"]
     dependency["repository"] = repository
     dependency["receipt_sha256"] = compact["receipt_sha256"]
+    request["host_state_dependency_sha256"] = digest(canonical(dependency))
     request["repo_expectation"] = {
         "uid": repository["uid"],
         "gid": repository["gid"],
