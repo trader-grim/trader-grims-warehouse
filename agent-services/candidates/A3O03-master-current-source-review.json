@@ -3,9 +3,9 @@
   "status": "REVIEW_PENDING",
   "plan_commit": "29ecfd9c09f9c9a0c288b7a032c21a54145e99de",
   "implementation": {
-    "commit": "d3075140d20d2948791fe7eace9719024fee51f6",
-    "tree": "aa43a6b4edd500af6abe0987b6c85c501792a705",
-    "controller_sha256": "sha256:81f397854746208e64e85363288a57c1ecd74cdeee9e2551c36e5dd6f657a972",
+    "commit": "94a924853316f49e0aa3386639fed9defc3e9ca1",
+    "tree": "b9a7acc9a107b290b4798b64cda3e9236dc8500f",
+    "controller_sha256": "sha256:84dbf9476f4a3411ac88b127c0d67349a3d447192e60ea9a80a4f479d8f09cea",
     "sudo_parity_receipt_sha256": "sha256:24b43217dc94f7e8a92585f377a571d5e151aa6b9ada772e12b62ba30b512b47"
   },
   "changes_since_prior_admission": [
@@ -13,12 +13,21 @@
     "run held read-only helper as repository owner db through fixed sudo wrapper",
     "disable ambient global known-hosts authority",
     "make readiness require exact mounted source and host-state authorities"
+    ,"register the isolated remote helper as a real Python module before dataclass evaluation"
   ],
   "prior_review_findings": {
     "root helper execution": "RESOLVED",
     "ambient global known hosts": "RESOLVED",
     "mounted readiness mismatch": "RESOLVED",
-    "sudo db execution parity": "PROVED"
+    "sudo db execution parity": "PROVED",
+    "remote helper dataclass bootstrap": "RESOLVED_BY_REGRESSION"
   },
-  "candidate_sha256": "sha256:12ebec39b28ba2a47a56a51a807087d8ffb92df6b3ce223c9dd17d47a40487c0"
+  "verification": {
+    "focused_preintegration_tests": 38,
+    "combined_authority_transport_handler_tests": 153,
+    "ruff": "PASS",
+    "py_compile": "PASS",
+    "diff_check": "PASS"
+  },
+  "candidate_sha256": "sha256:e2d1a1df1a5ad3e15fe899ac878dc2767b9d7ce2198eb240e13cfb80895eca92"
 }
