@@ -45,6 +45,28 @@ log = logging.getLogger(__name__)
 QUEUE_NAME = 'ebay_stage'
 
 
+def _committed_generation(response: Dict[str, Any]) -> str:
+    value = response.get('resulting_generation')
+    if (not isinstance(value, str) or len(value) != 64
+            or any(ch not in '0123456789abcdef' for ch in value)):
+        raise HardFailure('item fence returned no valid committed generation')
+    return value
+
+
+def _defer_stage_sync(payload: Dict[str, Any], effect_mode: str) -> bool:
+    """A listable workflow continues stage -> publish before provider sync.
+
+    Publish queues the same targeted projection after the listing is live.  A
+    stage-time sync would otherwise be free to mutate the canonical item before
+    the workflow evaluator consumes the stage receipt, making a valid
+    continuation nondeterministically look stale.
+    """
+    return (
+        effect_mode == 'workflow'
+        and payload.get('goal_profile_id') == 'tgw.ebay_listable'
+    )
+
+
 class EbayStageWorker(QueueWorker):
 
     def _provider_effect_mode(self) -> str:
@@ -395,9 +417,11 @@ class EbayStageWorker(QueueWorker):
                             effect_id=effect_id,
                             reason_code='PROVIDER_EFFECT_REPLAY_INVALID'),
                     ) from exc
-                enqueue_post_push_sync(
-                    sku, config=self.config, source_provider_effect_id=effect_id,
-                )
+                if not _defer_stage_sync(payload, effect_mode):
+                    enqueue_post_push_sync(
+                        sku, config=self.config,
+                        source_provider_effect_id=effect_id,
+                    )
                 return self._receipt(
                     payload, sku, outcome='satisfied', effect_id=effect_id,
                     reason_code='PROVIDER_EFFECT_SUCCEEDED', result=record.result,
@@ -626,23 +650,30 @@ class EbayStageWorker(QueueWorker):
             'staged_at': ebay_offer['staged_at'],
         }
         item['ebay_submitted'] = ebay_submitted
-        fence_ebay_write(self.config, sku, ebay_offer=ebay_offer, ebay_submitted=ebay_submitted,
-                          allow_protected=["staged_at"])
+        fence_response = fence_ebay_write(
+            self.config,
+            sku,
+            ebay_offer=ebay_offer,
+            ebay_submitted=ebay_submitted,
+            allow_protected=["staged_at"],
+        )
 
         log.info('ebay_stage: %s staged → offerId=%s (visible in Seller Hub)',
                  sku, result['offer_id'])
         tgw_logging.log_event('ebay_stage_complete', sku=sku,
                               offer_id=result['offer_id'])
 
-        enqueue_post_push_sync(
-            sku, config=self.config,
-            source_provider_effect_id=provider_effect_id,
+        resulting_generation = (
+            _committed_generation(fence_response)
+            if effect_mode == 'workflow' else None
         )
+        if not _defer_stage_sync(payload, effect_mode):
+            enqueue_post_push_sync(
+                sku, config=self.config,
+                source_provider_effect_id=provider_effect_id,
+            )
 
         if effect_mode == 'workflow':
-            resulting_generation = item_generation(json.loads(
-                json_path.read_text(encoding='utf-8')
-            ))
             return self._receipt(
                 payload, sku, outcome='satisfied', effect_id=provider_effect_id,
                 reason_code='PROVIDER_EFFECT_SUCCEEDED', result=result,

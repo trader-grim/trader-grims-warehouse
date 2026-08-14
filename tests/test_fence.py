@@ -20,6 +20,7 @@ httpx = pytest.importorskip("httpx", reason="httpx required by TestClient")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from tgw import http_server  # noqa: E402
+from tgw.item_mutation import item_generation  # noqa: E402
 
 API_KEY = "test-key-fence-001"
 AUTH = {"Authorization": f"Bearer {API_KEY}"}
@@ -198,6 +199,7 @@ class TestEbayWrite:
         assert r.json()["changed_fields"] == ["ebay_offer"]
         doc = _read_item(env["itemdata_root"], SKU)
         assert doc["ebay_offer"]["offer_id"] == "off001"
+        assert r.json()["resulting_generation"] == item_generation(doc)
         # price_comps must be preserved (protected sub-field)
         assert doc["ebay_offer"]["price_comps"] == {"source": "browse"}
 
@@ -249,6 +251,19 @@ class TestEbayWrite:
             headers=AUTH,
         )
         assert not any(k.get("queue_name") == "catalog_rebuild" for k in env["enqueue_calls"])
+
+
+class TestPatchCommittedGeneration:
+    def test_response_binds_exact_committed_document(self, env):
+        response = env["client"].patch(
+            f"/api/items/{SKU}",
+            json={"fields": {"title": "Committed title"}},
+            headers=AUTH,
+        )
+
+        assert response.status_code == 200
+        document = _read_item(env["itemdata_root"], SKU)
+        assert response.json()["resulting_generation"] == item_generation(document)
 
 
 # ---------------------------------------------------------------------------

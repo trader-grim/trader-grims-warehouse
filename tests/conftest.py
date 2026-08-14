@@ -21,7 +21,8 @@ def make_fake_fence_write(itemdata_root):
             if val is not None:
                 doc[key] = {**doc.get(key, {}), **val}
         p.write_text(json.dumps(doc), encoding='utf-8')
-        return {'ok': True}
+        from tgw.item_mutation import item_generation
+        return {'ok': True, 'resulting_generation': item_generation(doc)}
     return fake_fence_ebay_write
 
 
@@ -33,7 +34,8 @@ def make_fake_patch_item(itemdata_root):
         doc = json.loads(p.read_text(encoding='utf-8'))
         doc.update(fields)
         p.write_text(json.dumps(doc), encoding='utf-8')
-        return {'ok': True}
+        from tgw.item_mutation import item_generation
+        return {'ok': True, 'resulting_generation': item_generation(doc)}
     return fake_fence_patch_item
 
 
@@ -75,6 +77,8 @@ def make_fake_fence_write_tmp(tmp_path):
                 if val is not None:
                     doc[key] = {**doc.get(key, {}), **val}
             p.write_text(json.dumps(doc), encoding='utf-8')
+            from tgw.item_mutation import item_generation
+            return {'ok': True, 'resulting_generation': item_generation(doc)}
         return {'ok': True}
     return fake_fence_ebay_write
 
@@ -93,5 +97,7 @@ def make_fake_patch_item_tmp(tmp_path):
             doc = json.loads(p.read_text(encoding='utf-8'))
             doc.update(fields)
             p.write_text(json.dumps(doc), encoding='utf-8')
+            from tgw.item_mutation import item_generation
+            return {'ok': True, 'resulting_generation': item_generation(doc)}
         return {'ok': True}
     return fake_fence_patch_item

@@ -44,6 +44,7 @@ from .ebay.description import build_listing_description
 from .ebay.draft_specifics import get_ebay_aspects, set_ebay_aspects
 from .ebay.draft_specifics import is_envelope as _is_ebay_draft_envelope
 from .ebay.inventory_diff import apply_inventory_diff, diff_ebay_draft_to_inventory
+from .item_mutation import item_generation
 from .items import _archive_before_overwrite, atomic_write_json, create_item, locationupdate
 from .operator_console_host import configured_console_mount
 from .operator_console_plugin import mount_operator_console
@@ -1226,7 +1227,7 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
                 "field": "condition_enum",
             })
 
-    updated_keys = _apply_patch(json_path, body.fields)
+    updated_keys, resulting_generation = _apply_patch(json_path, body.fields)
 
     # Price edits leave a history trail (session 42): manual/UI price changes
     # previously appended nothing to price_history — Dave's $82.99 and every
@@ -1326,7 +1327,12 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
                 if "unique" not in str(_eq).lower() and "duplicate" not in str(_eq).lower():
                     log.warning("failed to auto-enqueue ebay_stage for %s: %s", sku, _eq)
 
-    return {"ok": True, "sku": sku, "updated": updated_keys}
+    return {
+        "ok": True,
+        "sku": sku,
+        "updated": updated_keys,
+        "resulting_generation": resulting_generation,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1484,7 +1490,7 @@ def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
     if not any(v is not None for v in incoming.values()):
         raise HTTPException(status_code=400, detail="no eBay blocks provided")
 
-    changed_fields = _apply_ebay_write(
+    changed_fields, resulting_generation = _apply_ebay_write(
         json_path,
         sku,
         ebay_offer=body.ebay_offer,
@@ -1494,7 +1500,12 @@ def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
         allow_protected=body.allow_protected,
     )
     _enqueue_catalog_rebuild(f"ebay_write:{sku}")
-    return {"ok": True, "sku": sku, "changed_fields": changed_fields}
+    return {
+        "ok": True,
+        "sku": sku,
+        "changed_fields": changed_fields,
+        "resulting_generation": resulting_generation,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1561,11 +1572,19 @@ def _persist_finding(json_path: "Path", sku: str, code: str, detail: str, source
         log.exception("failed to persist %s finding for %s", code, sku)
 
 
-def _apply_patch(json_path: "Path", fields: Dict[str, Any], _skip_catalog_upsert: bool = False) -> List[str]:
+def _apply_patch(
+    json_path: "Path",
+    fields: Dict[str, Any],
+    _skip_catalog_upsert: bool = False,
+) -> Tuple[List[str], str]:
     """Core item patch: deep-merge dict fields, write atomically, schedule rebuild.
 
     Fields with value None are deleted from the document.
-    Returns the list of keys that were written or deleted.
+    Returns the keys written or deleted and the exact generation of the
+    document passed to the committing atomic write.  Callers that drive a
+    workflow continuation must use this generation instead of reopening the
+    item path after the write, because an independent writer may legitimately
+    commit between the fence write and a later pathname read.
 
     _skip_catalog_upsert: True only for _persist_finding's own internal
     {"pipeline_error": ...}-only recursive call — skips both the SQLite
@@ -1698,6 +1717,7 @@ def _apply_patch(json_path: "Path", fields: Dict[str, Any], _skip_catalog_upsert
             if _base_key in fields:
                 doc["draft_listing"][_base_key] = fields[_base_key]
     atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
+    resulting_generation = item_generation(doc)
     _sku_for_mutation = doc.get("sku") or json_path.stem
     # Atomic per-item SQLite catalog upsert (PP-CATALOG-INCR-001 CI-2) — keeps
     # the inventory webui's data source live-accurate without waiting for the
@@ -1743,7 +1763,7 @@ def _apply_patch(json_path: "Path", fields: Dict[str, Any], _skip_catalog_upsert
     # actually affect what the thumbnail shows, not on every write.
     if "image" in _changed_keys or "photo_order" in _changed_keys:
         _enqueue_thumbnail_gen(_sku_for_mutation, reason=f"http_patch:{','.join(_changed_keys)}")
-    return _changed_keys
+    return _changed_keys, resulting_generation
 
 
 def _apply_ebay_write(
@@ -1755,7 +1775,7 @@ def _apply_ebay_write(
     ebay_submitted: Optional[Dict[str, Any]] = None,
     ebay_live: Optional[Dict[str, Any]] = None,
     allow_protected: Optional[List[str]] = None,
-) -> List[str]:
+) -> Tuple[List[str], str]:
     """eBay block deep-merge with field protection — same logic as POST /ebay-write.
 
     Protected sub-fields (price_comps, staged_at, photo_verify) are restored
@@ -1799,6 +1819,7 @@ def _apply_ebay_write(
         doc[block_key] = merged
         changed.append(block_key)
     atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
+    resulting_generation = item_generation(doc)
     # SQLite catalog upsert — see _apply_patch's identical block (PP-CATALOG-INCR-001 CI-2/C11 fix).
     try:
         from .sqlite_catalog import upsert_catalog_row
@@ -1823,7 +1844,7 @@ def _apply_ebay_write(
             )
     except Exception:
         pass
-    return changed
+    return changed, resulting_generation
 
 
 # ---------------------------------------------------------------------------

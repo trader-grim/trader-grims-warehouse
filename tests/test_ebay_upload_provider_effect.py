@@ -85,6 +85,28 @@ def test_workflow_effect_binds_exact_prepared_bytes_and_persists_receipt(
     assert receipt['evidence']['resulting_generation'] == item_generation(item)
 
 
+def test_workflow_upload_rejects_fence_response_without_committed_generation(
+    tmp_path, monkeypatch,
+):
+    worker, _sku, photo, job = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(worker_mod, 'prepare_upload', lambda cfg, path: SimpleNamespace(
+        photo_path=photo, image_bytes=b'bytes', mime='image/jpeg'))
+    monkeypatch.setattr(effects, 'reserve_and_begin_authorized_effect',
+                        lambda **kwargs: _effect())
+    monkeypatch.setattr(worker_mod, 'upload_prepared',
+                        lambda *args: 'https://eps/front')
+    monkeypatch.setattr(
+        effects,
+        'finish_provider_effect',
+        lambda effect_id, **kwargs: _effect('succeeded', kwargs['result']),
+    )
+    monkeypatch.setattr(worker_mod, 'fence_patch_item',
+                        lambda *args, **kwargs: {'ok': True})
+
+    with pytest.raises(HardFailure, match='committed generation'):
+        worker.handle(job)
+
+
 def test_timeout_after_dispatch_is_ambiguous_and_stops(tmp_path, monkeypatch):
     worker, sku, photo, job = _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(worker_mod, 'prepare_upload', lambda cfg, path: SimpleNamespace(

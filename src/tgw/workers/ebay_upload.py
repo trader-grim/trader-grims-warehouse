@@ -18,7 +18,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Tuple
 
 import psycopg2.errors
 import requests
@@ -37,7 +37,6 @@ from tgw.ebay.upload import (
     upload_prepared,
 )
 from tgw.errors import TreatmentFailure
-from tgw.item_mutation import item_generation
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.quota import QuotaBudgetExceeded
@@ -52,6 +51,14 @@ QUEUE_NAME = 'ebay_upload'
 # forever — the exact class of immortal backlog that burned 3 days of budget
 # in s43. Visible-and-stuck beats invisible-and-recurring.
 QUOTA_RETRY_LIMIT = 3
+
+
+def _committed_generation(response: Dict[str, Any]) -> str:
+    value = response.get('resulting_generation')
+    if (not isinstance(value, str) or len(value) != 64
+            or any(ch not in '0123456789abcdef' for ch in value)):
+        raise HardFailure('item fence returned no valid committed generation')
+    return value
 
 
 class EbayUploadWorker(QueueWorker):
@@ -80,8 +87,14 @@ class EbayUploadWorker(QueueWorker):
             'goal_profile_version': graph.goal_profile_version,
         }
 
-    def _persist_partial(self, sku: str, uploaded: List[Dict[str, str]],
-                         photos: List[Path]) -> List[Dict[str, str]]:
+    def _persist_partial(
+        self,
+        sku: str,
+        uploaded: List[Dict[str, str]],
+        photos: List[Path],
+        *,
+        clear_upload_blocked: bool = False,
+    ) -> Tuple[List[Dict[str, str]], str | None]:
         """Reorder `uploaded` to match photo_order and fence-patch it — called
         at every exit point (success, quota block, network error, per-photo
         failure) so partial progress is never lost to a retry re-uploading
@@ -96,12 +109,17 @@ class EbayUploadWorker(QueueWorker):
         for e in uploaded:
             if e['local'] not in seen_keys:
                 reordered.append(e)
+        resulting_generation = None
         if reordered:
-            fence_patch_item(self.config, sku, {
+            fields: Dict[str, Any] = {
                 'ebay_photos': reordered,
                 'draft_listing': {'imageUrls': [e['url'] for e in reordered]},
-            })
-        return reordered
+            }
+            if clear_upload_blocked:
+                fields['ebay_upload_blocked'] = None
+            response = fence_patch_item(self.config, sku, fields)
+            resulting_generation = _committed_generation(response)
+        return reordered, resulting_generation
 
     def _quota_timer_mode(self) -> str:
         migration = self.config.get('workflow_migration')
@@ -562,15 +580,17 @@ class EbayUploadWorker(QueueWorker):
         if not uploaded:
             raise RuntimeError(f'no photos uploaded for {sku} and none pre-existing')
 
-        reordered = self._persist_partial(sku, uploaded, photos)
+        reordered, resulting_generation = self._persist_partial(
+            sku,
+            uploaded,
+            photos,
+            clear_upload_blocked=bool(item.get('ebay_upload_blocked')),
+        )
 
         # Self-healing: a full success means photos are no longer missing —
         # clear any prior no-photos finding so catalog-verify stops flagging
         # an item that's since been repaired (mirrors legacy_listing_resolved
         # suppressing legacy_listing_unrepaired once dealt with).
-        if item.get('ebay_upload_blocked'):
-            fence_patch_item(self.config, sku, {'ebay_upload_blocked': None})
-
         new_count = len(uploaded) - len(existing)
         log.info('ebay_upload complete for %s: %d total (%d new)',
                  sku, len(reordered), new_count)
@@ -584,9 +604,8 @@ class EbayUploadWorker(QueueWorker):
 
 
         if provider_effect_mode == 'workflow':
-            resulting_generation = item_generation(json.loads(
-                json_path.read_text(encoding='utf-8')
-            ))
+            if resulting_generation is None:
+                raise HardFailure('upload completion did not commit item generation')
             return self._provider_receipt(
                 payload, sku, outcome='satisfied',
                 effect_id=(provider_effect_ids[-1] if provider_effect_ids else ''),
