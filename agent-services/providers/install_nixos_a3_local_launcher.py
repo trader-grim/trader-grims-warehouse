@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
+import pwd
 import stat
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,7 @@ CONFIG_PATH = Path("/etc/tgw/a3-successor-v5-launcher.json")
 KEY_PATH = Path("/etc/tgw/a3-successor-attestation.key")
 PUBLIC_PATH = Path("/etc/tgw/a3-successor-attestation.pub")
 PREREQUISITE_PATH = Path("/etc/tgw/a3-successor-v5-launcher-prerequisite.json")
+WRAPPER_KEY_PATH = Path("/etc/tgw/nix-observer-render-attestation.key")
 _Q = 2**255 - 19
 _D = -121665 * pow(121666, _Q - 2, _Q) % _Q
 _I = pow(2, (_Q - 1) // 4, _Q)
@@ -75,6 +78,13 @@ def public_key(seed: bytes) -> bytes:
     scalar = 2**254 + sum(2**index * ((hashed[index // 8] >> (index & 7)) & 1) for index in range(3, 254))
     x, y = _scalarmult(_B, scalar)
     return (y | ((x & 1) << 255)).to_bytes(32, "little")
+
+
+def _pkcs8_pem(seed: bytes) -> bytes:
+    der = bytes.fromhex("302e020100300506032b657004220420") + seed
+    encoded = base64.b64encode(der)
+    lines = [encoded[offset : offset + 64] for offset in range(0, len(encoded), 64)]
+    return b"-----BEGIN PRIVATE KEY-----\n" + b"\n".join(lines) + b"\n-----END PRIVATE KEY-----\n"
 
 
 def _ensure_directory(path: Path, mode: int) -> None:
@@ -189,10 +199,13 @@ def install(source: Path) -> dict[str, Any]:
         _publish(KEY_PATH, seed, 0o400)
     public = public_key(seed)
     _publish(PUBLIC_PATH, public, 0o444)
+    wrapper_key = _pkcs8_pem(seed)
+    _publish(WRAPPER_KEY_PATH, wrapper_key, 0o400)
+    account = pwd.getpwnam("codex")
     config = {
         "schema": "tgw-nixos-a3-local-launcher-config/v1",
-        "codex_uid": 1004,
-        "codex_gid": 1004,
+        "codex_uid": account.pw_uid,
+        "codex_gid": account.pw_gid,
         "signing_key_path": str(KEY_PATH),
         "signing_key_sha256": sha(seed),
         "attestation_public_key_path": str(PUBLIC_PATH),
@@ -229,6 +242,7 @@ def install(source: Path) -> dict[str, Any]:
         "config": {"path": str(CONFIG_PATH), "sha256": sha(config_raw), "size": len(config_raw), "mode": 0o444},
         "public_key": {"path": str(PUBLIC_PATH), "sha256": sha(public), "size": len(public), "mode": 0o444},
         "signing_key_ref": "external-root-0400:" + sha(seed),
+        "wrapper_signing_key_ref": "external-root-0400:" + sha(wrapper_key),
         "prerequisite": {"path": str(PREREQUISITE_PATH), "sha256": sha(prerequisite_raw), "size": len(prerequisite_raw), "mode": 0o444},
         "prerequisite_receipt_sha256": prerequisite["receipt_sha256"],
     }

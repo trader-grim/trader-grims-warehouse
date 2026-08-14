@@ -6,6 +6,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
@@ -79,6 +80,8 @@ def test_installer_and_launcher_derive_the_same_public_identity() -> None:
     installer = _installer()
     seed = bytes(range(32))
     assert installer.public_key(seed) == launcher.public_key(seed)
+    private = serialization.load_pem_private_key(installer._pkcs8_pem(seed), password=None)
+    assert private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw) == launcher.public_key(seed)
 
 
 def test_packet_parser_accepts_only_the_exact_bound_canonical_packet() -> None:
