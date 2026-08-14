@@ -18,7 +18,7 @@
     "base_commit": "70f86f338fe6b4c8200c9d9e250bc83656e4e77a",
     "base_tree": "fb137be8c90f2cd3d0ba7da24f3b8ff43904d330",
     "controller_path": "src/tgw/a3_host_state_observation.py",
-    "controller_sha256": "sha256:5ff87ba6abfb804f5f27e66e548c1569b8ff2b830cfa675fee4ed8f985b4f320",
+    "controller_sha256": "sha256:5d11d8acc6a8d4378d2455d0b2d63ae5eef92115e6449cd8966feb699db6eb10",
     "stdlib_helper_path": "src/tgw/a3_host_state_helper.py",
     "stdlib_helper_sha256": "sha256:c8ac0177bf3d7470a00ae3c2b49d7c073e6bfc71b0cce58694f5c5a3ae580fb9"
   },
@@ -46,8 +46,8 @@
     "dedicated_public_identity_and_known_hosts": "REQUIRED",
     "one_attempt_observation_grant": "REQUIRED",
     "independent_source_audit": "REQUIRED",
-    "installed_helper_result": "sha256:20c386a93009e7c619c304c7356b166aab5fad8cf858a5673aae643c7b8d51b0",
-    "installed_helper_manifest": "sha256:80a6d5fbed50308d55691e6f8ee7a8499c7fc4c629c61bd05024be4e63080d17"
+    "installed_helper_result": "sha256:34d1c9134574ea2bc5442e5ba3499c8477f5f9277cdf7ad0d2abf5ab55acf1ed",
+    "installed_helper_manifest": "sha256:a1cb8b866ac7e4ad6d6a2404a05c7eb1fb3c184c5f9eb6e31be714124ef73c2d"
   },
   "effects": {
     "remote_write": false,
@@ -62,5 +62,5 @@
   "grant": null,
   "request": null,
   "dispatchable": false,
-  "descriptor_sha256": "sha256:a3db3f1e2bd5c5898aee468204221401229c9316362f5d1c06ac45d989026f5f"
+  "descriptor_sha256": "sha256:8665ebc7013f111d3ec1df219a4034de237d016eec94e33a353be5bb35929fd0"
 }

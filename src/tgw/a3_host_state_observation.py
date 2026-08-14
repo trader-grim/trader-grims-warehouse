@@ -63,13 +63,13 @@ COMPOSITION_SCHEMA = "tgw-prod-a3-host-state-observation-composition/v1"
 REMOTE_SUDO = "/run/wrappers/bin/sudo"
 REMOTE_HELPER = (
     "/var/lib/tgw-a3-observer/"
-    "sha256-c5cccf19614c20a1e1cc7c3406f1a0caec512147815519a984ef7464e3ceaf4b.py"
+    "sha256-c8ac0177bf3d7470a00ae3c2b49d7c073e6bfc71b0cce58694f5c5a3ae580fb9.py"
 )
 HELPER_INSTALL_RESULT_SHA256 = (
-    "sha256:20c386a93009e7c619c304c7356b166aab5fad8cf858a5673aae643c7b8d51b0"
+    "sha256:34d1c9134574ea2bc5442e5ba3499c8477f5f9277cdf7ad0d2abf5ab55acf1ed"
 )
 HELPER_INSTALL_MANIFEST_SHA256 = (
-    "sha256:80a6d5fbed50308d55691e6f8ee7a8499c7fc4c629c61bd05024be4e63080d17"
+    "sha256:a1cb8b866ac7e4ad6d6a2404a05c7eb1fb3c184c5f9eb6e31be714124ef73c2d"
 )
 
 _SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
