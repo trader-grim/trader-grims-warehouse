@@ -162,9 +162,15 @@ def refresh_condition_policies(cfg: Dict[str, Any]) -> Dict[str, List[Tuple[str,
     policies: Dict[str, List[Tuple[str, str]]] = {}
     for entry in data.get('itemConditionPolicies', []):
         cat_id = entry['categoryId']
+        # Metadata occasionally omits the human description for a valid
+        # conditionId.  The identifier is the authority needed for policy
+        # enforcement; a missing optional label must not make the entire
+        # all-category cache refresh fail (and thereby turn every listing
+        # action into HTTP 500).
         conds = [
-            (c['conditionId'], c['conditionDescription'])
+            (str(c['conditionId']), str(c.get('conditionDescription') or c['conditionId']))
             for c in entry.get('itemConditions', [])
+            if isinstance(c, dict) and c.get('conditionId') not in (None, '')
         ]
         if conds:
             policies[cat_id] = conds
