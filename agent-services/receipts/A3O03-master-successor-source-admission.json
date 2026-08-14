@@ -1,0 +1,54 @@
+{
+  "schema": "tgw-a3o03-source-admission/v1",
+  "status": "REVIEWED_FROZEN",
+  "supersedes": "agent-services/receipts/A3O03-master-preintegration-source-admission.json",
+  "plan": {
+    "approved_commit": "29ecfd9c09f9c9a0c288b7a032c21a54145e99de",
+    "approved_tree": "3debe3dc6dc6a986bae3716fb3b750c6a304de51",
+    "approval_sha256": "sha256:62f13d64322f17deecf9490989a8f88d19b4698ae2d52341686e452859565449",
+    "parent_solution_sha256": "sha256:ab08bc1bf4220e67f3b40ab5c7cb819035fa1e6abc1c8a85923867b77c1b101c",
+    "parent_closure_sha256": "sha256:c653ae6a66c967fd417ca443eb87252fae4ea1a4caac1ca56ed42bdecb4e3910"
+  },
+  "source": {
+    "commit": "8fbfda211da2fca762fa8b942fee555929e3f792",
+    "tree": "ffa5ca53ec5c116c0ed904b7392189ab43848a01",
+    "archive_sha256": "sha256:8345f803e807d808c2ab9f8f804c437b63eeb02b579c49f6ecc538e7cb678552",
+    "archive_size": 12851200,
+    "archive_members": 1235,
+    "archive_ref": "/opt/TGW/evidence/codex/sha256/8345f803e807d808c2ab9f8f804c437b63eeb02b579c49f6ecc538e7cb678552.tar",
+    "controller_sha256": "sha256:17c050e2ad0bb1da51acce82bc9b33b05fb87ac86678b197a6b02872796f0cbf",
+    "provider_descriptor_sha256": "sha256:d85f74e140751539465a348bc0a2af7b5d746fce282f69c26bf35581367fa5ef"
+  },
+  "independent_review": {
+    "provider": "codex-isolated-review-runner",
+    "mode": "ephemeral-read-only-detached-snapshot",
+    "snapshot_sha256": "sha256:7889b80d0baa0eead668fa9ba08fd345b3ffa56dc79bddca02d10278d837df2f",
+    "verdict": "PASS",
+    "findings": [],
+    "summary": "No unresolved material semantic or security findings."
+  },
+  "superseded_review": {
+    "snapshot_sha256": "sha256:2eaea673b4162e6cd224cb3a2f8626ea0f444814378f91d7ec7ccfce3c6994af",
+    "verdict": "FAIL",
+    "finding_count": 2,
+    "resolved_by": "8fbfda211da2fca762fa8b942fee555929e3f792"
+  },
+  "gates": {
+    "authority_evaluator_matrix": {"passed": 282, "failed": 0},
+    "tracked_full": {"passed": 3967, "skipped": 5, "failed": 0},
+    "ruff": "PASS",
+    "py_compile": "PASS",
+    "diff_check": "PASS"
+  },
+  "effects": {
+    "remote_connection": false,
+    "remote_write": false,
+    "repository_write": false,
+    "nix": false,
+    "build": false,
+    "install": false,
+    "deploy": false,
+    "key_generation": false
+  },
+  "receipt_sha256": "sha256:4bd3707fe032caf39f39972e91e53c2b8f4a16082701d6644a991135728fec18"
+}
