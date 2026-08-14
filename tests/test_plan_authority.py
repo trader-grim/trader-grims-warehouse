@@ -1,14 +1,21 @@
 import threading
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from tgw.plan_authority import AuthorityDecision, AuthorityRequest, DecisionKind, TypedEffect, create_authority_router
+from tgw.plan_authority import AuthorityDecision, AuthorityRequest, DecisionKind, EffectKind, TypedEffect, create_authority_router
 from tgw.plan_solver import solve
 
 COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
+
+
+def test_sql_effect_constraint_covers_every_registered_effect():
+    sql = Path(__file__).parents[1].joinpath("src/tgw/plan_authority.sql").read_text(encoding="utf-8")
+    for kind in EffectKind:
+        assert f"'{kind.value}'" in sql
 
 
 def _solution():

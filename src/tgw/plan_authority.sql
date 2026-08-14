@@ -5,7 +5,14 @@ CREATE TABLE IF NOT EXISTS plan_authority_requests (
     closure_hash text NOT NULL,
     graph_id text NOT NULL,
     object_generation text NOT NULL,
-    effect_kind text NOT NULL CHECK (effect_kind IN ('coding-release','bounded-flake-push','flake-switch-record-only','dependency-resubmit')),
+    effect_kind text NOT NULL CHECK (effect_kind IN (
+        'coding-release',
+        'bounded-flake-push',
+        'flake-switch-record-only',
+        'dependency-resubmit',
+        'authority-canary',
+        'approval-platform-bootstrap-deployment'
+    )),
     effect_generation text NOT NULL,
     effect_hash text NOT NULL,
     effect_parameters jsonb NOT NULL,
