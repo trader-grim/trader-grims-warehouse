@@ -17,7 +17,6 @@ import fcntl
 import hashlib
 import json
 import os
-import resource
 import selectors
 import signal
 import socket
@@ -34,7 +33,8 @@ RESPONSE_SCHEMA = "tgw-nixos-a3-local-launch-response/v1"
 ATTESTATION_SCHEMA = "tgw-nixos-a3-local-netns-attestation/v1"
 CONFIG_SCHEMA = "tgw-nixos-a3-local-launcher-config/v1"
 RAW_EVIDENCE_SCHEMA = "tgw-nixos-a3-raw-link-route-probes/v1"
-CONFIG_PATH = "/etc/tgw/a3-successor-v4-launcher.json"
+CONFIG_PATH = "/etc/tgw/a3-successor-v5-launcher.json"
+CGROUP_ROOT = Path("/sys/fs/cgroup/tgw-a3-successor")
 MAX_PACKET_BYTES = 1_048_576
 MAX_DIAGNOSTIC_BYTES = 65_536
 _HEX = set("0123456789abcdef")
@@ -438,6 +438,63 @@ def _group_exists(pgid: int) -> bool:
     return True
 
 
+def _write_control(path: Path, value: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CLOEXEC)
+    try:
+        raw = value.encode()
+        offset = 0
+        while offset < len(raw):
+            written = os.write(fd, raw[offset:])
+            if written <= 0:
+                raise LauncherError(f"cgroup control write did not advance: {path.name}")
+            offset += written
+    finally:
+        os.close(fd)
+
+
+def _create_cgroup(packet: Mapping[str, Any], config: Mapping[str, Any]) -> Path:
+    CGROUP_ROOT.mkdir(mode=0o755, exist_ok=True)
+    root_metadata = CGROUP_ROOT.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(root_metadata.st_mode) or root_metadata.st_uid != 0:
+        raise LauncherError("launcher cgroup root authority differs")
+    controllers = set((CGROUP_ROOT / "cgroup.controllers").read_text().split())
+    if not {"pids", "memory"} <= controllers:
+        raise LauncherError("launcher cgroup controllers are unavailable")
+    enabled = set((CGROUP_ROOT / "cgroup.subtree_control").read_text().split())
+    if not {"pids", "memory"} <= enabled:
+        _write_control(CGROUP_ROOT / "cgroup.subtree_control", "+pids +memory")
+    group = CGROUP_ROOT / f"launch-{os.getpid()}-{packet['launch_nonce'][:16]}"
+    group.mkdir(mode=0o755)
+    try:
+        _write_control(group / "pids.max", str(config["max_processes"]))
+        _write_control(group / "memory.max", str(config["max_memory_bytes"]))
+        if (group / "memory.swap.max").exists():
+            _write_control(group / "memory.swap.max", "0")
+        return group
+    except BaseException:
+        group.rmdir()
+        raise
+
+
+def _cgroup_populated(group: Path) -> bool:
+    for line in (group / "cgroup.events").read_text().splitlines():
+        key, value = line.split()
+        if key == "populated":
+            return value == "1"
+    raise LauncherError("launcher cgroup omitted populated state")
+
+
+def _remove_cgroup(group: Path, *, force: bool) -> None:
+    if force and _cgroup_populated(group):
+        _write_control(group / "cgroup.kill", "1")
+    deadline = time.monotonic() + 2.0
+    while _cgroup_populated(group) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if _cgroup_populated(group):
+        raise LauncherError("logical cgroup could not be proven empty")
+    group.rmdir()
+
+
 def _cleanup_group_and_reap(pid: int, *, grace: float = 2.0) -> None:
     reaped = False
     for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -484,6 +541,7 @@ def _close_unadmitted_fds(admitted: set[int]) -> None:
 
 
 def _launch(packet: Mapping[str, Any], config: Mapping[str, Any]) -> tuple[int, bytes, bytes, dict[str, Any]]:
+    cgroup = _create_cgroup(packet, config)
     stdout_r, stdout_w = os.pipe2(os.O_CLOEXEC)
     stderr_r, stderr_w = os.pipe2(os.O_CLOEXEC)
     ready_r, ready_w = os.pipe2(os.O_CLOEXEC)
@@ -500,8 +558,6 @@ def _launch(packet: Mapping[str, Any], config: Mapping[str, Any]) -> tuple[int, 
             os.dup2(stderr_w, 2)
             os.close(stdout_w)
             os.close(stderr_w)
-            resource.setrlimit(resource.RLIMIT_NPROC, (config["max_processes"], config["max_processes"]))
-            resource.setrlimit(resource.RLIMIT_AS, (config["max_memory_bytes"], config["max_memory_bytes"]))
             libc = ctypes.CDLL(None, use_errno=True)
             for capability in range(64):
                 if libc.prctl(24, capability, 0, 0, 0) != 0 and ctypes.get_errno() not in {0, 22}:  # PR_CAPBSET_DROP; EINVAL above kernel maximum
@@ -546,6 +602,7 @@ def _launch(packet: Mapping[str, Any], config: Mapping[str, Any]) -> tuple[int, 
         uid, gid, capabilities, no_new_privs = _proc_privileges(pid)
         if uid != config["codex_uid"] or gid != config["codex_gid"] or capabilities or not no_new_privs:
             raise LauncherError("logical child privilege drop is incomplete")
+        _write_control(cgroup / "cgroup.procs", str(pid))
         os.write(release_w, b"G")
         os.close(release_w)
         release_w = -1
@@ -581,7 +638,10 @@ def _launch(packet: Mapping[str, Any], config: Mapping[str, Any]) -> tuple[int, 
         finally:
             selector.close()
     except BaseException:
-        _cleanup_group_and_reap(pid)
+        try:
+            _cleanup_group_and_reap(pid)
+        finally:
+            _remove_cgroup(cgroup, force=True)
         raise
     finally:
         os.close(ready_r)
@@ -590,8 +650,15 @@ def _launch(packet: Mapping[str, Any], config: Mapping[str, Any]) -> tuple[int, 
         for fd in output:
             os.close(fd)
     if _group_exists(pid):
-        _cleanup_group_and_reap(pid)
+        try:
+            _cleanup_group_and_reap(pid)
+        finally:
+            _remove_cgroup(cgroup, force=True)
         raise LauncherError("logical child left process-group survivors")
+    if _cgroup_populated(cgroup):
+        _remove_cgroup(cgroup, force=True)
+        raise LauncherError("logical child left cgroup descendants")
+    _remove_cgroup(cgroup, force=False)
     if returncode is None:
         raise LauncherError("logical child return code is absent")
     facts = {
