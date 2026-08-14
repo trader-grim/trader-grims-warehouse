@@ -42,6 +42,18 @@ def test_standalone_plan_default_and_exact_commit(tmp_path: Path):
     }) == commit
 
 
+def test_current_plan_commit_uses_configured_git_executable(tmp_path: Path):
+    root, commit = _plan(tmp_path)
+    wrapper = tmp_path / "held-git"
+    wrapper.write_text("#!/bin/sh\nexec git \"$@\"\n")
+    wrapper.chmod(0o755)
+    assert current_plan_commit(lambda: {
+        "plan_vault_path": root,
+        "plan_approved_commit": commit,
+        "plan_git_path": wrapper,
+    }) == commit
+
+
 def test_solution_loader_fails_closed_and_checks_identity(tmp_path: Path):
     root, _ = _plan(tmp_path)
 

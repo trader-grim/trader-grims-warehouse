@@ -87,6 +87,7 @@ def load_config(path: Path) -> Dict[str, Any]:
     incoming_path = p("incoming_path", "/opt/TGW/incoming")
     plan_vault_path = p("plan_vault_path", "/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault")
     plan_approved_commit = raw.get("plan_approved_commit")
+    plan_git_path = p("plan_git_path", "/run/current-system/sw/bin/git")
 
     full_catalog_path = p("full_catalog_path", str(catalog_root / "master-catalog.json"))
     search_catalog_path = p("search_catalog_path", str(catalog_root / "search-catalog.json"))
@@ -218,6 +219,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         "newitems_path": incoming_path / "newitems",
         "plan_vault_path": plan_vault_path,
         "plan_approved_commit": plan_approved_commit,
+        "plan_git_path": plan_git_path,
         "plan_inbox_path": plan_vault_path / "inbox",
         "plan_master_path": plan_vault_path / "plan" / "TGW-Master-Plan.md",
         "pm_intake_delay_hours": float(raw.get("pm_intake_delay_hours", 4.0)),

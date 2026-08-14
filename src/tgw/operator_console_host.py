@@ -27,8 +27,9 @@ def current_plan_commit(config_provider: Callable[[], Mapping[str, Any]]) -> str
     if approved is not None and (not isinstance(approved, str) or not _COMMIT.fullmatch(approved)):
         raise RuntimeError("approved standalone Plan commit is invalid")
     ref = approved or "HEAD"
+    git_path = str(config.get("plan_git_path") or "git")
     result = subprocess.run(
-        ["git", "-c", f"safe.directory={root}", "-C", str(root), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        [git_path, "-c", f"safe.directory={root}", "-C", str(root), "rev-parse", "--verify", f"{ref}^{{commit}}"],
         check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     if result.returncode:
