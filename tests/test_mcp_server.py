@@ -48,12 +48,18 @@ def test_sse_entrypoint_applies_service_binding(monkeypatch):
     monkeypatch.setattr(mcp_server.mcp, "run", lambda **kwargs: calls.append(kwargs))
     monkeypatch.setattr(mcp_server.mcp.settings, "host", "127.0.0.1")
     monkeypatch.setattr(mcp_server.mcp.settings, "port", 8000)
+    monkeypatch.setattr(mcp_server.mcp.settings.transport_security, "allowed_hosts", [])
+    monkeypatch.setattr(mcp_server.mcp.settings.transport_security, "allowed_origins", [])
 
     mcp_server.main()
 
     assert calls == [{"transport": "sse"}]
     assert mcp_server.mcp.settings.host == "100.107.99.66"
     assert mcp_server.mcp.settings.port == 8765
+    assert mcp_server.mcp.settings.transport_security.allowed_hosts == ["100.107.99.66:8765"]
+    assert mcp_server.mcp.settings.transport_security.allowed_origins == [
+        "http://100.107.99.66:8765",
+    ]
 
 # ---------------------------------------------------------------------------
 # Fakes

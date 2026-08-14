@@ -886,6 +886,8 @@ def main() -> None:
         host, port = _sse_binding()
         mcp.settings.host = host
         mcp.settings.port = port
+        mcp.settings.transport_security.allowed_hosts = [f'{host}:{port}']
+        mcp.settings.transport_security.allowed_origins = [f'http://{host}:{port}']
         mcp.run(transport='sse')
     else:
         mcp.run(transport='stdio')
