@@ -319,7 +319,15 @@ def authorize_and_dispatch_next_listing_effect(
     result, authority_id, created = authorize_and_request_item_goal(
         item_path, TGW_EBAY_LISTABLE, operator_identity=operator_identity,
         surface=surface, provider_identity=provider_identity,
-        scopes=("upload", "stage", "publish"), ttl_seconds=ttl_seconds,
+        # An existing offer is re-staged with ``force=True`` below so the
+        # current draft replaces the previously staged content before publish.
+        # The provider worker deliberately requires the narrower
+        # ``force-restage`` scope for that operation; issuing only ``stage``
+        # creates a job which is valid enough to enqueue but impossible to
+        # execute.  Bind both possibilities up front because the exact
+        # disposition is selected from the same evaluated generation below.
+        scopes=("upload", "stage", "publish", "force-restage"),
+        ttl_seconds=ttl_seconds,
         enqueue_fn=enqueue_fn, issuer=issuer, authority_lookup=authority_lookup,
     )
     if result.dispatched is not None:

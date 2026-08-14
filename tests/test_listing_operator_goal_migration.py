@@ -55,9 +55,11 @@ def test_next_listing_effect_dispatches_exact_governed_payload(
         graph=graph, dispatched=None, held_external=(treatment.identity,),
         operator_gates=(f"provider_contract_required:{treatment.identity}",),
     )
+    admission = {}
     monkeypatch.setattr(
         "tgw.workflow.listing_migration.authorize_and_request_item_goal",
-        lambda *args, **kwargs: (admitted, "authority-1", True),
+        lambda *args, **kwargs: admission.update(kwargs)
+        or (admitted, "authority-1", True),
     )
     calls = []
     monkeypatch.setattr(
@@ -69,7 +71,7 @@ def test_next_listing_effect_dispatches_exact_governed_payload(
         ),
     )
     authority = SimpleNamespace(
-        scopes=("upload", "stage", "publish"), entity_id="SKU-1",
+        scopes=("upload", "stage", "publish", "force-restage"), entity_id="SKU-1",
         object_generation="gen-1", pre_authority_condition_hash="pre-hash",
     )
 
@@ -85,7 +87,10 @@ def test_next_listing_effect_dispatches_exact_governed_payload(
     assert payload["operator_authority_id"] == "authority-1"
     assert payload["pre_authority_condition_hash"] == "pre-hash"
     assert (payload.get("force") is True) is expected_force
-    assert scope in authority.scopes
+    assert ("force-restage" if expected_force else scope) in authority.scopes
+    assert admission["scopes"] == (
+        "upload", "stage", "publish", "force-restage",
+    )
 
 
 def test_item_publish_workflow_never_enqueues_legacy_generic_jobs(tmp_path, monkeypatch):
