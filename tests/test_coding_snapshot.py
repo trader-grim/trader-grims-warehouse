@@ -484,3 +484,27 @@ class TestBuildCodingSnapshot:
         s1 = build_coding_snapshot(r1, _goal("implemented"))
         s2 = build_coding_snapshot(r2, _goal("implemented"))
         assert s1.generation != s2.generation
+
+    def test_generation_is_source_bound_not_request_branch_bound(self, tmp_path):
+        """The same source state can be pre-attested before request provisioning."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git_init(repo)
+        _git_write_file(repo, "source.py", "VALUE = 1\n")
+        _git_commit(repo, "source")
+
+        request_worktree = tmp_path / "request-worktree"
+        subprocess.run(
+            [
+                "git", "worktree", "add", "-b", "coding/request-123",
+                str(request_worktree), "HEAD",
+            ],
+            cwd=str(repo),
+            check=True,
+        )
+
+        before = build_coding_snapshot(repo, _goal("committed"))
+        provisioned = build_coding_snapshot(
+            request_worktree, _goal("committed")
+        )
+        assert before.generation == provisioned.generation

@@ -669,16 +669,23 @@ def cancel_job(job_id: str, message: Optional[str] = None,
     with _conn() as con:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute('SELECT * FROM cancel_job(%s, %s)', (job_id, message))
-            if result is not None:
+            cancelled = dict(cur.fetchone())
+            if result is not None and cancelled["state"] == "cancelled":
                 cur.execute(
                     """UPDATE queue_jobs
                          SET payload_json = COALESCE(payload_json, '{}'::jsonb)
                                             || jsonb_build_object('result', %s::jsonb)
-                       WHERE job_id = %s
+                       WHERE job_id = %s AND state = 'cancelled'
                        RETURNING *""",
                     (json.dumps(result), job_id),
                 )
-            return dict(cur.fetchone())
+                updated = cur.fetchone()
+                if updated is None:
+                    raise RuntimeError(
+                        "cancelled job changed state before receipt persistence"
+                    )
+                cancelled = dict(updated)
+            return cancelled
 
 
 def mark_running(job_id: str, lease_owner: str, lease_token: str) -> None:

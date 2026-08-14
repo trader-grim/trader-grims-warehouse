@@ -635,9 +635,11 @@ def build_coding_snapshot(
 
     object_id = str(worktree)
 
-    # Content-addressed generation: hash of git HEAD + branch + diff content
+    # Content-addressed generation: hash only the source state.  A request-bound
+    # worktree branch name is a location/claim identity, not source content; if
+    # it participated here, a generation attested before provisioning could
+    # never match the newly provisioned request worktree.
     head = _git_rev_parse(worktree, "HEAD") or "no-head"
-    branch = _git_branch(worktree) or "detached"
     canonical = _find_canonical_branch(worktree)
     if canonical:
         diff_content = _git_diff_stat(worktree, canonical, "HEAD") or ""
@@ -647,7 +649,7 @@ def build_coding_snapshot(
     # Generation is source state only. Receipts attest this state but must
     # never change the state they attest (which would make every receipt stale
     # the instant it is written).
-    gen_input = f"{head}|{branch}|{diff_content}|{source_fingerprint}".encode()
+    gen_input = f"{head}|{diff_content}|{source_fingerprint}".encode()
     generation = hashlib.sha256(gen_input).hexdigest()[:16]
 
     assertions: list[EvidenceAssertion] = []

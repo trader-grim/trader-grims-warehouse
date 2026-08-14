@@ -117,3 +117,37 @@ def test_timer_insert_failure_rolls_back_token_fenced_completion():
     assert "lease_token = %s::uuid" in first_sql
     assert "lease_expires_at > NOW()" in first_sql
     assert connection.__exit__.call_args.args[0] is RuntimeError
+
+
+def test_cancel_does_not_overwrite_concurrent_success_receipt():
+    succeeded = {"job_id": "job-1", "state": "succeeded", "payload_json": {}}
+    connection, cursor = _database(row=succeeded)
+
+    with patch.object(state_machine, "_conn", return_value=connection):
+        result = state_machine.cancel_job(
+            "job-1", "operator stop", {"outcome": "stopped"},
+        )
+
+    assert result == succeeded
+    cursor.execute.assert_called_once_with(
+        "SELECT * FROM cancel_job(%s, %s)", ("job-1", "operator stop")
+    )
+
+
+def test_cancel_receipt_update_is_fenced_to_cancelled_state():
+    cancelled = {"job_id": "job-1", "state": "cancelled", "payload_json": {}}
+    persisted = {
+        **cancelled,
+        "payload_json": {"result": {"outcome": "stopped"}},
+    }
+    connection, cursor = _database()
+    cursor.fetchone.side_effect = [cancelled, persisted]
+
+    with patch.object(state_machine, "_conn", return_value=connection):
+        result = state_machine.cancel_job(
+            "job-1", "operator stop", {"outcome": "stopped"},
+        )
+
+    assert result == persisted
+    update_sql = cursor.execute.call_args_list[1].args[0]
+    assert "WHERE job_id = %s AND state = 'cancelled'" in update_sql
