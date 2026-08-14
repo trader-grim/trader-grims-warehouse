@@ -887,6 +887,57 @@ def _workflow_attempt_rows(sku: str, limit: int = 100) -> List[Dict[str, Any]]:
             return rows
 
 
+def _workflow_reconciliation_rows(sku: str, limit: int = 100) -> Dict[str, Any]:
+    """Return only privacy-safe ledger columns needed to reconcile one item.
+
+    Request/authority JSON and provider result bodies are deliberately excluded.
+    This is observation only: it neither contacts a provider nor changes a ledger.
+    """
+    queries = {
+        "effects": """
+            SELECT effect_id, provider, operation, entity_type, entity_id,
+                   object_generation, graph_id, treatment_id, treatment_version,
+                   condition_hash, state, error_detail,
+                   created_at, dispatched_at, finished_at, updated_at
+              FROM provider_effects
+             WHERE entity_type = 'item' AND entity_id = %s
+             ORDER BY created_at DESC LIMIT %s
+        """,
+        "authorities": """
+            SELECT authority_id, operator_identity, surface, entity_id,
+                   goal_profile_id, goal_profile_version, object_generation,
+                   provider_identity, scopes, issued_at, expires_at,
+                   superseded_at, superseded_by
+              FROM operator_authorities
+             WHERE entity_id = %s
+             ORDER BY issued_at DESC LIMIT %s
+        """,
+        "observations": """
+            SELECT observation_id, observation_type, provider, provider_identity,
+                   sku, offer_id, object_generation, graph_id, condition_hash,
+                   content_identity, outcome, observed_at, created_at
+              FROM provider_observations
+             WHERE sku = %s
+             ORDER BY created_at DESC LIMIT %s
+        """,
+    }
+    result: Dict[str, Any] = {}
+    with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            for name, query in queries.items():
+                cur.execute(query, (sku, limit))
+                result[name] = [dict(row) for row in cur.fetchall()]
+    return result
+
+
+def _workflow_provider_identity() -> str:
+    migration = _cfg.get("workflow_migration")
+    if migration is None and isinstance(_cfg.get("raw"), dict):
+        migration = _cfg["raw"].get("workflow_migration")
+    value = migration.get("ebay_provider_identity") if isinstance(migration, dict) else None
+    return value if isinstance(value, str) else ""
+
+
 @app.get("/api/items/{sku}/workflow", dependencies=[AUTH])
 def item_workflow(sku: str) -> Dict[str, Any]:
     """Return the current read-only workflow Action Card for one item."""
@@ -903,6 +954,42 @@ def item_workflow(sku: str) -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"workflow projection unavailable: {exc}")
     return {"ok": True, "workflow": card}
+
+
+@app.get("/api/items/{sku}/workflow-reconciliation", dependencies=[AUTH])
+def item_workflow_reconciliation(sku: str) -> Dict[str, Any]:
+    """Expose a read-only, privacy-safe reconciliation bundle for one item."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    try:
+        item = load_item_doc(json_path)
+        ledgers = _workflow_reconciliation_rows(sku)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"workflow reconciliation unavailable: {exc}"
+        ) from exc
+    offer = item.get("ebay_offer") if isinstance(item.get("ebay_offer"), dict) else {}
+    listing = item.get("ebay_listing") if isinstance(item.get("ebay_listing"), dict) else {}
+    return {
+        "ok": True,
+        "schema": "workflow-reconciliation/v1",
+        "entity_id": sku,
+        "provider_identity": _workflow_provider_identity(),
+        "canonical_markers": {
+            "stage": {
+                key: offer.get(key)
+                for key in ("provider_effect_id", "offer_id", "stage_content_identity")
+            },
+            "publish": {
+                key: listing.get(key)
+                for key in ("provider_effect_id", "listing_id", "offer_id", "published_at")
+            },
+        },
+        **ledgers,
+    }
 
 
 @app.post("/api/items/{sku}/workflow-goal")

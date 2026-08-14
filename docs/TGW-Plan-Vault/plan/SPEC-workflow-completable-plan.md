@@ -56,6 +56,7 @@ that section is informative unless referenced by a hashed deliverable.
 | `scope_hash` | Canonical hash of scope, exclusions, work units, and acceptance |
 | `dependencies` | Stable plan/version or evidence references |
 | `work_units` | Ordered or dependency-linked bounded units |
+| `operator_surfaces` | Every real operator admission, approval, hold, reconciliation, and closure surface required by the plan; may be empty only when no unit or closure transition is operator-gated |
 | `plan_acceptance` | Conditions required beyond individual work units |
 | `rollback` | How effects are stopped/reversed and which evidence remains |
 
@@ -71,6 +72,7 @@ work_units:
       - registry:tgw-environment
     effect_class: local-reversible
     authority: plan-approved
+    operator_surface: null
     treatment_id: environment-registry-migrate
     treatment_version: 1
     inputs:
@@ -101,6 +103,58 @@ Requirements:
 - outputs and acceptance name schemas, not free-form “looks good” claims;
 - retry, conflict, reconciliation, and rollback semantics are explicit; and
 - shell commands embedded in Markdown are never executed directly.
+
+## Operator-surface completeness
+
+A plan is not workflow-completable merely because its backend treatments exist.
+Every work unit with `authority: operator-explicit`, every provider-write/external
+effect, and every human-authorized closure transition MUST bind a real operator
+surface. An ordinary domain action whose label happens to resemble the requested
+approval is not a substitute.
+
+The workflow contract MUST contain `operator_surfaces` (an empty list only when no
+operator-gated transition exists). Each surface declaration binds:
+
+- a stable surface ID and normal operator entrypoint;
+- its intended audience and explicit actions, including Approve and Hold;
+- the canonical status/evidence data source;
+- every work unit for which it is the authority surface; and
+- acceptance-condition IDs independently proving that the surface is deployed,
+  discoverable through the normal operator navigation path, and projecting current
+  canonical workflow state.
+
+```yaml
+operator_surfaces:
+  - id: workflow-approvals
+    route: /form/approvals
+    audience: operator
+    actions: [approve, hold, reconcile]
+    status_source: canonical-plan-graphs-receipts-authorities-and-effects
+    required_for: [W2-canary]
+    deployment_condition: W0-operator-surface:surface-deployed
+    discoverability_condition: W0-operator-surface:surface-discoverable
+    freshness_condition: W0-operator-surface:status-current
+```
+
+The bound surface must show the exact plan/version/scope/graph, work unit, target
+entity, requested effects, authority scopes and expiry, current conditions and
+receipt links, attempts, waits, holds, conflicts, ambiguity/reconciliation state,
+and legal next actions. Its approval decision must be immutable and bound to those
+same identities. It must never infer approval from page access, acknowledgement,
+an item action, a historical statement, or a generic logged-in session.
+
+Static YAML cannot prove that a route exists in real life. Admission therefore
+requires registered verifier evidence for deployment, navigation discoverability,
+and a current projection/decision round trip. Runtime dispatch must recheck that
+evidence and surface freshness. Missing, unreachable, stale, mismatched, or
+unregistered surfaces make the gated unit `HELD`/`UNKNOWN`; the workflow must not
+redirect the operator to an improvised CLI, ordinary Stage/Publish button, chat
+message, or another undeclared surface.
+
+Execution-status views are part of this contract when operators rely on them.
+They must project the workflow's canonical graphs, attempts, and receipts. A legacy
+agent trace or historical activity table cannot satisfy current-status acceptance
+unless every treatment in scope durably feeds it and exact freshness is verified.
 
 ## Verifiers and evidence
 
@@ -145,6 +199,8 @@ The workflow must not:
 - close a plan with unresolved conflicts, stale evidence, or repair-required effects;
   or
 - mutate the canonical Plan/Todo as an incidental worker side effect.
+- dispatch operator-gated work when its declared approval/status surface is absent,
+  unreachable, stale, undiscoverable, or backed by a non-authoritative data source.
 
 ## Completion transition
 
@@ -201,8 +257,12 @@ Existing PP and PLAN documents enter through an adapter that produces a lint rep
    executable procedure text;
 3. map supported claims to verifier IDs;
 4. leave unsupported or unsourced claims `UNKNOWN`;
-5. require human approval of the generated workflow contract; and
-6. begin evidence collection only after approval.
+5. require human approval of the generated workflow contract;
+6. identify every operator/provider/closure gate and bind its real deployed surface;
+7. add prerequisite implementation/deployment units for designed-but-absent surfaces;
+8. reject legacy or stale status pages as evidence unless their current canonical
+   data feed is proved; and
+9. begin evidence collection only after approval.
 
 No existing checkmark or “DONE” paragraph is retroactively converted into a receipt.
 The original document remains preserved and linked as migration provenance.
@@ -214,4 +274,3 @@ canonical hashing, dependency-cycle rejection, plan-version invalidation,
 receipt-binding exactness, conflict/reconciliation holds, arbitrary-command
 non-execution, historical-memory non-authority, completion-candidate generation, and
 human-authorized closure with a stale-candidate rejection.
-

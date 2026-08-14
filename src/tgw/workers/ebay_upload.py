@@ -12,6 +12,7 @@ Payload:    {sku: "<SKU>"}
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -28,7 +29,13 @@ from tgw.assets import ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.config import sku_dir as _cfg_sku_dir
 from tgw.config import sku_json as _cfg_sku_json
-from tgw.ebay.upload import upload_photo
+from tgw.ebay.upload import (
+    UploadDefinitivelyRejected,
+    UploadQuotaExceeded,
+    prepare_upload,
+    upload_photo,
+    upload_prepared,
+)
 from tgw.errors import TreatmentFailure
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -110,12 +117,63 @@ class EbayUploadWorker(QueueWorker):
             )
         return mode
 
+    def _provider_effect_mode(self) -> str:
+        migration = self.config.get('workflow_migration')
+        if migration is None and isinstance(self.config.get('raw'), dict):
+            migration = self.config['raw'].get('workflow_migration')
+        migration = migration if isinstance(migration, dict) else {}
+        mode = migration.get('ebay_upload_provider_effect', 'legacy')
+        if mode not in {'legacy', 'workflow'}:
+            raise HardFailure(
+                f'invalid workflow_migration.ebay_upload_provider_effect mode {mode!r}'
+            )
+        return mode
+
+    def _provider_identity(self) -> str:
+        migration = self.config.get('workflow_migration')
+        if migration is None and isinstance(self.config.get('raw'), dict):
+            migration = self.config['raw'].get('workflow_migration')
+        migration = migration if isinstance(migration, dict) else {}
+        value = migration.get('ebay_provider_identity')
+        return value if isinstance(value, str) else ''
+
+    @staticmethod
+    def _require_provider_binding(payload: Dict[str, Any]) -> None:
+        required = (
+            'treatment_id', 'treatment_version', 'graph_id', 'goal_profile_id',
+            'goal_profile_version', 'object_generation', 'condition_hash',
+            'operator_authority_id', 'pre_authority_condition_hash',
+        )
+        missing = [key for key in required
+                   if not isinstance(payload.get(key), str) or not payload[key].strip()]
+        if missing:
+            raise HardFailure('workflow upload effect missing binding: ' + ', '.join(missing))
+
+    @staticmethod
+    def _provider_receipt(payload: Dict[str, Any], sku: str, *, outcome: str,
+                          effect_id: str, reason_code: str) -> Dict[str, Any]:
+        return {
+            'receipt_schema_id': 'treatment-receipt/v1',
+            'treatment_id': payload['treatment_id'],
+            'treatment_version': payload['treatment_version'],
+            'graph_id': payload['graph_id'],
+            'goal_profile_id': payload['goal_profile_id'],
+            'goal_profile_version': payload['goal_profile_version'],
+            'object_generation': payload['object_generation'],
+            'condition_hash': payload['condition_hash'],
+            'entity_id': sku, 'outcome': outcome,
+            'established_conditions': [], 'artifacts': [f'item:{sku}'],
+            'evidence': {'reason_code': reason_code, 'provider': 'ebay',
+                         'provider_effect_id': effect_id},
+        }
+
     def handle(self, job: Dict[str, Any]) -> Dict[str, Any] | None:
         payload = job.get('payload_json') or {}
         sku = payload.get('sku', '')
         if not sku:
             raise HardFailure('ebay_upload job missing sku in payload')
         quota_timer_mode = self._quota_timer_mode()
+        provider_effect_mode = self._provider_effect_mode()
         if quota_timer_mode == 'workflow':
             required = ('treatment_id', 'treatment_version', 'graph_id',
                         'object_generation', 'condition_hash')
@@ -125,6 +183,10 @@ class EbayUploadWorker(QueueWorker):
                     'workflow quota timer missing bound identity: '
                     + ', '.join(missing)
                 )
+        if provider_effect_mode == 'workflow':
+            self._require_provider_binding(payload)
+            if not self._provider_identity().strip():
+                raise HardFailure('workflow upload provider identity is not configured')
 
         json_path = _cfg_sku_json(self.config, sku)
         if not json_path.exists():
@@ -167,16 +229,116 @@ class EbayUploadWorker(QueueWorker):
 
         uploaded: List[Dict[str, str]] = list(item.get('ebay_photos', []))
         errors: List[str] = []
+        provider_effect_ids: List[str] = [
+            value for entry in uploaded
+            if isinstance((value := entry.get('provider_effect_id')), str) and value
+        ]
         quota_blocked = False
         quota_detail = ''
+        quota_rejected_photo_key = ''
 
         for photo in photos:
             if str(photo) in existing:
                 log.debug('already uploaded: %s', photo.name)
                 continue
             try:
-                url = upload_photo(self.config, photo)
-                uploaded.append({'local': str(photo), 'url': url})
+                effect = None
+                if provider_effect_mode == 'workflow':
+                    from tgw.provider_effects import (
+                        ProviderEffectConflict,
+                        ProviderEffectReconciliationRequired,
+                        reserve_and_begin_authorized_effect,
+                    )
+                    from tgw.workflow.operator_authority import listing_content_identity
+
+                    try:
+                        photo_key = photo.relative_to(sku_dir).as_posix()
+                    except ValueError as exc:
+                        raise HardFailure(
+                            f'upload photo is outside SKU directory: {photo}'
+                        ) from exc
+                    prepared = prepare_upload(self.config, photo)
+                    digest = hashlib.sha256(prepared.image_bytes).hexdigest()
+                    quota_epochs = payload.get('quota_effect_epochs', {})
+                    quota_epochs = quota_epochs if isinstance(quota_epochs, dict) else {}
+                    quota_epoch = int(quota_epochs.get(photo_key, 0))
+                    request = {
+                        'sku': sku, 'photo_key': photo_key,
+                        'prepared_content_sha256': digest,
+                        'prepared_byte_length': len(prepared.image_bytes),
+                        'filename': photo.name, 'mime': prepared.mime,
+                        'picture_name': photo.stem, 'picture_set': 'Supersize',
+                        'quota_epoch': quota_epoch,
+                    }
+                    current_item = json.loads(json_path.read_text(encoding='utf-8'))
+                    authority_binding = {
+                        'entity_id': sku,
+                        'goal_profile_id': payload['goal_profile_id'],
+                        'goal_profile_version': payload['goal_profile_version'],
+                        'object_generation': payload['object_generation'],
+                        'pre_authority_condition_hash': payload['pre_authority_condition_hash'],
+                        'content_identity': listing_content_identity(current_item),
+                        'provider_identity': self._provider_identity(),
+                    }
+
+                    try:
+                        effect = reserve_and_begin_authorized_effect(
+                            authority_id=payload['operator_authority_id'],
+                            authority_scope='upload', authority_binding=authority_binding,
+                            provider='ebay', operation=(
+                                'upload-site-hosted-picture:q'
+                                f'{quota_epoch}'
+                            ),
+                            entity_type='item-photo', entity_id=f'{sku}:{photo_key}',
+                            object_generation=payload['object_generation'],
+                            graph_id=payload['graph_id'], treatment_id=payload['treatment_id'],
+                            treatment_version=payload['treatment_version'],
+                            condition_hash=payload['condition_hash'], request=request,
+                        )
+                    except ProviderEffectReconciliationRequired as exc:
+                        raise TreatmentFailure(
+                            f'{sku}: prior photo upload requires reconciliation',
+                            self._provider_receipt(
+                                payload, sku, outcome='reconciliation_required',
+                                effect_id=exc.record.effect_id,
+                                reason_code='PROVIDER_EFFECT_UNFINISHED',
+                            ),
+                        ) from exc
+                    except ProviderEffectConflict as exc:
+                        raise HardFailure(
+                            f'{sku}: upload provider effect admission failed: {exc}'
+                        ) from exc
+                    if effect.state == 'succeeded':
+                        url = (effect.result or {}).get('url')
+                        if not isinstance(url, str) or not url:
+                            raise HardFailure('succeeded upload effect has no URL')
+                    elif effect.state == 'rejected':
+                        raise TreatmentFailure(
+                            f'{sku}: photo upload was definitively rejected',
+                            self._provider_receipt(
+                                payload, sku, outcome='failed',
+                                effect_id=effect.effect_id,
+                                reason_code='PROVIDER_EFFECT_REJECTED',
+                            ),
+                        )
+                    else:
+                        url = upload_prepared(self.config, prepared)
+                        from tgw.provider_effects import finish_provider_effect
+                        effect = finish_provider_effect(
+                            effect.effect_id, state='succeeded',
+                            result={'url': url, 'prepared_content_sha256': digest,
+                                    'photo_key': photo_key},
+                        )
+                    provider_effect_ids.append(effect.effect_id)
+                else:
+                    url = upload_photo(self.config, photo)
+                entry = {'local': str(photo), 'url': url}
+                if provider_effect_mode == 'workflow':
+                    entry.update({
+                        'provider_effect_id': effect.effect_id,
+                        'prepared_content_sha256': digest,
+                    })
+                uploaded.append(entry)
                 tgw_logging.log_event('ebay_photo_uploaded', sku=sku,
                                       photo=photo.name, url=url)
             except (requests.exceptions.ConnectionError,
@@ -187,7 +349,49 @@ class EbayUploadWorker(QueueWorker):
                 # succeeded this pass).
                 log.warning('network error uploading %s: %s', photo.name, exc)
                 self._persist_partial(sku, uploaded, photos)
+                if provider_effect_mode == 'workflow' and effect is not None:
+                    from tgw.provider_effects import finish_provider_effect
+                    finished = finish_provider_effect(
+                        effect.effect_id, state='ambiguous',
+                        error_detail=f'{type(exc).__name__}: {exc}',
+                    )
+                    raise TreatmentFailure(
+                        f'{sku}: photo upload outcome ambiguous',
+                        self._provider_receipt(
+                            payload, sku, outcome='ambiguous',
+                            effect_id=finished.effect_id,
+                            reason_code='PROVIDER_EFFECT_AMBIGUOUS',
+                        ),
+                    ) from exc
                 raise
+            except UploadQuotaExceeded as exc:
+                if provider_effect_mode == 'workflow' and effect is not None:
+                    from tgw.provider_effects import finish_provider_effect
+                    finish_provider_effect(
+                        effect.effect_id, state='rejected', error_detail=str(exc),
+                    )
+                quota_blocked = True
+                quota_detail = str(exc)
+                quota_rejected_photo_key = (
+                    photo_key if provider_effect_mode == 'workflow' else ''
+                )
+                break
+            except UploadDefinitivelyRejected as exc:
+                if provider_effect_mode == 'workflow' and effect is not None:
+                    from tgw.provider_effects import finish_provider_effect
+                    finished = finish_provider_effect(
+                        effect.effect_id, state='rejected', error_detail=str(exc),
+                    )
+                    self._persist_partial(sku, uploaded, photos)
+                    raise TreatmentFailure(
+                        f'{sku}: photo upload rejected by provider',
+                        self._provider_receipt(
+                            payload, sku, outcome='failed',
+                            effect_id=finished.effect_id,
+                            reason_code='PROVIDER_EFFECT_REJECTED',
+                        ),
+                    ) from exc
+                errors.append(str(exc))
             except QuotaBudgetExceeded as exc:
                 # Client-side halt (background reserve protected) — no eBay
                 # call was made. Further attempts this pass will hit the same
@@ -199,7 +403,25 @@ class EbayUploadWorker(QueueWorker):
                 log.warning('ebay_upload: quota wall hit for %s after %d/%d new photos this pass — %s',
                             sku, len(uploaded) - len(existing), to_attempt, exc)
                 break
+            except (TreatmentFailure, HardFailure):
+                raise
             except Exception as exc:
+                if (provider_effect_mode == 'workflow' and effect is not None
+                        and effect.state == 'dispatched'):
+                    from tgw.provider_effects import finish_provider_effect
+                    finished = finish_provider_effect(
+                        effect.effect_id, state='ambiguous',
+                        error_detail=f'{type(exc).__name__}: {exc}',
+                    )
+                    self._persist_partial(sku, uploaded, photos)
+                    raise TreatmentFailure(
+                        f'{sku}: photo upload outcome ambiguous',
+                        self._provider_receipt(
+                            payload, sku, outcome='ambiguous',
+                            effect_id=finished.effect_id,
+                            reason_code='PROVIDER_EFFECT_AMBIGUOUS',
+                        ),
+                    ) from exc
                 err_str = str(exc)
                 # EPS reports its OWN quota exhaustion as Ack=Failure text,
                 # not an exception type — same wall, different vocabulary.
@@ -213,7 +435,8 @@ class EbayUploadWorker(QueueWorker):
                 errors.append(err_str)
 
         if quota_blocked:
-            self._persist_partial(sku, uploaded, photos)
+            if provider_effect_mode != 'workflow':
+                self._persist_partial(sku, uploaded, photos)
             quota_retries = int(payload.get('quota_retries', 0)) + 1
             _origin = ({'origin': 'operator'} if payload.get('origin') == 'operator' else {})
             if quota_retries > QUOTA_RETRY_LIMIT:
@@ -253,12 +476,24 @@ class EbayUploadWorker(QueueWorker):
                                   quota_retries=quota_retries, uploaded_so_far=len(uploaded))
             if quota_timer_mode == 'workflow':
                 timer_payload = dict(payload)
-                timer_payload.update({
+                timer_update = {
                     'sku': sku,
                     'reason': 'quota_timer_elapsed',
                     'quota_retries': quota_retries,
-                    **self._current_workflow_binding(sku),
-                })
+                }
+                if quota_rejected_photo_key:
+                    effect_epochs = dict(payload.get('quota_effect_epochs', {}))
+                    effect_epochs[quota_rejected_photo_key] = (
+                        int(effect_epochs.get(quota_rejected_photo_key, 0)) + 1
+                    )
+                    timer_update['quota_effect_epochs'] = effect_epochs
+                # Workflow provider-effect successes are the durable partial
+                # progress. Keep the exact authority-bound generation until
+                # all URLs can be fence-persisted together; changing the item
+                # here would invalidate the remaining upload authority.
+                if provider_effect_mode != 'workflow':
+                    timer_update.update(self._current_workflow_binding(sku))
+                timer_payload.update(timer_update)
                 return {
                     'receipt_schema_id': 'treatment-wait-receipt/v1',
                     'treatment_id': payload['treatment_id'],
@@ -337,12 +572,15 @@ class EbayUploadWorker(QueueWorker):
                               to_attempt=to_attempt)
 
 
-        return {
+        receipt = {
             "treatment_id": "ebay-upload",
             "outcome": "satisfied",
             "established_conditions": ("photos_uploaded",),
             "artifacts": (f"item:{sku}",),
         }
+        if provider_effect_ids:
+            receipt["provider_effect_ids"] = tuple(provider_effect_ids)
+        return receipt
 
 
 def main() -> int:

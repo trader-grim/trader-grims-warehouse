@@ -52,6 +52,7 @@ Current PP-WORKFLOW-001 seams are:
 | `item_ai_identify_fanout` | `legacy` | `workflow` |
 | `item_ebay_stage_fanout` | `legacy` | `workflow` |
 | `ebay_upload_quota_timer` | `legacy` | `workflow` |
+| `ebay_upload_provider_effect` | `legacy` | `workflow` |
 | `ebay_stage_provider_effect` | `legacy` | `workflow` |
 | `ebay_publish_provider_effect` | `legacy` | `workflow` |
 | `ebay_post_push_sync_producer` | `legacy` | `workflow` |
@@ -76,7 +77,7 @@ unexpected dead letter exists.
 6. For targeted sync: inventory mixed payloads, drain only exact legacy-targeted
    rows, enable `ebay_sync_targeted_consumer`, canary, then enable
    `ebay_post_push_sync_producer`.
-7. Enable provider-effect stage/publish only after authority, reservation,
+7. Enable provider-effect upload/stage/publish only after authority, reservation,
    ambiguity, and reconciliation checks pass.
 8. Enable legacy-stage onboarding only for an explicit isolated request; it is
    not a generic workflow goal.

@@ -8,7 +8,7 @@ authority_class: operator-approved
 created_at: 2026-08-11T00:00:00-07:00
 supersedes: null
 registry_revision: sha256:8521e11a564129b1224156abd9496ccdf63770b765b864cf44f0d9f46ab96617
-scope_hash: sha256:867c00840b5316fd1e3caa3affe3dc775503f35ec90655ba6afd74e657dc5e9b
+scope_hash: sha256:9e4f601bd544cc033764fb0e137a4965ab7e996bcefada8b98ead54a1e0e3b8a
 tracks: [server-bootstrap]
 dependencies: []
 ---
@@ -35,6 +35,7 @@ work_units:
     owns: [registry:tgw-environment-bootstrap]
     effect_class: read-only
     authority: plan-approved
+    operator_surface: null
     treatment_id: environment-read-only-discovery
     treatment_version: "1"
     inputs: {source_commit: 82149b9061d8c1289659b9535d87524e2a237dd3}
@@ -54,6 +55,7 @@ work_units:
     owns: [registry:tgw-environment-bootstrap]
     effect_class: local-reversible
     authority: plan-approved
+    operator_surface: null
     treatment_id: environment-local-scaffold
     treatment_version: "1"
     inputs: {inventory_receipt: evidence:S0-authoritative-inventory}
@@ -73,6 +75,7 @@ work_units:
     owns: [verification:environment-boundaries]
     effect_class: read-only
     authority: plan-approved
+    operator_surface: null
     treatment_id: environment-read-only-verify
     treatment_version: "1"
     inputs: {registry_receipt: evidence:S1-local-registry-scaffold}
@@ -90,6 +93,7 @@ work_units:
         freshness: same-plan-version
     on_conflict: reconciliation_required
     rollback: none-read-only
+operator_surfaces: []
 plan_acceptance:
   - S0-authoritative-inventory:inventory-bound
   - S1-local-registry-scaffold:registry-valid

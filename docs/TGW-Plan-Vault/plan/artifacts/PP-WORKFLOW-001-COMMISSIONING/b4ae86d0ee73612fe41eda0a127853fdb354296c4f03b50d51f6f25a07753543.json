@@ -1,0 +1,141 @@
+{
+  "condition_hash": "sha256:d9af91c55955af15016a86dbef18b6524ff1f8a71972257fefeca3e476c2509e",
+  "graph_id": "sha256:7a9300b930f297dee81ec2f6a1a1168baa0ea7b0c49f1874242fbb53a71d0600",
+  "plan_acceptance": [
+    "B0-reconcile:current-state-bound",
+    "B1-local-through-upload:sequence-durable",
+    "B2-provider-stage-publish:provider-effects-accepted"
+  ],
+  "plan_id": "PP-WORKFLOW-001-COMMISSIONING",
+  "plan_version": 1,
+  "registry_revision": "sha256:9489cd2c9b82aaeb59f812ea2adc96257bb80ad568d54dab7c58991186003e4c",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "a25c734e853165a807abbf8aa434c8922027b12e"
+  },
+  "required_conditions": [
+    "B0-reconcile:current-state-bound",
+    "B1-local-through-upload:sequence-durable",
+    "B2-provider-stage-publish:provider-effects-accepted"
+  ],
+  "schema": "tgw-plan-compiled-graph/v1",
+  "scope_hash": "sha256:e593f00c70babf87cf615289c9c30f351aeb843dfdbe9e65916a31fdc3079443",
+  "source_hash": "sha256:375c436e3b4a2ffea5f0781652931b8ee43572c8fd1af7cb9ebdb90604729ee7",
+  "work_units": [
+    {
+      "acceptance": [
+        {
+          "assertion": "source_tests_live_state_provider_identity_and_remaining_gaps_are_freshly_bound",
+          "condition_id": "B0-reconcile:current-state-bound",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "current-state-bound",
+          "verifier": "tgw.listing.backend-reconciliation/v1",
+          "verifier_version": "1"
+        }
+      ],
+      "authority": "plan-approved",
+      "effect_class": "read-only",
+      "id": "B0-reconcile",
+      "inputs": {
+        "candidate_skus": [
+          "tgw202507261628068",
+          "tgw202604300922410"
+        ],
+        "provider_identity_claim": "winchestermysterykitchen"
+      },
+      "kind": "discovery",
+      "on_conflict": "reconciliation_required",
+      "outputs": [
+        {
+          "id": "backend-reconciliation",
+          "schema": "tgw-listing-backend-reconciliation/v1"
+        }
+      ],
+      "owns": [
+        "workflow:listing-backend"
+      ],
+      "requires": [],
+      "rollback": "none-read-only",
+      "title": "Bind current source tests and fresh read-only production evidence",
+      "treatment_id": "listing-backend-reconcile",
+      "treatment_version": "1"
+    },
+    {
+      "acceptance": [
+        {
+          "assertion": "identify_draft_price_upload_use_verified_evidence_retries_and_reconciliation",
+          "condition_id": "B1-local-through-upload:sequence-durable",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "sequence-durable",
+          "verifier": "tgw.listing.backend-sequence/v1",
+          "verifier_version": "1"
+        }
+      ],
+      "authority": "plan-approved",
+      "effect_class": "local-reversible",
+      "id": "B1-local-through-upload",
+      "inputs": {
+        "controlled_sku": "tgw202507261628068"
+      },
+      "kind": "migration",
+      "on_conflict": "reconciliation_required",
+      "outputs": [
+        {
+          "id": "local-sequence-acceptance",
+          "schema": "tgw-listing-sequence-acceptance/v1"
+        }
+      ],
+      "owns": [
+        "workflow:listing-backend"
+      ],
+      "requires": [
+        "B0-reconcile"
+      ],
+      "rollback": "disable governed selector and preserve immutable receipts",
+      "title": "Prove evidence-driven identify draft price and upload convergence",
+      "treatment_id": "listing-backend-commission",
+      "treatment_version": "1"
+    },
+    {
+      "acceptance": [
+        {
+          "assertion": "exact_authority_effect_receipts_reconciliation_and_operator_acceptance_are_present",
+          "condition_id": "B2-provider-stage-publish:provider-effects-accepted",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "provider-effects-accepted",
+          "verifier": "tgw.listing.provider-acceptance/v1",
+          "verifier_version": "1"
+        }
+      ],
+      "authority": "operator-explicit",
+      "effect_class": "provider-write",
+      "id": "B2-provider-stage-publish",
+      "inputs": {
+        "provider_identity": "runtime-authoritative",
+        "staged_candidate": "tgw202604300922410"
+      },
+      "kind": "operator-acceptance",
+      "on_conflict": "reconciliation_required",
+      "outputs": [
+        {
+          "id": "provider-sequence-acceptance",
+          "schema": "tgw-listing-provider-acceptance/v1"
+        }
+      ],
+      "owns": [
+        "provider:ebay-listing"
+      ],
+      "requires": [
+        "B1-local-through-upload"
+      ],
+      "rollback": "stop producer preserve effects and select prior immutable release under operator authority",
+      "title": "Prove operator-authorized stage and publish with provider reconciliation",
+      "treatment_id": "listing-provider-acceptance",
+      "treatment_version": "1"
+    }
+  ]
+}

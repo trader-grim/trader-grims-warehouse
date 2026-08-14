@@ -43,11 +43,17 @@ _TOP_KEYS = {
     "created_at", "supersedes", "registry_revision", "scope_hash", "tracks",
     "dependencies",
 }
-_CONTRACT_KEYS = {"work_units", "plan_acceptance", "rollback", "exclusions"}
+_CONTRACT_KEYS = {
+    "work_units", "operator_surfaces", "plan_acceptance", "rollback", "exclusions",
+}
 _UNIT_KEYS = {
     "id", "title", "kind", "requires", "owns", "effect_class", "authority",
     "treatment_id", "treatment_version", "inputs", "outputs", "acceptance",
-    "on_conflict", "rollback",
+    "operator_surface", "on_conflict", "rollback",
+}
+_SURFACE_KEYS = {
+    "id", "route", "audience", "actions", "status_source", "required_for",
+    "deployment_condition", "discoverability_condition", "freshness_condition",
 }
 _ACCEPT_KEYS = {
     "id", "verifier", "assertion", "evidence_schema", "freshness",
@@ -154,6 +160,7 @@ class PlanDocument:
             "dependencies": self.metadata["dependencies"],
             "exclusions": self.contract["exclusions"],
             "work_units": self.contract["work_units"],
+            "operator_surfaces": self.contract["operator_surfaces"],
             "plan_acceptance": self.contract["plan_acceptance"],
             "rollback": self.contract["rollback"],
         })
@@ -205,6 +212,9 @@ def validate_plan(plan: PlanDocument, registry: Mapping[str, Any]) -> PlanDocume
     _string_list(meta["tracks"], "tracks", nonempty=True)
     _string_list(meta["dependencies"], "dependencies")
     _string_list(contract["exclusions"], "exclusions", nonempty=True)
+    surfaces = contract["operator_surfaces"]
+    if not isinstance(surfaces, list):
+        raise PlanValidationError("operator_surfaces must be a list")
     if not isinstance(contract["rollback"], str) or not contract["rollback"].strip():
         raise PlanValidationError("rollback must be non-empty")
     units = contract["work_units"]
@@ -252,6 +262,8 @@ def validate_plan(plan: PlanDocument, registry: Mapping[str, Any]) -> PlanDocume
             raise PlanValidationError(f"work unit {uid} outputs are invalid")
         _string(unit["on_conflict"], f"work unit {uid} on_conflict")
         _string(unit["rollback"], f"work unit {uid} rollback")
+        if unit["operator_surface"] is not None:
+            _string(unit["operator_surface"], f"work unit {uid} operator_surface")
         if not isinstance(unit["acceptance"], list) or not unit["acceptance"]:
             raise PlanValidationError(f"work unit {uid} requires acceptance")
         for raw_acceptance in unit["acceptance"]:
@@ -291,12 +303,53 @@ def validate_plan(plan: PlanDocument, registry: Mapping[str, Any]) -> PlanDocume
         visited.add(uid)
     for uid in by_id:
         visit(uid)
+    condition_ids = {
+        f"{unit['id']}:{item['id']}" for unit in units for item in unit["acceptance"]
+    }
+    surfaces_by_id: dict[str, dict[str, Any]] = {}
+    for raw_surface in surfaces:
+        surface = _mapping(raw_surface, "operator surface")
+        _keys(surface, _SURFACE_KEYS, f"operator surface {surface.get('id', '?')}")
+        if set(surface) != _SURFACE_KEYS:
+            raise PlanValidationError("operator surface fields are incomplete")
+        sid = surface["id"]
+        if not isinstance(sid, str) or not _ID.fullmatch(sid) or sid in surfaces_by_id:
+            raise PlanValidationError(f"invalid or duplicate operator surface id: {sid!r}")
+        surfaces_by_id[sid] = surface
+        for key in ("route", "audience", "status_source"):
+            _string(surface[key], f"operator surface {sid} {key}")
+        _string_list(surface["actions"], f"operator surface {sid} actions", nonempty=True)
+        required_for = _string_list(
+            surface["required_for"], f"operator surface {sid} required_for", nonempty=True,
+        )
+        if any(uid not in by_id for uid in required_for):
+            raise PlanValidationError(f"operator surface {sid} references unknown work unit")
+        for key in (
+            "deployment_condition", "discoverability_condition", "freshness_condition",
+        ):
+            if surface[key] not in condition_ids:
+                raise PlanValidationError(
+                    f"operator surface {sid} {key} must reference plan acceptance"
+                )
+    for uid, unit in by_id.items():
+        sid = unit["operator_surface"]
+        gated = unit["authority"] == "operator-explicit" or unit["effect_class"] == "provider-write"
+        if sid is None:
+            if gated:
+                raise PlanValidationError(
+                    f"work unit {uid} requires a verified operator surface"
+                )
+            continue
+        if sid not in surfaces_by_id or uid not in surfaces_by_id[sid]["required_for"]:
+            raise PlanValidationError(
+                f"work unit {uid} operator surface binding is incomplete"
+            )
     if (
         not isinstance(contract["plan_acceptance"], list)
         or not all(isinstance(item, str) for item in contract["plan_acceptance"])
         or len(contract["plan_acceptance"]) != len(set(contract["plan_acceptance"]))
         or set(contract["plan_acceptance"])
-        != {f"{unit['id']}:{item['id']}" for unit in units for item in unit["acceptance"]}
+        != condition_ids
     ):
         raise PlanValidationError("plan_acceptance must exactly name every work-unit acceptance condition")
     if plan.scope_hash != meta["scope_hash"]:

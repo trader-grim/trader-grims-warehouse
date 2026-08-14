@@ -1,0 +1,22 @@
+{
+  "conditions": [
+    {
+      "condition_id": "B0-reconcile:current-state-bound",
+      "receipt_ids": [],
+      "result": "unknown"
+    },
+    {
+      "condition_id": "B1-local-through-upload:sequence-durable",
+      "receipt_ids": [],
+      "result": "unknown"
+    },
+    {
+      "condition_id": "B2-provider-stage-publish:provider-effects-accepted",
+      "receipt_ids": [],
+      "result": "unknown"
+    }
+  ],
+  "graph_id": "sha256:7a9300b930f297dee81ec2f6a1a1168baa0ea7b0c49f1874242fbb53a71d0600",
+  "ready_for_candidate": false,
+  "schema": "tgw-plan-status/v1"
+}

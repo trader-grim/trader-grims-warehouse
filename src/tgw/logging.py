@@ -49,6 +49,7 @@ DEFAULT_LEVEL     = 'INFO'
 
 # Environment variable to override log level without touching config
 _ENV_LEVEL = 'TGW_LOG_LEVEL'
+_ENV_LOG_ROOT = 'TGW_LOG_ROOT'
 
 # ---------------------------------------------------------------------------
 # Structured JSON formatter
@@ -130,7 +131,10 @@ def setup_logging(
 
     root_logger.setLevel(numeric_level)
 
-    log_root = Path(log_root)
+    if log_root == DEFAULT_LOG_ROOT and os.environ.get(_ENV_LOG_ROOT):
+        log_root = Path(os.environ[_ENV_LOG_ROOT])
+    else:
+        log_root = Path(log_root)
     log_root.mkdir(parents=True, exist_ok=True)
 
     filename = log_file or f'{component.replace(".", "_")}.log'

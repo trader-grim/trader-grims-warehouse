@@ -130,6 +130,9 @@ EBAY_UPLOAD = TreatmentContract(
     version="1",
     requires=(
         Requirement("item_has_photos", (FingerprintResult.TRUE,)),
+        Requirement("ai_identified", (FingerprintResult.TRUE,)),
+        Requirement("draft_generated", (FingerprintResult.TRUE,)),
+        Requirement("priced", (FingerprintResult.TRUE,)),
         Requirement("operator_authorized_upload", (FingerprintResult.TRUE,)),
     ),
     may_establish=("photos_uploaded",),

@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import logging
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
@@ -58,6 +59,25 @@ class PhotoResizeError(RuntimeError):
     processed (e.g. corrupt/unreadable image) — distinct from a plain
     upload failure so it doesn't get masked as an eBay-side rejection
     (packet #1398 spec item 3)."""
+
+
+class UploadDefinitivelyRejected(RuntimeError):
+    """EPS response proves that the upload was not accepted."""
+
+
+class UploadQuotaExceeded(UploadDefinitivelyRejected):
+    """EPS definitively rejected this call because its quota was exhausted."""
+
+
+@dataclass(frozen=True)
+class PreparedUpload:
+    """Exact immutable request material prepared before effect dispatch."""
+
+    photo_path: Path
+    image_bytes: bytes
+    mime: str
+    xml_payload: str
+    headers: Dict[str, str]
 
 
 def _prepare_upload_bytes(photo_path: Path) -> bytes:
@@ -144,6 +164,69 @@ def _build_upload_payload(picture_name: str) -> str:
     return f'<?xml version="1.0" encoding="utf-8"?>{body}'
 
 
+def prepare_upload(cfg: Dict[str, Any], photo_path: Path) -> PreparedUpload:
+    """Prepare the exact outbound bytes, then perform the no-write quota check."""
+    if not photo_path.exists():
+        raise FileNotFoundError(f'photo not found: {photo_path}')
+    token = load_token(cfg)
+    prepared = PreparedUpload(
+        photo_path=photo_path,
+        image_bytes=_prepare_upload_bytes(photo_path),
+        mime=_MIME.get(photo_path.suffix.lower(), 'image/jpeg'),
+        xml_payload=_build_upload_payload(photo_path.stem),
+        headers={
+            'X-EBAY-API-IAF-TOKEN': token,
+            'X-EBAY-API-COMPATIBILITY-LEVEL': _API_VERSION,
+            'X-EBAY-API-CALL-NAME': 'UploadSiteHostedPictures',
+            'X-EBAY-API-SITEID': _SITE_ID,
+        },
+    )
+    quota.precheck(cfg, 'ebay_eps')
+    return prepared
+
+
+def upload_prepared(cfg: Dict[str, Any], prepared: PreparedUpload) -> str:
+    """Dispatch a previously prepared request exactly once (no preflight)."""
+    photo_path = prepared.photo_path
+    files = {
+        'XML Payload': ('', prepared.xml_payload.encode('utf-8'),
+                        'text/xml;charset=utf-8'),
+        'image': (photo_path.name, prepared.image_bytes, prepared.mime),
+    }
+    resp = requests.post(
+        _TRADING_ENDPOINT, headers=prepared.headers, files=files, timeout=90,
+    )
+    quota.record(cfg, 'ebay_eps')
+    if resp.status_code == 429:
+        quota.record_429(cfg, 'ebay_eps', photo_path.name)
+    capture_response(cfg, 'eps', f'UploadSiteHostedPictures {photo_path.name}',
+                     None, resp.status_code, resp.content)
+    if resp.status_code == 429:
+        raise UploadQuotaExceeded('UploadSiteHostedPictures HTTP 429')
+    if resp.status_code in {400, 401, 403, 404, 405, 413, 415, 422}:
+        raise UploadDefinitivelyRejected(
+            f'UploadSiteHostedPictures HTTP {resp.status_code}')
+    resp.raise_for_status()
+
+    root = ET.fromstring(resp.text)
+    ack = root.findtext(f'{{{_NS}}}Ack') or ''
+    if ack not in ('Success', 'Warning'):
+        msgs = root.findall(f'.//{{{_NS}}}ShortMessage')
+        error_text = '; '.join(m.text or '' for m in msgs) or 'unknown error'
+        if 'usage limit' in error_text.lower():
+            quota.record_429(cfg, 'ebay_eps', error_text)
+            raise UploadQuotaExceeded(
+                f'UploadSiteHostedPictures failed ({ack}): {error_text}')
+        raise UploadDefinitivelyRejected(
+            f'UploadSiteHostedPictures failed ({ack}): {error_text}')
+
+    url = root.findtext(f'{{{_NS}}}SiteHostedPictureDetails/{{{_NS}}}FullURL') or ''
+    if not url:
+        raise RuntimeError('UploadSiteHostedPictures: no FullURL in response')
+    log.info('uploaded %s → %s', photo_path.name, url[:60])
+    return url
+
+
 def upload_photo(cfg: Dict[str, Any], photo_path: Path) -> str:
     """
     Upload *photo_path* to eBay EPS and return the eBay-hosted FullURL.
@@ -152,55 +235,4 @@ def upload_photo(cfg: Dict[str, Any], photo_path: Path) -> str:
     Raises RuntimeError if eBay rejects the upload.
     Raises requests.exceptions.* on network failures (caller may retry).
     """
-    if not photo_path.exists():
-        raise FileNotFoundError(f'photo not found: {photo_path}')
-
-    token = load_token(cfg)
-    mime = _MIME.get(photo_path.suffix.lower(), 'image/jpeg')
-
-    xml_payload = _build_upload_payload(photo_path.stem)
-
-    headers = {
-        'X-EBAY-API-IAF-TOKEN':          token,
-        'X-EBAY-API-COMPATIBILITY-LEVEL': _API_VERSION,
-        'X-EBAY-API-CALL-NAME':          'UploadSiteHostedPictures',
-        'X-EBAY-API-SITEID':             _SITE_ID,
-    }
-
-    # Pre-flight dimension check/downscale (todo #1398/PP-DEADLETTER-001):
-    # eBay's UploadSiteHostedPictures rejects images over 15000px on a side.
-    # Operates on an in-memory copy only — never touches the stored original.
-    image_bytes = _prepare_upload_bytes(photo_path)
-
-    # requests builds multipart/form-data automatically from the files dict
-    files = {
-        'XML Payload': ('', xml_payload.encode('utf-8'), 'text/xml;charset=utf-8'),
-        'image':       (photo_path.name, image_bytes, mime),
-    }
-
-    quota.precheck(cfg, 'ebay_eps')
-    resp = requests.post(_TRADING_ENDPOINT, headers=headers, files=files, timeout=90)
-    quota.record(cfg, 'ebay_eps')
-    if resp.status_code == 429:
-        quota.record_429(cfg, 'ebay_eps', photo_path.name)
-    capture_response(cfg, 'eps', f'UploadSiteHostedPictures {photo_path.name}',
-                     None, resp.status_code, resp.content)
-    resp.raise_for_status()
-
-    root = ET.fromstring(resp.text)
-    ack = root.findtext(f'{{{_NS}}}Ack') or ''
-
-    if ack not in ('Success', 'Warning'):
-        msgs = root.findall(f'.//{{{_NS}}}ShortMessage')
-        error_text = '; '.join(m.text or '' for m in msgs) or 'unknown error'
-        # EPS reports quota exhaustion as Ack=Failure, not HTTP 429
-        if 'usage limit' in error_text.lower():
-            quota.record_429(cfg, 'ebay_eps', error_text)
-        raise RuntimeError(f'UploadSiteHostedPictures failed ({ack}): {error_text}')
-
-    url = root.findtext(f'{{{_NS}}}SiteHostedPictureDetails/{{{_NS}}}FullURL') or ''
-    if not url:
-        raise RuntimeError('UploadSiteHostedPictures: no FullURL in response')
-
-    log.info('uploaded %s → %s', photo_path.name, url[:60])
-    return url
+    return upload_prepared(cfg, prepare_upload(cfg, photo_path))

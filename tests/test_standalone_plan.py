@@ -38,6 +38,7 @@ def _contract():
             "id": "S0-inventory", "title": "Inventory registered facts",
             "kind": "discovery", "requires": [], "owns": ["registry:test"],
             "effect_class": "read-only", "authority": "plan-approved",
+            "operator_surface": None,
             "treatment_id": "inventory-read", "treatment_version": "1",
             "inputs": {}, "outputs": [{"id": "manifest", "schema": "manifest/v1"}],
             "acceptance": [{
@@ -47,18 +48,26 @@ def _contract():
             }],
             "on_conflict": "reconciliation_required", "rollback": "none-read-only",
         }],
+        "operator_surfaces": [],
         "plan_acceptance": ["S0-inventory:inventory-valid"],
         "rollback": "retain immutable evidence",
     }
 
 
-def _text(*, version=1, status="approved", contract=None, scope_hash=None, narrative="Never run `touch /tmp/pwned`."):
-    registry = _registry()
+def _text(*, version=1, status="approved", contract=None, scope_hash=None, narrative="Never run `touch /tmp/pwned`.", registry=None):
+    registry = registry or _registry()
     contract = contract or _contract()
     metadata = {
         "tracks": ["server"], "dependencies": [],
     }
-    scope = canonical_hash({**metadata, "exclusions": contract["exclusions"], "work_units": contract["work_units"], "plan_acceptance": contract["plan_acceptance"], "rollback": contract["rollback"]})
+    scope = canonical_hash({
+        **metadata,
+        "exclusions": contract["exclusions"],
+        "work_units": contract["work_units"],
+        "operator_surfaces": contract["operator_surfaces"],
+        "plan_acceptance": contract["plan_acceptance"],
+        "rollback": contract["rollback"],
+    })
     return f"""---
 schema: tgw-plan/v1
 plan_id: PLAN-TEST-001
@@ -155,6 +164,30 @@ def test_compile_rejects_proposed_plan_and_noncanonical_json():
         compile_plan(parse_plan(_text(status="proposed")), _registry(), _graph()["repository"])
     with pytest.raises(PlanValidationError, match="canonical JSON"):
         canonical_hash({"not_finite": float("nan")})
+
+
+def test_operator_gated_work_requires_deployed_discoverable_current_surface():
+    contract = _contract()
+    unit = contract["work_units"][0]
+    unit["authority"] = "operator-explicit"
+    registry = deepcopy(_registry())
+    registry["enums"]["authority"].append("operator-explicit")
+    with pytest.raises(PlanValidationError, match="verified operator surface"):
+        validate_plan(parse_plan(_text(contract=contract, registry=registry)), registry)
+
+    unit["operator_surface"] = "approvals"
+    condition = "S0-inventory:inventory-valid"
+    contract["operator_surfaces"] = [{
+        "id": "approvals", "route": "/form/approvals", "audience": "operator",
+        "actions": ["approve", "hold"], "status_source": "canonical-receipts",
+        "required_for": ["S0-inventory"], "deployment_condition": condition,
+        "discoverability_condition": condition, "freshness_condition": condition,
+    }]
+    validate_plan(parse_plan(_text(contract=contract, registry=registry)), registry)
+
+    contract["operator_surfaces"][0]["freshness_condition"] = "missing:condition"
+    with pytest.raises(PlanValidationError, match="must reference plan acceptance"):
+        validate_plan(parse_plan(_text(contract=contract, registry=registry)), registry)
 
 
 def test_evidence_exact_bindings_staleness_and_completion_candidate():

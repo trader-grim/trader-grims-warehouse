@@ -1,5 +1,5 @@
 schema: tgw-environment/v1
-revision: sha256:fcd04e03289d10db2625050f5e8ba0143048f778512a3a77fce5870f877d4097
+revision: sha256:64e7ca2dff5d8fdae10d77f0300a038bfcb55e1b2022841c530a6089d3024db4
 generated_at: "2026-08-11T08:55:00-07:00"
 content:
   hosts:
@@ -31,9 +31,15 @@ content:
       branch: master
       dirty_policy: fail-unless-attributed
       sources: [server-inventory-f16ad5146842bc84]
+    plan-vault:
+      host_role: development
+      path: /opt/TGW/library/plans
+      branch: main
+      dirty_policy: fail-unless-attributed
+      sources: [standalone-plan-root-fb9fee3]
   plans:
-    canonical_root: /opt/TGW/tgw-lib/src/trader-grims-warehouse/docs/TGW-Plan-Vault
-    source: repository:application
+    canonical_root: /opt/TGW/library/plans
+    source: repository:plan-vault
   releases:
     production_root: /opt/TGW/releases
     production_selector: /opt/TGW/current

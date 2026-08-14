@@ -1,0 +1,164 @@
+{
+  "condition_hash": "sha256:986bf2fa440c9e73d43e601e42b1ec700b045a475b5db8dd7efc5b60be8f4565",
+  "graph_id": "sha256:3f581d5e065825703d6435de7f80af61a22b04884338198a59a7a3cd69f10306",
+  "plan_acceptance": [
+    "W1-codex-implementation:implementation-bound",
+    "W1-codex-implementation:independently-reviewed",
+    "W1-codex-implementation:controller-verified",
+    "W2-controlled-production-acceptance:production-sequence-accepted"
+  ],
+  "plan_id": "PP-WORKFLOW-001",
+  "plan_version": 1,
+  "registry_revision": "sha256:54ef67ebf562b33270a4c0ddcbd0dad058fa82d42070c19786608ce752f69451",
+  "repository": {
+    "canonical_root": "/opt/TGW/tgw-lib/actors/codex/source/trader-grims-warehouse",
+    "repository_id": "trader-grims-warehouse",
+    "source_commit": "a25c734e853165a807abbf8aa434c8922027b12e"
+  },
+  "required_conditions": [
+    "W1-codex-implementation:controller-verified",
+    "W1-codex-implementation:implementation-bound",
+    "W1-codex-implementation:independently-reviewed",
+    "W2-controlled-production-acceptance:production-sequence-accepted"
+  ],
+  "schema": "tgw-plan-compiled-graph/v1",
+  "scope_hash": "sha256:cb002fcf060d2d15e319bdc16ff0f64f6431ec563d015f23a047ddc56cfcad13",
+  "source_hash": "sha256:282a7a01ff70c8aac6f75b9d37f4b754a828b4dc06ce8ba1b8fe2c54cdfdf473",
+  "work_units": [
+    {
+      "acceptance": [
+        {
+          "assertion": "exact_plan_scope_source_generation_subagent_findings_tests_and_diff_are_bound",
+          "condition_id": "W1-codex-implementation:implementation-bound",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "implementation-bound",
+          "verifier": "tgw.coding.implementation-receipt/v1",
+          "verifier_version": "1"
+        },
+        {
+          "assertion": "exact_implementation_is_independently_reviewed_against_this_frozen_plan",
+          "condition_id": "W1-codex-implementation:independently-reviewed",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "independently-reviewed",
+          "verifier": "tgw.coding.claude-review/v1",
+          "verifier_version": "1"
+        },
+        {
+          "assertion": "focused_and_regression_checks_pass_against_the_reviewed_generation",
+          "condition_id": "W1-codex-implementation:controller-verified",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "controller-verified",
+          "verifier": "tgw.coding.controller-verification/v1",
+          "verifier_version": "1"
+        }
+      ],
+      "authority": "plan-approved",
+      "effect_class": "local-reversible",
+      "id": "W1-codex-implementation",
+      "inputs": {
+        "admitted_first_gaps": [
+          "ebay_upload_requires_priced_before_it_is_eligible",
+          "every_EPS_write_has_a_durable_per_photo_content_bound_provider_effect",
+          "post_dispatch_uncertainty_gates_reconciliation_and_forbids_resend",
+          "partial_progress_survives_crash_without_repeating_accepted_uploads"
+        ],
+        "controlled_skus": [
+          "tgw202507261628068",
+          "tgw202604300922410"
+        ],
+        "decomposition": {
+          "coordinator": "codex",
+          "required": true,
+          "rule": "coordinator_owns_edits_and_integrates_subagent_findings",
+          "subagents": [
+            {
+              "effect": "read-only",
+              "role": "topology-and-evidence-auditor"
+            },
+            {
+              "effect": "read-only",
+              "role": "retry-and-reconciliation-auditor"
+            },
+            {
+              "effect": "read-only",
+              "role": "focused-test-reviewer"
+            }
+          ]
+        },
+        "mandatory_boundaries": [
+          "one_shot_evaluation_after_durable_evidence_change",
+          "unchanged_failed_attempt_does_not_redispatch",
+          "waits_use_durable_not_before_without_worker_sleep",
+          "ambiguous_provider_effect_never_blind_retries",
+          "stage_and_publish_require_exact_operator_authority",
+          "receipts_bind_sku_generation_graph_condition_treatment_and_provider_effect"
+        ],
+        "required_outcome": "identify_draft_price_upload_stage_publish_converges_from_verified_evidence",
+        "source_priority": "live_source_then_tests_then_current_docs"
+      },
+      "kind": "migration",
+      "on_conflict": "reconciliation_required",
+      "outputs": [
+        {
+          "id": "implementation-receipt",
+          "schema": "receipt/tgw-workflow/v1"
+        },
+        {
+          "id": "implementation-diff",
+          "schema": "tgw-source-diff/v1"
+        }
+      ],
+      "owns": [
+        "source:listing-workflow-backend"
+      ],
+      "requires": [],
+      "rollback": "revert only the candidate source diff and retain all receipts",
+      "title": "Codex closes the highest-value backend workflow gaps using bounded subagents",
+      "treatment_id": "codex-implement",
+      "treatment_version": "1"
+    },
+    {
+      "acceptance": [
+        {
+          "assertion": "exact_current_authority_effect_reconciliation_receipts_and_dave_acceptance_are_present",
+          "condition_id": "W2-controlled-production-acceptance:production-sequence-accepted",
+          "evidence_schema": "tgw-plan-evidence/v1",
+          "freshness": "same-plan-version",
+          "id": "production-sequence-accepted",
+          "verifier": "tgw.listing.provider-acceptance/v1",
+          "verifier_version": "1"
+        }
+      ],
+      "authority": "operator-explicit",
+      "effect_class": "provider-write",
+      "id": "W2-controlled-production-acceptance",
+      "inputs": {
+        "checklist": "reference/runbooks/pp-workflow-001-acceptance.md",
+        "identify_candidate": "tgw202507261628068",
+        "provider_identity": "runtime-authoritative",
+        "stage_candidate": "tgw202604300922410"
+      },
+      "kind": "operator-acceptance",
+      "on_conflict": "reconciliation_required",
+      "outputs": [
+        {
+          "id": "production-acceptance",
+          "schema": "tgw-listing-provider-acceptance/v1"
+        }
+      ],
+      "owns": [
+        "provider:ebay-listing"
+      ],
+      "requires": [
+        "W1-codex-implementation"
+      ],
+      "rollback": "stop producer preserve effects reconcile ambiguity and select prior accepted release under operator authority",
+      "title": "Reconcile and accept one controlled end-to-end production sequence",
+      "treatment_id": "listing-provider-acceptance",
+      "treatment_version": "1"
+    }
+  ]
+}

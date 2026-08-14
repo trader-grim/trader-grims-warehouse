@@ -1,0 +1,30 @@
+{
+  "enums": {
+    "authority": ["plan-approved", "operator-explicit"],
+    "effect_class": ["read-only", "local-reversible", "provider-read", "provider-write"],
+    "kind": ["discovery", "migration", "verification", "operator-acceptance"]
+  },
+  "schema": "tgw-plan-registry/v1",
+  "treatments": {
+    "claude-review": {"version": "1"},
+    "codex-implement": {"version": "1"},
+    "controller-verify": {"version": "1"},
+    "listing-backend-reconcile": {"version": "1"},
+    "listing-backend-commission": {"version": "1"},
+    "listing-provider-acceptance": {"version": "1"},
+    "listing-ui-contract": {"version": "1"},
+    "listing-ui-recovery": {"version": "1"},
+    "listing-ui-acceptance": {"version": "1"}
+  },
+  "verifiers": {
+    "tgw.coding.claude-review/v1": {"version": "1"},
+    "tgw.coding.controller-verification/v1": {"version": "1"},
+    "tgw.coding.implementation-receipt/v1": {"version": "1"},
+    "tgw.listing.backend-reconciliation/v1": {"version": "1"},
+    "tgw.listing.backend-sequence/v1": {"version": "1"},
+    "tgw.listing.provider-acceptance/v1": {"version": "1"},
+    "tgw.listing.ui-state-contract/v1": {"version": "1"},
+    "tgw.listing.ui-recovery/v1": {"version": "1"},
+    "tgw.listing.ui-operator-acceptance/v1": {"version": "1"}
+  }
+}

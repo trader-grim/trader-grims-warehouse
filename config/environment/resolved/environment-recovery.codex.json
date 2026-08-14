@@ -12,7 +12,7 @@
     "tests"
   ],
   "authority_files": ["AGENTS.md"],
-  "context_id": "sha256:5100ec2e58e7991f85d2bd732ddd07f7e5699de9424b52b9ee71a58f39e1e2de",
+  "context_id": "sha256:1edb869acc5e3ebc0c054935d51af8fef17ff89c35a4ab7ed1238543a87a29cf",
   "effect_class": "local-reversible",
   "excluded_authority_files": ["CLAUDE.md"],
   "historical_context_grants_authority": false,
@@ -29,7 +29,7 @@
     "plan_version": 1,
     "scope_hash": "sha256:d8b20e93faa5c9e6893fbe029c85b21d1e8f37c0b61253be8000b2e3c0dca82e"
   },
-  "registry_revision": "sha256:fcd04e03289d10db2625050f5e8ba0143048f778512a3a77fce5870f877d4097",
+  "registry_revision": "sha256:64e7ca2dff5d8fdae10d77f0300a038bfcb55e1b2022841c530a6089d3024db4",
   "repository": {
     "base_commit": "132966909be053b1bbfeddbf7bffd5ce201d3e6f",
     "branch": "recovery/pp-workflow-marketplace",
@@ -39,7 +39,7 @@
     "repository_id": "application"
   },
   "schema": "tgw-resolved-context/v1",
-  "task_hash": "sha256:6ffbb77f1dd57413f3cc92a5425f1820935a53664254487e78fb5461eaf6105b",
+  "task_hash": "sha256:a6d175a93b1fed64d4ad26b292fb20d86a479edee6d7539650b32abdc62e1445",
   "task_id": "environment-recovery-20260811",
   "unknowns": [
     "canonical application branch migration target",

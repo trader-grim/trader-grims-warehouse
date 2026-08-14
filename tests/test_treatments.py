@@ -350,7 +350,7 @@ def test_coding_pipeline_evaluate_with_all_treatments():
 
 def test_tgw_pipeline_evaluate_with_all_treatments():
     """TGW pipeline: photos → identify → draft → price → upload → stage → publish."""
-    # Phase 1: upload is eligible only with exact operator authority.
+    # Phase 1: upload is still blocked until pricing is complete.
     g1 = _evaluate(
         (
             _assertion("item_has_photos", FingerprintResult.TRUE),
@@ -359,7 +359,7 @@ def test_tgw_pipeline_evaluate_with_all_treatments():
         TGW_TREATMENTS,
     )
     eligible = {e.treatment_id for e in g1.eligible_treatments}
-    assert eligible == {"ai-identify", "ebay-upload"}
+    assert eligible == {"ai-identify"}
 
     # Phase 2: ai_identified — ebay-draft eligible.
     g2 = _evaluate(
@@ -372,7 +372,20 @@ def test_tgw_pipeline_evaluate_with_all_treatments():
     )
     eligible = {e.treatment_id for e in g2.eligible_treatments}
     assert "ebay-draft" in eligible
-    assert "ebay-upload" in eligible
+    assert "ebay-upload" not in eligible
+
+    # Upload becomes eligible only after the priced assertion and authority.
+    g2_priced = _evaluate(
+        (
+            _assertion("item_has_photos", FingerprintResult.TRUE),
+            _assertion("ai_identified", FingerprintResult.TRUE),
+            _assertion("draft_generated", FingerprintResult.TRUE),
+            _assertion("priced", FingerprintResult.TRUE),
+            _assertion("operator_authorized_upload", FingerprintResult.TRUE),
+        ),
+        TGW_TREATMENTS,
+    )
+    assert "ebay-upload" in {e.treatment_id for e in g2_priced.eligible_treatments}
 
     # Phase 3: draft + priced + photos_uploaded — ebay-stage eligible.
     g3 = _evaluate(

@@ -205,6 +205,71 @@ def test_attempt_query_uses_entity_identity_with_legacy_sku_fallback(monkeypatch
     assert rows[0]["retry_allowed"] is False
 
 
+def test_reconciliation_query_exposes_only_allowlisted_ledger_columns(monkeypatch):
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.fetchall.side_effect = [
+        [{"effect_id": "effect-1", "state": "succeeded"}],
+        [{"authority_id": "authority-1", "provider_identity": "ebay:account"}],
+        [{"observation_id": "observation-1", "outcome": "corroborated"}],
+    ]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value = cursor
+    monkeypatch.setitem(http_server._cfg, "postgres_dsn", "test-dsn")
+    monkeypatch.setattr(http_server.psycopg2, "connect", lambda *args, **kwargs: connection)
+
+    rows = http_server._workflow_reconciliation_rows("SKU-1")
+
+    assert rows["effects"][0]["effect_id"] == "effect-1"
+    assert rows["authorities"][0]["authority_id"] == "authority-1"
+    assert rows["observations"][0]["observation_id"] == "observation-1"
+    statements = "\n".join(call.args[0] for call in cursor.execute.call_args_list)
+    assert "request_json" not in statements
+    assert "authority_json" not in statements
+    assert "result_json" not in statements
+    assert all(call.args[1] == ("SKU-1", 100) for call in cursor.execute.call_args_list)
+
+
+def test_reconciliation_api_binds_provider_identity_and_canonical_markers(
+    tmp_path, monkeypatch,
+):
+    path = _item(tmp_path, condition="Used")
+    item = json.loads(path.read_text(encoding="utf-8"))
+    item["ebay_offer"] = {
+        "provider_effect_id": "stage-effect", "offer_id": "offer-1",
+        "stage_content_identity": "content-1",
+    }
+    item["ebay_listing"] = {
+        "provider_effect_id": "publish-effect", "listing_id": "listing-1",
+        "offer_id": "offer-1", "published_at": "2026-08-11T00:00:00Z",
+    }
+    path.write_text(json.dumps(item), encoding="utf-8")
+    monkeypatch.setitem(http_server._cfg, "itemdata_root", path.parents[1])
+    monkeypatch.setitem(
+        http_server._cfg, "workflow_migration",
+        {"ebay_provider_identity": "ebay:account"},
+    )
+    monkeypatch.setattr(
+        http_server, "_workflow_reconciliation_rows",
+        lambda sku: {"effects": [], "authorities": [], "observations": []},
+    )
+
+    response = http_server.item_workflow_reconciliation("SKU-1")
+
+    assert response["schema"] == "workflow-reconciliation/v1"
+    assert response["provider_identity"] == "ebay:account"
+    assert response["canonical_markers"]["stage"] == {
+        "provider_effect_id": "stage-effect", "offer_id": "offer-1",
+        "stage_content_identity": "content-1",
+    }
+    assert response["canonical_markers"]["publish"]["listing_id"] == "listing-1"
+    assert set(response) == {
+        "ok", "schema", "entity_id", "provider_identity", "canonical_markers",
+        "effects", "authorities", "observations",
+    }
+
+
 def test_item_detail_renders_clear_workflow_action_card(tmp_path):
     card = build_item_action_card(_item(tmp_path))
     html = http_server._render_item_detail_html(
