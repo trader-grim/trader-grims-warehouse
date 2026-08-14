@@ -33,12 +33,12 @@ def _plan(tmp_path: Path) -> tuple[Path, str]:
 def test_standalone_plan_default_and_exact_commit(tmp_path: Path):
     assert plan_root({}) == DEFAULT_PLAN_ROOT
     root, commit = _plan(tmp_path)
-    assert current_plan_commit(lambda: {"plan_vault_path": root}) == commit
+    assert current_plan_commit(lambda: {"standalone_plan_root": root}) == commit
 
     (root / "README.md").write_text("later Plan state\n")
     subprocess.run(["git", "-C", str(root), "commit", "-qam", "later"], check=True)
     assert current_plan_commit(lambda: {
-        "plan_vault_path": root, "plan_approved_commit": commit,
+        "standalone_plan_root": root, "plan_approved_commit": commit,
     }) == commit
 
 
@@ -48,7 +48,7 @@ def test_current_plan_commit_uses_configured_git_executable(tmp_path: Path):
     wrapper.write_text("#!/bin/sh\nexec git \"$@\"\n")
     wrapper.chmod(0o755)
     assert current_plan_commit(lambda: {
-        "plan_vault_path": root,
+        "standalone_plan_root": root,
         "plan_approved_commit": commit,
         "plan_git_path": wrapper,
     }) == commit
@@ -58,7 +58,7 @@ def test_solution_loader_fails_closed_and_checks_identity(tmp_path: Path):
     root, _ = _plan(tmp_path)
 
     def provider():
-        return {"plan_vault_path": root}
+        return {"standalone_plan_root": root}
     with pytest.raises(ValueError, match="unavailable"):
         load_solution(provider, "solution:sha256:missing")
     with pytest.raises(ValueError, match="invalid"):

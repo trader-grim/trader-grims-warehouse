@@ -86,6 +86,7 @@ def load_config(path: Path) -> Dict[str, Any]:
     archive_root = p("archive_root", "/opt/TGW/data/ItemArchive")
     incoming_path = p("incoming_path", "/opt/TGW/incoming")
     plan_vault_path = p("plan_vault_path", "/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault")
+    standalone_plan_root = p("standalone_plan_root", "/opt/TGW/library/plans")
     plan_approved_commit = raw.get("plan_approved_commit")
     plan_git_path = p("plan_git_path", "git")
 
@@ -218,6 +219,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         "incoming_path": incoming_path,
         "newitems_path": incoming_path / "newitems",
         "plan_vault_path": plan_vault_path,
+        "standalone_plan_root": standalone_plan_root,
         "plan_approved_commit": plan_approved_commit,
         "plan_git_path": plan_git_path,
         "plan_inbox_path": plan_vault_path / "inbox",

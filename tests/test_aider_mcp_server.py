@@ -373,7 +373,7 @@ def test_plan_runtime_binding_honors_explicit_config(tmp_path, monkeypatch):
     config_path = tmp_path / 'config.json'
     config_path.write_text(json.dumps({
         'secrets_root': str(tmp_path / 'secrets'),
-        'plan_vault_path': '/srv/tgw/plans',
+        'standalone_plan_root': '~/plans',
         'plan_git_path': '/run/current-system/sw/bin/git',
     }))
     monkeypatch.setenv('TGW_CONFIG', str(config_path))
@@ -382,7 +382,7 @@ def test_plan_runtime_binding_honors_explicit_config(tmp_path, monkeypatch):
 
     root, git_path = ams._plan_runtime_binding()
 
-    assert root == Path('/srv/tgw/plans')
+    assert root == Path('~/plans').expanduser()
     assert git_path == '/run/current-system/sw/bin/git'
 
 

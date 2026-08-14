@@ -11644,7 +11644,7 @@ _DOCS_EXTRA_CSS = (
 
 def _vault_root() -> Path:
     """Return the standalone Plan root; embedded Plan copies are never authority."""
-    p = _cfg.get("plan_vault_path")
+    p = _cfg.get("standalone_plan_root")
     if p:
         return Path(p)
     return Path("/opt/TGW/library/plans")

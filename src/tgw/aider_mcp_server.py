@@ -57,18 +57,16 @@ _WORKTREES_ROOT = Path('/opt/TGW/var/worktrees')
 
 def _plan_runtime_binding() -> tuple[Path, str]:
     """Load the same standalone Plan root/Git binding as the primary MCP server."""
-    from tgw.config import load_config, load_json_strict
+    from tgw.config import load_config
 
     config_path = Path(
         os.environ.get('TGW_CONFIG', '/opt/TGW/config/tgw-api-config.json')
     )
     cfg = load_config(config_path)
-    raw = load_json_strict(config_path) if config_path.exists() else {}
-    configured_root = raw.get('plan_vault_path')
     plan_root = Path(
         os.environ.get(
             'TGW_STANDALONE_PLAN_VAULT',
-            str(configured_root or '/opt/TGW/library/plans'),
+            str(cfg.get('standalone_plan_root') or '/opt/TGW/library/plans'),
         )
     )
     git_path = os.environ.get(

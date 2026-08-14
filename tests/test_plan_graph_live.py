@@ -53,7 +53,7 @@ def test_mcp_plan_graph_uses_configured_standalone_root(tmp_path, monkeypatch):
     from tgw import mcp_server
 
     root = _plan_repo(tmp_path)
-    monkeypatch.setattr(mcp_server, '_cfg', {'plan_vault_path': root})
+    monkeypatch.setattr(mcp_server, '_cfg', {'standalone_plan_root': root})
     result = json.loads(mcp_server.tgw_get_plan_graph('PP-ALPHA-001'))
     assert result['ok'] is True
     assert result['plan_root'] == str(root)

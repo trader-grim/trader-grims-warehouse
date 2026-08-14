@@ -653,7 +653,7 @@ def tgw_get_plan_graph(
     from tgw.plan_graph import live_plan_graph
 
     cfg = _get_cfg()
-    root = Path(cfg.get('plan_vault_path', '/opt/TGW/library/plans'))
+    root = Path(cfg.get('standalone_plan_root') or '/opt/TGW/library/plans')
     try:
         return json.dumps(live_plan_graph(
             root, task, receiver=receiver, operation=operation, limit=limit,

@@ -17,7 +17,7 @@ _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
 def plan_root(config: Mapping[str, Any]) -> Path:
-    return Path(config.get("plan_vault_path") or DEFAULT_PLAN_ROOT).resolve()
+    return Path(config.get("standalone_plan_root") or DEFAULT_PLAN_ROOT).resolve()
 
 
 def current_plan_commit(config_provider: Callable[[], Mapping[str, Any]]) -> str:
