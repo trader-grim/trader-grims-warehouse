@@ -48,6 +48,7 @@ _GIT = re.compile(r"^[0-9a-f]{40}$")
 _OPERATION = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 SOURCE_DESCRIPTOR_SCHEMA = "tgw-reviewed-observation-source/v1"
 _SOURCE_AUTHORITY_SEAL = object()
+_HOST_STATE_AUTHORITY_SEAL = object()
 
 
 class ObservationError(RuntimeError):
@@ -161,6 +162,94 @@ def load_source_authority(path: Path, expected_sha256: str) -> MountedSourceAuth
     return MountedSourceAuthority(path, expected_sha256, _token=_SOURCE_AUTHORITY_SEAL)
 
 
+class MountedHostStateDependency:
+    """Immutable held authority for the admitted A3O02 dependency artifact."""
+
+    __slots__ = ("_fd", "_identity", "_path", "_raw", "_sealed", "_sha256")
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        raise TypeError("MountedHostStateDependency is sealed")
+
+    def __init__(self, path: Path, expected_sha256: str, *, _token: object) -> None:
+        if _token is not _HOST_STATE_AUTHORITY_SEAL or not _SHA.fullmatch(expected_sha256):
+            raise ObservationError("host-state authority construction is not admitted")
+        absolute = path.absolute()
+        evidence_root = Path("/opt/TGW/evidence/codex/host-state-observation-v1")
+        if (
+            absolute.name != "dependency.json"
+            or absolute.parent.parent != evidence_root
+            or not re.fullmatch(r"[0-9a-f]{64}", absolute.parent.name)
+        ):
+            raise ObservationError("host-state authority locator is outside the admitted evidence family")
+        for ancestor in absolute.parents:
+            ancestor_st = os.lstat(ancestor)
+            if (
+                not stat.S_ISDIR(ancestor_st.st_mode)
+                or stat.S_ISLNK(ancestor_st.st_mode)
+                or ancestor_st.st_uid != 0
+                or stat.S_IMODE(ancestor_st.st_mode) & 0o022
+            ):
+                raise ObservationError("host-state authority root chain is not protected")
+            if ancestor == Path("/"):
+                break
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            st = os.fstat(fd)
+            raw = os.pread(fd, st.st_size + 1, 0)
+            dependency = json.loads(raw)
+            if (
+                not stat.S_ISREG(st.st_mode)
+                or st.st_uid != 0
+                or stat.S_IMODE(st.st_mode) not in {0o400, 0o444}
+                or st.st_nlink != 1
+                or len(raw) != st.st_size
+                or digest(raw) != expected_sha256
+                or raw != canonical(dependency)
+            ):
+                raise ObservationError("host-state authority file is not root-protected, canonical, and exact")
+        except Exception:
+            os.close(fd)
+            raise
+        object.__setattr__(self, "_fd", fd)
+        object.__setattr__(self, "_identity", _inode_identity(st))
+        object.__setattr__(self, "_path", absolute)
+        object.__setattr__(self, "_raw", raw)
+        object.__setattr__(self, "_sha256", expected_sha256)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("MountedHostStateDependency is immutable")
+        object.__setattr__(self, name, value)
+
+    @property
+    def dependency(self) -> Mapping[str, Any]:
+        return json.loads(self._raw)
+
+    @property
+    def sha256(self) -> str:
+        return self._sha256
+
+    def postcheck(self) -> None:
+        held = os.fstat(self._fd)
+        named = os.stat(self._path, follow_symlinks=False)
+        held_raw = os.pread(self._fd, held.st_size + 1, 0)
+        if (
+            _inode_identity(held) != self._identity
+            or _inode_identity(named) != self._identity
+            or held_raw != self._raw
+            or digest(held_raw) != self._sha256
+        ):
+            raise ObservationError("host-state authority changed while held")
+
+    def close(self) -> None:
+        os.close(self._fd)
+
+
+def load_host_state_dependency(path: Path, expected_sha256: str) -> MountedHostStateDependency:
+    return MountedHostStateDependency(path, expected_sha256, _token=_HOST_STATE_AUTHORITY_SEAL)
+
+
 def _fixture_source_descriptor() -> dict[str, Any]:
     """Non-production descriptor used only by local tests; production mounts one."""
     value = {
@@ -184,6 +273,7 @@ def validate_request(value: Any, *, now: datetime | None = None) -> dict[str, An
         "plan",
         "source",
         "host_state_dependency",
+        "host_state_dependency_sha256",
         "target",
         "transport",
         "bounds",
@@ -248,6 +338,8 @@ def validate_request(value: Any, *, now: datetime | None = None) -> dict[str, An
         or host_receipt["tools"] != tools
     ):
         raise ObservationError("host state receipt is not self-hashed and exact")
+    if request["host_state_dependency_sha256"] != digest(canonical(dependency)):
+        raise ObservationError("host state dependency is not bound to exact artifact bytes")
     if request["target"] != {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "master", "system": "x86_64-linux", "user": "codex", "port": 22}:
         raise ObservationError("target is not exact")
     transport_fields = {
@@ -324,27 +416,29 @@ def make_request(*, operation_id: str, transport: Mapping[str, str], source: Map
         "tools": {name: transport[name] for name in ("python_sha256", "git_sha256", "ssh_sha256")},
     }
     host_receipt["receipt_sha256"] = digest(canonical(host_receipt))
+    dependency = {
+        "schema": "tgw-prod-a3-host-state-observation-dependency/v1",
+        "status": "SATISFIED",
+        "descriptor_sha256": "sha256:" + "7" * 64,
+        "receipt_sha256": host_receipt["receipt_sha256"],
+        "observed_at": now.isoformat(),
+        "current_cas": "/nix/store/00000000000000000000000000000000-test-system",
+        "profile_cas": "/nix/store/00000000000000000000000000000000-test-system",
+        "repository": host_receipt["repository"],
+        "tools": {
+            "python_sha256": transport["python_sha256"],
+            "git_sha256": transport["git_sha256"],
+            "ssh_sha256": transport["ssh_sha256"],
+        },
+        "receipt": host_receipt,
+    }
     value = {
         "schema": REQUEST_SCHEMA,
         "operation_id": operation_id,
         "plan": {"commit": PLAN_COMMIT, "solution_sha256": PLAN_SOLUTION, "closure_sha256": PLAN_CLOSURE},
         "source": source,
-        "host_state_dependency": {
-            "schema": "tgw-prod-a3-host-state-observation-dependency/v1",
-            "status": "SATISFIED",
-            "descriptor_sha256": "sha256:" + "7" * 64,
-            "receipt_sha256": host_receipt["receipt_sha256"],
-            "observed_at": now.isoformat(),
-            "current_cas": "/nix/store/00000000000000000000000000000000-test-system",
-            "profile_cas": "/nix/store/00000000000000000000000000000000-test-system",
-            "repository": host_receipt["repository"],
-            "tools": {
-                "python_sha256": transport["python_sha256"],
-                "git_sha256": transport["git_sha256"],
-                "ssh_sha256": transport["ssh_sha256"],
-            },
-            "receipt": host_receipt,
-        },
+        "host_state_dependency": dependency,
+        "host_state_dependency_sha256": digest(canonical(dependency)),
         "target": {"host": "tgw-prod", "repository": "/home/db/tgw-flake", "branch": "master", "system": "x86_64-linux", "user": "codex", "port": 22},
         "transport": transport,
         "bounds": {
@@ -912,6 +1006,8 @@ class SshObservationProvider:
     mounted_source: Mapping[str, Any] | MountedSourceAuthority | None = None
     ssh_keygen_path: Path | None = None
     source_authority_sha256: str | None = None
+    mounted_host_state: MountedHostStateDependency | None = None
+    host_state_authority_sha256: str | None = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         raise TypeError("SshObservationProvider is sealed")
@@ -1062,8 +1158,13 @@ class SshObservationProvider:
             or type(self.mounted_source) is not MountedSourceAuthority
             or self.source_authority_sha256 != self.mounted_source.sha256
             or self.mounted_source.descriptor != validated["source"]
+            or type(self.mounted_host_state) is not MountedHostStateDependency
+            or self.host_state_authority_sha256 != validated["host_state_dependency_sha256"]
+            or self.mounted_host_state.sha256 != validated["host_state_dependency_sha256"]
+            or self.mounted_host_state.dependency != validated["host_state_dependency"]
         ):
             raise ObservationHold("sealed provider request or source authority differs")
+        self.mounted_host_state.postcheck()
         opened: list[int] = []
         try:
             ssh_fd, _ = _held_regular(self.ssh_path, validated["transport"]["ssh_sha256"], executable=True)
@@ -1150,7 +1251,10 @@ class SshObservationProvider:
             if used:
                 raise ObservationError("sealed observation launch was invoked more than once")
             used = True
-            return self.observe(validated, on_dispatch=lambda: None, _held=held)
+            try:
+                return self.observe(validated, on_dispatch=lambda: None, _held=held)
+            finally:
+                self.mounted_host_state.postcheck()
 
         def close() -> None:
             nonlocal used
@@ -1158,6 +1262,7 @@ class SshObservationProvider:
                 used = True
                 for fd in (helper_fd, identity_fd, hosts_fd, keygen_fd, ssh_fd):
                     os.close(fd)
+                self.mounted_host_state.postcheck()
 
         launch.close = close  # type: ignore[attr-defined]
         return launch

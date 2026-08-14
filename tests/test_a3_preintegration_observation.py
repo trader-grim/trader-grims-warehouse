@@ -73,6 +73,7 @@ def _bind_request_to_repo(request: dict, repo: Path) -> dict:
     dependency = request["host_state_dependency"]
     dependency["repository"] = repository
     dependency["receipt_sha256"] = compact["receipt_sha256"]
+    request["host_state_dependency_sha256"] = digest(canonical(dependency))
     request["repo_expectation"] = {
         "uid": repository["uid"],
         "gid": repository["gid"],
@@ -152,6 +153,15 @@ def test_request_binds_fresh_host_repository_master_authority() -> None:
     changed["host_state_dependency"]["repository"]["branch"] = "main"
     changed["request_sha256"] = digest(canonical({key: value for key, value in changed.items() if key != "request_sha256"}))
     with pytest.raises(ObservationError, match="host repository authority is invalid"):
+        validate_request(changed)
+
+
+def test_request_binds_host_state_dependency_artifact_bytes() -> None:
+    request = make_request(operation_id="host-state-artifact", transport=_transport())
+    changed = deepcopy(request)
+    changed["host_state_dependency"]["descriptor_sha256"] = "sha256:" + "9" * 64
+    changed["request_sha256"] = digest(canonical({key: value for key, value in changed.items() if key != "request_sha256"}))
+    with pytest.raises(ObservationError, match="not bound to exact artifact bytes"):
         validate_request(changed)
 
 
