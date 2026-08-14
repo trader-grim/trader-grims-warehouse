@@ -1077,7 +1077,7 @@ class SshObservationProvider:
         sealed_identity = _sealed("a3-observation-identity", identity)
         try:
             bootstrap = "ns={'__name__':'tgw_remote_helper'};exec(compile(" + repr(helper.decode()) + ",'a3-helper','exec'),ns);raise SystemExit(ns['helper_main']())"
-            remote = shlex.join([REMOTE_SUDO, "-n", "--", self.python_path, "-I", "-c", bootstrap])
+            remote = shlex.join([REMOTE_SUDO, "-n", "-u", "db", "--", self.python_path, "-I", "-c", bootstrap])
             argv = [
                 f"/proc/{os.getpid()}/fd/{ssh_fd}",
                 "-F",
@@ -1089,6 +1089,7 @@ class SshObservationProvider:
                 "-oIdentityAgent=none",
                 "-oClearAllForwardings=yes",
                 "-oStrictHostKeyChecking=yes",
+                "-oGlobalKnownHostsFile=/dev/null",
                 f"-oUserKnownHostsFile=/proc/{os.getpid()}/fd/{sealed_hosts}",
                 f"-oIdentityFile=/proc/{os.getpid()}/fd/{sealed_identity}",
                 "-oPasswordAuthentication=no",
