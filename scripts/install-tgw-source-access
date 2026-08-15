@@ -45,6 +45,10 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0644 \
     "$SOURCE_ROOT/config/environment/ssh/github-tgw-app.conf" \
     /etc/ssh/ssh_config.d/10-tgw-github-app.conf
+install -d -o root -g root -m 0755 /usr/local/libexec
+install -o root -g root -m 0755 \
+    "$SOURCE_ROOT/scripts/tgw-github-agent-load" \
+    /usr/local/libexec/tgw-github-agent-load
 
 if [ ! -e "$PRIVATE_KEY" ] && [ ! -e "$PUBLIC_KEY" ]; then
     umask 077

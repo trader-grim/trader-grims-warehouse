@@ -10,9 +10,7 @@ SupplementaryGroups=tgw-coders
 RuntimeDirectory=tgw-github-agent
 RuntimeDirectoryMode=0755
 ExecStart=/usr/bin/ssh-agent -D -a /run/tgw-github-agent/agent.sock
-ExecStartPost=/usr/bin/chgrp tgw-coders /run/tgw-github-agent/agent.sock
-ExecStartPost=/usr/bin/chmod 0660 /run/tgw-github-agent/agent.sock
-ExecStartPost=/usr/bin/env SSH_AUTH_SOCK=/run/tgw-github-agent/agent.sock /usr/bin/ssh-add /etc/tgw/credentials/github/trader-grims-warehouse/id_ed25519
+ExecStartPost=/usr/local/libexec/tgw-github-agent-load
 Restart=on-failure
 RestartSec=2s
 NoNewPrivileges=yes
