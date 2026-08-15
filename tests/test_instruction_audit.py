@@ -15,7 +15,8 @@ def test_real_instruction_inventory_is_hashed_classified_and_inert():
     result = audit_instructions(ROOT, load_registry(REGISTRY), observed_at="2026-08-11T09:05:00-07:00")
     paths = {item["path"] for item in result["sources"]}
     assert {"AGENTS.md", "CLAUDE.md", ".claude/agents/nix-flake-maintainer.md"} <= paths
-    assert "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md" in paths
+    assert not any(path.startswith("docs/TGW-Plan-Vault/") for path in paths)
+    assert "docs/runbooks/three-repository-boundary-v3-20260815.md" in paths
     assert all(item["sha256"].startswith("sha256:") for item in result["sources"])
     assert result["commands_executed_from_sources"] is False
     assert result["source_files_modified"] is False
@@ -27,14 +28,12 @@ def test_retired_reference_and_deploy_command_are_line_bound(tmp_path):
     registry = load_registry(REGISTRY)
     (tmp_path / ".claude/agents").mkdir(parents=True)
     (tmp_path / "config/environment/actors").mkdir(parents=True)
-    (tmp_path / "docs/TGW-Plan-Vault/plan/pp").mkdir(parents=True)
-    (tmp_path / "docs/TGW-Plan-Vault/reference/runbooks").mkdir(parents=True)
+    (tmp_path / "docs/runbooks").mkdir(parents=True)
     (tmp_path / "AGENTS.md").write_text("shared\n", encoding="utf-8")
     (tmp_path / "CLAUDE.md").write_text("Use a1131\n", encoding="utf-8")
     (tmp_path / ".claude/agents/nix-flake-maintainer.md").write_text("old\n", encoding="utf-8")
     (tmp_path / "config/environment/actors/tgw-steward.json").write_text("{}\n", encoding="utf-8")
-    (tmp_path / "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md").write_text("history is not authority\n", encoding="utf-8")
-    (tmp_path / "docs/TGW-Plan-Vault/reference/runbooks/deploy.md").write_text("nixos-rebuild switch\n", encoding="utf-8")
+    (tmp_path / "docs/runbooks/deploy.md").write_text("nixos-rebuild switch\n", encoding="utf-8")
     result = audit_instructions(tmp_path, registry, observed_at="2026-08-11T09:05:00-07:00")
     codes = {item["code"] for item in result["findings"]}
     assert {"retired-host-reference", "direct-mutable-deploy-command"} <= codes
@@ -44,14 +43,12 @@ def test_multiline_release_install_and_rollback_cannot_evade_audit(tmp_path):
     registry = load_registry(REGISTRY)
     (tmp_path / ".claude/agents").mkdir(parents=True)
     (tmp_path / "config/environment/actors").mkdir(parents=True)
-    (tmp_path / "docs/TGW-Plan-Vault/plan/pp").mkdir(parents=True)
-    runbooks = tmp_path / "docs/TGW-Plan-Vault/reference/runbooks"
+    runbooks = tmp_path / "docs/runbooks"
     runbooks.mkdir(parents=True)
     (tmp_path / "AGENTS.md").write_text("shared\n", encoding="utf-8")
     (tmp_path / "CLAUDE.md").write_text("claude\n", encoding="utf-8")
     (tmp_path / ".claude/agents/nix-flake-maintainer.md").write_text("old\n", encoding="utf-8")
     (tmp_path / "config/environment/actors/tgw-steward.json").write_text("{}\n", encoding="utf-8")
-    (tmp_path / "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md").write_text("history\n", encoding="utf-8")
     (runbooks / "deploy.md").write_text(
         "python3 -B -m tgw.release_installer --root /opt/TGW \\\n"
         "  install --archive x\n"

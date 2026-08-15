@@ -7,8 +7,7 @@
   "actor": "codex",
   "allowed_paths": [
     "config/environment",
-    "docs/TGW-Plan-Vault/plan",
-    "docs/TGW-Plan-Vault/reports/environment-recovery",
+    "docs/runbooks",
     "src/tgw",
     "tests"
   ],
@@ -22,7 +21,7 @@
     "S2-task-context:context-reproducible",
     "S2-task-context:actor-boundary"
   ],
-  "registry_revision": "sha256:64e7ca2dff5d8fdae10d77f0300a038bfcb55e1b2022841c530a6089d3024db4",
+  "registry_revision": "sha256:f497311c0dc494e0faf2b90f6ab43a894716fbfb62773fadf6f5930c7410969e",
   "created_at": "2026-08-11T09:00:00-07:00",
   "expires_at": "2026-08-18T09:00:00-07:00",
   "historical_context_grants_authority": false,

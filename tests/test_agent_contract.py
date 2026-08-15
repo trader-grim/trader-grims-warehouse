@@ -22,7 +22,7 @@ def test_steward_contract_is_clean_and_registry_routed():
         "AGENTS.md", "config/environment/actors/tgw-steward.json",
     ]
     assert "CLAUDE.md" in context["actor_instructions"]["excluded_authority_files"]
-    assert "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md" in context["actor_instructions"]["excluded_authority_files"]
+    assert context["actor_instructions"]["excluded_authority_files"] == ["CLAUDE.md"]
 
 
 @pytest.mark.parametrize(

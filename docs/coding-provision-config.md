@@ -1,0 +1,80 @@
+# Coding-provision API configuration
+
+Coding-provision has two roles.  Catnanny/requester clients create and read
+requests through the ordinary authenticated TGW API.  A tgw-lib worker is a
+separate, HTTP-only consumer: it never needs a PostgreSQL DSN, local queue
+database, SSH access, or a Python environment belonging to tgw-prod.
+
+The service and worker each receive the same non-secret `coding` section.
+The actual dedicated worker credential is supplied at runtime through the
+environment variable named by `worker_credential_env`; do not put its value in
+this JSON file.  The canonical service must expose the worker API at the
+configured endpoint and set that environment variable for `tgw-http` too.
+
+```json
+{
+  "coding": {
+    "api_endpoint": "https://tgw-prod.example",
+    "worker_api_endpoint": "https://tgw-prod.example",
+    "host": "tgw-lib-01",
+    "worker_identity": "tgw-coding-worker",
+    "repository_root": "/srv/tgw/trader-grims-warehouse",
+    "worktree_root": "/srv/tgw/worktrees",
+    "worker_credential_env": "TGW_CODING_WORKER_API_KEY",
+    "commands": {
+      "controller-verify": ["/usr/local/bin/tgw-controller-verify-runner"]
+    },
+    "allowed_runners": ["/usr/local/bin/tgw-controller-verify-runner"]
+  }
+}
+```
+
+Contract:
+
+- Catnanny uses `api_endpoint` plus its ordinary TGW API credential to create,
+  inspect, stop, and retrieve receipts from `/api/coding/requests`.  A request
+  body carries only request-safe identity — `todo_id` and `object_generation`.
+  The canonical tgw-prod service never receives or probes a tgw-lib worktree
+  path and never inspects Git.
+- Validation is split by role.  To accept a request, the canonical tgw-prod
+  service requires only `api_endpoint`, `host`, and `worker_identity`; it
+  must not require (or validate) the tgw-lib-local filesystem roots.  The
+  local worker execution contract additionally requires `worker_api_endpoint`,
+  `worker_credential_env`, `repository_root`, and `worktree_root`.
+- tgw-lib uses `worker_api_endpoint`, `worker_identity`, and the credential
+  named by `worker_credential_env` for
+  `/api/coding/worker/requests/*`.  The credential is sent only as the
+  `X-TGW-Worker-Authorization: Bearer …` header.
+- `host`, `worker_identity`, `repository_root`, and `worktree_root` are part of
+  the worker's fence.  After retrieving a request, the worker resolves its
+  local worktree (`worktree_root/todo-<id>`), reprobes the Git identity there,
+  and echoes the immutable envelope (location + hash) while claiming.  The
+  service records that envelope under the exact lease — it never probes the
+  worktree itself.
+- The service alone owns claim/start/complete/fail queue transitions and
+  service-authors the durable receipt from the recorded envelope.  The worker
+  rejects a completed response unless its receipt source, identity, location,
+  and envelope hash match the local envelope it validated.
+- A provision request is executable only after the canonical Todo lookup,
+  evaluator, and scheduler have attached a bounded execution envelope.  That
+  envelope names an exact `CODING_TREATMENTS` contract, graph/generation, and
+  evaluator evidence hashes.  The local worker runs that registered treatment
+  only; it never imports Foreman or connects to PostgreSQL.  If the service
+  has no executable route capable of issuing this envelope, the worker fails
+  the lease and the request status exposes its structured `failed` state and
+  error instead of fabricating a dispatch success.
+- The worker submits its validated location plus a portable
+  `coding-snapshot/v1` claim to the authenticated worker claim route.  The
+  service verifies the claim is bound to the request generation, looks up the
+  open Todo, evaluates the snapshot with the existing coding contracts, and
+  durably records the selected envelope under the lease.  A missing Todo,
+  malformed/stale snapshot, or no scheduler-eligible treatment fails that
+  lease with its structured error; it never becomes a successful no-op.
+- The coding runner remains a local argv protocol.  SSH is not a supported
+  runner or worker transport.
+- `commands.controller-verify` is required for the controller-verify queue and
+  must be the installed local `tgw-controller-verify-runner` argv above.  Its
+  command path must also appear in `allowed_runners`.  The runner executes
+  `python -m pytest -q` and `python -m ruff check .` in the worker-validated
+  worktree, and establishes `tested`, `linted`, and `controller_verified` only
+  when both checks pass.

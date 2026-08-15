@@ -120,7 +120,7 @@ _SEED_ITEMS = [
     ('admin',  20, 'IGDB credentials — Twitch dev account → register app → save client_id/client_secret to secrets_root/igdb-credentials.json', 'plan'),
     ('admin',  25, 'Discogs credentials — discogs.com/settings/developers → generate token → save to secrets_root/discogs-credentials.json', 'plan'),
     ('admin',  30, 'Go-UPC API key — go-upc.com/api → sign up → save to secrets_root/go-upc-credentials.json', 'plan'),
-    ('admin',  35, 'Run Perplexity briefs 001–004 in docs/TGW-Plan-Vault/perplexity/ and drop results to inbox/', 'plan'),
+    ('admin',  35, 'Run Perplexity briefs 001–004 in /opt/TGW/library/plans/perplexity/ and drop results to inbox/', 'plan'),
     ('admin',  40, 'tgw ebay-sweep → physical inventory review (run after Perplexity brief results arrive)', 'plan'),
     ('admin',  45, 'Fix 9 wrong-shipping Seller Hub listings flagged in sweep', 'plan'),
     ('admin',  50, 'Tailscale install on TGW server', 'plan'),

@@ -571,7 +571,7 @@ def tgw_mailbox_send(
     Same mechanism as `tgw mailbox send <actor> "<message>"` from the shell
     and the `tgw-mailbox-send` Claude Code skill (PP-RUNNERCOMMS-001) — this
     is the MCP front door for agents (e.g. Tigwa/Hermes) that don't have
-    shell access. Writes a file into docs/TGW-Plan-Vault/inbox/<to_actor>/
+    shell access. Writes a file into /opt/TGW/library/plans/inbox/<to_actor>/
     following the existing per-actor inbox naming/header convention.
 
     Args:

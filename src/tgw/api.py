@@ -3504,7 +3504,7 @@ def cmd_mailbox_send(
     (all three call this function — no logic duplicated between them).
 
     Follows the naming/header convention already live in
-    docs/TGW-Plan-Vault/inbox/{claude,tigwa,dave}/ — reverse-engineered from
+    /opt/TGW/library/plans/inbox/{claude,tigwa,dave}/ — reverse-engineered from
     real notes there, not invented: `<FROM-ACTOR>-<TYPE>-<slug>-<date>.md`,
     with a `# <Type>: <title>` header and `**From:**`/`**To:**`/`**Date:**`
     metadata lines.

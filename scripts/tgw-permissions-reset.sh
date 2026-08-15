@@ -177,7 +177,7 @@ VAR_ROOT="$TGW_ROOT/var"
 DATA_ROOT="$TGW_ROOT/data"
 SECRETS_DIR="${SECRETS_DIR:-$TGW_ROOT/secrets}"
 AUDIT_LOG="${AUDIT_LOG:-$LOG_ROOT/permissions-audit.log}"
-PLAN_VAULT_ROOT="$SRC_ROOT/trader-grims-warehouse/docs/TGW-Plan-Vault"
+PLAN_VAULT_ROOT="/opt/TGW/library/plans"
 
 # ---------------------------------------------------------------------------
 # CHECK mode — audit only, no changes

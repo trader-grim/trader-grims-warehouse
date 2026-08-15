@@ -89,10 +89,7 @@ def discover_instruction_sources(root: Path, registry: Mapping[str, Any]) -> dic
         for path in sorted(claude_root.rglob("*")):
             if path.is_file() and not path.is_symlink() and path.suffix in {".md", ".json"}:
                 add(path.relative_to(root).as_posix(), "claude-runtime")
-    for runbooks in (
-        root / "docs/TGW-Plan-Vault/reference/runbooks",
-        root / "docs/runbooks",
-    ):
+    for runbooks in (root / "docs/runbooks",):
         if runbooks.exists():
             for path in sorted(runbooks.glob("*.md")):
                 add(path.relative_to(root).as_posix(), "current-runbook")

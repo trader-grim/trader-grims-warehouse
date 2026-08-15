@@ -161,6 +161,7 @@ def _build_preflight_context(work_dir: Path) -> str:
     blocking the task (this is context, not a gate).
     """
     lines = ['## Plan Vault preflight (source-envelope bound)']
+    plan_root = Path('/opt/TGW/library/plans')
 
     try:
         from tgw.plan_graph import live_plan_graph
@@ -181,7 +182,7 @@ def _build_preflight_context(work_dir: Path) -> str:
     except Exception as exc:
         lines.append(f'- Plan Graph unavailable; do not infer missing intent ({exc})')
 
-    inbox_dir = work_dir / 'docs/TGW-Plan-Vault/inbox/claude'
+    inbox_dir = plan_root / 'inbox/claude'
     try:
         inbox_files = sorted(p.name for p in inbox_dir.glob('*.md'))
     except Exception:

@@ -54,7 +54,7 @@ def audit_environment_recovery(root: Path, *, observed_at: str) -> dict[str, Any
     """Audit the full program without mutating, contacting, or executing anything."""
     _timestamp(observed_at)
     root = root.resolve(strict=True)
-    reports = root / "docs/TGW-Plan-Vault/reports/environment-recovery"
+    reports = Path("/opt/TGW/library/plans/reports/environment-recovery")
     registry_path = root / "config/environment/registry.yaml"
     contract_path = root / "config/environment/actors/tgw-steward.json"
 
@@ -139,9 +139,9 @@ def audit_environment_recovery(root: Path, *, observed_at: str) -> dict[str, Any
             return value["decision"]
 
         satellite_checks.extend([
-            _check(f"{host}-evidence-package", manifest_path.relative_to(root).as_posix(), manifest_check),
-            _check(f"{host}-review-complete", review_path.relative_to(root).as_posix(), review_check),
-            _check(f"{host}-human-machine-disposition", disposition_path.relative_to(root).as_posix(), disposition_check),
+            _check(f"{host}-evidence-package", str(manifest_path), manifest_check),
+            _check(f"{host}-review-complete", str(review_path), review_check),
+            _check(f"{host}-human-machine-disposition", str(disposition_path), disposition_check),
         ])
 
     def final_acceptance_check() -> str:
@@ -158,7 +158,7 @@ def audit_environment_recovery(root: Path, *, observed_at: str) -> dict[str, Any
 
     final_check = _check(
         "human-final-acceptance",
-        "docs/TGW-Plan-Vault/reports/environment-recovery/final-human-acceptance.json",
+        str(reports / "final-human-acceptance.json"),
         final_acceptance_check,
     )
     checks = [*server_checks, *satellite_checks, final_check]

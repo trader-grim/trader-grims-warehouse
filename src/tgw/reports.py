@@ -453,7 +453,7 @@ def cmd_report_sales(
         if output_dir:
             dest = Path(output_dir)
         else:
-            plan_vault: Path = cfg.get("plan_vault_path") or Path("docs/TGW-Plan-Vault")
+            plan_vault: Path = cfg.get("plan_vault_path") or Path("/opt/TGW/library/plans")
             dest = plan_vault / "dev-workflow" / "research"
 
         dest.mkdir(parents=True, exist_ok=True)

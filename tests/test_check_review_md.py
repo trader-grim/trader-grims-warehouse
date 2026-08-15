@@ -6,7 +6,7 @@ silently skip tgw-runner-review's mandated REVIEW.md write in one session,
 only caught and backfilled after the fact (2026-07-13).
 
 All filesystem interaction is monkeypatched to a tmp_path fixture standing
-in for `docs/TGW-Plan-Vault/plan/packets/results/` -- no real vault path
+in for `/opt/TGW/library/plans/plan/packets/results/` -- no real Plan path
 is touched. Fully offline.
 """
 

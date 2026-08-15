@@ -3,14 +3,14 @@
 -REVIEW.md exists before its branch is stitched.
 
 Root cause (todo #1366, PP-HERMES-EA-001): `tgw-runner-review`'s mandated
-`docs/TGW-Plan-Vault/plan/packets/results/<id>-REVIEW.md` write (SKILL.md
+`/opt/TGW/library/plans/plan/packets/results/<id>-REVIEW.md` write (SKILL.md
 "Clean path — hand off to stitch" step) got silently skipped for 6 of 7
 concurrent-batch-stitched todos in one session (#1280/#1282/#1284/#1288/
 #1291/#1297), discovered and backfilled only after the fact
 (2026-07-13). Nothing mechanical caught the omission before merge. This
 script is that mechanical catch: given one or more todo ids, it checks
 that a `-REVIEW.md` file for each exists under
-`docs/TGW-Plan-Vault/plan/packets/results/`, and exits non-zero (with a
+`/opt/TGW/library/plans/plan/packets/results/`, and exits non-zero (with a
 clear per-id report) if any are missing.
 
 This tool does NOT judge review *content* — that's tgw-runner-review's
@@ -40,7 +40,7 @@ import sys
 from pathlib import Path
 from typing import List
 
-RESULTS_DIR = Path(__file__).resolve().parents[1] / 'docs' / 'TGW-Plan-Vault' / 'plan' / 'packets' / 'results'
+RESULTS_DIR = Path('/opt/TGW/library/plans/plan/packets/results')
 
 # A -REVIEW.md filename may cover one id ("<id>-REVIEW.md") or a
 # hyphenated multi-id/slug batch ("<id>-<id2>-slug-REVIEW.md" or
