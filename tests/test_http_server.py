@@ -6395,6 +6395,73 @@ def test_item_detail_top_retry_requeues_exact_retryable_dead_letter():
     assert 'onclick="retryPipeline()"' not in html
 
 
+def test_item_detail_receipt_identity_dead_letter_offers_new_current_graph_attempt():
+    """A stale receipt identity cannot be blind-retried, but it also must not
+    strand a valid draft after the receipt producer has been corrected.
+
+    The replacement List action launches a new operator-authorized evaluation;
+    it does not mutate or requeue the historical dead-letter job.
+    """
+    item = {
+        "sku": "tgw202510161310076",
+        "title": "Roland R-MIX",
+        "status": "In Stock",
+        "draft_listing": {"title": "Roland R-MIX", "price": 19.99},
+    }
+    jobs = [{
+        "queue_name": "ebay_upload",
+        "state": "dead_letter",
+        "job_id": "stale-receipt-job",
+        "retry_allowed": False,
+        "error_detail": "receipt binding rejected: INVALID_RECEIPT_IDENTITY",
+        "result": {
+            "outcome": "failed",
+            "evidence": {"reason_code": "INVALID_RECEIPT_IDENTITY"},
+        },
+    }]
+
+    html = http_server._render_item_detail_html(
+        "tgw202510161310076", item, [], [], jobs,
+    )
+    action_line = re.search(
+        r'<div class="act-row" id="action-line">(.*?)</div>', html,
+    )
+
+    assert action_line is not None
+    assert '>List on eBay</button>' in action_line.group(1)
+    assert 'onclick="listOnEbay()"' in action_line.group(1)
+    assert '>Retry</button>' not in action_line.group(1)
+    assert '>Needs attention</button>' not in action_line.group(1)
+
+
+def test_item_detail_other_nonretryable_dead_letter_still_needs_attention():
+    item = {
+        "sku": "tgw1",
+        "title": "Hard failure",
+        "status": "In Stock",
+        "draft_listing": {"title": "Hard failure", "price": 19.99},
+    }
+    jobs = [{
+        "queue_name": "ebay_upload",
+        "state": "dead_letter",
+        "job_id": "hard-failure-job",
+        "retry_allowed": False,
+        "result": {
+            "outcome": "failed",
+            "evidence": {"reason_code": "PROVIDER_REJECTED"},
+        },
+    }]
+
+    html = http_server._render_item_detail_html("tgw1", item, [], [], jobs)
+    action_line = re.search(
+        r'<div class="act-row" id="action-line">(.*?)</div>', html,
+    )
+
+    assert action_line is not None
+    assert '>Needs attention</button>' in action_line.group(1)
+    assert '>List on eBay</button>' not in action_line.group(1)
+
+
 def test_item_detail_missing_draft_price_shows_set_price_not_retry():
     """A pricing worker may correctly refuse to invent a price when it has no
     positive market evidence.  The empty draft price must still lead the

@@ -7707,12 +7707,39 @@ def _render_item_detail_html(
             and j.get("job_id")
             and j.get("retry_allowed", True)
         ), None)
+        _receipt_identity_failure = next((
+            j for j in jobs
+            if j.get("queue_name") == "ebay_upload"
+            and j.get("state") == "dead_letter"
+            and _after_baseline(j)
+            and not _superseded_by_success(j)
+            and isinstance(j.get("result"), dict)
+            and isinstance(j["result"].get("evidence"), dict)
+            and j["result"]["evidence"].get("reason_code")
+            == "INVALID_RECEIPT_IDENTITY"
+        ), None)
         if _retryable_failure:
             _line.append(_abtn(
                 "Retry",
                 f"retryJob({h(_json.dumps(str(_retryable_failure['job_id'])))})",
                 "red",
                 title=f"Retry failed {_retryable_failure.get('queue_name') or 'pipeline'} job",
+            ))
+        elif _receipt_identity_failure and _has_draft:
+            # The failed job is intentionally not blind-retryable: its graph and
+            # receipt identities are stale.  Once a current draft exists, the
+            # safe recovery is a new operator-authorized publish evaluation,
+            # which binds the current graph/source/generation and leaves the old
+            # dead letter in the audit history.  Without this branch the page
+            # offered only "Needs attention", even after the receipt producer
+            # was corrected, leaving no way for the operator to launch that
+            # replacement attempt (live incident tgw202510161310076).
+            _line.append(_abtn(
+                "List on eBay",
+                "listOnEbay()",
+                "green",
+                title=("Start a fresh listing attempt with the current draft and "
+                       "current receipt identity; the historical failure is retained"),
             ))
         else:
             _line.append(_abtn(
