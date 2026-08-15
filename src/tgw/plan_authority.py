@@ -159,6 +159,7 @@ class AuthorityStore(Protocol):
     def create_request(self, request: AuthorityRequest) -> Mapping[str, Any]: ...
     def decide(self, decision: AuthorityDecision) -> Mapping[str, Any]: ...
     def consume(self, request_id: str, *, effect_hash: str, generation: str) -> Mapping[str, Any]: ...
+    def record_execution(self, request_id: str, receipt: Mapping[str, Any]) -> Mapping[str, Any]: ...
     def get(self, request_id: str) -> Mapping[str, Any] | None: ...
     def list(self, limit: int = 100) -> Sequence[Mapping[str, Any]]: ...
     def events(self, request_id: str) -> Sequence[Mapping[str, Any]]: ...
@@ -233,12 +234,74 @@ class PostgresAuthorityStore:
             self._event(cur, request_id, "consumed", receipt)
             return receipt
 
+    def record_execution(self, request_id: str, receipt: Mapping[str, Any]) -> Mapping[str, Any]:
+        required = {
+            "schema", "request_id", "authority_receipt_id", "effect_hash", "effect_kind",
+            "generation", "handler_id", "outcome", "evidence", "rollback_receipt", "detail",
+            "receipt_hash",
+        }
+        if set(receipt) != required or receipt.get("schema") != "tgw-effect-execution-receipt/v1":
+            raise ValueError("effect execution receipt schema is not exact")
+        if receipt.get("request_id") != request_id:
+            raise ValueError("effect execution receipt request mismatch")
+        unsigned = dict(receipt)
+        claimed = unsigned.pop("receipt_hash")
+        if claimed != "sha256:" + sha256(_canonical(unsigned)).hexdigest():
+            raise ValueError("effect execution receipt self-hash mismatch")
+        evidence = receipt.get("evidence")
+        if (
+            not isinstance(evidence, Sequence)
+            or isinstance(evidence, (str, bytes))
+            or not all(isinstance(item, str) and item for item in evidence)
+            or not isinstance(receipt.get("detail"), str)
+            or (
+                receipt.get("rollback_receipt") is not None
+                and not isinstance(receipt.get("rollback_receipt"), str)
+            )
+        ):
+            raise ValueError("effect execution evidence is invalid")
+        with self._connection() as con, con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """INSERT INTO plan_authority_execution_receipts
+                   (execution_receipt_hash,request_id,authority_receipt_id,effect_hash,
+                    effect_generation,handler_id,outcome,evidence,rollback_receipt,detail)
+                   SELECT %s,r.request_id,e.receipt_id,r.effect_hash,r.effect_generation,
+                          %s,%s,%s::jsonb,%s,%s
+                     FROM plan_authority_requests r
+                     JOIN plan_authority_effect_receipts e USING(request_id)
+                    WHERE r.request_id=%s AND e.receipt_id=%s AND r.effect_hash=%s
+                      AND r.effect_generation=%s AND r.effect_kind=%s
+                   ON CONFLICT (request_id) DO NOTHING RETURNING *""",
+                (
+                    claimed, receipt["handler_id"], receipt["outcome"],
+                    json.dumps(list(evidence)), receipt["rollback_receipt"], receipt["detail"],
+                    request_id, receipt["authority_receipt_id"], receipt["effect_hash"],
+                    receipt["generation"], receipt["effect_kind"],
+                ),
+            )
+            row = cur.fetchone()
+            if row is None:
+                cur.execute(
+                    "SELECT * FROM plan_authority_execution_receipts WHERE request_id=%s",
+                    (request_id,),
+                )
+                existing_row = cur.fetchone()
+                existing = dict(existing_row) if existing_row is not None else None
+                if existing is not None and existing.get("execution_receipt_hash") == claimed:
+                    return existing
+                raise ValueError("execution receipt is mismatched or already recorded")
+            self._event(cur, request_id, "executed", receipt)
+            return dict(row)
+
     def get(self, request_id: str) -> Mapping[str, Any] | None:
         return self._query_one(
             """SELECT r.*,d.decision_id,d.decision_kind,d.decided_by,d.reason AS decision_reason,d.decided_at,
-                      e.receipt_id,e.consumed_at
+                      e.receipt_id,e.consumed_at,x.execution_receipt_hash,x.handler_id AS execution_handler_id,
+                      x.outcome AS execution_outcome,x.evidence AS execution_evidence,
+                      x.rollback_receipt,x.detail AS execution_detail,x.recorded_at AS executed_at
                  FROM plan_authority_requests r LEFT JOIN plan_authority_decisions d USING(request_id)
-                 LEFT JOIN plan_authority_effect_receipts e USING(request_id) WHERE r.request_id=%s""",
+                 LEFT JOIN plan_authority_effect_receipts e USING(request_id)
+                 LEFT JOIN plan_authority_execution_receipts x USING(request_id) WHERE r.request_id=%s""",
             (request_id,),
         )
 
@@ -246,9 +309,12 @@ class PostgresAuthorityStore:
         with self._connection() as con, con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """SELECT r.*,d.decision_id,d.decision_kind,d.decided_by,d.reason AS decision_reason,d.decided_at,
-                          e.receipt_id,e.consumed_at
+                          e.receipt_id,e.consumed_at,x.execution_receipt_hash,x.handler_id AS execution_handler_id,
+                          x.outcome AS execution_outcome,x.evidence AS execution_evidence,
+                          x.rollback_receipt,x.detail AS execution_detail,x.recorded_at AS executed_at
                      FROM plan_authority_requests r LEFT JOIN plan_authority_decisions d USING(request_id)
                      LEFT JOIN plan_authority_effect_receipts e USING(request_id)
+                     LEFT JOIN plan_authority_execution_receipts x USING(request_id)
                     ORDER BY r.requested_at DESC LIMIT %s""",
                 (limit,),
             )
@@ -277,6 +343,7 @@ def create_authority_router(
     load_solution: Callable[[str], Mapping[str, Any]],
     require_operator: Callable[[], Any],
     require_executor: Callable[[], Any],
+    execute_request: Callable[[str], Mapping[str, Any]] | None = None,
 ) -> APIRouter:
     """One HTTP projection over the canonical authority store."""
 
@@ -299,7 +366,7 @@ def create_authority_router(
             solution = load_solution(str(body["solution_hash"]))
             request = AuthorityRequest.create(body, solution=solution, current_plan_commit=current_plan_commit())
             return {"schema": AUTHORITY_SCHEMA, "request": store.create_request(request)}
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, RuntimeError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @router.post("/requests/{request_id}/decisions", dependencies=[Depends(require_operator)])
@@ -311,9 +378,16 @@ def create_authority_router(
 
     @router.post("/requests/{request_id}/consume", dependencies=[Depends(require_executor)])
     def consume(request_id: str, body: dict[str, Any]):
+        del request_id, body
+        raise HTTPException(409, "direct authority consumption is disabled; use the typed execute route")
+
+    @router.post("/requests/{request_id}/execute", dependencies=[Depends(require_executor)])
+    def execute(request_id: str):
+        if execute_request is None:
+            raise HTTPException(409, "typed execution controller is not mounted")
         try:
-            return {"schema": AUTHORITY_SCHEMA, "receipt": store.consume(request_id, effect_hash=str(body["effect_hash"]), generation=str(body["generation"]))}
-        except (KeyError, ValueError) as exc:
+            return {"schema": AUTHORITY_SCHEMA, "execution": execute_request(request_id)}
+        except (KeyError, ValueError, RuntimeError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     return router

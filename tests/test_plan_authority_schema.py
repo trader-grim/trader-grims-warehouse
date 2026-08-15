@@ -25,7 +25,7 @@ def test_explicit_migration_is_locked_idempotent_and_hash_receipted():
     receipt = apply_plan_authority_schema("postgresql://db", connect=connect)
     assert cursor.execute.call_args_list[0].args[0].startswith("SELECT pg_advisory_xact_lock")
     assert "CREATE TABLE IF NOT EXISTS plan_authority_requests" in cursor.execute.call_args_list[1].args[0]
-    assert receipt["migration"] == "plan-authority-v1"
+    assert receipt["migration"] == "plan-authority-v2"
     assert receipt["sql_sha256"].startswith("sha256:")
 
 

@@ -88,6 +88,7 @@ def test_configured_mount_is_late_bound_and_reuses_auth_functions():
     assert isinstance(mount.store, ConfiguredAuthorityStore)
     assert mount.require_operator is operator
     assert mount.require_executor is executor
+    assert callable(mount.execute_request)
     with pytest.raises(RuntimeError, match="not configured"):
         mount.store.list()
 

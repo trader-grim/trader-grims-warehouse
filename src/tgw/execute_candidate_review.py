@@ -9,6 +9,7 @@ import json
 import subprocess
 import tarfile
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -17,6 +18,8 @@ from tgw.governed_coding import dispatch_role
 from tgw.harness_registry import load_registry, observe_health
 from tgw.review_configuration import configured_review_command
 from tgw.review_runner import snapshot_hash
+
+REVIEW_LEASE_SECONDS = 15 * 60
 
 
 def _canonical(value: Any) -> bytes:
@@ -38,7 +41,26 @@ def _extract_archive(data: bytes, destination: Path) -> None:
         archive.extractall(destination, filter="data")
 
 
-def _card(manifest: Mapping[str, Any], packet: Mapping[str, Any]) -> dict[str, Any]:
+def _review_lease(source_commit: str, *, observed_at: datetime) -> dict[str, str]:
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("candidate review observation time must include a timezone")
+    issued = observed_at.astimezone(timezone.utc)
+    expires = issued + timedelta(seconds=REVIEW_LEASE_SECONDS)
+    issued_text = issued.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    expires_text = expires.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return {
+        "id": f"review:{source_commit}:{_hash(issued_text)[7:19]}",
+        "expires_at": expires_text,
+        "stop_policy": "hold",
+    }
+
+
+def _card(
+    manifest: Mapping[str, Any],
+    packet: Mapping[str, Any],
+    *,
+    observed_at: datetime,
+) -> dict[str, Any]:
     source = manifest["source"]
     plan = manifest["plan"]
     return {
@@ -57,11 +79,19 @@ def _card(manifest: Mapping[str, Any], packet: Mapping[str, Any]) -> dict[str, A
         "exclusions": ["source mutation", "deployment", "installation", "authority broadening"],
         "acceptance": ["validated semantic and security verdict bound to the candidate"],
         "receipt_sink": "candidate-review:" + str(source["commit"]),
-        "lease": {"id": "review:" + str(source["commit"]), "expires_at": "2026-08-12T23:59:59Z", "stop_policy": "hold"},
+        "lease": _review_lease(str(source["commit"]), observed_at=observed_at),
     }
 
 
-def execute(manifest_path: Path, repository: Path) -> dict[str, Any]:
+def execute(
+    manifest_path: Path,
+    repository: Path,
+    *,
+    observed_at: datetime | None = None,
+) -> dict[str, Any]:
+    execution_observed_at = observed_at or datetime.now(timezone.utc)
+    if execution_observed_at.tzinfo is None or execution_observed_at.utcoffset() is None:
+        raise ValueError("candidate review observation time must include a timezone")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     archive = subprocess.run(
         ["git", "-c", f"safe.directory={repository}", "archive", manifest["source"]["commit"]],
@@ -104,7 +134,7 @@ def execute(manifest_path: Path, repository: Path) -> dict[str, Any]:
             health,
             role="independent-review",
             adapters=adapters,
-            card_template=_card(manifest, packet),
+            card_template=_card(manifest, packet, observed_at=execution_observed_at),
             execution_identity="isolated-review:" + str(manifest["source"]["commit"]),
             required_capabilities=("isolated-snapshot-review",),
         )

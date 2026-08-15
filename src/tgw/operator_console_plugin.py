@@ -25,6 +25,7 @@ _ROUTES = {
     ("/api/plan-authority/requests/{request_id}", ("GET",)),
     ("/api/plan-authority/requests/{request_id}/decisions", ("POST",)),
     ("/api/plan-authority/requests/{request_id}/consume", ("POST",)),
+    ("/api/plan-authority/requests/{request_id}/execute", ("POST",)),
     ("/api/operator-console/discovery", ("GET",)),
     ("/api/operator-console/requests", ("GET",)),
     ("/api/operator-console/requests/{request_id}", ("GET",)),
@@ -39,6 +40,7 @@ class OperatorConsoleMount:
     load_solution: Callable[[str], Mapping[str, Any]]
     require_operator: Callable[[], Any]
     require_executor: Callable[[], Any]
+    execute_request: Callable[[str], Mapping[str, Any]] | None = None
 
 
 def mount_operator_console(app: FastAPI, config: OperatorConsoleMount) -> None:
@@ -51,6 +53,7 @@ def mount_operator_console(app: FastAPI, config: OperatorConsoleMount) -> None:
         load_solution=config.load_solution,
         require_operator=config.require_operator,
         require_executor=config.require_executor,
+        execute_request=config.execute_request,
     )
     existing = {
         (route.path, tuple(sorted(getattr(route, "methods", None) or ())))

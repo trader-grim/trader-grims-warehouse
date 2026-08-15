@@ -92,6 +92,13 @@ def load_config(path: Path) -> Dict[str, Any]:
     plan_repository_root = p("plan_repository_root", str(standalone_plan_root))
     plan_approved_commit = raw.get("plan_approved_commit")
     plan_git_path = p("plan_git_path", "git")
+    plan_projection_path = (
+        p("plan_projection_path", str(raw["plan_projection_path"]))
+        if raw.get("plan_projection_path") is not None
+        else None
+    )
+    plan_projection_trusted_uid = int(raw.get("plan_projection_trusted_uid", 0))
+    plan_projection_root = p("plan_projection_root", "/opt/TGW/releases")
 
     # If an approved commit is configured, every canonical path below must be
     # backed by a clean materialization of that exact commit.  The primary
@@ -103,33 +110,43 @@ def load_config(path: Path) -> Dict[str, Any]:
             r"[0-9a-f]{40}", plan_approved_commit
         ):
             raise ValueError("plan_approved_commit must be a full Git commit")
-        if "plan_repository_root" not in raw:
+        if plan_projection_path is not None:
+            from tgw.plan_runtime_projection import load_projection
+
+            load_projection(
+                plan_projection_path,
+                expected_plan_commit=plan_approved_commit,
+                trusted_uid=plan_projection_trusted_uid,
+                trusted_root=plan_projection_root,
+            )
+        elif "plan_repository_root" not in raw:
             raise ValueError(
                 "plan_repository_root is required when plan_approved_commit is configured"
             )
-        if plan_repository_root.resolve() == standalone_plan_root.resolve():
+        elif plan_repository_root.resolve() == standalone_plan_root.resolve():
             raise ValueError(
                 "approved Plan materialization and update repository must be distinct"
             )
-        git_argv = [
-            str(plan_git_path), "-c", f"safe.directory={standalone_plan_root}",
-            "-C", str(standalone_plan_root),
-        ]
-        try:
-            head = subprocess.run(
-                [*git_argv, "rev-parse", "--verify", "HEAD^{commit}"],
-                check=False, capture_output=True, text=True, timeout=10,
-            )
-            status = subprocess.run(
-                [*git_argv, "status", "--porcelain=v1", "--untracked-files=all"],
-                check=False, capture_output=True, text=True, timeout=10,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ValueError("approved standalone Plan materialization is unavailable") from exc
-        if head.returncode or head.stdout.strip() != plan_approved_commit:
-            raise ValueError("standalone Plan materialization does not match approved commit")
-        if status.returncode or status.stdout:
-            raise ValueError("standalone Plan materialization is not clean")
+        if plan_projection_path is None:
+            git_argv = [
+                str(plan_git_path), "-c", f"safe.directory={standalone_plan_root}",
+                "-C", str(standalone_plan_root),
+            ]
+            try:
+                head = subprocess.run(
+                    [*git_argv, "rev-parse", "--verify", "HEAD^{commit}"],
+                    check=False, capture_output=True, text=True, timeout=10,
+                )
+                status = subprocess.run(
+                    [*git_argv, "status", "--porcelain=v1", "--untracked-files=all"],
+                    check=False, capture_output=True, text=True, timeout=10,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise ValueError("approved standalone Plan materialization is unavailable") from exc
+            if head.returncode or head.stdout.strip() != plan_approved_commit:
+                raise ValueError("standalone Plan materialization does not match approved commit")
+            if status.returncode or status.stdout:
+                raise ValueError("standalone Plan materialization is not clean")
 
     full_catalog_path = p("full_catalog_path", str(catalog_root / "master-catalog.json"))
     search_catalog_path = p("search_catalog_path", str(catalog_root / "search-catalog.json"))
@@ -265,6 +282,9 @@ def load_config(path: Path) -> Dict[str, Any]:
         "plan_repository_root": plan_repository_root,
         "plan_approved_commit": plan_approved_commit,
         "plan_git_path": plan_git_path,
+        "plan_projection_path": plan_projection_path,
+        "plan_projection_trusted_uid": plan_projection_trusted_uid,
+        "plan_projection_root": plan_projection_root,
         "plan_inbox_path": plan_vault_path / "inbox",
         # Canonical Plan intent lives only in the standalone repository.  The
         # mutable/synced Plan Vault remains the inbox and general docs surface,

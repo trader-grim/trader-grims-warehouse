@@ -131,9 +131,27 @@ class EffectExecutionReceipt:
     rollback_receipt: str | None = None
     detail: str = ""
 
+    def as_mapping(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "request_id": self.request_id,
+            "authority_receipt_id": self.authority_receipt_id,
+            "effect_hash": self.effect_hash,
+            "effect_kind": self.effect_kind,
+            "generation": self.generation,
+            "handler_id": self.handler_id,
+            "outcome": self.outcome.value,
+            "evidence": list(self.evidence),
+            "rollback_receipt": self.rollback_receipt,
+            "detail": self.detail,
+        }
+
     @property
     def receipt_hash(self) -> str:
-        return "sha256:" + hashlib.sha256(_canonical(self.__dict__)).hexdigest()
+        return "sha256:" + hashlib.sha256(_canonical(self.as_mapping())).hexdigest()
+
+    def sealed_mapping(self) -> dict[str, Any]:
+        return {**self.as_mapping(), "receipt_hash": self.receipt_hash}
 
 
 def _authority_canary(parameters: Mapping[str, str]) -> Mapping[str, Any]:

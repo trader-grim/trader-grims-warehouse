@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from tgw.candidate_review import (
     generate_review_packet,
     validate_review_result,
 )
+from tgw.execute_candidate_review import REVIEW_LEASE_SECONDS, _card
 from tgw.harness_registry import load_registry, observe_health
 from tgw.review_runner import snapshot_hash
 
@@ -208,3 +210,26 @@ def test_candidate_manifest_and_review_result_tampering_fail_closed(tmp_path):
     review["selected_provider"] = "other"
     with pytest.raises(CandidateReviewError, match="result hash mismatch"):
         validate_review_result(value, review)
+
+
+def test_governed_review_card_lease_is_fresh_bounded_and_attempt_specific(tmp_path):
+    packet_value, _ = packet(tmp_path)
+    observed = datetime(2026, 8, 16, 12, 34, 56, 789, tzinfo=timezone.utc)
+
+    first = _card(manifest(), packet_value, observed_at=observed)["lease"]
+    second = _card(
+        manifest(), packet_value, observed_at=observed + timedelta(seconds=1)
+    )["lease"]
+
+    assert datetime.fromisoformat(first["expires_at"].replace("Z", "+00:00")) == (
+        observed + timedelta(seconds=REVIEW_LEASE_SECONDS)
+    )
+    assert first["id"] != second["id"]
+    assert first["stop_policy"] == "hold"
+
+
+def test_governed_review_card_rejects_an_unzoned_observation_time(tmp_path):
+    packet_value, _ = packet(tmp_path)
+
+    with pytest.raises(ValueError, match="include a timezone"):
+        _card(manifest(), packet_value, observed_at=datetime(2026, 8, 16, 12, 0))

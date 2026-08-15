@@ -20,6 +20,7 @@ empty string when the secret file is absent.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -143,6 +144,25 @@ def test_approved_plan_requires_distinct_update_repository(tmp_path):
             **base,
             "plan_repository_root": str(root),
         }))
+
+
+def test_production_plan_projection_replaces_a_local_plan_checkout(tmp_path):
+    protected = tmp_path / "releases"
+    protected.mkdir(mode=0o700)
+    projection = protected / "plan-projection.json"
+    source = Path(__file__).parents[1] / "agent-services/plan-runtime/GOVERNED-EXECUTION-PLATFORM-f0a8cf22.json"
+    projection.write_bytes(source.read_bytes())
+    projection.chmod(0o400)
+    cfg = load_config(_write_cfg(tmp_path, {
+        "standalone_plan_root": "/run/tgw/no-local-plan",
+        "plan_repository_root": "/run/tgw/no-local-plan",
+        "plan_approved_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+        "plan_projection_path": str(projection),
+        "plan_projection_root": str(protected),
+        "plan_projection_trusted_uid": os.getuid(),
+    }))
+    assert cfg["plan_projection_path"] == projection
+    assert cfg["plan_approved_commit"] == "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99"
 
 
 # ---------------------------------------------------------------------------

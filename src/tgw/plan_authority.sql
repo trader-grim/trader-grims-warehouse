@@ -48,6 +48,20 @@ CREATE TABLE IF NOT EXISTS plan_authority_effect_receipts (
     consumed_at timestamptz NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS plan_authority_execution_receipts (
+    execution_receipt_hash text PRIMARY KEY,
+    request_id text NOT NULL UNIQUE REFERENCES plan_authority_requests(request_id),
+    authority_receipt_id uuid NOT NULL REFERENCES plan_authority_effect_receipts(receipt_id),
+    effect_hash text NOT NULL,
+    effect_generation text NOT NULL,
+    handler_id text NOT NULL,
+    outcome text NOT NULL CHECK (outcome IN ('succeeded','retry','hold','ambiguous','rolled_back','failed')),
+    evidence jsonb NOT NULL,
+    rollback_receipt text,
+    detail text NOT NULL,
+    recorded_at timestamptz NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS plan_authority_events (
     sequence bigserial PRIMARY KEY,
     request_id text NOT NULL REFERENCES plan_authority_requests(request_id),

@@ -5,14 +5,17 @@
 body{font:16px system-ui,sans-serif;background:#101216;color:#e5e7eb;margin:0;padding:2rem}main{max-width:70rem;margin:auto}
 .notice,.card{border:1px solid #46505f;border-radius:.6rem;padding:1rem;margin:1rem 0;background:#181c22}.notice{border-color:#8a6d2f;color:#f2d68a}
 .meta{font:13px ui-monospace,monospace;color:#aab2bf;overflow-wrap:anywhere}.actions{color:#9fd3ad}.error{color:#ff9b9b}
+button{margin:.35rem .35rem .35rem 0;padding:.55rem .8rem;border:1px solid #72819a;border-radius:.35rem;background:#293242;color:#fff;cursor:pointer}button:hover{background:#36445a}
 </style></head><body><main><h1>Operator Authority</h1>
 <p>The status, evidence, and legal actions for Plan-bound effects.</p>
 <div class="notice">Only records from PlanAuthority grant authority. Agent Runs, Todos, PP-CLIP, listing state, notifications, and visiting this page do not approve an effect.</div>
 <section id="requests">Loading authority records…</section>
 <script>
 const esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const button=(request,action)=>`<button data-request="${esc(request)}" data-action="${esc(action)}">${esc(action.replaceAll('-',' '))}</button>`;
 fetch('/api/operator-console/requests').then(async r=>{const d=await r.json();if(!r.ok)throw Error(d.detail||r.statusText);return d}).then(d=>{
  const root=document.getElementById('requests'); if(!d.requests.length){root.textContent='No authority requests exist.';return}
- root.innerHTML=d.requests.map(x=>`<article class="card"><h2>${esc(x.summary)}</h2><b>${esc(x.status)}</b><p class="actions">Legal actions: ${esc(x.legal_actions.join(', '))}</p><p>Evidence: ${esc(x.evidence.join(', '))}</p><div class="meta">Request ${esc(x.request_id)}<br>Plan ${esc(x.plan_commit)}<br>Closure ${esc(x.closure_hash)}<br>Effect ${esc(x.effect.kind)} @ ${esc(x.effect.generation)}</div></article>`).join('')
+ root.innerHTML=d.requests.map(x=>`<article class="card"><h2>${esc(x.summary)}</h2><b>${esc(x.status)}</b><p class="actions">Legal actions: ${esc(x.legal_actions.join(', '))}</p><p>${x.legal_actions.filter(a=>a!=='view-evidence').map(a=>button(x.request_id,a)).join('')}</p><p>Evidence: ${esc(x.evidence.join(', '))}</p><div class="meta">Request ${esc(x.request_id)}<br>Plan ${esc(x.plan_commit)}<br>Closure ${esc(x.closure_hash)}<br>Effect ${esc(x.effect.kind)} @ ${esc(x.effect.generation)}<br>Execution ${esc(x.execution?.receipt_hash)}</div></article>`).join('');
+ root.addEventListener('click',async event=>{const target=event.target.closest('button');if(!target)return;target.disabled=true;try{const request=target.dataset.request,action=target.dataset.action;let url,body;if(['approve','hold','reconcile'].includes(action)){const reason=prompt(`Reason for ${action}:`);if(!reason){target.disabled=false;return}url=`/api/plan-authority/requests/${encodeURIComponent(request)}/decisions`;body={kind:action,decided_by:'operator:web-console',reason}}else if(action==='execute-by-controller'){url=`/api/plan-authority/requests/${encodeURIComponent(request)}/execute`;body={}}else{return}const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const result=await response.json();if(!response.ok)throw Error(result.detail||response.statusText);location.reload()}catch(error){alert(error.message);target.disabled=false}})
 }).catch(e=>document.getElementById('requests').innerHTML=`<p class="error">Authority unavailable: ${esc(e.message)}</p>`);
 </script></main></body></html>

@@ -38,6 +38,8 @@ NAVIGATION = {
 
 
 def _status(row: Mapping[str, Any], now: datetime) -> str:
+    if row.get("execution_outcome"):
+        return str(row["execution_outcome"])
     if row.get("receipt_id") or row.get("consumed_at"):
         return "consumed"
     decision = row.get("decision_kind")
@@ -61,7 +63,7 @@ def project_request(row: Mapping[str, Any], *, now: datetime | None = None) -> d
     if status == "pending":
         actions.extend(("approve", "hold", "reconcile"))
     elif status == "approve":
-        actions.append("consume-by-executor")
+        actions.append("execute-by-controller")
     return {
         "request_id": row.get("request_id"),
         "status": status,
@@ -86,6 +88,15 @@ def project_request(row: Mapping[str, Any], *, now: datetime | None = None) -> d
             "at": row.get("decided_at"),
         } if row.get("decision_kind") else None,
         "receipt_id": row.get("receipt_id"),
+        "execution": {
+            "receipt_hash": row.get("execution_receipt_hash"),
+            "handler_id": row.get("execution_handler_id"),
+            "outcome": row.get("execution_outcome"),
+            "evidence": list(row.get("execution_evidence") or ()),
+            "rollback_receipt": row.get("rollback_receipt"),
+            "detail": row.get("execution_detail"),
+            "executed_at": row.get("executed_at"),
+        } if row.get("execution_receipt_hash") else None,
         "legal_actions": actions,
         "authority": AUTHORITY_SCHEMA,
     }
@@ -98,6 +109,7 @@ def create_operator_console_router(
     load_solution: Callable[[str], Mapping[str, Any]],
     require_operator: Callable[[], Any],
     require_executor: Callable[[], Any],
+    execute_request: Callable[[str], Mapping[str, Any]] | None = None,
 ) -> APIRouter:
     """Return one mountable router for UI, shared API, and authority writes."""
     router = APIRouter()
@@ -107,6 +119,7 @@ def create_operator_console_router(
         load_solution=load_solution,
         require_operator=require_operator,
         require_executor=require_executor,
+        execute_request=execute_request,
     ))
 
     @router.get("/api/operator-console/discovery", dependencies=[Depends(require_operator)])

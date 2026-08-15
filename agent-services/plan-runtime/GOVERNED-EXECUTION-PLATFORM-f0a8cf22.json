@@ -1,0 +1,213 @@
+{
+  "plan_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+  "plan_files": [
+    {
+      "path": "plan/PLAN-governed-execution-platform-build.md",
+      "sha256": "sha256:1ab60857dee1ff856848d4d52cae6b87b5906c5ad5fb0108f433b4a30f4e3246"
+    },
+    {
+      "path": "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml",
+      "sha256": "sha256:182cec4d0cb029a3116dc99f3ca974910218a2d0a1b4d0b550f505b63c8f0be8"
+    }
+  ],
+  "plan_id": "PLAN-GOVERNED-EXECUTION-PLATFORM",
+  "projection_sha256": "sha256:68f0b812c2481f065ab0e1ce9c88ca7337a8ecc3598ac4139d0172ac00c57ce5",
+  "schema": "tgw-plan-runtime-projection/v1",
+  "solution": {
+    "closure_hash": "sha256:fd1d4796309b294cfab9f7a877bcccc5f7c6ef230cff2fc0cd7fcbb9dcf9e14c",
+    "complete": true,
+    "conformance_providers": [
+      {
+        "available": true,
+        "id": "tgw-native-exact@1",
+        "result": "selected"
+      },
+      {
+        "agreement": "verified",
+        "available": true,
+        "closure_hash": "sha256:fd1d4796309b294cfab9f7a877bcccc5f7c6ef230cff2fc0cd7fcbb9dcf9e14c",
+        "id": "luet-pinned-0.9.26@1",
+        "result": "agreement"
+      }
+    ],
+    "conformance_verified": true,
+    "dispatchable": true,
+    "invalidated_receipts": [],
+    "phase_order": [
+      [
+        "build-workflow-convergence",
+        "canonical-plan-graph",
+        "recovered-promptcraft"
+      ],
+      [
+        "build-operator-authority",
+        "native-exact-resolver",
+        "shared-tgw-plan-skill"
+      ],
+      [
+        "build-harness-role-lanes",
+        "build-operator-surface"
+      ],
+      [
+        "build-governed-execution"
+      ]
+    ],
+    "plan_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+    "rejected_alternatives": [],
+    "resolver": "tgw-native-exact@1",
+    "reusable_receipts": [],
+    "root": {
+      "id": "PLAN-GOVERNED-EXECUTION-PLATFORM",
+      "minimum_state": "operationally_verified",
+      "profile": "production"
+    },
+    "satisfied_installed": [],
+    "schema": "tgw-plan-solution/v1",
+    "selected_alternatives": [],
+    "selected_capabilities": [
+      "authority.operator-decisions@1",
+      "coding.governed-execution@1",
+      "coding.harness-agnostic-role-lanes@1",
+      "operator.surface-projection@1",
+      "plan.capability-resolution@2",
+      "plan.graph-query@1",
+      "plan.shared-planning-skill@1",
+      "promptcraft.receiver-profiles@1",
+      "workflow.condition-derived-convergence@1"
+    ],
+    "selected_providers": [
+      "build-governed-execution",
+      "build-harness-role-lanes",
+      "build-operator-authority",
+      "build-operator-surface",
+      "build-workflow-convergence",
+      "canonical-plan-graph",
+      "native-exact-resolver",
+      "recovered-promptcraft",
+      "shared-tgw-plan-skill"
+    ],
+    "solution_hash": "sha256:31ad3fd9faa4da237cdcc1da9b5d4b8cf40a1c4c71962a343fd6c6e175485e1f",
+    "unresolved": [],
+    "work_units": [
+      {
+        "capability": "authority.operator-decisions@1",
+        "establishes": [
+          "authority.operator-decisions@1@operationally_verified"
+        ],
+        "id": "establish:authority.operator-decisions@1",
+        "requires_capabilities": [
+          "workflow.condition-derived-convergence@1"
+        ],
+        "resume_from": [],
+        "selected_provider": "build-operator-authority"
+      },
+      {
+        "capability": "coding.governed-execution@1",
+        "establishes": [
+          "coding.governed-execution@1@operationally_verified"
+        ],
+        "id": "establish:coding.governed-execution@1",
+        "requires_capabilities": [
+          "coding.harness-agnostic-role-lanes@1",
+          "plan.capability-resolution@2",
+          "workflow.condition-derived-convergence@1"
+        ],
+        "resume_from": [],
+        "selected_provider": "build-governed-execution"
+      },
+      {
+        "capability": "coding.harness-agnostic-role-lanes@1",
+        "establishes": [
+          "coding.harness-agnostic-role-lanes@1@operationally_verified"
+        ],
+        "id": "establish:coding.harness-agnostic-role-lanes@1",
+        "requires_capabilities": [
+          "plan.shared-planning-skill@1",
+          "promptcraft.receiver-profiles@1"
+        ],
+        "resume_from": [],
+        "selected_provider": "build-harness-role-lanes"
+      },
+      {
+        "capability": "operator.surface-projection@1",
+        "establishes": [
+          "operator.surface-projection@1@operationally_verified"
+        ],
+        "id": "establish:operator.surface-projection@1",
+        "requires_capabilities": [
+          "authority.operator-decisions@1"
+        ],
+        "resume_from": [],
+        "selected_provider": "build-operator-surface"
+      },
+      {
+        "capability": "plan.capability-resolution@2",
+        "establishes": [
+          "plan.capability-resolution@2@operationally_verified"
+        ],
+        "id": "establish:plan.capability-resolution@2",
+        "requires_capabilities": [
+          "plan.graph-query@1"
+        ],
+        "resume_from": [
+          "source-commit:c414762",
+          "test:tests/test_plan_solver.py"
+        ],
+        "selected_provider": "native-exact-resolver"
+      },
+      {
+        "capability": "plan.graph-query@1",
+        "establishes": [
+          "plan.graph-query@1@operationally_verified"
+        ],
+        "id": "establish:plan.graph-query@1",
+        "requires_capabilities": [],
+        "resume_from": [
+          "source-commit:edb452e",
+          "test:tests/test_plan_graph_live.py"
+        ],
+        "selected_provider": "canonical-plan-graph"
+      },
+      {
+        "capability": "plan.shared-planning-skill@1",
+        "establishes": [
+          "plan.shared-planning-skill@1@operationally_verified"
+        ],
+        "id": "establish:plan.shared-planning-skill@1",
+        "requires_capabilities": [
+          "plan.graph-query@1"
+        ],
+        "resume_from": [
+          "source-commit:e668871",
+          "test:agent-services/skills/tgw-plan/scripts/check_adapters.py"
+        ],
+        "selected_provider": "shared-tgw-plan-skill"
+      },
+      {
+        "capability": "promptcraft.receiver-profiles@1",
+        "establishes": [
+          "promptcraft.receiver-profiles@1@operationally_verified"
+        ],
+        "id": "establish:promptcraft.receiver-profiles@1",
+        "requires_capabilities": [],
+        "resume_from": [
+          "lineage:agent-services/providers/promptcraft/LINEAGE.sha256",
+          "source-commit:3260710",
+          "test:tests/test_promptcraft_agent_service.py:13-passed"
+        ],
+        "selected_provider": "recovered-promptcraft"
+      },
+      {
+        "capability": "workflow.condition-derived-convergence@1",
+        "establishes": [
+          "workflow.condition-derived-convergence@1@operationally_verified"
+        ],
+        "id": "establish:workflow.condition-derived-convergence@1",
+        "requires_capabilities": [],
+        "resume_from": [],
+        "selected_provider": "build-workflow-convergence"
+      }
+    ]
+  },
+  "solution_sha256": "sha256:729c193cfb38baa2262e443cab925f7976dd7e47bcdc416795875eb98642b653"
+}

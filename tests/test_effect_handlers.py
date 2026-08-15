@@ -58,6 +58,8 @@ def test_registered_effects_consume_exact_authority_then_invoke_only_their_handl
     assert receipt.outcome is EffectOutcome.SUCCEEDED
     assert receipt.effect_hash == effect.effect_hash
     assert receipt.receipt_hash.startswith("sha256:")
+    assert receipt.sealed_mapping()["receipt_hash"] == receipt.receipt_hash
+    assert receipt.sealed_mapping()["outcome"] == "succeeded"
     handler_id, _, _, _ = registry.prepare(effect)
     assert receipt.handler_id == handler_id
     assert sum(provider.call_count for provider in providers.values()) == (0 if kind == "authority-canary" else 1)

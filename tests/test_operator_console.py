@@ -33,6 +33,9 @@ class Store:
     def consume(self, request_id, *, effect_hash, generation):  # pragma: no cover
         raise AssertionError
 
+    def record_execution(self, request_id, receipt):  # pragma: no cover
+        raise AssertionError
+
 
 def _row(**updates):
     row = {
@@ -56,12 +59,13 @@ def _row(**updates):
     return row
 
 
-def _client(row):
+def _client(row, execute_request=None):
     app = FastAPI()
     app.include_router(create_operator_console_router(
         Store(row), current_plan_commit=lambda: "f" * 40,
         load_solution=lambda _: {}, require_operator=lambda: "operator",
         require_executor=lambda: "executor",
+        execute_request=execute_request,
     ))
     return TestClient(app)
 
@@ -72,9 +76,16 @@ def test_projection_reports_status_evidence_and_only_legal_actions():
     assert pending["evidence"] == ["receipt:1"]
     assert pending["legal_actions"] == ["view-evidence", "approve", "hold", "reconcile"]
     assert project_request(_row(decision_kind="approve"))["legal_actions"] == [
-        "view-evidence", "consume-by-executor",
+        "view-evidence", "execute-by-controller",
     ]
     assert project_request(_row(receipt_id="receipt:done"))["status"] == "consumed"
+    executed = project_request(_row(
+        receipt_id="receipt:done", execution_receipt_hash="sha256:done",
+        execution_outcome="succeeded", execution_handler_id="authority-canary-receipt-only@1",
+        execution_evidence=["authority-canary:sha256:one"], execution_detail="",
+    ))
+    assert executed["status"] == "succeeded"
+    assert executed["execution"]["receipt_hash"] == "sha256:done"
 
 
 def test_mount_exposes_shared_api_site_and_canonical_authority_router():
@@ -85,6 +96,28 @@ def test_mount_exposes_shared_api_site_and_canonical_authority_router():
     site = client.get("/form/plan-authority")
     assert site.status_code == 200
     assert "Only records from PlanAuthority grant authority" in site.text
+    assert client.post(
+        "/api/plan-authority/requests/request:sha256:abc/consume", json={}
+    ).status_code == 409
+
+
+def test_typed_execute_route_invokes_only_the_mounted_controller():
+    observed = []
+    client = _client(
+        _row(decision_kind="approve"),
+        lambda request_id: observed.append(request_id) or {"outcome": "succeeded"},
+    )
+    response = client.post("/api/plan-authority/requests/request:sha256:abc/execute")
+    assert response.status_code == 200
+    assert response.json()["execution"] == {"outcome": "succeeded"}
+    assert observed == ["request:sha256:abc"]
+
+
+def test_console_html_exposes_real_decision_and_execute_controls():
+    site = _client(_row()).get("/form/plan-authority").text
+    assert "execute-by-controller" in site
+    assert "/decisions" in site
+    assert "/execute" in site
 
 
 def test_discovery_names_one_backend_and_non_authority_surfaces():

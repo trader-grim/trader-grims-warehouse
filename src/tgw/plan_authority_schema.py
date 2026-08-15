@@ -13,6 +13,7 @@ REQUIRED_TABLES = frozenset(
         "plan_authority_requests",
         "plan_authority_decisions",
         "plan_authority_effect_receipts",
+        "plan_authority_execution_receipts",
         "plan_authority_events",
     }
 )
@@ -27,9 +28,9 @@ def apply_plan_authority_schema(dsn: str, *, connect: Callable[..., Any] = psyco
         raise ValueError("PlanAuthority database is not configured")
     sql = _sql()
     with connect(dsn) as con, con.cursor() as cur:
-        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("tgw-plan-authority-schema-v1",))
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("tgw-plan-authority-schema-v2",))
         cur.execute(sql)
-    return {"schema": "tgw-schema-migration-receipt/v1", "migration": "plan-authority-v1", "sql_sha256": "sha256:" + sha256(sql.encode()).hexdigest()}
+    return {"schema": "tgw-schema-migration-receipt/v1", "migration": "plan-authority-v2", "sql_sha256": "sha256:" + sha256(sql.encode()).hexdigest()}
 
 
 def require_plan_authority_schema(dsn: str, *, connect: Callable[..., Any] = psycopg2.connect) -> None:
