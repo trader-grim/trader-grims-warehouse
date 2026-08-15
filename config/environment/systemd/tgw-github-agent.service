@@ -30,4 +30,3 @@ MemoryDenyWriteExecute=yes
 
 [Install]
 WantedBy=multi-user.target
-
