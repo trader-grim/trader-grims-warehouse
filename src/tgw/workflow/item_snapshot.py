@@ -269,6 +269,30 @@ def _published(item: Dict[str, Any]) -> bool:
     return listing.get("status") == "Active"
 
 
+def inventory_available(item: Mapping[str, Any]) -> bool:
+    """Return whether an item may enter the eBay listing pipeline.
+
+    A historical ``status=sold`` is authoritative even when an older draft
+    still carries a positive quantity.  Restocking therefore requires an
+    explicit status change as well as a positive quantity; stale draft data
+    must never turn a sold item back into a listing candidate.
+    """
+    status = str(item.get("status") or "").strip().lower()
+    if status in {"sold", "disposed", "archived", "deleted"}:
+        return False
+    draft = item.get("draft_listing")
+    draft = draft if isinstance(draft, Mapping) else {}
+    raw_quantity = draft.get("quantity", item.get("quantity", 1))
+    if raw_quantity is None:
+        raw_quantity = 1
+    if isinstance(raw_quantity, bool):
+        return False
+    try:
+        return int(raw_quantity) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _valid_condition(item: Dict[str, Any]) -> bool:
     """condition field is a known canonical value."""
     cond = _get_str(item, "condition")
@@ -320,6 +344,7 @@ def _check_pipeline_error(item: Dict[str, Any]) -> Optional[EvidenceAssertion]:
 # ---------------------------------------------------------------------------
 
 _ITEM_CHECKERS: dict[str, callable] = {
+    "inventory_available": inventory_available,
     "item_has_photos": _has_photos,
     "photos_uploaded": _photos_uploaded,
     "ai_identified": _ai_identified,
@@ -334,6 +359,10 @@ _ITEM_CHECKERS: dict[str, callable] = {
 }
 
 _ITEM_REASONS: dict[str, tuple[str, str]] = {
+    "inventory_available": (
+        "inventory status and quantity permit listing",
+        "inventory is terminal or has no available quantity",
+    ),
     "item_has_photos": ("photos present", "no photos"),
     "photos_uploaded": ("photos uploaded to eBay/draft", "photos not yet uploaded"),
     "ai_identified": ("AI category or product lookup present", "not yet AI-identified"),

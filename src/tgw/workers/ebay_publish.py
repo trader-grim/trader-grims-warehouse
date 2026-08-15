@@ -35,6 +35,7 @@ from tgw.ebay.sync import format_ebay_error as _format_ebay_error
 from tgw.errors import TreatmentFailure
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
+from tgw.workflow.item_snapshot import inventory_available
 
 log = logging.getLogger(__name__)
 
@@ -356,6 +357,11 @@ class EbayPublishWorker(QueueWorker):
         item = json.loads(json_path.read_text(encoding='utf-8'))
         if item.get('sku') != sku:
             raise HardFailure('ebay_publish canonical item sku does not match payload sku')
+        if not inventory_available(item):
+            raise HardFailure(
+                f'{sku}: inventory is sold, terminal, or zero quantity; '
+                'explicitly restore inventory before publishing to eBay'
+            )
 
         # Idempotent: a replayed/directly-enqueued job for a live item must not
         # re-publish or overwrite the reprice_schedule (markdown clock).

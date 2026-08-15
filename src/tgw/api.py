@@ -17,7 +17,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -472,7 +472,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "alt-text-batch",
     ]),
     ("eBay", [
-        "ebay-pull", "ebay-sweep", "import-sold-csv", "sku-migrate",
+        "ebay-pull", "ebay-sweep", "import-sold-csv",
+        "reconcile-sold-orders", "sku-migrate",
         "migrate-review", "migrate-unblock", "migrate-restore",
         "review",
         "setup-ebay-hooks", "build-archive-index", "history-index",
@@ -828,6 +829,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--show-columns", action="store_true", help="print CSV column names and exit (for format inspection)")
     p.add_argument("--fuzzy", action="store_true", help="second pass: match unresolved rows by title similarity")
     p.add_argument("--fuzzy-threshold", type=float, default=0.80, metavar="N", help="Jaccard similarity threshold for title match (default 0.80)")
+
+    p = sub.add_parser(
+        "reconcile-sold-orders",
+        help=("reconcile the complete visible GetOrders window against current "
+              "provider-active inventory; local writes only"),
+    )
+    p.add_argument(
+        "--apply", action="store_true",
+        help="apply safe local ItemData repairs (default: read-only preview)",
+    )
+    p.add_argument(
+        "--csv", action="append", default=[], metavar="FILE",
+        help=("also reconcile a Seller Hub all-orders CSV; repeat for multiple "
+              "exports (API overlap is deduplicated by order ID)"),
+    )
 
     p = sub.add_parser("ebay-pull", help="on-demand eBay data pull: full Inventory API mirror + Trading API sync → ItemData")
     p.add_argument("--no-inventory", action="store_true", help="skip Inventory API full mirror (title/aspects/images/description/price)")
@@ -5226,6 +5242,51 @@ def main() -> int:
                         print("catalog_rebuild job enqueued.")
                     except Exception:
                         pass
+
+        elif args.op == "reconcile-sold-orders":
+            from .apis.ebay.trading import get_my_ebay_selling, get_orders
+            from .ebay.pull import (
+                _MAX_ORDER_LOOKBACK_DAYS,
+                load_sold_order_csvs,
+                reconcile_sold_order_history,
+            )
+            from .queue import state_machine as _sm
+
+            _sm.init(cfg["postgres_dsn"])
+            observed_at = datetime.now(tz=timezone.utc)
+            api_orders = list(get_orders(
+                cfg,
+                observed_at - timedelta(days=_MAX_ORDER_LOOKBACK_DAYS),
+                observed_at,
+            ))
+            csv_paths = [Path(value) for value in args.csv]
+            csv_orders = load_sold_order_csvs(csv_paths)
+            orders = [*api_orders, *csv_orders]
+            active = list(get_my_ebay_selling(cfg))
+            result = reconcile_sold_order_history(
+                cfg,
+                cfg["itemdata_root"],
+                orders,
+                active,
+                observed_at.isoformat(),
+                dry_run=not args.apply,
+            )
+            result["api_orders_fetched"] = len(api_orders)
+            result["csv_orders_loaded"] = len(csv_orders)
+            result["csv_files"] = [str(path) for path in csv_paths]
+            if args.apply and result.get("ok") and (
+                result.get("active_status_restored")
+                or result.get("active_sales_recorded")
+                or result.get("inactive_sales_marked")
+            ):
+                try:
+                    _sm.enqueue_catalog_rebuild("reconcile_sold_orders")
+                    result["catalog_rebuild_enqueued"] = True
+                except Exception as exc:
+                    result["catalog_rebuild_enqueued"] = False
+                    result["catalog_rebuild_error"] = f"{type(exc).__name__}: {exc}"
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result.get("ok") else 1
 
         elif args.op == "ebay-pull":
             from .ebay.pull import (

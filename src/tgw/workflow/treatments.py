@@ -106,7 +106,10 @@ AI_IDENTIFY = TreatmentContract(
 EBAY_DRAFT = TreatmentContract(
     identity="ebay-draft",
     version="1",
-    requires=(Requirement("ai_identified", (FingerprintResult.TRUE,)),),
+    requires=(
+        Requirement("inventory_available", (FingerprintResult.TRUE,)),
+        Requirement("ai_identified", (FingerprintResult.TRUE,)),
+    ),
     may_establish=("draft_generated",),
     must_preserve=("item_data",),
     ownership=("listing.draft",),
@@ -117,7 +120,10 @@ EBAY_DRAFT = TreatmentContract(
 EBAY_PRICE = TreatmentContract(
     identity="ebay-price",
     version="1",
-    requires=(Requirement("draft_generated", (FingerprintResult.TRUE,)),),
+    requires=(
+        Requirement("inventory_available", (FingerprintResult.TRUE,)),
+        Requirement("draft_generated", (FingerprintResult.TRUE,)),
+    ),
     may_establish=("priced",),
     must_preserve=("item_data",),
     ownership=("listing.price",),
@@ -129,6 +135,7 @@ EBAY_UPLOAD = TreatmentContract(
     identity="ebay-upload",
     version="1",
     requires=(
+        Requirement("inventory_available", (FingerprintResult.TRUE,)),
         Requirement("item_has_photos", (FingerprintResult.TRUE,)),
         Requirement("ai_identified", (FingerprintResult.TRUE,)),
         Requirement("draft_generated", (FingerprintResult.TRUE,)),
@@ -146,6 +153,7 @@ EBAY_STAGE = TreatmentContract(
     identity="ebay-stage",
     version="1",
     requires=(
+        Requirement("inventory_available", (FingerprintResult.TRUE,)),
         Requirement("draft_generated", (FingerprintResult.TRUE,)),
         Requirement("priced", (FingerprintResult.TRUE,)),
         Requirement("photos_uploaded", (FingerprintResult.TRUE,)),
@@ -162,6 +170,7 @@ EBAY_PUBLISH = TreatmentContract(
     identity="ebay-publish",
     version="1",
     requires=(
+        Requirement("inventory_available", (FingerprintResult.TRUE,)),
         Requirement("staged", (FingerprintResult.TRUE,)),
         Requirement("staged_content_current", (FingerprintResult.TRUE,)),
         Requirement("operator_authorized_publish", (FingerprintResult.TRUE,)),

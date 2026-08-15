@@ -72,20 +72,20 @@ TGW_EBAY_IDENTIFIED = GoalProfile(
 TGW_EBAY_DRAFTED = GoalProfile(
     identity="tgw.ebay_drafted",
     version="1",
-    required=("item_has_photos", "ai_identified", "draft_generated"),
+    required=("inventory_available", "item_has_photos", "ai_identified", "draft_generated"),
 )
 
 TGW_EBAY_PRICED = GoalProfile(
     identity="tgw.ebay_priced",
     version="1",
-    required=("item_has_photos", "ai_identified", "draft_generated", "priced"),
+    required=("inventory_available", "item_has_photos", "ai_identified", "draft_generated", "priced"),
 )
 
 TGW_EBAY_STAGED = GoalProfile(
     identity="tgw.ebay_staged",
     version="1",
     required=(
-        "item_has_photos", "ai_identified", "draft_generated", "priced",
+        "inventory_available", "item_has_photos", "ai_identified", "draft_generated", "priced",
         "photos_uploaded", "staged", "staged_content_current",
     ),
 )
@@ -94,7 +94,7 @@ TGW_EBAY_LISTABLE = GoalProfile(
     identity="tgw.ebay_listable",
     version="1",
     required=(
-        "item_has_photos", "ai_identified", "draft_generated", "priced",
+        "inventory_available", "item_has_photos", "ai_identified", "draft_generated", "priced",
         "photos_uploaded", "staged", "staged_content_current",
         "valid_condition", "valid_category",
         "title_ok", "published",

@@ -44,6 +44,7 @@ _CODING_CONDITIONS = frozenset({
 })
 
 _TGW_CONDITIONS = frozenset({
+    "inventory_available",
     "item_has_photos",
     "ai_identified",
     "draft_generated",
@@ -287,16 +288,21 @@ def test_ai_identify_requires_photos():
 
 
 def test_ebay_draft_requires_ai_identified():
-    """ebay-draft requires ai_identified:TRUE."""
-    req = EBAY_DRAFT.requires[0]
-    assert req.condition_id == "ai_identified"
-    assert FingerprintResult.TRUE in req.accepted_results
+    """ebay-draft requires available inventory and ai_identified:TRUE."""
+    assert {req.condition_id for req in EBAY_DRAFT.requires} == {
+        "inventory_available", "ai_identified",
+    }
+    assert all(
+        FingerprintResult.TRUE in req.accepted_results
+        for req in EBAY_DRAFT.requires
+    )
 
 
 def test_ebay_stage_requires_data_and_operator_authority():
     conditions = {req.condition_id for req in EBAY_STAGE.requires}
     assert conditions == {
-        "draft_generated", "priced", "photos_uploaded", "operator_authorized_stage",
+        "inventory_available", "draft_generated", "priced", "photos_uploaded",
+        "operator_authorized_stage",
     }
     for req in EBAY_STAGE.requires:
         assert FingerprintResult.TRUE in req.accepted_results
@@ -304,7 +310,8 @@ def test_ebay_stage_requires_data_and_operator_authority():
 
 def test_ebay_publish_requires_current_stage_and_operator_authority():
     assert {item.condition_id for item in EBAY_PUBLISH.requires} == {
-        "staged", "staged_content_current", "operator_authorized_publish",
+        "inventory_available", "staged", "staged_content_current",
+        "operator_authorized_publish",
     }
 
 
@@ -365,6 +372,7 @@ def test_tgw_pipeline_evaluate_with_all_treatments():
     g2 = _evaluate(
         (
             _assertion("item_has_photos", FingerprintResult.TRUE),
+            _assertion("inventory_available", FingerprintResult.TRUE),
             _assertion("ai_identified", FingerprintResult.TRUE),
             _assertion("operator_authorized_upload", FingerprintResult.TRUE),
         ),
@@ -378,6 +386,7 @@ def test_tgw_pipeline_evaluate_with_all_treatments():
     g2_priced = _evaluate(
         (
             _assertion("item_has_photos", FingerprintResult.TRUE),
+            _assertion("inventory_available", FingerprintResult.TRUE),
             _assertion("ai_identified", FingerprintResult.TRUE),
             _assertion("draft_generated", FingerprintResult.TRUE),
             _assertion("priced", FingerprintResult.TRUE),
@@ -391,6 +400,7 @@ def test_tgw_pipeline_evaluate_with_all_treatments():
     g3 = _evaluate(
         (
             _assertion("item_has_photos", FingerprintResult.TRUE),
+            _assertion("inventory_available", FingerprintResult.TRUE),
             _assertion("ai_identified", FingerprintResult.TRUE),
             _assertion("draft_generated", FingerprintResult.TRUE),
             _assertion("priced", FingerprintResult.TRUE),
@@ -407,6 +417,7 @@ def test_tgw_pipeline_evaluate_with_all_treatments():
     g4 = _evaluate(
         (
             _assertion("item_has_photos", FingerprintResult.TRUE),
+            _assertion("inventory_available", FingerprintResult.TRUE),
             _assertion("ai_identified", FingerprintResult.TRUE),
             _assertion("draft_generated", FingerprintResult.TRUE),
             _assertion("priced", FingerprintResult.TRUE),
@@ -420,3 +431,28 @@ def test_tgw_pipeline_evaluate_with_all_treatments():
     eligible = {e.treatment_id for e in g4.eligible_treatments}
     assert "ebay-publish" in eligible
     assert "ebay-stage" not in eligible
+
+
+def test_terminal_inventory_blocks_every_listing_treatment():
+    graph = _evaluate(
+        (
+            _assertion("inventory_available", FingerprintResult.FALSE),
+            _assertion("item_has_photos", FingerprintResult.TRUE),
+            _assertion("ai_identified", FingerprintResult.TRUE),
+            _assertion("draft_generated", FingerprintResult.TRUE),
+            _assertion("priced", FingerprintResult.TRUE),
+            _assertion("photos_uploaded", FingerprintResult.TRUE),
+            _assertion("staged", FingerprintResult.TRUE),
+            _assertion("staged_content_current", FingerprintResult.TRUE),
+            _assertion("operator_authorized_upload", FingerprintResult.TRUE),
+            _assertion("operator_authorized_stage", FingerprintResult.TRUE),
+            _assertion("operator_authorized_publish", FingerprintResult.TRUE),
+        ),
+        TGW_TREATMENTS,
+    )
+
+    eligible = {item.treatment_id for item in graph.eligible_treatments}
+    assert not eligible.intersection({
+        "ebay-draft", "ebay-price", "ebay-upload", "ebay-stage",
+        "ebay-publish",
+    })

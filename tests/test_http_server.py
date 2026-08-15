@@ -6498,7 +6498,7 @@ def test_item_detail_sold_out_item_has_no_relist_action():
     assert '>List on eBay</button>' not in action_line.group(1)
 
 
-def test_item_detail_restocked_sold_item_can_be_relisted():
+def test_item_detail_positive_stale_quantity_does_not_override_sold_status():
     item = {
         "sku": "tgw-restocked",
         "title": "Restocked item",
@@ -6518,8 +6518,10 @@ def test_item_detail_restocked_sold_item_can_be_relisted():
     )
 
     assert action_line is not None
-    assert '>Relist</button>' in action_line.group(1)
-    assert 'onclick="relistItem()"' in action_line.group(1)
+    assert '>Sold</button>' in action_line.group(1)
+    assert ' disabled' in action_line.group(1)
+    assert '>Relist</button>' not in action_line.group(1)
+    assert '>List on eBay</button>' not in action_line.group(1)
 
 
 def test_item_detail_missing_draft_price_shows_set_price_not_retry():

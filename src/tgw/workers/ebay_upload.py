@@ -40,6 +40,7 @@ from tgw.errors import TreatmentFailure
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.quota import QuotaBudgetExceeded
+from tgw.workflow.item_snapshot import inventory_available
 
 log = logging.getLogger(__name__)
 
@@ -235,6 +236,11 @@ class EbayUploadWorker(QueueWorker):
             raise HardFailure(f'item JSON not found for {sku}')
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
+        if not inventory_available(item):
+            raise HardFailure(
+                f'{sku}: inventory is sold, terminal, or zero quantity; '
+                'explicitly restore inventory before uploading listing photos'
+            )
 
         # Collect photos in photo_order display order
         sku_dir: Path = _cfg_sku_dir(self.config, sku)

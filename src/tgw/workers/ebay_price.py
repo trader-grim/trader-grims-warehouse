@@ -42,6 +42,7 @@ from tgw.item_mutation import (
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.sqlite_catalog import upsert_catalog_row
+from tgw.workflow.item_snapshot import inventory_available
 
 log = logging.getLogger(__name__)
 
@@ -202,6 +203,11 @@ class EbayPriceWorker(QueueWorker):
             raise HardFailure(f'item JSON not found for {sku}')
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
+        if not inventory_available(item):
+            raise HardFailure(
+                f'{sku}: inventory is sold, terminal, or zero quantity; '
+                'explicitly restore inventory before pricing an eBay listing'
+            )
 
         governed_keys = {
             "treatment_id", "treatment_version", "graph_id",

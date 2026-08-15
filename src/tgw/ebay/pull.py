@@ -9,6 +9,7 @@ Public API:
     mark_item_sold(json_path, ...)                              → bool (True if newly marked)
     sync_active_listings(cfg, itemdata_root, ...)               → stats dict
     sync_sold_orders(cfg, listing_index, ...)                   → stats dict
+    reconcile_sold_order_history(cfg, itemdata_root, ...)       → stats dict
     sync_inventory_api(cfg, itemdata_root, ...)                 → stats dict
     backfill_draft_from_live(item, cfg)                         → bool (True if draft written)
     record_orphan_listings(orphans, synced_at, full_scan)       → None (persists to ORPHAN_REGISTRY)
@@ -16,7 +17,9 @@ Public API:
 
 from __future__ import annotations
 
+import csv
 import html
+import io
 import json
 import logging
 import re
@@ -789,6 +792,375 @@ def sync_sold_orders(cfg: Dict[str, Any], listing_index: Dict[str, Path],
             stats['errors'],
         )
 
+    return stats
+
+
+def _sale_records(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    records = item.get('ebay_sale') or []
+    if isinstance(records, dict):
+        return [dict(records)]
+    if isinstance(records, list):
+        return [dict(record) for record in records if isinstance(record, dict)]
+    return []
+
+
+def _exact_sku_path(itemdata_root: Path, sku: Any) -> Optional[Path]:
+    """Resolve only a canonical TGW SKU to its canonical ItemData JSON."""
+    value = str(sku or '').strip()
+    if not re.fullmatch(r'tgw[0-9]+', value, flags=re.IGNORECASE):
+        return None
+    path = itemdata_root / value / f'{value}.json'
+    return path if path.is_file() else None
+
+
+def _persisted_sale_record(record: Dict[str, Any], synced_at: str) -> Dict[str, Any]:
+    return {
+        key: record.get(key)
+        for key in ('order_id', 'buyer', 'sale_price', 'quantity', 'sale_date')
+    } | {'synced_at': synced_at}
+
+
+def _flatten_order_transactions(
+    orders: List[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Group exact completed-order facts by listing ID and order ID."""
+    grouped: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for order in orders:
+        order_id = str(order.get('order_id') or '').strip()
+        if not order_id:
+            continue
+        for tx in order.get('transactions') or []:
+            if not isinstance(tx, dict):
+                continue
+            listing_id = str(tx.get('listing_id') or '').strip()
+            if not listing_id:
+                continue
+            by_order = grouped.setdefault(listing_id, {})
+            if order_id in by_order:
+                # API and Seller Hub CSV windows can overlap.  The provider
+                # order ID is the idempotency authority: seeing the same
+                # order/listing twice must never decrement inventory twice.
+                quantity = int(tx.get('quantity') or 1)
+                if by_order[order_id]['quantity'] != quantity:
+                    raise ValueError(
+                        f'conflicting quantity for order {order_id!r}, '
+                        f'listing {listing_id!r}'
+                    )
+                if not by_order[order_id].get('sku'):
+                    by_order[order_id]['sku'] = str(tx.get('sku') or '').strip()
+                continue
+            by_order[order_id] = {
+                'order_id': order_id,
+                'buyer': str(order.get('buyer') or ''),
+                'sale_price': tx.get('sale_price'),
+                'quantity': int(tx.get('quantity') or 1),
+                'sale_date': str(tx.get('sale_date') or ''),
+                'sku': str(tx.get('sku') or '').strip(),
+            }
+    return {
+        listing_id: list(by_order.values())
+        for listing_id, by_order in grouped.items()
+    }
+
+
+_CSV_LISTING_ID = ('Item Number', 'Item number', 'ItemID', 'Item ID')
+_CSV_ORDER_ID = (
+    'Order Number', 'Order number', 'Order ID',
+    'Sales Record Number', 'Transaction ID',
+)
+_CSV_BUYER = ('Buyer Username', 'Buyer username', 'Buyer user ID', 'Buyer')
+_CSV_QUANTITY = ('Quantity', 'Qty', 'Item quantity')
+_CSV_PRICE = ('Sold For', 'Sold for', 'Sale Price', 'Sale price', 'Item price')
+_CSV_DATE = ('Sale Date', 'Sale date', 'Purchase Date', 'Purchase date', 'Order date')
+_CSV_SKU = ('Custom Label', 'Custom label', 'SKU', 'Sku')
+
+
+def _csv_pick(row: Dict[str, str], columns: Tuple[str, ...]) -> str:
+    for column in columns:
+        if column in row:
+            value = str(row[column] or '').strip()
+            if value:
+                return value
+    return ''
+
+
+def load_sold_order_csvs(paths: List[Path]) -> List[Dict[str, Any]]:
+    """Load Seller Hub exports into the same contract as ``GetOrders``.
+
+    Every usable row must carry an exact listing ID and provider order
+    identity.  This intentionally does not admit fuzzy/title matching.
+    """
+    orders: List[Dict[str, Any]] = []
+    for path in paths:
+        if not path.is_file():
+            raise ValueError(f'sold-order CSV does not exist: {path}')
+        lines = path.read_text(encoding='utf-8-sig').splitlines(keepends=True)
+        header_index = next((
+            index for index, line in enumerate(lines)
+            if any(value.strip().strip('"') for value in line.split(','))
+        ), None)
+        if header_index is None:
+            raise ValueError(f'sold-order CSV has no header: {path}')
+        reader = csv.DictReader(io.StringIO(''.join(lines[header_index:])))
+        for row_number, row in enumerate(reader, start=header_index + 2):
+            listing_id = _csv_pick(row, _CSV_LISTING_ID)
+            if not listing_id:
+                continue
+            order_id = _csv_pick(row, _CSV_ORDER_ID)
+            if not order_id:
+                raise ValueError(
+                    f'sold-order CSV row {row_number} has no order identity: {path}'
+                )
+            quantity_raw = _csv_pick(row, _CSV_QUANTITY) or '1'
+            try:
+                quantity = int(quantity_raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f'sold-order CSV row {row_number} has invalid quantity: {path}'
+                ) from exc
+            if quantity < 1:
+                raise ValueError(
+                    f'sold-order CSV row {row_number} has non-positive quantity: {path}'
+                )
+            price_raw = _csv_pick(row, _CSV_PRICE)
+            try:
+                sale_price: Any = float(price_raw.lstrip('$').replace(',', ''))
+            except ValueError:
+                sale_price = price_raw or None
+            sale_date = _csv_pick(row, _CSV_DATE)
+            orders.append({
+                'order_id': order_id,
+                'buyer': _csv_pick(row, _CSV_BUYER),
+                'created_at': sale_date,
+                'transactions': [{
+                    'listing_id': listing_id,
+                    'sku': _csv_pick(row, _CSV_SKU),
+                    'sale_price': sale_price,
+                    'quantity': quantity,
+                    'sale_date': sale_date,
+                }],
+            })
+    return orders
+
+
+def reconcile_sold_order_history(
+    cfg: Dict[str, Any],
+    itemdata_root: Path,
+    orders: List[Dict[str, Any]],
+    active_listings: List[Dict[str, Any]],
+    synced_at: str,
+    *,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """Reconcile the complete visible GetOrders window against live inventory.
+
+    Current provider-active inventory wins only for *current availability*:
+    it restores a stale local ``sold`` status and quantity while retaining all
+    historic sale records.  A missing order on an active listing is appended
+    without decrementing again, because the provider quantity already reflects
+    the current available amount.  For listings no longer active, the normal
+    idempotent sold-marker owns the quantity/status transition.
+
+    The function never changes an eBay listing or offer.
+    """
+    listing_index = build_listing_index(itemdata_root)
+    transactions = _flatten_order_transactions(orders)
+    active_by_id = {
+        str(listing.get('listing_id') or ''): listing
+        for listing in active_listings
+        if str(listing.get('listing_id') or '').strip()
+    }
+    stats: Dict[str, Any] = {
+        'orders_fetched': len(orders),
+        'transactions': sum(len(values) for values in transactions.values()),
+        'active_fetched': len(active_listings),
+        'active_status_restored': 0,
+        'active_sales_recorded': 0,
+        'inactive_sales_marked': 0,
+        'already_recorded': 0,
+        'unmatched_orders': [],
+        'active_unmatched': [],
+        'errors': [],
+        'dry_run': dry_run,
+    }
+
+    # Custom Label is the provider's exact TGW SKU identity.  It safely joins
+    # a current listing whose local record predates listing_id persistence,
+    # and lets historic CSV rows attach to a currently relisted/restocked SKU
+    # without treating the old, inactive listing ID as current availability.
+    active_paths: Dict[Path, Dict[str, Any]] = {}
+    active_entries: List[Tuple[str, Dict[str, Any], Path]] = []
+    for listing_id, listing in active_by_id.items():
+        json_path = listing_index.get(listing_id)
+        if not json_path:
+            json_path = _exact_sku_path(itemdata_root, listing.get('custom_label'))
+        if not json_path:
+            stats['active_unmatched'].append(listing_id)
+            continue
+        canonical_path = json_path.resolve()
+        prior = active_paths.get(canonical_path)
+        if prior and str(prior.get('listing_id')) != listing_id:
+            stats['errors'].append({
+                'listing_id': listing_id,
+                'error': 'multiple provider-active listings resolve to one SKU',
+            })
+            continue
+        active_paths[canonical_path] = listing
+        active_entries.append((listing_id, listing, json_path))
+
+    # First reconcile every provider-active local record, including listings
+    # whose sale predates the API window.  This is the proof that a local sold
+    # status is corrupt rather than authority to infer availability from age.
+    for listing_id, listing, json_path in active_entries:
+        try:
+            item = json.loads(json_path.read_text(encoding='utf-8'))
+            if not isinstance(item, dict):
+                raise ValueError('item JSON is not an object')
+            sku = json_path.parent.name
+            records = _sale_records(item)
+            recorded_ids = {
+                str(record.get('order_id') or '') for record in records
+            }
+            missing = [
+                record for record in transactions.get(listing_id, [])
+                if record['order_id'] not in recorded_ids
+            ]
+            try:
+                available = int(listing.get('quantity') or 0)
+                quantity_sold = int(listing.get('quantity_sold') or 0)
+            except (TypeError, ValueError) as exc:
+                raise ValueError('provider active quantity is invalid') from exc
+            available = max(0, available - quantity_sold)
+            restore_status = (
+                str(item.get('status') or '').strip().lower() == 'sold'
+                and available > 0
+            )
+            if not missing and not restore_status:
+                stats['already_recorded'] += len(
+                    transactions.get(listing_id, [])
+                )
+                continue
+            if dry_run:
+                stats['active_sales_recorded'] += len(missing)
+                stats['active_status_restored'] += int(restore_status)
+                continue
+            fields: Dict[str, Any] = {}
+            if missing:
+                fields['ebay_sale'] = [
+                    *records,
+                    *[_persisted_sale_record(record, synced_at)
+                      for record in missing],
+                ]
+            if restore_status:
+                existing_listing = item.get('ebay_listing')
+                existing_listing = (
+                    dict(existing_listing)
+                    if isinstance(existing_listing, dict) else {}
+                )
+                fields.update({
+                    'status': 'In Stock',
+                    'draft_listing': {'quantity': available},
+                    'ebay_listing': {
+                        **existing_listing,
+                        'listing_id': listing_id,
+                        'status': 'Active',
+                        'synced_at': synced_at,
+                    },
+                    'sold_reconciliation': {
+                        'schema': 'tgw-sold-active-reconciliation/v1',
+                        'listing_id': listing_id,
+                        'provider_status': str(listing.get('status') or 'Active'),
+                        'provider_available_quantity': available,
+                        'observed_at': synced_at,
+                    },
+                })
+            fence_patch_item(cfg, sku, fields)
+            stats['active_sales_recorded'] += len(missing)
+            stats['active_status_restored'] += int(restore_status)
+        except Exception as exc:
+            stats['errors'].append({
+                'listing_id': listing_id,
+                'error': f'{type(exc).__name__}: {exc}',
+            })
+
+    # Transactions on listings absent from the current active census are
+    # terminal sales and may safely use the normal quantity/status transition.
+    for listing_id, records in transactions.items():
+        if listing_id in active_by_id:
+            continue
+        json_path = listing_index.get(listing_id)
+        if not json_path:
+            candidate_paths = {
+                path for record in records
+                if (path := _exact_sku_path(itemdata_root, record.get('sku')))
+            }
+            if len(candidate_paths) == 1:
+                json_path = candidate_paths.pop()
+            elif len(candidate_paths) > 1:
+                stats['errors'].append({
+                    'listing_id': listing_id,
+                    'error': 'one listing ID resolves to multiple CSV SKUs',
+                })
+                continue
+        if not json_path or not json_path.exists():
+            stats['unmatched_orders'].append(listing_id)
+            continue
+        if json_path.resolve() in active_paths:
+            # A prior listing ID for inventory that is provider-active today.
+            # Record history, but do not decrement or change current status.
+            try:
+                item = json.loads(json_path.read_text(encoding='utf-8'))
+                existing = _sale_records(item)
+                recorded_ids = {
+                    str(record.get('order_id') or '') for record in existing
+                }
+                missing = [
+                    record for record in records
+                    if record['order_id'] not in recorded_ids
+                ]
+                if not missing:
+                    stats['already_recorded'] += len(records)
+                    continue
+                if not dry_run:
+                    fence_patch_item(cfg, json_path.parent.name, {
+                        'ebay_sale': [
+                            *existing,
+                            *[_persisted_sale_record(record, synced_at)
+                              for record in missing],
+                        ],
+                    })
+                stats['active_sales_recorded'] += len(missing)
+            except Exception as exc:
+                stats['errors'].append({
+                    'listing_id': listing_id,
+                    'error': f'{type(exc).__name__}: {exc}',
+                })
+            continue
+        for record in records:
+            try:
+                changed = mark_item_sold(
+                    json_path,
+                    order_id=record['order_id'],
+                    buyer=record['buyer'],
+                    sale_price=record['sale_price'],
+                    quantity=record['quantity'],
+                    sale_date=record['sale_date'],
+                    synced_at=synced_at,
+                    cfg=cfg,
+                    dry_run=dry_run,
+                )
+                if changed:
+                    stats['inactive_sales_marked'] += 1
+                else:
+                    stats['already_recorded'] += 1
+            except Exception as exc:
+                stats['errors'].append({
+                    'listing_id': listing_id,
+                    'order_id': record['order_id'],
+                    'error': f'{type(exc).__name__}: {exc}',
+                })
+
+    stats['ok'] = not stats['errors']
     return stats
 
 

@@ -39,6 +39,7 @@ from tgw.errors import TreatmentFailure
 from tgw.item_mutation import item_generation
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
+from tgw.workflow.item_snapshot import inventory_available
 
 log = logging.getLogger(__name__)
 
@@ -237,6 +238,11 @@ class EbayStageWorker(QueueWorker):
                 f'— stage waits for them (will retry)')
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
+        if not inventory_available(item):
+            raise HardFailure(
+                f'{sku}: inventory is sold, terminal, or zero quantity; '
+                'explicitly restore inventory before staging an eBay offer'
+            )
         if effect_mode == 'workflow' and item.get('sku') != sku:
             raise HardFailure('ebay_stage authoritative item sku does not equal requested sku')
         existing_listing = item.get('ebay_listing', {})

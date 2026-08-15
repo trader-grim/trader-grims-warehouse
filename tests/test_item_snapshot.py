@@ -136,6 +136,32 @@ def test_snapshot_generation_is_stable():
         assert a.generation == b.generation
 
 
+def test_inventory_available_treats_sold_status_as_terminal_even_with_quantity():
+    goal = GoalProfile("listable", "1", ("inventory_available",))
+    snap = _snapshot(
+        _make_item(status="sold", draft_listing={"quantity": 9}),
+        goal=goal,
+    )
+
+    assert _result(snap, "inventory_available") == FingerprintResult.FALSE
+
+
+def test_inventory_available_requires_explicit_status_restore_and_positive_quantity():
+    goal = GoalProfile("listable", "1", ("inventory_available",))
+
+    restored = _snapshot(
+        _make_item(status="In Stock", draft_listing={"quantity": 2}),
+        goal=goal,
+    )
+    zero = _snapshot(
+        _make_item(status="In Stock", draft_listing={"quantity": 0}),
+        goal=goal,
+    )
+
+    assert _result(restored, "inventory_available") == FingerprintResult.TRUE
+    assert _result(zero, "inventory_available") == FingerprintResult.FALSE
+
+
 # ---------------------------------------------------------------------------
 # item_has_photos
 # ---------------------------------------------------------------------------
