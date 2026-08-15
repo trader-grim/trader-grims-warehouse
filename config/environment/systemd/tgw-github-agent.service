@@ -4,8 +4,8 @@ After=local-fs.target
 
 [Service]
 Type=simple
-User=tgw-git
-Group=tgw-git
+User=tgw-release
+Group=tgw-release
 RuntimeDirectory=tgw-github-agent
 RuntimeDirectoryMode=0700
 ExecStart=/usr/bin/ssh-agent -D -a /run/tgw-github-agent/agent.sock

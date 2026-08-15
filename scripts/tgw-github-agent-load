@@ -2,7 +2,7 @@
 set -eu
 
 SOCKET=/run/tgw-github-agent/agent.sock
-PRIVATE_KEY=/etc/tgw/credentials/github/trader-grims-warehouse/id_ed25519
+PRIVATE_KEY=/var/lib/tgw-release/.ssh/trader-grims-warehouse_deploy_ed25519
 attempt=0
 
 while [ ! -S "$SOCKET" ]; do

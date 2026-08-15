@@ -26,15 +26,23 @@ def test_installer_is_fixed_to_application_repository() -> None:
 
     assert "git@github-tgw-app:trader-grim/trader-grims-warehouse.git" in installer
     assert "trader-grim/tgw-flake.git" not in installer
+    assert "RELEASE_USER=tgw-release" in installer
+    assert "RELEASE_HOME=/var/lib/tgw-release" in installer
+    assert "PRIVATE_KEY=$KEY_DIRECTORY/trader-grims-warehouse_deploy_ed25519" in installer
     sudoers = (ROOT / "config/environment/sudoers/tgw-source-git").read_text()
+    assert "%tgw-release ALL=(tgw-release)" in sudoers
+    assert "%tgw-coders" not in sudoers
     assert "/usr/local/bin/tgw-source-git dry-run" in sudoers
     assert "/usr/local/bin/tgw-source-git publish" in sudoers
     assert "publish-candidate" not in sudoers
+    service = (ROOT / "config/environment/systemd/tgw-github-agent.service").read_text()
+    assert "User=tgw-release" in service
+    assert "Group=tgw-release" in service
 
 
 def test_successor_runbooks_state_three_repository_boundary() -> None:
     separation = (ROOT / "docs/runbooks/three-repository-boundary-v3-20260815.md").read_text()
-    access = (ROOT / "docs/runbooks/shared-source-access-v3-20260815.md").read_text()
+    access = (ROOT / "docs/runbooks/shared-source-access-v4-20260815.md").read_text()
 
     assert "trader-grim/trader-grims-warehouse" in separation
     assert "trader-grim/tgw-flake" in separation

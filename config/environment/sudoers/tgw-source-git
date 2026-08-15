@@ -1,4 +1,4 @@
-%tgw-coders ALL=(tgw-git) NOPASSWD: /usr/local/bin/tgw-source-git status
-%tgw-coders ALL=(tgw-git) NOPASSWD: /usr/local/bin/tgw-source-git fetch
-%tgw-coders ALL=(tgw-git) NOPASSWD: /usr/local/bin/tgw-source-git dry-run
-%tgw-coders ALL=(tgw-git) NOPASSWD: /usr/local/bin/tgw-source-git publish
+%tgw-release ALL=(tgw-release) NOPASSWD: /usr/local/bin/tgw-source-git status
+%tgw-release ALL=(tgw-release) NOPASSWD: /usr/local/bin/tgw-source-git fetch
+%tgw-release ALL=(tgw-release) NOPASSWD: /usr/local/bin/tgw-source-git dry-run
+%tgw-release ALL=(tgw-release) NOPASSWD: /usr/local/bin/tgw-source-git publish

@@ -4,9 +4,12 @@ set -eu
 MODE=${1:-prepare}
 REPOSITORY=/opt/TGW/tgw-lib/src/trader-grims-warehouse
 REMOTE=git@github-tgw-app:trader-grim/trader-grims-warehouse.git
-KEY_DIRECTORY=/etc/tgw/credentials/github/trader-grims-warehouse
-PRIVATE_KEY=$KEY_DIRECTORY/id_ed25519
-PUBLIC_KEY=$KEY_DIRECTORY/id_ed25519.pub
+RELEASE_USER=tgw-release
+RELEASE_GROUP=tgw-release
+RELEASE_HOME=/var/lib/tgw-release
+KEY_DIRECTORY=$RELEASE_HOME/.ssh
+PRIVATE_KEY=$KEY_DIRECTORY/trader-grims-warehouse_deploy_ed25519
+PUBLIC_KEY=$PRIVATE_KEY.pub
 SSH_PUBLIC_KEY=/etc/ssh/tgw_github_app.pub
 AGENT_SOCKET=/run/tgw-github-agent/agent.sock
 SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -22,6 +25,15 @@ if ! getent group tgw-coders >/dev/null; then
     exit 69
 fi
 
+if ! getent group "$RELEASE_GROUP" >/dev/null; then
+    groupadd --system "$RELEASE_GROUP"
+fi
+if ! getent passwd "$RELEASE_USER" >/dev/null; then
+    useradd --system --gid "$RELEASE_GROUP" --home-dir "$RELEASE_HOME" \
+        --create-home --shell /usr/sbin/nologin "$RELEASE_USER"
+fi
+usermod -a -G tgw-coders "$RELEASE_USER"
+
 if [ ! -d /opt/TGW/tgw-lib ]; then
     echo "canonical TGW library root is absent" >&2
     exit 69
@@ -36,15 +48,8 @@ case "$MODE" in
         ;;
 esac
 
-if ! getent passwd tgw-git >/dev/null; then
-    useradd --system --user-group --home-dir /nonexistent --no-create-home \
-        --shell /usr/sbin/nologin tgw-git
-fi
-usermod -a -G tgw-coders tgw-git
-
-install -d -o root -g root -m 0755 /etc/tgw/credentials
-install -d -o root -g root -m 0755 /etc/tgw/credentials/github
-install -d -o root -g tgw-git -m 0750 "$KEY_DIRECTORY"
+install -d -o "$RELEASE_USER" -g "$RELEASE_GROUP" -m 0750 "$RELEASE_HOME"
+install -d -o "$RELEASE_USER" -g "$RELEASE_GROUP" -m 0700 "$KEY_DIRECTORY"
 install -o root -g root -m 0644 \
     "$SOURCE_ROOT/config/environment/ssh/github-known-hosts" \
     /etc/ssh/tgw_github_known_hosts
@@ -73,9 +78,9 @@ elif [ ! -f "$PRIVATE_KEY" ] || [ ! -f "$PUBLIC_KEY" ]; then
     exit 65
 fi
 
-chown tgw-git:tgw-git "$PRIVATE_KEY"
+chown "$RELEASE_USER:$RELEASE_GROUP" "$PRIVATE_KEY"
 chmod 0600 "$PRIVATE_KEY"
-chown root:root "$PUBLIC_KEY"
+chown "$RELEASE_USER:$RELEASE_GROUP" "$PUBLIC_KEY"
 chmod 0644 "$PUBLIC_KEY"
 
 derived_public=$(ssh-keygen -y -f "$PRIVATE_KEY" | awk '{print $1 " " $2}')
@@ -100,7 +105,7 @@ if [ ! -S "$AGENT_SOCKET" ]; then
     echo "TGW GitHub agent socket is absent" >&2
     exit 70
 fi
-agent_fingerprint=$(runuser -u tgw-git -- \
+agent_fingerprint=$(runuser -u "$RELEASE_USER" -- \
     env SSH_AUTH_SOCK="$AGENT_SOCKET" ssh-add -l)
 public_fingerprint=$(ssh-keygen -lf "$PUBLIC_KEY" | awk '{print $2}')
 case "$agent_fingerprint" in
@@ -117,8 +122,8 @@ if [ "$MODE" = prepare ]; then
     exit 0
 fi
 
-runuser -u tgw-git -- /usr/local/bin/tgw-source-git status >/dev/null
-runuser -u tgw-git -- /usr/local/bin/tgw-source-git dry-run
+runuser -u "$RELEASE_USER" -- /usr/local/bin/tgw-source-git status >/dev/null
+runuser -u "$RELEASE_USER" -- /usr/local/bin/tgw-source-git dry-run
 
 git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" remote set-url origin "$REMOTE"
 
