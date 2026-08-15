@@ -10,6 +10,7 @@ export PATH=/usr/bin:/bin
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_TERMINAL_PROMPT=0
 export SSH_AUTH_SOCK=/run/tgw-github-agent/agent.sock
+cd /
 
 git_repository() {
     git --git-dir="$GIT_DIRECTORY" "$@"
