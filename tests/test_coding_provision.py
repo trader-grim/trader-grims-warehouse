@@ -18,10 +18,22 @@ from fastapi.testclient import TestClient
 from tgw import api, coding_cli, coding_execution, coding_provision, coding_provision_worker, http_server
 from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
+from tgw.workers import coding as coding_worker
 from tgw.workers.coding import CodingWorker
 from tgw.workflow.coding_snapshot import serialize_snapshot
 from tgw.workflow.contracts import EvidenceAssertion, FingerprintResult, ObjectSnapshot
 from tgw.workflow.treatments import CODING_TREATMENTS
+
+
+def test_coding_defaults_use_shared_development_repository() -> None:
+    expected = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
+
+    assert coding_execution.DEFAULT_REPOSITORY_ROOT == expected
+    assert coding_worker.DEFAULT_REPOSITORY_ROOT == expected
+    assert "/opt/TGW/src/trader-grims-warehouse" not in {
+        str(coding_execution.DEFAULT_REPOSITORY_ROOT),
+        str(coding_worker.DEFAULT_REPOSITORY_ROOT),
+    }
 
 
 class NativeQueue:

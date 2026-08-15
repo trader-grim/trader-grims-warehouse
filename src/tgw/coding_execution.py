@@ -18,7 +18,7 @@ from tgw.workflow.contracts import OUTCOME_CONFLICT, OUTCOME_FAILED, OUTCOME_PAR
 from tgw.workflow.treatments import CODING_TREATMENTS
 
 DEFAULT_WORKTREE_ROOT = Path("/opt/TGW/var/worktrees")
-DEFAULT_REPOSITORY_ROOT = Path("/opt/TGW/src/trader-grims-warehouse")
+DEFAULT_REPOSITORY_ROOT = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
 _RECEIPT_FILES = {
     "codex-implement": "implementation-receipt.json",
     "claude-review": "review-receipt.json",
