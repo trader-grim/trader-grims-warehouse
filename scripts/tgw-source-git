@@ -1,0 +1,82 @@
+#!/bin/sh
+set -eu
+
+COMMAND=${1:-}
+REPOSITORY=/opt/TGW/tgw-lib/src/trader-grims-warehouse
+REMOTE=git@github-tgw-app:trader-grim/trader-grims-warehouse.git
+
+export HOME=/nonexistent
+export PATH=/usr/bin:/bin
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_TERMINAL_PROMPT=0
+export SSH_AUTH_SOCK=/run/tgw-github-agent/agent.sock
+
+git_repository() {
+    git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" "$@"
+}
+
+remote_commit() {
+    git ls-remote --heads "$REMOTE" "$1" | awk 'NR == 1 {print $1}'
+}
+
+verify_local_lineage() {
+    git_repository cat-file -e main^{commit}
+    git_repository cat-file -e production^{commit}
+    git_repository cat-file -e integrate/full-plan-fb9^{commit}
+    git_repository merge-base --is-ancestor production main
+}
+
+verify_remote_readback() {
+    name=$1
+    local_value=$(git_repository rev-parse "$name^{commit}")
+    remote_value=$(remote_commit "refs/heads/$name")
+    if [ "$local_value" != "$remote_value" ]; then
+        echo "remote $name mismatch: local=$local_value remote=${remote_value:-absent}" >&2
+        exit 65
+    fi
+    echo "$name=$remote_value"
+}
+
+case "$COMMAND" in
+    status)
+        verify_local_lineage
+        ssh-keygen -lf /etc/ssh/tgw_github_app.pub
+        git ls-remote --heads "$REMOTE" \
+            refs/heads/main \
+            refs/heads/production \
+            refs/heads/integrate/full-plan-fb9
+        ;;
+    fetch)
+        git_repository fetch --no-tags "$REMOTE" \
+            '+refs/heads/*:refs/remotes/origin/*'
+        ;;
+    dry-run)
+        verify_local_lineage
+        remote_main=$(remote_commit refs/heads/main)
+        if [ -n "$remote_main" ]; then
+            git_repository merge-base --is-ancestor "$remote_main" main
+        fi
+        git_repository push --dry-run "$REMOTE" \
+            refs/heads/main:refs/heads/main \
+            refs/heads/production:refs/heads/production \
+            refs/heads/integrate/full-plan-fb9:refs/heads/integrate/full-plan-fb9
+        ;;
+    publish)
+        verify_local_lineage
+        remote_main=$(remote_commit refs/heads/main)
+        if [ -n "$remote_main" ]; then
+            git_repository merge-base --is-ancestor "$remote_main" main
+        fi
+        git_repository push "$REMOTE" \
+            refs/heads/main:refs/heads/main \
+            refs/heads/production:refs/heads/production \
+            refs/heads/integrate/full-plan-fb9:refs/heads/integrate/full-plan-fb9
+        verify_remote_readback main
+        verify_remote_readback production
+        verify_remote_readback integrate/full-plan-fb9
+        ;;
+    *)
+        echo "usage: tgw-source-git {status|fetch|dry-run|publish}" >&2
+        exit 64
+        ;;
+esac

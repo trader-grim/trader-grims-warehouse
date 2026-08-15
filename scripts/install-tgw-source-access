@@ -49,6 +49,13 @@ install -d -o root -g root -m 0755 /usr/local/libexec
 install -o root -g root -m 0755 \
     "$SOURCE_ROOT/scripts/tgw-github-agent-load" \
     /usr/local/libexec/tgw-github-agent-load
+install -o root -g root -m 0755 \
+    "$SOURCE_ROOT/scripts/tgw-source-git" \
+    /usr/local/bin/tgw-source-git
+install -o root -g root -m 0440 \
+    "$SOURCE_ROOT/config/environment/sudoers/tgw-source-git" \
+    /etc/sudoers.d/tgw-source-git
+visudo -cf /etc/sudoers.d/tgw-source-git
 
 if [ ! -e "$PRIVATE_KEY" ] && [ ! -e "$PUBLIC_KEY" ]; then
     umask 077
@@ -87,7 +94,8 @@ if [ ! -S "$AGENT_SOCKET" ]; then
     echo "TGW GitHub agent socket is absent" >&2
     exit 70
 fi
-agent_fingerprint=$(SSH_AUTH_SOCK="$AGENT_SOCKET" ssh-add -l)
+agent_fingerprint=$(runuser -u tgw-git -- \
+    env SSH_AUTH_SOCK="$AGENT_SOCKET" ssh-add -l)
 public_fingerprint=$(ssh-keygen -lf "$PUBLIC_KEY" | awk '{print $2}')
 case "$agent_fingerprint" in
     *"$public_fingerprint"*) ;;
@@ -103,14 +111,8 @@ if [ "$MODE" = prepare ]; then
     exit 0
 fi
 
-git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" cat-file -e main^{commit}
-git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" cat-file -e production^{commit}
-
-git ls-remote --exit-code "$REMOTE" refs/heads/main >/dev/null
-git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" push --dry-run "$REMOTE" \
-    refs/heads/main:refs/heads/main \
-    refs/heads/production:refs/heads/production \
-    refs/heads/integrate/full-plan-fb9:refs/heads/integrate/full-plan-fb9
+runuser -u tgw-git -- /usr/local/bin/tgw-source-git status >/dev/null
+runuser -u tgw-git -- /usr/local/bin/tgw-source-git dry-run
 
 git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" remote set-url origin "$REMOTE"
 
