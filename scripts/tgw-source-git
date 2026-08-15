@@ -2,7 +2,7 @@
 set -eu
 
 COMMAND=${1:-}
-REPOSITORY=/opt/TGW/tgw-lib/src/trader-grims-warehouse
+GIT_DIRECTORY=/opt/TGW/tgw-lib/src/trader-grims-warehouse/.git
 REMOTE=git@github-tgw-app:trader-grim/trader-grims-warehouse.git
 
 export HOME=/nonexistent
@@ -12,7 +12,7 @@ export GIT_TERMINAL_PROMPT=0
 export SSH_AUTH_SOCK=/run/tgw-github-agent/agent.sock
 
 git_repository() {
-    git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" "$@"
+    git --git-dir="$GIT_DIRECTORY" "$@"
 }
 
 remote_commit() {
