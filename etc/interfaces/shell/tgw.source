@@ -57,7 +57,12 @@ tgw suggest "$@"
 }
 
 suggedit () {
-kate /opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault/suggestions/SUGGESTIONS.md
+local plan_root="${TGW_PLAN_ROOT:-/opt/TGW/library/plans}"
+if [[ ! -d "$plan_root" ]]; then
+    echo "The Plan is not installed on this host; use tgw-lib:/opt/TGW/library/plans." >&2
+    return 1
+fi
+kate "$plan_root/suggestions/SUGGESTIONS.md"
 }
 
 keydedit () {
@@ -2891,7 +2896,7 @@ xdotool key Tab Ctrl+v Return Ctrl+Tab
 #cd $itemdatapath ; for item in tgw* ; do alias $item="tgw_info_popup $item &" ; done
 
 # tgw bash/zsh tab completion
-_TGW_COMPLETION=/opt/TGW/src/trader-grims-warehouse/etc/completion/tgw-completion.bash
+_TGW_COMPLETION=/opt/TGW/current/etc/completion/tgw-completion.bash
 if [[ -f "$_TGW_COMPLETION" ]]; then
     source "$_TGW_COMPLETION"
 fi

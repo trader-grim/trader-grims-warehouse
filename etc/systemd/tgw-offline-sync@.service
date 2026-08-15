@@ -23,4 +23,4 @@ Type=oneshot
 User=tgw
 Group=tgw
 WorkingDirectory=/opt/TGW
-ExecStart=/opt/TGW/src/trader-grims-warehouse/bin/tgw-offline-sync %i
+ExecStart=/opt/TGW/current/bin/tgw-offline-sync %i

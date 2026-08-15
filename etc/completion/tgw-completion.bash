@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # tgw bash/zsh tab completion
 # Source this file in ~/.bashrc or ~/.zshrc:
-#   source /opt/TGW/src/trader-grims-warehouse/etc/completion/tgw-completion.bash
+#   source /opt/TGW/current/etc/completion/tgw-completion.bash
 # Or install system-wide:
-#   sudo cp /opt/TGW/src/trader-grims-warehouse/etc/completion/tgw-completion.bash \
+#   sudo cp /opt/TGW/current/etc/completion/tgw-completion.bash \
 #        /etc/bash_completion.d/tgw
 
 _tgw_subcommands=(

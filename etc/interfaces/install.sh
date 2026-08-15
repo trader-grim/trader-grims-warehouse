@@ -3,7 +3,7 @@
 #
 # Deploys all operator interface configs from the repo to their system locations.
 # Run as root from any directory:
-#   sudo bash /opt/TGW/src/trader-grims-warehouse/etc/interfaces/install.sh
+#   sudo bash /opt/TGW/current/etc/interfaces/install.sh
 #
 # What this installs (system-level, run as root):
 #   MC VFS        — /opt/TGW/mc/ symlink → repo; system extfs + menu configs

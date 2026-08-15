@@ -6,7 +6,7 @@
 # the chosen entry back to the clipboard via `tgw clip get --id N --copy`.
 #
 # Bind to a Sway/Qtile keybind, e.g. (Sway config):
-#   bindsym $mod+v exec /opt/TGW/src/trader-grims-warehouse/bin/tgw-clip-picker
+#   bindsym $mod+v exec /opt/TGW/current/bin/tgw-clip-picker
 #
 # Requires: rofi (or dmenu as a fallback), the tgw venv, tgw-clipd running
 # with history in ~/.local/share/tgw-clip/ (per-user, per PP-CLIP-001 Phase 1).

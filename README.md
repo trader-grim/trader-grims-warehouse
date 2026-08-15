@@ -13,7 +13,7 @@ multi-marketplace support planned.
 ## Install (development)
 
 ```bash
-cd /opt/TGW/src/trader-grims-warehouse
+cd /opt/TGW/tgw-lib/src/trader-grims-warehouse
 pip install -e ".[dev]"
 ```
 

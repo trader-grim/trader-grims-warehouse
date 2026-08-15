@@ -15,7 +15,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, '/opt/TGW/src/trader-grims-warehouse/src')
+sys.path.insert(0, '/opt/TGW/current/src')
 CONFIG_PATH = Path('/opt/TGW/config/tgw-api-config.json')
 DSN = 'dbname=state_machine user=tgw'
 CATALOG = Path('/opt/TGW/data/ItemCatalog/search-catalog.json')

@@ -8,7 +8,7 @@
 # Usage: sudo -u tgw bash bin/flutter-fix-perms [flutter-root]
 set -euo pipefail
 
-FLUTTER_ROOT="${1:-/opt/TGW/src/trader-grims-warehouse/flutter}"
+FLUTTER_ROOT="${1:-/opt/TGW/tgw-lib/src/trader-grims-warehouse/flutter}"
 CACHE="$FLUTTER_ROOT/bin/cache"
 
 if [[ ! -d "$CACHE" ]]; then

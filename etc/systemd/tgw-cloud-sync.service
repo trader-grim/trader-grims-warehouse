@@ -8,4 +8,4 @@ Type=oneshot
 User=tgw
 Group=tgw
 WorkingDirectory=/opt/TGW
-ExecStart=/opt/TGW/src/trader-grims-warehouse/bin/tgw-cloud-sync
+ExecStart=/opt/TGW/current/bin/tgw-cloud-sync

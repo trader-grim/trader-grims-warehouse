@@ -2,7 +2,7 @@
 # etc/interfaces/qtile/install.sh — TGW Qtile window manager installer.
 #
 # Run as your DESKTOP USER (not root) from any directory:
-#   bash /opt/TGW/src/trader-grims-warehouse/etc/interfaces/qtile/install.sh
+#   bash /opt/TGW/current/etc/interfaces/qtile/install.sh
 #
 # What this does:
 #   1. Checks that system packages (qtile, xclip, dmenu) are installed; prints

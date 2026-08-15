@@ -4,4 +4,4 @@ RequiresMountsFor=/home/snapshot/TGW-SNAPSHOT-0
 
 [Service]
 Type=oneshot
-ExecStart=/opt/TGW/src/trader-grims-warehouse/bin/tgw-snapshot
+ExecStart=/opt/TGW/current/bin/tgw-snapshot

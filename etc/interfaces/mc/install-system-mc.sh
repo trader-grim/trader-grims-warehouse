@@ -2,7 +2,7 @@
 # install-system-mc.sh — install TGW VFS/menu integration system-wide.
 # Canonical location: etc/interfaces/mc/install-system-mc.sh (inside TGW repo)
 # Run as:  sudo bash /opt/TGW/mc/install-system-mc.sh
-# (or:     sudo bash /opt/TGW/src/trader-grims-warehouse/etc/interfaces/mc/install-system-mc.sh)
+# (or:     sudo bash /opt/TGW/current/etc/interfaces/mc/install-system-mc.sh)
 set -euo pipefail
 
 MC_ETC=/etc/mc

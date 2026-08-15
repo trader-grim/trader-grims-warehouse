@@ -6,10 +6,9 @@
 import json
 import os
 import sys
-import time
 from pathlib import Path
 
-sys.path.insert(0, '/opt/TGW/src/trader-grims-warehouse/src')
+sys.path.insert(0, '/opt/TGW/current/src')
 CONFIG_PATH = Path('/opt/TGW/config/tgw-api-config.json')
 
 

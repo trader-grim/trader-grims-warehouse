@@ -1,5 +1,5 @@
 {
-  "canonical_root": "/opt/TGW/src/trader-grims-warehouse",
+  "canonical_root": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
   "repository_id": "trader-grims-warehouse",
   "source_commit": "82149b9061d8c1289659b9535d87524e2a237dd3"
 }

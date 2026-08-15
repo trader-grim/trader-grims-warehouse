@@ -97,7 +97,7 @@ def _graph():
     plan = parse_plan(_text())
     return compile_plan(plan, _registry(), {
         "repository_id": "trader-grims-warehouse",
-        "canonical_root": "/opt/TGW/src/trader-grims-warehouse",
+        "canonical_root": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
         "source_commit": "82149b906f000000000000000000000000000000",
     })
 

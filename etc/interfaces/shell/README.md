@@ -44,7 +44,7 @@ The live `/opt/TGW/bin/` files are owned by `tgw` and drive Dave's daily shell;
 of truth. To deploy (backs up existing, replaces only when changed):
 
 ```bash
-sudo bash /opt/TGW/src/trader-grims-warehouse/etc/interfaces/install.sh
+sudo bash /opt/TGW/current/etc/interfaces/install.sh
 # then, in open shells:
 source /opt/TGW/bin/tgw.source
 ```
