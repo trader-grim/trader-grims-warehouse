@@ -118,8 +118,9 @@ if [ "$MODE" = prepare ]; then
 fi
 
 runuser -u tgw-git -- /usr/local/bin/tgw-source-git status >/dev/null
-runuser -u tgw-git -- /usr/local/bin/tgw-source-git dry-run
+runuser -u tgw-git -- /usr/local/bin/tgw-source-git dry-run-candidate
 
 git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" remote set-url origin "$REMOTE"
 
 echo "activated_remote=$REMOTE"
+echo "publication_scope=refs/heads/repair/application-clean-v1 only"

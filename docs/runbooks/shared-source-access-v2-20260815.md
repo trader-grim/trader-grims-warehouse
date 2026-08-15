@@ -36,12 +36,14 @@ Then activate from reviewed application source:
 
 ```bash
 sudo scripts/install-tgw-source-access activate
-sudo -n -u tgw-git /usr/local/bin/tgw-source-git publish
+sudo -n -u tgw-git /usr/local/bin/tgw-source-git publish-candidate
 ```
 
-Activation proves remote read and dry-run publication before changing canonical
-`origin`. Publication performs exact remote readback of `main`, `production`, and
-`integrate/full-plan-fb9`.
+Activation proves remote read and dry-run candidate publication before changing
+canonical `origin`. Publication can update only
+`refs/heads/repair/application-clean-v1` and performs exact readback. It cannot
+update `main`, `production`, or `integrate/full-plan-fb9`; promotion requires a
+separate reviewed integration action.
 
 Do not attach this key to `tgw-flake`, and do not move the existing flake deploy
 key back to the application repository. Independent keys prevent a rotation or

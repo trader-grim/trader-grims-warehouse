@@ -4,6 +4,7 @@ set -eu
 COMMAND=${1:-}
 GIT_DIRECTORY=/opt/TGW/tgw-lib/src/trader-grims-warehouse/.git
 REMOTE=git@github-tgw-app:trader-grim/trader-grims-warehouse.git
+CANDIDATE=repair/application-clean-v1
 
 export HOME=/nonexistent
 export PATH=/usr/bin:/bin
@@ -25,16 +26,13 @@ verify_local_lineage() {
     # The application repository owns Python/application source. The separate
     # production-flake repository owns host configurations and must never be
     # published through this command.
-    git_repository cat-file -e main:pyproject.toml
-    git_repository cat-file -e main:src/tgw/__init__.py
-    if git_repository cat-file -e main:nix/hosts/tgw-prod.nix 2>/dev/null; then
+    git_repository cat-file -e "$CANDIDATE:pyproject.toml"
+    git_repository cat-file -e "$CANDIDATE:src/tgw/__init__.py"
+    if git_repository cat-file -e "$CANDIDATE:nix/hosts/tgw-prod.nix" 2>/dev/null; then
         echo "refusing production-flake history in application publisher" >&2
         exit 65
     fi
-    git_repository cat-file -e main^{commit}
-    git_repository cat-file -e production^{commit}
-    git_repository cat-file -e integrate/full-plan-fb9^{commit}
-    git_repository merge-base --is-ancestor production main
+    git_repository cat-file -e "$CANDIDATE^{commit}"
 }
 
 verify_remote_readback() {
@@ -54,40 +52,33 @@ case "$COMMAND" in
         ssh-keygen -lf /etc/ssh/tgw_github_app.pub
         git ls-remote --heads "$REMOTE" \
             refs/heads/main \
-            refs/heads/production \
-            refs/heads/integrate/full-plan-fb9
+            "refs/heads/$CANDIDATE"
         ;;
     fetch)
         git_repository fetch --no-tags "$REMOTE" \
             '+refs/heads/*:refs/remotes/origin/*'
         ;;
-    dry-run)
+    dry-run-candidate)
         verify_local_lineage
         remote_main=$(remote_commit refs/heads/main)
         if [ -n "$remote_main" ]; then
-            git_repository merge-base --is-ancestor "$remote_main" main
+            git_repository merge-base --is-ancestor "$remote_main" "$CANDIDATE"
         fi
         git_repository push --dry-run "$REMOTE" \
-            refs/heads/main:refs/heads/main \
-            refs/heads/production:refs/heads/production \
-            refs/heads/integrate/full-plan-fb9:refs/heads/integrate/full-plan-fb9
+            "refs/heads/$CANDIDATE:refs/heads/$CANDIDATE"
         ;;
-    publish)
+    publish-candidate)
         verify_local_lineage
         remote_main=$(remote_commit refs/heads/main)
         if [ -n "$remote_main" ]; then
-            git_repository merge-base --is-ancestor "$remote_main" main
+            git_repository merge-base --is-ancestor "$remote_main" "$CANDIDATE"
         fi
         git_repository push "$REMOTE" \
-            refs/heads/main:refs/heads/main \
-            refs/heads/production:refs/heads/production \
-            refs/heads/integrate/full-plan-fb9:refs/heads/integrate/full-plan-fb9
-        verify_remote_readback main
-        verify_remote_readback production
-        verify_remote_readback integrate/full-plan-fb9
+            "refs/heads/$CANDIDATE:refs/heads/$CANDIDATE"
+        verify_remote_readback "$CANDIDATE"
         ;;
     *)
-        echo "usage: tgw-source-git {status|fetch|dry-run|publish}" >&2
+        echo "usage: tgw-source-git {status|fetch|dry-run-candidate|publish-candidate}" >&2
         exit 64
         ;;
 esac

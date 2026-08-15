@@ -10,10 +10,14 @@ def test_application_publisher_is_fixed_to_application_repository() -> None:
 
     assert "git@github-tgw-app:trader-grim/trader-grims-warehouse.git" in wrapper
     assert "trader-grim/tgw-flake.git" not in wrapper
-    assert "main:pyproject.toml" in wrapper
-    assert "main:src/tgw/__init__.py" in wrapper
-    assert "main:nix/hosts/tgw-prod.nix" in wrapper
+    assert "$CANDIDATE:pyproject.toml" in wrapper
+    assert "$CANDIDATE:src/tgw/__init__.py" in wrapper
+    assert "$CANDIDATE:nix/hosts/tgw-prod.nix" in wrapper
     assert "refusing production-flake history" in wrapper
+    assert "repair/application-clean-v1" in wrapper
+    assert "dry-run-candidate" in wrapper
+    assert "publish-candidate" in wrapper
+    assert "refs/heads/main:refs/heads/main" not in wrapper
 
 
 def test_installer_is_fixed_to_application_repository() -> None:
@@ -21,6 +25,9 @@ def test_installer_is_fixed_to_application_repository() -> None:
 
     assert "git@github-tgw-app:trader-grim/trader-grims-warehouse.git" in installer
     assert "trader-grim/tgw-flake.git" not in installer
+    sudoers = (ROOT / "config/environment/sudoers/tgw-source-git").read_text()
+    assert "publish-candidate" in sudoers
+    assert " tgw-source-git publish\n" not in sudoers
 
 
 def test_successor_runbooks_state_two_repository_boundary() -> None:
