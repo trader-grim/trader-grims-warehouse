@@ -652,15 +652,23 @@ class EbayUploadWorker(QueueWorker):
                              else 'UPLOAD_SUCCEEDED'),
                 resulting_generation=resulting_generation,
             )
-        receipt = {
-            "treatment_id": "ebay-upload",
-            "outcome": "satisfied",
-            "established_conditions": ("photos_uploaded",),
-            "artifacts": (f"item:{sku}",),
+        if resulting_generation is None:
+            raise HardFailure('upload completion did not commit item generation')
+        result = {
+            'schema': 'ebay-upload-result/v1',
+            'outcome': 'satisfied',
+            'established_conditions': ['photos_uploaded'],
+            'artifacts': [f'item:{sku}'],
+            'evidence': {
+                'reason_code': 'UPLOAD_SUCCEEDED',
+                'resulting_generation': resulting_generation,
+                'uploaded_this_attempt': new_count,
+                'uploaded_total': len(reordered),
+            },
         }
         if provider_effect_ids:
-            receipt["provider_effect_ids"] = tuple(provider_effect_ids)
-        return receipt
+            result['evidence']['provider_effect_ids'] = list(provider_effect_ids)
+        return result
 
 
 def main() -> int:

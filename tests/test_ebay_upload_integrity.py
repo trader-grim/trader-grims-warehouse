@@ -354,6 +354,47 @@ def test_governed_upload_in_legacy_transport_returns_fully_bound_receipt(
     assert _treatment_receipt_error(receipt, queued_job) is None
 
 
+def test_operator_photo_resync_returns_non_treatment_result(
+    worker, tmp_path, monkeypatch,
+):
+    """A direct Resync Photos job is not a workflow treatment dispatch.
+
+    Production hit this with a complete 7/7 photo mapping: ebay_upload did no
+    external upload work, returned a legacy partial ``treatment_id`` object,
+    and worker_base dead-lettered the otherwise successful reconciliation as
+    INVALID_RECEIPT_IDENTITY.  The direct result must be explicitly shaped as
+    a non-treatment result so the queue can record ordinary success.
+    """
+    sku = 'tgwtest-operator-resync'
+    local_photo = tmp_path / sku / '1.jpg'
+    d = _write_item(tmp_path, sku, ebay_photos=[{
+        'local': str(local_photo),
+        'url': 'https://i.ebayimg.com/1.jpg',
+    }])
+    _make_photos(d, ['1.jpg'])
+    upload_calls = []
+    monkeypatch.setattr(
+        ebay_upload, 'upload_photo',
+        lambda cfg, photo: upload_calls.append(photo),
+    )
+
+    result = worker.handle(_job(
+        sku, origin='operator', reason='resync_photos_gap',
+    ))
+
+    assert upload_calls == []
+    assert result['schema'] == 'ebay-upload-result/v1'
+    assert result['outcome'] == 'satisfied'
+    assert result['established_conditions'] == ['photos_uploaded']
+    assert result['artifacts'] == [f'item:{sku}']
+    assert result['evidence']['reason_code'] == 'UPLOAD_SUCCEEDED'
+    assert result['evidence']['uploaded_this_attempt'] == 0
+    assert result['evidence']['uploaded_total'] == 1
+    assert len(result['evidence']['resulting_generation']) == 64
+    from tgw.queue.worker_base import _is_treatment_receipt_candidate
+    assert _is_treatment_receipt_candidate(result) is False
+
+
 def test_malformed_and_stale_photo_rows_do_not_skip_or_survive_upload(
     worker, tmp_path, monkeypatch,
 ):
