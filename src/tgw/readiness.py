@@ -147,7 +147,10 @@ class EbayReadinessChecker(ReadinessChecker):
         _aspects_cat = str(dl.get("aspects_category_id") or "").strip()
         _draft_cat   = str(dl.get("category_id") or "").strip()
         _aspects_stale = bool(_aspects_cat and _draft_cat and _aspects_cat != _draft_cat)
-        if _aspects_stale:
+        if not _draft_cat or _draft_cat == "99":
+            _f("ebay_required_aspects", "Required aspects", "missing", "required",
+               "category required before aspects can be checked", "dl-aspects")
+        elif _aspects_stale:
             _f("ebay_required_aspects", "Required aspects", "warning", "required",
                f"stale — computed for category {_aspects_cat}, now {_draft_cat} · re-draft needed",
                "dl-aspects")

@@ -6542,6 +6542,121 @@ def test_item_detail_workflow_card_shows_photo_sync_fingerprint(
     assert reason in html
 
 
+def test_item_detail_photo_sync_warning_offers_resync_not_stale_retry():
+    """Current condition evidence outranks an older failed attempt.
+
+    A draft can have every local photo represented in ``ebay_photos`` while its
+    draft image order is still unsynchronized.  In that state the bounded repair
+    is ``resync_photos``/``ebay_upload``.  Blindly retrying a historical stage or
+    evaluator dead letter cannot establish ``photos_uploaded`` and may repeat the
+    wrong treatment.
+    """
+    item = {
+        "sku": "tgw202604121416554",
+        "title": "What Neat Feet!",
+        "status": "In Stock",
+        "draft_listing": {
+            "title": "What Neat Feet!",
+            "category_id": "261186",
+            "price": 11.99,
+        },
+    }
+    jobs = [{
+        "queue_name": "ebay_stage",
+        "state": "dead_letter",
+        "job_id": "historical-stage-failure",
+        "retry_allowed": True,
+        "error_detail": "eBay rejected staging",
+    }]
+    workflow_card = {
+        "goal": {"id": "tgw.ebay_listable", "version": "1"},
+        "object_generation": "generation-current",
+        "graph_id": "graph-current",
+        "fingerprints": [{
+            "condition_id": "photos_uploaded",
+            "result": "false",
+            "reasons": [
+                "photo sync waiting: 7/7 local photos; "
+                "draft image order is not synchronized",
+            ],
+            "evidence": [{"identity": "photo-sync:current"}],
+        }, {
+            "condition_id": "item_has_photos",
+            "result": "true",
+            "reasons": ["photos present"],
+            "evidence": [{"identity": "item-data:current"}],
+        }],
+    }
+
+    html = http_server._render_item_detail_html(
+        item["sku"], item, [], [], jobs, workflow_card=workflow_card,
+    )
+    action_line = re.search(
+        r'<div class="act-row" id="action-line">(.*?)</div>', html,
+    )
+
+    assert action_line is not None
+    assert '>Resync Photos</button>' in action_line.group(1)
+    assert 'onclick="resyncPhotos()"' in action_line.group(1)
+    assert '>Retry</button>' not in action_line.group(1)
+    assert '>Needs attention</button>' not in action_line.group(1)
+
+
+def test_item_detail_uses_ai_category_before_draft_exists(env):
+    _login(env["client"])
+    sku = "tgw-ai-category-fallback"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Identified Book",
+        "ai_identified": True,
+        "ebay_category_id": "261186",
+        "ebay_category_name": "Books",
+    })
+
+    response = env["client"].get(f"/form/items/{sku}")
+
+    assert response.status_code == 200
+    assert 'id="dl-cat-id" value="261186"' in response.text
+    assert "261186&nbsp;·&nbsp;Books" in response.text
+    assert 'window._DL_CAT_ID = "261186"' in response.text
+
+
+def test_item_detail_visibly_flags_missing_primary_category(env):
+    _login(env["client"])
+    sku = "tgw-missing-category"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Uncategorized Item",
+        "ai_identified": True,
+        "draft_listing": {"title": "Uncategorized Item"},
+    })
+
+    response = env["client"].get(f"/form/items/{sku}")
+
+    assert response.status_code == 200
+    assert 'id="dl-cat-search"' in response.text
+    assert 'aria-invalid="true"' in response.text
+    assert "Required — choose an eBay category before staging" in response.text
+    assert "category required before aspects can be checked" in response.text
+
+
+def test_required_aspect_controls_have_machine_visible_invalid_state(env):
+    _login(env["client"])
+    sku = "tgw-required-aspect-state"
+    _write_item(env["itemdata_root"], sku, {
+        "sku": sku,
+        "title": "Book",
+        "draft_listing": {"title": "Book", "category_id": "261186"},
+    })
+
+    response = env["client"].get(f"/form/items/{sku}")
+
+    assert response.status_code == 200
+    assert "data-required=\"'+(asp.required?'true':'false')+'\"" in response.text
+    assert "aria-invalid=\"'+(reqEmpty?'true':'false')+'\"" in response.text
+    assert "if(reqEmpty)missingReq++" in response.text
+
+
 @pytest.mark.parametrize(
     "item",
     (

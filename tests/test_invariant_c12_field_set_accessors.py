@@ -59,9 +59,9 @@ _MIGRATION_SCRIPT = _SCRIPTS / "migrate_field_set_envelope.py"
 # A new entry here must be justified the same way, in code review.
 _ALLOWLIST = {
     (_SRC / "tgw" / "draft_sync.py", 90),
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 556),   # (b) AI model response
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 616),   # (a) accessor patch write
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 711),   # (a) accessor patch write
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 572),   # (b) AI model response
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 666),   # (a) accessor patch write
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 761),   # (a) accessor patch write
     # Refreshed 2026-07-18 (this packet — todo #1499/#1500/#1506/#1507, the
     # same stale-line-numbers report independently rediscovered 4 times by
     # different tgw-coder packets today, each correctly declining to fix an
@@ -104,7 +104,7 @@ _ALLOWLIST = {
     # /form/runs route + _render_runs_html() inserted ~186 lines before this
     # entry, shifting it from 5855 to 6041 — re-verified against current
     # HEAD, no accessor-routing behavior changed, only position.
-    (_SRC / "tgw" / "http_server.py", 7302),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 7343),              # (b) revision_draft.delta
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)

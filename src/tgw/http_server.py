@@ -4217,6 +4217,7 @@ function initCatPicker(cfg){
   function selectCategory(cid,cname){
     hid.value=cid;
     if(bc)bc.textContent=cid+' \\u00b7 '+cname;
+    if(typeof flagFieldInvalid==='function')flagFieldInvalid(inp,false);
     inp.value='';
     dd.style.display='none';dd.innerHTML='';
     _idx=-1;_items=[];_pendingId=null;
@@ -4401,6 +4402,40 @@ function initCatSearch2(){
 
 # Module-level constant — avoids nested quote hell in f-string script blocks
 _CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById('aspects-loading');\n  var form=document.getElementById('aspects-form');\n  if(!catId){if(loading)loading.textContent='No category.';return;}\n  var curCondSel=document.getElementById('dl-condition-select');\n  var curCondQ=curCondSel&&curCondSel.value?'?current_condition='+encodeURIComponent(curCondSel.value):'';\n  fetch('/api/ebay/category-context/'+encodeURIComponent(catId)+curCondQ,{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent='Context load failed.';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById('dl-condition-select');\n    if(sel&&d.conditions&&d.conditions.length){\n      var curVal=sel.value;\n      var stillValid=d.conditions.some(function(c){return c.enum===curVal;});\n      var html='';\n      if(!curVal)html+='<option value=\"\" selected disabled>\\u2014 select \\u2014</option>';\n      d.conditions.forEach(function(c){\n        html+='<option value=\"'+c.enum+'\"'+(c.enum===curVal?' selected':'')+'>'+c.label+'</option>';\n      });\n      if(curVal&&!stillValid){\n        if(d.condition_remap){\n          curVal=d.condition_remap.enum;\n          html=html.replace('<option value=\"'+curVal+'\"','<option value=\"'+curVal+'\" selected');\n        }else{\n          html+='<option value=\"'+curVal+'\" selected>'+curVal+' \\u2014 not valid for this category, please fix</option>';\n        }\n      }\n      sel.innerHTML=html;\n      flagFieldInvalid(sel,!!(curVal&&!stillValid&&!d.condition_remap));\n      if(d.condition_remap&&curVal===d.condition_remap.enum){\n        fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n          headers:authHeaders({'Content-Type':'application/json'}),\n          body:JSON.stringify({fields:{draft_listing:{condition_enum:curVal}}})});\n      }\n      var cn=document.getElementById('condition-policy-note');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 category changed, condition auto-matched to nearest same-or-worse: '+d.condition_remap.label:'')+((curVal&&!stillValid&&!d.condition_remap)?' \\u2014 current value invalid, please re-select':'');\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById('dl-ship-input');\n      var fhint=document.getElementById('dl-ship-hint');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n            headers:authHeaders({'Content-Type':'application/json'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent='suggested: '+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById('store-cat-hint');\n      if(sch)sch.textContent='suggested: '+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById('category-group-hint');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?' · typical $'+d.pricing.typical_used.toFixed(2):'';\n        var pf=d.pricing&&d.pricing.floor?' · floor $'+d.pricing.floor.toFixed(2):'';\n        gh.textContent='group: '+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display='none';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=d.aspects_error\n        ?'<span style=\"color:#e88;font-size:.82em\">Item specifics lookup failed (\\u2018'+d.aspects_error+'\\u2019) \\u2014 every eBay category has specifics; this is a lookup error, not an empty category. <a href=\"#\" onclick=\"loadCatCtx(\\''+catId+'\\');return false\" style=\"color:#8ac\">Retry</a></span>'\n        :'<span style=\"color:#556;font-size:.82em\">No specifics returned for this category \\u2014 unexpected, please verify manually</span>';\n      return;\n    }\n    var html='';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?'<span style=\"font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px\">REQ</span>'\n        :'<span style=\"font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px\">REC</span>';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||'').toString():'');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||'').toString():'');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||'').toString():'');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?'edit':'same';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?'proposed':'same';}\n      else{cur=liveVal;layer=liveVal?'live':'empty';}\n      cur=cur.replace(/\"/g,'&quot;');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?'#c44':(layer==='edit'?'#44c':(layer==='proposed'?'#884':'#444'));\n      var bg=reqEmpty?'#1a0a0a':(layer==='edit'?'#0a0a1a':(layer==='proposed'?'#1a1a00':'#1a1a1a'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer==='edit'||layer==='proposed')&&liveVal\n        ?'<div style=\"font-size:.7em;color:#445;margin-top:1px\">live: '+liveVal.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'\n        :'';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode==='SELECTION_ONLY'){\n        var offList=cur&&asp.allowed_values.indexOf(cur)===-1;\n        var opts=asp.allowed_values.map(function(v){\n          return '<option value=\"'+v+'\"'+(v===cur?' selected':'')+'>'+v+'</option>';\n        }).join('');\n        if(offList)opts='<option value=\"'+cur+'\" selected>'+cur+' \\u2014 not in this category\\u2019s list, please verify</option>'+opts;\n        inp='<select data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" style=\"background:'+bg+';color:#eee;border:1px solid '+(offList?'#c84':bord)+';border-radius:3px;padding:2px 5px;font-size:.85em\"><option value=\"\">—</option>'+opts+'</select>';\n      }else{\n        var dlid='dl-asp-'+asp.name.replace(/[^a-zA-Z0-9]/g,'-');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?'<datalist id=\"'+dlid+'\">'+asp.allowed_values.map(function(v){return '<option value=\"'+v+'\"></option>';}).join('')+'</datalist>'\n          :'';\n        inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" value=\"'+cur+'\"'\n           +' style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">'\n           +dlopts;\n      }\n      html+='<div class=\"frow\"'+(reqEmpty?' style=\"border-left:2px solid #944;padding-left:4px\"':'')+'>  <span class=\"fn\" style=\"font-size:.82em\">'+asp.name+badge+'</span><span class=\"fv\">'+inp+liveHint+'</span></div>';\n    });\n    var covered={};\n    d.aspects.forEach(function(asp){covered[asp.name]=true;});\n    Object.keys(prefill).forEach(function(name){\n      if(covered[name])return;\n      var xcur=(prefill[name]||'').toString().replace(/\"/g,'&quot;');\n      var xkey=name.replace(/\"/g,'&quot;');\n      var xbadge='<span style=\"font-size:.7em;background:#1a2a3a;color:#8ac;border-radius:3px;padding:1px 5px;margin-left:4px\" title=\"A seller-defined custom aspect \u2014 not in this category\u2019s standard list, but a real eBay field, pushed live like any other\">CUSTOM ASPECT</span>';\n      var xcb='<input type=\"checkbox\" class=\"aspect-keep-cb\" data-aspect-key=\"'+xkey+'\" checked title=\"Checked = keep on this eBay listing. Uncheck = discard at Save (moved to the Inventory Record as a superset, never deleted).\" style=\"margin-right:4px;vertical-align:middle\">';\n      var xinp='<input type=\"text\" data-aspect=\"'+name+'\" data-initial=\"'+xcur+'\" value=\"'+xcur+'\" style=\"background:#1a1a2a;color:#eee;border:1px solid #446;border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">';\n      html+='<div class=\"frow\"><span class=\"fn\" style=\"font-size:.82em\">'+xcb+name+xbadge+'</span><span class=\"fv\">'+xinp+'</span></div>';\n    });\n\n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0){html='<div style=\"margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88\">'+missingReq+' required aspect'+(missingReq===1?'':'s')+' missing values — fill before staging</div>'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent='Category context load failed.';\n  });\n}\ndocument.addEventListener('DOMContentLoaded',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch==='function')initCatSearch();\n  if(typeof initCatSearch2==='function')initCatSearch2();\n  if(typeof loadInventoryDiff==='function')loadInventoryDiff();\n});\n"
+
+# The category-context script predates Python formatting and is deliberately a
+# single quoted constant. Apply validation additions as exact substitutions so
+# missing required data has both a visible state and an accessible DOM state.
+_CATEGORY_CONTEXT_IIFE = (
+    _CATEGORY_CONTEXT_IIFE.replace(
+        "if(!catId){if(loading)loading.textContent='No category.';return;}",
+        "if(!catId){flagFieldInvalid('dl-cat-search',true);"
+        "if(loading){loading.textContent='Category required before item specifics can be checked.';"
+        "loading.style.color='#e88';}return;}",
+    )
+    .replace(
+        "var html='';\n    d.aspects.forEach",
+        "var html='';var missingReq=0;\n    d.aspects.forEach",
+    )
+    .replace(
+        "var reqEmpty=asp.required&&!cur;",
+        "var reqEmpty=asp.required&&!cur;if(reqEmpty)missingReq++;",
+    )
+    .replace(
+        "<select data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\"",
+        "<select data-aspect=\"'+asp.name+'\" data-required=\"'+(asp.required?'true':'false')+'\" "
+        "aria-invalid=\"'+(reqEmpty?'true':'false')+'\" data-initial=\"'+cur+'\"",
+    )
+    .replace(
+        " data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" value=\"'+cur+'\"",
+        " data-aspect=\"'+asp.name+'\" data-required=\"'+(asp.required?'true':'false')+'\" "
+        "aria-invalid=\"'+(reqEmpty?'true':'false')+'\" data-initial=\"'+cur+'\" value=\"'+cur+'\"",
+    )
+    .replace(
+        "var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0)",
+        "if(missingReq>0)",
+    )
+)
 
 # ---------------------------------------------------------------------------
 # GET /form/intake — intake landing page (HTML)
@@ -6459,12 +6494,18 @@ def _render_item_detail_html(
     h = _html.escape
 
     workflow_card_html = ""
+    photo_fingerprint: Dict[str, Any] | None = None
+    item_photos_fingerprint: Dict[str, Any] | None = None
     if workflow_card:
         goal = workflow_card.get("goal") or {}
         fingerprints = workflow_card.get("fingerprints") or []
         photo_fingerprint = next((
             fp for fp in fingerprints
             if fp.get("condition_id") == "photos_uploaded"
+        ), None)
+        item_photos_fingerprint = next((
+            fp for fp in fingerprints
+            if fp.get("condition_id") == "item_has_photos"
         ), None)
         photo_state_html = ""
         if photo_fingerprint:
@@ -7324,8 +7365,25 @@ def _render_item_detail_html(
     _dl_cond_val = h((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "")
     _dl_cond_lbl = h((dl or {}).get("condition_label") or (dl or {}).get("condition_description") or "")
     _dl_desc_val = h((dl or {}).get("description") or item.get("description") or "")
-    _dl_cat_name = h(str((dl or {}).get("category_name") or ""))
-    _dl_cat_id_v = h(str((dl or {}).get("category_id") or ""))
+    # AI Identify resolves the authoritative eBay category before ebay_draft
+    # exists. The editor previously ignored that valid result until a draft was
+    # generated, rendering an empty category and hiding the category aspects.
+    _dl_cat_id_raw = str(
+        (dl or {}).get("category_id") or item.get("ebay_category_id") or ""
+    ).strip()
+    _dl_cat_name_raw = str(
+        (dl or {}).get("category_name") or item.get("ebay_category_name") or ""
+    ).strip()
+    _dl_cat_missing = not _dl_cat_id_raw or _dl_cat_id_raw == "99"
+    _dl_cat_name = h(_dl_cat_name_raw)
+    _dl_cat_id_v = h(_dl_cat_id_raw)
+    _dl_cat_warning_html = (
+        '<span style="color:#e88">Required — choose an eBay category before staging</span>'
+        if _dl_cat_missing else ""
+    )
+    _dl_cat_aria_invalid = "true" if _dl_cat_missing else "false"
+    _dl_cat_bg = "#1a0a0a" if _dl_cat_missing else "#1a1a1a"
+    _dl_cat_border = "#c44" if _dl_cat_missing else "#444"
     _dl_ship_val = str((dl or {}).get("shipping_profile") or (dl or {}).get("fulfillment_policy_id") or "")
     _dl_return_val = str((dl or {}).get("return_policy_id") or "")
     # PP-OFFER-001 follow-up (todo #1256): Best Offer is a per-item Inventory
@@ -7603,6 +7661,12 @@ def _render_item_detail_html(
         and not _superseded_by_success(j)
         for j in jobs
     )
+    _needs_photo_resync = bool(
+        photo_fingerprint
+        and photo_fingerprint.get("result") == "false"
+        and item_photos_fingerprint
+        and item_photos_fingerprint.get("result") == "true"
+    )
     # A missing draft price is itself the actionable state.  Do not depend on
     # a worker having also persisted the newer ``no_price_set`` finding: older
     # ebay_price dead letters (and workers which correctly refuse to invent a
@@ -7698,6 +7762,20 @@ def _render_item_detail_html(
         if not is_active and _has_draft:
             _line.append(_abtn("List on eBay", "listOnEbay()", "green",
                                title="Save draft, run every needed step, and publish"))
+    elif _needs_photo_resync:
+        # Current condition evidence outranks historical failed attempts.  The
+        # resync endpoint queues the bounded ebay_upload treatment when local,
+        # hosted, or draft-order identities differ.  If that treatment cannot
+        # establish photos_uploaded, its ordinary worker failure is preserved as
+        # a dead letter with the real upload/synchronization error; retrying an
+        # older stage/evaluator job cannot repair this condition.
+        _line.append(_abtn(
+            "Resync Photos",
+            "resyncPhotos()",
+            "yellow",
+            title=("Synchronize current local photos with eBay and the draft order; "
+                   "a failed synchronization will be recorded as a dead letter"),
+        ))
     elif _has_error and not is_active:
         def _job_reason_code(job: Dict[str, Any]) -> str:
             """Read a worker reason from its persisted queue payload.
@@ -7910,11 +7988,14 @@ def _render_item_detail_html(
         f'<span class="fv" style="flex:1;position:relative">'
         f'<div id="dl-cat-breadcrumb" style="font-size:.82em;color:#aaa;margin-bottom:3px">'
         f"{_dl_cat_id_v}{'&nbsp;·&nbsp;' + _dl_cat_name if _dl_cat_name else ''}"
+        f"{_dl_cat_warning_html}"
         f"</div>"
         f'<div style="display:flex;gap:4px;align-items:flex-start">'
         f'<input id="dl-cat-search" type="text" placeholder="Search name, type an ID, or Browse…" '
+        f'aria-invalid="{_dl_cat_aria_invalid}" '
         f'autocomplete="off" '
-        f'style="flex:1;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'style="flex:1;background:{_dl_cat_bg};color:#eee;'
+        f'border:1px solid {_dl_cat_border};'
         f'border-radius:4px;padding:3px 6px;font-size:.88em">'
         f'<a href="#" id="dl-cat-browse-btn" onclick="return false" '
         f'style="display:inline-block;padding:3px 8px;border-radius:4px;font-size:.8em;'
@@ -8636,6 +8717,7 @@ def _render_item_detail_html(
         f"  var el=(typeof elOrId==='string')?document.getElementById(elOrId):elOrId;"
         f"  if(!el)return;"
         f"  el.style.borderColor=isInvalid?'#c44':'#444';"
+        f"  el.setAttribute('aria-invalid',isInvalid?'true':'false');"
         f"}}"
         # ── updateCharCount ───────────────────────────────────────────────────
         f"function updateCharCount(inp,max,countId){{"

@@ -173,6 +173,22 @@ def _prompt_for_item(
     else:
         prompt = _USER_PROMPT
 
+    # A category group is not guaranteed to exist yet on older catalog items:
+    # identifying the item is often the operation which discovers its category.
+    # Product lookups can still identify a grounded family of aspects that the
+    # first observation must not silently omit.
+    product_lookup = item.get("product_lookup") or {}
+    if product_lookup.get("source") == "open_library":
+        prompt += (
+            "\nSource-specific target aspects for this identified book:\n"
+            '["Author", "Book Title", "Format", "Language", '
+            '"Publication Year", "Publisher", "ISBN", "Topic"]\n'
+            "Include every grounded value for these names in item_specifics. "
+            "Use the supplied product lookup for exact bibliographic values and "
+            "the photos for values visible on the item; leave genuinely unknown "
+            "values absent.\n"
+        )
+
     group_name = str(item.get("category_group") or "").strip()
     groups_path = cfg.get("category_groups_path")
     if not group_name or not groups_path:
@@ -556,6 +572,40 @@ class AIIdentifyWorker(QueueWorker):
         ai_item_specifics = result.get("item_specifics") or {}
         if not isinstance(ai_item_specifics, dict):
             ai_item_specifics = {}
+        else:
+            ai_item_specifics = {
+                str(key): str(value).strip()
+                for key, value in ai_item_specifics.items()
+                if value is not None and str(value).strip()
+            }
+
+        # Project structured identification fields into the universal aspect
+        # record as well as their canonical top-level slots. Previously an AI
+        # response could correctly identify Brand/Model/Material yet leave the
+        # corresponding listing aspect absent. Existing operator values still
+        # win below when the accessor computes ``new_only``.
+        for aspect_name, aspect_value in (
+            ("Brand", brand),
+            ("Model", item_model),
+            ("Manufacturer", manufacturer),
+            ("MPN", mpn),
+            ("Color", color),
+            ("Material", material),
+            ("Country/Region of Manufacture", country_of_manufacture),
+            ("UPC", upc),
+        ):
+            if aspect_value:
+                ai_item_specifics.setdefault(aspect_name, aspect_value)
+        product_lookup = item.get("product_lookup") or {}
+        if product_lookup.get("source") == "open_library":
+            for aspect_name, lookup_key in (
+                ("Author", "brand"),
+                ("Book Title", "title"),
+                ("ISBN", "isbn"),
+            ):
+                lookup_value = str(product_lookup.get(lookup_key) or "").strip()
+                if lookup_value:
+                    ai_item_specifics.setdefault(aspect_name, lookup_value)
 
         if not title:
             raise HardFailure(f"ai_identify: empty title in model response for {sku}")
