@@ -20,6 +20,25 @@ def test_setup_logging_returns_logger():
         tl._configured = False  # reset after test
 
 
+def test_console_only_logging_opens_no_file_handler():
+    import tgw.logging as tl
+
+    root_logger = logging.getLogger('tgw')
+    tl._configured = False
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+        handler.close()
+    setup_logging('tgw.embedded-test', log_root=None, console=True)
+    assert not any(
+        isinstance(handler, logging.handlers.RotatingFileHandler)
+        for handler in root_logger.handlers
+    )
+    tl._configured = False
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+        handler.close()
+
+
 def test_get_logger_namespaced():
     logger = get_logger('myworker')
     assert logger.name == 'tgw.myworker'

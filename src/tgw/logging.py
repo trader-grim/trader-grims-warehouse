@@ -95,7 +95,7 @@ _configured = False   # guard against double-setup in the same process
 def setup_logging(
     component: str = 'tgw',
     *,
-    log_root: Path = DEFAULT_LOG_ROOT,
+    log_root: Path | None = DEFAULT_LOG_ROOT,
     log_file: Optional[str] = None,
     level: Optional[str] = None,
     console: bool = True,
@@ -110,7 +110,7 @@ def setup_logging(
 
     Args:
         component:    Logger name, e.g. 'tgw.queue.launcher'
-        log_root:     Directory for log files
+        log_root:     Directory for log files; ``None`` selects console-only
         log_file:     Log filename (default: '<component>.log')
         level:        Log level string (default: TGW_LOG_LEVEL env or 'INFO')
         console:      Emit to stderr as well as file
@@ -131,42 +131,45 @@ def setup_logging(
 
     root_logger.setLevel(numeric_level)
 
-    if log_root == DEFAULT_LOG_ROOT and os.environ.get(_ENV_LOG_ROOT):
-        log_root = Path(os.environ[_ENV_LOG_ROOT])
-    else:
-        log_root = Path(log_root)
-    log_root.mkdir(parents=True, exist_ok=True)
-
     filename = log_file or f'{component.replace(".", "_")}.log'
-
-    # --- Rotating file handler (human-readable) ---
-    file_path = log_root / filename
-    fh = logging.handlers.RotatingFileHandler(
-        file_path,
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding='utf-8',
-    )
-    fh.setLevel(numeric_level)
-    fh.setFormatter(logging.Formatter(_FILE_FORMAT, datefmt=_DATE_FORMAT))
-    root_logger.addHandler(fh)
-
-    # --- Structured JSON file handler (optional) ---
-    if json_file:
-        if filename.endswith('.log'):
-            json_filename = filename[:-len('.log')] + '.jsonl'
+    file_path: Path | None = None
+    if log_root is not None:
+        if log_root == DEFAULT_LOG_ROOT and os.environ.get(_ENV_LOG_ROOT):
+            log_root = Path(os.environ[_ENV_LOG_ROOT])
         else:
-            json_filename = 'tgw.jsonl'
-        json_path = log_root / json_filename
-        jh = logging.handlers.RotatingFileHandler(
-            json_path,
+            log_root = Path(log_root)
+        log_root.mkdir(parents=True, exist_ok=True)
+
+        # --- Rotating file handler (human-readable) ---
+        file_path = log_root / filename
+        fh = logging.handlers.RotatingFileHandler(
+            file_path,
             maxBytes=max_bytes,
             backupCount=backup_count,
             encoding='utf-8',
         )
-        jh.setLevel(numeric_level)
-        jh.setFormatter(JsonFormatter())
-        root_logger.addHandler(jh)
+        fh.setLevel(numeric_level)
+        fh.setFormatter(logging.Formatter(_FILE_FORMAT, datefmt=_DATE_FORMAT))
+        root_logger.addHandler(fh)
+
+        # --- Structured JSON file handler (optional) ---
+        if json_file:
+            if filename.endswith('.log'):
+                json_filename = filename[:-len('.log')] + '.jsonl'
+            else:
+                json_filename = 'tgw.jsonl'
+            json_path = log_root / json_filename
+            jh = logging.handlers.RotatingFileHandler(
+                json_path,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding='utf-8',
+            )
+            jh.setLevel(numeric_level)
+            jh.setFormatter(JsonFormatter())
+            root_logger.addHandler(jh)
+    elif json_file:
+        raise ValueError("json_file requires an explicit log_root")
 
     # --- Console handler ---
     if console:
@@ -176,7 +179,7 @@ def setup_logging(
         root_logger.addHandler(ch)
 
     _configured = True
-    root_logger.debug('Logging configured: level=%s file=%s', level, file_path)
+    root_logger.debug('Logging configured: level=%s file=%s', level, file_path or 'console-only')
     return root_logger
 
 

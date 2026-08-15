@@ -1,0 +1,876 @@
+import io
+import json
+import os
+import socket
+import struct
+import subprocess
+import sys
+import tarfile
+import time
+import types
+from hashlib import sha256
+from pathlib import Path
+
+import pytest
+
+from tgw.nixos_reviewed_evaluation import (
+    BOOTSTRAP,
+    EXECUTABLES,
+    FAILURE_STAGES,
+    SSH_EXECUTABLE,
+    EvaluationError,
+    ImmutableFailureReceiptStore,
+    RemoteEvaluationFailure,
+    SshReviewedEvaluationProvider,
+    StepFailure,
+    _sealed_memfd,
+    _validate_remote_effect,
+    create_bootstrap_failure_receipt,
+    create_failure_receipt,
+    execute_packet,
+    main,
+    serialize_remote_argv,
+    validate_bootstrap_failure_receipt,
+    validate_failure_receipt,
+)
+from tgw.plan_authority import TypedEffect
+
+COMMIT = "a" * 40
+TREE = "b" * 40
+DIGEST = "c" * 64
+
+
+def parameters(archive_digest=DIGEST):
+    input_closure = [
+        {
+            "lock_node": "nixpkgs",
+            "lock_rev": "ac62194c3917d5f474c1a844b6fd6da2db95077d",
+            "lock_nar_hash": "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w=",
+            "path": "/nix/store/11111111111111111111111111111111-input",
+            "nar_sha256": "sha256:" + DIGEST,
+        }
+    ]
+    return {
+        "target_host": "tgw-prod",
+        "flake_repository_id": "tgw-flake",
+        "artifact_ref": f"artifact:sha256:{archive_digest}",
+        "source_commit": COMMIT,
+        "source_tree": TREE,
+        "source_archive_sha256": archive_digest,
+        "archive_root": "trader-grims-warehouse",
+        "flake_lock_sha256": DIGEST,
+        "module_path": "nix/review-egress.nix",
+        "module_sha256": DIGEST,
+        "provider_sha256": DIGEST,
+        "ssh_sha256": DIGEST,
+        "known_hosts_sha256": DIGEST,
+        "remote_python_sha256": DIGEST,
+        "git_sha256": DIGEST,
+        "nix_sha256": DIGEST,
+        "nix_store_sha256": DIGEST,
+        "systemd_analyze_sha256": DIGEST,
+        "scratch_id": "nixos-review:test",
+        "system": "x86_64-linux",
+        "evaluation_target": "review-egress-systemd-units",
+        "unit_set": "tgw-review-egress@.service,tgw-review-egress-attest@.service,tgw-review-egress-namespace@.service",
+        "output_schema": "tgw-nixos-reviewed-evaluation-receipt/v1",
+        "nix_network_policy": "offline-no-substituters",
+        "input_closure_manifest_json": json.dumps(input_closure, sort_keys=True, separators=(",", ":")),
+        "input_closure_manifest_sha256": "sha256:" + sha256(json.dumps(input_closure, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "input_closure_path_count": "1",
+        "minimum_systemd_version": "257",
+        "max_duration_seconds": "300",
+        "max_output_bytes": "1048576",
+        "max_archive_bytes": "1048576",
+        "max_unpacked_bytes": "4194304",
+        "max_files": "1000",
+        "activate": "false",
+        "profile_write": "false",
+        "home_db_write": "false",
+        "operation_id": "nixos-review:test",
+    }
+
+
+def effect(request=None):
+    return {"kind": "nixos-reviewed-evaluation", "generation": "eval-1", "parameters": request or parameters()}
+
+
+def test_real_prepared_effect_envelope_matches_authority_and_remote_parser():
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    prepared = effect(parameters())
+    authority = TypedEffect.parse(prepared)
+    remote, bound = provider_module._validate_remote_effect(prepared)
+    assert remote == prepared and bound == prepared["parameters"]
+    assert authority.effect_hash == provider_module._effect_hash(remote)
+    assert "generation" not in bound
+
+    duplicated = json.loads(json.dumps(prepared))
+    duplicated["parameters"]["generation"] = duplicated["generation"]
+    with pytest.raises(EvaluationError, match="exact typed object"):
+        provider_module._validate_remote_effect(duplicated)
+    mismatched = {**prepared, "generation": ""}
+    with pytest.raises(EvaluationError, match="identity"):
+        provider_module._validate_remote_effect(mismatched)
+
+
+@pytest.mark.parametrize("mutation", ["hash", "count", "path", "nar", "lock_node", "lock_rev", "lock_nar", "duplicate", "omitted"])
+def test_input_closure_manifest_is_exact_content_addressed_and_bounded(mutation):
+    value = parameters()
+    manifest = json.loads(value["input_closure_manifest_json"])
+    if mutation == "hash":
+        value["input_closure_manifest_sha256"] = "sha256:" + "0" * 64
+    elif mutation == "count":
+        value["input_closure_path_count"] = "2"
+    elif mutation == "path":
+        manifest[0]["path"] = "/tmp/not-store"
+    elif mutation == "nar":
+        manifest[0]["nar_sha256"] = "sha256:bad"
+    elif mutation == "lock_node":
+        manifest[0]["lock_node"] = "unrelated"
+    elif mutation == "lock_rev":
+        manifest[0]["lock_rev"] = "0" * 40
+    elif mutation == "lock_nar":
+        manifest[0]["lock_nar_hash"] = "sha256-unrelated="
+    elif mutation == "omitted":
+        manifest.clear()
+        value["input_closure_path_count"] = "0"
+    else:
+        manifest.append(dict(manifest[0]))
+        value["input_closure_path_count"] = "2"
+    if mutation in {"path", "nar", "lock_node", "lock_rev", "lock_nar", "duplicate", "omitted"}:
+        value["input_closure_manifest_json"] = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        value["input_closure_manifest_sha256"] = "sha256:" + sha256(value["input_closure_manifest_json"].encode()).hexdigest()
+    with pytest.raises(EvaluationError, match="input closure"):
+        _validate_remote_effect(effect(value))
+
+
+def make_archive(path: Path, *, commit=COMMIT):
+    with tarfile.open(path, "w", format=tarfile.PAX_FORMAT, pax_headers={"comment": commit}) as archive:
+        root = "trader-grims-warehouse/"
+        info = tarfile.TarInfo(root)
+        info.type = tarfile.DIRTYPE
+        archive.addfile(info)
+        for name, data in ((root + "flake.lock", b"lock"), (root + "nix/review-egress.nix", b"module")):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+
+
+def packet(request, archive):
+    raw = json.dumps(effect(request), sort_keys=True, separators=(",", ":")).encode()
+    return io.BytesIO(struct.pack("!Q", len(raw)) + raw + archive.read_bytes())
+
+
+def test_controller_provider_uses_only_fixed_ssh_helper_and_content_bound_input(tmp_path):
+    archive = tmp_path / "source.tar"
+    make_archive(archive)
+    digest = sha256(archive.read_bytes()).hexdigest()
+    request = parameters(digest)
+    output = json.dumps({"schema": "receipt"}).encode()
+    commands = []
+
+    def invoke(argv, **kwargs):
+        commands.append(argv)
+        return subprocess.CompletedProcess(argv, 0, output, b"")
+
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("100.107.99.66 ssh-ed25519 AAAA")
+    known_hosts.chmod(0o600)
+    request["ssh_sha256"] = "sha256:" + sha256(Path(SSH_EXECUTABLE).read_bytes()).hexdigest()
+    request["known_hosts_sha256"] = "sha256:" + sha256(known_hosts.read_bytes()).hexdigest()
+    provider = SshReviewedEvaluationProvider(lambda identity: archive, known_hosts=known_hosts, request_hash="sha256:" + "d" * 64, invoke=invoke)
+
+    assert provider(effect(request)) == {"schema": "receipt"}
+    assert SSH_EXECUTABLE == "/usr/bin/ssh"
+    assert "-F" in commands[0] and "/dev/null" in commands[0]
+    assert "codex@100.107.99.66" in commands[0] and "tgw-prod" not in commands[0]
+
+
+@pytest.mark.parametrize("stage", sorted(FAILURE_STAGES))
+def test_failure_receipt_all_stages_are_exact_and_self_hashed(stage):
+    request = parameters()
+    context = {
+        "request_hash": "sha256:" + "d" * 64,
+        "effect_hash": __import__("tgw.nixos_reviewed_evaluation", fromlist=["_effect_hash"])._effect_hash(effect(request)),
+        "generation": effect(request)["generation"],
+        "provider_sha256": request["provider_sha256"],
+        "scratch_root_created": True,
+        "run_created": True,
+        "cleanup_attempted": True,
+    }
+    receipt = create_failure_receipt(
+        context=context,
+        stage=stage,
+        diagnostic_code="SUBPROCESS_FAILED",
+        exception_class="EvaluationError",
+        cleanup_result="removed",
+        subprocess_step="nix-build",
+        return_code=1,
+        stdout=b"private output",
+        stderr=b"private error",
+    )
+    assert validate_failure_receipt(receipt, effect(request), request_hash=context["request_hash"]) == receipt
+    encoded = json.dumps(receipt)
+    assert "private output" not in encoded and "private error" not in encoded
+
+
+def test_failure_receipt_cleanup_ambiguity_and_fabrication_are_rejected():
+    request = parameters()
+    context = {
+        "request_hash": "sha256:" + "d" * 64,
+        "effect_hash": __import__("tgw.nixos_reviewed_evaluation", fromlist=["_effect_hash"])._effect_hash(effect(request)),
+        "generation": effect(request)["generation"],
+        "provider_sha256": request["provider_sha256"],
+    }
+    receipt = create_failure_receipt(
+        context=context,
+        stage="cleanup",
+        diagnostic_code="CLEANUP_FAILED",
+        exception_class="OSError",
+        cleanup_result="failed",
+    )
+    assert receipt["outcome"] == "AMBIGUOUS"
+    validate_failure_receipt(receipt, effect(request), request_hash=context["request_hash"])
+    for mutation in ({"outcome": "FAILED"}, {"stage": "shell"}, {"raw_stderr": "secret"}):
+        forged = dict(receipt)
+        forged.update(mutation)
+        with pytest.raises(EvaluationError):
+            validate_failure_receipt(forged, effect(request), request_hash=context["request_hash"])
+    oversized = dict(receipt)
+    oversized["stdout_bytes"] = int(request["max_output_bytes"]) + 1
+    with pytest.raises(EvaluationError, match="diagnostic digest"):
+        validate_failure_receipt(oversized, effect(request), request_hash=context["request_hash"])
+
+
+@pytest.mark.parametrize("stage", sorted(FAILURE_STAGES))
+def test_controller_persists_only_validated_remote_failure(tmp_path, stage):
+    archive = tmp_path / "source.tar"
+    make_archive(archive)
+    request = parameters(sha256(archive.read_bytes()).hexdigest())
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("100.107.99.66 ssh-ed25519 AAAA")
+    known_hosts.chmod(0o600)
+    request["ssh_sha256"] = "sha256:" + sha256(Path(SSH_EXECUTABLE).read_bytes()).hexdigest()
+    request["known_hosts_sha256"] = "sha256:" + sha256(known_hosts.read_bytes()).hexdigest()
+    request_hash = "sha256:" + "d" * 64
+    context = {
+        "request_hash": request_hash,
+        "effect_hash": __import__("tgw.nixos_reviewed_evaluation", fromlist=["_effect_hash"])._effect_hash(effect(request)),
+        "generation": effect(request)["generation"],
+        "provider_sha256": request["provider_sha256"],
+        "cleanup_attempted": True,
+    }
+    failure = create_failure_receipt(
+        context=context,
+        stage=stage,
+        diagnostic_code="SUBPROCESS_FAILED",
+        exception_class="EvaluationError",
+        cleanup_result="removed",
+        subprocess_step="nix-eval" if stage == "nix-eval" else "none",
+        return_code=1,
+    )
+    store_root = tmp_path / "failure-receipts"
+    store_root.mkdir(mode=0o700)
+    provider = SshReviewedEvaluationProvider(
+        lambda _: archive,
+        known_hosts=known_hosts,
+        request_hash=request_hash,
+        failure_store=ImmutableFailureReceiptStore(store_root),
+        invoke=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, json.dumps(failure).encode(), b"raw secret"),
+    )
+    with pytest.raises(RemoteEvaluationFailure) as captured:
+        provider(effect(request))
+    assert captured.value.receipt_ref["artifact_ref"].startswith("artifact:sha256:")
+    assert json.loads(Path(captured.value.receipt_ref["path"]).read_text()) == failure
+
+
+def test_bootstrap_failure_is_bound_and_rejects_fabrication():
+    request_hash = "sha256:" + "d" * 64
+    provider_hash = "sha256:" + "c" * 64
+    receipt = create_bootstrap_failure_receipt(
+        request_hash=request_hash,
+        provider_sha256=provider_hash,
+        diagnostic_code="VALIDATION_REFUSED",
+        exception_class="EvaluationError",
+    )
+    assert validate_bootstrap_failure_receipt(receipt, request_hash=request_hash, provider_sha256=provider_hash) == receipt
+    forged = dict(receipt)
+    forged["request_hash"] = "sha256:" + "e" * 64
+    with pytest.raises(EvaluationError, match="binding mismatch"):
+        validate_bootstrap_failure_receipt(forged, request_hash=request_hash, provider_sha256=provider_hash)
+
+
+def test_main_emits_bootstrap_schema_for_pretyped_request_failure(monkeypatch):
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    request_hash = "sha256:" + "d" * 64
+    provider_hash = "sha256:" + "c" * 64
+    monkeypatch.setattr(provider_module, "_BOOTSTRAP_REQUEST_HASH", request_hash, raising=False)
+    monkeypatch.setattr(provider_module, "_BOOTSTRAP_PROVIDER_SHA256", provider_hash, raising=False)
+    monkeypatch.setattr(provider_module, "execute_packet", lambda stream: (_ for _ in ()).throw(EvaluationError("invalid request")))
+    provider_module._FAILURE_CONTEXT = {"stage": "request-validation", "cleanup_result": "not-created"}
+    output = io.BytesIO()
+    monkeypatch.setattr(provider_module.sys, "stdout", type("Output", (), {"buffer": output})())
+    assert main() == 1
+    receipt = json.loads(output.getvalue())
+    assert validate_bootstrap_failure_receipt(receipt, request_hash=request_hash, provider_sha256=provider_hash) == receipt
+
+
+@pytest.mark.parametrize("stage", sorted(FAILURE_STAGES - {"cleanup"}))
+def test_main_control_channel_preserves_original_failure_stage(stage, monkeypatch):
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    request = parameters()
+    provider_module._FAILURE_CONTEXT = {
+        "stage": stage,
+        "request_hash": "sha256:" + "d" * 64,
+        "effect_hash": provider_module._effect_hash(effect(request)),
+        "generation": effect(request)["generation"],
+        "provider_sha256": request["provider_sha256"],
+        "cleanup_attempted": True,
+        "cleanup_result": "removed",
+    }
+    monkeypatch.setattr(provider_module, "execute_packet", lambda stream: (_ for _ in ()).throw(EvaluationError("injected refusal")))
+    output = io.BytesIO()
+    monkeypatch.setattr(provider_module.sys, "stdout", type("Output", (), {"buffer": output})())
+    assert main() == 1
+    assert json.loads(output.getvalue())["stage"] == stage
+
+
+def test_immutable_sink_failure_retains_validated_receipt_as_ambiguous(tmp_path):
+    root = tmp_path / "unsafe"
+    root.mkdir(mode=0o755)
+    failure = {"outcome": "FAILED"}
+    exc = RemoteEvaluationFailure(failure, persistence_error=True)
+    assert exc.receipt == failure and exc.reconciliation_outcome == "AMBIGUOUS"
+    with pytest.raises(EvaluationError, match="store identity"):
+        ImmutableFailureReceiptStore(root).persist(failure)
+
+
+def test_controller_provider_rejects_artifact_mismatch_before_ssh(tmp_path):
+    archive = tmp_path / "source.tar"
+    archive.write_bytes(b"wrong")
+    called = []
+    with pytest.raises(EvaluationError, match="digest mismatch"):
+        SshReviewedEvaluationProvider(lambda _: archive, known_hosts=tmp_path / "missing", invoke=lambda *a, **k: called.append(a))(effect(parameters()))
+    assert not called
+
+
+def test_remote_helper_executes_only_fixed_offline_steps_and_cleans_scratch(tmp_path, monkeypatch):
+    archive = tmp_path / "source.tar"
+    make_archive(archive)
+    digest = sha256(archive.read_bytes()).hexdigest()
+    request = parameters(digest)
+    request["flake_lock_sha256"] = "sha256:" + sha256(b"lock").hexdigest()
+    request["module_sha256"] = "sha256:" + sha256(b"module").hexdigest()
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    closure = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-tgw-prod-test"
+    original_is_file = Path.is_file
+    original_read_text = Path.read_text
+    original_iterdir = Path.iterdir
+    original_digest = __import__("tgw.nixos_reviewed_evaluation", fromlist=["_digest_file"])._digest_file
+    monkeypatch.setattr(
+        Path,
+        "is_file",
+        lambda path: True if str(path).startswith(closure + "/units/") or str(path) == closure + "/verifier-metadata.json" else original_is_file(path),
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda path, *args, **kwargs: (
+            json.dumps(
+                {
+                    "schema": "tgw-review-egress-systemd-units/v1",
+                    "system": "x86_64-linux",
+                    "units": list(provider_module.UNITS),
+                    "activation": False,
+                }
+            )
+            if str(path) == closure + "/verifier-metadata.json"
+            else original_read_text(path, *args, **kwargs)
+        ),
+    )
+    monkeypatch.setattr(
+        Path,
+        "iterdir",
+        lambda path: (
+            iter([Path(closure) / "units", Path(closure) / "verifier-metadata.json"])
+            if str(path) == closure
+            else iter([Path(closure) / "units" / unit for unit in provider_module.UNITS])
+            if str(path) == closure + "/units"
+            else original_iterdir(path)
+        ),
+    )
+    remote_paths = {"/run/current-system/sw/bin/python3", *EXECUTABLES.values()}
+    monkeypatch.setattr("tgw.nixos_reviewed_evaluation._digest_file", lambda path: "sha256:" + DIGEST if str(path).startswith(closure) or str(path) in remote_paths else original_digest(path))
+    calls = []
+
+    def fake_run(argv, *, cwd, timeout):
+        calls.append(argv)
+        if argv[-1] == "write-tree":
+            return TREE
+        if argv[-1] == ".#inputIdentities.nixpkgs.outPath":
+            return json.loads(request["input_closure_manifest_json"])[0]["path"]
+        if "drvPath" in argv[-1]:
+            return "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-review.drv"
+        if "build" in argv:
+            return closure
+        if "--requisites" in argv:
+            return closure + "\n/nix/store/11111111111111111111111111111111-dependency\n"
+        if "hash" in argv:
+            return DIGEST
+        if argv == [EXECUTABLES["systemd_analyze"], "--version"]:
+            return "systemd 257\n"
+        if argv == [EXECUTABLES["nix"], "--version"]:
+            return "nix (Nix) 2.28.5\n"
+        return ""
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+    result = execute_packet(packet(request, archive), run=fake_run, scratch_root=scratch, scratch_uid=os.geteuid())
+
+    assert result["cleanup"] == "removed" and not list(scratch.iterdir())
+    assert result["scratch_root"] == {"path": str(scratch), "created_by_attempt": False, "final_state": "retained-existing"}
+    nix_calls = [call for call in calls if call[0] == EXECUTABLES["nix"] and "--offline" in call]
+    assert nix_calls and all(call[1:5] == ["--offline", "--option", "substituters", ""] for call in nix_calls)
+    assert all(["--option", "allow-import-from-derivation", "false"] == call[5:8] and "--no-write-lock-file" in call for call in nix_calls)
+    assert not any(word in {"switch", "boot", "test", "profile"} for call in calls for word in call)
+    assert set(result["unit_sha256"]) == set(request["unit_set"].split(","))
+    assert any(call[-3:] == ["add", "-f", "-A"] for call in calls)
+
+
+def test_forced_index_reconstructs_tracked_files_hidden_by_ignore_rules(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / ".gitignore").write_text("generated/\n")
+    generated = source / "generated"
+    generated.mkdir()
+    (generated / "tracked.txt").write_text("candidate content")
+    git = ["/usr/bin/git", "-c", "core.hooksPath=/dev/null", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.required=false"]
+    subprocess.run(git + ["init", "-q"], cwd=source, check=True)
+    subprocess.run(git + ["add", "-f", "-A"], cwd=source, check=True)
+    expected = subprocess.check_output(git + ["write-tree"], cwd=source, text=True).strip()
+
+    subprocess.run(git + ["read-tree", "--empty"], cwd=source, check=True)
+    subprocess.run(git + ["add", "-A"], cwd=source, check=True)
+    ignored_tree = subprocess.check_output(git + ["write-tree"], cwd=source, text=True).strip()
+    assert ignored_tree != expected
+    subprocess.run(git + ["add", "-f", "-A"], cwd=source, check=True)
+    assert subprocess.check_output(git + ["write-tree"], cwd=source, text=True).strip() == expected
+
+
+def test_missing_offline_input_is_refused_before_eval_or_build(tmp_path, monkeypatch):
+    archive = tmp_path / "source.tar"
+    make_archive(archive)
+    request = parameters(sha256(archive.read_bytes()).hexdigest())
+    request["flake_lock_sha256"] = "sha256:" + sha256(b"lock").hexdigest()
+    request["module_sha256"] = "sha256:" + sha256(b"module").hexdigest()
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    original_digest = provider_module._digest_file
+    remote_paths = {provider_module.REMOTE_PYTHON, *EXECUTABLES.values()}
+    monkeypatch.setattr(provider_module, "_digest_file", lambda path: "sha256:" + DIGEST if str(path) in remote_paths else original_digest(path))
+    calls = []
+
+    def fake_run(argv, *, cwd, timeout):
+        calls.append(argv)
+        if argv[-1] == "write-tree":
+            return TREE
+        if "hash" in argv:
+            return "0" * 64
+        return ""
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+    with pytest.raises(EvaluationError, match="offline (resolved input set|input closure)"):
+        execute_packet(packet(request, archive), run=fake_run, scratch_root=scratch, scratch_uid=os.geteuid())
+    assert not any("drvPath" in call[-1] or "build" in call for call in calls)
+    assert not list(scratch.iterdir())
+
+
+def test_real_main_execute_packet_pre_scratch_failure(tmp_path, monkeypatch):
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    archive = tmp_path / "source.tar"
+    make_archive(archive)
+    request = parameters(sha256(archive.read_bytes()).hexdigest())
+    request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    request_hash = "sha256:" + "d" * 64
+    monkeypatch.setattr(provider_module, "_BOOTSTRAP_REQUEST_HASH", request_hash, raising=False)
+    monkeypatch.setattr(provider_module, "_BOOTSTRAP_PROVIDER_SHA256", request["provider_sha256"], raising=False)
+    output = io.BytesIO()
+
+    def inject(stage):
+        if stage == "provider-identity":
+            raise EvaluationError("injected typed refusal")
+
+    scratch = tmp_path / "scratch"
+    assert main(input_stream=packet(request, archive), output_stream=output, execute_kwargs={"scratch_root": scratch, "scratch_uid": os.geteuid(), "stage_hook": inject}) == 1
+    receipt = json.loads(output.getvalue())
+    assert receipt["stage"] == "provider-identity" and receipt["cleanup_result"] == "not-created"
+    assert not scratch.exists()
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_real_main_execute_packet_nix_eval_failure_and_cleanup_outcome(tmp_path, monkeypatch, cleanup_fails):
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    archive = tmp_path / "source.tar"
+    make_archive(archive)
+    request = parameters(sha256(archive.read_bytes()).hexdigest())
+    request["flake_lock_sha256"] = "sha256:" + sha256(b"lock").hexdigest()
+    request["module_sha256"] = "sha256:" + sha256(b"module").hexdigest()
+    request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    original_digest = provider_module._digest_file
+    remote_paths = {provider_module.REMOTE_PYTHON, *EXECUTABLES.values()}
+    monkeypatch.setattr(provider_module, "_digest_file", lambda path: "sha256:" + DIGEST if str(path) in remote_paths else original_digest(path))
+    monkeypatch.setattr(provider_module, "_BOOTSTRAP_REQUEST_HASH", "sha256:" + "d" * 64, raising=False)
+    monkeypatch.setattr(provider_module, "_BOOTSTRAP_PROVIDER_SHA256", request["provider_sha256"], raising=False)
+
+    def fake_run(argv, *, cwd, timeout):
+        return TREE if argv[-1] == "write-tree" else ""
+
+    def inject(stage):
+        if stage == "nix-eval":
+            raise StepFailure("injected timeout", step="nix-eval", diagnostic_code="BOUND_EXCEEDED", return_code=None, stdout=b"", stderr=b"")
+
+    def cleanup(path, *, ignore_errors):
+        import shutil
+
+        shutil.rmtree(path, ignore_errors=ignore_errors)
+        if cleanup_fails:
+            raise OSError("injected cleanup uncertainty")
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+    output = io.BytesIO()
+    assert (
+        main(
+            input_stream=packet(request, archive),
+            output_stream=output,
+            execute_kwargs={"run": fake_run, "scratch_root": scratch, "scratch_uid": os.geteuid(), "stage_hook": inject, "cleanup_tree": cleanup},
+        )
+        == 1
+    )
+    receipt = json.loads(output.getvalue())
+    assert receipt["stage"] == ("cleanup" if cleanup_fails else "nix-eval")
+    assert receipt["outcome"] == ("AMBIGUOUS" if cleanup_fails else "FAILED")
+    assert receipt["diagnostic_code"] == ("CLEANUP_FAILED" if cleanup_fails else "BOUND_EXCEEDED")
+    assert receipt["subprocess_step"] == "nix-eval"
+    assert not list(scratch.iterdir())
+
+
+@pytest.mark.parametrize("change", [{"activate": "true"}, {"module_path": "../../etc/passwd"}, {"command": "id"}])
+def test_remote_helper_rejects_broadened_request_before_scratch(tmp_path, change):
+    archive = tmp_path / "source.tar"
+    make_archive(archive)
+    request = {**parameters(sha256(archive.read_bytes()).hexdigest()), **change}
+    scratch = tmp_path / "scratch"
+    with pytest.raises(ValueError):
+        execute_packet(packet(request, archive), scratch_root=scratch, scratch_uid=os.geteuid())
+    assert not scratch.exists()
+
+
+def test_remote_helper_cleans_scratch_on_failure(tmp_path, monkeypatch):
+    archive = tmp_path / "source.tar"
+    make_archive(archive, commit="d" * 40)
+    request = parameters(sha256(archive.read_bytes()).hexdigest())
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    original_digest = provider_module._digest_file
+    remote_paths = {provider_module.REMOTE_PYTHON, *EXECUTABLES.values()}
+    monkeypatch.setattr(provider_module, "_digest_file", lambda path: "sha256:" + DIGEST if str(path) in remote_paths else original_digest(path))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+    with pytest.raises(EvaluationError, match="commit identity"):
+        execute_packet(packet(request, archive), scratch_root=scratch, scratch_uid=os.geteuid())
+    assert not list(scratch.iterdir())
+
+
+def test_provider_source_has_no_shell_or_activation_escape_hatch():
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    source = Path(provider_module.__file__).read_text()
+    assert "shell=True" not in source
+    assert "nixos-rebuild" not in source
+    assert "nix profile" not in source
+    assert "/home/db/tgw-flake" not in source
+    assert "from tgw" not in source and "import tgw" not in source
+    assert 'SSH_EXECUTABLE = "/usr/bin/ssh"' in source
+    assert '"-F"' in source and '"/dev/null"' in source
+
+
+def test_remote_helper_rejects_git_control_files_and_scratch_symlink(tmp_path, monkeypatch):
+    archive = tmp_path / "source.tar"
+    with tarfile.open(archive, "w", format=tarfile.PAX_FORMAT, pax_headers={"comment": COMMIT}) as value:
+        info = tarfile.TarInfo("trader-grims-warehouse/.git/config")
+        info.size = 6
+        value.addfile(info, io.BytesIO(b"[core]"))
+    request = parameters(sha256(archive.read_bytes()).hexdigest())
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    original_digest = provider_module._digest_file
+    remote_paths = {provider_module.REMOTE_PYTHON, *EXECUTABLES.values()}
+    monkeypatch.setattr(provider_module, "_digest_file", lambda path: "sha256:" + DIGEST if str(path) in remote_paths else original_digest(path))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+    with pytest.raises(EvaluationError, match="unsafe member"):
+        execute_packet(packet(request, archive), scratch_root=scratch, scratch_uid=os.geteuid())
+    target = tmp_path / "target"
+    target.mkdir()
+    scratch.rmdir()
+    scratch.symlink_to(target, target_is_directory=True)
+    with pytest.raises(EvaluationError, match="root-owned"):
+        execute_packet(packet(request, archive), scratch_root=scratch, scratch_uid=os.geteuid())
+
+
+def test_controller_rejects_archive_size_before_transport(tmp_path):
+    archive = tmp_path / "large.tar"
+    archive.write_bytes(b"x" * 2048)
+    digest = sha256(archive.read_bytes()).hexdigest()
+    request = parameters(digest)
+    request["max_archive_bytes"] = "1024"
+    with pytest.raises(EvaluationError, match="exceeds"):
+        SshReviewedEvaluationProvider(lambda _: archive, known_hosts=tmp_path / "unused")(effect(request))
+
+
+def test_remote_helper_creates_and_rolls_back_exact_scratch_root(tmp_path, monkeypatch):
+    archive = tmp_path / "source.tar"
+    make_archive(archive, commit="d" * 40)
+    request = parameters(sha256(archive.read_bytes()).hexdigest())
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    original_digest = provider_module._digest_file
+    remote_paths = {provider_module.REMOTE_PYTHON, *EXECUTABLES.values()}
+    monkeypatch.setattr(provider_module, "_digest_file", lambda path: "sha256:" + DIGEST if str(path) in remote_paths else original_digest(path))
+    scratch = tmp_path / "tgw-reviewed-evaluation"
+    with pytest.raises(EvaluationError, match="commit identity"):
+        execute_packet(packet(request, archive), scratch_root=scratch, scratch_uid=os.geteuid())
+    assert not scratch.exists()
+
+
+def test_scratch_root_rejects_symlink_or_wrong_mode_without_chmod(tmp_path):
+    from tgw.nixos_reviewed_evaluation import _prepare_scratch_root
+
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    scratch = tmp_path / "tgw-reviewed-evaluation"
+    scratch.symlink_to(target, target_is_directory=True)
+    with pytest.raises(EvaluationError, match="root-owned"):
+        _prepare_scratch_root(scratch, expected_uid=os.geteuid())
+    scratch.unlink()
+    scratch.mkdir(mode=0o755)
+    with pytest.raises(EvaluationError, match="root-owned"):
+        _prepare_scratch_root(scratch, expected_uid=os.geteuid())
+    assert scratch.stat().st_mode & 0o777 == 0o755
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "tgw-prod ssh-ed25519 AAAA",
+        "100.107.99.66 ssh-dss AAAA",
+        "100.107.99.66 ssh-ed25519 !!!",
+        "100.107.99.66 ssh-ed25519 AAAA\n100.107.99.66 ssh-ed25519 BBBB",
+    ],
+)
+def test_controller_rejects_nonexact_known_host_grammar(tmp_path, line):
+    archive = tmp_path / "source.tar"
+    make_archive(archive)
+    digest = sha256(archive.read_bytes()).hexdigest()
+    request = parameters(digest)
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text(line)
+    known_hosts.chmod(0o600)
+    request["ssh_sha256"] = "sha256:" + sha256(Path(SSH_EXECUTABLE).read_bytes()).hexdigest()
+    request["known_hosts_sha256"] = "sha256:" + sha256(known_hosts.read_bytes()).hexdigest()
+    with pytest.raises(EvaluationError, match="one admitted host key"):
+        SshReviewedEvaluationProvider(lambda _: archive, known_hosts=known_hosts, invoke=lambda *a, **k: None)(effect(request))
+
+
+@pytest.mark.parametrize("kind", ["duplicate", "special", "wrong_root"])
+def test_remote_archive_rejects_ambiguous_member_sets(tmp_path, monkeypatch, kind):
+    archive = tmp_path / "source.tar"
+    with tarfile.open(archive, "w", format=tarfile.PAX_FORMAT, pax_headers={"comment": COMMIT}) as value:
+        name = "other/file" if kind == "wrong_root" else "trader-grims-warehouse/file"
+        info = tarfile.TarInfo(name)
+        if kind == "special":
+            info.type = tarfile.FIFOTYPE
+        else:
+            info.size = 1
+        value.addfile(info, None if kind == "special" else io.BytesIO(b"x"))
+        if kind == "duplicate":
+            value.addfile(info, io.BytesIO(b"x"))
+    request = parameters(sha256(archive.read_bytes()).hexdigest())
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    request["provider_sha256"] = "sha256:" + sha256(Path(provider_module.__file__).read_bytes()).hexdigest()
+    original_digest = provider_module._digest_file
+    remote_paths = {provider_module.REMOTE_PYTHON, *EXECUTABLES.values()}
+    monkeypatch.setattr(provider_module, "_digest_file", lambda path: "sha256:" + DIGEST if str(path) in remote_paths else original_digest(path))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+    with pytest.raises(EvaluationError, match="unsafe|single root|duplicate"):
+        execute_packet(packet(request, archive), scratch_root=scratch, scratch_uid=os.geteuid())
+    assert not list(scratch.iterdir())
+
+
+def test_real_openssh_reads_sealed_parent_memfd_and_rejects_wrong_key(tmp_path):
+    sshd = Path("/usr/sbin/sshd")
+    if not sshd.is_file():
+        pytest.skip("local OpenSSH server is unavailable")
+    host_key = tmp_path / "host_key"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(host_key)], check=True)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    config = tmp_path / "sshd_config"
+    config.write_text(
+        f"Port {port}\nListenAddress 127.0.0.1\nHostKey {host_key}\nPidFile {tmp_path / 'sshd.pid'}\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n"
+    )
+    server = subprocess.Popen([str(sshd), "-D", "-e", "-f", str(config)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            with socket.socket() as client:
+                if client.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            time.sleep(0.05)
+        else:
+            pytest.skip("local sshd could not start unprivileged")
+        public = host_key.with_suffix(".pub").read_text().split()
+        correct = f"[127.0.0.1]:{port} {public[0]} {public[1]}\n".encode()
+
+        def connect(content):
+            fd = _sealed_memfd("known-hosts-test", content)
+            try:
+                return subprocess.run(
+                    [
+                        SSH_EXECUTABLE,
+                        "-F",
+                        "/dev/null",
+                        "-oBatchMode=yes",
+                        "-oClearAllForwardings=yes",
+                        "-oStrictHostKeyChecking=yes",
+                        f"-oUserKnownHostsFile=/proc/{os.getpid()}/fd/{fd}",
+                        "-p",
+                        str(port),
+                        "127.0.0.1",
+                        "true",
+                    ],
+                    pass_fds=(fd,),
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            finally:
+                os.close(fd)
+
+        accepted_key = connect(correct)
+        assert "REMOTE HOST IDENTIFICATION HAS CHANGED" not in accepted_key.stderr and "Host key verification failed" not in accepted_key.stderr
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(tmp_path / "wrong")], check=True)
+        wrong_public = (tmp_path / "wrong.pub").read_text().split()
+        rejected_key = connect(f"[127.0.0.1]:{port} {wrong_public[0]} {wrong_public[1]}\n".encode())
+        assert "REMOTE HOST IDENTIFICATION HAS CHANGED" in rejected_key.stderr or "Host key verification failed" in rejected_key.stderr
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
+def test_real_sshd_preserves_shell_quoted_python_program_and_metacharacters(tmp_path):
+    sshd = Path("/usr/sbin/sshd")
+    if not sshd.is_file():
+        pytest.skip("local OpenSSH server is unavailable")
+    host_key, client_key = tmp_path / "host_key", tmp_path / "client_key"
+    for key in (host_key, client_key):
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    authorized = tmp_path / "authorized_keys"
+    authorized.write_text(client_key.with_suffix(".pub").read_text())
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    config = tmp_path / "sshd_config"
+    config.write_text(
+        f"Port {port}\nListenAddress 127.0.0.1\nHostKey {host_key}\nPidFile {tmp_path / 'sshd.pid'}\n"
+        f"AuthorizedKeysFile {authorized}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\n"
+        "KbdInteractiveAuthentication no\nPubkeyAuthentication yes\nPermitRootLogin no\n"
+    )
+    server = subprocess.Popen([str(sshd), "-D", "-e", "-f", str(config)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            with socket.socket() as client:
+                if client.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            time.sleep(0.05)
+        public = host_key.with_suffix(".pub").read_text().split()
+        hosts_fd = _sealed_memfd("quoted-command-host", f"[127.0.0.1]:{port} {public[0]} {public[1]}\n".encode())
+        marker = tmp_path / "must-not-exist"
+        program = "import sys;print(sys.stdin.read());print('literal ; $(touch " + str(marker) + ")')"
+        remote = serialize_remote_argv([sys.executable, "-I", "-c", program])
+        try:
+            result = subprocess.run(
+                [
+                    SSH_EXECUTABLE,
+                    "-F",
+                    "/dev/null",
+                    "-oBatchMode=yes",
+                    "-oStrictHostKeyChecking=yes",
+                    f"-oUserKnownHostsFile=/proc/{os.getpid()}/fd/{hosts_fd}",
+                    "-i",
+                    str(client_key),
+                    "-p",
+                    str(port),
+                    "127.0.0.1",
+                    remote,
+                ],
+                input="frame",
+                text=True,
+                capture_output=True,
+                timeout=5,
+                pass_fds=(hosts_fd,),
+            )
+        finally:
+            os.close(hosts_fd)
+        assert result.returncode == 0 and "frame" in result.stdout and "literal ; $(touch" in result.stdout
+        assert not marker.exists()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_exact_streamed_provider_bootstrap_invokes_main_once_and_never_returns_empty(monkeypatch, fails):
+    import tgw.nixos_reviewed_evaluation as provider_module
+
+    source = Path(provider_module.__file__).read_bytes()
+    request_hash = "sha256:" + "d" * 64
+    provider_hash = sha256(source).hexdigest()
+    framed_tail = b"framed-request-and-archive"
+    calls = []
+
+    def executor(stream, **kwargs):
+        calls.append(stream.read())
+        if fails:
+            raise EvaluationError("injected bounded failure")
+        return {"schema": "test-success/v1", "outcome": "verified"}
+
+    bootstrap_globals = {"__name__": "bootstrap-test", "_BOOTSTRAP_EXECUTOR": executor}
+    stdin = io.BytesIO(struct.pack("!Q", len(source)) + source + provider_hash.encode() + request_hash.encode() + framed_tail)
+    stdout = io.BytesIO()
+    fake_sys = types.SimpleNamespace(stdin=types.SimpleNamespace(buffer=stdin), stdout=types.SimpleNamespace(buffer=stdout))
+    monkeypatch.setitem(sys.modules, "sys", fake_sys)
+    with pytest.raises(SystemExit) as exited:
+        exec(BOOTSTRAP, bootstrap_globals)
+    assert exited.value.code == (1 if fails else 0)
+    assert calls == [framed_tail]
+    result = json.loads(stdout.getvalue())
+    assert result["schema"] == ("tgw-nixos-reviewed-evaluation-bootstrap-failure/v1" if fails else "test-success/v1")
+    assert stdout.getvalue()

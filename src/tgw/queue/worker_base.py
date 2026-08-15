@@ -203,7 +203,13 @@ class QueueWorker:
         self._stop           = False
         self._last_recover   = 0.0
         state_machine.init(config.get('postgres_dsn', 'dbname=state_machine user=tgw'))
-        tgw_logging.setup_logging(component=f'worker.{queue_name}')
+        # File logging is a resolved configuration binding.  Directly
+        # constructed workers (tests and embedded callers) stay console-only
+        # instead of implicitly opening the production log directory.
+        tgw_logging.setup_logging(
+            component=f'worker.{queue_name}',
+            log_root=config.get('log_root'),
+        )
 
         # PP-QUOTA-001: workers are background callers — the quota layer may
         # halt them at the budget threshold to protect the operator's reserve.

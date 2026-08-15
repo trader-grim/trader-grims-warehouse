@@ -16,6 +16,21 @@ CREATE TABLE IF NOT EXISTS plan_authority_requests (
     requested_at timestamptz NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE plan_authority_requests
+    DROP CONSTRAINT IF EXISTS plan_authority_requests_effect_kind_check;
+ALTER TABLE plan_authority_requests
+    ADD CONSTRAINT plan_authority_requests_effect_kind_check CHECK (effect_kind IN (
+        'coding-release',
+        'bounded-flake-push',
+        'flake-switch-record-only',
+        'dependency-resubmit',
+        'authority-canary',
+        'approval-platform-bootstrap-deployment',
+        'nixos-reviewed-evaluation',
+        'nixos-observer-render-evaluation',
+        'nixos-a3-successor-evaluation'
+    ));
+
 CREATE TABLE IF NOT EXISTS plan_authority_decisions (
     decision_id text PRIMARY KEY,
     request_id text NOT NULL UNIQUE REFERENCES plan_authority_requests(request_id),
@@ -43,18 +58,3 @@ CREATE TABLE IF NOT EXISTS plan_authority_events (
 
 CREATE INDEX IF NOT EXISTS plan_authority_events_request_idx
     ON plan_authority_events(request_id, sequence);
-
--- CREATE TABLE IF NOT EXISTS does not update a CHECK constraint created by an
--- older release. Replace the canonical named constraint on every schema run so
--- a live upgrade admits exactly the same closed effect registry as Python.
-ALTER TABLE plan_authority_requests
-    DROP CONSTRAINT IF EXISTS plan_authority_requests_effect_kind_check;
-ALTER TABLE plan_authority_requests
-    ADD CONSTRAINT plan_authority_requests_effect_kind_check CHECK (effect_kind IN (
-        'coding-release',
-        'bounded-flake-push',
-        'flake-switch-record-only',
-        'dependency-resubmit',
-        'authority-canary',
-        'approval-platform-bootstrap-deployment'
-    ));

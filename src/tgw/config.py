@@ -85,6 +85,7 @@ def load_config(path: Path) -> Dict[str, Any]:
     itemdata_root = p("itemdata_root", "/opt/TGW/data/ItemData")
     catalog_root = p("catalog_root", "/opt/TGW/data/ItemCatalog")
     archive_root = p("archive_root", "/opt/TGW/data/ItemArchive")
+    log_root = p("log_root", "/opt/TGW/var/log")
     incoming_path = p("incoming_path", "/opt/TGW/incoming")
     plan_vault_path = p("plan_vault_path", "/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault")
     standalone_plan_root = p("standalone_plan_root", "/opt/TGW/library/plans")
@@ -243,6 +244,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         "itemdata_root": itemdata_root,
         "catalog_root": catalog_root,
         "archive_root": archive_root,
+        "log_root": log_root,
         "full_catalog_path": full_catalog_path,
         "search_catalog_path": search_catalog_path,
         "full_catalog_csv_path": full_catalog_csv_path,

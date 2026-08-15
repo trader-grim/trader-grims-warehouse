@@ -18,6 +18,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.29",
     "mcp>=1.0",
+    "cryptography>=44",
     "pyperclip>=1.8",
     "python-xlib>=0.33",
     "mistune>=3.0",
@@ -56,6 +57,12 @@ tgw-queue-launcher = "tgw.queue.launcher:main"
 tgw-release-install = "tgw.release_installer:main"
 tgw-review-egress-broker = "tgw.review_egress_broker:main"
 tgw-review-egress-namespace = "tgw.review_egress_namespace:main"
+tgw-review-socket-readback = "tgw.review_egress_namespace:socket_readback_main"
+tgw-nixos-reviewed-evaluation = "tgw.nixos_reviewed_evaluation:main"
+tgw-nixos-observer-render-evaluation = "tgw.nixos_observer_render_evaluation:main"
+tgw-nixos-a3-successor-evaluation = "tgw.nixos_a3_successor_evaluation:main"
+tgw-prod-a3-preintegration-observation = "tgw.a3_preintegration_observation:main"
+tgw-prod-a3-preintegration-helper = "tgw.a3_preintegration_observation:helper_main"
 tgw-echo-worker           = "tgw.workers.echo:main"
 tgw-token-worker          = "tgw.workers.token_refresh:main"
 tgw-pm-intake-worker      = "tgw.workers.pm_intake:main"
@@ -101,7 +108,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-"tgw" = ["static/*"]
+"tgw" = ["static/*", "plan_authority.sql"]
 "tgw.queue" = ["*.sql"]
 
 [tool.pytest.ini_options]

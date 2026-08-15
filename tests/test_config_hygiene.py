@@ -58,6 +58,15 @@ def test_full_catalog_path_explicit_override(tmp_path):
     assert cfg["full_catalog_path"] == Path(override)
 
 
+def test_log_root_is_resolved_once_at_the_config_boundary(tmp_path):
+    defaulted = load_config(_write_cfg(tmp_path, {}))
+    assert defaulted["log_root"] == Path("/opt/TGW/var/log")
+
+    explicit = tmp_path / "logs"
+    configured = load_config(_write_cfg(tmp_path, {"log_root": str(explicit)}))
+    assert configured["log_root"] == explicit
+
+
 def test_plan_roots_keep_mutable_and_authority_bindings_separate(tmp_path):
     cfg = load_config(_write_cfg(tmp_path, {}))
     assert cfg["plan_vault_path"] == Path(

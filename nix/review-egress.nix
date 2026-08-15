@@ -18,11 +18,13 @@ in {
       description = "TGW exact-bound review egress broker %i";
       requires = [ "tgw-review-egress-namespace@%i.service" ];
       after = [ "tgw-review-egress-namespace@%i.service" ];
+      wants = [ "tgw-review-egress-attest@%i.service" ];
       serviceConfig = {
         Type = "simple"; User = "tgw-review-broker"; Group = "tgw-review-broker";
         NetworkNamespacePath = "/run/netns/tgw-review-%i";
-        LoadCredential = "auth.json:${cfg.credentialPath}";
-        ExecStart = "${cfg.package}/bin/tgw-review-egress-broker --policy /run/tgw-review/%i/policy.json --verify-runtime ${cfg.runtimePath} --credential \${CREDENTIALS_DIRECTORY}/auth.json --network-attestation /run/tgw-review/%i/network-attestation.json --receipt /run/tgw-review/%i/egress-receipt.json";
+        LoadCredential = "attestation.pub:/run/credentials/tgw-review-attestation.pub";
+        Environment = "TGW_REVIEW_BROKER_PORT=18443";
+        ExecStart = "${cfg.package}/bin/tgw-review-egress-broker --policy /run/tgw-review/%i/policy.json --verify-runtime ${cfg.runtimePath} --network-attestation /run/tgw-review/%i/network-attestation.json --attestation-public-key \${CREDENTIALS_DIRECTORY}/attestation.pub --ready /run/tgw-review/%i/ready.json --receipt /run/tgw-review/%i/egress-receipt.json --bind-topology-run %i";
         NoNewPrivileges = true; PrivateDevices = true; PrivateTmp = true; ProtectSystem = "strict"; ProtectHome = true;
         ProtectKernelTunables = true; ProtectKernelModules = true; ProtectControlGroups = true;
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ]; CapabilityBoundingSet = "";
@@ -39,6 +41,22 @@ in {
         CapabilityBoundingSet = [ "CAP_NET_ADMIN" "CAP_SYS_ADMIN" ]; AmbientCapabilities = [ "CAP_NET_ADMIN" "CAP_SYS_ADMIN" ];
         NoNewPrivileges = true; ProtectSystem = "strict"; ProtectHome = true; PrivateTmp = true;
         ReadWritePaths = [ "/run/netns" "/run/tgw-review/%i" ];
+      };
+    };
+    # Root verifier reads live namespace/ruleset/process state and negative
+    # probe evidence, then MACs the short-lived attestation. Broker sees only
+    # the resulting receipt and a verification key, never provider auth.
+    systemd.services."tgw-review-egress-attest@" = {
+      requires = [ "tgw-review-egress@%i.service" ];
+      after = [ "tgw-review-egress@%i.service" ];
+      partOf = [ "tgw-review-egress@%i.service" ];
+      serviceConfig = {
+        Type = "oneshot"; User = "root";
+        LoadCredential = "attestation.key:/run/credentials/tgw-review-attestation.key";
+        ExecStart = "${cfg.package}/bin/tgw-review-egress-namespace attest %i --broker-uid 972 --worker-uid 973 --policy /run/tgw-review/%i/policy.json --trust-key \${CREDENTIALS_DIRECTORY}/attestation.key --receipt /run/tgw-review/%i/network-attestation.json";
+        CapabilityBoundingSet = [ "CAP_NET_ADMIN" "CAP_SYS_PTRACE" ];
+        NoNewPrivileges = true; ProtectSystem = "strict"; ProtectHome = true;
+        ReadWritePaths = [ "/run/tgw-review/%i" ];
       };
     };
   };

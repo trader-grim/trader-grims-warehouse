@@ -1,0 +1,12 @@
+{
+  "approved_plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+  "authority_consumption": "distinct-read-only-observation-grant-only",
+  "capability": "read-only:tgw-prod-flake-identity-observation",
+  "dispatchable": false,
+  "effect_kind": "tgw-prod-a3-preintegration-observation",
+  "handler_id": "tgw-prod-a3-preintegration-observation@1",
+  "plan_commit": null,
+  "requires_plan_review": true,
+  "schema": "tgw-plan-delta-proposal/v1",
+  "status": "PROPOSED_NOT_APPROVED"
+}
