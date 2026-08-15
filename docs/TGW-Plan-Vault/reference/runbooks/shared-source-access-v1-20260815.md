@@ -51,8 +51,8 @@ The installer:
 2. installs `/etc/ssh/ssh_config.d/10-tgw-github-app.conf`;
 3. creates the repository-specific key only if both key files are absent;
 4. refuses partial or mismatched credential state;
-5. stores the private key as `root:tgw-git` mode `0640` inside a root-only
-   directory;
+5. stores the private key as `tgw-git:tgw-git` mode `0600` inside a protected
+   directory and installs a separate public copy at `/etc/ssh/tgw_github_app.pub`;
 6. installs and starts `tgw-github-agent.service`;
 7. exposes only `/run/tgw-github-agent/agent.sock` to `tgw-coders`;
 8. prints only the public-key fingerprint and public-key path.
@@ -67,7 +67,7 @@ In GitHub repository settings for
 `trader-grim/trader-grims-warehouse`, add the contents of:
 
 ```text
-/etc/tgw/credentials/github/trader-grims-warehouse/id_ed25519.pub
+/etc/ssh/tgw_github_app.pub
 ```
 
 as a deploy key named `tgw-lib tgw-coders`, with **Allow write access** enabled.
