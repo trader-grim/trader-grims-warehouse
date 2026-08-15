@@ -1,0 +1,82 @@
+#!/bin/sh
+set -eu
+
+MODE=${1:-prepare}
+REPOSITORY=/opt/TGW/tgw-lib/src/trader-grims-warehouse
+REMOTE=git@github-tgw-app:trader-grim/trader-grims-warehouse.git
+KEY_DIRECTORY=/etc/tgw/credentials/github/trader-grims-warehouse
+PRIVATE_KEY=$KEY_DIRECTORY/id_ed25519
+PUBLIC_KEY=$KEY_DIRECTORY/id_ed25519.pub
+SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SOURCE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIRECTORY/.." && pwd)
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "install-tgw-source-access must run as root" >&2
+    exit 77
+fi
+
+if ! getent group tgw-coders >/dev/null; then
+    echo "required group tgw-coders is absent" >&2
+    exit 69
+fi
+
+case "$MODE" in
+    prepare|activate) ;;
+    *)
+        echo "usage: install-tgw-source-access [prepare|activate]" >&2
+        exit 64
+        ;;
+esac
+
+install -d -o root -g root -m 0755 /etc/tgw/credentials
+install -d -o root -g root -m 0755 /etc/tgw/credentials/github
+install -d -o root -g tgw-coders -m 0750 "$KEY_DIRECTORY"
+install -o root -g root -m 0644 \
+    "$SOURCE_ROOT/config/environment/ssh/github-known-hosts" \
+    /etc/ssh/tgw_github_known_hosts
+install -o root -g root -m 0644 \
+    "$SOURCE_ROOT/config/environment/ssh/github-tgw-app.conf" \
+    /etc/ssh/ssh_config.d/10-tgw-github-app.conf
+
+if [ ! -e "$PRIVATE_KEY" ] && [ ! -e "$PUBLIC_KEY" ]; then
+    umask 077
+    ssh-keygen -q -t ed25519 -N "" \
+        -C "tgw-coders@tgw-lib trader-grims-warehouse" \
+        -f "$PRIVATE_KEY"
+elif [ ! -f "$PRIVATE_KEY" ] || [ ! -f "$PUBLIC_KEY" ]; then
+    echo "incomplete TGW GitHub credential pair; refusing replacement" >&2
+    exit 65
+fi
+
+chown root:tgw-coders "$PRIVATE_KEY"
+chmod 0640 "$PRIVATE_KEY"
+chown root:root "$PUBLIC_KEY"
+chmod 0644 "$PUBLIC_KEY"
+
+derived_public=$(ssh-keygen -y -f "$PRIVATE_KEY")
+stored_public=$(awk '{print $1 " " $2}' "$PUBLIC_KEY")
+if [ "$derived_public" != "$stored_public" ]; then
+    echo "TGW GitHub public/private key mismatch" >&2
+    exit 65
+fi
+
+ssh-keygen -lf "$PUBLIC_KEY"
+
+if [ "$MODE" = prepare ]; then
+    echo "prepared_public_key=$PUBLIC_KEY"
+    echo "next=register this key as a write-enabled deploy key on trader-grims-warehouse, then run activate"
+    exit 0
+fi
+
+git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" cat-file -e main^{commit}
+git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" cat-file -e production^{commit}
+
+git ls-remote --exit-code "$REMOTE" refs/heads/main >/dev/null
+git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" push --dry-run "$REMOTE" \
+    refs/heads/main:refs/heads/main \
+    refs/heads/production:refs/heads/production \
+    refs/heads/integrate/full-plan-fb9:refs/heads/integrate/full-plan-fb9
+
+git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" remote set-url origin "$REMOTE"
+
+echo "activated_remote=$REMOTE"
