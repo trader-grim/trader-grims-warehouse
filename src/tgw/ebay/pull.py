@@ -774,9 +774,20 @@ def sync_sold_orders(cfg: Dict[str, Any], listing_index: Dict[str, Path],
                           marked=stats['sold_marked'],
                           orders_fetched=stats['orders_fetched'])
 
-    if not dry_run:
+    # Advance only after every matched transaction has been reconciled.  A
+    # partially successful pass is safe to replay because mark_item_sold is
+    # idempotent by order_id; advancing past a failed write permanently loses
+    # the sale.  This happened in production when the local fence API timed
+    # out for eight completed orders and the cursor still moved to ``now``.
+    if not dry_run and stats['errors'] == 0:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps({'last_synced_at': now.isoformat()}, indent=2))
+    elif not dry_run:
+        log.error(
+            'ebay_pull: sold cursor held after %d reconciliation error(s); '
+            'the next pass will replay this order window',
+            stats['errors'],
+        )
 
     return stats
 

@@ -145,3 +145,51 @@ def test_recent_incremental_resume_not_clamped(monkeypatch, tmp_path):
     window_start, _ = calls[0]
     # should be ~8 hours ago (6h + the 2h rewind), nowhere near the 89-day clamp
     assert window_start > datetime.now(timezone.utc) - timedelta(days=1)
+
+
+def test_failed_sold_mark_does_not_advance_incremental_cursor(
+    monkeypatch, tmp_path,
+):
+    """A local write failure must leave the order inside the next scan.
+
+    Production found eight completed orders, failed every ItemData write on
+    an HTTP timeout, and nevertheless advanced ``last_synced_at``.  The next
+    run started after those orders and permanently presented sold inventory
+    as an unpublished offer.
+    """
+    order = {
+        'order_id': '22-14981-45837',
+        'buyer': 'buyer',
+        'transactions': [{
+            'listing_id': '227446147105',
+            'sale_price': 33.99,
+            'quantity': 1,
+            'sale_date': '2026-08-08T01:24:47.000Z',
+        }],
+    }
+    monkeypatch.setattr(
+        pull_mod, 'get_orders', lambda *args, **kwargs: iter([order]),
+    )
+    monkeypatch.setattr(
+        pull_mod, 'mark_item_sold',
+        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError('write timed out')),
+    )
+
+    item_path = tmp_path / 'tgw1.json'
+    item_path.write_text('{}', encoding='utf-8')
+    state_path = tmp_path / 'sold-sync-state.json'
+    original_cursor = (
+        datetime.now(timezone.utc) - timedelta(hours=6)
+    ).isoformat()
+    state_path.write_text(
+        json.dumps({'last_synced_at': original_cursor}), encoding='utf-8',
+    )
+
+    stats = pull_mod.sync_sold_orders(
+        _cfg(), {'227446147105': item_path}, 'now', state_path,
+    )
+
+    assert stats == {'orders_fetched': 1, 'sold_marked': 0, 'errors': 1}
+    assert json.loads(state_path.read_text(encoding='utf-8')) == {
+        'last_synced_at': original_cursor,
+    }
