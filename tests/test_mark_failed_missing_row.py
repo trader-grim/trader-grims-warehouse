@@ -7,6 +7,8 @@ alert/reschedule worker_base.py only fires on 'dead_letter'.
 
 from contextlib import contextmanager
 
+import pytest
+
 import tgw.queue.state_machine as state_machine
 
 
@@ -29,13 +31,15 @@ class _FakeConn:
         return _FakeCursor()
 
 
-def test_mark_failed_returns_dead_letter_when_row_missing(monkeypatch):
+def test_mark_failed_rejects_missing_running_lease(monkeypatch):
     @contextmanager
     def _fake_conn():
         yield _FakeConn()
 
     monkeypatch.setattr(state_machine, "_conn", _fake_conn)
 
-    result = state_machine.mark_failed("gone-job-id", "owner:1", "some error")
-
-    assert result == "dead_letter"
+    with pytest.raises(RuntimeError, match="lost running lease"):
+        state_machine.mark_failed(
+            "gone-job-id", "owner:1",
+            "55555555-5555-4555-8555-555555555555", "some error",
+        )

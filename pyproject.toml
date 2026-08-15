@@ -15,11 +15,13 @@ dependencies = [
     "textual>=0.59",
     "psycopg2-binary>=2.9",
     "fastapi>=0.110",
+    "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.29",
     "mcp>=1.0",
     "pyperclip>=1.8",
     "python-xlib>=0.33",
     "mistune>=3.0",
+    "PyYAML>=6.0",
     "Pillow>=10.0",
 ]
 
@@ -46,10 +48,14 @@ nats = [
 
 [project.scripts]
 tgw                = "tgw.api:main"
+tgw-coding         = "tgw.coding_cli:main"
 tgw-mcp-server     = "tgw.mcp_server:main"
 tgw-aider-mcp-server = "tgw.aider_mcp_server:main"
 tgw-browser        = "tgw.browser:main"
 tgw-queue-launcher = "tgw.queue.launcher:main"
+tgw-release-install = "tgw.release_installer:main"
+tgw-review-egress-broker = "tgw.review_egress_broker:main"
+tgw-review-egress-namespace = "tgw.review_egress_namespace:main"
 tgw-echo-worker           = "tgw.workers.echo:main"
 tgw-token-worker          = "tgw.workers.token_refresh:main"
 tgw-pm-intake-worker      = "tgw.workers.pm_intake:main"
@@ -65,15 +71,28 @@ tgw-ebay-dole-worker      = "tgw.workers.ebay_dole:main"
 tgw-ebay-price-reducer-worker = "tgw.workers.ebay_price_reducer:main"
 tgw-velocity-stats-worker     = "tgw.workers.velocity_stats:main"
 tgw-ebay-sync-worker      = "tgw.workers.ebay_sync:main"
+tgw-ebay-onboard-legacy-stage-worker = "tgw.workers.ebay_onboard_legacy_stage:main"
 tgw-ebay-repush-worker    = "tgw.workers.ebay_repush:main"
 tgw-ebay-sku-migrate-worker = "tgw.workers.ebay_sku_migrate:main"
 tgw-clipd              = "tgw.clipd:main"
 tgw-multi-intake-worker   = "tgw.workers.multi_intake:main"
 tgw-catalog-rebuild-worker = "tgw.workers.catalog_rebuild:main"
 tgw-plan-render-worker    = "tgw.workers.plan_render:main"
+tgw-plan                  = "tgw.plan_cli:main"
+tgw-environment-recovery  = "tgw.environment_recovery_cli:main"
 tgw-thumbnail-gen-worker      = "tgw.workers.thumbnail_gen:main"
 tgw-alt-text-worker           = "tgw.workers.alt_text:main"
 tgw-sync-conflict-worker      = "tgw.workers.sync_conflict:main"
+tgw-normalize-condition-worker = "tgw.workers.normalize_condition:main"
+tgw-workflow-evaluate-worker = "tgw.workers.workflow_evaluate:main"
+tgw-coding-worker             = "tgw.workers.coding:main"
+tgw-coding-provision-worker   = "tgw.coding_provision_worker:main"
+tgw-codex-implement-worker    = "tgw.workers.coding:codex_implement_main"
+tgw-claude-review-worker      = "tgw.workers.coding:claude_review_main"
+tgw-controller-verify-worker  = "tgw.workers.coding:controller_verify_main"
+tgw-controller-verify-runner  = "tgw.workers.controller_verify:main"
+tgw-codex-implement-runner    = "tgw.workers.codex_implement:main"
+tgw-hermes-stitch-worker      = "tgw.workers.coding:hermes_stitch_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -82,11 +101,20 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
+"tgw" = ["static/*"]
 "tgw.queue" = ["*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = ["nix", ".git", "__pycache__", "*.egg-info", "systemd"]
+# todo #1361: cache_dir MUST stay outside any worktree. tgw-coder worktrees
+# are sometimes run under `sudo -u tgw` and sometimes as `db` -- pytest
+# creates .pytest_cache/ owned by whichever user ran it, and a later
+# other-user `rm -rf` on the worktree then needs sudo to clean it up.
+# $HOME expands per-invoking-user (pytest's resolve_from_str() calls
+# os.path.expandvars()), so tgw and db each get their own cache under
+# their own home and never write into the worktree tree at all.
+cache_dir = "$HOME/.cache/tgw-pytest"
 
 [tool.ruff]
 line-length = 200

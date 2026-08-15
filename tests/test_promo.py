@@ -19,6 +19,7 @@ from tgw.promo import (
     _scan_promo_candidates,
     cmd_promo_draft,
     cmd_promo_list,
+    cmd_promo_sync,
 )
 
 # ---------------------------------------------------------------------------
@@ -562,3 +563,78 @@ class TestPromoListMocked:
         with patch("tgw.apis.ebay.client.ebay_get", return_value={}):
             result = cmd_promo_list(cfg)
         assert result["marketplace_id"] == "EBAY_US"
+
+
+# ---------------------------------------------------------------------------
+# promo sync — promotionId absent / promotionHref None (todo #1296)
+# ---------------------------------------------------------------------------
+
+
+class TestPromoSyncNullHref:
+    """Regression tests for the AttributeError fixed in todo #1296:
+    `promo_summary.get("promotionHref", "")` returned None (not the
+    default) when the key was present with an explicit `null` value,
+    and `.split("/")` on None crashed the whole sync loop.
+    """
+
+    def test_both_id_and_href_absent_or_none_skips_without_crash(self, tmp_path):
+        cfg = _make_cfg(tmp_path)
+        promos = [
+            {
+                "promotionId": None,
+                "promotionHref": None,
+                "promotionStatus": "RUNNING",
+                "name": "Broken Promo",
+            }
+        ]
+        with (
+            patch("tgw.apis.ebay.promotions.list_item_price_markdowns", return_value=promos),
+            patch("tgw.apis.ebay.promotions.get_item_price_markdown") as mock_detail,
+        ):
+            result = cmd_promo_sync(cfg)
+        # Must not raise AttributeError; the entry is skipped via `if not promo_id: continue`.
+        assert result["ok"] is True
+        assert result["blocks_written"] == 0
+        mock_detail.assert_not_called()
+
+    def test_promotion_id_present_used_directly(self, tmp_path):
+        cfg = _make_cfg(tmp_path)
+        promos = [
+            {
+                "promotionId": "abc123",
+                "promotionHref": None,
+                "promotionStatus": "RUNNING",
+                "name": "Normal Promo",
+            }
+        ]
+        with (
+            patch("tgw.apis.ebay.promotions.list_item_price_markdowns", return_value=promos),
+            patch(
+                "tgw.apis.ebay.promotions.get_item_price_markdown",
+                return_value={"selectedInventoryDiscounts": []},
+            ) as mock_detail,
+        ):
+            result = cmd_promo_sync(cfg)
+        assert result["ok"] is True
+        mock_detail.assert_called_once_with(cfg, "abc123")
+
+    def test_href_fallback_used_when_id_absent(self, tmp_path):
+        cfg = _make_cfg(tmp_path)
+        promos = [
+            {
+                "promotionId": None,
+                "promotionHref": "https://api.ebay.com/sell/marketing/v1/item_price_markdown/PROMO-456",
+                "promotionStatus": "SCHEDULED",
+                "name": "Href-only Promo",
+            }
+        ]
+        with (
+            patch("tgw.apis.ebay.promotions.list_item_price_markdowns", return_value=promos),
+            patch(
+                "tgw.apis.ebay.promotions.get_item_price_markdown",
+                return_value={"selectedInventoryDiscounts": []},
+            ) as mock_detail,
+        ):
+            result = cmd_promo_sync(cfg)
+        assert result["ok"] is True
+        mock_detail.assert_called_once_with(cfg, "PROMO-456")

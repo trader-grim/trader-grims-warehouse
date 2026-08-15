@@ -9,6 +9,7 @@ from pathlib import Path
 from tgw.api import list_items
 from tgw.items import (
     catlocmvall,
+    create_item,
     titleupdate,
     update_item,
     update_items,
@@ -50,6 +51,32 @@ def test_update_item_changes_field():
         result = update_item(cfg, 'tgw20260101000000001', 'title', 'New Title')
         assert result['ok'] is True
         assert read_item(root, 'tgw20260101000000001')['title'] == 'New Title'
+
+
+def test_create_item_creates_parent_dir():
+    # Todo #1311: create_item() must mkdir the parent dir before writing —
+    # previously only the http_server.py caller did this, so calling
+    # create_item() directly on a SKU with no existing directory raised
+    # FileNotFoundError from the underlying atomic write (untested prior
+    # to this fix).
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        cfg = make_cfg(root)
+        sku = 'tgw20260101000000099'
+        assert not (root / sku).exists()
+        path = create_item(cfg, sku, {'title': 'New Item'})
+        assert path.exists()
+        assert read_item(root, sku)['title'] == 'New Item'
+
+
+def test_create_item_existing_sku_raises():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        make_item(root, 'tgw20260101000000098', title='Existing')
+        cfg = make_cfg(root)
+        import pytest
+        with pytest.raises(FileExistsError):
+            create_item(cfg, 'tgw20260101000000098', {'title': 'Dup'})
 
 
 def test_update_item_missing_sku():

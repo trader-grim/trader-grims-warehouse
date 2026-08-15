@@ -113,7 +113,10 @@ def test_cmd_bulk_preview(cfg):
     assert out["count"] == 1
 
 
-def test_cmd_bulk_apply_enqueues_rebuild(cfg, monkeypatch):
+def test_cmd_bulk_apply_no_longer_enqueues_rebuild(cfg, monkeypatch):
+    """PP-CATALOG-INCR-001 CI-4 (2026-07-18): enqueue_catalog_rebuild() is now
+    a no-op — items.py's _write_field/set_fields upsert the SQLite catalog
+    directly on write instead (CI-2/CI-4), so no queue job is created."""
     from tgw.queue import state_machine as sm
     sku = "tgw20260101120000031"
     _item(cfg, sku, {"title": "Old", "location": "A1"})
@@ -123,7 +126,7 @@ def test_cmd_bulk_apply_enqueues_rebuild(cfg, monkeypatch):
     out = api.cmd_bulk(cfg, field="title", value="New", location="A1", apply=True)
     assert out["applied"] is True
     assert out["count"] == 1
-    assert calls and calls[0]["queue_name"] == "catalog_rebuild"
+    assert calls == []
 
 
 # --- bug #007: partial-success must still write + rebuild ---
@@ -151,8 +154,9 @@ def test_bulk_partial_success_contract(cfg, monkeypatch):
     assert len(out["failed"]) == 1
 
 
-def test_cmd_bulk_enqueues_rebuild_on_partial_success(cfg, monkeypatch):
-    """Rebuild must be gated on count, not ok — partial success still changed disk."""
+def test_cmd_bulk_no_longer_enqueues_rebuild_on_partial_success(cfg, monkeypatch):
+    """PP-CATALOG-INCR-001 CI-4 (2026-07-18): enqueue_catalog_rebuild() is now
+    a no-op (see test_cmd_bulk_apply_no_longer_enqueues_rebuild)."""
     from tgw.queue import state_machine as sm
     calls = []
     monkeypatch.setattr(sm, "init", lambda *a, **k: None)
@@ -164,7 +168,7 @@ def test_cmd_bulk_enqueues_rebuild_on_partial_success(cfg, monkeypatch):
     )
     out = api.cmd_bulk(cfg, field="title", value="X", location="A1", apply=True)
     assert out["count"] == 5
-    assert calls and calls[0]["queue_name"] == "catalog_rebuild"
+    assert calls == []
 
 
 # --- bug #008: negative limit must not slice from the end ---

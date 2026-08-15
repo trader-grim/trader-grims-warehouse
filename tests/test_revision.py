@@ -295,6 +295,47 @@ class TestCmdRevise:
 
 
 # ---------------------------------------------------------------------------
+# fence-compliant read/write (#1313/#1316): sku_old fallback + E5 archiving
+# ---------------------------------------------------------------------------
+
+class TestCmdReviseFenceCompliance:
+    def _reset_resolver_cache(self):
+        import tgw.resolver as resolver_mod
+        resolver_mod._sku_old_index = None
+
+    def test_resolves_old_sku_via_sku_old_fallback(self, tmp_path):
+        """A request using a renamed item's OLD sku must resolve via
+        find_current_sku, matching items.get_item()'s established idiom."""
+        self._reset_resolver_cache()
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw002", {"title": "Renamed item", "sku_old": "tgw001"})
+
+        result = cmd_revise(cfg, "tgw001", ["title=New title"])
+
+        assert result["ok"] is True
+        assert result["sku"] == "tgw001"
+        item = _read_item(cfg, "tgw002")
+        assert item["revision_draft"]["delta"] == {"title": "New title"}
+
+    def test_archives_pre_overwrite_content_on_write(self, tmp_path):
+        """atomic_write_json must receive archive_root so invariant E5
+        (archive-before-overwrite) fires on the revision_draft write."""
+        cfg = _make_cfg(tmp_path)
+        archive_root = tmp_path / "archive"
+        cfg["archive_root"] = archive_root
+        _make_item(cfg, "tgw001", {"title": "Old title"})
+
+        # First write: item JSON doesn't exist yet at write-time... it does
+        # (created by _make_item), so this write is itself an overwrite.
+        result = cmd_revise(cfg, "tgw001", ["title=New title"])
+
+        assert result["ok"] is True
+        assert archive_root.exists()
+        archived = list(archive_root.rglob("*.zip"))
+        assert archived, f"expected an archive zip under {archive_root}, found none"
+
+
+# ---------------------------------------------------------------------------
 # detect_drift in context of existing draft
 # ---------------------------------------------------------------------------
 
@@ -712,6 +753,31 @@ class TestLiveApply:
         assert "Inventory API" in result["error"]
         assert puts == []
 
+    def test_archives_pre_overwrite_content_on_live_apply(self, tmp_path):
+        """#1316: the live-apply write must also pass archive_root so
+        invariant E5 fires (item JSON already exists at write-time)."""
+        cfg = _make_cfg(tmp_path)
+        archive_root = tmp_path / "archive"
+        cfg["archive_root"] = archive_root
+        _make_item_with_draft(cfg, "tgw001", delta={"price": 25.0},
+                              mirror=dict(_LIVE_MIRROR))
+        inv, offer = _fresh_bodies()
+
+        def fake_get(cfg_, path, **kw):
+            return dict(inv) if "inventory_item" in path else dict(offer)
+
+        def fake_put(cfg_, path, body, **kw):
+            return {}
+
+        with patch("tgw.apis.ebay.client.ebay_get", side_effect=fake_get), \
+             patch("tgw.apis.ebay.client.ebay_put", side_effect=fake_put):
+            result = cmd_revise_apply(cfg, "tgw001", dry_run=False, by="test")
+
+        assert result["ok"] is True
+        assert archive_root.exists()
+        archived = list(archive_root.rglob("*.zip"))
+        assert archived, f"expected an archive zip under {archive_root}, found none"
+
     def test_no_offer_id_refuses(self, tmp_path):
         mirror = {"listing_id": "1", "api": "inventory"}
         cfg, result, puts = self._run(tmp_path, {"price": 25.0}, mirror=mirror)
@@ -728,6 +794,23 @@ class TestLiveApply:
         assert history[0]["delta"] == {"price": 25.0}
         assert history[0]["by"] == "test"
         assert history[0]["calls"] == result["calls"]
+
+    def test_c14_aspects_delta_clear_omits_key_not_blank_value(self, tmp_path):
+        """An operator's revision-apply delta clearing 'Brand' (an accepted
+        proposal setting it to '') must omit the key from the PUT body sent
+        to eBay's Inventory API, not send Brand: [''] — eBay rejects an
+        explicit empty aspect value outright (invariant C14 incident,
+        #1462), and this push path never got that fix applied."""
+        cfg, result, puts = self._run(
+            tmp_path, {"item_specifics": {"Brand": "", "Color": ["Red"]}})
+        assert result["ok"] is True
+        inv_body = puts[0][1]
+        assert "Brand" not in inv_body["product"]["aspects"], (
+            "cleared aspect 'Brand' was sent to eBay as an explicit blank "
+            "value instead of being omitted — eBay rejects this outright, "
+            "invariant C14"
+        )
+        assert inv_body["product"]["aspects"]["Color"] == ["Red"]
 
     def test_blocking_drift_still_refuses_live(self, tmp_path):
         cfg = _make_cfg(tmp_path)

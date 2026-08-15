@@ -47,6 +47,7 @@ def _reset_quota_context():
 
 def _run(worker: _RecordingWorker, payload: Dict[str, Any]) -> None:
     job = {'job_id': '00000000-0000-0000-0000-000000000000',
+           'lease_token': '11111111-1111-4111-8111-111111111111',
            'payload_json': payload, 'attempt_count': 0, 'max_attempts': 5}
     with mock.patch('tgw.queue.worker_base.state_machine') as sm:
         sm.mark_running.return_value = None
@@ -111,7 +112,6 @@ def test_interactive_context_passes_quota_precheck_at_halt():
 
 
 @pytest.mark.parametrize('module_name', [
-    'tgw.workers.ebay_draft',
     'tgw.workers.ebay_price',
     'tgw.workers.ebay_stage',
     'tgw.workers.ebay_publish',
@@ -126,3 +126,11 @@ def test_pipeline_workers_propagate_origin(module_name):
     assert "'origin'" in src or '"origin"' in src, (
         f'{module_name} enqueues downstream jobs but never propagates '
         f"origin='operator' (invariant C10)")
+
+
+def test_draft_worker_has_no_hardcoded_downstream_enqueue():
+    import inspect
+
+    from tgw.workers import ebay_draft
+
+    assert "enqueue_job(" not in inspect.getsource(ebay_draft)

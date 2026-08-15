@@ -7,6 +7,15 @@ import tgw.api as api
 from tgw.queue import WORKER_QUEUES
 
 
+def test_autonomous_coding_queues_use_the_canonical_worker_registry():
+    assert {"codex-implement", "claude-review", "controller-verify", "hermes-stitch"}.issubset(WORKER_QUEUES)
+    assert "operator-admit" not in WORKER_QUEUES
+
+
+def test_normalize_condition_uses_the_canonical_worker_registry():
+    assert "normalize_condition" in WORKER_QUEUES
+
+
 def test_unknown_queue_rejected():
     out = api.cmd_restart_workers(queues=["not_a_queue"])
     assert out["ok"] is False

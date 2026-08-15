@@ -20,6 +20,7 @@ httpx = pytest.importorskip("httpx", reason="httpx required by TestClient")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from tgw import http_server  # noqa: E402
+from tgw.item_mutation import item_generation  # noqa: E402
 
 API_KEY = "test-key-fence-001"
 AUTH = {"Authorization": f"Bearer {API_KEY}"}
@@ -171,13 +172,16 @@ class TestAppend:
         )
         assert r.status_code == 404
 
-    def test_append_enqueues_catalog_rebuild(self, env):
+    def test_append_no_longer_enqueues_catalog_rebuild(self, env):
+        """PP-CATALOG-INCR-001 CI-4 (2026-07-18): enqueue_catalog_rebuild() is
+        now a no-op — the fence's SQLite upsert (CI-2) keeps the catalog live
+        instead of a per-write queue job."""
         env["client"].post(
             f"/api/items/{SKU}/append",
             json={"op": "price_event", "data": {"price": "5.00"}},
             headers=AUTH,
         )
-        assert any(k.get("queue_name") == "catalog_rebuild" for k in env["enqueue_calls"])
+        assert not any(k.get("queue_name") == "catalog_rebuild" for k in env["enqueue_calls"])
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +199,7 @@ class TestEbayWrite:
         assert r.json()["changed_fields"] == ["ebay_offer"]
         doc = _read_item(env["itemdata_root"], SKU)
         assert doc["ebay_offer"]["offer_id"] == "off001"
+        assert r.json()["resulting_generation"] == item_generation(doc)
         # price_comps must be preserved (protected sub-field)
         assert doc["ebay_offer"]["price_comps"] == {"source": "browse"}
 
@@ -238,13 +243,27 @@ class TestEbayWrite:
         )
         assert r.status_code == 404
 
-    def test_enqueues_catalog_rebuild(self, env):
+    def test_no_longer_enqueues_catalog_rebuild(self, env):
+        """PP-CATALOG-INCR-001 CI-4 (2026-07-18): see TestAppend's identical note."""
         env["client"].post(
             f"/api/items/{SKU}/ebay-write",
             json={"ebay_offer": {"price": "8.00"}},
             headers=AUTH,
         )
-        assert any(k.get("queue_name") == "catalog_rebuild" for k in env["enqueue_calls"])
+        assert not any(k.get("queue_name") == "catalog_rebuild" for k in env["enqueue_calls"])
+
+
+class TestPatchCommittedGeneration:
+    def test_response_binds_exact_committed_document(self, env):
+        response = env["client"].patch(
+            f"/api/items/{SKU}",
+            json={"fields": {"title": "Committed title"}},
+            headers=AUTH,
+        )
+
+        assert response.status_code == 200
+        document = _read_item(env["itemdata_root"], SKU)
+        assert response.json()["resulting_generation"] == item_generation(document)
 
 
 # ---------------------------------------------------------------------------
@@ -286,13 +305,16 @@ class TestCreateItem:
         )
         assert r.status_code == 400
 
-    def test_create_enqueues_catalog_rebuild(self, env):
+    def test_create_no_longer_enqueues_catalog_rebuild(self, env):
+        """PP-CATALOG-INCR-001 CI-4 (2026-07-18): enqueue_catalog_rebuild() is
+        now a no-op — create_item_endpoint upserts the new SKU's SQLite
+        catalog row directly instead."""
         env["client"].post(
             "/api/items",
             json={"sku": NEW_SKU, "data": {"title": "X"}},
             headers=AUTH,
         )
-        assert any(k.get("queue_name") == "catalog_rebuild" for k in env["enqueue_calls"])
+        assert not any(k.get("queue_name") == "catalog_rebuild" for k in env["enqueue_calls"])
 
     def test_create_requires_auth(self, env):
         r = env["client"].post(

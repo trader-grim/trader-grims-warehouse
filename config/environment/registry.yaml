@@ -1,0 +1,72 @@
+schema: tgw-environment/v1
+revision: sha256:64e7ca2dff5d8fdae10d77f0300a038bfcb55e1b2022841c530a6089d3024db4
+generated_at: "2026-08-11T08:55:00-07:00"
+content:
+  hosts:
+    production:
+      canonical_name: tgw-prod
+      roles: [production, nixos]
+      verified_at: "2026-08-11T08:28:18-07:00"
+      sources: [server-inventory-f16ad5146842bc84]
+    development:
+      canonical_name: tgw-lib
+      roles: [development, controller]
+      verified_at: "2026-08-11T08:35:40-07:00"
+      sources: [server-inventory-supplement-20260811]
+  retired_hosts:
+    a1131:
+      replacement_role: production
+      behavior: fail
+      reason: obsolete historical host name
+  repositories:
+    application:
+      host_role: development
+      path: /opt/TGW/tgw-lib/src/trader-grims-warehouse
+      branch: catio-nix-0.0.1-alpha
+      dirty_policy: fail-unless-attributed
+      sources: [server-inventory-supplement-20260811]
+    nix_flake:
+      host_role: production
+      path: /home/db/tgw-flake
+      branch: master
+      dirty_policy: fail-unless-attributed
+      sources: [server-inventory-f16ad5146842bc84]
+    plan-vault:
+      host_role: development
+      path: /opt/TGW/library/plans
+      branch: main
+      dirty_policy: fail-unless-attributed
+      sources: [standalone-plan-root-fb9fee3]
+  plans:
+    canonical_root: /opt/TGW/library/plans
+    source: repository:plan-vault
+  releases:
+    production_root: /opt/TGW/releases
+    production_selector: /opt/TGW/current
+    development_root: /opt/TGW/tgw-lib/releases
+  instructions:
+    precedence:
+      - platform-and-user-authority
+      - repository-agents
+      - environment-snapshot
+      - exact-task-contract
+      - persona-style-overlay
+      - historical-reference-only
+    history_grants_authority: false
+    memory_grants_authority: false
+  agents:
+    claude-code:
+      authority_files: [AGENTS.md, CLAUDE.md]
+      excluded_authority_files: []
+    codex:
+      authority_files: [AGENTS.md]
+      excluded_authority_files: [CLAUDE.md]
+    hermes-tigwa:
+      authority_files: [AGENTS.md, config/environment/actors/tgw-steward.json]
+      excluded_authority_files: [CLAUDE.md, docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md]
+      status: clean-contract-active-satellite-recovery-quarantined
+  unknowns:
+    - canonical application branch migration target
+    - attribution of canonical repository dirty paths
+    - catnanny identity access and acquisition method
+    - helicrew identity access and acquisition method

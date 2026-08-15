@@ -25,16 +25,18 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
-from tgw.config import load_config, sku_json
-from tgw.resolver import iter_all_skus
-from tgw.assets import ordered_photos
-from tgw.ebay.upload import upload_photo
 from tgw.apis.ebay.client import ebay_get, ebay_put
-from tgw.apis.fence import ebay_write as fence_ebay_write, patch_item as fence_patch_item
+from tgw.apis.fence import ebay_write as fence_ebay_write
+from tgw.apis.fence import patch_item as fence_patch_item
+from tgw.assets import ordered_photos
+from tgw.config import load_config, sku_json
+from tgw.ebay.upload import upload_photo
+from tgw.logging import announce_script_run
+from tgw.resolver import iter_all_skus
 
 LOG_PATH = Path('/opt/TGW/var/log/ebay-photo-push.log')
 
@@ -190,6 +192,13 @@ def main() -> None:
     parser.add_argument('--include-no-eps', action='store_true',
                         help='also process items with zero EPS photos on eBay')
     args = parser.parse_args()
+
+    announce_script_run(
+        'ebay_photo_push.py',
+        'restore full photo sets on live eBay listings where local photo count exceeds eBay EPS URL count',
+        dry_run=args.dry_run, sku=args.sku, limit=args.limit,
+        include_no_eps=args.include_no_eps,
+    )
 
     cfg = load_config(Path('/opt/TGW/config/tgw-api-config.json'))
     key_path = cfg['secrets_root'] / 'tgw-api-key.json'

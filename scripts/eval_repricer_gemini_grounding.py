@@ -25,10 +25,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
-from tgw.config import load_config  # noqa: E402
-from tgw.apis.google_genai import load_google_key  # noqa: E402
-from tgw.ebay.pricing import suggest_price  # noqa: E402
 from tgw import quota  # noqa: E402
+from tgw.apis.google_genai import load_google_key  # noqa: E402
+from tgw.config import load_config  # noqa: E402
+from tgw.ebay.pricing import suggest_price  # noqa: E402
+from tgw.logging import announce_script_run, setup_logging  # noqa: E402
 
 # Fixed sample — 10 real, sold TGW items (master-catalog.json, status='sold',
 # price > $10, title length > 20 chars), chosen with a fixed random seed so
@@ -90,6 +91,17 @@ def _call_gemini_grounded(client, model: str, title: str) -> dict:
 
 
 def main() -> int:
+    # No prior logging configuration in this script (verified live, todo
+    # #1369) — without it, announce_script_run()'s event is silently
+    # dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.eval_repricer_gemini_grounding')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'eval_repricer_gemini_grounding.py',
+        'standalone eval — Gemini+Search-grounding pricing vs production BrowseCompsProvider (PP-REPRICER-001, not wired into production)',
+    )
     cfg = load_config(Path('/opt/TGW/config/tgw-api-config.json'))
     from tgw.apis.google_genai import _require_genai
     genai = _require_genai()

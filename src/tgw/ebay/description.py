@@ -19,6 +19,7 @@ Public API:
 
 from __future__ import annotations
 
+import html as _html
 from typing import Any, Dict
 
 _DEFAULT_BOILERPLATE = (
@@ -74,4 +75,4 @@ def build_listing_description(item: Dict[str, Any],
 
     pl = picklist_line(item)
 
-    return f'<p>{ai_desc}</p>{bp_html}<p>{pl}</p>'
+    return f'<p>{_html.escape(ai_desc)}</p>{bp_html}<p>{_html.escape(pl)}</p>'

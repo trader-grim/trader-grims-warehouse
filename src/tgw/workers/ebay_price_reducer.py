@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
+import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
@@ -68,6 +69,8 @@ class EbayPriceReducerWorker(QueueWorker):
                     queue_name=QUEUE_NAME,
                     payload={'reason': 'startup'},
                     max_attempts=3,
+                    dedupe_key=f'{QUEUE_NAME}:pending',
+                    debounce=True,
                 )
                 log.info('ebay_price_reducer: enqueued startup job')
         except Exception as exc:
@@ -297,12 +300,17 @@ class EbayPriceReducerWorker(QueueWorker):
 
     def _reschedule(self) -> None:
         next_run = time.time() + RUN_INTERVAL_S
-        jid = state_machine.enqueue_job(
-            queue_name=QUEUE_NAME,
-            payload={'reason': 'scheduled'},
-            not_before=next_run,
-            max_attempts=3,
-        )
+        try:
+            jid = state_machine.enqueue_job(
+                queue_name=QUEUE_NAME,
+                payload={'reason': 'scheduled'},
+                not_before=next_run,
+                max_attempts=3,
+                dedupe_key=f'{QUEUE_NAME}:pending',
+                debounce=True,
+            )
+        except psycopg2.errors.UniqueViolation:
+            jid = None
         log.info('ebay_price_reducer: next run in %dh (job %s)',
                  RUN_INTERVAL_S // 3600, jid)
         tgw_logging.log_event('ebay_price_reducer_rescheduled',

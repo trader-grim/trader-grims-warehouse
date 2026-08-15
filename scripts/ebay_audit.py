@@ -31,7 +31,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 # Bootstrap path so tgw imports work when run as a script
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from tgw.apis.ebay.trading import get_my_ebay_selling
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.pull import fetch_offer_for_sku, iter_inventory_api_items
+from tgw.logging import announce_script_run
 
 logging.basicConfig(
     level=logging.INFO,
@@ -92,7 +93,6 @@ def run_audit(cfg: Dict[str, Any], fetch_offers: bool = True) -> Dict[str, Any]:
         len(duplicate_skus), len(orphan_trading),
     )
 
-    accounted = len(inventory_only_skus) + len(trading_only_skus) + len(duplicate_skus)
     # duplicates count as 2 live listings (one per API)
     live_count = len(inventory_only_skus) + len(trading_only_skus) + 2 * len(duplicate_skus)
     gap = SELLER_HUB_LIVE_COUNT - live_count
@@ -137,12 +137,12 @@ def run_audit(cfg: Dict[str, Any], fetch_offers: bool = True) -> Dict[str, Any]:
     def trading_summary(sku: str) -> List[Dict]:
         return [
             {
-                'listing_id': l.get('listing_id'),
-                'title': l.get('title', '')[:80],
-                'price': l.get('live_price'),
-                'url': l.get('listing_url'),
+                'listing_id': listing.get('listing_id'),
+                'title': listing.get('title', '')[:80],
+                'price': listing.get('live_price'),
+                'url': listing.get('listing_url'),
             }
-            for l in trading_by_sku.get(sku, [])
+            for listing in trading_by_sku.get(sku, [])
         ]
 
     def offer_summary(sku: str) -> Optional[Dict]:
@@ -193,11 +193,11 @@ def run_audit(cfg: Dict[str, Any], fetch_offers: bool = True) -> Dict[str, Any]:
         'no_offer': sorted(no_offer),
         'orphan_trading_no_label': [
             {
-                'listing_id': l.get('listing_id'),
-                'title': l.get('title', '')[:80],
-                'price': l.get('live_price'),
+                'listing_id': listing.get('listing_id'),
+                'title': listing.get('title', '')[:80],
+                'price': listing.get('live_price'),
             }
-            for l in orphan_trading
+            for listing in orphan_trading
         ],
         'orphan_inventory_no_local': sorted(orphan_inventory),
         'orphan_trading_no_local': sorted(orphan_trading_no_local),
@@ -273,6 +273,12 @@ def main() -> int:
     parser.add_argument('--out', default=None,
                         help='Output JSON path (default: /opt/TGW/var/log/ebay-audit-<ts>.json)')
     args = parser.parse_args()
+
+    announce_script_run(
+        'ebay_audit.py',
+        'cross-reference Inventory API vs Trading API vs local ItemData',
+        config=args.config, no_offers=args.no_offers, out=args.out,
+    )
 
     cfg = load_config(Path(args.config))
 

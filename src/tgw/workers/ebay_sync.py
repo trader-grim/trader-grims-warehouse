@@ -13,9 +13,11 @@ Queue name: ebay_sync
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -31,8 +33,9 @@ from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.ebay.pull import backfill_canonical_from_live
 from tgw.ebay.sync import fetch_all_offers
+from tgw.errors import TreatmentFailure
 from tgw.queue import state_machine
-from tgw.queue.worker_base import QueueWorker
+from tgw.queue.worker_base import HardFailure, QueueWorker
 
 log = logging.getLogger(__name__)
 
@@ -49,19 +52,428 @@ SYNC_INTERVAL_S = 6 * 3600  # check eBay every 6 hours
 
 
 class EbaySyncWorker(QueueWorker):
+    _OBSERVATION_SCHEMA = "ebay-sync-observation/v1"
+
+    @staticmethod
+    def _observation_fingerprint(offer):
+        encoded = json.dumps(
+            offer, ensure_ascii=False, allow_nan=False, sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _observation_checkpoint(self, payload, sku, offer):
+        from tgw.item_mutation import operation_identity
+
+        observation = {
+            "provider_effect_id": payload["provider_effect_id"],
+            "provider_identity": payload["provider_identity"],
+            "projection_policy": "verify-noop/v1",
+            "offer": offer,
+        }
+        operation_id = operation_identity(
+            sku=sku, kind="ebay-sync-targeted",
+            expected_generation=payload["object_generation"],
+            payload=observation,
+        )
+        return {
+            "schema_id": self._OBSERVATION_SCHEMA,
+            "sku": sku,
+            "expected_generation": payload["object_generation"],
+            "source_provider_effect_id": payload["provider_effect_id"],
+            "source_operation": payload["source_operation"],
+            "provider_identity": payload["provider_identity"],
+            "expected_offer_id": payload["expected_offer_id"],
+            "observed_offer_id": offer.get("offerId"),
+            "offer": offer,
+            "offer_fingerprint": self._observation_fingerprint(offer),
+            "mutation_kind": "ebay-sync-targeted",
+            "projection_policy": "verify-noop/v1",
+            "operation_id": operation_id,
+        }
+
+    def _validate_observation_checkpoint(self, checkpoint, payload, sku):
+        if not isinstance(checkpoint, dict) or checkpoint.get("schema_id") != (
+            self._OBSERVATION_SCHEMA
+        ):
+            raise HardFailure("workflow targeted sync checkpoint schema mismatch")
+        exact = {
+            "sku": sku,
+            "expected_generation": payload["object_generation"],
+            "source_provider_effect_id": payload["provider_effect_id"],
+            "source_operation": payload["source_operation"],
+            "provider_identity": payload["provider_identity"],
+            "expected_offer_id": payload["expected_offer_id"],
+            "mutation_kind": "ebay-sync-targeted",
+            "projection_policy": "verify-noop/v1",
+        }
+        if any(checkpoint.get(key) != value for key, value in exact.items()):
+            raise HardFailure("workflow targeted sync checkpoint binding mismatch")
+        offer = checkpoint.get("offer")
+        if not isinstance(offer, dict):
+            raise HardFailure("workflow targeted sync checkpoint offer is invalid")
+        try:
+            expected = self._observation_checkpoint(payload, sku, offer)
+        except (TypeError, ValueError) as exc:
+            raise HardFailure("workflow targeted sync checkpoint is not JSON-native") from exc
+        checkpoint_encoded = json.dumps(
+            checkpoint, allow_nan=False, sort_keys=True, separators=(",", ":"),
+        )
+        expected_encoded = json.dumps(
+            expected, allow_nan=False, sort_keys=True, separators=(",", ":"),
+        )
+        if checkpoint_encoded != expected_encoded:
+            raise HardFailure("workflow targeted sync checkpoint identity mismatch")
+        return offer, checkpoint["operation_id"]
+    def _targeted_mode(self) -> str:
+        migration = self.config.get("workflow_migration")
+        if migration is None and isinstance(self.config.get("raw"), dict):
+            migration = self.config["raw"].get("workflow_migration")
+        migration = migration if isinstance(migration, dict) else {}
+        mode = migration.get("ebay_sync_targeted_consumer", "off")
+        if mode not in {"off", "workflow"}:
+            raise HardFailure(f"invalid ebay_sync_targeted_consumer mode {mode!r}")
+        return mode
+
+    @staticmethod
+    def _targeted_receipt(payload, sku, outcome, reason, **evidence):
+        return {
+            "receipt_schema_id": "treatment-receipt/v1",
+            "treatment_id": payload["treatment_id"],
+            "treatment_version": payload["treatment_version"],
+            "graph_id": payload["graph_id"], "outcome": outcome,
+            "goal_profile_id": payload["goal_profile_id"],
+            "goal_profile_version": payload["goal_profile_version"],
+            "object_generation": payload["object_generation"],
+            "condition_hash": payload["condition_hash"],
+            "entity_id": sku,
+            "established_conditions": (
+                ["provider_projection_current"] if outcome == "satisfied" else []
+            ),
+            "artifacts": [f"item:{sku}"],
+            "evidence": {
+                "reason_code": reason, "provider_effect_id": payload["provider_effect_id"],
+                "provider_identity": payload["provider_identity"], **evidence,
+            },
+        }
+
+    def _targeted_wait_receipt(self, payload, sku):
+        retry = int(payload.get("sync_retry", 0)) + 1
+        if retry > 3:
+            raise TreatmentFailure(
+                "targeted sync provider read retry limit reached",
+                self._targeted_receipt(
+                    payload, sku, "reconciliation_required",
+                    "PROVIDER_READ_RETRY_LIMIT", sync_retry=retry - 1,
+                ),
+            )
+        delay = self.config.get("workflow_targeted_sync_retry_seconds", 300)
+        if isinstance(delay, bool) or not isinstance(delay, (int, float)):
+            raise HardFailure("workflow targeted sync retry delay is invalid")
+        delay = float(delay)
+        if not 1 <= delay <= 3600:
+            raise HardFailure("workflow targeted sync retry delay is outside bounds")
+        timer_payload = {**payload, "sync_retry": retry, "reason": "timer_elapsed"}
+        return {
+            **self._targeted_receipt(
+                payload, sku, "transient_backoff", "PROVIDER_READ_TRANSIENT",
+                sync_retry=retry,
+            ),
+            "receipt_schema_id": "treatment-wait-receipt/v1",
+            "timer": {
+                "queue_name": QUEUE_NAME,
+                "not_before": time.time() + delay,
+                "payload": timer_payload,
+                "dedupe_key": (
+                    f"workflow-timer:{payload['graph_id']}:"
+                    f"{payload['provider_effect_id']}:ebay-sync:{retry}"
+                ),
+                "max_attempts": 3,
+            },
+        }
+
+    def _find_offer_governed(self, payload, sku):
+        """Strict provider read for governed sync; never swallow evidence."""
+        try:
+            data = ebay_get(
+                self.config, "/sell/inventory/v1/offer", params={"sku": sku},
+            )
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout):
+            return self._targeted_wait_receipt(payload, sku)
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status == 429 or (isinstance(status, int) and status >= 500):
+                return self._targeted_wait_receipt(payload, sku)
+            if status == 404 and int(payload.get("sync_retry", 0)) < 3:
+                return self._targeted_wait_receipt(payload, sku)
+            outcome = "failed" if status in {401, 403} else "reconciliation_required"
+            reason = (
+                "PROVIDER_AUTHORIZATION_FAILED" if status in {401, 403}
+                else "PROVIDER_OFFER_ABSENT" if status == 404
+                else "PROVIDER_RESPONSE_ERROR"
+            )
+            raise TreatmentFailure(str(exc), self._targeted_receipt(
+                payload, sku, outcome, reason, http_status=status,
+            )) from exc
+        if not isinstance(data, dict) or not isinstance(data.get("offers"), list):
+            raise TreatmentFailure("malformed provider offer response",
+                self._targeted_receipt(payload, sku, "reconciliation_required",
+                                       "PROVIDER_RESPONSE_MALFORMED"))
+        offers = data["offers"]
+        if len(offers) > 1 or any(not isinstance(offer, dict) for offer in offers):
+            raise TreatmentFailure("ambiguous provider offer response",
+                self._targeted_receipt(payload, sku, "reconciliation_required",
+                                       "PROVIDER_RESPONSE_AMBIGUOUS"))
+        if not offers:
+            if int(payload.get("sync_retry", 0)) < 3:
+                return self._targeted_wait_receipt(payload, sku)
+            raise TreatmentFailure("provider offer absent", self._targeted_receipt(
+                payload, sku, "reconciliation_required", "PROVIDER_OFFER_ABSENT",
+            ))
+        return offers[0]
+
+    def _handle_governed_targeted(self, payload, sku, job):
+        from tgw.item_mutation import item_generation
+        from tgw.provider_effects import (
+            ProviderEffectConflict,
+            lookup_succeeded_provider_effect,
+        )
+        required = ("treatment_id", "treatment_version", "graph_id",
+                    "goal_profile_id", "goal_profile_version",
+                    "object_generation", "condition_hash", "provider_effect_id",
+                    "provider_identity", "expected_offer_id")
+        required = (*required, "source_operation")
+        missing = [key for key in required
+                   if not isinstance(payload.get(key), str) or not payload[key].strip()]
+        if missing:
+            raise HardFailure("workflow targeted sync missing binding: " + ", ".join(missing))
+        sync_retry = payload.get("sync_retry", 0)
+        if (isinstance(sync_retry, bool) or not isinstance(sync_retry, int)
+                or not 0 <= sync_retry <= 3):
+            raise HardFailure("workflow targeted sync retry count is invalid")
+        if (payload["treatment_id"] != "ebay-sync-targeted"
+                or payload["treatment_version"] != "1"):
+            raise HardFailure("workflow targeted sync treatment binding mismatch")
+        if (job.get("entity_type") != "item" or job.get("entity_id") != sku
+                or payload.get("entity_id") != sku):
+            raise HardFailure("workflow targeted sync entity binding mismatch")
+        job_id_raw = job.get("job_id")
+        lease_token_raw = job.get("lease_token")
+        owner = getattr(self, "owner", None)
+        if not isinstance(owner, str) or not owner.strip():
+            raise HardFailure("workflow targeted sync lacks running lease identity")
+        try:
+            job_id = str(uuid.UUID(str(job_id_raw)))
+            lease_token = str(uuid.UUID(str(lease_token_raw)))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise HardFailure(
+                "workflow targeted sync lacks running lease identity"
+            ) from exc
+        path = self.config["itemdata_root"] / sku / f"{sku}.json"
+        checkpoint = (job.get("payload_json") or {}).get("observation_checkpoint")
+        replaying_checkpoint = checkpoint is not None
+        if checkpoint is None:
+            item = json.loads(path.read_text(encoding="utf-8"))
+        if checkpoint is None and item_generation(item) != payload["object_generation"]:
+            raise TreatmentFailure("targeted sync generation conflict",
+                self._targeted_receipt(payload, sku, "conflict", "GENERATION_CONFLICT"))
+        try:
+            source, bound_offer_id = lookup_succeeded_provider_effect(
+                provider_effect_id=payload["provider_effect_id"], sku=sku,
+                provider_identity=payload["provider_identity"],
+                expected_offer_id=payload["expected_offer_id"],
+            )
+        except ProviderEffectConflict as exc:
+            raise TreatmentFailure(str(exc), self._targeted_receipt(
+                payload, sku, "reconciliation_required", "SOURCE_EFFECT_INVALID",
+            )) from exc
+        if source.operation != payload["source_operation"]:
+            raise TreatmentFailure("source operation contradiction",
+                self._targeted_receipt(
+                    payload, sku, "reconciliation_required",
+                    "SOURCE_OPERATION_CONTRADICTION",
+                ))
+        operation_id = None
+        if checkpoint is not None:
+            self._validate_observation_checkpoint(
+                checkpoint, payload, sku,
+            )
+            checkpoint = state_machine.checkpoint_running_job(
+                job_id, owner, lease_token, checkpoint,
+            )
+            offer, operation_id = self._validate_observation_checkpoint(
+                checkpoint, payload, sku,
+            )
+        else:
+            offer = self._find_offer_governed(payload, sku)
+        if isinstance(offer, dict) and offer.get("receipt_schema_id") == (
+            "treatment-wait-receipt/v1"
+        ):
+            return offer
+        if offer is None:
+            raise TreatmentFailure("provider offer absent", self._targeted_receipt(
+                payload, sku, "reconciliation_required", "PROVIDER_OFFER_ABSENT",
+            ))
+        if offer.get("offerId") != bound_offer_id:
+            raise TreatmentFailure("provider offer contradiction", self._targeted_receipt(
+                payload, sku, "reconciliation_required", "PROVIDER_OFFER_CONTRADICTION",
+                observed_offer_id=offer.get("offerId"),
+            ))
+        if offer.get("sku") not in (None, "", sku):
+            raise TreatmentFailure("provider SKU contradiction", self._targeted_receipt(
+                payload, sku, "reconciliation_required", "PROVIDER_SKU_CONTRADICTION",
+                observed_sku=offer.get("sku"),
+            ))
+        if checkpoint is None:
+            checkpoint = self._observation_checkpoint(payload, sku, offer)
+            operation_id = checkpoint["operation_id"]
+            checkpoint = state_machine.checkpoint_running_job(
+                job_id, owner, lease_token, checkpoint,
+            )
+            offer, operation_id = self._validate_observation_checkpoint(
+                checkpoint, payload, sku,
+            )
+        mutation = self._project_governed_offer(
+            payload=payload, sku=sku, offer=offer, item_path=path,
+            operation_id=operation_id,
+        )
+        if replaying_checkpoint and mutation.status == "REPAIR_REQUIRED":
+            from tgw.item_mutation import reconcile_mutation
+
+            mutation = reconcile_mutation(
+                item_path=path,
+                journal_root=self._item_mutation_journal_root(),
+                operation_id=operation_id,
+                project=self._project_catalog,
+            )
+        if mutation.status != "COMMITTED":
+            outcome = {
+                "CONFLICT": "conflict", "REPAIR_REQUIRED": "repair_required",
+                "FAILED": "failed",
+            }.get(mutation.status, "repair_required")
+            raise TreatmentFailure(
+                mutation.detail or f"targeted sync mutation {mutation.status}",
+                self._targeted_receipt(
+                    payload, sku, outcome,
+                    f"ITEM_MUTATION_{mutation.status}",
+                    operation_id=mutation.operation_id,
+                    resulting_generation=mutation.resulting_generation,
+                ),
+            )
+        return self._targeted_receipt(
+            payload, sku, "satisfied", "PROVIDER_PROJECTION_CURRENT",
+            changed=mutation.changed,
+            operation_id=mutation.operation_id,
+            resulting_generation=mutation.resulting_generation,
+            observed_offer_id=offer.get("offerId"),
+        )
+
+    def _project_governed_offer(
+        self, *, payload, sku, offer, item_path, operation_id=None,
+    ):
+        """Project one read-only observation through the item mutation CAS."""
+        from tgw.item_mutation import mutate_item
+
+        observation = {
+            "provider_effect_id": payload["provider_effect_id"],
+            "provider_identity": payload["provider_identity"],
+            "projection_policy": "verify-noop/v1",
+            "offer": offer,
+        }
+
+        def mutate(document):
+            if document.get("sku") != sku:
+                raise ValueError("authoritative document SKU does not match requested SKU")
+            updated = dict(document)
+            listing = dict(updated.get("ebay_listing") or {})
+            local_offer = dict(updated.get("ebay_offer") or {})
+            offer_id = offer.get("offerId")
+            status = offer.get("status")
+            listing_info = offer.get("listing") or {}
+            listing_id = listing_info.get("listingId")
+            listing_status = listing_info.get("listingStatus")
+            if offer_id:
+                listing["offer_id"] = offer_id
+                local_offer["offer_id"] = offer_id
+            if status:
+                listing["status"] = status
+                local_offer["status"] = status
+            if listing_id:
+                listing["listing_id"] = listing_id
+                listing["listing_url"] = f"https://www.ebay.com/itm/{listing_id}"
+            if listing_status:
+                listing["listing_status"] = listing_status
+            price = (offer.get("pricingSummary") or {}).get("price") or {}
+            if price.get("value") is not None:
+                local_offer["price"] = float(price["value"])
+                listing["live_price"] = float(price["value"])
+            category_id = offer.get("categoryId")
+            if category_id:
+                local_offer["category_id"] = str(category_id)
+            if offer.get("availableQuantity") is not None:
+                local_offer["quantity"] = offer["availableQuantity"]
+            marketplace_id = offer.get("marketplaceId")
+            if marketplace_id:
+                updated["marketplace_id"] = str(marketplace_id)
+            updated["ebay_listing"] = listing
+            updated["ebay_offer"] = local_offer
+            live = dict(updated.get("ebay_live") or {})
+            live["offer"] = dict(offer)
+            updated["ebay_live"] = live
+            updated["provider_projection_receipt"] = {
+                "provider_effect_id": payload["provider_effect_id"],
+                "provider_identity": payload["provider_identity"],
+                "offer_id": offer_id,
+            }
+            return updated
+
+        data_root = Path(self.config.get("data_root", self.config["itemdata_root"].parent))
+        return mutate_item(
+            item_path=item_path,
+            archive_root=Path(self.config.get(
+                "archive_root", data_root / "ItemArchive",
+            )),
+            journal_root=self._item_mutation_journal_root(),
+            sku=sku, kind="ebay-sync-targeted",
+            expected_generation=payload["object_generation"],
+            payload=observation, mutate=mutate, project=self._project_catalog,
+            project_noop=True, operation_id=operation_id,
+        )
+
+    def _item_mutation_journal_root(self):
+        data_root = Path(self.config.get(
+            "data_root", self.config["itemdata_root"].parent,
+        ))
+        return Path(self.config.get(
+            "item_mutation_journal_root", data_root.parent / "var/item-mutations",
+        ))
+
+    def _project_catalog(self, _sku, document):
+        from tgw.sqlite_catalog import upsert_catalog_row
+
+        result = upsert_catalog_row(dict(self.config), document)
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            raise RuntimeError("SQLite projection did not report success")
+        return result
     def run(self) -> None:
         self.install_signal_handlers()
         tgw_logging.log_event("worker_start", queue=QUEUE_NAME, owner=self.owner)
         log.info("ebay_sync worker started: owner=%s", self.owner)
 
-        # Enqueue a startup sync job only if the queue is completely idle
+        # Governed/timer work must not suppress the independent periodic chain.
         try:
-            depths = state_machine.queue_depths()
-            if depths.get(QUEUE_NAME, 0) == 0:
+            pending_periodic = state_machine.has_pending_job_with_payload(
+                QUEUE_NAME, f"{QUEUE_NAME}:pending",
+                [{"reason": "startup"}, {"reason": "scheduled"}],
+            )
+            if not pending_periodic:
                 state_machine.enqueue_job(
                     queue_name=QUEUE_NAME,
                     payload={"reason": "startup"},
                     max_attempts=3,
+                    dedupe_key=f"{QUEUE_NAME}:pending",
+                    debounce=True,
                 )
                 log.info("ebay_sync: enqueued startup sync job")
         except Exception as exc:
@@ -78,10 +490,24 @@ class EbaySyncWorker(QueueWorker):
         tgw_logging.log_event("worker_stop", queue=QUEUE_NAME, owner=self.owner)
         log.info("ebay_sync worker stopped")
 
-    def handle(self, job: Dict[str, Any]) -> None:
-        target_sku = (job.get("payload_json") or {}).get("sku")
+    def handle(self, job: Dict[str, Any]) -> Dict[str, Any] | None:
+        payload = job.get("payload_json") or {}
+        from tgw.ebay.sync import classify_targeted_sync_payload
+        shape = classify_targeted_sync_payload(payload)
+        if shape == "ambiguous":
+            raise HardFailure("ambiguous ebay_sync payload schema")
+        if shape == "governed":
+            mode = self._targeted_mode()
+            if mode != "workflow":
+                raise HardFailure(
+                    f"workflow targeted sync consumer is not admitted (mode={mode})"
+                )
+            return self._handle_governed_targeted(
+                payload, payload.get("sku"), job,
+            )
+        target_sku = payload.get("sku")
 
-        if target_sku:
+        if shape == "legacy" and target_sku:
             # Per-SKU sync — fetch just this item's offer from eBay
             log.info("ebay_sync: targeted sync for %s", target_sku)
             tgw_logging.log_event("ebay_sync_start", sku=target_sku)
@@ -102,15 +528,7 @@ class EbaySyncWorker(QueueWorker):
                 updated = 0
             if updated:
                 try:
-                    import time as _time
-
-                    state_machine.enqueue_job(
-                        queue_name="catalog_rebuild",
-                        payload={"reason": "ebay_sync_targeted"},
-                        dedupe_key="catalog_rebuild:pending",
-                        not_before=_time.time() + 5,
-                        max_attempts=3,
-                    )
+                    state_machine.enqueue_catalog_rebuild("ebay_sync_targeted", delay_seconds=5.0)
                 except Exception:
                     pass
             log.info("ebay_sync: targeted sync %s → %s", target_sku, "updated" if updated else "no change")
@@ -132,6 +550,7 @@ class EbaySyncWorker(QueueWorker):
                     errs = exc.response.json().get('errors', [])
                     eids = {int(e.get('errorId', 0)) for e in errs}
                 except Exception:
+                    errs = []
                     eids = set()
                 if 25707 in eids:
                     consecutive = self._record_fallback_state(used_fallback=True)
@@ -163,6 +582,26 @@ class EbaySyncWorker(QueueWorker):
                     offers = self._fetch_offers_by_local_skus()
                     self._mark_fallback_executed()
                 else:
+                    # Unrecognized 400 — not the known 25707 orphaned-SKU class.
+                    # fetch_all_offers() already logs the raw eBay error IDs/messages
+                    # before re-raising when it can parse the response body, but log
+                    # again here (with the eids this handler independently parsed) so
+                    # triage of "yet another eBay error ID we don't handle" never
+                    # depends solely on that inner log line surviving unbroken up the
+                    # call chain (todo #1397/PP-DEADLETTER-001).
+                    if errs:
+                        for e in errs:
+                            log.error(
+                                "ebay_sync: unrecognized eBay 400 on bulk offer list — "
+                                "errorId=%s message=%s",
+                                e.get('errorId'), e.get('message', ''),
+                            )
+                    else:
+                        log.error(
+                            "ebay_sync: unrecognized eBay 400 on bulk offer list — "
+                            "unparseable/empty error body: %s",
+                            exc.response.text[:300] if exc.response is not None else '',
+                        )
                     raise
             else:
                 raise
@@ -216,13 +655,7 @@ class EbaySyncWorker(QueueWorker):
 
         if updated:
             try:
-                state_machine.enqueue_job(
-                    queue_name="catalog_rebuild",
-                    payload={"reason": "ebay_sync"},
-                    dedupe_key="catalog_rebuild:pending",
-                    not_before=time.time() + 30,
-                    max_attempts=3,
-                )
+                state_machine.enqueue_catalog_rebuild("ebay_sync")
             except psycopg2.errors.UniqueViolation:
                 pass
 
@@ -565,6 +998,8 @@ class EbaySyncWorker(QueueWorker):
                 state_machine.enqueue_job(
                     queue_name="ebay_repush",
                     payload={"sku": sku},
+                    entity_type="item",
+                    entity_id=sku,
                     dedupe_key=f"ebay_repush:{sku}",
                     max_attempts=3,
                 )
@@ -582,12 +1017,17 @@ class EbaySyncWorker(QueueWorker):
 
     def _reschedule(self) -> None:
         next_run = time.time() + SYNC_INTERVAL_S
-        jid = state_machine.enqueue_job(
-            queue_name=QUEUE_NAME,
-            payload={"reason": "scheduled"},
-            not_before=next_run,
-            max_attempts=3,
-        )
+        try:
+            jid = state_machine.enqueue_job(
+                queue_name=QUEUE_NAME,
+                payload={"reason": "scheduled"},
+                not_before=next_run,
+                max_attempts=3,
+                dedupe_key=f"{QUEUE_NAME}:pending",
+                debounce=True,
+            )
+        except psycopg2.errors.UniqueViolation:
+            jid = None
         log.info("ebay_sync: next sync in %dh (job %s)", SYNC_INTERVAL_S // 3600, jid)
         tgw_logging.log_event("ebay_sync_rescheduled", next_run_in_hours=SYNC_INTERVAL_S // 3600, next_job_id=jid)
 

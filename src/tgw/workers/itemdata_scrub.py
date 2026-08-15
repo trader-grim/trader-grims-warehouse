@@ -11,11 +11,19 @@ from pathlib import Path
 from typing import Any
 
 # PP-FENCE-001 gap (audit#1143 #1235): scrub_itemdata applies recursive,
-# pattern-based key removal across the whole doc. The fence's patch_item()
-# only sets top-level fields — no delete semantics — so this worker keeps
-# writing via atomic_write_json directly (same documented gap class as
+# pattern-based key removal across the whole doc. items.strip_fields()
+# only removes a flat list of top-level field names in one call — it does
+# not recurse into nested dicts/lists — so it cannot express this rule
+# set (the production denylist has recursive=true, a real live-used
+# capability, not dead code). This worker keeps writing via
+# atomic_write_json directly (same documented gap class as
 # multi_intake.py's key-deletion write) rather than a fence redesign.
+# Path construction and reads, however, DO have canonical fence
+# equivalents and are routed through them (audit#COHESION-2026-07 #1305).
+from tgw import config as tgw_config
 from tgw.items import atomic_write_json
+from tgw.logging import announce_script_run
+from tgw.resolver import find_current_sku, load_item_doc
 
 logger = logging.getLogger(__name__)
 
@@ -85,14 +93,17 @@ def scrub_itemdata(data: dict[str, Any], rules: ScrubRules) -> tuple[dict[str, A
 
 
 def derive_item_path(itemdata_root: Path, sku: str) -> Path:
-    return Path(itemdata_root) / sku / f"{sku}.json"
+    """Canonical item JSON path for *sku* under *itemdata_root*.
 
-
-def _is_safe_sku(sku: str) -> bool:
-    """Reject any sku that could escape default_root as a path component
-    (audit#1143 #1171, finding 11: SKU was taken from job content with no
-    validation at all)."""
-    return bool(sku) and '..' not in sku and '/' not in sku and '\\' not in sku
+    Delegates to config.sku_json() — the single shared path-building
+    helper used everywhere else in the fence — instead of hand-joining
+    path components (audit#COHESION-2026-07 #1305). Raises ValueError for
+    an unsafe sku (audit#1143 #1171, finding 11: SKU taken from job
+    content had no validation at all) — the same canonical
+    config._safe_segment() validator every other fence path helper relies
+    on, rather than a locally duplicated character check. Callers must
+    catch ValueError."""
+    return tgw_config.sku_json({"itemdata_root": Path(itemdata_root)}, sku)
 
 
 def process_queue_job(job_file: Path, rules: ScrubRules, default_root: Path,
@@ -123,22 +134,36 @@ def process_queue_job(job_file: Path, rules: ScrubRules, default_root: Path,
                     if len(job_content) < 64 and '\n' not in job_content:
                         sku = job_content
 
-        if not _is_safe_sku(sku):
+        try:
+            file_path = derive_item_path(root_dir, sku)
+        except ValueError:
             logger.error(f"Rejecting unsafe SKU {sku!r} from job file {job_file.name}")
             return False
 
-        file_path = derive_item_path(root_dir, sku)
-
         if not file_path.exists():
-            logger.error(f"Target data file for SKU {sku} not found at {file_path}")
-            return False
+            # Fence-consistent alias fallback (audit#COHESION-2026-07
+            # #1305, mirrors revision.py #1313/#1316 and mcp_server.py
+            # #1312 in the same batch): a job may still reference an
+            # item's OLD sku after a rename, resolve it via the sku_old
+            # index before concluding "not found."
+            cfg = {"itemdata_root": Path(root_dir)}
+            current = find_current_sku(cfg, sku)
+            if current:
+                try:
+                    file_path = derive_item_path(root_dir, current)
+                except ValueError:
+                    logger.error(f"Rejecting unsafe resolved SKU {current!r} from job file {job_file.name}")
+                    return False
+            if not file_path.exists():
+                logger.error(f"Target data file for SKU {sku} not found at {file_path}")
+                return False
 
         # Safe read of the actual item JSON data file
         if file_path.stat().st_size == 0:
             logger.error(f"Target data file {file_path} is completely empty. Skipping.")
             return False
 
-        item_data = json.loads(file_path.read_text(encoding='utf-8'))
+        item_data = load_item_doc(file_path)
         cleaned_data, removed_paths = scrub_itemdata(item_data, rules)
 
         atomic_write_json(file_path, cleaned_data, archive_root=archive_root,
@@ -160,6 +185,12 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    announce_script_run(
+        'itemdata_scrub.py (workers/ file-queue batch variant)',
+        'sweep and process file-based itemdata_scrub queue jobs from cwd (not systemd-scheduled — ad hoc batch run)',
+        config=str(args.config),
+    )
 
     try:
         cfg = load_config(args.config)

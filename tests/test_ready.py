@@ -55,6 +55,24 @@ def test_ready_pool_filters_and_sorts_oldest_first(cfg):
     assert [p['sku'] for p in pool] == ['tgw20260101000000002', 'tgw20260101000000003']
 
 
+def test_ready_pool_uses_canonical_sku_from_doc_not_dir_name(cfg):
+    """Fence read (load_item_doc) trusts the JSON's own sku field over the
+    directory name, matching how every other fenced reader (catalog.py etc.)
+    behaves. A raw json.loads() + directory-name read (the old bypass) would
+    have reported the stale directory name instead."""
+    old_dir_name = 'tgw20260101000000002'
+    doc_path = cfg['itemdata_root'] / old_dir_name / f'{old_dir_name}.json'
+    doc = json.loads(doc_path.read_text(encoding='utf-8'))
+    doc['sku'] = 'tgw20260101000000099'  # renamed sku recorded in the doc itself
+    doc['sku_old'] = old_dir_name
+    doc_path.write_text(json.dumps(doc), encoding='utf-8')
+
+    pool = ready_pool(cfg)
+    skus = [p['sku'] for p in pool]
+    assert 'tgw20260101000000099' in skus
+    assert old_dir_name not in skus
+
+
 def test_dole_batch_size():
     assert dole_batch_size(0, 60) == 0
     assert dole_batch_size(1, 60) == 1     # non-empty pool always doles at least 1

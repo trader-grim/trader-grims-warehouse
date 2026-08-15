@@ -162,9 +162,15 @@ def refresh_condition_policies(cfg: Dict[str, Any]) -> Dict[str, List[Tuple[str,
     policies: Dict[str, List[Tuple[str, str]]] = {}
     for entry in data.get('itemConditionPolicies', []):
         cat_id = entry['categoryId']
+        # Metadata occasionally omits the human description for a valid
+        # conditionId.  The identifier is the authority needed for policy
+        # enforcement; a missing optional label must not make the entire
+        # all-category cache refresh fail (and thereby turn every listing
+        # action into HTTP 500).
         conds = [
-            (c['conditionId'], c['conditionDescription'])
+            (str(c['conditionId']), str(c.get('conditionDescription') or c['conditionId']))
             for c in entry.get('itemConditions', [])
+            if isinstance(c, dict) and c.get('conditionId') not in (None, '')
         ]
         if conds:
             policies[cat_id] = conds
@@ -263,6 +269,28 @@ def best_condition(cfg: Dict[str, Any], category_id: str,
 def condition_enum(condition_id: str) -> str:
     """Return the Inventory API enum string for a conditionId."""
     return CONDITION_ID_TO_ENUM.get(condition_id, 'USED_EXCELLENT')
+
+
+# Full set of Inventory API condition enum strings this system knows about,
+# derived from CONDITION_ID_TO_ENUM's values (not eBay's per-category subset
+# — that additionally narrows by category via allowed_conditions_for_category,
+# but this global set is the cheap, always-available first check: a value
+# like "Very Good" (a human label, not an enum) fails this regardless of
+# category context. See PP-CONDITION-ENUM-001 / todo #1562: draft_listing.
+# condition_enum was silently corrupted to a raw label with zero validation,
+# bypassing ebay_stage's safe legacy-string fallback and dead-lettering the
+# eBay push with an opaque error.
+ALL_CONDITION_ENUMS: frozenset = frozenset(CONDITION_ID_TO_ENUM.values())
+
+
+def is_known_condition_enum(value: Any) -> bool:
+    """True if *value* is a real Inventory API condition enum string.
+
+    Global vocabulary check only — does not require a category_id. Used to
+    reject obviously-corrupt values (e.g. a human-readable label) before
+    they're persisted to draft_listing.condition_enum.
+    """
+    return isinstance(value, str) and value in ALL_CONDITION_ENUMS
 
 
 

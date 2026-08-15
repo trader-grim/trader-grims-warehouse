@@ -57,12 +57,13 @@ import csv
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from tgw import items  # noqa: E402
 from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
+from tgw.logging import announce_script_run, setup_logging  # noqa: E402
 
 
 def _canonical_category(doc: Dict[str, Any]) -> Tuple[str, str]:
@@ -145,6 +146,19 @@ def main() -> int:
     parser.add_argument('--report', type=Path,
                        default=Path('/opt/TGW/var/log/category-recompile-report.json'))
     args = parser.parse_args()
+
+    # No prior logging configuration in this script (verified live, todo
+    # #1369) — without it, announce_script_run()'s event is silently
+    # dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.recompile_category_backfill')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'recompile_category_backfill.py',
+        'repeatable, additive-only own-dataset category recovery/backfill (todo #1135)',
+        apply=args.apply, limit=args.limit, report=str(args.report),
+    )
 
     cfg = load_config(DEFAULT_CONFIG)
     catalog_root = Path(cfg['catalog_root'])

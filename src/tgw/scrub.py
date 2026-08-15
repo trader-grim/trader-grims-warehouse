@@ -7,7 +7,6 @@ Each pass is idempotent and safe to re-run. Always dry-run first.
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -64,7 +63,7 @@ def data_scrub_pass1(cfg: Dict[str, Any], dry_run: bool = True) -> Dict[str, Any
                      for k, v in doc.items()}
 
         if not dry_run:
-            atomic_write_json(path, new_doc)
+            atomic_write_json(path, new_doc, archive_root=cfg.get('archive_root'))
             log.debug('%s: #VERIFIED → verified (%r)', sku, old_value)
 
         renamed.append({'sku': sku, 'value': old_value})
@@ -128,7 +127,7 @@ def data_scrub_qty_repair(cfg: Dict[str, Any], dry_run: bool = True) -> Dict[str
 
         if not dry_run:
             doc['qty'] = 1
-            atomic_write_json(path, doc)
+            atomic_write_json(path, doc, archive_root=cfg.get('archive_root'))
             log.debug('%s: qty %r → 1', sku, qty)
 
         repaired.append({'sku': sku, 'old_qty': qty})
@@ -212,7 +211,7 @@ def data_scrub_size_class_backfill(cfg: Dict[str, Any], dry_run: bool = True) ->
 
         if not dry_run:
             doc.update(fields)
-            atomic_write_json(path, doc)
+            atomic_write_json(path, doc, archive_root=cfg.get('archive_root'))
             log.debug('%s: set %s', sku, fields)
 
         updated.append({'sku': sku, 'fields': fields})
@@ -221,13 +220,7 @@ def data_scrub_size_class_backfill(cfg: Dict[str, Any], dry_run: bool = True) ->
         try:
             from .queue import state_machine as _sm
             _sm.init(cfg['postgres_dsn'])
-            _sm.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': 'size_class_backfill'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            _sm.enqueue_catalog_rebuild('size_class_backfill')
         except Exception:
             pass
 

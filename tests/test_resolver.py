@@ -88,6 +88,25 @@ def test_resolve_exact_sku():
         assert result == {'tgw20260101000000001'}
 
 
+def test_resolve_old_format_partial_sku_prefix_match():
+    # A 14-17 char query that isn't itself a directory should still match
+    # full-length SKUs sharing that prefix (old-format prefix-match fast
+    # path). Regression test for #1285: comparing s[:18] to q[:18] never
+    # matched because slicing a <18-char query to [:18] is a no-op, so the
+    # two operands ended up different lengths and could never be equal.
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        make_item(root, 'tgw20260101000000001', location='A1')
+        make_item(root, 'tgw20260601000000002', location='A2')
+        cfg = make_cfg(root)
+
+        # 17 chars: 'tgw' + 14 digits
+        partial = 'tgw20260101000000'[:17]
+        assert 14 <= len(partial) <= 17
+        result = resolve(cfg, sku=partial)
+        assert result == {'tgw20260101000000001'}
+
+
 def test_resolve_date_range():
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
@@ -155,3 +174,31 @@ def test_resolve_empty_field_empty_string():
         assert 'tgw20260101000000001' in result
         assert 'tgw20260101000000002' in result
         assert 'tgw20260101000000003' not in result
+
+
+def test_resolve_corrupt_item_json_skipped_but_logged(caplog):
+    """A JSON-loading selector must not crash or silently drop a corrupt item —
+    it should skip the corrupt SKU, still return the valid matches, and leave
+    a WARNING log record naming the SKU. Regression test for #1301: resolve()
+    previously caught the load failure in a bare `except Exception: continue`
+    with no trace left anywhere."""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        make_item(root, 'tgw20260101000000001', **{'#STATUS': 'ACTIVE'})
+        make_item(root, 'tgw20260101000000002', **{'#STATUS': 'ACTIVE'})
+
+        # Corrupt the second item's JSON so load_item_doc_by_sku() raises.
+        corrupt_path = root / 'tgw20260101000000002' / 'tgw20260101000000002.json'
+        corrupt_path.write_text('{not valid json', encoding='utf-8')
+
+        cfg = make_cfg(root)
+        with caplog.at_level('WARNING', logger='tgw.resolver'):
+            result = resolve(cfg, status='ACTIVE')
+
+        # Valid item still found; search doesn't crash or silently vanish
+        # the whole result set.
+        assert result == {'tgw20260101000000001'}
+
+        # A warning was logged naming the skipped SKU.
+        warnings = [r for r in caplog.records if r.levelname == 'WARNING']
+        assert any('tgw20260101000000002' in r.getMessage() for r in warnings)

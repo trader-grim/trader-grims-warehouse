@@ -19,29 +19,25 @@ CLI: ``tgw ready [list|set <sku…>|unset <sku…>]``
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from tgw.items import load_item_doc, sku_json, update_item
+from tgw.resolver import find_item_jsons
 
 
 def ready_pool(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Scan ItemData for ready items, oldest ``ready_at`` first."""
-    root = cfg['itemdata_root']
     pool: List[Dict[str, Any]] = []
-    for child in sorted(root.iterdir()):
-        jf = child / f'{child.name}.json'
-        if not jf.exists():
-            continue
+    for json_path in find_item_jsons(cfg):
         try:
-            doc = json.loads(jf.read_text(encoding='utf-8'))
+            doc = load_item_doc(json_path)
         except Exception:
             continue
         offer = doc.get('ebay_offer') or {}
         if offer.get('offer_id') and offer.get('status') == 'UNPUBLISHED' and offer.get('ready_at'):
             pool.append({
-                'sku': child.name,
+                'sku': doc.get('sku') or json_path.parent.name,
                 'title': doc.get('title', ''),
                 'price': offer.get('price'),
                 'location': doc.get('location', ''),

@@ -33,6 +33,14 @@ CREATE INDEX IF NOT EXISTS idx_status   ON catalog(status);
 CREATE INDEX IF NOT EXISTS idx_title    ON catalog(title);
 """
 
+# db_path strings this process has already confirmed the schema exists for
+# (upsert_catalog_row) — avoids re-running the idempotent-but-not-free
+# executescript on every single per-item upsert call. Process-lifetime only,
+# matches other in-process caches in this codebase (e.g. sync.py's
+# _policies_cache) — never persisted, never needs invalidating beyond a
+# process restart since the schema itself never changes at runtime.
+_SCHEMA_ENSURED: set = set()
+
 
 _TERMINAL_STATUSES = frozenset({
     'sold', 'archived', 'disposed', 'recalled', 'merged', 'discard', 'vero',
@@ -137,3 +145,60 @@ def build_sqlite_catalog(cfg: Dict[str, Any],
     return {'ok': True, 'artifact': 'sqlite_catalog',
             'path': str(db_path), 'source_count': len(item_jsons),
             'rows_built': len(rows), 'elapsed_seconds': elapsed}
+
+
+def upsert_catalog_row(cfg: Dict[str, Any], doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Atomic per-item SQLite catalog upsert (PP-CATALOG-INCR-001 CI-2).
+
+    Called synchronously from the fence write path (_apply_patch /
+    _apply_ebay_write in http_server.py) right after a successful
+    atomic_write_json, so the SQLite catalog — what the inventory webui
+    reads — reflects a write immediately, without waiting for the periodic
+    full rebuild (CI-4). *doc* is the already-in-memory post-write document;
+    no re-read from disk needed. Row shape/column derivation must stay
+    identical to build_sqlite_catalog's, so a full rebuild is always a
+    no-op reconciliation for any SKU this path already covered.
+    """
+    sku = _scalar(doc, 'sku')
+    if not sku:
+        return {'ok': False, 'error': 'doc has no sku'}
+    db_path: Path = cfg['sqlite_catalog_path']
+    row = (
+        sku,
+        _scalar(doc, 'title'),
+        _scalar(doc, 'location'),
+        _resolve_status(doc),
+        _price_col(doc),
+        _scalar(doc, 'qty'),
+        _scalar(doc, 'image'),
+        _scalar(doc, 'attribute_set'),
+        json.dumps(doc, ensure_ascii=False),
+    )
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(db_path)
+    try:
+        # Schema is idempotent (CREATE TABLE/INDEX IF NOT EXISTS) but still
+        # costs a parse+execute per call with no effect after the first —
+        # real, avoidable overhead in a per-SKU bulk-edit loop (code-review
+        # finding, 2026-07-18). Skip once this process has confirmed the
+        # schema exists for this db_path.
+        if str(db_path) not in _SCHEMA_ENSURED:
+            con.executescript(_SCHEMA)
+            _SCHEMA_ENSURED.add(str(db_path))
+        with con:
+            con.execute(
+                """INSERT INTO catalog
+                   (sku, title, location, status, price, qty, image,
+                    attribute_set, data, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(sku) DO UPDATE SET
+                       title=excluded.title, location=excluded.location,
+                       status=excluded.status, price=excluded.price,
+                       qty=excluded.qty, image=excluded.image,
+                       attribute_set=excluded.attribute_set, data=excluded.data,
+                       updated_at=excluded.updated_at""",
+                row,
+            )
+    finally:
+        con.close()
+    return {'ok': True, 'sku': sku}

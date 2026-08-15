@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from tgw.logging import announce_script_run, setup_logging
+
 DEFAULT_ROOT = Path('/opt/TGW/data/ItemData')
 
 
@@ -295,6 +297,19 @@ def main() -> int:
     parser.add_argument('--backup-dir', default='', help='Directory to store backups before fixing')
     parser.add_argument('--limit', type=int, default=0, help='Only process the first N files')
     args = parser.parse_args()
+
+    # No prior logging configuration in this script (verified live, todo
+    # #1369) — without it, announce_script_run()'s event is silently
+    # dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.repair_itemdata_json')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'repair_itemdata_json.py',
+        'scan and conservatively repair malformed ItemData JSON files',
+        root=args.root, fix=args.fix, dry_run=args.dry_run, limit=args.limit,
+    )
 
     root = Path(args.root).expanduser()
     backup_dir = Path(args.backup_dir).expanduser() if args.backup_dir else None

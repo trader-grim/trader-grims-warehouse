@@ -5,7 +5,7 @@ Storage: PostgreSQL table ``todo_items`` in ``state_machine`` DB.
 CLI entry point: ``tgw todo [agent] [--add TEXT] [--done ID] [--seed]``
                  ``tgw todo brief <id>`` — self-contained per-agent task spec
 
-Agents: claude, admin, gemini, db  (open-ended — any string is valid)
+Agents: claude, admin, gemini, db, tigwa  (open-ended — any string is valid)
 Priority: integer, lower = higher priority (50 = default, 10 = urgent, 90 = someday)
 
 PP-PLANDB-001 Phase 1 columns (migration, applied 2026-06-12)::
@@ -57,6 +57,27 @@ def _ensure_reasoning_column() -> None:
         log.warning('_ensure_reasoning_column: migration skipped — %s', exc)
 
 
+def _ensure_status_note_column() -> None:
+    """Idempotent migration: add status_note column to todo_items if absent.
+
+    Separate from ``body`` so a dispatch step (e.g. tgw-coder marking
+    in-progress) can record a status without destroying the original
+    finding text — see todo #1384.
+    """
+    sql = """
+    DO $$ BEGIN
+        ALTER TABLE todo_items ADD COLUMN status_note TEXT;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+    """
+    try:
+        with _conn() as con:
+            with con.cursor() as cur:
+                cur.execute(sql)
+    except Exception as exc:
+        log.warning('_ensure_status_note_column: migration skipped — %s', exc)
+
+
 def _push_clipboard(text: str) -> bool:
     """Push text to the system clipboard via pyperclip."""
     try:
@@ -81,6 +102,7 @@ def _conn() -> Generator:
 
 
 _ensure_reasoning_column()
+_ensure_status_note_column()
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +217,7 @@ def todo_list(agent: Optional[str] = None, show_all: bool = False) -> List[Dict[
             where = ('WHERE ' + ' AND '.join(parts)) if parts else ''
             cur.execute(
                 f'SELECT id, agent, priority, body, source, added_at, done_at, '
-                f'pp_ref, depends_on, plan_anchor, reasoning '
+                f'pp_ref, depends_on, plan_anchor, reasoning, status_note '
                 f'FROM todo_items {where} ORDER BY agent, priority, id',
                 params,
             )
@@ -208,7 +230,7 @@ def todo_get(item_id: int) -> Optional[Dict[str, Any]]:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 'SELECT id, agent, priority, body, source, added_at, done_at, '
-                'pp_ref, depends_on, plan_anchor, reasoning FROM todo_items WHERE id = %s',
+                'pp_ref, depends_on, plan_anchor, reasoning, status_note FROM todo_items WHERE id = %s',
                 (item_id,),
             )
             row = cur.fetchone()
@@ -240,6 +262,24 @@ def todo_update(item_id: int, body: str) -> Dict[str, Any]:
         return {'ok': False, 'error': f'item {item_id} not found or already done'}
     _enqueue_plan_render('todo_update')
     return {'ok': True, 'id': row[0], 'agent': row[1], 'body': body}
+
+
+def todo_set_status_note(item_id: int, note: str) -> Dict[str, Any]:
+    """Record a progress/dispatch note without touching ``body`` (todo #1384:
+    the tgw-coder dispatch step was overwriting the original finding text
+    with a generic 'in progress: tgw-coder' placeholder via todo_update)."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                "UPDATE todo_items SET status_note = %s WHERE id = %s AND done_at IS NULL "
+                "RETURNING id, agent, body",
+                (note, item_id),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {'ok': False, 'error': f'item {item_id} not found or already done'}
+    _enqueue_plan_render('todo_set_status_note')
+    return {'ok': True, 'id': row[0], 'agent': row[1], 'body': row[2], 'status_note': note}
 
 
 def todo_delegate(item_id: int, new_agent: str) -> Dict[str, Any]:
@@ -291,6 +331,7 @@ def todo_set_meta(
     depends_on: Optional[List[int]] = None,
     plan_anchor: Optional[str] = None,
     reasoning: Optional[str] = None,
+    status_note: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Set PP-PLANDB-001 metadata on an existing item. Only passed fields change."""
     sets, params = [], []
@@ -306,14 +347,17 @@ def todo_set_meta(
     if reasoning is not None:
         sets.append('reasoning = %s')
         params.append(reasoning)
+    if status_note is not None:
+        sets.append('status_note = %s')
+        params.append(status_note or None)
     if not sets:
-        return {'ok': False, 'error': 'no metadata given — pass --pp/--depends/--anchor/--reasoning'}
+        return {'ok': False, 'error': 'no metadata given — pass --pp/--depends/--anchor/--reasoning/--status-note'}
     params.append(item_id)
     with _conn() as con:
         with con.cursor() as cur:
             cur.execute(
                 f"UPDATE todo_items SET {', '.join(sets)} WHERE id = %s "
-                f"RETURNING id, agent, pp_ref, depends_on, plan_anchor, reasoning",
+                f"RETURNING id, agent, pp_ref, depends_on, plan_anchor, reasoning, status_note",
                 params,
             )
             row = cur.fetchone()
@@ -321,7 +365,8 @@ def todo_set_meta(
         return {'ok': False, 'error': f'item {item_id} not found'}
     _enqueue_plan_render('todo_set_meta')
     return {'ok': True, 'id': row[0], 'agent': row[1], 'pp_ref': row[2],
-            'depends_on': row[3], 'plan_anchor': row[4], 'reasoning': row[5]}
+            'depends_on': row[3], 'plan_anchor': row[4], 'reasoning': row[5],
+            'status_note': row[6]}
 
 
 # ---------------------------------------------------------------------------
@@ -330,16 +375,35 @@ def todo_set_meta(
 
 _PLAN_EXTRACT_CAP = 6000
 
-_BRIEF_CONSTRAINTS = """\
+_SHARED_BRIEF_CONSTRAINTS = """\
 ## Constraints
 
-- Read `CLAUDE.md` first; settled-architecture rules apply (tgw-api fence,
-  `{ok, ...}` output contract, secrets from `secrets_root`, workers stay thin,
-  catalog rebuild always a job).
 - Never touch config files, secrets, or eBay OAuth scopes.
 - Acceptance: `pytest -q` must pass offline; new behavior gets tests.
 - If a requirement is impossible as specified, stop and explain instead of
   improvising."""
+
+
+def _brief_constraints(agent: str) -> str:
+    """Return instructions for the assigned actor, never for another actor.
+
+    ``CLAUDE.md`` is Claude Code's session contract.  Historically every Todo
+    brief injected it into every actor, which made a Codex/Hermes assignment
+    inherit Claude-only authority.  Repository ``AGENTS.md`` is the neutral
+    routing boundary and selects any actor-specific contract from there.
+    """
+    normalized = agent.strip().lower()
+    if normalized == 'claude':
+        actor = (
+            '- You are Claude Code: read `CLAUDE.md` and follow its '
+            'human-supervised session contract.'
+        )
+    else:
+        actor = (
+            '- Read repository `AGENTS.md` for your actor routing. '
+            '`CLAUDE.md` is context only and does not govern you.'
+        )
+    return f"## Actor contract\n\n{actor}\n\n{_SHARED_BRIEF_CONSTRAINTS}"
 
 
 def extract_plan_section(plan_path: Path, anchor: str) -> str:
@@ -393,8 +457,9 @@ def todo_brief(item_id: int, plan_path: Path) -> Dict[str, Any]:
         f'# Task brief — todo #{item["id"]} [{item["agent"]}] '
         f'(p{item["priority"]}, source: {item["source"]}, {status})',
         '',
-        'You are working in the Trader Grim\'s Warehouse (TGW) repo at',
-        '`/opt/TGW/src/trader-grims-warehouse`. This brief is self-contained;',
+        'You are working in the exact TGW worktree bound by the workflow',
+        'execution envelope. Do not substitute a remembered or hard-coded path.',
+        'This brief is self-contained;',
         'consult the linked plan section before deviating from it.',
         '',
         '## Task',
@@ -405,6 +470,8 @@ def todo_brief(item_id: int, plan_path: Path) -> Dict[str, Any]:
     reasoning = item.get('reasoning', 'normal')
     if reasoning and reasoning != 'normal':
         parts += [f'**Reasoning:** {reasoning}', '']
+    if item.get('status_note'):
+        parts += [f'**Status:** {item["status_note"]}', '']
     if item.get('pp_ref'):
         parts += [f'**Plan item:** {item["pp_ref"]}'
                   + (f' — see master-plan section "{item["plan_anchor"]}"' if item.get('plan_anchor') else ''),
@@ -416,8 +483,8 @@ def todo_brief(item_id: int, plan_path: Path) -> Dict[str, Any]:
     elif anchor:
         parts += ['## Linked plan section', '',
                   f'(no master-plan heading matched "{anchor}" — read '
-                  f'`docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md` directly)', '']
-    parts.append(_BRIEF_CONSTRAINTS)
+                  f'`{plan_path}` directly)', '']
+    parts.append(_brief_constraints(str(item['agent'])))
 
     return {'ok': True, 'id': item['id'], 'agent': item['agent'],
             'brief': '\n'.join(parts)}
@@ -639,7 +706,8 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
                                pp_ref=args.pp,
                                depends_on=_parse_depends(args.depends),
                                plan_anchor=args.anchor,
-                               reasoning=getattr(args, 'reasoning', None))
+                               reasoning=getattr(args, 'reasoning', None),
+                               status_note=getattr(args, 'status_note', None))
         if result['ok']:
             print(f"Meta #{result['id']} [{result['agent']}]: pp_ref={result['pp_ref']} "
                   f"depends_on={result['depends_on']} plan_anchor={result['plan_anchor']}")
@@ -663,6 +731,18 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         result = todo_update(int(item_id), body)
         if result['ok']:
             print(f"Updated #{result['id']} [{result['agent']}]: {body[:60]}")
+        else:
+            print(f"Error: {result['error']}")
+        return result
+
+    if getattr(args, 'note', None) is not None:
+        item_id, note = args.note[0], ' '.join(args.note[1:])
+        if not note:
+            print('Error: --note requires ID and text')
+            return {'ok': False, 'error': 'missing text'}
+        result = todo_set_status_note(int(item_id), note)
+        if result['ok']:
+            print(f"Noted #{result['id']} [{result['agent']}]: {note[:60]}")
         else:
             print(f"Error: {result['error']}")
         return result
@@ -697,24 +777,47 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     all_deps = sorted({d for item in items for d in (item.get('depends_on') or [])})
     still_open = open_ids(all_deps)
 
-    current_agent = None
-    for item in items:
-        ag = item['agent']
-        if ag != current_agent:
-            print(f'\n── {ag} ──')
-            current_agent = ag
-        done_mark = '✓' if item['done_at'] else ' '
-        badges = ''
-        if item.get('pp_ref'):
-            badges += f' [{item["pp_ref"]}]'
-        blockers = [d for d in (item.get('depends_on') or []) if d in still_open]
-        if blockers:
-            badges += ' ⛔' + ','.join(f'#{d}' for d in blockers)
-        r = item.get('reasoning', 'normal')
-        if r and r != 'normal':
-            badges += f' [{r}]'
-        body_preview = item['body'][:80] + ('…' if len(item['body']) > 80 else '')
-        print(f'  [{done_mark}] #{item["id"]:3d} p{item["priority"]:2d} {badges} {body_preview}')
+    if getattr(args, 'by_pp', False):
+        by_pp: Dict[str, List[Dict[str, Any]]] = {}
+        for item in items:
+            by_pp.setdefault(item.get('pp_ref') or '(no pp_ref)', []).append(item)
+        # tagged PP groups first (the useful part), untagged noise bucket last
+        group_order = sorted(k for k in by_pp if k != '(no pp_ref)')
+        if '(no pp_ref)' in by_pp:
+            group_order.append('(no pp_ref)')
+        grouped_items = [(pp, sorted(by_pp[pp], key=lambda i: (i['priority'], i['id']))) for pp in group_order]
+    else:
+        grouped_items = []
+        current_agent = None
+        bucket: List[Dict[str, Any]] = []
+        for item in items:
+            ag = item['agent']
+            if ag != current_agent:
+                if bucket:
+                    grouped_items.append((current_agent, bucket))
+                bucket = []
+                current_agent = ag
+            bucket.append(item)
+        if bucket:
+            grouped_items.append((current_agent, bucket))
+
+    for label, group in grouped_items:
+        print(f'\n── {label} ──')
+        for item in group:
+            done_mark = '✓' if item['done_at'] else ' '
+            badges = ''
+            if item.get('pp_ref') and not getattr(args, 'by_pp', False):
+                badges += f' [{item["pp_ref"]}]'
+            blockers = [d for d in (item.get('depends_on') or []) if d in still_open]
+            if blockers:
+                badges += ' ⛔' + ','.join(f'#{d}' for d in blockers)
+            r = item.get('reasoning', 'normal')
+            if r and r != 'normal':
+                badges += f' [{r}]'
+            if item.get('status_note'):
+                badges += f' ({item["status_note"][:30]})'
+            body_preview = item['body'][:80] + ('…' if len(item['body']) > 80 else '')
+            print(f'  [{done_mark}] #{item["id"]:3d} p{item["priority"]:2d} {badges} {body_preview}')
 
     print(f'\n{len(items)} item(s).')
     return {'ok': True, 'count': len(items)}

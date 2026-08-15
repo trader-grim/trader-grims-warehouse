@@ -75,3 +75,26 @@ def test_refresh_condition_policies_updates_mem_cache(tmp_path, monkeypatch):
 
     # the freshly-refreshed value, not the stale primed one, must come back
     assert conditions._get_policies(cfg) == {'165806': [('1000', 'New')]}
+
+
+def test_refresh_accepts_condition_without_optional_description(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(
+        conditions,
+        'ebay_get',
+        lambda *args, **kwargs: {
+            'itemConditionPolicies': [{
+                'categoryId': '171175',
+                'itemConditions': [
+                    {'conditionId': '5000'},
+                    {'conditionId': '6000', 'conditionDescription': 'Acceptable'},
+                ],
+            }],
+        },
+    )
+
+    refreshed = conditions.refresh_condition_policies(cfg)
+
+    assert refreshed['171175'] == [
+        ('5000', '5000'), ('6000', 'Acceptable'),
+    ]

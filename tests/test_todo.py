@@ -81,7 +81,7 @@ def test_todo_add_enqueues_plan_render(_no_render_enqueue):
 
 def test_todo_set_meta_partial_update():
     from tgw.todo import todo_set_meta
-    ctx, cur = _mock_conn(fetchone_return=(7, 'claude', 'PP-X-001', [1, 2], None, 'normal'))
+    ctx, cur = _mock_conn(fetchone_return=(7, 'claude', 'PP-X-001', [1, 2], None, 'normal', None))
     with patch('tgw.todo._conn', ctx):
         result = todo_set_meta(7, pp_ref='PP-X-001', depends_on=[1, 2])
     assert result['ok'] is True
@@ -94,6 +94,17 @@ def test_todo_set_meta_requires_a_field():
     from tgw.todo import todo_set_meta
     result = todo_set_meta(7)
     assert result['ok'] is False
+
+
+def test_todo_set_meta_status_note():
+    from tgw.todo import todo_set_meta
+    note = 'in-progress; worktree: /opt/TGW/var/worktrees/todo-1732-cli'
+    row = (1732, 'claude', 'PP-WORKFLOW-001', [], None, 'normal', note)
+    ctx, cur = _mock_conn(fetchone_return=row)
+    with patch('tgw.todo._conn', ctx):
+        result = todo_set_meta(1732, status_note=note)
+    assert result['status_note'] == note
+    assert 'status_note = %s' in cur.execute.call_args.args[0]
 
 
 def test_todo_set_meta_not_found():
@@ -165,7 +176,26 @@ def test_todo_brief_includes_plan_extract_and_deps(tmp_path):
     assert 'build the foo' in brief
     assert 'Foo design prose' in brief          # plan extract present
     assert '#8 [done] prereq task' in brief     # dependency status
-    assert 'CLAUDE.md' in brief                 # constraints block
+    assert 'You are Claude Code' in brief       # actor-specific contract
+    assert 'read `CLAUDE.md`' in brief
+    assert '/opt/TGW/src/trader-grims-warehouse' not in brief
+
+
+def test_todo_brief_routes_codex_to_agents_not_claude(tmp_path):
+    from tgw import todo as todo_mod
+    plan = tmp_path / 'plan.md'
+    plan.write_text(_PLAN_MD, encoding='utf-8')
+    item = {
+        'id': 10, 'agent': 'codex', 'priority': 10, 'body': 'safe task',
+        'source': 'operator-plan', 'added_at': None, 'done_at': None,
+        'pp_ref': None, 'depends_on': [], 'plan_anchor': None,
+    }
+    with patch.object(todo_mod, 'todo_get', return_value=item):
+        brief = todo_mod.todo_brief(10, plan)['brief']
+    assert 'Read repository `AGENTS.md`' in brief
+    assert '`CLAUDE.md` is context only and does not govern you' in brief
+    assert 'You are Claude Code' not in brief
+    assert 'exact TGW worktree bound by the workflow' in brief
 
 
 def test_todo_brief_not_found():
@@ -649,7 +679,7 @@ def test_todo_add_reasoning_high():
 
 def test_todo_set_meta_reasoning():
     from tgw.todo import todo_set_meta
-    ctx, cur = _mock_conn(fetchone_return=(7, 'claude', None, [], None, 'low'))
+    ctx, cur = _mock_conn(fetchone_return=(7, 'claude', None, [], None, 'low', None))
     with patch('tgw.todo._conn', ctx):
         result = todo_set_meta(7, reasoning='low')
     assert result['ok'] is True

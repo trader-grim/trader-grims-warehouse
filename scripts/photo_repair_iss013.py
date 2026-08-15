@@ -54,6 +54,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
+from tgw.logging import announce_script_run  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -362,6 +363,12 @@ def main() -> int:
     parser.add_argument('--skip-snapshot-check', action='store_true',
                         help='Skip the snapshot age check')
     args = parser.parse_args()
+
+    announce_script_run(
+        'photo_repair_iss013.py',
+        'ISS-013 repair — rename misnamed <SKU>-alt.jpg files back to <original>-alt.jpg',
+        execute=args.execute, dry_run=args.dry_run, sku=args.sku,
+    )
 
     execute: bool = args.execute
 

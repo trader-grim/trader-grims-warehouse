@@ -98,6 +98,56 @@ def test_offer_body_still_builds_without_weight(cfg):
 
 
 # ---------------------------------------------------------------------------
+# Todo #1462: eBay's Inventory API rejects an empty-string aspect value with
+# a garbled generic errorId 25002 whose message dumps the entire aspects
+# dict rather than naming the offending field (confirmed live 2026-07-16 on
+# tgw202605040949058, right after #1461 started correctly persisting an
+# operator's cleared aspect field as an explicit ""). The internal record
+# must keep "" as the real cleared value (see draft_specifics.py), but the
+# push to eBay must omit that aspect key entirely — this PUT is a full
+# replace of product.aspects, so omitting achieves the intended "clear this
+# aspect on eBay" outcome.
+# ---------------------------------------------------------------------------
+
+def test_empty_string_aspect_omitted_from_push(cfg):
+    item = _item(**{
+        'draft_listing': {
+            **_item()['draft_listing'],
+            'item_specifics': {'Material': '', 'Type': 'Brooch'},
+        },
+    })
+    inv_body, _ = sync._build_offer_bodies(cfg, 'tgw0001', item)
+    aspects = inv_body['product']['aspects']
+    assert 'Material' not in aspects
+    assert aspects['Type'] == ['Brooch']
+
+
+def test_none_aspect_also_omitted_from_push(cfg):
+    item = _item(**{
+        'draft_listing': {
+            **_item()['draft_listing'],
+            'item_specifics': {'Material': None, 'Type': 'Brooch'},
+        },
+    })
+    inv_body, _ = sync._build_offer_bodies(cfg, 'tgw0001', item)
+    aspects = inv_body['product']['aspects']
+    assert 'Material' not in aspects
+    assert aspects['Type'] == ['Brooch']
+
+
+def test_non_empty_aspect_still_pushed(cfg):
+    item = _item(**{
+        'draft_listing': {
+            **_item()['draft_listing'],
+            'item_specifics': {'Material': 'Sterling Silver', 'Type': 'Brooch'},
+        },
+    })
+    inv_body, _ = sync._build_offer_bodies(cfg, 'tgw0001', item)
+    aspects = inv_body['product']['aspects']
+    assert aspects['Material'] == ['Sterling Silver']
+
+
+# ---------------------------------------------------------------------------
 # audit#1143 #1254 — marketplaceId is never hardcoded to EBAY_US
 # ---------------------------------------------------------------------------
 

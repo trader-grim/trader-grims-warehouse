@@ -1,0 +1,27 @@
+[Unit]
+Description=TGW repository-scoped GitHub SSH agent
+After=local-fs.target
+
+[Service]
+Type=simple
+User=tgw-git
+Group=tgw-git
+RuntimeDirectory=tgw-github-agent
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/ssh-agent -D -a /run/tgw-github-agent/agent.sock
+ExecStartPost=/usr/local/libexec/tgw-github-agent-load
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

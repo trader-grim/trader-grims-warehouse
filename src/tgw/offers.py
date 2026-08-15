@@ -33,6 +33,173 @@ from tgw.items import atomic_write_json
 
 log = logging.getLogger(__name__)
 
+# C11 (invariants.md): a durable registry for Best Offer responses that
+# succeeded against eBay's live API but whose local SKU could not be
+# resolved from the SQLite catalog. Without this, a successful eBay-side
+# accept/counter/decline had no local record at all, no queryable finding,
+# and no way to retry resolution later. Mirrors the
+# `ebay_sku_migrate._BLOCKED_REGISTRY` pattern (plain JSON registry keyed
+# by an identifier that IS known, atomic tmp-file write). Keyed by
+# offer_id since that (plus listing_id) is what's known when SKU
+# resolution fails -- there is no resolved item to attach a field to.
+_UNRESOLVED_REGISTRY = Path('/opt/TGW/var/offers-unresolved.json')
+
+
+def _record_unresolved_offer(
+    offer_id: str,
+    listing_id: str,
+    action: str,
+    counter_price: Optional[float],
+    by: str,
+    at: str,
+) -> None:
+    """Persist a Best-Offer outcome that succeeded on eBay but could not be
+    resolved to a local SKU, so a future repair pass can retry resolution.
+
+    Registry entries are keyed by offer_id and never silently dropped:
+    each retry attempt (e.g. by a future repair worker) bumps `attempts`
+    and `last_attempt_at` rather than overwriting history. Entries are
+    only removed once resolution succeeds (see `_resolve_unresolved_offer`).
+    """
+    try:
+        registry: Dict[str, Any] = {}
+        if _UNRESOLVED_REGISTRY.exists():
+            registry = json.loads(_UNRESOLVED_REGISTRY.read_text(encoding='utf-8'))
+
+        existing = registry.get(offer_id)
+        if existing is None:
+            registry[offer_id] = {
+                "offer_id": offer_id,
+                "listing_id": listing_id,
+                "action": action,
+                "counter_price": counter_price,
+                "by": by,
+                "first_seen_at": at,
+                "last_attempt_at": at,
+                "attempts": 1,
+                "resolved": False,
+            }
+        else:
+            existing["last_attempt_at"] = at
+            existing["attempts"] = existing.get("attempts", 1) + 1
+            existing["resolved"] = False
+
+        _UNRESOLVED_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _UNRESOLVED_REGISTRY.with_suffix('.tmp')
+        tmp.write_text(json.dumps(registry, indent=2, ensure_ascii=False), encoding='utf-8')
+        tmp.replace(_UNRESOLVED_REGISTRY)
+    except Exception as exc:
+        # Persisting the finding must never itself crash the caller; a
+        # failure here still leaves the log line as a last-resort trail.
+        log.error(
+            "offer_history: FAILED to persist unresolved-SKU finding for offer %s "
+            "(listing_id=%s): %s", offer_id, listing_id, exc,
+        )
+
+
+def _resolve_unresolved_offer(offer_id: str) -> None:
+    """Remove a previously-recorded unresolved offer once it has been
+    resolved (e.g. by a future repair pass re-running SKU resolution).
+    Not called from the current handling path -- provided so a later
+    repair worker has a symmetric, tested way to clear resolved entries.
+    """
+    try:
+        if not _UNRESOLVED_REGISTRY.exists():
+            return
+        registry: Dict[str, Any] = json.loads(_UNRESOLVED_REGISTRY.read_text(encoding='utf-8'))
+        if offer_id not in registry:
+            return
+        registry.pop(offer_id, None)
+        tmp = _UNRESOLVED_REGISTRY.with_suffix('.tmp')
+        tmp.write_text(json.dumps(registry, indent=2, ensure_ascii=False), encoding='utf-8')
+        tmp.replace(_UNRESOLVED_REGISTRY)
+    except Exception as exc:
+        log.warning("offer_history: could not clear resolved offer %s: %s", offer_id, exc)
+
+
+def repair_unresolved_offers(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Retry local SKU resolution for every entry in the unresolved-offer
+    registry (C11 repair pass, todo #1373 -- follow-up to #1314).
+
+    Makes NO eBay API calls: each entry already recorded a Best-Offer
+    response that succeeded live against eBay at the time it was first
+    seen. This only re-runs `_find_item_by_listing_id()` (the same
+    offline SQLite-catalog lookup that failed originally) in case the
+    catalog has since caught up (e.g. a delayed catalog_rebuild, or the
+    item was intake'd/synced after the offer response landed).
+
+    On success: the offer-history entry is written onto the now-found
+    item (same shape `_log_offer_history()` writes on its success path)
+    and the registry entry is cleared via `_resolve_unresolved_offer()`.
+    On repeat failure: `_record_unresolved_offer()` is called again,
+    which bumps `attempts`/`last_attempt_at` in place (no data lost).
+
+    Returns {ok, repaired: [offer_id...], still_unresolved: [offer_id...],
+    total}.
+    """
+    repaired: List[str] = []
+    still_unresolved: List[str] = []
+
+    if not _UNRESOLVED_REGISTRY.exists():
+        return {"ok": True, "repaired": repaired, "still_unresolved": still_unresolved, "total": 0}
+
+    try:
+        registry: Dict[str, Any] = json.loads(_UNRESOLVED_REGISTRY.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.error("repair_unresolved_offers: could not read registry: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    for offer_id, entry in list(registry.items()):
+        if entry.get("resolved"):
+            continue
+        listing_id = entry.get("listing_id", "")
+        action = entry.get("action", "")
+        counter_price = entry.get("counter_price")
+        by = entry.get("by", "claude")
+
+        path = _find_item_by_listing_id(cfg, listing_id)
+        if path is None:
+            _record_unresolved_offer(offer_id, listing_id, action, counter_price, by, now_iso)
+            still_unresolved.append(offer_id)
+            continue
+
+        try:
+            item = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("repair_unresolved_offers: could not read %s: %s", path, exc)
+            still_unresolved.append(offer_id)
+            continue
+
+        history_entry: Dict[str, Any] = {
+            "offer_id": offer_id,
+            "listing_id": listing_id,
+            "action": action,
+            "by": by,
+            "at": entry.get("first_seen_at", now_iso),
+        }
+        if counter_price is not None:
+            history_entry["counter_price"] = counter_price
+
+        history: List[Dict[str, Any]] = item.setdefault("offer_history", [])
+        history.append(history_entry)
+        atomic_write_json(path, item, pretty=cfg.get("pretty", True))
+
+        _resolve_unresolved_offer(offer_id)
+        repaired.append(offer_id)
+        log.info(
+            "repair_unresolved_offers: resolved offer %s (listing_id=%s) onto %s",
+            offer_id, listing_id, path,
+        )
+
+    return {
+        "ok": True,
+        "repaired": repaired,
+        "still_unresolved": still_unresolved,
+        "total": len(repaired) + len(still_unresolved),
+    }
+
 
 # ---------------------------------------------------------------------------
 # Item lookup helpers
@@ -68,7 +235,13 @@ def _log_offer_history(
     """Append a response record to offer_history in the item JSON."""
     path = _find_item_by_listing_id(cfg, listing_id)
     if path is None:
+        # C11: this offer response already SUCCEEDED against eBay's live
+        # API (this function is only called after that). If we can't
+        # resolve which local SKU it belongs to, that must not just be
+        # logged and dropped -- persist it durably so an operator/repair
+        # pass can find and retry it later.
         log.warning("offer_history: item with listing_id=%s not found", listing_id)
+        _record_unresolved_offer(offer_id, listing_id, action, counter_price, by, at)
         return
     try:
         item = json.loads(path.read_text(encoding="utf-8"))

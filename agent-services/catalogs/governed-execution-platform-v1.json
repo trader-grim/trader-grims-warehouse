@@ -1,0 +1,37 @@
+{
+  "schema": "tgw-plan-provider-catalog/v1",
+  "id": "governed-execution-platform-providers@1",
+  "plan_id": "PLAN-GOVERNED-EXECUTION-PLATFORM",
+  "plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+  "profiles": {
+    "production": {"minimum_state": "operationally_verified"}
+  },
+  "capabilities": [
+    "plan.capability-resolution@2",
+    "plan.graph-query@1",
+    "plan.shared-planning-skill@1",
+    "workflow.condition-derived-convergence@1",
+    "coding.governed-execution@1",
+    "authority.operator-decisions@1",
+    "operator.surface-projection@1",
+    "coding.harness-agnostic-role-lanes@1",
+    "promptcraft.receiver-profiles@1"
+  ],
+  "providers": [
+    {"id": "native-exact-resolver", "provides": ["plan.capability-resolution@2"], "requires": ["plan.graph-query@1"]},
+    {"id": "canonical-plan-graph", "provides": ["plan.graph-query@1"], "requires": []},
+    {"id": "shared-tgw-plan-skill", "provides": ["plan.shared-planning-skill@1"], "requires": ["plan.graph-query@1"]},
+    {"id": "recovered-promptcraft", "provides": ["promptcraft.receiver-profiles@1"], "requires": []},
+    {"id": "build-workflow-convergence", "provides": ["workflow.condition-derived-convergence@1"], "requires": []},
+    {"id": "build-operator-authority", "provides": ["authority.operator-decisions@1"], "requires": ["workflow.condition-derived-convergence@1"]},
+    {"id": "build-operator-surface", "provides": ["operator.surface-projection@1"], "requires": ["authority.operator-decisions@1"]},
+    {"id": "build-harness-role-lanes", "provides": ["coding.harness-agnostic-role-lanes@1"], "requires": ["plan.shared-planning-skill@1", "promptcraft.receiver-profiles@1"]},
+    {"id": "build-governed-execution", "provides": ["coding.governed-execution@1"], "requires": ["plan.capability-resolution@2", "workflow.condition-derived-convergence@1", "coding.harness-agnostic-role-lanes@1"]}
+  ],
+  "observations": [
+    {"capability": "plan.capability-resolution@2", "provider": "native-exact-resolver", "state": "tested", "evidence": ["source-commit:c414762", "test:tests/test_plan_solver.py"]},
+    {"capability": "plan.graph-query@1", "provider": "canonical-plan-graph", "state": "tested", "evidence": ["source-commit:edb452e", "test:tests/test_plan_graph_live.py"]},
+    {"capability": "plan.shared-planning-skill@1", "provider": "shared-tgw-plan-skill", "state": "tested", "evidence": ["source-commit:e668871", "test:agent-services/skills/tgw-plan/scripts/check_adapters.py"]},
+    {"capability": "promptcraft.receiver-profiles@1", "provider": "recovered-promptcraft", "state": "tested", "evidence": ["source-commit:3260710", "lineage:agent-services/providers/promptcraft/LINEAGE.sha256", "test:tests/test_promptcraft_agent_service.py:13-passed"]}
+  ]
+}

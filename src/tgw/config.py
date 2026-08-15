@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Set
+from urllib.parse import urlsplit
 
 DEFAULT_CONFIG = Path("/opt/TGW/config/tgw-api-config.json")
 
@@ -84,6 +87,48 @@ def load_config(path: Path) -> Dict[str, Any]:
     archive_root = p("archive_root", "/opt/TGW/data/ItemArchive")
     incoming_path = p("incoming_path", "/opt/TGW/incoming")
     plan_vault_path = p("plan_vault_path", "/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault")
+    standalone_plan_root = p("standalone_plan_root", "/opt/TGW/library/plans")
+    plan_repository_root = p("plan_repository_root", str(standalone_plan_root))
+    plan_approved_commit = raw.get("plan_approved_commit")
+    plan_git_path = p("plan_git_path", "git")
+
+    # If an approved commit is configured, every canonical path below must be
+    # backed by a clean materialization of that exact commit.  The primary
+    # repository may advance with evidence or proposed edits, so production can
+    # bind ``standalone_plan_root`` to a detached approved worktree and
+    # ``plan_repository_root`` to the advancing repository.
+    if plan_approved_commit is not None:
+        if not isinstance(plan_approved_commit, str) or not re.fullmatch(
+            r"[0-9a-f]{40}", plan_approved_commit
+        ):
+            raise ValueError("plan_approved_commit must be a full Git commit")
+        if "plan_repository_root" not in raw:
+            raise ValueError(
+                "plan_repository_root is required when plan_approved_commit is configured"
+            )
+        if plan_repository_root.resolve() == standalone_plan_root.resolve():
+            raise ValueError(
+                "approved Plan materialization and update repository must be distinct"
+            )
+        git_argv = [
+            str(plan_git_path), "-c", f"safe.directory={standalone_plan_root}",
+            "-C", str(standalone_plan_root),
+        ]
+        try:
+            head = subprocess.run(
+                [*git_argv, "rev-parse", "--verify", "HEAD^{commit}"],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+            status = subprocess.run(
+                [*git_argv, "status", "--porcelain=v1", "--untracked-files=all"],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("approved standalone Plan materialization is unavailable") from exc
+        if head.returncode or head.stdout.strip() != plan_approved_commit:
+            raise ValueError("standalone Plan materialization does not match approved commit")
+        if status.returncode or status.stdout:
+            raise ValueError("standalone Plan materialization is not clean")
 
     full_catalog_path = p("full_catalog_path", str(catalog_root / "master-catalog.json"))
     search_catalog_path = p("search_catalog_path", str(catalog_root / "search-catalog.json"))
@@ -194,8 +239,6 @@ def load_config(path: Path) -> Dict[str, Any]:
         "ebay_credentials_path": ebay_credentials_path,
         "ebay_draft_csv_path": ebay_draft_csv_path,
         "api_key": _api_key,
-        "alt_text_provider": raw.get("alt_text_provider", "openrouter"),
-        "alt_text_model": raw.get("alt_text_model", "google/gemini-2.5-flash"),
         "postgres_dsn": postgres_dsn,
         "itemdata_root": itemdata_root,
         "catalog_root": catalog_root,
@@ -216,8 +259,21 @@ def load_config(path: Path) -> Dict[str, Any]:
         "incoming_path": incoming_path,
         "newitems_path": incoming_path / "newitems",
         "plan_vault_path": plan_vault_path,
+        "standalone_plan_root": standalone_plan_root,
+        "plan_repository_root": plan_repository_root,
+        "plan_approved_commit": plan_approved_commit,
+        "plan_git_path": plan_git_path,
         "plan_inbox_path": plan_vault_path / "inbox",
-        "plan_master_path": plan_vault_path / "plan" / "TGW-Master-Plan.md",
+        # Canonical Plan intent lives only in the standalone repository.  The
+        # mutable/synced Plan Vault remains the inbox and general docs surface,
+        # but must never become an alternate Master Plan authority.
+        "plan_master_path": standalone_plan_root / "plan" / "TGW-Master-Plan.md",
+        "plan_detail_root": standalone_plan_root / "plan" / "pp",
+        "plan_detail_roots": (
+            standalone_plan_root / "plan" / "pp",
+            standalone_plan_root / "pp",
+        ),
+        "plan_update_master_path": plan_repository_root / "plan" / "TGW-Master-Plan.md",
         "pm_intake_delay_hours": float(raw.get("pm_intake_delay_hours", 4.0)),
         # PP-EDITOR-001 ready-state dole-out: publish pool/divisor items per cycle
         "dole_interval_s": int(raw.get("dole_interval_s", 3600)),
@@ -246,18 +302,139 @@ def load_config(path: Path) -> Dict[str, Any]:
         "backup_snapshot_root": backup_snapshot_root,
         "backup_secrets_dir": backup_secrets_dir,
         "backup_rclone_stamp": backup_rclone_stamp,
+        # Coding workers consume this normalized section directly.  Retain
+        # ``raw`` below for compatibility with callers needing other custom
+        # configuration.
+        "coding": raw.get("coding", {}),
         "raw": raw,
     }
+
+
+def load_coding_worker_config(path: Path) -> Dict[str, Any]:
+    """Return the supported normalized config contract for coding workers.
+
+    Coding workers must not reach back into ``raw``: that compatibility
+    payload is intentionally not a worker configuration interface.  Keeping
+    this small loader beside ``load_config`` makes the contract testable and
+    preserves the validated normalized ``coding`` section.
+    """
+    config = load_config(path)
+    coding = config.get("coding")
+    if not isinstance(coding, dict):
+        raise ValueError("coding configuration must be an object")
+    config["coding"] = dict(coding)
+    return config
+
+
+# ---------------------------------------------------------------------------
+# Coding-provision bootstrap configuration validation
+#
+# The service/client request contract and the local worker execution contract
+# are separate.  The canonical tgw-prod service must not require (or validate)
+# the tgw-lib-local filesystem roots merely to accept a request; those roots
+# are validated only where a local worker will actually execute.
+# ---------------------------------------------------------------------------
+
+
+def _require_http_endpoint(coding: Dict[str, Any], field: str) -> None:
+    value = coding.get(field)
+    if not isinstance(value, str) or not value.startswith(("http://", "https://")):
+        raise ValueError(f"coding.{field} must be an http(s) endpoint URL")
+
+
+def validate_worker_endpoint(value: Any) -> str:
+    """Require TLS except for an explicitly loopback-only worker endpoint."""
+    if not isinstance(value, str):
+        raise ValueError("coding.worker_api_endpoint must be a secure endpoint URL")
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ValueError("coding.worker_api_endpoint must be a secure endpoint URL")
+    if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        raise ValueError(
+            "coding.worker_api_endpoint must use HTTPS unless it is loopback-only"
+        )
+    return value
+
+
+def _require_non_empty_string(coding: Dict[str, Any], field: str) -> None:
+    value = coding.get(field)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"coding.{field} must be a non-empty string")
+
+
+def _require_path(coding: Dict[str, Any], field: str) -> None:
+    value = coding.get(field)
+    if not isinstance(value, (str, Path)) or not str(value):
+        raise ValueError(f"coding.{field} must be a path")
+
+
+def validate_service_request_config(coding: Any) -> Dict[str, Any]:
+    """Validate the service/client request contract.
+
+    Accepting a request on the canonical service needs only the endpoint, the
+    fixed host, and the worker identity.  The tgw-lib-local filesystem roots
+    (``repository_root``, ``worktree_root``), the worker-facing endpoint, and
+    the worker credential reference are worker execution concerns and are
+    intentionally NOT required here.  Raises ``ValueError`` naming the
+    offending field when a required field is absent or malformed.
+    """
+    if not isinstance(coding, dict):
+        raise ValueError("coding configuration must be an object")
+    _require_http_endpoint(coding, "api_endpoint")
+    _require_non_empty_string(coding, "host")
+    _require_non_empty_string(coding, "worker_identity")
+    return coding
+
+
+def validate_worker_execution_config(coding: Any) -> Dict[str, Any]:
+    """Validate the local worker execution contract.
+
+    Executing on tgw-lib needs the worker-facing endpoint, the credential
+    reference (``worker_credential_env`` — only the name of the runtime
+    environment variable that carries the real credential; never its value),
+    the host/worker identity fence, and the local filesystem roots the worker
+    will reprobe.  Raises ``ValueError`` naming the offending field when a
+    required field is absent or malformed.
+    """
+    if not isinstance(coding, dict):
+        raise ValueError("coding configuration must be an object")
+    validate_worker_endpoint(coding.get("worker_api_endpoint"))
+    _require_non_empty_string(coding, "host")
+    _require_non_empty_string(coding, "worker_identity")
+    _require_non_empty_string(coding, "worker_credential_env")
+    _require_path(coding, "repository_root")
+    _require_path(coding, "worktree_root")
+    return coding
 
 
 # ---------------------------------------------------------------------------
 # Canonical path helpers — the only place paths are constructed
 # ---------------------------------------------------------------------------
 
+_SAFE_SEGMENT_RE = re.compile(r'^[A-Za-z0-9_.-]+$')
+
+
+def _safe_segment(root: Path, name: str, kind: str) -> Path:
+    """Join *name* under *root* as a single path segment, raising
+    ValueError if it isn't a safe, contained segment."""
+    if not name or name in ('.', '..') or not _SAFE_SEGMENT_RE.match(name):
+        raise ValueError(f"unsafe {kind} value: {name!r}")
+    candidate = (root / name).resolve()
+    root_resolved = root.resolve()
+    if candidate != root_resolved and root_resolved not in candidate.parents:
+        raise ValueError(f"{kind} {name!r} escapes {root}")
+    return candidate
+
 
 def sku_dir(cfg: Dict[str, Any], sku: str) -> Path:
     """Canonical directory for a SKU."""
-    return cfg["itemdata_root"] / sku
+    return _safe_segment(cfg["itemdata_root"], sku, "sku")
 
 
 def sku_json(cfg: Dict[str, Any], sku: str) -> Path:
@@ -272,7 +449,7 @@ def sku_exists(cfg: Dict[str, Any], sku: str) -> bool:
 
 def location_dir(cfg: Dict[str, Any], location: str) -> Path:
     """Canonical location directory in the symlink tree."""
-    return cfg["location_tree_root"] / location
+    return _safe_segment(cfg["location_tree_root"], location, "location")
 
 
 def queue_dir(cfg: Dict[str, Any], queue_name: str) -> Path:

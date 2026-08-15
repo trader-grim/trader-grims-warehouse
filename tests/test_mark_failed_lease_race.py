@@ -13,7 +13,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
+import pytest
+
 import tgw.queue.state_machine as state_machine
+
+TOKEN = "44444444-4444-4444-8444-444444444444"
 
 
 class _FakeCursor:
@@ -70,7 +74,7 @@ def test_normal_retry_wait_transition_no_race(monkeypatch):
     )
     _patch_conn(monkeypatch, cur)
 
-    result = state_machine.mark_failed("job-1", "owner:1", "boom")
+    result = state_machine.mark_failed("job-1", "owner:1", TOKEN, "boom")
 
     assert result == "retry_wait"
     # No re-query for actual state needed on the happy path.
@@ -87,7 +91,7 @@ def test_normal_dead_letter_transition_no_race(monkeypatch):
     )
     _patch_conn(monkeypatch, cur)
 
-    result = state_machine.mark_failed("job-2", "owner:1", "boom")
+    result = state_machine.mark_failed("job-2", "owner:1", TOKEN, "boom")
 
     assert result == "dead_letter"
     assert any("SET state = 'dead_letter'" in q for q in cur.executed)
@@ -107,10 +111,8 @@ def test_retry_wait_lease_race_reports_actual_state_not_phantom(monkeypatch):
     )
     _patch_conn(monkeypatch, cur)
 
-    result = state_machine.mark_failed("job-3", "owner:1", "boom")
-
-    assert result == "retry_wait"  # queued is non-terminal
-    assert any('SELECT state FROM' in q for q in cur.executed)
+    with pytest.raises(RuntimeError, match="lost running lease"):
+        state_machine.mark_failed("job-3", "owner:1", TOKEN, "boom")
 
 
 def test_dead_letter_lease_race_skips_promotion_and_reports_actual_state(monkeypatch):
@@ -127,9 +129,8 @@ def test_dead_letter_lease_race_skips_promotion_and_reports_actual_state(monkeyp
     )
     _patch_conn(monkeypatch, cur)
 
-    result = state_machine.mark_failed("job-4", "owner:1", "boom")
-
-    assert result == "dead_letter"
+    with pytest.raises(RuntimeError, match="lost running lease"):
+        state_machine.mark_failed("job-4", "owner:1", TOKEN, "boom")
     assert not any("SET state = 'dead_letter'" in q for q in cur.executed)
 
 
@@ -143,6 +144,5 @@ def test_lease_race_row_now_gone_reports_dead_letter(monkeypatch):
     )
     _patch_conn(monkeypatch, cur)
 
-    result = state_machine.mark_failed("job-5", "owner:1", "boom")
-
-    assert result == "dead_letter"
+    with pytest.raises(RuntimeError, match="lost running lease"):
+        state_machine.mark_failed("job-5", "owner:1", TOKEN, "boom")

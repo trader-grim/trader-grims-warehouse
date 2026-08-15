@@ -13,6 +13,7 @@ from tgw.queue import state_machine
 def _job(attempt_count=1, max_attempts=5):
     return {
         "job_id": "j1",
+        "lease_token": "33333333-3333-4333-8333-333333333333",
         "attempt_count": attempt_count,
         "max_attempts": max_attempts,
         "payload_json": {},

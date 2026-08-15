@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import tgw.clipd as clipd
-from tgw.clip import list_history, record_clip
+from tgw.clip import deliver_clip, list_history, record_clip
 
 # ---------------------------------------------------------------------------
 # detect_backend
@@ -156,6 +156,54 @@ def test_process_change_records_selection(tmp_path):
     finally:
         a.close()
         b.close()
+
+
+# ---------------------------------------------------------------------------
+# process_change — sensitive-content exclusion (todo #1565/PP-CLIP-001)
+# ---------------------------------------------------------------------------
+
+def test_process_change_skips_password_hint(tmp_path):
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    result = clipd.process_change('hunter2', 'clipboard', reg, db_path=db, password_hint=True)
+    assert result == {'ok': True, 'skipped': True, 'reason': 'password_hint'}
+    assert list_history(db_path=db) == []
+
+
+def test_process_change_password_hint_still_updates_dedup(tmp_path):
+    """A password-hinted copy is not persisted, but dedup tracking still
+    advances — a real subsequent non-sensitive copy is not itself treated as
+    a duplicate of the (unpersisted) password content."""
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    clipd.process_change('hunter2', 'clipboard', reg, db_path=db, password_hint=True)
+    result = clipd.process_change('normal text', 'clipboard', reg, db_path=db)
+    assert result['ok'] is True
+    assert result.get('skipped') is not True
+    rows = list_history(db_path=db)
+    assert len(rows) == 1
+    assert rows[0]['content'] == 'normal text'
+
+
+def test_process_change_no_password_hint_persists_normally(tmp_path):
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    result = clipd.process_change('ordinary clip text', 'clipboard', reg, db_path=db,
+                                   password_hint=False)
+    assert result['ok'] is True
+    assert result.get('skipped') is not True
+    rows = list_history(db_path=db)
+    assert len(rows) == 1
+    assert rows[0]['content'] == 'ordinary clip text'
+
+
+def test_process_change_skips_secret_shaped_content(tmp_path):
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    secret = 'ghp_' + 'aB3xQ9zT1kLmN7pR5sV8wY0cD2fH4jK6' * 1  # ghp_-prefixed token shape
+    result = clipd.process_change(secret, 'clipboard', reg, db_path=db)
+    assert result == {'ok': True, 'skipped': True, 'reason': 'secret_pattern'}
+    assert list_history(db_path=db) == []
 
 
 # ---------------------------------------------------------------------------
@@ -345,14 +393,15 @@ def test_wayland_backend_processes_clipboard_line(tmp_path):
     proc = _make_proc(['tgw202601011200000\n'])
     changes = []
 
-    def fake_process_change(content, selection, subscribers, db_path=None):
+    def fake_process_change(content, selection, subscribers, db_path=None, password_hint=False):
         changes.append((content, selection))
         stop.set()  # prevent restart loop
         return {'ok': True, 'is_sku': True, 'sku': content}
 
     with patch.object(backend, '_spawn', return_value=proc):
-        with patch.object(clipd, 'process_change', side_effect=fake_process_change):
-            backend._run_watcher('clipboard')
+        with patch.object(backend, '_has_password_hint', return_value=False):
+            with patch.object(clipd, 'process_change', side_effect=fake_process_change):
+                backend._run_watcher('clipboard')
 
     assert changes == [('tgw202601011200000', 'clipboard')]
 
@@ -433,6 +482,132 @@ def test_wayland_backend_handles_missing_executable(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# WaylandBackend._has_password_hint (todo #1565/PP-CLIP-001)
+# ---------------------------------------------------------------------------
+
+def test_wayland_has_password_hint_true_when_offered():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.WaylandBackend(reg)
+
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = 'text/plain\nx-kde-passwordManagerHint\n'
+
+    with patch('tgw.clipd.subprocess.run', return_value=result) as mock_run:
+        assert backend._has_password_hint('clipboard') is True
+
+    args = mock_run.call_args[0][0]
+    assert args == ['wl-paste', '--list-types']
+
+
+def test_wayland_has_password_hint_false_when_absent():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.WaylandBackend(reg)
+
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = 'text/plain\nUTF8_STRING\n'
+
+    with patch('tgw.clipd.subprocess.run', return_value=result):
+        assert backend._has_password_hint('clipboard') is False
+
+
+def test_wayland_has_password_hint_uses_primary_flag():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.WaylandBackend(reg)
+
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = 'x-kde-passwordManagerHint\n'
+
+    with patch('tgw.clipd.subprocess.run', return_value=result) as mock_run:
+        assert backend._has_password_hint('primary') is True
+
+    args = mock_run.call_args[0][0]
+    assert args == ['wl-paste', '--list-types', '--primary']
+
+
+def test_wayland_has_password_hint_false_on_missing_executable():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.WaylandBackend(reg)
+
+    with patch('tgw.clipd.subprocess.run', side_effect=FileNotFoundError('wl-paste')):
+        assert backend._has_password_hint('clipboard') is False
+
+
+def test_wayland_run_watcher_skips_persisting_password_hinted_content(tmp_path):
+    """End-to-end: a password-hinted copy reaches _run_watcher and is not
+    persisted, while a normal copy in the same stream still is."""
+    db = tmp_path / 'h.db'
+    reg = clipd._SubscriberRegistry()
+    stop = threading.Event()
+    backend = clipd.WaylandBackend(reg, db_path=db, stop_event=stop, restart_delay=0)
+
+    proc = _make_proc(['hunter2\n', 'normal text\n'])
+
+    hint_result = MagicMock()
+    hint_result.returncode = 0
+    hint_result.stdout = 'x-kde-passwordManagerHint\n'
+
+    call_count = [0]
+
+    def fake_run(args, **kw):
+        call_count[0] += 1
+        if call_count[0] == 2:  # after 'normal text' triggers stop
+            stop.set()
+        return hint_result if call_count[0] == 1 else MagicMock(returncode=0, stdout='')
+
+    with patch.object(backend, '_spawn', return_value=proc):
+        with patch('tgw.clipd.subprocess.run', side_effect=fake_run):
+            backend._run_watcher('clipboard')
+
+    rows = list_history(db_path=db)
+    assert len(rows) == 1
+    assert rows[0]['content'] == 'normal text'
+
+
+# ---------------------------------------------------------------------------
+# X11Backend._has_password_hint (todo #1565/PP-CLIP-001)
+# ---------------------------------------------------------------------------
+
+def test_x11_has_password_hint_true_when_offered():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.X11Backend(reg)
+
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = 'TARGETS\nx-kde-passwordManagerHint\nUTF8_STRING\n'
+
+    with patch('tgw.clipd.subprocess.run', return_value=result) as mock_run:
+        assert backend._has_password_hint('clipboard') is True
+
+    args = mock_run.call_args[0][0]
+    assert 'xclip' in args
+    assert 'TARGETS' in args
+    assert 'clipboard' in args
+
+
+def test_x11_has_password_hint_false_when_absent():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.X11Backend(reg)
+
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = 'TARGETS\nUTF8_STRING\n'
+
+    with patch('tgw.clipd.subprocess.run', return_value=result):
+        assert backend._has_password_hint('clipboard') is False
+
+
+def test_x11_has_password_hint_false_on_missing_executable():
+    reg = clipd._SubscriberRegistry()
+    backend = clipd.X11Backend(reg)
+
+    with patch('tgw.clipd.subprocess.run', side_effect=FileNotFoundError('xclip')):
+        assert backend._has_password_hint('clipboard') is False
+
+
+# ---------------------------------------------------------------------------
 # X11Backend._read_selection_content
 # ---------------------------------------------------------------------------
 
@@ -495,3 +670,106 @@ def test_x11_read_selection_returns_none_on_timeout():
 
     with patch('tgw.clipd.subprocess.run', side_effect=subprocess.TimeoutExpired(['xclip'], 2.0)):
         assert backend._read_selection_content('clipboard') is None
+
+
+# ---------------------------------------------------------------------------
+# launch_rofi_picker (todo #1292/#1293 — queried nonexistent 'clips' table
+# and double cursor.fetchone() call; regression coverage against the real
+# clip_history schema)
+#
+# todo #1563/PP-CLIP-001 clipboard-agent-delivery Phase 0 — selection is now
+# keyed by row id (fed as f"{id}\t{display_text}" into rofi, looked up by id
+# after selection), not by a truncated-content-prefix LIKE match. The old
+# prefix match silently returned the wrong/truncated content whenever two
+# rows shared a 120-char prefix — very likely the cause of Dave's recurring
+# paste-corruption symptom. These tests now select by id, matching the real
+# rofi contract.
+# ---------------------------------------------------------------------------
+
+def _fake_rofi_process(select_value):
+    """Build a fake Popen result that 'selects' select_value from rofi's stdin feed."""
+    proc = MagicMock()
+    proc.stdin = MagicMock()
+    proc.stdout = MagicMock()
+    proc.stdout.read.return_value = select_value + '\n'
+    proc.wait.return_value = 0
+    return proc
+
+
+def test_launch_rofi_picker_returns_full_content_not_truncated(tmp_path):
+    db_path = tmp_path / 'history.db'
+    long_content = 'A' * 500 + ' END-OF-CONTENT-MARKER'
+    record_clip('short one', db_path=db_path)
+    result_id = record_clip(long_content, db_path=db_path)['id']  # most recent -> first in ORDER BY id DESC
+
+    selection = f'{result_id}\t{long_content[:120]}'
+    with patch('tgw.clipd.subprocess.Popen', return_value=_fake_rofi_process(selection)):
+        result = clipd.launch_rofi_picker(db_path)
+
+    assert result == long_content
+
+
+def test_launch_rofi_picker_returns_none_on_unparseable_id(tmp_path):
+    db_path = tmp_path / 'history.db'
+    record_clip('something else entirely', db_path=db_path)
+
+    with patch('tgw.clipd.subprocess.Popen', return_value=_fake_rofi_process('NOT-AN-ID\tsome text')):
+        result = clipd.launch_rofi_picker(db_path)
+
+    assert result is None
+
+
+def test_launch_rofi_picker_queries_clip_history_table(tmp_path):
+    db_path = tmp_path / 'history.db'
+    result_id = record_clip('a clip', db_path=db_path)['id']
+
+    # No mocking of Popen internals needed beyond stdout/stdin — this just
+    # proves the SELECT against clip_history (not the nonexistent 'clips'
+    # table) succeeds instead of being swallowed by the except-and-return-None.
+    with patch('tgw.clipd.subprocess.Popen', return_value=_fake_rofi_process(f'{result_id}\ta clip')):
+        result = clipd.launch_rofi_picker(db_path)
+
+    assert result == 'a clip'
+
+
+def test_launch_rofi_picker_id_based_lookup_resolves_shared_prefix_collision(tmp_path):
+    """Regression test for the actual paste-corruption bug: two rows sharing
+    an identical 120+ char prefix must each resolve to THEIR OWN full content
+    when selected by id, never the other's (todo #1563)."""
+    db_path = tmp_path / 'history.db'
+    shared_prefix = 'X' * 150
+    content_a = shared_prefix + ' — variant A tail'
+    content_b = shared_prefix + ' — variant B tail'
+    id_a = record_clip(content_a, db_path=db_path)['id']
+    id_b = record_clip(content_b, db_path=db_path)['id']
+
+    with patch('tgw.clipd.subprocess.Popen',
+               return_value=_fake_rofi_process(f'{id_a}\t{shared_prefix[:120]}')):
+        result_a = clipd.launch_rofi_picker(db_path)
+    with patch('tgw.clipd.subprocess.Popen',
+               return_value=_fake_rofi_process(f'{id_b}\t{shared_prefix[:120]}')):
+        result_b = clipd.launch_rofi_picker(db_path)
+
+    assert result_a == content_a
+    assert result_b == content_b
+    assert result_a != result_b
+
+
+def test_launch_rofi_picker_agent_rows_tagged_and_labeled(tmp_path):
+    db_path = tmp_path / 'history.db'
+    delivered_id = deliver_clip('the actual ticket text', label='eBay support ticket', db_path=db_path)['id']
+
+    captured = {}
+
+    def _capture_popen(*args, **kwargs):
+        proc = _fake_rofi_process(f'{delivered_id}\tignored')
+        captured['stdin_write'] = proc.stdin.write
+        return proc
+
+    with patch('tgw.clipd.subprocess.Popen') as mock_popen:
+        mock_popen.return_value = _fake_rofi_process(f'{delivered_id}\tignored')
+        clipd.launch_rofi_picker(db_path)
+        fed_text = mock_popen.return_value.stdin.write.call_args[0][0]
+
+    assert '[AGENT]' in fed_text
+    assert 'eBay support ticket' in fed_text

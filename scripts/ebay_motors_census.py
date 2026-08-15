@@ -39,12 +39,13 @@ import json
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Dict, List, Set
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from tgw import items  # noqa: E402
 from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
+from tgw.logging import announce_script_run, setup_logging  # noqa: E402
 
 
 def _iter_offer_records(capture_root: Path):
@@ -90,6 +91,19 @@ def main() -> int:
                        help='Census markdown output path (default: '
                             'reference/ebay-marketplace-census-2026-07-04.md)')
     args = parser.parse_args()
+
+    # No prior logging configuration in this script (verified live, todo
+    # #1369) — without it, announce_script_run()'s event is silently
+    # dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.ebay_motors_census')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'ebay_motors_census.py',
+        'Motors marketplace census from R1.8 raw capture; optionally patches marketplace_id via the fence',
+        apply=args.apply, capture_root=args.capture_root, out=args.out,
+    )
 
     repo_root = Path(__file__).resolve().parents[1]
     out_path = Path(args.out) if args.out else (

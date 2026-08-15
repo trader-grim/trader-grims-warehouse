@@ -153,6 +153,59 @@ def test_condition_filter_falls_back_below_min_comps(cfg, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _llm_filter_comps — routed through the config-only model facility
+# (2026-07-14, Dave: was a hardcoded openai/gpt-4o-mini raw OpenRouter call,
+# bypassing tgw-models.json entirely; now pricing_comp_filter/deepseek-v4-flash)
+# ---------------------------------------------------------------------------
+
+def test_llm_filter_comps_uses_configured_task_not_hardcoded_model(monkeypatch, cfg):
+    calls = []
+
+    def fake_call_model(task, system_prompt, user_prompt, cfg_arg):
+        calls.append(task)
+        return json.dumps({'confidence': 'high', 'comps': [
+            {'i': 0, 'keep': True, 'reason': 'match'},
+            {'i': 1, 'keep': False, 'reason': 'different product'},
+            {'i': 2, 'keep': True, 'reason': 'match'},
+        ]})
+
+    monkeypatch.setattr(pricing, 'call_model', fake_call_model)
+    summaries = _summaries([10.0, 999.0, 12.0])
+
+    kept_prices, confidence = pricing._llm_filter_comps(cfg, 'Acme Widget', summaries, None)
+
+    assert calls == ['pricing_comp_filter']  # routed via tgw-models.json, not a literal model id
+    assert confidence == 'high'
+    assert 999.0 not in kept_prices
+    assert summaries[1]['_llm_dropped'] is True
+    assert summaries[0]['_llm_dropped'] is False
+
+
+def test_llm_filter_comps_falls_back_on_call_model_error(monkeypatch, cfg):
+    def fake_call_model(task, system_prompt, user_prompt, cfg_arg):
+        raise RuntimeError('no models[pricing_comp_filter] entry in tgw-models.json')
+
+    monkeypatch.setattr(pricing, 'call_model', fake_call_model)
+    summaries = _summaries([10.0, 11.0, 12.0])
+
+    kept_prices, confidence = pricing._llm_filter_comps(cfg, 'Acme Widget', summaries, None)
+
+    assert confidence == 'medium'
+    assert sorted(kept_prices) == [10.0, 11.0, 12.0]  # unfiltered fallback
+    assert all(s['_llm_dropped'] is False for s in summaries)
+
+
+def test_llm_filter_comps_falls_back_on_malformed_json(monkeypatch, cfg):
+    monkeypatch.setattr(pricing, 'call_model', lambda *a, **k: 'not valid json at all')
+    summaries = _summaries([10.0, 11.0, 12.0])
+
+    kept_prices, confidence = pricing._llm_filter_comps(cfg, 'Acme Widget', summaries, None)
+
+    assert confidence == 'medium'
+    assert sorted(kept_prices) == [10.0, 11.0, 12.0]
+
+
+# ---------------------------------------------------------------------------
 # Worker level — B3 provenance, B4 launch >= target, B5 stage gating
 # ---------------------------------------------------------------------------
 
@@ -223,13 +276,13 @@ def test_unpriced_item_never_enqueues_stage(price_worker, tmp_path, monkeypatch)
     assert all(kw['queue_name'] != 'ebay_stage' for kw in price_worker._enqueued)
 
 
-def test_priced_item_enqueues_stage(price_worker, tmp_path, monkeypatch):
+def test_priced_item_does_not_hardcode_stage_successor(price_worker, tmp_path, monkeypatch):
     comps = {'count': 3, 'min': 10.0, 'p25': 10.0, 'median': 12.0,
              'p75': 14.0, 'max': 15.0}
     monkeypatch.setattr(ebay_price, 'suggest_price',
                         lambda *a, **k: _suggestion(10.0, comps))
     _run(price_worker, tmp_path, 'tgw3')
-    assert any(kw['queue_name'] == 'ebay_stage' for kw in price_worker._enqueued)
+    assert all(kw['queue_name'] != 'ebay_stage' for kw in price_worker._enqueued)
 
 
 def test_launch_price_at_least_target_price(price_worker, tmp_path, monkeypatch):
@@ -284,6 +337,11 @@ def test_chain_enqueued_price_skips_when_operator_set_last(price_worker, tmp_pat
     assert result['ebay_offer']['price_guard_skipped']['reason'] == 'operator_price_history'
     assert result['ebay_offer']['price_guard_skipped']['operator_price'] == 42.0
     assert all(kw['queue_name'] != 'ebay_stage' for kw in price_worker._enqueued)
+    # PP-CATALOG-INCR-001 CI-4 (2026-07-18): catalog_rebuild's enqueue is now
+    # a no-op — the price_guard_skipped write's SQLite catalog row is kept
+    # live by CI-2's synchronous fence-write upsert instead (invariant A7's
+    # "real mutation" concern is satisfied by that, not a queue job).
+    assert all(kw['queue_name'] != 'catalog_rebuild' for kw in price_worker._enqueued)
 
 
 def test_operator_origin_reprice_overrides_operator_history(price_worker, tmp_path, monkeypatch):

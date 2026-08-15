@@ -1,0 +1,125 @@
+#!/bin/sh
+set -eu
+
+MODE=${1:-prepare}
+REPOSITORY=/opt/TGW/tgw-lib/src/trader-grims-warehouse
+REMOTE=git@github-tgw-app:trader-grim/trader-grims-warehouse.git
+KEY_DIRECTORY=/etc/tgw/credentials/github/trader-grims-warehouse
+PRIVATE_KEY=$KEY_DIRECTORY/id_ed25519
+PUBLIC_KEY=$KEY_DIRECTORY/id_ed25519.pub
+SSH_PUBLIC_KEY=/etc/ssh/tgw_github_app.pub
+AGENT_SOCKET=/run/tgw-github-agent/agent.sock
+SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SOURCE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIRECTORY/.." && pwd)
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "install-tgw-source-access must run as root" >&2
+    exit 77
+fi
+
+if ! getent group tgw-coders >/dev/null; then
+    echo "required group tgw-coders is absent" >&2
+    exit 69
+fi
+
+if [ ! -d /opt/TGW/tgw-lib ]; then
+    echo "canonical TGW library root is absent" >&2
+    exit 69
+fi
+setfacl -m g:tgw-coders:--x /opt/TGW/tgw-lib
+
+case "$MODE" in
+    prepare|activate) ;;
+    *)
+        echo "usage: install-tgw-source-access [prepare|activate]" >&2
+        exit 64
+        ;;
+esac
+
+if ! getent passwd tgw-git >/dev/null; then
+    useradd --system --user-group --home-dir /nonexistent --no-create-home \
+        --shell /usr/sbin/nologin tgw-git
+fi
+usermod -a -G tgw-coders tgw-git
+
+install -d -o root -g root -m 0755 /etc/tgw/credentials
+install -d -o root -g root -m 0755 /etc/tgw/credentials/github
+install -d -o root -g tgw-git -m 0750 "$KEY_DIRECTORY"
+install -o root -g root -m 0644 \
+    "$SOURCE_ROOT/config/environment/ssh/github-known-hosts" \
+    /etc/ssh/tgw_github_known_hosts
+install -o root -g root -m 0644 \
+    "$SOURCE_ROOT/config/environment/ssh/github-tgw-app.conf" \
+    /etc/ssh/ssh_config.d/10-tgw-github-app.conf
+install -d -o root -g root -m 0755 /usr/local/libexec
+install -o root -g root -m 0755 \
+    "$SOURCE_ROOT/scripts/tgw-github-agent-load" \
+    /usr/local/libexec/tgw-github-agent-load
+install -o root -g root -m 0755 \
+    "$SOURCE_ROOT/scripts/tgw-source-git" \
+    /usr/local/bin/tgw-source-git
+install -o root -g root -m 0440 \
+    "$SOURCE_ROOT/config/environment/sudoers/tgw-source-git" \
+    /etc/sudoers.d/tgw-source-git
+visudo -cf /etc/sudoers.d/tgw-source-git
+
+if [ ! -e "$PRIVATE_KEY" ] && [ ! -e "$PUBLIC_KEY" ]; then
+    umask 077
+    ssh-keygen -q -t ed25519 -N "" \
+        -C "tgw-coders@tgw-lib trader-grims-warehouse" \
+        -f "$PRIVATE_KEY"
+elif [ ! -f "$PRIVATE_KEY" ] || [ ! -f "$PUBLIC_KEY" ]; then
+    echo "incomplete TGW GitHub credential pair; refusing replacement" >&2
+    exit 65
+fi
+
+chown tgw-git:tgw-git "$PRIVATE_KEY"
+chmod 0600 "$PRIVATE_KEY"
+chown root:root "$PUBLIC_KEY"
+chmod 0644 "$PUBLIC_KEY"
+
+derived_public=$(ssh-keygen -y -f "$PRIVATE_KEY" | awk '{print $1 " " $2}')
+stored_public=$(awk '{print $1 " " $2}' "$PUBLIC_KEY")
+if [ "$derived_public" != "$stored_public" ]; then
+    echo "TGW GitHub public/private key mismatch" >&2
+    exit 65
+fi
+
+install -o root -g root -m 0644 "$PUBLIC_KEY" "$SSH_PUBLIC_KEY"
+
+ssh-keygen -lf "$PUBLIC_KEY"
+
+install -o root -g root -m 0644 \
+    "$SOURCE_ROOT/config/environment/systemd/tgw-github-agent.service" \
+    /etc/systemd/system/tgw-github-agent.service
+systemctl daemon-reload
+systemctl enable tgw-github-agent.service
+systemctl restart tgw-github-agent.service
+
+if [ ! -S "$AGENT_SOCKET" ]; then
+    echo "TGW GitHub agent socket is absent" >&2
+    exit 70
+fi
+agent_fingerprint=$(runuser -u tgw-git -- \
+    env SSH_AUTH_SOCK="$AGENT_SOCKET" ssh-add -l)
+public_fingerprint=$(ssh-keygen -lf "$PUBLIC_KEY" | awk '{print $2}')
+case "$agent_fingerprint" in
+    *"$public_fingerprint"*) ;;
+    *)
+        echo "TGW GitHub agent did not load the admitted key" >&2
+        exit 70
+        ;;
+esac
+
+if [ "$MODE" = prepare ]; then
+    echo "prepared_public_key=$SSH_PUBLIC_KEY"
+    echo "next=register this key as a write-enabled deploy key on trader-grims-warehouse, then run activate"
+    exit 0
+fi
+
+runuser -u tgw-git -- /usr/local/bin/tgw-source-git status >/dev/null
+runuser -u tgw-git -- /usr/local/bin/tgw-source-git dry-run
+
+git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" remote set-url origin "$REMOTE"
+
+echo "activated_remote=$REMOTE"

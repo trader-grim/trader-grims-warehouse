@@ -17,7 +17,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -34,7 +34,10 @@ from .catalog import (
 )
 from .config import DEFAULT_CONFIG, load_config
 from .context import clear_context, get_context, set_context
+from .ebay.draft_specifics import get_ebay_aspects as _get_ebay_aspects
+from .ebay.inventory_diff import diff_ebay_draft_to_inventory as _diff_ebay_to_inventory
 from .health import check_all
+from .inventory_record import get_inventory_fields as _get_inventory_fields
 from .items import (
     catlocmvall,
     get_item,
@@ -459,6 +462,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "update", "update-where", "update-title", "update-location", "update-verified",
         "update-status", "set-shipping", "bulk", "price-freeship", "hint",
         "data-scrub", "revise", "alt-text",
+        "inventory-sweep", "inventory-record",
     ]),
     ("Context / Intake", [
         "set-context", "get-context", "clear-context", "set-template", "create-item",
@@ -468,7 +472,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "alt-text-batch",
     ]),
     ("eBay", [
-        "ebay-pull", "ebay-sweep", "import-sold-csv", "sku-migrate",
+        "ebay-pull", "ebay-sweep", "import-sold-csv",
+        "reconcile-sold-orders", "sku-migrate",
         "migrate-review", "migrate-unblock", "migrate-restore",
         "review",
         "setup-ebay-hooks", "build-archive-index", "history-index",
@@ -489,6 +494,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "admin-file", "classify-suggestions", "picklist", "print-label", "mvitems",
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
         "claude-help", "clip", "suggest-edit", "promo", "nix-bundle-usb",
+        "mailbox", "trace", "flake",
+        "coding",
     ]),
 ]
 
@@ -536,13 +543,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--skus-only", action="store_true", dest="skus_only", help="output one SKU per line (pipe-friendly)")
 
-    p = sub.add_parser("search", help="search items by text (shorthand for list --search TEXT)")
+    p = sub.add_parser("search", help="search items by text (shorthand for list --search TEXT); --full-text hits the recoll index instead (PP-KNOWLEDGE-001 R2)")
     p.add_argument("text", nargs="?", default="", help="search text")
     p.add_argument("--location", default="")
     p.add_argument("--status", default="")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--skus-only", action="store_true", dest="skus_only")
     p.add_argument("--empty", default=None, dest="empty_field", metavar="FIELD", help="return only items where FIELD is missing/null/empty-string")
+    p.add_argument("--full-text", default=None, dest="full_text", metavar="QUERY", help="run a recoll (recollq) full-text query over the whole knowledge index instead of the item DB")
 
     p = sub.add_parser("resolve", help="resolve identifiers to a set of SKUs")
     p.add_argument("--sku", default=None)
@@ -638,13 +646,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--launch", action="store_true", help="exec claude now (default: print the command)")
 
     p = sub.add_parser("clip", help="TGW clipboard history store/query (PP-CLIP-001)")
-    p.add_argument("clip_action", choices=["list", "last-sku", "search", "wipe", "get"])
-    p.add_argument("pattern", nargs="?", default="", help="search pattern (for search)")
+    p.add_argument("clip_action", choices=["list", "last-sku", "search", "wipe", "get", "deliver"])
+    p.add_argument("pattern", nargs="?", default="",
+                   help="search pattern (for search) / content to deliver (for deliver)")
     p.add_argument("--limit", type=int, default=20, help="max rows (list/search)")
     p.add_argument("--sku-only", action="store_true", help="list: SKU clips only")
     p.add_argument("--id", type=int, default=None, metavar="ID",
                    help="get: clip entry ID to retrieve (prints full content)")
     p.add_argument("--copy", action="store_true", help="get: also copy content back to clipboard")
+    p.add_argument("--label", default=None, help="deliver: optional short human-readable description")
+    p.add_argument("--requested-by", default="claude", dest="requested_by",
+                   help="deliver: who requested the delivery (claude|tigwa); not yet persisted to schema")
 
     p = sub.add_parser("catlocmvall", help="(deprecated) move all items from one location to another — use mvitems")
     p.add_argument("from_location")
@@ -761,6 +773,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=0, help="max items per group (0 = unlimited)")
     p.add_argument("--output", default=None, help="write markdown checklist to this file instead of stdout")
 
+    p = sub.add_parser("inventory-sweep", help="generate manifest-vs-physical checklist for one storage location (PP-INVENTORY-001 manual leg)")
+    p.add_argument("location", help="storage location code, e.g. FF0792")
+    p.add_argument("--output", default=None, help="write markdown checklist to this file instead of stdout")
+
+    p = sub.add_parser("inventory-record", help="record one operator reconciliation result during a physical inventory sweep (PP-INVENTORY-001 manual leg)")
+    p.add_argument("sku", help="SKU being reconciled")
+    p.add_argument("result", choices=["present", "missing", "misfiled"], help="physical reconciliation result")
+    p.add_argument("--location", default=None, help="the location being swept (recorded on the finding for provenance)")
+    p.add_argument("--to-location", default=None, help="corrected location (required for result=misfiled)")
+    p.add_argument("--note", default=None, help="free-text note")
+
     p = sub.add_parser("bulk", help="bulk-edit one field across matched items (PP-BULKEDIT-001); dry-run unless --apply")
     p.add_argument("--field", required=True, choices=["title", "location", "status", "ai_hint", "shipping_profile"], help="which field to set on every matched item")
     p.add_argument("--value", required=True, help="new value for the field")
@@ -807,6 +830,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fuzzy", action="store_true", help="second pass: match unresolved rows by title similarity")
     p.add_argument("--fuzzy-threshold", type=float, default=0.80, metavar="N", help="Jaccard similarity threshold for title match (default 0.80)")
 
+    p = sub.add_parser(
+        "reconcile-sold-orders",
+        help=("reconcile the complete visible GetOrders window against current "
+              "provider-active inventory; local writes only"),
+    )
+    p.add_argument(
+        "--apply", action="store_true",
+        help="apply safe local ItemData repairs (default: read-only preview)",
+    )
+    p.add_argument(
+        "--csv", action="append", default=[], metavar="FILE",
+        help=("also reconcile a Seller Hub all-orders CSV; repeat for multiple "
+              "exports (API overlap is deduplicated by order ID)"),
+    )
+
     p = sub.add_parser("ebay-pull", help="on-demand eBay data pull: full Inventory API mirror + Trading API sync → ItemData")
     p.add_argument("--no-inventory", action="store_true", help="skip Inventory API full mirror (title/aspects/images/description/price)")
     p.add_argument("--no-active", action="store_true", help="skip Trading API active listing sync (legacy/non-inventory items)")
@@ -830,6 +868,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("migrate-restore", help="restore item JSON from pre-migration archive snapshot")
     p.add_argument("old_sku", help="original (old-format) SKU — used to locate the archive file")
     p.add_argument("--dry-run", action="store_true", help="show what would be restored without writing")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite an existing live item JSON at the restore destination "
+                        "(default: refuse if destination already exists)")
 
     p = sub.add_parser("sku-migrate", help="SKU normalization (PP-ADD-005)")
     p.add_argument("--check-collisions", action="store_true", help="run collision check only — no changes")
@@ -972,8 +1013,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="generate alt_text + seo_caption via vision model; rename primary image to <sku>-alt.jpg and archive original to history",
     )
     p.add_argument("sku", nargs="?", default=None, help="SKU to process (omit with --batch)")
-    p.add_argument("--model", default=None, help="vision model ID (default: google/gemini-2.5-flash)")
-    p.add_argument("--provider", default=None, choices=["openrouter", "ollama"], help="provider (default: openrouter)")
+    p.add_argument("--model", default=None, help="vision model ID (default: from tgw-models.json's 'alt_text' task config)")
+    p.add_argument(
+        "--provider", default=None,
+        choices=["openrouter", "ollama", "google_direct", "deepseek_direct", "anthropic_direct"],
+        help="provider (default: from tgw-models.json's 'alt_text' task config)",
+    )
     p.add_argument("--dry-run", action="store_true", help="show what would happen without calling the model or writing files")
     p.add_argument("--batch", action="store_true", help="run all eligible items directly with rate-limiting (OpenRouter free ~20 req/min)")
     p.add_argument("--limit", type=int, default=0, metavar="N", help="max items to process in --batch mode (0 = all eligible)")
@@ -992,7 +1037,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("todo", help="multi-agent TODO tracker (PP-TODO-001 / PP-PLANDB-001)")
     p.add_argument("agent", nargs="?", default=None,
-                   help="filter by agent: claude, admin, gemini, db (omit for all); "
+                   help="filter by agent: claude, admin, gemini, db, tigwa (omit for all); "
                         "or 'brief' to generate a task spec; combine with --next for top task")
     p.add_argument("brief_id", nargs="?", default=None, help="todo id for 'tgw todo brief <id>'")
     p.add_argument("--add", metavar="TEXT", help="add a new TODO item")
@@ -1000,21 +1045,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--priority", type=int, default=50, metavar="N", help="priority for --add (lower = higher priority; default 50)")
     p.add_argument("--source", default="session", metavar="SRC", help="source label for --add (default: session)")
     p.add_argument("--all", dest="show_all", action="store_true", help="show completed items too")
+    p.add_argument("--by-pp", dest="by_pp", action="store_true", help="group the listing by pp_ref instead of agent")
     p.add_argument("--seed", action="store_true", help="seed Work Tracks items from master plan into the tracker")
     p.add_argument("--update", nargs="+", metavar=("ID", "TEXT"), help="update body text of an item: --update ID new text here")
+    p.add_argument("--note", nargs="+", metavar=("ID", "TEXT"), help="set a status/progress note without touching body text: --note ID new note here")
     p.add_argument("--delegate", nargs=2, metavar=("ID", "AGENT"), help="reassign item to a different agent: --delegate ID agent")
     p.add_argument("--set-priority", nargs=2, metavar=("ID", "N"), dest="set_priority", help="change item priority: --set-priority ID N")
     p.add_argument("--pp", default=None, metavar="PP-REF", help="PP-* plan item for --add / --set-meta (e.g. PP-PLANDB-001)")
     p.add_argument("--depends", default=None, metavar="IDS", help="comma-separated todo ids this item depends on (for --add / --set-meta)")
     p.add_argument("--anchor", default=None, metavar="HEADING", help="master-plan heading text the item links to (for --add / --set-meta)")
     p.add_argument("--set-meta", type=int, default=None, metavar="ID", dest="set_meta", help="set --pp/--depends/--anchor on an existing item")
+    p.add_argument("--status-note", default=None, metavar="TEXT", help="progress metadata for --set-meta (for example an in-progress worktree)")
     p.add_argument("--clip", action="store_true", help="copy brief output to clipboard (brief mode only)")
     p.add_argument("--next", action="store_true", dest="next_task",
                    help="shorthand: top open task for AGENT, print brief + copy to clipboard; "
                         "replaces 'brief --next --agent AGENT --clip'")
     p.add_argument("--nextloop", action="store_true", dest="nextloop",
                    help="loop --next continuously until tasks are exhausted or user quits (y=done/s=skip/q=quit)")
-    p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next / --nextloop (e.g. claude, gemini, admin)")
+    p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next / --nextloop (e.g. claude, gemini, admin, tigwa)")
+
+    p = sub.add_parser("coding", help="create and inspect receipt-addressed coding provision requests")
+    p.add_argument("coding_op", choices=["start", "status", "log", "stop", "access-status"])
+    p.add_argument("request_id", nargs="?")
+    p.add_argument("--todo-id", type=int)
+    p.add_argument("--object-generation")
+    p.add_argument("--source-commit", help="exact lowercase 40-hex commit in the registered repository")
+    p.add_argument("--endpoint", help="explicit endpoint override")
+    p.add_argument("--api-key", help="explicit credential override")
 
     p = sub.add_parser("plan", help="plan/taskboard operations (PP-PLANDB-001)")
     p.add_argument(
@@ -1046,8 +1103,62 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("suggest-edit", help="open SUGGESTIONS.md in $EDITOR for review before PM-intake")
     p.add_argument("--pending-only", action="store_true", help="extract only unprocessed ([ ]) entries to a temp file for editing")
 
+    p = sub.add_parser("mailbox", help="mailbox: send a message to another actor's Plan Vault inbox (PP-RUNNERCOMMS-001)")
+    mbox_sub = p.add_subparsers(dest="mailbox_op", required=True, metavar="MAILBOX-OP")
+    mp = mbox_sub.add_parser("send", help="write a message file into <actor>'s inbox")
+    mp.add_argument("to_actor", help="target actor, e.g. claude, tigwa, dave")
+    mp.add_argument("text", help="message body")
+    mp.add_argument("--from", dest="from_actor", default="claude", metavar="ACTOR", help="sending actor (default: claude)")
+    mp.add_argument("--type", dest="msg_type", default="NOTE", metavar="TYPE", help="message type, e.g. NOTE, REQUEST, RESPONSE, REVIEW (default: NOTE)")
+    mp.add_argument("--subject", default=None, metavar="TEXT", help="short subject/title; also used to derive the filename slug (default: derived from message text)")
+    mp.add_argument("--todo", type=int, default=None, dest="todo_id", metavar="ID", help="related todo id, recorded in the message header")
+
+    p = sub.add_parser("trace", help="agent run trace logging: start/end a tracked run (PP-AGENTTRACE-001)")
+    trace_sub = p.add_subparsers(dest="trace_op", required=True, metavar="TRACE-OP")
+    tp = trace_sub.add_parser("start", help="record the start of an agent run; prints the new run_id to stdout")
+    tp.add_argument("--agent-type", required=True, dest="agent_type", metavar="TYPE",
+                     help="e.g. claude-main, claude-subagent, tgw-coder, nix-flake-maintainer, aider")
+    tp.add_argument("--parent-run-id", default=None, dest="parent_run_id", metavar="ID", help="run_id of the parent run, for nested dispatches")
+    tp.add_argument("--todo", type=int, default=None, dest="todo_id", metavar="ID", help="todo id this run is working")
+    tp.add_argument("--pp", default=None, dest="pp_ref", metavar="PP-REF", help="PP-* plan item this run is working")
+    tp.add_argument("--host", default=None, metavar="HOST", help="host name (default: auto-detected via socket.gethostname())")
+    tp.add_argument("--git-branch", default=None, dest="git_branch", metavar="BRANCH", help="git branch (default: auto-detected via git rev-parse in cwd, best-effort)")
+
+    tp = trace_sub.add_parser("end", help="record the end of an agent run")
+    tp.add_argument("run_id", help="run_id returned by 'tgw trace start'")
+    tp.add_argument("--status", required=True, choices=["completed", "failed", "killed", "escalated"], help="final run status")
+    tp.add_argument("--summary", default=None, help="one-line summary of the run")
+    tp.add_argument("--transcript", default=None, dest="transcript_path", help="path to the archived transcript (see archive_transcript())")
+
+    p = sub.add_parser("flake", help="flake-mutation push/switch request gate (PP-FLAKEGATE-001) — agents request, only a human's mark-executed closes the loop")
+    flake_sub = p.add_subparsers(dest="flake_op", required=True, metavar="FLAKE-OP")
+
+    fp = flake_sub.add_parser("request-push", help="enqueue a request for a human to git push a flake commit; never touches git itself")
+    fp.add_argument("--repo", required=True, help="local flake checkout path, e.g. ~/tgw-flake")
+    fp.add_argument("--host", required=True, help="host the checkout lives on, e.g. tgw-prod / a1131")
+    fp.add_argument("--commit", required=True, help="commit sha to be pushed")
+    fp.add_argument("--summary", required=True, help="one-line description of the change")
+
+    fp = flake_sub.add_parser("request-switch", help="enqueue a request for a human to nixos-rebuild switch; never touches nixos-rebuild itself")
+    fp.add_argument("--host", required=True, help="host to switch, e.g. tgw-prod / a1131")
+    fp.add_argument("--commit", required=True, help="commit sha being activated")
+    fp.add_argument("--summary", required=True, help="one-line description of the change")
+
+    flake_sub.add_parser("queue", help="list flake_mutation jobs still queued (pending a human decision)")
+
+    fp = flake_sub.add_parser("show", help="full detail of one flake_mutation job")
+    fp.add_argument("job_id", help="job_id (UUID) from 'tgw flake queue'/'request-push'/'request-switch'")
+
+    fp = flake_sub.add_parser("mark-executed", help="record that a human ran the real push/switch by hand — the ONLY command that closes a flake_mutation job; never executes anything")
+    fp.add_argument("job_id", help="job_id (UUID) to mark executed")
+    fp.add_argument("--by", default=None, dest="executed_by", help="name of the human who ran it (recorded in queue_job_history)")
+
+    fp = flake_sub.add_parser("audit", help="detective backstop: flag origin/master commits with no matching executed flake_mutation push record")
+    fp.add_argument("--repo", default="~/tgw-flake", help="flake checkout path to audit (default: %(default)s)")
+
     p = sub.add_parser("admin-file", help="scan inbox and enqueue eligible notes for PM-intake (PP-DOCFLOW-001)")
     p.add_argument("--now", action="store_true", help="bypass submission-delay gate (process all files regardless of age)")
+    p.add_argument("--dry-run", action="store_true", help="report a manifest of eligible/ineligible candidates without moving or enqueuing anything")
 
     p = sub.add_parser("classify-suggestions", help="batch-classify unprocessed SUGGESTIONS.md entries via LLM (PP-DOCFLOW-001 Phase 2)")
     p.add_argument("--apply", action="store_true", help="mark already-done entries [x] and create todos for new-work entries")
@@ -1069,7 +1180,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="FIELD=VALUE",
         dest="assignments",
         default=[],
-        help="field=value pair to add to the delta (repeat for multiple fields; supports dotted paths like draft_listing.price)",
+        help="field=value pair to add to the delta (repeat for multiple fields; bare field names only, e.g. price=19.99 — see revision._SUPPORTED_FIELDS)",
     )
     p.add_argument("--show", action="store_true", help="print human-readable diff to stdout before JSON result")
     p.add_argument("--by", default="claude", metavar="AGENT", help="who is creating this revision draft (default: claude)")
@@ -1079,8 +1190,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("offers", help="list and respond to incoming Best Offers (PP-OFFER-001)")
     p.add_argument(
         "offer_op",
-        choices=["list", "respond"],
-        help="list: show incoming offers; respond: accept/decline/counter an offer",
+        choices=["list", "respond", "repair"],
+        help="list: show incoming offers; respond: accept/decline/counter an offer; "
+             "repair: retry local SKU resolution for the unresolved-offer registry (C11, #1373)",
     )
     p.add_argument("offer_id", nargs="?", default=None, metavar="OFFER_ID", help="Best Offer ID (required for respond)")
     p.add_argument("--listing-id", default=None, metavar="LISTING_ID", help="eBay listing/item ID (required for respond)")
@@ -1151,6 +1263,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fix", action="store_true", help="report auto-applicable fixes (e.g. strip stale TEMPLATE: title prefix); dry-run unless --write is given")
     p.add_argument("--write", action="store_true", help="with --fix: actually apply the fixes (default: dry-run only)")
     p.add_argument("--scan-events-hours", type=int, default=24, metavar="N", help="window for the success_count_contradiction log-scan rule (PP-PHOTOSYNC-001 P7); 0 disables it")
+    p.add_argument("--check-photos", action="store_true", help="decode every item photo and flag unreadable/corrupt files (photo_files_readable rule, #1154); cached by (size,mtime), off by default")
 
     p = sub.add_parser(
         "nix-bundle-usb",
@@ -1245,8 +1358,80 @@ def _load_live_photo_index(cfg: Dict[str, Any]) -> "tuple[Optional[Dict[str, int
     return index, age_hours
 
 
+_PHOTO_DECODE_CACHE_FLUSH_EVERY = 500  # items scanned between periodic cache flushes
+
+
+def _photo_decode_cache_path(cfg: Dict[str, Any]) -> Optional[Path]:
+    catalog_root = cfg.get("catalog_root")
+    return Path(catalog_root) / "photo-decode-cache.json" if catalog_root else None
+
+
+def _load_photo_decode_cache(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Load the (size,mtime)->decode-result sidecar cache (photo-integrity
+    mitigation plan leg 3, todo #1154). Missing/corrupt cache -> empty dict,
+    same fail-open-to-full-rescan behavior as the other disk caches in this
+    codebase (e.g. condition policies, aspects)."""
+    cache_path = _photo_decode_cache_path(cfg)
+    if not cache_path or not cache_path.exists():
+        return {}
+    try:
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_photo_decode_cache(cfg: Dict[str, Any], cache: Dict[str, Any]) -> None:
+    """Merge *cache* onto whatever's on disk under an exclusive flock
+    (code-review follow-up: a plain write_text was both non-atomic — a
+    crash mid-write could corrupt the whole cache, same failure class
+    audit#1143 #1239 already fixed for the other eBay disk caches — and a
+    lost-update risk against any concurrent writer). Uses the same shared
+    helper those caches use rather than a fourth hand-rolled read/write."""
+    cache_path = _photo_decode_cache_path(cfg)
+    if not cache_path:
+        return
+    try:
+        from tgw.apis.ebay._cache_io import locked_merge_cache_json
+        locked_merge_cache_json(cache_path, lambda current: {**current, **cache})
+    except OSError as exc:
+        log.warning("catalog-verify: could not write photo-decode-cache: %s", exc)
+
+
+def _check_photo_readable(photo_path: Path, cache: Dict[str, Any]) -> Optional[str]:
+    """Return an error string if *photo_path* fails to decode, else None.
+
+    Cheap incremental (photo-integrity mitigation leg 1, todo #1154): a file
+    whose (size, mtime) matches the cached entry is trusted without
+    re-decoding — only files that changed since the last pass (or were
+    never checked) pay the PIL decode cost. Cache key is the path string so
+    a rename/move is treated as a fresh file, never silently inherits a
+    stale verdict.
+    """
+    try:
+        st = photo_path.stat()
+    except OSError as exc:
+        return f"stat failed: {exc}"
+    key = str(photo_path)
+    fingerprint = [st.st_size, st.st_mtime]
+    cached = cache.get(key)
+    if cached and cached.get("fingerprint") == fingerprint:
+        return cached.get("error")
+
+    error: Optional[str] = None
+    try:
+        from PIL import Image
+        with Image.open(photo_path) as im:
+            im.load()
+    except Exception as exc:
+        error = str(exc)
+
+    cache[key] = {"fingerprint": fingerprint, "error": error}
+    return error
+
+
 def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any],
-                  live_photo_index: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:
+                  live_photo_index: Optional[Dict[str, int]] = None,
+                  photo_decode_cache: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Return list of violation dicts for one item (PP-VERIFY-001)."""
     import re
 
@@ -1277,6 +1462,19 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any],
     if not photos:
         v("no_photo", "warning", "No photo files in item folder")
 
+    # photo-integrity mitigation leg 1 (todo #1154): a truncated/corrupt
+    # photo sat silent for 3.5 years (Feb-2022 bulk-migration copy bug)
+    # because nothing decodes photos until a worker needs them. Opt-in via
+    # photo_decode_cache (None = skip, matches every pre-existing caller/
+    # test) so this only runs where a caller has explicitly wired a cache —
+    # real catalog-verify runs always pass one; ad-hoc/test calls don't pay
+    # the PIL decode cost unless they ask for it.
+    if photo_decode_cache is not None:
+        for photo in photos:
+            error = _check_photo_readable(photo, photo_decode_cache)
+            if error:
+                v("photo_files_readable", "critical", f"{photo.name}: {error}")
+
     cat_id = doc.get("ebay_category_id")
     if cat_id is not None and str(cat_id).strip():
         try:
@@ -1302,6 +1500,64 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any],
             "ebay_rejected" if pipeline_error.get("error") else "unknown")
         _pe_detail = pipeline_error.get("detail") or pipeline_error.get("error") or str(pipeline_error)
         v(f"pipeline_error:{_pe_code}", "warning", str(_pe_detail)[:300])
+
+    # invariant C12 (todo #1416): Set A (item_attributes) and Set B
+    # (draft_listing.item_specifics) drifting apart on an overlapping key
+    # is a DATA-level symptom of the exact boundary bug C12 exists to
+    # prevent at the CODE level (see invariants.md C12's static detector,
+    # tests/test_invariant_c12_field_set_accessors.py, for the "regularly
+    # check and repair" half's complement). Only flagged when the item has
+    # a live ebay_offer.offer_id — a drift only matters here because it's
+    # live (a never-published draft's Set A/Set B disagreeing is normal
+    # pre-publish churn, not a finding).
+    if (doc.get("ebay_offer") or {}).get("offer_id"):
+        _c12_ia = _get_inventory_fields(doc)
+        _c12_isp = _get_ebay_aspects(doc)
+        _c12_drift = sorted(
+            k for k in (set(_c12_ia) & set(_c12_isp))
+            if str(_c12_ia[k]) != str(_c12_isp[k])
+        )
+        if _c12_drift:
+            v("field_set_drift", "warning",
+              f"item_attributes (Set A) and draft_listing.item_specifics "
+              f"(Set B) disagree on live item, key(s): {', '.join(_c12_drift)}")
+
+    # invariant C13 (todo #1417): a real, discoverable eBay->Inventory
+    # diff (tgw.ebay.inventory_diff.diff_ebay_draft_to_inventory) that has
+    # sat unresolved for a long time is stale unreviewed drift — make it
+    # queryable via catalog-verify rather than only a manual `curl` of the
+    # diff endpoint. Unlike field_set_drift above, this is NOT gated on a
+    # live ebay_offer.offer_id — a pending/never-published draft's
+    # eBay-discovered value can sit unreviewed just as long as a live
+    # item's, and Dave's design intent for this packet ("gated automatic
+    # update... operator can uncheck or skip") is about routine review
+    # cadence, not just live-listing correctness.
+    # 30 days is the packet spec's proposed default (spec point 7);
+    # flagged here as a default worth confirming with Dave, not silently
+    # picked as settled. Only flags a key when `detected_at` is known
+    # (Prime Directive 1: a legacy item with no history/timestamp is not
+    # claimed to be "30+ days stale" when that age is actually unknown).
+    _C13_STALE_DAYS = 30
+    _c13_diffs = _diff_ebay_to_inventory(doc)
+    if _c13_diffs:
+        _now = datetime.now(timezone.utc)
+        _c13_stale_keys = []
+        for _fd in _c13_diffs:
+            _detected = _fd.get("detected_at")
+            if not _detected:
+                continue
+            try:
+                _detected_dt = datetime.fromisoformat(str(_detected).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if (_now - _detected_dt).days >= _C13_STALE_DAYS:
+                _c13_stale_keys.append(_fd["key"])
+        if _c13_stale_keys:
+            v("inventory_diff_unresolved_stale", "warning",
+              f"eBay draft and inventory record have disagreed on "
+              f"key(s) {', '.join(sorted(_c13_stale_keys))} for "
+              f"{_C13_STALE_DAYS}+ days with no operator review "
+              f"(GET /api/items/{sku}/inventory-diff)")
 
     # New-pipeline checks
     offer_price = None
@@ -1481,6 +1737,32 @@ def _verify_item(sku: str, item_dir: Path, doc: Dict[str, Any],
               f"item_number={legacy_blocked.get('item_number')} photo repair "
               f"failed: {repair.get('error')}")
 
+    # Invariant C11 (todo #1303): ebay_upload.py's no-photos-on-disk guard
+    # used to log+skip with the job still reported SUCCEEDED — an item could
+    # silently stall forever with no durable record. It now persists
+    # `ebay_upload_blocked`; surface unrepaired instances here (same pattern
+    # as legacy_listing_unrepaired above) so operators can regularly find
+    # and fix them. Cleared to None by the worker on the next full success.
+    upload_blocked = doc.get("ebay_upload_blocked")
+    if upload_blocked:
+        v("ebay_upload_no_photos_unrepaired", "critical",
+          f"reason={upload_blocked.get('reason')} detected at "
+          f"{upload_blocked.get('detected_at')} — item has no photos on "
+          f"disk for eBay upload, blocked since detection")
+
+    # todo #1304 / invariant C11: multi_intake.py used to only log/notify
+    # when a derived child SKU collided with an existing ItemData record —
+    # transient, not queryable later. It now persists `sku_collision_blocked`
+    # on the colliding item on every hit; this is the "regularly check for
+    # and repair" detector for that finding, mirroring `legacy_listing_
+    # unrepaired` above.
+    sku_collision_blocked = doc.get("sku_collision_blocked")
+    if sku_collision_blocked and not doc.get("sku_collision_resolved"):
+        v("sku_collision_unrepaired", "warning",
+          f"base_sku={sku_collision_blocked.get('base_sku')} collided with this "
+          f"item's SKU at {sku_collision_blocked.get('detected_at')} — never "
+          f"resolved (verify not a mistaken duplicate)")
+
     return viols
 
 
@@ -1581,12 +1863,20 @@ def cmd_catalog_verify(
     fix: bool = False,
     write: bool = False,
     scan_events_hours: int = 24,
+    check_photos: bool = False,
 ) -> Dict[str, Any]:
     """Scan ItemData for assumption violations and emit a markdown checklist.
 
     With ``fix=True`` the scan also reports auto-applicable corrections (dry-run
     by default); pass ``write=True`` to actually apply them through the item
     update fence.  A per-SKU fix log is printed and returned under ``fixes``.
+
+    ``check_photos=True`` enables the photo_files_readable rule (todo #1154)
+    — decodes every item photo (cheap incremental via a (size,mtime) sidecar
+    cache; only changed files pay the real PIL decode cost) and flags any
+    that fail. Off by default: a full-fleet run is comparatively heavy and
+    this is meant to be opted into (nightly timer, or an explicit CLI ask),
+    not silently added to every ad-hoc scan.
     """
     from tgw.items import atomic_write_json, update_item
 
@@ -1606,6 +1896,8 @@ def cmd_catalog_verify(
         log.warning("catalog-verify: capture is %.1fh old (> %sh) — "
                     "photos_short_on_ebay falling back to local mirror",
                     live_photo_index_age_h, _LIVE_PHOTO_INDEX_STALE_HOURS)
+
+    photo_decode_cache: Optional[Dict[str, Any]] = _load_photo_decode_cache(cfg) if check_photos else None
 
     for item_dir in sorted(root.iterdir()):
         if not item_dir.is_dir() or not item_dir.name.startswith("tgw"):
@@ -1640,7 +1932,7 @@ def cmd_catalog_verify(
             continue
 
         scanned += 1
-        item_viols = _verify_item(sku, item_dir, doc, live_photo_index)
+        item_viols = _verify_item(sku, item_dir, doc, live_photo_index, photo_decode_cache)
 
         # Apply fixes FIRST (when writing) so the violation list, the report,
         # the by_rule tally, and the mark_verified gate all reflect post-fix
@@ -1661,18 +1953,26 @@ def cmd_catalog_verify(
                         error = res.get("error")
                 fix_log.append({"sku": sku, **f, "applied": applied, "error": error})
             if item_fixed:
-                item_viols = _verify_item(sku, item_dir, doc, live_photo_index)  # re-scan mutated doc
+                item_viols = _verify_item(sku, item_dir, doc, live_photo_index, photo_decode_cache)  # re-scan mutated doc
 
         for viol in item_viols:
             if _SEV_ORDER.get(viol["severity"], 99) <= min_sev:
                 all_violations.append(viol)
+
+        # code-review follow-up: flush the photo-decode cache periodically,
+        # not only after the whole scan finishes — a full-fleet run is
+        # explicitly documented as heavy, and a crash/kill partway through
+        # used to discard every decode already done in that run, defeating
+        # the "cheap incremental" point of caching by (size,mtime) at all.
+        if photo_decode_cache is not None and scanned % _PHOTO_DECODE_CACHE_FLUSH_EVERY == 0:
+            _save_photo_decode_cache(cfg, photo_decode_cache)
 
         if mark_verified:
             has_violations = bool(item_viols)
             if force or not has_violations:
                 ts = datetime.now(tz=timezone.utc).isoformat()
                 doc["catalog_verified"] = {"ts": ts, "by": "catalog-verify"}
-                atomic_write_json(jf, doc, pretty=cfg.get("pretty", True))
+                atomic_write_json(jf, doc, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
                 marked += 1
 
         if limit and scanned >= limit:
@@ -1686,6 +1986,9 @@ def cmd_catalog_verify(
         for viol in _scan_upload_complete_contradictions(scan_events_hours):
             if _SEV_ORDER.get(viol["severity"], 99) <= min_sev:
                 all_violations.append(viol)
+
+    if photo_decode_cache is not None:
+        _save_photo_decode_cache(cfg, photo_decode_cache)
 
     by_rule: Dict[str, int] = {}
     for viol in all_violations:
@@ -1788,7 +2091,7 @@ def cmd_hint(cfg: Dict[str, Any], sku: str, hint: str, force: bool = False) -> D
         },
     )
 
-    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
 
     # Enqueue ai_identify — dedupe key means a pending job won't double-enqueue
     import psycopg2.errors
@@ -2188,7 +2491,7 @@ def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str], enqueue_stage: bool
                 **(item.get("legacy_listing_blocked") or {}),
                 "duplicate_check": dup,
             }
-            atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+            atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
             resolved.append(sku)
 
         # Only queue ebay_stage if the item has already been priced —
@@ -3005,19 +3308,13 @@ def cmd_price_freeship(
             draft["price"] = combined
             item["draft_listing"] = draft
         item["free_shipping"] = True
-        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
         try:
             import psycopg2.errors  # noqa: PLC0415
 
             from tgw.queue import state_machine as _sm
             _sm.init(cfg["postgres_dsn"])
-            _sm.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": f"price_freeship:{sku}"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            _sm.enqueue_catalog_rebuild(f"price_freeship:{sku}")
         except psycopg2.errors.UniqueViolation:
             pass
         except Exception as exc:
@@ -3124,13 +3421,7 @@ def cmd_bulk(
             from .queue import state_machine as _sm
 
             _sm.init(cfg["postgres_dsn"])
-            _sm.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": "bulk_edit"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            _sm.enqueue_catalog_rebuild("bulk_edit")
         except Exception:
             pass
 
@@ -3173,6 +3464,197 @@ def cmd_suggest_edit(cfg: Dict[str, Any], pending_only: bool = False) -> Dict[st
     print(f"Opening {suggestions_file} in {editor}")
     os.execlp(editor, editor, str(suggestions_file))
     return {"ok": True}  # unreachable if execlp succeeds
+
+
+# Known standing actors with a mailbox today (PP-RUNNERCOMMS-001). This is a
+# convenience default list for validation/error messages only — any
+# subdirectory that already exists under plan_inbox_path is a valid send
+# target, and a brand-new actor's inbox dir is created on first send rather
+# than gatekept, matching the PP's "extended to any new addressable actor as
+# one gets added" framing. `archive` / `queued` are shared holding areas, not
+# actors, and are refused as send targets.
+MAILBOX_RESERVED_DIRS = {"archive", "queued"}
+MAILBOX_KNOWN_ACTORS = {"claude", "tigwa", "dave"}
+
+_MAILBOX_SLUG_RE = None
+
+
+def _mailbox_slugify(text: str, max_words: int = 8) -> str:
+    """Derive a filename-safe slug from free text (lowercase, hyphenated)."""
+    import re as _re
+
+    words = _re.findall(r"[A-Za-z0-9]+", text.lower())
+    slug = "-".join(words[:max_words]) or "message"
+    return slug[:80]
+
+
+def cmd_mailbox_send(
+    cfg: Dict[str, Any],
+    to_actor: str,
+    text: str,
+    from_actor: str = "claude",
+    msg_type: str = "NOTE",
+    subject: Optional[str] = None,
+    todo_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Write a mailbox message into another actor's Plan Vault inbox.
+
+    PP-RUNNERCOMMS-001: the one send mechanism behind `tgw mailbox send`, the
+    `tgw-mailbox-send` Claude Code skill, and the `tgw_mailbox_send` MCP tool
+    (all three call this function — no logic duplicated between them).
+
+    Follows the naming/header convention already live in
+    docs/TGW-Plan-Vault/inbox/{claude,tigwa,dave}/ — reverse-engineered from
+    real notes there, not invented: `<FROM-ACTOR>-<TYPE>-<slug>-<date>.md`,
+    with a `# <Type>: <title>` header and `**From:**`/`**To:**`/`**Date:**`
+    metadata lines.
+    """
+    to_actor = (to_actor or "").strip().lower()
+    from_actor = (from_actor or "claude").strip().lower()
+    msg_type = (msg_type or "NOTE").strip().upper()
+
+    if not to_actor:
+        return {"ok": False, "error": "to_actor is required"}
+    if to_actor in MAILBOX_RESERVED_DIRS:
+        return {"ok": False, "error": f"{to_actor!r} is a shared holding area, not an actor mailbox"}
+    if not text or not text.strip():
+        return {"ok": False, "error": "message text is required"}
+
+    inbox_root = cfg["plan_inbox_path"]
+    target_dir = inbox_root / to_actor
+
+    # Never silently create a mailbox for a plausible typo of a known actor;
+    # DO create one for a genuinely new actor name (not in the known set,
+    # not a reserved dir) per the PP's extensibility framing.
+    if not target_dir.is_dir() and to_actor not in MAILBOX_KNOWN_ACTORS:
+        existing = sorted(
+            p.name for p in inbox_root.iterdir()
+            if p.is_dir() and p.name not in MAILBOX_RESERVED_DIRS
+        ) if inbox_root.is_dir() else []
+        return {
+            "ok": False,
+            "error": (
+                f"no mailbox for actor {to_actor!r} and it is not a known actor "
+                f"({sorted(MAILBOX_KNOWN_ACTORS)}); existing mailboxes: {existing}. "
+                "Pass the intended actor name, or create inbox/<actor>/ first if this "
+                "is deliberately a brand-new addressable actor."
+            ),
+        }
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now(tz=timezone.utc)
+    date_str = now.strftime("%Y-%m-%d")
+    slug = _mailbox_slugify(subject or text)
+
+    base_name = f"{from_actor.upper()}-{msg_type}-{slug}-{date_str}"
+    dest = target_dir / f"{base_name}.md"
+    n = 2
+    while dest.exists():
+        dest = target_dir / f"{base_name}-{n}.md"
+        n += 1
+
+    title = subject or (text.strip().splitlines()[0][:80])
+    header_lines = [
+        f"# {msg_type.title()}: {title}",
+        "",
+        f"**From:** {from_actor}",
+        f"**To:** {to_actor}",
+        f"**Date:** {now.strftime('%Y-%m-%dT%H:%M')}Z",
+    ]
+    if todo_id is not None:
+        header_lines.append(f"**Todo:** #{todo_id}")
+    header_lines.append("")
+    header_lines.append(text.strip())
+    header_lines.append("")
+
+    dest.write_text("\n".join(header_lines), encoding="utf-8")
+    return {"ok": True, "file": str(dest), "to": to_actor, "from": from_actor}
+
+
+def _detect_host() -> Optional[str]:
+    """Best-effort hostname detection — never raises."""
+    try:
+        import socket
+
+        return socket.gethostname()
+    except Exception:
+        return None
+
+
+def _detect_git_branch() -> Optional[str]:
+    """Best-effort current git branch detection — never raises.
+
+    This is metadata, not the point of `tgw trace start`; a git-detection
+    failure (not a repo, no git installed, detached HEAD) must never block
+    the command."""
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            branch = result.stdout.strip()
+            return branch or None
+    except Exception:
+        pass
+    return None
+
+
+def cmd_trace_start(
+    cfg: Dict[str, Any],
+    agent_type: str,
+    *,
+    parent_run_id: Optional[str] = None,
+    todo_id: Optional[int] = None,
+    pp_ref: Optional[str] = None,
+    host: Optional[str] = None,
+    git_branch: Optional[str] = None,
+) -> Dict[str, Any]:
+    """`tgw trace start` — record the start of one agent run (PP-AGENTTRACE-001).
+
+    Prints (and returns) the new run_id. Never fail-soft: a DB error here
+    is returned as {ok: False, error: ...}, not swallowed — the run_id is
+    the load-bearing handle callers need for `tgw trace end` and nested
+    dispatches.
+    """
+    from tgw.queue import state_machine as sm
+
+    sm.init(cfg.get("postgres_dsn", "dbname=state_machine user=tgw"))
+
+    try:
+        run_id = sm.start_agent_run(
+            agent_type,
+            parent_run_id=parent_run_id,
+            todo_id=todo_id,
+            pp_ref=pp_ref,
+            host=host if host is not None else _detect_host(),
+            git_branch=git_branch if git_branch is not None else _detect_git_branch(),
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "run_id": run_id}
+
+
+def cmd_trace_end(
+    cfg: Dict[str, Any],
+    run_id: str,
+    *,
+    status: str,
+    summary: Optional[str] = None,
+    transcript_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """`tgw trace end` — record the end of one agent run (PP-AGENTTRACE-001)."""
+    from tgw.queue import state_machine as sm
+
+    sm.init(cfg.get("postgres_dsn", "dbname=state_machine user=tgw"))
+
+    try:
+        sm.end_agent_run(run_id, status=status, summary=summary, transcript_path=transcript_path)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "run_id": run_id, "status": status}
 
 
 def cmd_classify_suggestions(
@@ -3660,7 +4142,7 @@ def cmd_set_template(
     doc = load_item_doc(json_path)
     fields = _build_template_fields(cfg, grp, group_key, doc)
     doc.update(fields)
-    atomic_write_json(json_path, doc, pretty=True)
+    atomic_write_json(json_path, doc, pretty=True, archive_root=cfg.get("archive_root"))
 
     # Push SETTEMPLATE: to clipboard for KDE Connect camera relay
     template_str = f"SETTEMPLATE:{grp['name']}"
@@ -3849,6 +4331,22 @@ def main() -> int:
             result = get_item(cfg, args.sku)
 
         elif args.op == "search":
+            if args.full_text is not None:
+                from tgw.search_full import format_results_text, run_full_text_search
+                result = run_full_text_search(args.full_text, limit=args.limit)
+                if not result.get("ok"):
+                    print(f"error: {result.get('error')}", file=sys.stderr)
+                    return 1
+                if args.skus_only:
+                    # best-effort: only SKU-shaped tokens found in result urls
+                    import re as _re
+                    for row in result["results"]:
+                        m = _re.search(r"tgw\d{17}", row.get("url", ""))
+                        if m:
+                            print(m.group(0))
+                    return 0
+                print(format_results_text(result))
+                return 0
             result = list_items(cfg, search=args.text, location=args.location, status=args.status, limit=args.limit, empty_field=args.empty_field)
             if args.skus_only:
                 for item in result["items"]:
@@ -3964,7 +4462,12 @@ def main() -> int:
         elif args.op == "clip":
             from .clip import cmd_clip
 
-            result = cmd_clip(args.clip_action, pattern=args.pattern, limit=args.limit, sku_only=args.sku_only, clip_id=getattr(args, "id", None), copy=getattr(args, "copy", False))
+            result = cmd_clip(
+                args.clip_action, pattern=args.pattern, limit=args.limit,
+                sku_only=args.sku_only, clip_id=getattr(args, "id", None),
+                copy=getattr(args, "copy", False), label=getattr(args, "label", None),
+                requested_by=getattr(args, "requested_by", "claude"),
+            )
 
         elif args.op == "catlocmvall":
             result = catlocmvall(cfg, args.from_location, args.to_location, check_only=check)
@@ -3983,9 +4486,118 @@ def main() -> int:
         elif args.op == "suggest-edit":
             result = cmd_suggest_edit(cfg, pending_only=args.pending_only)
 
+        elif args.op == "mailbox":
+            if args.mailbox_op == "send":
+                result = cmd_mailbox_send(
+                    cfg,
+                    args.to_actor,
+                    args.text,
+                    from_actor=args.from_actor,
+                    msg_type=args.msg_type,
+                    subject=args.subject,
+                    todo_id=args.todo_id,
+                )
+            else:
+                result = {"ok": False, "error": f"unknown mailbox op: {args.mailbox_op!r}"}
+
+        elif args.op == "trace":
+            if args.trace_op == "start":
+                result = cmd_trace_start(
+                    cfg,
+                    args.agent_type,
+                    parent_run_id=args.parent_run_id,
+                    todo_id=args.todo_id,
+                    pp_ref=args.pp_ref,
+                    host=args.host,
+                    git_branch=args.git_branch,
+                )
+                if result.get("ok"):
+                    print(result["run_id"])
+                else:
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                return 0 if result.get("ok") else 1
+            elif args.trace_op == "end":
+                result = cmd_trace_end(
+                    cfg,
+                    args.run_id,
+                    status=args.status,
+                    summary=args.summary,
+                    transcript_path=args.transcript_path,
+                )
+                if result.get("ok"):
+                    print(f"Ended run {result['run_id']}: status={result['status']}")
+                else:
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                return 0 if result.get("ok") else 1
+            else:
+                result = {"ok": False, "error": f"unknown trace op: {args.trace_op!r}"}
+
+        elif args.op == "flake":
+            from tgw import flake_gate
+
+            if args.flake_op == "request-push":
+                result = flake_gate.request_push(args.repo, args.host, args.commit, args.summary)
+                if result.get("ok"):
+                    print(result["job_id"])
+                else:
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                return 0 if result.get("ok") else 1
+            elif args.flake_op == "request-switch":
+                result = flake_gate.request_switch(args.host, args.commit, args.summary)
+                if result.get("ok"):
+                    print(result["job_id"])
+                else:
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                return 0 if result.get("ok") else 1
+            elif args.flake_op == "queue":
+                result = flake_gate.queue_table()
+                jobs = result.get("jobs", [])
+                if jobs:
+                    print(f"{'JOB_ID':<38} {'KIND':<8} {'HOST':<10} {'COMMIT':<14} {'REQUESTED_AT':<20} SUMMARY")
+                    for j in jobs:
+                        print(f"{j['job_id']:<38} {j['kind']:<8} {(j['host'] or ''):<10} "
+                              f"{j['commit']:<14} {str(j['requested_at']):<20} {j['summary']}")
+                else:
+                    print("(no flake_mutation jobs pending)")
+                return 0
+            elif args.flake_op == "show":
+                result = flake_gate.show_job(args.job_id)
+                if not result.get("ok"):
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                    return 1
+                print(json.dumps(result["job"], ensure_ascii=False, indent=2, default=str))
+                return 0
+            elif args.flake_op == "mark-executed":
+                result = flake_gate.mark_executed(args.job_id, executed_by=args.executed_by)
+                if not result.get("ok"):
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                    return 1
+                print(f"Marked executed: {result['job']['job_id']} (state={result['job']['state']})")
+                return 0
+            elif args.flake_op == "audit":
+                result = flake_gate.audit(args.repo)
+                if not result.get("ok"):
+                    print(f"Error: {result.get('error')}", file=sys.stderr)
+                    return 1
+                findings = result.get("findings", [])
+                print(f"Checked {result['commits_checked']} commits on origin/master ({result['repo']}).")
+                if findings:
+                    print(f"FINDINGS: {len(findings)} commit(s) with no matching executed flake_mutation push record:")
+                    for f in findings:
+                        print(f"  {f['sha']}  {f['date']}")
+                else:
+                    print("No findings — every post-rollout commit has a matching executed push record.")
+                return 0  # detective backstop only, never blocks — see module docstring
+            else:
+                result = {"ok": False, "error": f"unknown flake op: {args.flake_op!r}"}
+
         elif args.op == "admin-file":
             from tgw.workers.pm_intake import cmd_admin_file
-            result = cmd_admin_file(cfg, bypass_delay=getattr(args, "now", False))
+            result = cmd_admin_file(
+                cfg,
+                bypass_delay=getattr(args, "now", False),
+                dry_run=getattr(args, "dry_run", False),
+            )
             return 0 if result["ok"] else 1
 
         elif args.op == "classify-suggestions":
@@ -4066,7 +4678,7 @@ def main() -> int:
                 row: Dict[str, Any] = {"sku": sku, "ok": True, **q.to_dict()}
                 if args.save and item.get("draft_listing") is not None:
                     item["draft_listing"]["quality"] = q.to_dict()
-                    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+                    atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
                     row["saved"] = True
                 rows.append(row)
             result = {"ok": True, "items": rows}
@@ -4103,7 +4715,7 @@ def main() -> int:
                     result = {"ok": True, "sku": args.sku, "found": True, "result": lookup.to_dict()}
                     if args.save:
                         item["product_lookup"] = lookup.to_dict()
-                        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True))
+                        atomic_write_json(json_path, item, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
                         result["saved"] = True
 
         elif args.op in ("suggest", "note", "btw"):
@@ -4436,7 +5048,7 @@ def main() -> int:
                 was_blocked = "sku_migrate_blocked" in doc
                 doc.pop("sku_migrate_blocked", None)
                 doc.pop("sku_migrate_skip", None)
-                atomic_write_json(json_path, doc, pretty=cfg.get("pretty", True))
+                atomic_write_json(json_path, doc, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
                 registry.pop(sku, None)
                 status = "unblocked" if was_blocked else "skip flag cleared (was not blocked)"
                 print(f"  {sku}: {status}")
@@ -4487,6 +5099,11 @@ def main() -> int:
                 print(f"Destination directory does not exist: {dest.parent}")
                 return 1
 
+            if dest.exists() and not args.force:
+                print(f"Destination already has a live item — refusing to overwrite: {dest}. "
+                      f"Use --force to override.")
+                return 1
+
             print(f"Restore target: {dest}")
             if args.dry_run:
                 print("Dry run — no changes written.")
@@ -4496,7 +5113,7 @@ def main() -> int:
             restore_data = dict(snapshot)
             restore_data["sku"] = new_sku if new_sku else old_sku
             from .items import atomic_write_json as _awj
-            _awj(dest, restore_data, pretty=cfg.get("pretty", True))
+            _awj(dest, restore_data, pretty=cfg.get("pretty", True), archive_root=cfg.get("archive_root"))
             print(f"Restored {len(restore_data)} fields to {dest}")
             return 0
 
@@ -4537,6 +5154,32 @@ def main() -> int:
             )
             if args.output:
                 print(json.dumps(result, indent=2))
+            return 0 if result["ok"] else 1
+
+        elif args.op == "inventory-sweep":
+            from .physical_inventory import inventory_sweep_checklist
+
+            result = inventory_sweep_checklist(
+                cfg,
+                args.location,
+                output=Path(args.output) if args.output else None,
+            )
+            if args.output:
+                print(json.dumps(result, indent=2))
+            return 0 if result["ok"] else 1
+
+        elif args.op == "inventory-record":
+            from .physical_inventory import inventory_record
+
+            result = inventory_record(
+                cfg,
+                args.sku,
+                args.result,
+                location=args.location,
+                to_location=args.to_location,
+                note=args.note,
+            )
+            print(json.dumps(result, indent=2))
             return 0 if result["ok"] else 1
 
         elif args.op == "build-archive-index":
@@ -4595,16 +5238,55 @@ def main() -> int:
                 marked = result.get("marked", 0)
                 if marked and not args.dry_run:
                     try:
-                        _sm.enqueue_job(
-                            queue_name="catalog_rebuild",
-                            payload={"reason": "import_sold_csv"},
-                            dedupe_key="catalog_rebuild:pending",
-                            not_before=time.time() + 30,
-                            max_attempts=3,
-                        )
+                        _sm.enqueue_catalog_rebuild("import_sold_csv")
                         print("catalog_rebuild job enqueued.")
                     except Exception:
                         pass
+
+        elif args.op == "reconcile-sold-orders":
+            from .apis.ebay.trading import get_my_ebay_selling, get_orders
+            from .ebay.pull import (
+                _MAX_ORDER_LOOKBACK_DAYS,
+                load_sold_order_csvs,
+                reconcile_sold_order_history,
+            )
+            from .queue import state_machine as _sm
+
+            _sm.init(cfg["postgres_dsn"])
+            observed_at = datetime.now(tz=timezone.utc)
+            api_orders = list(get_orders(
+                cfg,
+                observed_at - timedelta(days=_MAX_ORDER_LOOKBACK_DAYS),
+                observed_at,
+            ))
+            csv_paths = [Path(value) for value in args.csv]
+            csv_orders = load_sold_order_csvs(csv_paths)
+            orders = [*api_orders, *csv_orders]
+            active = list(get_my_ebay_selling(cfg))
+            result = reconcile_sold_order_history(
+                cfg,
+                cfg["itemdata_root"],
+                orders,
+                active,
+                observed_at.isoformat(),
+                dry_run=not args.apply,
+            )
+            result["api_orders_fetched"] = len(api_orders)
+            result["csv_orders_loaded"] = len(csv_orders)
+            result["csv_files"] = [str(path) for path in csv_paths]
+            if args.apply and result.get("ok") and (
+                result.get("active_status_restored")
+                or result.get("active_sales_recorded")
+                or result.get("inactive_sales_marked")
+            ):
+                try:
+                    _sm.enqueue_catalog_rebuild("reconcile_sold_orders")
+                    result["catalog_rebuild_enqueued"] = True
+                except Exception as exc:
+                    result["catalog_rebuild_enqueued"] = False
+                    result["catalog_rebuild_error"] = f"{type(exc).__name__}: {exc}"
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result.get("ok") else 1
 
         elif args.op == "ebay-pull":
             from .ebay.pull import (
@@ -4706,13 +5388,7 @@ def main() -> int:
 
             if total_changes and not dry_run:
                 try:
-                    _sm.enqueue_job(
-                        queue_name="catalog_rebuild",
-                        payload={"reason": "ebay_pull"},
-                        dedupe_key="catalog_rebuild:pending",
-                        not_before=time.time() + 30,
-                        max_attempts=3,
-                    )
+                    _sm.enqueue_catalog_rebuild("ebay_pull")
                     print("catalog_rebuild job enqueued.")
                 except Exception:
                     pass
@@ -4946,9 +5622,11 @@ def main() -> int:
                     print()
 
         elif args.op == "offers":
-            from .offers import cmd_offers_list, cmd_offers_respond
+            from .offers import cmd_offers_list, cmd_offers_respond, repair_unresolved_offers
 
-            if args.offer_op == "respond":
+            if args.offer_op == "repair":
+                result = repair_unresolved_offers(cfg)
+            elif args.offer_op == "respond":
                 action = args.offer_action
                 if action is None and args.counter_price is not None:
                     action = "Counter"
@@ -5034,6 +5712,14 @@ def main() -> int:
             # cmd_todo handles its own printing; skip the generic JSON dump
             return 0 if result.get("ok", True) else 1
 
+        elif args.op == "coding":
+            from tgw.coding_cli import run as run_coding
+            if args.coding_op == "start" and not args.todo_id:
+                parser.error("coding start requires --todo-id")
+            if args.coding_op in {"status", "log", "stop"} and not args.request_id:
+                parser.error(f"coding {args.coding_op} requires REQUEST_ID")
+            return run_coding(args)
+
         elif args.op == "plan":
             if args.plan_op == "render":
                 from tgw.plan_render import render_taskboard
@@ -5073,6 +5759,7 @@ def main() -> int:
                 fix=getattr(args, "fix", False),
                 write=getattr(args, "write", False),
                 scan_events_hours=getattr(args, "scan_events_hours", 24),
+                check_photos=getattr(args, "check_photos", False),
             )
             if getattr(args, "as_json", False):
                 print(json.dumps(result, indent=2))
@@ -5140,10 +5827,19 @@ def main() -> int:
 
             _sm.init(cfg["postgres_dsn"])
             cleared = _sm.clear_dead_letter(queue_name="token_refresh")
+            # PP-STATEMACHINE-001 Phase 3 (todo #1608): supersede=True is the
+            # "force now regardless of pending schedule" case — without it, a
+            # future-dated 'token_refresh:pending' row (from the singleton
+            # debounce key added in Phase 1) would silently win over this
+            # manual restart via debounce's GREATEST(not_before) rule, making
+            # this command appear to succeed while doing nothing until the
+            # original schedule anyway (flagged as #1607 audit item D.1).
             jid = _sm.enqueue_job(
                 queue_name="token_refresh",
                 payload={"reason": "manual_restart"},
                 max_attempts=3,
+                dedupe_key="token_refresh:pending",
+                supersede=True,
             )
             result = {
                 "ok": True,

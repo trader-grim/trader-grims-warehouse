@@ -160,7 +160,7 @@ class _EditItemScreenState extends ConsumerState<EditItemScreen> {
           const SizedBox(height: 4),
           if (mode == 'SELECTION_ONLY')
             DropdownButtonFormField<String>(
-              initialValue: values.any((v) => v['localizedValue'] == controller.text) ? controller.text : null,
+              value: values.any((v) => v['localizedValue'] == controller.text) ? controller.text : null,
               items: [
                 const DropdownMenuItem(value: null, child: Text('Select...')),
                 ...values.map((v) => DropdownMenuItem(
@@ -337,7 +337,7 @@ class _EditItemScreenState extends ConsumerState<EditItemScreen> {
                 Expanded(
                   child: DropdownButtonFormField<String>(
                     decoration: const InputDecoration(labelText: 'Condition', border: OutlineInputBorder()),
-                    initialValue: _selectedCondition,
+                    value: _selectedCondition,
                     items: _conditions.map((c) => DropdownMenuItem(value: c, child: Text(c.isEmpty ? 'None' : c))).toList(),
                     onChanged: (val) => setState(() => _selectedCondition = val),
                   ),

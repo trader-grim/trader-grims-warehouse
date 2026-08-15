@@ -21,6 +21,7 @@ class _FakeWorker(worker_base.QueueWorker):
 def _job(attempt_count):
     return {
         "job_id": "j1",
+        "lease_token": "22222222-2222-4222-8222-222222222222",
         "attempt_count": attempt_count,
         "max_attempts": 5,
         "payload_json": {},
@@ -34,7 +35,7 @@ def test_transient_error_requeues_on_first_attempt(monkeypatch):
     monkeypatch.setattr(state_machine, "mark_running", lambda *a, **k: None)
     monkeypatch.setattr(
         state_machine, "requeue_with_backoff",
-        lambda job_id, owner, delay, detail: calls.__setitem__("requeue", delay),
+        lambda job_id, owner, token, delay, detail: calls.__setitem__("requeue", delay),
     )
     monkeypatch.setattr(
         state_machine, "mark_failed",
@@ -53,7 +54,7 @@ def test_transient_error_requeues_on_final_attempt_too(monkeypatch):
     monkeypatch.setattr(state_machine, "mark_running", lambda *a, **k: None)
     monkeypatch.setattr(
         state_machine, "requeue_with_backoff",
-        lambda job_id, owner, delay, detail: calls.__setitem__("requeue", delay),
+        lambda job_id, owner, token, delay, detail: calls.__setitem__("requeue", delay),
     )
     monkeypatch.setattr(state_machine, "mark_failed", lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("mark_failed should not be called for a transient error")

@@ -1,0 +1,82 @@
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from tgw.candidate_manifest import CandidateManifestError, build_candidate_manifest, verify_backup_restore
+
+
+def _repo(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "app.py").write_text("old\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    (repo / "app.py").write_text("new\n")
+    subprocess.run(["git", "commit", "-qam", "candidate"], cwd=repo, check=True)
+    return repo, base
+
+
+def _manifest(repo, base, **changes):
+    values = dict(
+        commit="HEAD",
+        base_commit=base,
+        plan_commit="plan-commit",
+        solution_hash="sha256:solution",
+        closure_hash="sha256:closure",
+        focused_receipt={"status": "passed", "count": 1},
+        full_suite=("pytest", "-q"),
+    )
+    values.update(changes)
+    return build_candidate_manifest(repo, **values)
+
+
+def test_manifest_is_reproducible_from_closed_commit_and_ignores_dirty_worktree(tmp_path):
+    repo, base = _repo(tmp_path)
+    first = _manifest(repo, base)
+    (repo / "app.py").write_text("dirty and not candidate\n")
+    second = _manifest(repo, base)
+
+    assert first == second
+    assert first["candidate_closed"] is True
+    assert first["installed"] is False
+    assert first["tests"]["full_suite"]["status"] == "DEFINED_NOT_RUN"
+
+
+def test_database_change_requires_verified_backup_restore(tmp_path):
+    repo, base = _repo(tmp_path)
+    (repo / "schema.sql").write_text("CREATE TABLE example(id int);\n")
+    subprocess.run(["git", "add", "schema.sql"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "schema"], cwd=repo, check=True)
+
+    with pytest.raises(CandidateManifestError, match="backup/restore"):
+        _manifest(repo, base)
+
+    receipt = verify_backup_restore(b"schema-v1", backup=lambda body: b"backup:" + body, restore=lambda body: body.removeprefix(b"backup:"))
+    manifest = _manifest(repo, base, migration_receipt=receipt)
+    assert manifest["database"]["migration_paths"] == ["schema.sql"]
+    assert manifest["database"]["backup_restore"]["verified"] is True
+
+
+def test_failed_restore_cannot_admit_migration_candidate(tmp_path):
+    repo, base = _repo(tmp_path)
+    (repo / "schema.sql").write_text("ALTER TABLE example ADD COLUMN name text;\n")
+    subprocess.run(["git", "add", "schema.sql"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "schema"], cwd=repo, check=True)
+    receipt = verify_backup_restore(b"schema", backup=lambda body: body, restore=lambda body: b"wrong")
+
+    with pytest.raises(CandidateManifestError):
+        _manifest(repo, base, migration_receipt=receipt)
+
+
+def test_manifest_hash_covers_plan_test_and_migration_bindings(tmp_path):
+    repo, base = _repo(tmp_path)
+    first = _manifest(repo, base)
+    changed = _manifest(repo, base, focused_receipt={"status": "passed", "count": 2})
+    assert first["manifest_hash"] != changed["manifest_hash"]
+    json.dumps(first)

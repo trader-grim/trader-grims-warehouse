@@ -14,6 +14,7 @@
     '<a href="/form/links">Links</a>' +
     '<a href="/form/offers">Offers</a>' +
     '<a href="/form/revisions">Revisions</a>' +
+    '<a href="/form/search">Search</a>' +
     '<div class="nav-dropdown">' +
       '<button class="nav-dropdown-toggle">Operations &#9662;</button>' +
       '<div class="nav-dropdown-menu">' +
@@ -25,7 +26,10 @@
     '<div class="nav-dropdown">' +
       '<button class="nav-dropdown-toggle">Admin &#9662;</button>' +
       '<div class="nav-dropdown-menu">' +
+        '<a href="/form/size-classes">Size Classes</a>' +
         '<a href="/form/todos">Todos</a>' +
+        '<a href="/form/runs">Agent Runs</a>' +
+        '<a href="/form/plan-authority">Plan Authority</a>' +
       '</div>' +
     '</div>';
 

@@ -110,6 +110,51 @@ class TestAltText:
         assert doc["draft_listing"]["alt_text"] == "Silver pocket watch with chain on white background"
         assert "Elgin" in doc["draft_listing"]["seo_caption"]
 
+    def test_success_persists_raw_llm_response(self, tmp_path, monkeypatch):
+        """Data Charter raw-preservation rule: the raw model response must be
+        kept alongside the parsed alt_text/seo_caption, not discarded once
+        parsed — mirrors ai_identify's vision_results[] pattern."""
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001")
+        _patch_vision(monkeypatch)
+
+        result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
+        assert result["ok"] is True
+
+        doc = json.loads((Path(cfg["itemdata_root"]) / "tgw001" / "tgw001.json").read_text())
+        assert "alt_text_results" in doc
+        assert len(doc["alt_text_results"]) == 1
+        record = doc["alt_text_results"][0]
+        assert record["raw_response"] == _GOOD_RESPONSE
+        assert record["extracted"]["alt_text"] == doc["draft_listing"]["alt_text"]
+        assert record["extracted"]["seo_caption"] == doc["draft_listing"]["seo_caption"]
+        assert record["model"] == _DUMMY_MODEL
+        assert record["photo"] == "tgw001.jpg"
+
+    def test_cache_hit_does_not_append_new_raw_record(self, tmp_path, monkeypatch):
+        """A pHash cache hit reuses a prior derived result without calling the
+        model again — nothing new to persist, so no duplicate record."""
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001")
+        _patch_vision(monkeypatch)
+
+        cached_result = {
+            "alt_text": "Cached description",
+            "seo_caption": "Cached caption.",
+        }
+        import tgw.image_hash as image_hash_mod
+        monkeypatch.setattr(image_hash_mod, "compute_dhash", lambda *a, **kw: "deadbeef")
+        monkeypatch.setattr(image_hash_mod, "lookup_hash", lambda *a, **kw: cached_result)
+
+        result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
+        assert result["ok"] is True
+        assert result["cache_hit"] is True
+
+        doc = json.loads((Path(cfg["itemdata_root"]) / "tgw001" / "tgw001.json").read_text())
+        assert "alt_text_results" not in doc
+
     def test_success_copies_to_alt_companion(self, tmp_path, monkeypatch):
         cfg = _make_cfg(tmp_path)
         _make_item(cfg, "tgw001")
@@ -130,23 +175,56 @@ class TestAltText:
 
         result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
         assert result["archived_to_history"] is True
-        history_path = Path(tmp_path) / "history" / "ItemData" / "tgw001" / "tgw001.jpg"
+        history_path = Path(tmp_path) / "history-staging" / "tgw001" / "tgw001.jpg"
         assert history_path.exists()
 
     def test_does_not_rearchive_if_already_in_history(self, tmp_path, monkeypatch):
         cfg = _make_cfg(tmp_path)
         _make_item(cfg, "tgw001")
         _add_photo(cfg, "tgw001", name="tgw001.jpg")
-        # Pre-populate history
-        hist_dir = Path(tmp_path) / "history" / "ItemData" / "tgw001"
+        # Pre-populate history-staging
+        hist_dir = Path(tmp_path) / "history-staging" / "tgw001"
         hist_dir.mkdir(parents=True)
         (hist_dir / "tgw001.jpg").write_bytes(b"old")
         _patch_vision(monkeypatch)
 
         result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
         assert result["archived_to_history"] is False
-        # Original history file unchanged
+        # Original history-staging file unchanged
         assert (hist_dir / "tgw001.jpg").read_bytes() == b"old"
+
+    def test_broken_history_symlink_is_never_touched(self, tmp_path, monkeypatch):
+        """todo #1615 / PP-DATALEARN-001: the archive copy no longer goes
+        through the 'history' symlink at all (mounted or not) — it always
+        lands in local history-staging/. A broken/dangling 'history' symlink
+        must not affect the archive step in any way."""
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001", name="tgw001.jpg")
+        _patch_vision(monkeypatch)
+
+        # Simulate MasterArchive not mounted: history root is a dangling symlink.
+        history_root = Path(tmp_path) / "history"
+        history_root.symlink_to(Path(tmp_path) / "does-not-exist" / "MasterArchive-history")
+
+        result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
+
+        assert result["ok"] is True
+        assert result["archived_to_history"] is True
+        # Rest of the job still completed normally.
+        assert result["alt_text"]
+        alt_path = Path(cfg["itemdata_root"]) / "tgw001" / "tgw001-alt.jpg"
+        assert alt_path.exists()
+
+        # Archive copy landed in local staging, not through the broken symlink.
+        staging_path = Path(tmp_path) / "history-staging" / "tgw001" / "tgw001.jpg"
+        assert staging_path.exists()
+        # The broken symlink itself was never touched/resolved.
+        assert not history_root.exists()  # still dangling, unchanged
+
+        # Item JSON itself was still written with alt_text/seo_caption.
+        item_json = json.loads((Path(cfg["itemdata_root"]) / "tgw001" / "tgw001.json").read_text())
+        assert item_json["draft_listing"]["alt_text"]
 
     def test_idempotent_skip_when_already_processed(self, tmp_path):
         cfg = _make_cfg(tmp_path)
@@ -648,3 +726,114 @@ class TestGoogleDirectProvider:
         cmd_alt_text(cfg, "tgw001", provider="google_direct", model="gemini-2.5-flash-lite")
 
         assert len(calls[0]["img_b64_list"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# todo #1372 / PP-COHESION-001 — both alt_text.py atomic_write_json call sites
+# (serial cmd_alt_text + batch _apply_alt_text_result) must pass archive_root
+# (invariant E5, archive-before-overwrite on an existing item), matching the
+# fix already applied to api.py's call sites in #1298/#1299/#1300.
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveRootPassthrough:
+    def test_cmd_alt_text_passes_archive_root_to_atomic_write_json(self, tmp_path, monkeypatch):
+        from unittest.mock import patch
+
+        cfg = _make_cfg(tmp_path)
+        cfg["archive_root"] = tmp_path / "archive"
+        _make_item(cfg, "tgw001")
+        _add_photo(cfg, "tgw001")
+        _patch_vision(monkeypatch)
+
+        with patch("tgw.items.atomic_write_json") as mock_awj:
+            result = cmd_alt_text(cfg, sku="tgw001", model=_DUMMY_MODEL)
+
+        assert result["ok"] is True
+        assert mock_awj.called
+        _, kwargs = mock_awj.call_args
+        assert kwargs.get("archive_root") == cfg["archive_root"]
+
+    def test_apply_alt_text_result_passes_archive_root_to_atomic_write_json(self, tmp_path):
+        from unittest.mock import patch
+
+        from tgw.alt_text import _apply_alt_text_result
+
+        cfg = _make_cfg(tmp_path)
+        cfg["archive_root"] = tmp_path / "archive"
+        _make_item(cfg, "tgw001")
+        photo = _add_photo(cfg, "tgw001")
+
+        with patch("tgw.items.atomic_write_json") as mock_awj:
+            result = _apply_alt_text_result(
+                cfg, "tgw001", "Some alt text", "Some caption.", photo, "deadbeef",
+            )
+
+        assert result["ok"] is True
+        assert mock_awj.called
+        _, kwargs = mock_awj.call_args
+        assert kwargs.get("archive_root") == cfg["archive_root"]
+
+
+# ---------------------------------------------------------------------------
+# todo #1408 / PP-DATALEARN-001 — same unguarded FileExistsError risk on
+# archive-write as cmd_alt_text had (fixed in #1407), but on the Gemini Batch
+# apply path (_apply_alt_text_result). Mirrors #1407's two new tests exactly,
+# adapted to the batch function's call signature.
+# ---------------------------------------------------------------------------
+
+
+class TestApplyAltTextResultArchiveGuard:
+    def test_apply_alt_text_result_broken_history_symlink_is_never_touched(self, tmp_path, monkeypatch):
+        """todo #1615 / PP-DATALEARN-001 (mirrors cmd_alt_text's same fix):
+        the batch-apply archive copy no longer goes through the 'history'
+        symlink at all (mounted or not) — it always lands in local
+        history-staging/. A broken/dangling 'history' symlink must not
+        affect the archive step in any way."""
+        from tgw.alt_text import _apply_alt_text_result
+
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        photo = _add_photo(cfg, "tgw001", name="tgw001.jpg")
+
+        # Simulate MasterArchive not mounted: history root is a dangling symlink.
+        history_root = Path(tmp_path) / "history"
+        history_root.symlink_to(Path(tmp_path) / "does-not-exist" / "MasterArchive-history")
+
+        result = _apply_alt_text_result(
+            cfg, "tgw001", "Some alt text", "Some caption.", photo, "deadbeef",
+            model="gemini-2.5-flash-lite", raw_response="{}",
+        )
+
+        assert result["ok"] is True
+        assert result["archived_to_history"] is True
+        # Rest of the job still completed normally.
+        assert result["alt_text"] == "Some alt text"
+
+        # Archive copy landed in local staging, not through the broken symlink.
+        staging_path = Path(tmp_path) / "history-staging" / "tgw001" / "tgw001.jpg"
+        assert staging_path.exists()
+        # The broken symlink itself was never touched/resolved.
+        assert not history_root.exists()  # still dangling, unchanged
+
+        # Item JSON itself was still written with alt_text/seo_caption.
+        item_json = json.loads((Path(cfg["itemdata_root"]) / "tgw001" / "tgw001.json").read_text())
+        assert item_json["draft_listing"]["alt_text"] == "Some alt text"
+
+    def test_apply_alt_text_result_archives_normally(self, tmp_path, monkeypatch):
+        """Control case: normal archive path works, writing to local
+        history-staging/ (no 'history' mount state involved anymore)."""
+        from tgw.alt_text import _apply_alt_text_result
+
+        cfg = _make_cfg(tmp_path)
+        _make_item(cfg, "tgw001")
+        photo = _add_photo(cfg, "tgw001", name="tgw001.jpg")
+
+        result = _apply_alt_text_result(
+            cfg, "tgw001", "Some alt text", "Some caption.", photo, "deadbeef",
+        )
+
+        assert result["ok"] is True
+        assert result["archived_to_history"] is True
+        history_path = Path(tmp_path) / "history-staging" / "tgw001" / "tgw001.jpg"
+        assert history_path.exists()

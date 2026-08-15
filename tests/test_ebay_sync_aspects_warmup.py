@@ -47,7 +47,7 @@ def _worker(cfg: Dict[str, Any]) -> EbaySyncWorker:
 
 
 def _job() -> Dict[str, Any]:
-    return {"payload_json": {}}  # no sku → full-fetch path
+    return {"payload_json": {"reason": "scheduled"}}  # exact full-fetch shape
 
 
 def test_warm_up_called_with_seen_category_ids(tmp_path, monkeypatch):

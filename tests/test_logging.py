@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import tempfile
 from pathlib import Path
 
@@ -31,3 +32,58 @@ def test_get_logger_already_namespaced():
 
 def test_log_event_does_not_raise():
     log_event('test.event', sku='tgw20260101000000001', count=5)
+
+
+def test_json_log_path_no_extension_falls_back_to_tgw_jsonl():
+    """log_file without a '.log' substring must not collide with the
+    main log file — regression test for #1290."""
+    import tgw.logging as tl
+
+    root_logger = logging.getLogger('tgw')
+    with tempfile.TemporaryDirectory() as d:
+        tl._configured = False
+        for h in list(root_logger.handlers):
+            root_logger.removeHandler(h)
+        setup_logging(
+            'x', log_root=Path(d), log_file='custom', json_file=True,
+            console=False,
+        )
+        file_paths = {
+            Path(h.baseFilename)
+            for h in root_logger.handlers
+            if isinstance(h, logging.handlers.RotatingFileHandler)
+        }
+        tl._configured = False
+        for h in list(root_logger.handlers):
+            root_logger.removeHandler(h)
+
+    assert Path(d) / 'custom' in file_paths
+    assert Path(d) / 'tgw.jsonl' in file_paths
+    assert Path(d) / 'custom.jsonl' not in file_paths
+    assert len(file_paths) == 2
+
+
+def test_json_log_path_with_log_extension_produces_matching_jsonl():
+    import tgw.logging as tl
+
+    root_logger = logging.getLogger('tgw')
+    with tempfile.TemporaryDirectory() as d:
+        tl._configured = False
+        for h in list(root_logger.handlers):
+            root_logger.removeHandler(h)
+        setup_logging(
+            'x', log_root=Path(d), log_file='custom.log', json_file=True,
+            console=False,
+        )
+        file_paths = {
+            Path(h.baseFilename)
+            for h in root_logger.handlers
+            if isinstance(h, logging.handlers.RotatingFileHandler)
+        }
+        tl._configured = False
+        for h in list(root_logger.handlers):
+            root_logger.removeHandler(h)
+
+    assert Path(d) / 'custom.log' in file_paths
+    assert Path(d) / 'custom.jsonl' in file_paths
+    assert len(file_paths) == 2

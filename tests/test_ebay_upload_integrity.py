@@ -17,6 +17,7 @@ import json
 import pytest
 
 import tgw.workers.ebay_upload as ebay_upload
+from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
 from tgw.quota import QuotaBudgetExceeded
 
@@ -121,6 +122,141 @@ def test_quota_retry_preserves_operator_origin(worker, tmp_path, monkeypatch):
     assert worker._enqueued[0]['payload']['origin'] == 'operator'
 
 
+def test_workflow_quota_wall_returns_bound_timer_without_self_enqueue(
+    worker, tmp_path, monkeypatch,
+):
+    sku = 'tgwtest-timer'
+    d = _write_item(tmp_path, sku)
+    _make_photos(d, ['1.jpg'])
+    worker.config['workflow_migration'] = {'ebay_upload_quota_timer': 'workflow'}
+    monkeypatch.setattr(ebay_upload.time, 'time', lambda: 1_000.0)
+    monkeypatch.setattr(
+        ebay_upload, 'upload_photo',
+        lambda cfg, photo: (_ for _ in ()).throw(QuotaBudgetExceeded('quota')),
+    )
+    job = _job(
+        sku, origin='operator', treatment_id='ebay-upload',
+        treatment_version='1', graph_id='graph-1', object_generation='gen-1',
+        condition_hash='condition-1',
+    )
+
+    receipt = worker.handle(job)
+
+    assert worker._enqueued == []
+    assert receipt['outcome'] == 'transient_backoff'
+    assert receipt['receipt_schema_id'] == 'treatment-wait-receipt/v1'
+    assert receipt['evidence'] == {
+        'reason_code': 'EBAY_UPLOAD_QUOTA_BLOCKED',
+        'quota_retries': 1,
+        'uploaded_this_attempt': 0,
+        'uploaded_total': 0,
+        'operator_origin': True,
+        'changed': False,
+    }
+    timer = receipt['timer']
+    assert timer['not_before'] == 1_000.0 + 6 * 3600
+    assert timer['payload']['object_generation']
+    assert timer['payload']['condition_hash']
+    assert timer['payload']['origin'] == 'operator'
+    assert timer['dedupe_key'] == (
+        f"workflow-timer:{timer['payload']['graph_id']}:ebay-upload:quota:1"
+    )
+
+
+def test_workflow_quota_timer_requires_generation_bound_dispatch(
+    worker, tmp_path, monkeypatch,
+):
+    sku = 'tgwtest-unbound'
+    d = _write_item(tmp_path, sku)
+    _make_photos(d, ['1.jpg'])
+    worker.config['workflow_migration'] = {'ebay_upload_quota_timer': 'workflow'}
+    provider_calls = []
+    monkeypatch.setattr(ebay_upload, 'upload_photo',
+                        lambda cfg, photo: provider_calls.append(photo))
+    before = _read(tmp_path, sku)
+
+    with pytest.raises(HardFailure, match='missing bound identity'):
+        worker.handle(_job(sku))
+
+    assert provider_calls == []
+    assert _read(tmp_path, sku) == before
+    assert worker._enqueued == []
+
+
+def test_invalid_quota_timer_selector_fails_before_provider_or_item_effect(
+    worker, tmp_path, monkeypatch,
+):
+    sku = 'tgwtest-invalid-mode'
+    d = _write_item(tmp_path, sku)
+    _make_photos(d, ['1.jpg'])
+    worker.config['workflow_migration'] = {'ebay_upload_quota_timer': 'surprise'}
+    provider_calls = []
+    monkeypatch.setattr(ebay_upload, 'upload_photo',
+                        lambda cfg, photo: provider_calls.append(photo))
+    before = _read(tmp_path, sku)
+
+    with pytest.raises(HardFailure, match='invalid workflow_migration'):
+        worker.handle(_job(sku))
+
+    assert provider_calls == []
+    assert _read(tmp_path, sku) == before
+    assert worker._enqueued == []
+
+
+def test_workflow_quota_timer_preserves_partial_progress_and_rebinds_snapshot(
+    worker, tmp_path, monkeypatch,
+):
+    sku = 'tgwtest-partial-timer'
+    d = _write_item(tmp_path, sku)
+    _make_photos(d, ['1.jpg', '2.jpg'])
+    worker.config['workflow_migration'] = {'ebay_upload_quota_timer': 'workflow'}
+
+    def first_then_quota(cfg, photo):
+        if photo.name == '2.jpg':
+            raise QuotaBudgetExceeded('quota')
+        return 'https://x/1.jpg'
+
+    monkeypatch.setattr(ebay_upload, 'upload_photo', first_then_quota)
+    receipt = worker.handle(_job(
+        sku, treatment_id='ebay-upload', treatment_version='1',
+        graph_id='prior-graph', object_generation='prior-generation',
+        condition_hash='prior-condition',
+    ))
+
+    assert len(_read(tmp_path, sku)['ebay_photos']) == 1
+    assert receipt['evidence']['uploaded_this_attempt'] == 1
+    assert receipt['evidence']['changed'] is True
+    assert receipt['timer']['payload']['object_generation'] != 'prior-generation'
+    assert receipt['timer']['payload']['graph_id'] != 'prior-graph'
+
+
+def test_workflow_quota_cap_is_structured_operator_attention(
+    worker, tmp_path, monkeypatch,
+):
+    sku = 'tgwtest-workflow-cap'
+    d = _write_item(tmp_path, sku)
+    _make_photos(d, ['1.jpg'])
+    worker.config['workflow_migration'] = {'ebay_upload_quota_timer': 'workflow'}
+    monkeypatch.setattr(
+        ebay_upload, 'upload_photo',
+        lambda cfg, photo: (_ for _ in ()).throw(QuotaBudgetExceeded('quota')),
+    )
+
+    with pytest.raises(TreatmentFailure) as caught:
+        worker.handle(_job(
+            sku, quota_retries=ebay_upload.QUOTA_RETRY_LIMIT,
+            treatment_id='ebay-upload', treatment_version='1',
+            graph_id='graph-1', object_generation='gen-1',
+            condition_hash='condition-1', origin='operator',
+        ))
+
+    evidence = caught.value.result['evidence']
+    assert evidence['reason_code'] == 'EBAY_UPLOAD_QUOTA_RETRY_LIMIT'
+    assert evidence['operator_attention_required'] is True
+    assert evidence['operator_origin'] is True
+    assert worker._enqueued == []
+
+
 def test_partial_photo_failure_raises_not_silently_succeeds(worker, tmp_path, monkeypatch):
     """A non-quota per-photo failure (e.g. a corrupt file) must not be masked
     either — any shortfall raises so worker_base retries, never silent success."""
@@ -163,6 +299,161 @@ def test_full_success_still_reports_complete(worker, tmp_path, monkeypatch):
     assert complete_events[0]['new'] == 2
     doc = _read(tmp_path, sku)
     assert len(doc['ebay_photos']) == 2
+
+
+def test_governed_upload_in_legacy_transport_returns_fully_bound_receipt(
+    worker, tmp_path, monkeypatch,
+):
+    """A workflow-dispatched upload remains receipt-bound during migration.
+
+    Production had scheduled this exact governed job while the upload worker's
+    transport selector was still legacy.  The photos uploaded successfully,
+    but the legacy-shaped receipt omitted graph/generation/condition identity
+    and worker_base dead-lettered it after the external success.
+    """
+    sku = 'tgwtest-governed-legacy'
+    d = _write_item(tmp_path, sku)
+    _make_photos(d, ['1.jpg'])
+    monkeypatch.setattr(
+        ebay_upload, 'upload_photo',
+        lambda cfg, photo: f'https://i.ebayimg.com/{photo.name}',
+    )
+
+    receipt = worker.handle(_job(
+        sku,
+        treatment_id='ebay-upload', treatment_version='1',
+        graph_id='graph-1',
+        goal_profile_id='tgw.ebay_listable', goal_profile_version='1',
+        object_generation='generation-1', condition_hash='condition-1',
+        entity_id=sku,
+    ))
+
+    assert receipt['receipt_schema_id'] == 'treatment-receipt/v1'
+    assert receipt['treatment_id'] == 'ebay-upload'
+    assert receipt['graph_id'] == 'graph-1'
+    assert receipt['goal_profile_id'] == 'tgw.ebay_listable'
+    assert receipt['object_generation'] == 'generation-1'
+    assert receipt['condition_hash'] == 'condition-1'
+    assert receipt['entity_id'] == sku
+    assert receipt['outcome'] == 'satisfied'
+    assert receipt['established_conditions'] == ['photos_uploaded']
+    assert receipt['evidence']['reason_code'] == 'UPLOAD_SUCCEEDED'
+    assert len(receipt['evidence']['resulting_generation']) == 64
+    from tgw.queue.worker_base import _treatment_receipt_error
+    queued_job = _job(
+        sku,
+        treatment_id='ebay-upload', treatment_version='1',
+        graph_id='graph-1',
+        goal_profile_id='tgw.ebay_listable', goal_profile_version='1',
+        object_generation='generation-1', condition_hash='condition-1',
+        entity_id=sku,
+    )
+    queued_job.update({
+        'queue_name': 'ebay_upload', 'entity_type': 'item', 'entity_id': sku,
+    })
+    assert _treatment_receipt_error(receipt, queued_job) is None
+
+
+def test_operator_photo_resync_returns_non_treatment_result(
+    worker, tmp_path, monkeypatch,
+):
+    """A direct Resync Photos job is not a workflow treatment dispatch.
+
+    Production hit this with a complete 7/7 photo mapping: ebay_upload did no
+    external upload work, returned a legacy partial ``treatment_id`` object,
+    and worker_base dead-lettered the otherwise successful reconciliation as
+    INVALID_RECEIPT_IDENTITY.  The direct result must be explicitly shaped as
+    a non-treatment result so the queue can record ordinary success.
+    """
+    sku = 'tgwtest-operator-resync'
+    local_photo = tmp_path / sku / '1.jpg'
+    d = _write_item(tmp_path, sku, ebay_photos=[{
+        'local': str(local_photo),
+        'url': 'https://i.ebayimg.com/1.jpg',
+    }])
+    _make_photos(d, ['1.jpg'])
+    upload_calls = []
+    monkeypatch.setattr(
+        ebay_upload, 'upload_photo',
+        lambda cfg, photo: upload_calls.append(photo),
+    )
+
+    result = worker.handle(_job(
+        sku, origin='operator', reason='resync_photos_gap',
+    ))
+
+    assert upload_calls == []
+    assert result['schema'] == 'ebay-upload-result/v1'
+    assert result['outcome'] == 'satisfied'
+    assert result['established_conditions'] == ['photos_uploaded']
+    assert result['artifacts'] == [f'item:{sku}']
+    assert result['evidence']['reason_code'] == 'UPLOAD_SUCCEEDED'
+    assert result['evidence']['uploaded_this_attempt'] == 0
+    assert result['evidence']['uploaded_total'] == 1
+    assert len(result['evidence']['resulting_generation']) == 64
+    from tgw.queue.worker_base import _is_treatment_receipt_candidate
+    assert _is_treatment_receipt_candidate(result) is False
+
+
+def test_malformed_and_stale_photo_rows_do_not_skip_or_survive_upload(
+    worker, tmp_path, monkeypatch,
+):
+    sku = 'tgwtest-stale-photo-rows'
+    local_photo = tmp_path / sku / '1.jpg'
+    d = _write_item(tmp_path, sku, ebay_photos=[
+        'https://legacy.example/not-a-mapping.jpg',
+        {'local': str(local_photo), 'url': ''},
+        {'local': str(tmp_path / sku / 'removed.jpg'), 'url': 'https://x/stale'},
+    ])
+    _make_photos(d, ['1.jpg'])
+    calls = []
+    monkeypatch.setattr(
+        ebay_upload, 'upload_photo',
+        lambda cfg, photo: calls.append(photo.name) or 'https://x/1.jpg',
+    )
+
+    worker.handle(_job(sku))
+
+    assert calls == ['1.jpg']
+    assert _read(tmp_path, sku)['ebay_photos'] == [
+        {'local': str(tmp_path / sku / '1.jpg'), 'url': 'https://x/1.jpg'},
+    ]
+
+
+def test_no_photos_on_disk_persists_durable_finding(worker, tmp_path):
+    """Invariant C11 (todo #1303): the no-photos guard must persist a durable
+    finding on the item JSON (queryable by catalog-verify), not just log and
+    silently succeed leaving the item stalled forever."""
+    sku = 'tgwtest7'
+    _write_item(tmp_path, sku)  # no photos created on disk
+
+    worker.handle(_job(sku))
+
+    doc = _read(tmp_path, sku)
+    blocked = doc.get('ebay_upload_blocked')
+    assert blocked is not None, 'no-photos guard must persist ebay_upload_blocked'
+    assert blocked['reason'] == 'no_photos_on_disk'
+    assert blocked['detected_at']
+
+
+def test_full_success_clears_prior_no_photos_finding(worker, tmp_path, monkeypatch):
+    """Self-healing: once photos are added back and upload succeeds, the
+    prior ebay_upload_blocked finding must be cleared, not left stale."""
+    sku = 'tgwtest8'
+    d = _write_item(tmp_path, sku)
+    # Simulate a previously-recorded finding from an earlier no-photos pass.
+    doc = _read(tmp_path, sku)
+    doc['ebay_upload_blocked'] = {'reason': 'no_photos_on_disk', 'detected_at': 'x'}
+    (d / f'{sku}.json').write_text(json.dumps(doc), encoding='utf-8')
+
+    _make_photos(d, ['1.jpg'])
+    monkeypatch.setattr(ebay_upload, 'upload_photo',
+                        lambda cfg, photo: f'https://x/{photo.name}')
+
+    worker.handle(_job(sku))
+
+    doc = _read(tmp_path, sku)
+    assert not doc.get('ebay_upload_blocked'), 'finding must be cleared on full success'
 
 
 def test_network_error_persists_partial_progress_before_reraising(worker, tmp_path, monkeypatch):

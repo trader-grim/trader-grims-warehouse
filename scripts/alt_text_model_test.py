@@ -31,6 +31,8 @@ from pathlib import Path
 
 import requests
 
+from tgw.logging import announce_script_run, setup_logging
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -405,6 +407,20 @@ def main() -> None:
     parser.add_argument('--models', nargs='+', metavar='ID',
                         help='test only these model IDs (subset of defaults)')
     args = parser.parse_args()
+
+    # No prior logging configuration in this script (verified live, todo
+    # #1369) — without it, announce_script_run()'s event is silently
+    # dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.alt_text_model_test')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'alt_text_model_test.py',
+        'side-by-side vision model comparison for alt-text quality/latency/cost',
+        skus=args.skus, n=args.n, include_ollama=args.include_ollama,
+        models=args.models,
+    )
 
     openrouter_key = _load_openrouter_key()
 

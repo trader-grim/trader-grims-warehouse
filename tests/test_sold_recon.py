@@ -177,20 +177,41 @@ def test_mark_item_sold_writes_sale_block(tmp_path):
     doc = json.loads(p.read_text(encoding="utf-8"))
     assert doc["status"] == "sold"
     assert doc["ebay_listing"]["status"] == "Sold"
-    assert doc["ebay_sale"] == {
+    # ebay_sale is a LIST of sold-order records (todo #1604 / PP-SOLD-001).
+    assert doc["ebay_sale"] == [{
         "order_id": "O-1", "buyer": "bob", "sale_price": 19.99,
         "quantity": 1, "sale_date": "2026-06-07",
         "synced_at": "2026-06-07T00:00:00Z",
-    }
+    }]
 
 
-def test_mark_item_sold_is_idempotent(tmp_path):
+def test_mark_item_sold_same_order_id_is_idempotent(tmp_path):
+    # Re-delivering the SAME order_id must not duplicate the record.
     p = _sold_item(tmp_path)
     assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, **_SOLD_ARGS) is True
-    # Second call: already sold -> False, no change.
-    assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, **dict(_SOLD_ARGS, order_id="O-2")) is False
+    assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, **_SOLD_ARGS) is False
     doc = json.loads(p.read_text(encoding="utf-8"))
-    assert doc["ebay_sale"]["order_id"] == "O-1"  # not overwritten
+    assert len(doc["ebay_sale"]) == 1
+    assert doc["ebay_sale"][0]["order_id"] == "O-1"
+
+
+def test_mark_item_sold_second_distinct_order_is_never_dropped(tmp_path):
+    # Regression test for todo #1604 / PP-SOLD-001: a genuinely different
+    # order_id for a SKU that is already status=sold must still be recorded
+    # (appended), not silently discarded by the old status=='sold' guard.
+    p = _sold_item(tmp_path)
+    assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, **_SOLD_ARGS) is True
+    second_args = dict(_SOLD_ARGS, order_id="O-2", buyer="alice",
+                        sale_date="2026-06-08", synced_at="2026-06-08T00:00:00Z")
+    assert pull.mark_item_sold(p, cfg={"api_key": "test-api-key"}, **second_args) is True
+
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    assert doc["status"] == "sold"
+    assert len(doc["ebay_sale"]) == 2
+    order_ids = {rec["order_id"] for rec in doc["ebay_sale"]}
+    assert order_ids == {"O-1", "O-2"}
+    second_rec = next(r for r in doc["ebay_sale"] if r["order_id"] == "O-2")
+    assert second_rec["buyer"] == "alice"
 
 
 def test_mark_item_sold_dry_run_does_not_write(tmp_path):
@@ -199,6 +220,288 @@ def test_mark_item_sold_dry_run_does_not_write(tmp_path):
     doc = json.loads(p.read_text(encoding="utf-8"))
     assert doc["status"] == "available"
     assert "ebay_sale" not in doc
+
+
+def _order(order_id: str, listing_id: str, *, quantity: int = 1) -> dict:
+    return {
+        "order_id": order_id,
+        "buyer": "buyer",
+        "transactions": [{
+            "listing_id": listing_id,
+            "sale_price": 12.5,
+            "quantity": quantity,
+            "sale_date": "2026-08-01T00:00:00Z",
+        }],
+    }
+
+
+def test_load_sold_order_csvs_handles_blank_prefix_and_real_headers(tmp_path):
+    csv_path = tmp_path / "orders.csv"
+    csv_path.write_text(
+        '\ufeff,,,,\n'
+        '"Order Number","Buyer Username","Item Number","Quantity",'
+        '"Sold For","Sale Date"\n'
+        '"O-CSV","alice","L-CSV","2","$12.50","2026-05-01"\n',
+        encoding="utf-8",
+    )
+
+    orders = pull.load_sold_order_csvs([csv_path])
+
+    assert orders == [{
+        "order_id": "O-CSV",
+        "buyer": "alice",
+        "created_at": "2026-05-01",
+        "transactions": [{
+            "listing_id": "L-CSV",
+            "sku": "",
+            "sale_price": 12.5,
+            "quantity": 2,
+            "sale_date": "2026-05-01",
+        }],
+    }]
+
+
+def test_history_reconcile_deduplicates_api_and_csv_order(tmp_path):
+    _write_item(tmp_path, "tgw-dedupe", {
+        "sku": "tgw-dedupe",
+        "status": "In Stock",
+        "draft_listing": {"quantity": 3},
+        "ebay_listing": {"listing_id": "L-D", "status": "Active"},
+    })
+    order = _order("O-D", "L-D", quantity=1)
+
+    result = pull.reconcile_sold_order_history(
+        {"itemdata_root": tmp_path, "api_key": "test-api-key"},
+        tmp_path,
+        [order, order],
+        [{"listing_id": "L-D", "status": "Active", "quantity": 3}],
+        "2026-08-15T00:00:00Z",
+        dry_run=False,
+    )
+
+    item = json.loads((tmp_path / "tgw-dedupe" / "tgw-dedupe.json").read_text())
+    assert result["active_sales_recorded"] == 1
+    assert len(item["ebay_sale"]) == 1
+    assert item["draft_listing"]["quantity"] == 3
+
+
+def test_history_reconcile_rejects_conflicting_duplicate_quantity(tmp_path):
+    with pytest.raises(ValueError, match="conflicting quantity"):
+        pull.reconcile_sold_order_history(
+            {"itemdata_root": tmp_path, "api_key": "test-api-key"},
+            tmp_path,
+            [_order("O-X", "L-X", quantity=1),
+             _order("O-X", "L-X", quantity=2)],
+            [],
+            "2026-08-15T00:00:00Z",
+        )
+
+
+def test_history_reconcile_old_listing_csv_does_not_sell_active_relisted_sku(
+    tmp_path,
+):
+    _write_item(tmp_path, "tgw123", {
+        "sku": "tgw123",
+        "status": "In Stock",
+        "draft_listing": {"quantity": 2},
+        "ebay_listing": {"listing_id": "L-NEW", "status": "Active"},
+    })
+    historic = _order("O-OLD", "L-OLD")
+    historic["transactions"][0]["sku"] = "tgw123"
+
+    result = pull.reconcile_sold_order_history(
+        {"itemdata_root": tmp_path, "api_key": "test-api-key"},
+        tmp_path,
+        [historic],
+        [{
+            "listing_id": "L-NEW", "custom_label": "tgw123",
+            "status": "Active", "quantity": 2,
+        }],
+        "2026-08-15T00:00:00Z",
+        dry_run=False,
+    )
+
+    item = json.loads((tmp_path / "tgw123" / "tgw123.json").read_text())
+    assert result["active_sales_recorded"] == 1
+    assert item["status"] == "In Stock"
+    assert item["draft_listing"]["quantity"] == 2
+    assert item["ebay_sale"][0]["order_id"] == "O-OLD"
+
+
+def test_history_reconcile_active_custom_label_resolves_missing_listing_index(
+    tmp_path,
+):
+    _write_item(tmp_path, "tgw456", {
+        "sku": "tgw456",
+        "status": "sold",
+        "draft_listing": {"quantity": 0},
+    })
+
+    result = pull.reconcile_sold_order_history(
+        {"itemdata_root": tmp_path, "api_key": "test-api-key"},
+        tmp_path,
+        [],
+        [{
+            "listing_id": "L-ACTIVE", "custom_label": "tgw456",
+            "status": "Active", "quantity": 1,
+        }],
+        "2026-08-15T00:00:00Z",
+        dry_run=False,
+    )
+
+    item = json.loads((tmp_path / "tgw456" / "tgw456.json").read_text())
+    assert result["active_unmatched"] == []
+    assert result["active_status_restored"] == 0
+    assert result["ok"] is False
+    assert result["active_sold_conflicts"] == [{
+        "sku": "tgw456",
+        "listing_id": "L-ACTIVE",
+        "provider_available_quantity": 1,
+        "prior_sold_marker": False,
+    }]
+    assert item["status"] == "sold"
+    assert item["draft_listing"]["quantity"] == 0
+
+
+def test_history_reconcile_holds_provider_active_sold_inventory(tmp_path):
+    _write_item(tmp_path, "tgw-active", {
+        "sku": "tgw-active",
+        "status": "sold",
+        "draft_listing": {"quantity": 0},
+        "ebay_listing": {"listing_id": "L-1", "status": "Sold"},
+        "ebay_sale": [{"order_id": "OLD"}],
+    })
+
+    result = pull.reconcile_sold_order_history(
+        {"itemdata_root": tmp_path, "api_key": "test-api-key"},
+        tmp_path,
+        [_order("NEW", "L-1")],
+        [{
+            "listing_id": "L-1", "custom_label": "tgw-active",
+            "status": "Active", "quantity": 4, "quantity_sold": 0,
+        }],
+        "2026-08-15T00:00:00Z",
+        dry_run=False,
+    )
+
+    item = json.loads((tmp_path / "tgw-active" / "tgw-active.json").read_text())
+    assert result["ok"] is False
+    assert item["ebay_listing"]["status"] == "Sold"
+    assert result["active_status_restored"] == 0
+    assert len(result["active_sold_conflicts"]) == 1
+    assert result["active_sales_recorded"] == 1
+    assert item["status"] == "sold"
+    assert item["draft_listing"]["quantity"] == 0
+    assert {sale["order_id"] for sale in item["ebay_sale"]} == {"OLD", "NEW"}
+
+
+def test_history_reconcile_repairs_v1_sold_marker_without_relisting(tmp_path):
+    _write_item(tmp_path, "tgw-repair", {
+        "sku": "tgw-repair",
+        "status": "In Stock",
+        "draft_listing": {"quantity": 4, "title": "preserved"},
+        "ebay_listing": {"listing_id": "L-REPAIR", "status": "Active"},
+        "sold_reconciliation": {
+            "schema": "tgw-sold-active-reconciliation/v1",
+        },
+    })
+
+    result = pull.reconcile_sold_order_history(
+        {"itemdata_root": tmp_path, "api_key": "test-api-key"},
+        tmp_path,
+        [],
+        [{
+            "listing_id": "L-REPAIR", "custom_label": "tgw-repair",
+            "status": "Active", "quantity": 4,
+        }],
+        "2026-08-15T00:00:00Z",
+        dry_run=False,
+    )
+
+    item = json.loads((tmp_path / "tgw-repair" / "tgw-repair.json").read_text())
+    assert result["ok"] is False
+    assert result["active_sold_local_restored"] == 1
+    assert item["status"] == "sold"
+    assert item["draft_listing"] == {"quantity": 0, "title": "preserved"}
+    assert item["ebay_listing"]["status"] == "Active"
+    assert item["sold_reconciliation"]["schema"] == "tgw-sold-active-conflict/v2"
+
+
+def test_history_reconcile_active_sale_does_not_decrement_provider_quantity(tmp_path):
+    _write_item(tmp_path, "tgw-multi", {
+        "sku": "tgw-multi",
+        "status": "In Stock",
+        "draft_listing": {"quantity": 7},
+        "ebay_listing": {"listing_id": "L-2", "status": "Active"},
+    })
+
+    pull.reconcile_sold_order_history(
+        {"itemdata_root": tmp_path, "api_key": "test-api-key"},
+        tmp_path,
+        [_order("ORDER", "L-2", quantity=2)],
+        [{
+            "listing_id": "L-2", "custom_label": "tgw-multi",
+            "status": "Active", "quantity": 7, "quantity_sold": 0,
+        }],
+        "2026-08-15T00:00:00Z",
+        dry_run=False,
+    )
+
+    item = json.loads((tmp_path / "tgw-multi" / "tgw-multi.json").read_text())
+    assert item["status"] == "In Stock"
+    assert item["draft_listing"]["quantity"] == 7
+    assert item["ebay_sale"][0]["order_id"] == "ORDER"
+
+
+def test_history_reconcile_inactive_completed_order_marks_sold(tmp_path):
+    _write_item(tmp_path, "tgw-ended", {
+        "sku": "tgw-ended",
+        "status": "In Stock",
+        "draft_listing": {"quantity": 1},
+        "ebay_listing": {"listing_id": "L-3", "status": "UNPUBLISHED"},
+    })
+
+    result = pull.reconcile_sold_order_history(
+        {"itemdata_root": tmp_path, "api_key": "test-api-key"},
+        tmp_path,
+        [_order("ORDER", "L-3")],
+        [],
+        "2026-08-15T00:00:00Z",
+        dry_run=False,
+    )
+
+    item = json.loads((tmp_path / "tgw-ended" / "tgw-ended.json").read_text())
+    assert result["inactive_sales_marked"] == 1
+    assert item["status"] == "sold"
+    assert item["draft_listing"]["quantity"] == 0
+
+
+def test_history_reconcile_dry_run_leaves_active_sold_item_unchanged(tmp_path):
+    _write_item(tmp_path, "tgw-dry", {
+        "sku": "tgw-dry",
+        "status": "sold",
+        "draft_listing": {"quantity": 2},
+        "ebay_listing": {"listing_id": "L-4", "status": "PUBLISHED"},
+    })
+    path = tmp_path / "tgw-dry" / "tgw-dry.json"
+    before = path.read_bytes()
+
+    result = pull.reconcile_sold_order_history(
+        {"itemdata_root": tmp_path, "api_key": "test-api-key"},
+        tmp_path,
+        [_order("ORDER", "L-4")],
+        [{
+            "listing_id": "L-4", "custom_label": "tgw-dry",
+            "status": "Active", "quantity": 2, "quantity_sold": 0,
+        }],
+        "2026-08-15T00:00:00Z",
+        dry_run=True,
+    )
+
+    assert result["active_status_restored"] == 0
+    assert len(result["active_sold_conflicts"]) == 1
+    assert result["active_sales_recorded"] == 1
+    assert path.read_bytes() == before
 
 
 # ---------------------------------------------------------------------------

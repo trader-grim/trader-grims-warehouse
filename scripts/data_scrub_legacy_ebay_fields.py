@@ -53,9 +53,11 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from recompile_category_backfill import _canonical_category  # noqa: E402
+
 from tgw import items  # noqa: E402
 from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
-from recompile_category_backfill import _canonical_category  # noqa: E402
+from tgw.logging import announce_script_run, setup_logging  # noqa: E402
 
 FIELDS_TO_CHECK = [
     'Item number', '#STATUS', 'attribute_set', 'm2_categories', 'category_ids',
@@ -286,6 +288,19 @@ def main() -> int:
                        help='Skip scanning; read a previously written plan/report '
                             'file and apply it (run this mode as tgw)')
     args = parser.parse_args()
+
+    # No prior logging configuration in this script (verified live, todo
+    # #1369) — without it, announce_script_run()'s event is silently
+    # dropped (default root level WARNING, no handlers).
+    try:
+        setup_logging('tgw.data_scrub_legacy_ebay_fields')
+    except OSError:
+        pass  # no writable log root (e.g. CI/test env) — announce still attempted below
+    announce_script_run(
+        'data_scrub_legacy_ebay_fields.py',
+        'strip legacy eBay Trading API fields from item JSON (todo #1053)',
+        apply_plan=args.apply_plan, limit=args.limit, report=args.report,
+    )
 
     if args.apply_plan:
         _apply(Path(args.apply_plan))

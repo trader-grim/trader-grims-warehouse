@@ -542,18 +542,59 @@ def check_sync_conflicts(cfg: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def check_nats(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Probe the NATS audit-mutation stream (PP-AIOPS-001 Phase 1, fire-and-forget
+    by design — never blocks ItemData writes, see nats_client.py).
+
+    Green (ok=True): connected to a broker, streams present.
+    Yellow (ok=True, warn=True): nats-py is installed but no broker is
+      reachable — EXPECTED until PP-AIOPS-001's broker is stood up (todo
+      #1510, deliberately held pending Dave's go-ahead). Fire-and-forget
+      means item mutations are unaffected; this is informational, not a
+      platform failure.
+    Red (ok=False): anything else — e.g. nats-py not installed (dependency
+      regression) or an unexpected probe error — a real problem worth fixing.
+    """
     t = time.time()
     url = cfg.get("nats_url", "nats://127.0.0.1:4222")
     try:
         from tgw.apis.nats_client import check_nats as _probe
+    except ImportError as e:
+        return _result("nats", False,
+                       f"nats-py not installed: {e} — mutations are not being audited",
+                       (time.time() - t) * 1000, url=url)
+
+    try:
         result = _probe(url)
         ok = result.get("ok", False)
         latency = result.get("latency_ms")
         streams = result.get("streams", [])
-        detail = f"connected ({latency}ms)" if ok else result.get("error", "unreachable")
-        return _result("nats", ok, detail, (time.time() - t) * 1000,
-                       url=url, latency_ms=latency, streams=streams,
-                       warn=not ok)
+        error = result.get("error", "")
+
+        if ok:
+            detail = f"connected ({latency}ms)"
+            return _result("nats", True, detail, (time.time() - t) * 1000,
+                           url=url, latency_ms=latency, streams=streams,
+                           warn=False)
+
+        broker_unreachable = any(
+            marker in error.lower()
+            for marker in ("no servers available", "connection refused",
+                           "connection timeout", "timed out")
+        )
+        if broker_unreachable:
+            detail = (f"module installed, broker unreachable ({error}) — "
+                       "expected until #1510 stands up the NATS broker; "
+                       "fire-and-forget, item mutations unaffected")
+            return _result("nats", True, detail, (time.time() - t) * 1000,
+                           url=url, latency_ms=latency, streams=streams,
+                           warn=True)
+
+        # Any other failure (e.g. module missing, auth error, unexpected
+        # exception) is a real problem, not the expected no-broker state.
+        return _result("nats", False, error or "unreachable",
+                       (time.time() - t) * 1000, url=url, latency_ms=latency,
+                       streams=streams, warn=True)
     except Exception as e:
         return _result("nats", False, str(e), (time.time() - t) * 1000, url=url)
 
@@ -597,6 +638,124 @@ def check_ebay_sync_fallback(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Unresolved Best-Offer registry check (invariant C11, todo #1373, follow-up
+# to #1314)
+# ---------------------------------------------------------------------------
+
+# Same fixed path as tgw.offers._UNRESOLVED_REGISTRY. Not cfg-driven (the
+# registry itself has no ItemData/SKU to key off, so there's no per-item
+# catalog-verify rule that fits — this is the cross-cutting discovery
+# mechanism instead). Kept as a module-level constant (not inlined) so
+# tests can monkeypatch it the same way tests/test_offers.py monkeypatches
+# the source-of-truth constant in offers.py.
+_OFFERS_UNRESOLVED_REGISTRY = Path('/opt/TGW/var/offers-unresolved.json')
+
+
+def check_offers_unresolved(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Surface the count of Best-Offer responses that succeeded live on
+    eBay but could not be resolved to a local SKU (see
+    tgw.offers._record_unresolved_offer / invariant C11).
+
+    Without this, the registry (/opt/TGW/var/offers-unresolved.json) has
+    no discovery mechanism at all -- an operator would never know it
+    exists. `tgw offers repair` (tgw.offers.repair_unresolved_offers)
+    retries resolution; this check just surfaces the count so someone
+    knows to run it.
+
+    ok=True when the registry is absent/empty or every entry is resolved.
+    ok=False (warn=True) when 1+ unresolved entries remain.
+    """
+    t = time.time()
+    path = _OFFERS_UNRESOLVED_REGISTRY
+    if not path.exists():
+        return _result("offers_unresolved", True, "no unresolved offers", (time.time() - t) * 1000,
+                       offers_unresolved_count=0)
+    try:
+        registry = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return _result("offers_unresolved", True, f"registry unreadable: {exc}", (time.time() - t) * 1000,
+                       offers_unresolved_count=0)
+
+    unresolved = [oid for oid, entry in registry.items() if not entry.get("resolved")]
+    n = len(unresolved)
+    if n == 0:
+        return _result("offers_unresolved", True, "no unresolved offers", (time.time() - t) * 1000,
+                       offers_unresolved_count=0)
+    return _result(
+        "offers_unresolved", False,
+        f"{n} unresolved Best-Offer entr{'y' if n == 1 else 'ies'} — run `tgw offers repair`",
+        (time.time() - t) * 1000, warn=True, offers_unresolved_count=n,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sold-order history gap check (invariant C11, todo #1271, follow-up to
+# #1270/PP-DATAINTEGRITY-001)
+# ---------------------------------------------------------------------------
+
+# Same default path/override key as tgw.ebay.pull._DEFAULT_SOLD_ORDER_GAP_LOG /
+# _record_sold_order_gap's `raw.sold_order_gap_log` cfg override. Not
+# imported directly from tgw.ebay.pull to avoid pulling that module's
+# eBay-client/fence imports into every `tgw health` run — this mirrors the
+# quota-incident-log pattern (_incident_log_path in quota.py) of a
+# locally-known default + cfg override, kept in sync by convention same as
+# _OFFERS_UNRESOLVED_REGISTRY above.
+_DEFAULT_SOLD_ORDER_GAP_LOG = '/opt/TGW/var/log/sold-order-history-gaps.jsonl'
+
+
+def check_sold_order_gaps(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Surface real, PERMANENT sold-order history gaps recorded by
+    tgw.ebay.pull._record_sold_order_gap (invariant C11): GetOrders cannot
+    see further back than its 89-day rolling ceiling, so an incremental
+    resume whose last sync predates that window loses history
+    irrecoverably. Without this check the JSONL registry has no discovery
+    mechanism — an operator would never know a gap occurred.
+
+    ok=True when the log is absent/empty (no gap has ever occurred).
+    ok=False (warn=True) when 1+ gap records exist — surfaces the count,
+    total days lost, and the most recent gap's detail.
+    """
+    t = time.time()
+    raw = cfg.get('raw', {}) if isinstance(cfg.get('raw'), dict) else {}
+    path = Path(raw.get('sold_order_gap_log', _DEFAULT_SOLD_ORDER_GAP_LOG))
+
+    if not path.exists():
+        return _result('sold_order_gaps', True, 'no sold-order history gaps recorded',
+                       (time.time() - t) * 1000, sold_order_gap_count=0)
+
+    records = []
+    try:
+        for line in path.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except Exception:
+                continue
+    except Exception as exc:
+        return _result('sold_order_gaps', True, f'gap log unreadable: {exc}',
+                       (time.time() - t) * 1000, sold_order_gap_count=0)
+
+    n = len(records)
+    if n == 0:
+        return _result('sold_order_gaps', True, 'no sold-order history gaps recorded',
+                       (time.time() - t) * 1000, sold_order_gap_count=0)
+
+    total_days = sum(r.get('gap_days', 0) for r in records)
+    latest = max(records, key=lambda r: r.get('ts', ''))
+    return _result(
+        'sold_order_gaps', False,
+        f"{n} sold-order history gap(s), {total_days} day(s) unrecoverable total — "
+        f"most recent {latest.get('gap_days', '?')} day(s) at {latest.get('ts', '?')} "
+        f"(requested from {latest.get('requested_from', '?')}, clamped to "
+        f"{latest.get('clamped_from', '?')})",
+        (time.time() - t) * 1000, warn=True, sold_order_gap_count=n,
+        sold_order_gap_days_total=total_days, sold_order_gap_latest=latest,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Metered-API quota check (PP-QUOTA-001, session 42)
 # ---------------------------------------------------------------------------
 
@@ -609,15 +768,18 @@ def _openrouter_key_limit(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     near-exhausted, causing a 402 pile-up that took a live log-dive to
     diagnose. Surfacing it here means the next time this happens it's
     visible in `tgw health` instead. Returns None (not an error) if the
-    credentials file or the `requests` call fails — this is a nice-to-have
-    signal, never a reason to fail the whole quota check.
+    OPENROUTER_API_KEY secret is unset (see tgw.apis.secrets.get_api_key())
+    or the `requests` call fails — this is a nice-to-have signal, never a
+    reason to fail the whole quota check.
     """
     try:
         import requests
-        cred_path = Path(cfg.get('secrets_root', '/opt/TGW/secrets')) / 'openrouter-credentials.json'
-        if not cred_path.exists():
+
+        from tgw.apis.secrets import get_api_key
+        try:
+            key = get_api_key('openrouter')
+        except RuntimeError:
             return None
-        key = json.loads(cred_path.read_text(encoding='utf-8')).get('api_key')
         if not key:
             return None
         resp = requests.get(
@@ -667,20 +829,51 @@ def check_quota(cfg: Dict[str, Any]) -> Dict[str, Any]:
                    f"remaining ({or_limit.get('limit_reset')})")
         or_low = remaining < (0.1 * or_limit['limit'])
 
+    # todo #1337 / PP-QUOTA-001: proactive low-balance warning for the three
+    # direct-LLM providers. DeepSeek gets a real live balance check;
+    # Google/Anthropic (no balance API — see quota.py module docstring)
+    # get an estimated-spend-today translation of the existing call-count
+    # budget, using real ai_usage token counts x published pricing.
+    bal = {}
+    bal_note = ''
+    bal_low = False
+    try:
+        bal = quota.balance_status(cfg)
+        ds = bal.get('deepseek')
+        parts = []
+        if ds is not None:
+            parts.append(f"deepseek balance: ${ds['total_balance_usd']:.2f}"
+                         + (' [LOW]' if ds.get('low') else ''))
+        est = bal.get('estimated_cost_usd') or {}
+        if est:
+            parts.append('est. spend today: ' + ', '.join(
+                f"{pool}=${amt:.2f}" + (' [LOW]' if bal.get('cost_warn', {}).get(pool) else '')
+                for pool, amt in sorted(est.items())))
+        if parts:
+            bal_note = ' | ' + '; '.join(parts)
+        bal_low = bool(bal.get('low_balance'))
+    except Exception as exc:  # noqa: BLE001 — nice-to-have signal, never fail health
+        log.warning('quota.balance_status failed: %s', exc)
+
     if incidents:
         return _result('quota', False,
-                       f'{incidents} × 429 incident(s) today — {spent_summary}{or_note}',
+                       f'{incidents} × 429 incident(s) today — {spent_summary}{or_note}{bal_note}',
                        (time.time() - t) * 1000, warn=True,
                        incidents_today=incidents, pools=st.get('pools', {}),
-                       openrouter_key_limit=or_limit)
-    if hot or or_low:
-        reason = ', '.join(sorted(hot)) if hot else 'openrouter key near its limit'
+                       openrouter_key_limit=or_limit, balance=bal)
+    if hot or or_low or bal_low:
+        reasons = list(sorted(hot))
+        if or_low:
+            reasons.append('openrouter key near its limit')
+        if bal_low:
+            reasons.append('direct-LLM provider low balance/spend')
+        reason = ', '.join(reasons)
         return _result('quota', True,
-                       f"background halted: {reason} — {spent_summary}{or_note}",
+                       f"background halted: {reason} — {spent_summary}{or_note}{bal_note}",
                        (time.time() - t) * 1000, warn=True, pools=st.get('pools', {}),
-                       openrouter_key_limit=or_limit)
-    return _result('quota', True, f'{spent_summary}{or_note}', (time.time() - t) * 1000,
-                   pools=st.get('pools', {}), openrouter_key_limit=or_limit)
+                       openrouter_key_limit=or_limit, balance=bal)
+    return _result('quota', True, f'{spent_summary}{or_note}{bal_note}', (time.time() - t) * 1000,
+                   pools=st.get('pools', {}), openrouter_key_limit=or_limit, balance=bal)
 
 
 # ---------------------------------------------------------------------------
@@ -714,6 +907,8 @@ def check_all(cfg: Dict[str, Any],
     ]
     checks.append(check_nats(cfg))
     checks.append(check_ebay_sync_fallback(cfg))
+    checks.append(check_offers_unresolved(cfg))
+    checks.append(check_sold_order_gaps(cfg))
     checks.append(check_quota(cfg))
     if include_ollama:
         checks.append(check_ollama())

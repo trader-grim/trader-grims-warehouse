@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from .config import load_json_strict
+from .config import load_json_strict, location_dir
 from .resolver import find_item_jsons, load_item_doc
 
 # ---------------------------------------------------------------------------
@@ -293,7 +293,11 @@ def build_location_tree(cfg: Dict[str, Any], source: str = 'auto',
             problems.append(f'missing item dir for sku {sku}: {target}')
             continue
         if not check_only:
-            link_dir  = dest_root / location
+            try:
+                link_dir = location_dir(cfg, location)
+            except ValueError as exc:
+                problems.append(f'unsafe location for sku {sku}: {exc}')
+                continue
             link_path = link_dir / sku
             link_dir.mkdir(parents=True, exist_ok=True)
             if link_path.exists() or link_path.is_symlink():
@@ -378,10 +382,19 @@ def build_all_catalogs(cfg: Dict[str, Any],
     from .sqlite_catalog import build_sqlite_catalog
     started = time.time()
     steps = []
+    # source='auto' (rather than a hardcoded 'full_catalog'/'search_catalog')
+    # is required here, not just a stylistic choice: in check_only mode the
+    # prior step never writes its output file (see build_full_catalog /
+    # build_search_catalog `if not check_only: atomic_write_json(...)`), so
+    # a fresh system doing a check_only dry-run has no full_catalog file on
+    # disk yet. Forcing source='full_catalog' would make load_full_catalog()
+    # raise FileNotFoundError instead of the preview falling back to reading
+    # ItemData directly, exactly as build_search_catalog's own 'auto' mode
+    # already does when full_catalog_path doesn't exist (#1286).
     for result in [
         build_full_catalog(cfg, check_only=check_only),
-        build_search_catalog(cfg, source='full_catalog', check_only=check_only),
-        build_location_tree(cfg, source='search_catalog', check_only=check_only),
+        build_search_catalog(cfg, source='auto', check_only=check_only),
+        build_location_tree(cfg, source='auto', check_only=check_only),
         build_sqlite_catalog(cfg, check_only=check_only),
     ]:
         steps.append(result)

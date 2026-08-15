@@ -248,6 +248,25 @@ def test_classify_batch_ops_suggestion_gets_pp_ops_001(cfg):
     assert result[0]["todo_agent"] == "admin"
 
 
+@pytest.mark.parametrize("bad_agent", ["gemini", "", "Claude", "ADMIN", "  ", None])
+def test_apply_invalid_todo_agent_falls_back_to_admin(suggestions_file, bad_agent):
+    """An invalid/hallucinated todo_agent value must never flow through raw —
+    it falls back to 'admin' (human review) rather than being passed as-is."""
+    entries = parse_pending(suggestions_file)
+    classified = [
+        {"index": 0, "action": "review_flag"},
+        {"index": 1, "action": "todo", "todo_agent": bad_agent,
+         "todo_body": "do the thing"},
+        {"index": 2, "action": "review_flag"},
+    ]
+    with patch("tgw.suggestions.todo_add") as mock_add:
+        apply_classifications(suggestions_file, entries, classified, write=True)
+    mock_add.assert_called_once_with(
+        "admin", "do the thing",
+        source="suggestions_classify", pp_ref=None, reasoning="normal",
+    )
+
+
 def test_apply_ops_todo_passes_pp_ops_001(suggestions_file):
     """apply_classifications passes PP-OPS-001 to todo_add for operator-gate todos."""
     entries = parse_pending(suggestions_file)

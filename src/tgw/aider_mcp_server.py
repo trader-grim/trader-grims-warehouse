@@ -40,14 +40,40 @@ from mcp.server import FastMCP
 # Constants
 # ---------------------------------------------------------------------------
 
-_REPO_ROOT = Path('/opt/TGW/src/trader-grims-warehouse')
+# Derived, not hardcoded (CI incident 2026-07-18, todo #1458 follow-up):
+# a literal '/opt/TGW/src/trader-grims-warehouse' only exists on tgw-prod.
+# _ensure_worktree() passes this as subprocess cwd, and GitHub's hosted
+# runner checks the repo out elsewhere -- a hardcoded cwd that doesn't
+# exist makes Popen raise FileNotFoundError before git even runs.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _AIDER_BIN = Path('/home/tgw/.local/bin/aider')
-_SECRETS_ROOT = Path('/opt/TGW/secrets')
 _AUDIT_LOG = Path.home() / '.local/share/aider-audit/usage.csv'
 
 _AUDIT_FIELDS = ['timestamp', 'mode', 'files', 'prompt_excerpt', 'exit_code', 'duration_s']
 
 _TASK_TIMEOUT = 300  # seconds; architect mode can be slow
+_WORKTREES_ROOT = Path('/opt/TGW/var/worktrees')
+
+
+def _plan_runtime_binding() -> tuple[Path, str]:
+    """Load the same standalone Plan root/Git binding as the primary MCP server."""
+    from tgw.config import load_config
+
+    config_path = Path(
+        os.environ.get('TGW_CONFIG', '/opt/TGW/config/tgw-api-config.json')
+    )
+    cfg = load_config(config_path)
+    plan_root = Path(
+        os.environ.get(
+            'TGW_STANDALONE_PLAN_VAULT',
+            str(cfg.get('standalone_plan_root') or '/opt/TGW/library/plans'),
+        )
+    )
+    git_path = os.environ.get(
+        'TGW_STANDALONE_PLAN_GIT',
+        str(cfg.get('plan_git_path') or 'git'),
+    )
+    return plan_root, git_path
 
 # ---------------------------------------------------------------------------
 # Secrets + audit helpers
@@ -55,14 +81,16 @@ _TASK_TIMEOUT = 300  # seconds; architect mode can be slow
 
 
 def _load_api_keys() -> dict[str, str]:
+    from tgw.apis.secrets import get_api_key
+
     keys = {}
-    for env_name, filename in [
-        ('ANTHROPIC_API_KEY', 'anthropic-credentials.json'),
-        ('OPENROUTER_API_KEY', 'openrouter-credentials.json'),
+    for env_name, provider in [
+        ('ANTHROPIC_API_KEY', 'anthropic'),
+        ('OPENROUTER_API_KEY', 'openrouter'),
+        ('DEEPSEEK_API_KEY', 'deepseek'),
     ]:
-        p = _SECRETS_ROOT / filename
         try:
-            val = json.loads(p.read_text())['api_key']
+            val = get_api_key(provider)
             if val:
                 keys[env_name] = val
         except Exception:
@@ -91,19 +119,136 @@ def _append_audit(row: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_files(files: list[str]) -> tuple[list[Path], str | None]:
-    """Resolve repo-relative paths; reject anything outside the repo.
+def _resolve_files(files: list[str], base: Path | None = None) -> tuple[list[Path], str | None]:
+    """Resolve repo-relative paths against `base` (default: shared checkout);
+    reject anything outside `base`.
+
+    `base` matters when running inside a worktree — the paths must resolve
+    against the worktree's own copy, not the shared checkout, or a "task
+    isolated" run silently edits the wrong tree.
 
     Returns (resolved_paths, error_message_or_None).
     """
+    base = base or _REPO_ROOT
     resolved = []
-    repo_str = str(_REPO_ROOT.resolve())
+    base_str = str(base.resolve())
     for f in files:
-        candidate = (_REPO_ROOT / f).resolve()
-        if not str(candidate).startswith(repo_str + os.sep) and str(candidate) != repo_str:
+        candidate = (base / f).resolve()
+        if not str(candidate).startswith(base_str + os.sep) and str(candidate) != base_str:
             return [], f'file outside repo boundary: {f!r}'
         resolved.append(candidate)
     return resolved, None
+
+
+def _slugify_task_slug(task_slug: str) -> tuple[str, str | None]:
+    """Validate a caller-supplied task_slug for safe use as a branch/dir name."""
+    import re
+
+    if not re.match(r'^[0-9]+-[a-z0-9_-]+$|^aider-[0-9]+$', task_slug):
+        return '', (
+            f'invalid task_slug {task_slug!r}; expected "<id>-<slug>" '
+            '(e.g. "1358-aider-worktree-fix")'
+        )
+    return task_slug, None
+
+
+def _build_preflight_context(work_dir: Path) -> str:
+    """Surface the same class of Plan Vault awareness Claude's own sessions
+    get automatically from `.claude/hooks/session-start-briefing.py`
+    (SessionStart hook) — inbox file count/names + `tgw plan check`
+    warnings — into an Aider task's initial prompt.
+
+    Best-effort: any failure here degrades to a short note rather than
+    blocking the task (this is context, not a gate).
+    """
+    lines = ['## Plan Vault preflight (source-envelope bound)']
+
+    try:
+        from tgw.plan_graph import live_plan_graph
+
+        plan_root, git_path = _plan_runtime_binding()
+
+        packet = live_plan_graph(
+            plan_root,
+            'Aider worktree implementation context', receiver='aider', limit=8,
+            git_path=git_path,
+        )
+        lines.extend([
+            f"- Standalone Plan commit: {packet['plan_commit']}",
+            f"- Source envelope: {packet['source_envelope']}",
+            f"- Aider receiver rule: {packet['receiver_profile']}",
+            f"- Authority: {packet['canonical_authority']}",
+        ])
+    except Exception as exc:
+        lines.append(f'- Plan Graph unavailable; do not infer missing intent ({exc})')
+
+    inbox_dir = work_dir / 'docs/TGW-Plan-Vault/inbox/claude'
+    try:
+        inbox_files = sorted(p.name for p in inbox_dir.glob('*.md'))
+    except Exception:
+        inbox_files = None
+    if inbox_files is None:
+        lines.append('- inbox/claude: could not read (skipped)')
+    elif inbox_files:
+        shown = ', '.join(inbox_files[:10])
+        more = f' (+{len(inbox_files) - 10} more)' if len(inbox_files) > 10 else ''
+        lines.append(f'- inbox/claude: {len(inbox_files)} file(s): {shown}{more}')
+    else:
+        lines.append('- inbox/claude: empty')
+
+    try:
+        proc = subprocess.run(
+            ['tgw', 'plan', 'check'],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        check_out = (proc.stdout or proc.stderr or '').strip()
+        lines.append(f'- `tgw plan check`: {check_out[:800] or "(no output)"}')
+    except Exception as exc:
+        lines.append(f'- `tgw plan check`: could not run ({exc})')
+
+    lines.append(
+        '- If anything above is directly relevant to the files you are about '
+        'to edit, take it into account before proceeding.'
+    )
+    return '\n'.join(lines) + '\n'
+
+
+def _ensure_worktree(task_slug: str) -> tuple[Path, str | None]:
+    """Create (or reattach to) the isolated worktree+branch for one task,
+    matching tgw-coder's contract (PP-HERMES-EA-001, mandatory 2026-07-13)
+    and bin/tgw-aider's shell-side equivalent. Base branch is verified LIVE,
+    never hardcoded.
+
+    Returns (worktree_dir, error_message_or_None).
+    """
+    worktree_dir = _WORKTREES_ROOT / task_slug
+    branch = f'task/{task_slug}'
+
+    if worktree_dir.is_dir():
+        return worktree_dir, None
+
+    base_proc = subprocess.run(
+        ['git', 'branch', '--show-current'],
+        cwd=_REPO_ROOT, capture_output=True, text=True,
+    )
+    base_branch = base_proc.stdout.strip()
+    if not base_branch:
+        return worktree_dir, 'could not determine live base branch (detached HEAD?)'
+
+    branch_exists = subprocess.run(
+        ['git', 'show-ref', '--quiet', f'refs/heads/{branch}'],
+        cwd=_REPO_ROOT,
+    ).returncode == 0
+
+    cmd = ['git', 'worktree', 'add']
+    cmd += [str(worktree_dir), branch] if branch_exists else ['-b', branch, str(worktree_dir), base_branch]
+    proc = subprocess.run(cmd, cwd=_REPO_ROOT, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return worktree_dir, f'git worktree add failed: {proc.stderr.strip()}'
+    return worktree_dir, None
 
 
 # ---------------------------------------------------------------------------
@@ -113,9 +258,14 @@ def _resolve_files(files: list[str]) -> tuple[list[Path], str | None]:
 mcp = FastMCP(
     name='tgw-aider',
     instructions=(
-        'Aider code-editing bridge for TGW. '
-        'Delegate mechanical Python edits to Aider (Claude-backed) via '
-        'aider_run_task. Use aider_get_diff / aider_get_log to inspect results. '
+        'Aider code-editing bridge for TGW, running DeepSeek V4 Flash '
+        '(direct API) — the "busywork" execution tier: XS/S mechanical '
+        'coding tasks, monitoring/schlepping/merging, not architecture or '
+        'eBay-invariant work. Delegate mechanical Python edits to Aider via '
+        'aider_run_task, passing task_slug="<todo-id>-<slug>" for anything '
+        'with a real todo behind it — that isolates the run to its own '
+        'worktree+branch (mandatory contract, PP-HERMES-EA-001), matching '
+        'tgw-coder. Use aider_get_diff / aider_get_log to inspect results. '
         'Files must be repo-relative paths (e.g. "src/tgw/items.py"). '
         'Prefer "edit" mode for straightforward changes; "architect" for '
         'multi-file refactors that need a planning pass first.'
@@ -128,6 +278,7 @@ def aider_run_task(
     prompt: str,
     files: list[str],
     mode: str = 'edit',
+    task_slug: str = '',
 ) -> str:
     """Run an Aider code-editing task on the specified TGW source files.
 
@@ -136,10 +287,19 @@ def aider_run_task(
             (e.g. "Add a guard in items._write_field() that raises ValueError
             when qty < 0, then add a test in tests/test_items.py").
         files: Repo-relative paths to hand to Aider (e.g. ["src/tgw/items.py",
-            "tests/test_items.py"]).  All must be inside the TGW repo.
-        mode: "edit" — Sonnet edits directly (default, fast, good for focused
-            changes).  "architect" — Sonnet plans the diff, Haiku applies it
-            (better for multi-file refactors).
+            "tests/test_items.py"]).  All must be inside the task's tree.
+        mode: "edit" — deepseek-v4-flash edits directly (default, fast, good
+            for focused changes).  "architect" — a planning pass first, then
+            edits applied (better for multi-file refactors).
+        task_slug: REQUIRED. "<todo-id>-<slug>" (e.g. "1358-aider-worktree-fix").
+            Runs in an isolated worktree at /opt/TGW/var/worktrees/<task_slug>
+            on branch task/<task_slug> — the same mandatory-isolation
+            contract tgw-coder follows (PP-HERMES-EA-001). Reattaches if the
+            worktree already exists. There is no shared-checkout fallback:
+            an empty/omitted task_slug used to silently run directly against
+            the shared checkout with auto-commits enabled (todo #1458) — now
+            rejected outright rather than approval-gated, since no legitimate
+            caller was found depending on that path.
 
     Returns JSON: {ok, exit_code, output, diff, duration_s}
     """
@@ -149,18 +309,52 @@ def aider_run_task(
             'error': f'invalid mode {mode!r}; must be "edit" or "architect"',
         })
 
-    paths, err = _resolve_files(files)
+    # Structural input validation first, against _REPO_ROOT — before
+    # _ensure_worktree(), which shells out to live git and needs a real
+    # branch checked out (fails on a detached-HEAD checkout, e.g. CI's
+    # actions/checkout). Bad input shouldn't require creating a worktree
+    # to be rejected. Paths get re-resolved against the real work_dir
+    # below once the worktree exists.
+    if not files:
+        return json.dumps({'ok': False, 'error': 'files list is empty'})
+    _, err = _resolve_files(files, base=_REPO_ROOT)
+    if err:
+        return json.dumps({'ok': False, 'error': err})
+
+    if not task_slug or not task_slug.strip():
+        return json.dumps({
+            'ok': False,
+            'error': (
+                'task_slug is required — every aider_run_task dispatch must run '
+                'in its own isolated worktree ("<todo-id>-<slug>", e.g. '
+                '"1358-aider-worktree-fix"), matching tgw-coder\'s mandatory '
+                'worktree-isolation contract (PP-HERMES-EA-001). There is no '
+                'shared-checkout fallback (todo #1458).'
+            ),
+        })
+
+    task_slug, err = _slugify_task_slug(task_slug)
+    if err:
+        return json.dumps({'ok': False, 'error': err})
+    work_dir, err = _ensure_worktree(task_slug)
+    if err:
+        return json.dumps({'ok': False, 'error': err})
+
+    paths, err = _resolve_files(files, base=work_dir)
     if err:
         return json.dumps({'ok': False, 'error': err})
     if not paths:
         return json.dumps({'ok': False, 'error': 'files list is empty'})
+
+    preflight = _build_preflight_context(work_dir)
+    full_prompt = f'{preflight}\n{prompt}'
 
     msg_file = None
     try:
         with tempfile.NamedTemporaryFile(
             mode='w', suffix='.md', prefix='aider_task_', delete=False
         ) as tf:
-            tf.write(prompt)
+            tf.write(full_prompt)
             msg_file = tf.name
 
         cmd = [str(_AIDER_BIN), '--yes', '--message-file', msg_file]
@@ -169,11 +363,18 @@ def aider_run_task(
         cmd += [str(p) for p in paths]
 
         env = {**os.environ, **_API_KEYS}
+        # Matches tgw-coder's documented worktree gotchas (todo #1374): the
+        # tgw venv's editable install + psycopg2's libz.so.1 both need these
+        # or a worktree run silently tests/imports the wrong copy of the code.
+        env['PYTHONPATH'] = f"{work_dir / 'src'}:{env.get('PYTHONPATH', '')}"
+        env['LD_LIBRARY_PATH'] = (
+            f"{env.get('NIX_LD_LIBRARY_PATH', '')}:{env.get('LD_LIBRARY_PATH', '')}"
+        )
         t0 = time.monotonic()
 
         proc = subprocess.run(
             cmd,
-            cwd=_REPO_ROOT,
+            cwd=work_dir,
             env=env,
             capture_output=True,
             text=True,
@@ -183,14 +384,14 @@ def aider_run_task(
 
         diff_proc = subprocess.run(
             ['git', 'diff'],
-            cwd=_REPO_ROOT,
+            cwd=work_dir,
             capture_output=True,
             text=True,
         )
         diff = diff_proc.stdout or ''
 
         rel_files = ' '.join(
-            str(p.relative_to(_REPO_ROOT)) for p in paths
+            str(p.relative_to(work_dir)) for p in paths
         )
         _append_audit({
             'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),

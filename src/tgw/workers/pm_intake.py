@@ -1,9 +1,13 @@
 """
 tgw.workers.pm_intake — Plan-Manager intake worker.
 
-Watches inbox/ for dropped Markdown notes. When a note appears:
-    1. Move it to inbox/queued/<filename> (only after submission-delay gate)
-    2. Enqueue a pm_intake job referencing the file
+Watches inbox/, inbox/dave/, and inbox/tigwa/ for dropped Markdown notes
+(inbox/claude/, inbox/queued/, inbox/archive/, inbox/review/ are never
+scanned — see the topology comment above scan_and_enqueue). When a note
+appears:
+    1. Move it to inbox/queued/<owner-qualified-name> (only after submission-delay gate)
+    2. Enqueue a pm_intake job referencing the file, with owner/source_path/sha256
+       recorded in the payload for provenance and idempotent dedupe
     3. On claim: read file, call LLM to classify the change,
        dispatch action (append_to_section | file_document | flag_for_review | no_change)
     4. Archive to inbox/archive/ (durable — included in vault sync)
@@ -30,14 +34,17 @@ Queue name: pm_intake
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 import shutil
+import socket
 import time
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import psycopg2
 import psycopg2.errors
@@ -123,6 +130,7 @@ Respond with JSON only:
 
 _NOTE_MAX_CHARS = 32000
 _URL_FETCH_MAX_CHARS = 32000
+_MAX_RESPONSE_BYTES = 5_000_000  # 5MB — generous for HTML/text pages, well above _URL_FETCH_MAX_CHARS's needs
 
 # Matches a bare HTTP/HTTPS URL as the entire note content
 _URL_ONLY_RE = re.compile(r'^https?://\S+$', re.IGNORECASE)
@@ -184,6 +192,35 @@ def is_url_submission(text: str) -> Optional[str]:
     return stripped if _URL_ONLY_RE.match(stripped) else None
 
 
+def _resolve_is_safe(hostname: str) -> bool:
+    """False if *hostname* resolves to any private/loopback/link-local/
+    reserved/multicast address — blocks SSRF to internal network targets."""
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return False  # can't resolve → can't safely proceed
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast):
+            return False
+    return True
+
+
+class _SSRFBlocked(Exception):
+    """Raised from the httpx request event hook to abort a request/redirect
+    whose target resolves to a private/internal address."""
+
+
+def _ssrf_guard_hook(request: 'Any') -> None:
+    """httpx request event hook — fires for the initial request AND for
+    every redirect hop when follow_redirects=True, so this re-checks each
+    hop before it is sent."""
+    host = request.url.host
+    if not host or not _resolve_is_safe(host):
+        raise _SSRFBlocked(f'blocked: url targets a private/internal address ({host!r})')
+
+
 def fetch_url(url: str, timeout_s: float = 10.0) -> Dict[str, Any]:
     """Fetch a URL and return extracted text content.
 
@@ -207,26 +244,65 @@ def fetch_url(url: str, timeout_s: float = 10.0) -> Dict[str, Any]:
     except ImportError:
         return {'ok': False, 'url': url, 'error': 'httpx not installed'}
 
+    parsed = urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        return {'ok': False, 'url': url,
+                'error': 'blocked: url targets a private/internal address (no valid hostname)'}
+    if not _resolve_is_safe(parsed.hostname):
+        return {'ok': False, 'url': url,
+                'error': 'blocked: url targets a private/internal address'}
+
     try:
-        with httpx.Client(follow_redirects=True, timeout=timeout_s) as client:
-            resp = client.get(url, headers={'User-Agent': 'TGW-pm-intake/1.0'})
+        with httpx.Client(
+            follow_redirects=True,
+            timeout=timeout_s,
+            event_hooks={'request': [_ssrf_guard_hook]},
+        ) as client:
+            with client.stream(
+                'GET', url, headers={'User-Agent': 'TGW-pm-intake/1.0'}
+            ) as resp:
+                content_length = resp.headers.get('content-length')
+                if content_length is not None:
+                    try:
+                        if int(content_length) > _MAX_RESPONSE_BYTES:
+                            return {
+                                'ok': False, 'url': url,
+                                'error': f'response too large (content-length {content_length} '
+                                         f'exceeds {_MAX_RESPONSE_BYTES} bytes)',
+                            }
+                    except ValueError:
+                        pass  # malformed header — fall through to the real streaming guard
+
+                body = bytearray()
+                for chunk in resp.iter_bytes():
+                    body.extend(chunk)
+                    if len(body) > _MAX_RESPONSE_BYTES:
+                        return {
+                            'ok': False, 'url': url,
+                            'error': f'response too large (exceeded {_MAX_RESPONSE_BYTES} bytes '
+                                     f'while streaming)',
+                        }
+
+                if resp.status_code >= 400:
+                    return {'ok': False, 'url': url,
+                            'error': f'HTTP {resp.status_code} from {resp.url}'}
+
+                content_type = resp.headers.get('content-type', '').lower()
+                final_url = str(resp.url)
+                encoding = resp.encoding or 'utf-8'
+                text = body.decode(encoding, errors='replace')
+    except _SSRFBlocked as exc:
+        return {'ok': False, 'url': url, 'error': str(exc)}
     except httpx.TimeoutException:
         return {'ok': False, 'url': url, 'error': f'timeout after {timeout_s}s'}
     except httpx.RequestError as exc:
         return {'ok': False, 'url': url, 'error': f'request error: {exc}'}
 
-    if resp.status_code >= 400:
-        return {'ok': False, 'url': url,
-                'error': f'HTTP {resp.status_code} from {resp.url}'}
-
-    content_type = resp.headers.get('content-type', '').lower()
-    final_url = str(resp.url)
-
     if 'html' in content_type:
-        raw_text = _html_to_text(resp.text)
-        title = _extract_title(resp.text)
+        raw_text = _html_to_text(text)
+        title = _extract_title(text)
     elif content_type.startswith('text/'):
-        raw_text = resp.text.strip()
+        raw_text = text.strip()
         title = ''
     else:
         return {
@@ -274,11 +350,18 @@ def _build_url_note(fetch_result: Dict[str, Any]) -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _archive(note_path: Path, processed_dir: Path) -> None:
+def _archive(note_path: Path, processed_dir: Path, source_label: Optional[str] = None) -> None:
+    """Move note_path into processed_dir with a timestamp prefix.
+
+    source_label (e.g. 'tigwa/foo.md') is flattened into the archived filename
+    when given, so provenance survives archiving and same-name notes from
+    different owner queues never collide in the flat archive/ dir.
+    """
     ts = datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S')
-    archive_path = processed_dir / f'{ts}-{note_path.name}'
+    flat_name = source_label.replace('/', '__') if source_label else note_path.name
+    archive_path = processed_dir / f'{ts}-{flat_name}'
     shutil.move(str(note_path), archive_path)
-    log.info('archived %s → archive/%s', note_path.name, archive_path.name)
+    log.info('archived %s → archive/%s', source_label or note_path.name, archive_path.name)
 
 
 def _patch_plan_append(plan_text: str, section_heading: str, content: str) -> str:
@@ -347,13 +430,154 @@ def _write_filing_log(
 
 # ---------------------------------------------------------------------------
 # Shared scan-and-enqueue logic (used by worker loop and tgw admin-file)
+#
+# Plan Vault inbox topology (2026-07-15, PP-HERMES-EA-001 #1435/#1436): the
+# inbox was split per-actor to stop the class of incident where one actor
+# processed another's inbox as their own contract (Tigwa reading Claude's
+# inbox as her own Step 1 job). admin-file/pm_intake now discovers ONLY:
+#   inbox/            root staging (unassigned intake)
+#   inbox/dave/       Dave-originated intake
+#   inbox/tigwa/      Tigwa-originated intake
+# and never recurses into inbox/claude/ (Claude's own correspondence —
+# explicitly not general intake), inbox/queued/, inbox/archive/, or
+# inbox/review/ (operational subtrees, not fresh intake). glob('*.md') on
+# each of those three directories is non-recursive, so this exclusion is
+# structural, not just a filename check.
 # ---------------------------------------------------------------------------
 
+_INTAKE_OWNERS: tuple = ('root', 'dave', 'tigwa')
+_CONTROL_FILENAMES: frozenset = frozenset({'readme.md', 'untitled.base'})
+
+
+def _owner_dir(inbox_dir: Path, owner: str) -> Path:
+    return inbox_dir if owner == 'root' else inbox_dir / owner
+
+
+def _relative_name(owner: str, md_file: Path) -> str:
+    """Owner-qualified relative name used as queue payload/path identity.
+
+    Root files keep their bare filename (backward compatible with existing
+    queued/<filename> layout); dave/tigwa files are qualified as
+    '<owner>/<filename>' so same-name notes from different owners never
+    collide once staged into queued/, review/, or archive/.
+    """
+    return md_file.name if owner == 'root' else f'{owner}/{md_file.name}'
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with path.open('rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _iter_source_files(inbox_dir: Path):
+    """Yield (owner, md_file) for every intake-eligible (Markdown, staged/
+    enqueued) candidate, sorted deterministically by owner then filename."""
+    for owner in _INTAKE_OWNERS:
+        subdir = _owner_dir(inbox_dir, owner)
+        if not subdir.is_dir():
+            continue
+        for md_file in sorted(subdir.glob('*.md')):
+            if md_file.name.lower() in _CONTROL_FILENAMES:
+                continue
+            yield owner, md_file
+
+
+def _iter_all_candidate_files(inbox_dir: Path):
+    """Yield (owner, path) for every direct-child regular file across
+    root/dave/tigwa, including non-Markdown types — manifest reporting only,
+    never used to drive a move/enqueue. Excludes control files. Non-
+    recursive, same as _iter_source_files."""
+    for owner in _INTAKE_OWNERS:
+        subdir = _owner_dir(inbox_dir, owner)
+        if not subdir.is_dir():
+            continue
+        for path in sorted(subdir.iterdir()):
+            if not path.is_file():
+                continue
+            if path.name.lower() in _CONTROL_FILENAMES:
+                continue
+            yield owner, path
+
+
+_UNSUPPORTED_TYPE_REASON = 'seen but not actionable: unsupported source type pending supervised normalization'
+
+
+def build_intake_manifest(cfg: Dict[str, Any], bypass_delay: bool = False) -> List[Dict[str, Any]]:
+    """Non-mutating inventory of intake candidates across root/dave/tigwa.
+
+    Covers every direct-child regular file, not just Markdown (Tigwa review,
+    #1438): non-Markdown files are reported eligible=False with an explicit
+    "seen but not actionable" reason instead of being invisible, since
+    knowledge-first intake (Dave, 2026-07-15) requires every direct source
+    artifact to appear as a preserved/deferred candidate even when staging
+    stays Markdown-only. Each entry reports source path, owner queue, file
+    type, size, mtime, sha256, eligibility decision, and (Markdown only) the
+    queue path a real run would use. Never touches the filesystem beyond
+    stat()/read for hashing.
+    """
+    inbox_dir: Path = cfg['plan_inbox_path']
+    delay_hours: float = float(cfg.get('pm_intake_delay_hours', 4.0))
+    manifest: List[Dict[str, Any]] = []
+
+    for owner, path in _iter_all_candidate_files(inbox_dir):
+        rel_name = _relative_name(owner, path)
+        is_markdown = path.suffix.lower() == '.md'
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            manifest.append({
+                'source_path': rel_name, 'owner': owner, 'eligible': False,
+                'reason': f'stat failed: {exc}',
+            })
+            continue
+
+        try:
+            sha256 = _sha256_file(path)
+        except OSError as exc:
+            manifest.append({
+                'source_path': rel_name, 'owner': owner, 'eligible': False,
+                'reason': f'read failed: {exc}',
+            })
+            continue
+
+        age_hours = (time.time() - stat.st_mtime) / 3600
+        entry: Dict[str, Any] = {
+            'source_path': rel_name,
+            'owner': owner,
+            'file_type': path.suffix.lstrip('.').lower() or 'unknown',
+            'size_bytes': stat.st_size,
+            'mtime': datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            'age_hours': round(age_hours, 1),
+            'sha256': sha256,
+        }
+
+        if not is_markdown:
+            entry['eligible'] = False
+            entry['reason'] = _UNSUPPORTED_TYPE_REASON
+            manifest.append(entry)
+            continue
+
+        aged_enough = bypass_delay or age_hours >= delay_hours
+        entry['eligible'] = aged_enough
+        entry['reason'] = 'ready' if aged_enough else f'{age_hours:.1f}h old, delay gate is {delay_hours:.0f}h'
+        entry['planned_queue_path'] = f'queued/{rel_name}'
+        manifest.append(entry)
+
+    return manifest
+
+
 def scan_and_enqueue(cfg: Dict[str, Any], bypass_delay: bool = False) -> List[str]:
-    """Scan inbox for eligible .md files, move to queued/, enqueue jobs.
+    """Scan root/dave/tigwa inbox queues for eligible .md files, move each to
+    queued/<owner-qualified-name>, and enqueue a pm_intake job.
 
     Files that have not yet aged past pm_intake_delay_hours are skipped unless
-    bypass_delay is True. Returns list of filenames enqueued (or already queued).
+    bypass_delay is True. Returns list of owner-qualified names enqueued (or
+    already queued) — plain filename for root, '<owner>/<filename>' for
+    dave/tigwa sources.
     """
     inbox_dir: Path = cfg['plan_inbox_path']
     queued_dir = inbox_dir / 'queued'
@@ -362,9 +586,8 @@ def scan_and_enqueue(cfg: Dict[str, Any], bypass_delay: bool = False) -> List[st
     delay_hours: float = float(cfg.get('pm_intake_delay_hours', 4.0))
     enqueued: List[str] = []
 
-    for md_file in sorted(inbox_dir.glob('*.md')):
-        if md_file.name.lower() == 'readme.md':
-            continue
+    for owner, md_file in _iter_source_files(inbox_dir):
+        rel_name = _relative_name(owner, md_file)
 
         if not bypass_delay:
             try:
@@ -374,47 +597,114 @@ def scan_and_enqueue(cfg: Dict[str, Any], bypass_delay: bool = False) -> List[st
             if age_hours < delay_hours:
                 log.debug(
                     'skipping %s: %.1fh old, delay gate is %.0fh',
-                    md_file.name, age_hours, delay_hours,
+                    rel_name, age_hours, delay_hours,
                 )
                 continue
 
-        dest = queued_dir / md_file.name
+        try:
+            sha256 = _sha256_file(md_file)
+        except OSError as exc:
+            log.warning('could not hash %s: %s', rel_name, exc)
+            continue
+
+        dest = queued_dir / rel_name
+        queued_name = rel_name
+
+        # Collision guard (Tigwa review, #1438): Path.rename() replaces an
+        # existing destination on this filesystem, so a naive move could
+        # silently clobber an already-queued file of the same owner-
+        # qualified name. Never overwrite: if the queued destination already
+        # exists with identical content, this is an idempotent duplicate
+        # (skip the move, don't re-enqueue); if it exists with different
+        # content, give the incoming file its own content-addressed
+        # destination instead of colliding.
+        if dest.exists():
+            try:
+                existing_sha256 = _sha256_file(dest)
+            except OSError as exc:
+                log.warning('could not hash existing queued/%s to check collision: %s', rel_name, exc)
+                continue
+            if existing_sha256 == sha256:
+                log.info('%s already queued with identical content — skipping duplicate', rel_name)
+                tgw_logging.log_event(
+                    'pm_intake_duplicate_skipped', filename=rel_name, owner=owner, sha256=sha256,
+                )
+                enqueued.append(rel_name)
+                continue
+            collision_filename = f'{dest.stem}__{sha256[:8]}{dest.suffix}'
+            dest = dest.parent / collision_filename
+            queued_name = f'{owner}/{collision_filename}' if owner != 'root' else collision_filename
+            log.warning(
+                'collision at queued/%s (content differs) — routing to queued/%s instead',
+                rel_name, queued_name,
+            )
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             md_file.rename(dest)
         except OSError as exc:
-            log.warning('could not move %s to queued/: %s', md_file.name, exc)
+            log.warning('could not move %s to queued/: %s', rel_name, exc)
             continue
 
-        dedupe_key = f'pm_intake:{md_file.name}'
+        # Content+path-qualified dedupe key: same owner+filename with unchanged
+        # content is not re-enqueued (idempotent rerun), but an edited note
+        # (new sha256) or a same-named note from a different owner (different
+        # rel_name) gets its own key — no cross-owner or stale-content collision.
+        dedupe_key = f'pm_intake:{queued_name}:{sha256[:16]}'
         try:
             jid = state_machine.enqueue_job(
                 queue_name=QUEUE_NAME,
-                payload={'filename': md_file.name},
+                payload={
+                    'filename': queued_name,
+                    'owner': owner,
+                    'source_path': rel_name,
+                    'sha256': sha256,
+                    'intake_ts': datetime.now(tz=timezone.utc).isoformat(),
+                },
                 dedupe_key=dedupe_key,
                 max_attempts=3,
             )
-            log.info('enqueued pm_intake job for %s (job %s)', md_file.name, jid)
-            tgw_logging.log_event('pm_intake_enqueued', filename=md_file.name, job_id=jid)
-            enqueued.append(md_file.name)
+            log.info('enqueued pm_intake job for %s (job %s)', queued_name, jid)
+            tgw_logging.log_event('pm_intake_enqueued', filename=queued_name, owner=owner, job_id=jid)
+            enqueued.append(queued_name)
         except psycopg2.errors.UniqueViolation:
-            log.info('pm_intake job already exists for %s — skipping', md_file.name)
-            enqueued.append(md_file.name)
+            log.info('pm_intake job already exists for %s — skipping', queued_name)
+            enqueued.append(queued_name)
         except Exception:
-            log.exception('failed to enqueue pm_intake job for %s', md_file.name)
+            log.exception('failed to enqueue pm_intake job for %s', queued_name)
             dest.rename(md_file)
 
     return enqueued
 
 
 # ---------------------------------------------------------------------------
-# CLI command: tgw admin-file [--now]
+# CLI command: tgw admin-file [--now] [--dry-run]
 # ---------------------------------------------------------------------------
 
-def cmd_admin_file(cfg: Dict[str, Any], bypass_delay: bool = False) -> Dict[str, Any]:
+def cmd_admin_file(
+    cfg: Dict[str, Any],
+    bypass_delay: bool = False,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
     """Scan inbox and enqueue eligible notes for pm_intake processing.
 
-    Called by `tgw admin-file [--now]`. Returns {'ok', 'enqueued', 'files'}.
+    Called by `tgw admin-file [--now] [--dry-run]`.
+    --dry-run reports a manifest (source path, owner, type, size, mtime,
+    sha256, eligibility, planned queue path) without moving or enqueuing
+    anything. Returns {'ok', 'enqueued', 'files'} normally, or
+    {'ok', 'dry_run': True, 'candidates': [...]} under --dry-run.
     """
+    if dry_run:
+        manifest = build_intake_manifest(cfg, bypass_delay=bypass_delay)
+        if manifest:
+            print(f'{len(manifest)} candidate(s) found (dry run — nothing moved or enqueued):')
+            for entry in manifest:
+                status = 'ELIGIBLE' if entry.get('eligible') else 'skip'
+                print(f'  [{status}] {entry["owner"]:5s} {entry["source_path"]} — {entry.get("reason", "")}')
+        else:
+            print('No candidate inbox files found (dry run).')
+        return {'ok': True, 'dry_run': True, 'candidates': manifest}
+
     state_machine.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
     files = scan_and_enqueue(cfg, bypass_delay=bypass_delay)
     if files:
@@ -460,7 +750,9 @@ class PMIntakeWorker(QueueWorker):
         queued_dir = inbox_dir / 'queued'
         processed_dir = inbox_dir / 'archive'
         vault_path: Path = self.config['plan_vault_path']
-        master_plan_path: Path = self.config['plan_master_path']
+        master_plan_path: Path = self.config.get(
+            'plan_update_master_path', self.config['plan_master_path']
+        )
         processed_dir.mkdir(parents=True, exist_ok=True)
 
         note_path = queued_dir / filename
@@ -475,7 +767,7 @@ class PMIntakeWorker(QueueWorker):
         if not note_text:
             log.info('note %s is empty — archiving with no_change', filename)
             tgw_logging.log_event('pm_intake_empty_note', filename=filename)
-            _archive(note_path, processed_dir)
+            _archive(note_path, processed_dir, source_label=filename)
             return
 
         # PP-DOCFLOW-001 Phase 3: URL submission — fetch and substitute content
@@ -493,8 +785,8 @@ class PMIntakeWorker(QueueWorker):
                 )
                 # Immediate flag_for_review — no LLM call needed
                 review_dir = inbox_dir / 'review'
-                review_dir.mkdir(parents=True, exist_ok=True)
                 dest = review_dir / filename
+                dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(note_path), str(dest))
                 try:
                     todo_add(
@@ -505,7 +797,7 @@ class PMIntakeWorker(QueueWorker):
                     )
                 except Exception:
                     log.exception('failed to create todo for URL fetch failure — review file still moved')
-                _archive(note_path, processed_dir)
+                _archive(note_path, processed_dir, source_label=filename)
                 tgw_logging.log_event(
                     'pm_intake_url_flagged', filename=filename, url=url, error=error_msg
                 )
@@ -675,8 +967,8 @@ class PMIntakeWorker(QueueWorker):
 
         elif action == 'flag_for_review':
             review_dir = inbox_dir / 'review'
-            review_dir.mkdir(parents=True, exist_ok=True)
             dest = review_dir / filename
+            dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(note_path), str(dest))
             log.info('flagged for review: %s → inbox/review/%s', filename, filename)
 
@@ -704,7 +996,7 @@ class PMIntakeWorker(QueueWorker):
         else:
             raise HardFailure(f'unknown action {action!r} from LLM for {filename}')
 
-        _archive(note_path, processed_dir)
+        _archive(note_path, processed_dir, source_label=filename)
         tgw_logging.log_event('pm_intake_archived', filename=filename)
 
 

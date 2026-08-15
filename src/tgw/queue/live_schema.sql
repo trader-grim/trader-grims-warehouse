@@ -92,6 +92,59 @@ CREATE TABLE public.queue_jobs (
     CONSTRAINT queue_jobs_run_mode_check CHECK ((run_mode = ANY (ARRAY['immediate'::text, 'scheduled'::text, 'repeat'::text])))
 );
 
+CREATE TABLE public.operator_authorities (
+    authority_id uuid PRIMARY KEY,
+    operator_identity text NOT NULL, surface text NOT NULL,
+    entity_id text NOT NULL, goal_profile_id text NOT NULL,
+    goal_profile_version text NOT NULL, object_generation text NOT NULL,
+    pre_authority_condition_hash text NOT NULL, content_identity text NOT NULL,
+    provider_identity text NOT NULL, scopes text[] NOT NULL,
+    issued_at timestamptz NOT NULL, expires_at timestamptz NOT NULL,
+    superseded_at timestamptz, superseded_by text,
+    CHECK (expires_at > issued_at), CHECK (cardinality(scopes) > 0)
+);
+
+CREATE INDEX idx_operator_authorities_entity
+    ON public.operator_authorities USING btree (entity_id, issued_at DESC);
+
+CREATE TABLE public.provider_effects (
+    effect_id text PRIMARY KEY CHECK (effect_id ~ '^[0-9a-f]{64}$'),
+    provider text NOT NULL, operation text NOT NULL,
+    entity_type text NOT NULL, entity_id text NOT NULL,
+    object_generation text NOT NULL, graph_id text NOT NULL,
+    treatment_id text NOT NULL, treatment_version text NOT NULL,
+    condition_hash text NOT NULL,
+    request_json jsonb NOT NULL, authority_json jsonb NOT NULL,
+    state text NOT NULL CHECK (state IN
+        ('reserved','dispatched','succeeded','rejected','ambiguous','reconciliation_required')),
+    result_json jsonb, error_detail text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    dispatched_at timestamptz, finished_at timestamptz,
+    UNIQUE (provider, operation, entity_type, entity_id, object_generation)
+);
+
+CREATE UNIQUE INDEX uq_provider_effects_unresolved_entity
+    ON public.provider_effects USING btree
+    (provider, operation, entity_type, entity_id)
+    WHERE (state = ANY (ARRAY['reserved'::text, 'dispatched'::text,
+        'ambiguous'::text, 'reconciliation_required'::text]));
+
+CREATE TABLE public.provider_observations (
+    observation_id text PRIMARY KEY CHECK (observation_id ~ '^[0-9a-f]{64}$'),
+    schema_id text NOT NULL CHECK (schema_id = 'provider-observation/v1'),
+    observation_type text NOT NULL,
+    provider text NOT NULL, provider_identity text NOT NULL,
+    sku text NOT NULL, offer_id text NOT NULL,
+    object_generation text NOT NULL, graph_id text NOT NULL,
+    condition_hash text NOT NULL, content_identity text NOT NULL,
+    outcome text NOT NULL CHECK (outcome IN
+        ('corroborated','contradicted','indeterminate')),
+    evidence_json jsonb NOT NULL,
+    observed_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
 
 --
 -- Name: cancel_job(uuid, text); Type: FUNCTION; Schema: public; Owner: -
@@ -197,6 +250,8 @@ BEGIN
        AND state = 'running'
        AND lease_owner = p_worker_id
        AND lease_token = p_lease_token
+       AND lease_expires_at IS NOT NULL
+       AND lease_expires_at > NOW()
      RETURNING * INTO v_job;
 
     IF NOT FOUND THEN
@@ -415,6 +470,8 @@ BEGIN
        AND state = 'running'
        AND lease_owner = p_worker_id
        AND lease_token = p_lease_token
+       AND lease_expires_at IS NOT NULL
+       AND lease_expires_at > NOW()
      RETURNING * INTO v_job;
 
     IF NOT FOUND THEN
@@ -559,6 +616,26 @@ CREATE UNIQUE INDEX uq_queue_jobs_dedupe_key_active ON public.queue_jobs USING b
 
 
 --
+-- Name: uq_queue_jobs_dedupe_key_pending; Type: INDEX; Schema: public; Owner: -
+--
+-- todo #1618 / PP-STATEMACHINE-001: independent DB-level backstop — "at
+-- most one queued/retry_wait row per dedupe_key". NOT used as an ON
+-- CONFLICT arbiter — enqueue_job()'s debounce=True path does not use
+-- INSERT ... ON CONFLICT at all (a real Postgres arbiter-inference gotcha,
+-- verified live, made that approach unworkable — see schema.sql for the
+-- full rationale, and state_machine.py's enqueue_job() docstring "Fix
+-- actually used"). The debounce path instead does an explicit
+-- pg_advisory_xact_lock-guarded read-then-write in Python; this index is
+-- just a real DB-level safety net for the same invariant.
+-- NOT YET APPLIED to the live production database as of this commit — see
+-- the #1618 result manifest; applying it is the stitch/merge step's job,
+-- not this commit's.
+--
+
+CREATE UNIQUE INDEX uq_queue_jobs_dedupe_key_pending ON public.queue_jobs USING btree (dedupe_key) WHERE (dedupe_key IS NOT NULL AND state IN ('queued', 'retry_wait'));
+
+
+--
 -- Name: queue_jobs trg_queue_jobs_history; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -600,4 +677,3 @@ ALTER TABLE ONLY public.queue_jobs
 --
 
 \unrestrict m7vFfl7xFLdqtbYkAY592oojjlNWeqzesQmubOtcNm6rEMz04wEXfTFX1i64XEd
-

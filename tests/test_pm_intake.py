@@ -194,6 +194,292 @@ def test_scan_and_enqueue_skips_readme(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Per-actor inbox topology (2026-07-15, PP-HERMES-EA-001 #1435/#1436):
+# root/dave/tigwa are intake sources; claude/queued/archive/review are not.
+# ---------------------------------------------------------------------------
+
+def _mk_note(path: Path, content: str = '# Test', age_hours: float = 10.0) -> Path:
+    path.write_text(content)
+    ts = time.time() - (age_hours * 3600)
+    os.utime(path, (ts, ts))
+    return path
+
+
+def test_scan_and_enqueue_discovers_dave_and_tigwa(tmp_path):
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'dave').mkdir(parents=True)
+    (inbox / 'tigwa').mkdir(parents=True)
+    _mk_note(inbox / 'dave' / 'note-a.md')
+    _mk_note(inbox / 'tigwa' / 'note-b.md')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+    mock_sm = MagicMock()
+    mock_sm.enqueue_job.return_value = 'job-uuid'
+
+    with patch('tgw.workers.pm_intake.state_machine', mock_sm):
+        result = scan_and_enqueue(cfg, bypass_delay=False)
+
+    assert sorted(result) == ['dave/note-a.md', 'tigwa/note-b.md']
+    assert (inbox / 'queued' / 'dave' / 'note-a.md').exists()
+    assert (inbox / 'queued' / 'tigwa' / 'note-b.md').exists()
+
+
+def test_scan_and_enqueue_excludes_claude_queued_archive_review(tmp_path):
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    for sub in ('claude', 'queued', 'archive', 'review'):
+        (inbox / sub).mkdir(parents=True)
+    _mk_note(inbox / 'claude' / 'handoff.md')
+    _mk_note(inbox / 'queued' / 'already-queued.md')
+    _mk_note(inbox / 'archive' / '20260101-old.md')
+    _mk_note(inbox / 'review' / 'flagged.md')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+
+    with patch('tgw.workers.pm_intake.state_machine'):
+        result = scan_and_enqueue(cfg, bypass_delay=False)
+
+    assert result == []
+    # nothing was touched
+    assert (inbox / 'claude' / 'handoff.md').exists()
+    assert (inbox / 'queued' / 'already-queued.md').exists()
+
+
+def test_scan_and_enqueue_same_filename_different_owners_no_collision(tmp_path):
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'dave').mkdir(parents=True)
+    (inbox / 'tigwa').mkdir(parents=True)
+    _mk_note(inbox / 'dave' / 'shared-name.md', content='dave content')
+    _mk_note(inbox / 'tigwa' / 'shared-name.md', content='tigwa content')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+    mock_sm = MagicMock()
+    mock_sm.enqueue_job.return_value = 'job-uuid'
+
+    with patch('tgw.workers.pm_intake.state_machine', mock_sm):
+        result = scan_and_enqueue(cfg, bypass_delay=False)
+
+    assert sorted(result) == ['dave/shared-name.md', 'tigwa/shared-name.md']
+    dave_queued = (inbox / 'queued' / 'dave' / 'shared-name.md').read_text()
+    tigwa_queued = (inbox / 'queued' / 'tigwa' / 'shared-name.md').read_text()
+    assert dave_queued == 'dave content'
+    assert tigwa_queued == 'tigwa content'
+    # dedupe keys differ (owner-qualified path), both jobs actually enqueued
+    call_keys = [c.kwargs['dedupe_key'] for c in mock_sm.enqueue_job.call_args_list]
+    assert len(set(call_keys)) == 2
+
+
+def test_scan_and_enqueue_idempotent_same_content_not_reenqueued(tmp_path):
+    """Unique-violation on an unchanged dedupe key should still count as
+    'already queued' (idempotent rerun), not silently dropped."""
+    import psycopg2.errors
+
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'tigwa').mkdir(parents=True)
+    _mk_note(inbox / 'tigwa' / 'note.md', content='same content')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+    mock_sm = MagicMock()
+    mock_sm.enqueue_job.side_effect = psycopg2.errors.UniqueViolation('already exists')
+
+    with patch('tgw.workers.pm_intake.state_machine', mock_sm):
+        result = scan_and_enqueue(cfg, bypass_delay=False)
+
+    assert result == ['tigwa/note.md']
+    # file still moved into queued/ even though the job already existed
+    assert (inbox / 'queued' / 'tigwa' / 'note.md').exists()
+
+
+def test_scan_and_enqueue_payload_has_provenance(tmp_path):
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'dave').mkdir(parents=True)
+    _mk_note(inbox / 'dave' / 'note.md', content='provenance test')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+    mock_sm = MagicMock()
+    mock_sm.enqueue_job.return_value = 'job-uuid'
+
+    with patch('tgw.workers.pm_intake.state_machine', mock_sm):
+        scan_and_enqueue(cfg, bypass_delay=False)
+
+    payload = mock_sm.enqueue_job.call_args.kwargs['payload']
+    assert payload['filename'] == 'dave/note.md'
+    assert payload['owner'] == 'dave'
+    assert payload['source_path'] == 'dave/note.md'
+    assert len(payload['sha256']) == 64
+    assert 'intake_ts' in payload
+
+
+def test_build_intake_manifest_dry_run_no_mutation(tmp_path):
+    from tgw.workers.pm_intake import build_intake_manifest
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'dave').mkdir(parents=True)
+    (inbox / 'tigwa').mkdir(parents=True)
+    _mk_note(inbox / 'dave' / 'ready.md', age_hours=10.0)
+    _mk_note(inbox / 'tigwa' / 'too-fresh.md', age_hours=0.1)
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0}
+
+    manifest = build_intake_manifest(cfg, bypass_delay=False)
+
+    by_path = {m['source_path']: m for m in manifest}
+    assert by_path['dave/ready.md']['eligible'] is True
+    assert by_path['dave/ready.md']['owner'] == 'dave'
+    assert by_path['dave/ready.md']['planned_queue_path'] == 'queued/dave/ready.md'
+    assert 'sha256' in by_path['dave/ready.md']
+    assert by_path['tigwa/too-fresh.md']['eligible'] is False
+
+    # nothing was moved or created
+    assert (inbox / 'dave' / 'ready.md').exists()
+    assert (inbox / 'tigwa' / 'too-fresh.md').exists()
+    assert not (inbox / 'queued').exists()
+
+
+def test_build_intake_manifest_surfaces_non_markdown_as_deferred(tmp_path):
+    """Tigwa review #1438 / knowledge-first policy: non-Markdown direct
+    sources must be visible in --dry-run as preserved/deferred candidates,
+    not silently invisible, even though staging stays Markdown-only."""
+    from tgw.workers.pm_intake import build_intake_manifest
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'dave').mkdir(parents=True)
+    _mk_note(inbox / 'dave' / 'note.md', age_hours=10.0)
+    (inbox / 'dave' / 'research.pdf').write_bytes(b'%PDF-1.4 fake pdf bytes')
+    (inbox / 'dave' / 'notes.html').write_text('<html>fake</html>')
+    # control files stay excluded, even from this all-files enumeration
+    (inbox / 'README.md').write_text('# control file')
+    (inbox / 'Untitled.base').write_text('control')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0}
+
+    manifest = build_intake_manifest(cfg, bypass_delay=False)
+    by_path = {m['source_path']: m for m in manifest}
+
+    assert by_path['dave/note.md']['eligible'] is True
+
+    pdf = by_path['dave/research.pdf']
+    assert pdf['eligible'] is False
+    assert pdf['reason'] == 'seen but not actionable: unsupported source type pending supervised normalization'
+    assert pdf['owner'] == 'dave'
+    assert pdf['file_type'] == 'pdf'
+    assert 'sha256' in pdf
+    assert 'size_bytes' in pdf
+    assert 'mtime' in pdf
+    assert 'planned_queue_path' not in pdf
+
+    html = by_path['dave/notes.html']
+    assert html['eligible'] is False
+    assert html['reason'] == 'seen but not actionable: unsupported source type pending supervised normalization'
+
+    assert 'README.md' not in by_path
+    assert 'Untitled.base' not in by_path
+
+    # still fully non-mutating
+    assert (inbox / 'dave' / 'research.pdf').exists()
+    assert (inbox / 'dave' / 'notes.html').exists()
+    assert not (inbox / 'queued').exists()
+
+
+def test_scan_and_enqueue_never_overwrites_existing_queued_file(tmp_path):
+    """Tigwa review #1438: same owner+filename with different content and a
+    pre-existing queued destination must never be silently clobbered."""
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'tigwa').mkdir(parents=True)
+    queued_dir = inbox / 'queued' / 'tigwa'
+    queued_dir.mkdir(parents=True)
+    (queued_dir / 'note.md').write_text('OLD queued content — must survive')
+
+    _mk_note(inbox / 'tigwa' / 'note.md', content='NEW incoming content, different from queued')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+    mock_sm = MagicMock()
+    mock_sm.enqueue_job.return_value = 'job-uuid'
+
+    with patch('tgw.workers.pm_intake.state_machine', mock_sm):
+        result = scan_and_enqueue(cfg, bypass_delay=False)
+
+    # original queued artifact untouched
+    assert (queued_dir / 'note.md').read_text() == 'OLD queued content — must survive'
+    # incoming file routed to a distinct, content-addressed destination
+    siblings = sorted(p.name for p in queued_dir.iterdir())
+    assert 'note.md' in siblings
+    assert len(siblings) == 2
+    new_name = [n for n in siblings if n != 'note.md'][0]
+    assert new_name.startswith('note__') and new_name.endswith('.md')
+    assert (queued_dir / new_name).read_text() == 'NEW incoming content, different from queued'
+    assert any(r.endswith(new_name) for r in result)
+    # source file was moved (not left behind, not duplicated)
+    assert not (inbox / 'tigwa' / 'note.md').exists()
+
+
+def test_scan_and_enqueue_identical_content_collision_is_idempotent_noop(tmp_path):
+    """Same owner+filename+content already queued: skip as a duplicate, do
+    not move (nothing to move to) and do not re-enqueue a fresh job."""
+    from tgw.workers.pm_intake import scan_and_enqueue
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'tigwa').mkdir(parents=True)
+    queued_dir = inbox / 'queued' / 'tigwa'
+    queued_dir.mkdir(parents=True)
+    (queued_dir / 'note.md').write_text('identical content')
+
+    _mk_note(inbox / 'tigwa' / 'note.md', content='identical content')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+    mock_sm = MagicMock()
+
+    with patch('tgw.workers.pm_intake.state_machine', mock_sm):
+        result = scan_and_enqueue(cfg, bypass_delay=False)
+
+    assert result == ['tigwa/note.md']
+    mock_sm.enqueue_job.assert_not_called()
+    # queued artifact unchanged, and only one file sits in queued/tigwa/
+    assert (queued_dir / 'note.md').read_text() == 'identical content'
+    assert [p.name for p in queued_dir.iterdir()] == ['note.md']
+    # source left in place (not silently deleted) — data preservation
+    assert (inbox / 'tigwa' / 'note.md').exists()
+
+
+def test_cmd_admin_file_dry_run_does_not_touch_state_machine(tmp_path):
+    from tgw.workers.pm_intake import cmd_admin_file
+
+    inbox = tmp_path / 'inbox'
+    (inbox / 'dave').mkdir(parents=True)
+    _mk_note(inbox / 'dave' / 'note.md')
+
+    cfg = {'plan_inbox_path': inbox, 'pm_intake_delay_hours': 4.0,
+           'postgres_dsn': 'dbname=state_machine user=tgw'}
+
+    with patch('tgw.workers.pm_intake.state_machine') as mock_sm:
+        result = cmd_admin_file(cfg, dry_run=True)
+
+    assert result['ok'] is True
+    assert result['dry_run'] is True
+    assert len(result['candidates']) == 1
+    mock_sm.init.assert_not_called()
+    assert not (inbox / 'queued').exists()
+
+
+# ---------------------------------------------------------------------------
 # Action handlers via handle() with mocked worker
 # ---------------------------------------------------------------------------
 
@@ -479,25 +765,61 @@ def test_html_to_text_collapses_whitespace():
 
 
 def _make_mock_response(text, content_type='text/html; charset=utf-8',
-                        status_code=200, url='https://example.com/'):
-    """Build a fake httpx Response-like object."""
+                        status_code=200, url='https://example.com/',
+                        content_length=None):
+    """Build a fake httpx streamed-Response-like object.
+
+    fetch_url() now uses client.stream(...).iter_bytes() rather than a
+    buffering client.get(...), so the mock exposes .iter_bytes() and is
+    itself usable as a context manager (matching what client.stream(...)
+    returns from real httpx).
+    """
     resp = MagicMock()
     resp.status_code = status_code
-    resp.headers = {'content-type': content_type}
+    headers = {'content-type': content_type}
+    if content_length is not None:
+        headers['content-length'] = str(content_length)
+    resp.headers = headers
     resp.text = text
     resp.url = url
+    resp.encoding = 'utf-8'
+    body = text if isinstance(text, bytes) else text.encode('utf-8')
+    resp.iter_bytes = MagicMock(return_value=iter([body]) if body else iter([]))
+    resp.__enter__ = MagicMock(return_value=resp)
+    resp.__exit__ = MagicMock(return_value=False)
     return resp
 
 
+def _patch_resolve_safe(safe=True):
+    """Patch the SSRF hostname-resolution check so fetch_url tests that are
+    exercising unrelated behavior don't depend on real DNS resolution."""
+    return patch('tgw.workers.pm_intake._resolve_is_safe', return_value=safe)
+
+
 def _mock_httpx_ok(html, url='https://example.com/article'):
-    """Context manager that patches httpx.Client to return a successful response."""
+    """Context manager that patches httpx.Client to stream a successful
+    response, and treats the target host as SSRF-safe (real DNS not used)."""
     from unittest.mock import MagicMock, patch
     mock_resp = _make_mock_response(html, url=url)
     mock_client = MagicMock()
     mock_client.__enter__ = MagicMock(return_value=mock_client)
     mock_client.__exit__ = MagicMock(return_value=False)
-    mock_client.get = MagicMock(return_value=mock_resp)
-    return patch('httpx.Client', return_value=mock_client)
+    mock_client.stream = MagicMock(return_value=mock_resp)
+
+    class _Combined:
+        def __enter__(self):
+            self._p1 = patch('httpx.Client', return_value=mock_client)
+            self._p2 = _patch_resolve_safe(True)
+            self._p1.__enter__()
+            self._p2.__enter__()
+            return mock_client
+
+        def __exit__(self, *exc):
+            self._p2.__exit__(*exc)
+            self._p1.__exit__(*exc)
+            return False
+
+    return _Combined()
 
 
 def test_fetch_url_success(tmp_path):
@@ -517,8 +839,8 @@ def test_fetch_url_http_error():
     mock_client = MagicMock()
     mock_client.__enter__ = MagicMock(return_value=mock_client)
     mock_client.__exit__ = MagicMock(return_value=False)
-    mock_client.get = MagicMock(return_value=resp)
-    with patch('httpx.Client', return_value=mock_client):
+    mock_client.stream = MagicMock(return_value=resp)
+    with patch('httpx.Client', return_value=mock_client), _patch_resolve_safe(True):
         result = fetch_url('https://example.com/missing')
     assert result['ok'] is False
     assert '404' in result['error']
@@ -530,8 +852,8 @@ def test_fetch_url_unsupported_content_type():
     mock_client = MagicMock()
     mock_client.__enter__ = MagicMock(return_value=mock_client)
     mock_client.__exit__ = MagicMock(return_value=False)
-    mock_client.get = MagicMock(return_value=resp)
-    with patch('httpx.Client', return_value=mock_client):
+    mock_client.stream = MagicMock(return_value=resp)
+    with patch('httpx.Client', return_value=mock_client), _patch_resolve_safe(True):
         result = fetch_url('https://example.com/file.pdf')
     assert result['ok'] is False
     assert 'unsupported' in result['error']
@@ -541,11 +863,11 @@ def test_fetch_url_network_error():
     import httpx
 
     from tgw.workers.pm_intake import fetch_url
-    with patch('httpx.Client') as mock_cls:
+    with patch('httpx.Client') as mock_cls, _patch_resolve_safe(True):
         mock_client = MagicMock()
         mock_client.__enter__ = MagicMock(return_value=mock_client)
         mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.get = MagicMock(side_effect=httpx.RequestError('connection refused'))
+        mock_client.stream = MagicMock(side_effect=httpx.RequestError('connection refused'))
         mock_cls.return_value = mock_client
         result = fetch_url('https://down.example.com/')
     assert result['ok'] is False
@@ -558,11 +880,128 @@ def test_fetch_url_plaintext():
     mock_client = MagicMock()
     mock_client.__enter__ = MagicMock(return_value=mock_client)
     mock_client.__exit__ = MagicMock(return_value=False)
-    mock_client.get = MagicMock(return_value=resp)
-    with patch('httpx.Client', return_value=mock_client):
+    mock_client.stream = MagicMock(return_value=resp)
+    with patch('httpx.Client', return_value=mock_client), _patch_resolve_safe(True):
         result = fetch_url('https://example.com/file.txt')
     assert result['ok'] is True
     assert result['text'] == 'plain text content'
+
+
+# ---------------------------------------------------------------------------
+# SSRF protection (#1278) and response-size cap (#1279)
+# ---------------------------------------------------------------------------
+
+def test_fetch_url_blocks_loopback():
+    """fetch_url() must refuse http://127.0.0.1/ with no network call made."""
+    from tgw.workers.pm_intake import fetch_url
+    with patch('httpx.Client') as mock_cls:
+        result = fetch_url('http://127.0.0.1/')
+    assert result['ok'] is False
+    assert 'blocked' in result['error']
+    mock_cls.assert_not_called()
+
+
+def test_fetch_url_blocks_link_local_metadata():
+    """fetch_url() must refuse the cloud-metadata link-local address."""
+    from tgw.workers.pm_intake import fetch_url
+    with patch('httpx.Client') as mock_cls:
+        result = fetch_url('http://169.254.169.254/')
+    assert result['ok'] is False
+    assert 'blocked' in result['error']
+    mock_cls.assert_not_called()
+
+
+def test_fetch_url_blocks_redirect_to_loopback():
+    """A public-looking URL that 302-redirects to a loopback target must be
+    blocked mid-redirect by the event_hooks guard, not followed.
+
+    Uses a real httpx.Client with an httpx.MockTransport (only the
+    transport is mocked) so this actually exercises follow_redirects=True
+    + event_hooks for this httpx version, not just fetch_url's own logic.
+    """
+    import httpx
+
+    from tgw.workers.pm_intake import fetch_url
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == 'redirect-source.example.com':
+            return httpx.Response(302, headers={'Location': 'http://127.0.0.1:9/'})
+        # Should never be reached — the redirect target must be blocked first.
+        return httpx.Response(200, text='should not be reached')
+
+    transport = httpx.MockTransport(handler)
+    real_client_cls = httpx.Client
+
+    def patched_client(*args, **kwargs):
+        kwargs['transport'] = transport
+        return real_client_cls(*args, **kwargs)
+
+    from tgw.workers.pm_intake import _resolve_is_safe as _real_resolve_is_safe
+
+    def fake_resolve_is_safe(hostname):
+        # The "public" test host is treated as safe without real DNS; the
+        # redirect target (a real loopback literal) is judged for real —
+        # this is what actually proves the mid-redirect check fires.
+        if hostname == 'redirect-source.example.com':
+            return True
+        return _real_resolve_is_safe(hostname)
+
+    with patch('httpx.Client', side_effect=patched_client), \
+         patch('tgw.workers.pm_intake._resolve_is_safe', side_effect=fake_resolve_is_safe):
+        result = fetch_url('http://redirect-source.example.com/')
+
+    assert result['ok'] is False
+    assert 'blocked' in result['error']
+
+
+def test_fetch_url_normal_case_no_regression():
+    """A real public URL (mocked) still returns ok with extracted text."""
+    from tgw.workers.pm_intake import fetch_url
+    html = '<html><head><title>Hi</title></head><body><p>Normal page.</p></body></html>'
+    with _mock_httpx_ok(html, url='https://example.com/normal'):
+        result = fetch_url('https://example.com/normal')
+    assert result['ok'] is True
+    assert result['title'] == 'Hi'
+    assert 'Normal page.' in result['text']
+
+
+def test_fetch_url_rejects_oversized_content_length():
+    """A Content-Length header over the cap must be rejected before any
+    body bytes are read — the iterator must never be fully consumed."""
+    from tgw.workers.pm_intake import _MAX_RESPONSE_BYTES, fetch_url
+    resp = _make_mock_response(
+        'x' * 100, url='https://example.com/huge', content_length=_MAX_RESPONSE_BYTES + 1,
+    )
+    consumed = MagicMock(side_effect=AssertionError('body iterator must not be consumed'))
+    resp.iter_bytes = consumed
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.stream = MagicMock(return_value=resp)
+    with patch('httpx.Client', return_value=mock_client), _patch_resolve_safe(True):
+        result = fetch_url('https://example.com/huge')
+    assert result['ok'] is False
+    assert 'too large' in result['error']
+    consumed.assert_not_called()
+
+
+def test_fetch_url_aborts_streaming_body_over_cap_without_content_length():
+    """No Content-Length header, but the streamed body exceeds the cap —
+    must still be aborted once the accumulated size crosses the limit
+    (proves the fast-path header check isn't the only guard)."""
+    from tgw.workers.pm_intake import _MAX_RESPONSE_BYTES, fetch_url
+    chunk = b'a' * 1_000_000
+    n_chunks = (_MAX_RESPONSE_BYTES // len(chunk)) + 3  # comfortably over the cap
+    resp = _make_mock_response('placeholder', url='https://example.com/stream-huge')
+    resp.iter_bytes = MagicMock(return_value=iter([chunk] * n_chunks))
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.stream = MagicMock(return_value=resp)
+    with patch('httpx.Client', return_value=mock_client), _patch_resolve_safe(True):
+        result = fetch_url('https://example.com/stream-huge')
+    assert result['ok'] is False
+    assert 'too large' in result['error']
 
 
 def test_handle_url_submission_filed(tmp_path):

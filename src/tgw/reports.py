@@ -107,7 +107,7 @@ def _median(values: List[float]) -> Optional[float]:
 
 
 def _pct(n: int, total: int) -> str:
-    if not total or not n:
+    if not total:
         return "—"
     return f"{round(100.0 * n / total, 1):.1f}%"
 
@@ -191,23 +191,35 @@ def _scan_items(
         group = _item_group(item, cat_id_to_key)
 
         if status == "sold":
-            sale = item.get("ebay_sale") or {}
-            sale_date_raw = str(sale.get("sale_date") or "")
-            sale_dt = _parse_date(sale_date_raw)
-            if sale_dt is None:
-                continue
-            month = sale_dt.strftime("%Y-%m")
-            price = _coerce_price(sale.get("sale_price"))
+            # ebay_sale is a list of sold-order records (todo #1604 /
+            # PP-SOLD-001) — a SKU can carry more than one distinct order
+            # (multi-qty, or an "oversold" extra order). Legacy items
+            # written before that fix may still carry a single dict; treat
+            # that as a one-element list rather than dropping the data.
+            raw_sales = item.get("ebay_sale") or []
+            if isinstance(raw_sales, dict):
+                raw_sales = [raw_sales] if raw_sales else []
+            elif not isinstance(raw_sales, list):
+                raw_sales = []
             pub_dt = _pub_date(item)
-            days = _days_between(pub_dt, sale_dt)
-            stage = _sold_stage(item, sale_dt)
-            sold_rows.append({
-                "month": month,
-                "group": group,
-                "price": price,
-                "days_to_sale": days,
-                "stage": stage,
-            })
+            for sale in raw_sales:
+                if not isinstance(sale, dict):
+                    continue
+                sale_date_raw = str(sale.get("sale_date") or "")
+                sale_dt = _parse_date(sale_date_raw)
+                if sale_dt is None:
+                    continue
+                month = sale_dt.strftime("%Y-%m")
+                price = _coerce_price(sale.get("sale_price"))
+                days = _days_between(pub_dt, sale_dt)
+                stage = _sold_stage(item, sale_dt)
+                sold_rows.append({
+                    "month": month,
+                    "group": group,
+                    "price": price,
+                    "days_to_sale": days,
+                    "stage": stage,
+                })
 
         elif status not in ("archived", "disposed", "recalled", "merged",
                             "discard", "disposeddisposed", "vero", "draft"):

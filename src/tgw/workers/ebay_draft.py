@@ -16,15 +16,14 @@ import csv
 import io
 import json
 import logging
-import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
-from tgw import quota
+from tgw import inventory_record, quota
 from tgw.apis.ebay.client import ebay_get
 from tgw.apis.ebay.conditions import best_condition
 from tgw.apis.ebay.specifics import get_aspects
@@ -34,9 +33,20 @@ from tgw.apis.ollama import extract_json
 from tgw.assets import ordered_photos as _asset_ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.config import sku_json as _cfg_sku_json
+from tgw.ebay.aspect_translation import translate_inventory_to_ebay_draft
 from tgw.ebay.description import build_listing_description
+from tgw.ebay.draft_specifics import set_ebay_aspects, wrap_ebay_specifics
+from tgw.errors import TreatmentFailure
+from tgw.item_mutation import (
+    item_generation,
+    mutate_item,
+    operation_identity,
+    reconcile_mutation,
+)
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
+from tgw.sqlite_catalog import upsert_catalog_row
+from tgw.workflow.item_snapshot import inventory_available
 
 log = logging.getLogger(__name__)
 
@@ -248,36 +258,238 @@ def _build_prompt(item: Dict[str, Any], aspects: List[Dict[str, Any]],
     return '\n'.join(lines)
 
 
-def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX_ASPECTS) -> str:
-    """Return base64 JPEG, resized to max_px on the longest edge."""
+def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX_ASPECTS) -> Optional[str]:
+    """Return base64 JPEG, resized to max_px on the longest edge.
+
+    Returns None (rather than raising) if *img_path* is truncated/corrupt and
+    can't be decoded -- the same corruption class PP-DATAINTEGRITY-001 leg 1's
+    photo_files_readable catalog-verify rule already detects project-wide
+    (#1154, 206 bad files/149 SKUs). Before this fix the OSError propagated
+    uncaught all the way to a bare dead_letter with no durable finding (todo
+    #1403; confirmed live: 7-8 ebay_draft dead-letters, 'image file is
+    truncated'/'broken data stream'). Callers are responsible for skipping a
+    None result and recording a finding -- see _aspect_fill_photos, which
+    already screens for this before a photo ever reaches here, so this catch
+    is a second line of defense (e.g. a file that changes between selection
+    and encode).
+    """
     try:
         from PIL import Image
     except ImportError:
         return base64.b64encode(img_path.read_bytes()).decode()
 
-    with Image.open(img_path) as img:
-        img.thumbnail((max_px, max_px), Image.LANCZOS)
-        buf = io.BytesIO()
-        img.convert('RGB').save(buf, format='JPEG', quality=85)
+    try:
+        with Image.open(img_path) as img:
+            img.thumbnail((max_px, max_px), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.convert('RGB').save(buf, format='JPEG', quality=85)
+    except OSError:
+        return None
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def _aspect_fill_photos(item: Dict[str, Any], sku_dir: Path, provider: str) -> List[Path]:
+def _aspect_fill_photos(
+    item: Dict[str, Any],
+    sku_dir: Path,
+    provider: str,
+    *,
+    sku: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None,
+    finding_sink: Optional[List[Dict[str, Any]]] = None,
+) -> List[Path]:
     """Select up to _MAX_PHOTOS_ASPECTS photos for the vision aspect-fill call.
 
     Cloud providers get the item's real photo set (excluding -alt./cropped-
     derivatives); anything else gets none (falls back to the text-only prompt).
+
+    Truncated/corrupt photos are screened out here rather than left to raise
+    OSError deep inside the vision call and dead-letter the whole job (todo
+    #1403) -- this is the same corruption class PP-DATAINTEGRITY-001 leg 1's
+    photo_files_readable catalog-verify rule already detects project-wide
+    (#1154). When *sku*/*config* are supplied, each skip is recorded as a
+    durable pipeline_error finding (invariant C11 -- a guard's skip is a
+    finding, not a log line), reusing the existing generic pipeline_error
+    mechanism (see api.py's _verify_item, which surfaces any pipeline_error
+    as a catalog-verify violation) rather than inventing a second "corrupt
+    photo" tracking scheme. Callers that don't pass sku/config (e.g. the
+    existing pre-#1403 test suite) get filtering only, no persistence --
+    matches every pre-existing call site's positional-args-only signature.
     """
     if provider not in CLOUD_PROVIDERS:
         return []
     all_photos = _asset_ordered_photos(item, sku_dir)
-    return [
+    candidates = [
         p for p in all_photos
         if '-alt.' not in p.name and not p.name.startswith('cropped-')
     ][:_MAX_PHOTOS_ASPECTS]
 
+    readable: List[Path] = []
+    unreadable: List[str] = []
+    for p in candidates:
+        try:
+            from PIL import Image
+            with Image.open(p) as im:
+                im.load()
+        except ImportError:
+            # No PIL available -- can't pre-screen; trust the file the same
+            # way _encode_resized falls back to a raw base64 read.
+            readable.append(p)
+            continue
+        except OSError as exc:
+            unreadable.append(f'{p.name}: {exc}')
+            continue
+        readable.append(p)
+
+    if unreadable and sku and config is not None:
+        log.warning('%s: %d unreadable/corrupt photo(s) skipped for vision '
+                    'aspect-fill: %s', sku, len(unreadable), unreadable)
+        finding = {
+            'code':   'photo_files_readable',
+            'detail': (f'{len(unreadable)} photo(s) unreadable/corrupt, skipped '
+                       f'for vision aspect-fill (other readable photos/fields '
+                       f'still used): {"; ".join(unreadable)}'),
+            'ts':     datetime.now(timezone.utc).isoformat(),
+            'source': 'ebay_draft',
+        }
+        if finding_sink is not None:
+            finding_sink.append(finding)
+        else:
+            fence_patch_item(config, sku, {'pipeline_error': finding})
+        tgw_logging.log_event('ebay_draft_unreadable_photo', sku=sku,
+                              unreadable_count=len(unreadable))
+
+    return readable
+
 
 class EbayDraftWorker(QueueWorker):
+
+    def _governed_receipt(
+        self, payload: Dict[str, Any], sku: str, *, outcome: str,
+        changed: bool, resulting_generation: str | None,
+        operation_id: str = "", mutation_status: str = "",
+    ) -> Dict[str, Any]:
+        return {
+            "receipt_schema_id": "treatment-receipt/v1",
+            "treatment_id": "ebay-draft",
+            "treatment_version": "1",
+            "graph_id": payload["graph_id"],
+            "goal_profile_id": payload["goal_profile_id"],
+            "goal_profile_version": payload["goal_profile_version"],
+            "object_generation": payload["object_generation"],
+            "condition_hash": payload["condition_hash"],
+            "entity_id": sku,
+            "outcome": outcome,
+            "established_conditions": (["draft_generated"]
+                                       if outcome == "satisfied" else []),
+            "evidence": {
+                "changed": changed,
+                "resulting_generation": resulting_generation,
+                **({"operation_id": operation_id} if operation_id else {}),
+                **({"mutation_status": mutation_status} if mutation_status else {}),
+            },
+        }
+
+    def _commit_governed_draft(
+        self, *, job: Dict[str, Any], payload: Dict[str, Any], sku: str,
+        json_path: Path, checkpoint: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        expected = {
+            "schema": "ebay-draft-observation/v1",
+            "sku": sku,
+            "expected_generation": payload["object_generation"],
+        }
+        if any(checkpoint.get(key) != value for key, value in expected.items()):
+            raise HardFailure("ebay_draft checkpoint identity mismatch")
+        fields = checkpoint.get("fields")
+        if not isinstance(fields, dict):
+            raise HardFailure("ebay_draft checkpoint fields missing")
+        mutation_payload = {
+            "schema": checkpoint["schema"],
+            "job_id": job["job_id"],
+            "graph_id": payload["graph_id"],
+            "fields": fields,
+        }
+        operation_id = operation_identity(
+            sku=sku, kind="ebay-draft",
+            expected_generation=payload["object_generation"],
+            payload=mutation_payload,
+        )
+        if checkpoint.get("operation_id") != operation_id:
+            raise HardFailure("ebay_draft checkpoint operation identity mismatch")
+
+        def mutate(document: Dict[str, Any]) -> Dict[str, Any]:
+            if document.get("sku") != sku:
+                raise ValueError("authoritative document SKU mismatch")
+            updated = dict(document)
+            updated.update(fields)
+            return updated
+
+        def project(_sku: str, document: Dict[str, Any]) -> Dict[str, Any]:
+            result = upsert_catalog_row(self.config, document)
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                raise RuntimeError("SQLite projection did not report success")
+            return result
+
+        data_root = Path(self.config.get("data_root", "/opt/TGW/data"))
+        journal_root = Path(self.config.get(
+            "item_mutation_journal_root", data_root.parent / "var/item-mutations",
+        ))
+        result = mutate_item(
+            item_path=json_path,
+            archive_root=Path(self.config.get(
+                "archive_root", data_root / "ItemArchive",
+            )),
+            journal_root=journal_root,
+            sku=sku,
+            kind="ebay-draft",
+            expected_generation=payload["object_generation"],
+            payload=mutation_payload,
+            mutate=mutate,
+            project=project,
+            operation_id=operation_id,
+        )
+        status = str(result.status).upper()
+        if status == "REPAIR_REQUIRED":
+            result = reconcile_mutation(
+                item_path=json_path, journal_root=journal_root,
+                operation_id=operation_id, project=project,
+            )
+            status = str(result.status).upper()
+        if status != "COMMITTED":
+            outcome = {
+                "CONFLICT": "conflict", "REPAIR_REQUIRED": "repair_required",
+            }.get(status, "failed")
+            receipt = self._governed_receipt(
+                payload, sku, outcome=outcome, changed=bool(result.changed),
+                resulting_generation=result.resulting_generation,
+                operation_id=operation_id, mutation_status=status,
+            )
+            receipt["evidence"]["detail"] = result.detail
+            raise TreatmentFailure(
+                f"ebay-draft mutation did not commit: {status}", receipt,
+            )
+        draft = fields.get("draft_listing")
+        valid_draft = (
+            isinstance(draft, dict)
+            and isinstance(draft.get("title"), str)
+            and bool(draft["title"].strip())
+            and str(draft.get("category_id", "99")) != "99"
+        )
+        if not valid_draft:
+            receipt = self._governed_receipt(
+                payload, sku, outcome="partial", changed=bool(result.changed),
+                resulting_generation=result.resulting_generation,
+                operation_id=operation_id, mutation_status=status,
+            )
+            receipt["evidence"]["reason_code"] = "DRAFT_REQUIRES_OPERATOR_CATEGORY"
+            raise TreatmentFailure(
+                "ebay-draft committed fallback requiring operator category", receipt,
+            )
+        return self._governed_receipt(
+            payload, sku, outcome="satisfied", changed=bool(result.changed),
+            resulting_generation=result.resulting_generation,
+            operation_id=operation_id, mutation_status=status,
+        )
 
     def handle(self, job: Dict[str, Any]) -> None:
         payload = job.get('payload_json') or {}
@@ -290,6 +502,45 @@ class EbayDraftWorker(QueueWorker):
             raise HardFailure(f'item JSON not found for {sku}')
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
+        if not inventory_available(item):
+            raise HardFailure(
+                f'{sku}: inventory is sold, terminal, or zero quantity; '
+                'explicitly restore inventory before generating an eBay draft'
+            )
+
+        governed_keys = {
+            "treatment_id", "treatment_version", "graph_id",
+            "goal_profile_id", "goal_profile_version", "object_generation",
+            "condition_hash",
+        }
+        governed = any(key in payload for key in governed_keys)
+        if governed:
+            required = governed_keys | {"entity_id"}
+            if any(not isinstance(payload.get(key), str) or not payload[key].strip()
+                   for key in required):
+                raise HardFailure("ebay_draft governed job has incomplete identity")
+            if payload["treatment_id"] != "ebay-draft" or payload["treatment_version"] != "1":
+                raise HardFailure("ebay_draft governed treatment identity mismatch")
+            if job.get("entity_type") != "item" or job.get("entity_id") != sku:
+                raise HardFailure("ebay_draft governed entity envelope mismatch")
+            if payload["entity_id"] != sku or payload.get("object_id", sku) != sku:
+                raise HardFailure("ebay_draft governed payload entity mismatch")
+            if not isinstance(job.get("job_id"), str) or not job["job_id"].strip():
+                raise HardFailure("ebay_draft governed job_id missing")
+            if not isinstance(job.get("lease_token"), str) or not job["lease_token"].strip():
+                raise HardFailure("ebay_draft governed lease token missing")
+            if (item_generation(item) != payload["object_generation"]
+                    and "observation_checkpoint" not in payload):
+                raise HardFailure("ebay_draft governed object generation mismatch")
+            if "observation_checkpoint" in payload:
+                checkpoint = state_machine.checkpoint_running_job(
+                    job["job_id"], self.owner, job["lease_token"],
+                    payload["observation_checkpoint"],
+                )
+                return self._commit_governed_draft(
+                    job=job, payload=payload, sku=sku, json_path=json_path,
+                    checkpoint=checkpoint,
+                )
 
         title = item.get('title', '')
         if not title or title == sku:
@@ -338,6 +589,15 @@ class EbayDraftWorker(QueueWorker):
                 aspects = get_aspects(self.config, category_id)
             except Exception as exc:
                 if _is_ebay_offline(exc):
+                    if governed:
+                        receipt = self._governed_receipt(
+                            payload, sku, outcome="failed", changed=False,
+                            resulting_generation=payload["object_generation"],
+                        )
+                        receipt["evidence"]["reason_code"] = "EBAY_OBSERVATION_UNAVAILABLE"
+                        raise TreatmentFailure(
+                            "ebay-draft provider observation unavailable", receipt,
+                        )
                     _write_offline_csv_row(self.config, sku, item)
                     item['offline_draft'] = True
                     fence_patch_item(self.config, sku, {'offline_draft': True})
@@ -384,24 +644,15 @@ class EbayDraftWorker(QueueWorker):
 
         # Phase 2b — pre-fill from item_attributes (AI-identified attributes, lower
         # priority than product_lookup so they only fill what's not already set)
-        ia = item.get('item_attributes') or {}
-        ia_filled: List[str] = []
-        for attr_name, attr_val in ia.items():
-            if not attr_val or attr_name in prefilled:
-                continue
-            if attr_name not in aspect_names:
-                continue
-            val = str(attr_val).strip()
-            if not val:
-                continue
-            aspect_def = next((a for a in aspects if a['name'] == attr_name), None)
-            if aspect_def and aspect_def['mode'] == 'SELECTION_ONLY' and aspect_def['allowed_values']:
-                if val not in aspect_def['allowed_values']:
-                    log.debug('item_attr prefill: %r not in allowed values for %r — skipping',
-                              val, attr_name)
-                    continue
-            prefilled[attr_name] = val
-            ia_filled.append(attr_name)
+        # todo #1416: routed through the named Set A -> Set B translation
+        # function (tgw.ebay.aspect_translation) — the ONE legitimate
+        # cross-set translation point in the codebase, extracted from what
+        # used to be inline logic here (no behavior change).
+        ia = inventory_record.get_inventory_fields(item)
+        ia_translated = translate_inventory_to_ebay_draft(
+            ia, category_id, self.config, aspects=aspects, already_filled=prefilled)
+        ia_filled: List[str] = list(ia_translated.keys())
+        prefilled.update(ia_translated)
 
         if ia_filled:
             log.info('%s: pre-filled %d specifics from item_attributes: %s',
@@ -413,6 +664,7 @@ class EbayDraftWorker(QueueWorker):
         # aren't silently missed. Routed through bulk_classify (cheap, free-tier
         # Gemini) since this is high-volume structured extraction, not prose.
         remaining_aspects = [a for a in aspects if a['name'] not in prefilled]
+        photo_findings: List[Dict[str, Any]] = []
         if not remaining_aspects:
             suggested: Dict[str, Any] = {}
             log.info('%s: all %d aspects already prefilled — skipping vision call',
@@ -421,8 +673,19 @@ class EbayDraftWorker(QueueWorker):
             prompt = _build_prompt(item, aspects, prefilled=prefilled, browse_hints=browse_hints)
             _classify_provider, _classify_model = get_task_model(self.config, 'bulk_classify')
             sku_dir = json_path.parent
-            photos = _aspect_fill_photos(item, sku_dir, _classify_provider)
-            img_b64_list = [_encode_resized(p) for p in photos]
+            photos = _aspect_fill_photos(
+                item, sku_dir, _classify_provider, sku=sku, config=self.config,
+                finding_sink=(photo_findings if governed else None),
+            )
+            img_b64_list = []
+            for p in photos:
+                b64 = _encode_resized(p)
+                if b64 is None:
+                    # Second-line defense: became unreadable between
+                    # selection and encode (see _encode_resized docstring).
+                    log.warning('%s: %s unreadable at encode time -- skipping', sku, p.name)
+                    continue
+                img_b64_list.append(b64)
             log.info('asking %s/%s to fill %d aspects for %s (%d photos)',
                      _classify_provider, _classify_model, len(remaining_aspects), sku, len(photos))
             tgw_logging.log_event('ebay_draft_aspects_call', sku=sku,
@@ -434,8 +697,15 @@ class EbayDraftWorker(QueueWorker):
             try:
                 suggested = extract_json(raw)
             except Exception as exc:
+                # audit#1143 #1249: 200 chars was too short to see whether a
+                # failure was a genuinely malformed response or just missing
+                # its closing ```fence beyond the cutoff -- every one of the
+                # 95 dead-lettered jobs of this class was undiagnosable after
+                # the fact because the truncated text always looked
+                # identically "cut off mid-JSON." 2000 chars covers a full
+                # aspect-fill response in the overwhelming majority of cases.
                 raise HardFailure(
-                    f'ebay_draft: model returned non-JSON for {sku}: {raw[:200]}'
+                    f'ebay_draft: model returned non-JSON for {sku}: {raw[:2000]}'
                 ) from exc
 
         # Phase 5 — description enrichment: if product_lookup has a substantive
@@ -542,6 +812,14 @@ class EbayDraftWorker(QueueWorker):
         # Build draft listing block
         effective_description = enriched_description or item.get('description', '')
         _prev_dl = item.get('draft_listing') or {}
+        # todo #1418: item_specifics is Set B's envelope, written ONLY through
+        # tgw.ebay.draft_specifics. ebay_draft rebuilds the full aspect set from
+        # scratch each run (not an incremental merge), so the envelope's `fields`
+        # is a full replace — but history still records genuinely-changed keys,
+        # via the accessor's diff-against-existing logic, matching price_history's
+        # "only append on a real change" discipline.
+        _specifics_hist_patch = set_ebay_aspects(item, item_specifics, source='ebay_draft')
+        item_specifics_envelope = wrap_ebay_specifics(item_specifics)
         draft: Dict[str, Any] = {
             'title':                      title,
             'category_id':                category_id,
@@ -554,7 +832,8 @@ class EbayDraftWorker(QueueWorker):
             'quantity':                   1,
             'price':                      _prev_dl.get('price'),
             'shipping_profile':           _prev_dl.get('shipping_profile'),
-            'item_specifics':             item_specifics,
+            'item_specifics':             item_specifics_envelope,
+            'item_specifics_history':     _specifics_hist_patch['item_specifics_history'],
             'description':                effective_description,
             'aspects_category_id':        category_id,
             'aspects_required_total':     len(req_aspects),
@@ -609,7 +888,14 @@ class EbayDraftWorker(QueueWorker):
         draft['quality'] = score_draft(item, photo_count=photo_count).to_dict()
 
         item['draft_listing'] = draft
-        patch_fields: Dict[str, Any] = {'draft_listing': draft}
+        patch_fields: Dict[str, Any] = {
+            'draft_listing': draft,
+            # AI Identify/Reidentify requests a fresh draft without deleting
+            # the operator's existing draft before replacement is ready.
+            'ai_redraft_requested': None,
+        }
+        if governed and photo_findings:
+            patch_fields['pipeline_error'] = photo_findings[-1]
         if category_resolved_here:
             # Session 41 fix: this used to be mutated in memory only — never
             # persisted — so every subsequent re-draft of an item ai_identify
@@ -618,6 +904,31 @@ class EbayDraftWorker(QueueWorker):
             # already straining that quota today.
             patch_fields['ebay_category_id']   = item['ebay_category_id']
             patch_fields['ebay_category_name'] = item['ebay_category_name']
+        if governed:
+            mutation_payload = {
+                "schema": "ebay-draft-observation/v1",
+                "job_id": job["job_id"],
+                "graph_id": payload["graph_id"],
+                "fields": patch_fields,
+            }
+            checkpoint = {
+                "schema": "ebay-draft-observation/v1",
+                "sku": sku,
+                "expected_generation": payload["object_generation"],
+                "fields": patch_fields,
+                "operation_id": operation_identity(
+                    sku=sku, kind="ebay-draft",
+                    expected_generation=payload["object_generation"],
+                    payload=mutation_payload,
+                ),
+            }
+            checkpoint = state_machine.checkpoint_running_job(
+                job["job_id"], self.owner, job["lease_token"], checkpoint,
+            )
+            return self._commit_governed_draft(
+                job=job, payload=payload, sku=sku, json_path=json_path,
+                checkpoint=checkpoint,
+            )
         fence_patch_item(self.config, sku, patch_fields)
 
         log.info('ebay_draft complete for %s: %d specifics filled', sku, len(item_specifics))
@@ -625,39 +936,6 @@ class EbayDraftWorker(QueueWorker):
                               specifics_filled=len(item_specifics),
                               item_specifics=item_specifics)
 
-        try:
-            state_machine.enqueue_job(
-                queue_name='catalog_rebuild',
-                payload={'reason': f'ebay_draft:{sku}'},
-                dedupe_key='catalog_rebuild:pending',
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
-        except psycopg2.errors.UniqueViolation:
-            pass
-
-        # Invariant C10: operator provenance travels the whole chain — a draft
-        # job the operator pressed for hands its origin to price and upload.
-        _origin = {'origin': 'operator'} if payload.get('origin') == 'operator' else {}
-        try:
-            state_machine.enqueue_job(
-                queue_name='ebay_price',
-                payload={'sku': sku, **_origin},
-                dedupe_key=f'ebay_price:{sku}',
-                max_attempts=5,
-            )
-        except psycopg2.errors.UniqueViolation:
-            pass
-
-        try:
-            state_machine.enqueue_job(
-                queue_name='ebay_upload',
-                payload={'sku': sku, **_origin},
-                dedupe_key=f'ebay_upload:{sku}',
-                max_attempts=5,
-            )
-        except psycopg2.errors.UniqueViolation:
-            pass
 
         # If the item is already staged/live on eBay, the regenerated draft is
         # NOT pushed automatically. Dave's rule (session 42): "we cannot have
@@ -670,6 +948,10 @@ class EbayDraftWorker(QueueWorker):
                      '(NOT auto-pushed to the existing offer)', sku)
             tgw_logging.log_event('ebay_draft_live_update_pending', sku=sku,
                                   offer_id=item['ebay_offer']['offer_id'])
+
+        return {"ok": True, "sku": sku}
+
+
 
 
 def main() -> int:

@@ -1,9 +1,13 @@
 """
 tgw.workers.ai_identify — Vision-model item identification worker.
 
-Provider and model are configured in tgw-models.json under the "ai_identify" key.
-Defaults: openrouter / google/gemini-2.5-flash-lite (fast, cheap).
-Ollama fallback: qwen2.5vl:7b (CPU-only, slow).
+Provider and model are configured ONLY in tgw-models.json under the
+"ai_identify" key (invariant E15, 2026-07-20) — see that file's own
+'_comment' and 'defaults' block for the current live provider/model,
+including the Ollama fallback if one is configured there. Do not add a
+hardcoded model id here, even as an inert "fallback" constant — this
+module previously carried a dead `_OLLAMA_FALLBACK_MODEL` constant that
+was never actually read by any code path (removed 2026-07-20).
 
 Results are written only if the item still has an empty ai_identified flag — safe
 to re-run; will not overwrite unless ai_reidentify is set.
@@ -15,29 +19,34 @@ import base64
 import io
 import json
 import logging
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import psycopg2.errors
-
 import tgw.logging as tgw_logging
-from tgw import quota
+from tgw import inventory_record, quota
+from tgw.apis.ebay.specifics import get_category_group_aspects
 from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.apis.llm import CLOUD_PROVIDERS, call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
 from tgw.assets import ordered_photos as _asset_ordered_photos
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.config import sku_dir as _cfg_sku_dir
+from tgw.errors import TreatmentFailure
+from tgw.item_mutation import (
+    item_generation,
+    mutate_item,
+    operation_identity,
+    reconcile_mutation,
+)
 from tgw.items import append_history_event
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
+from tgw.sqlite_catalog import upsert_catalog_row
 
 log = logging.getLogger(__name__)
 
 QUEUE_NAME = "ai_identify"
-_OLLAMA_FALLBACK_MODEL = "qwen2.5vl:7b"
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"}
 _VISION_MAX_PX = 512  # Ollama CPU path — keep small
@@ -47,12 +56,28 @@ _MAX_PHOTOS_CLOUD = 6  # max images per call for cloud providers
 _SYSTEM_PROMPT = """\
 You are an inventory cataloguing assistant. You will be shown a photo of an item.
 Extract every field you can observe or reasonably infer. Use null for fields you cannot determine.
+
+CRITICAL RULE — never overclaim material authenticity: this is secondhand/thrift
+inventory, almost all of it is costume jewelry and base-metal goods, not fine
+jewelry. Default assumption for ANY metal item is base/plated metal, and for ANY
+faceted/sparkly stone is glass, rhinestone, or simulated material — NOT gold,
+silver, or a genuine gemstone. Only state a precious metal (gold/silver/sterling)
+or a genuine/natural gemstone, or give a carat weight, if you can see an actual
+hallmark, stamp, or certification in the photo. If you cannot see one, leave that
+field null/blank rather than guessing a plausible-sounding value. This rule
+overrides any instinct to fill in every field — an accurate blank beats a
+confident, unverifiable guess.
+
 Respond with valid JSON only — no prose, no markdown fences.
 """
 
 _ITEM_FIELDS_SCHEMA = """\
 {
-  "title": "concise descriptive title under 80 chars, include brand and model if visible",
+  "title": "concise descriptive title under 80 chars — lead with the most \
+specific searchable noun (brand name, or the exact product/model type) in \
+the first 3-4 words; do NOT open with a generic word like 'Vintage', \
+'Antique', 'Unbranded', or 'Old' — put specificity first, descriptive \
+words after; include brand and model if visible",
   "category": "plain English category name (e.g. Board Games, Action Figures, Vintage Electronics)",
   "description": "2-4 sentences describing what the item is, what is visible, notable features",
   "condition": "one of: New, Like New, Very Good, Good, Acceptable",
@@ -60,11 +85,35 @@ _ITEM_FIELDS_SCHEMA = """\
   "model": "specific model name or number if visible, else null",
   "manufacturer": "full manufacturer name if different from brand or more specific, else null",
   "mpn": "model/part number printed on item if visible, else null",
-  "color": "primary color or color description, else null",
-  "material": "primary material (e.g. plastic, metal, fabric, ceramic, paper), else null",
+  "color": "primary color or color description — 'Gold'/'Silver' is a \
+normal, legitimate color descriptor for a gold- or silver-toned item, use \
+it freely, else null",
+  "material": "primary material composition (e.g. plastic, metal, fabric, \
+ceramic, paper) — for metal items, default to 'metal' or 'base metal'; \
+only claim a precious metal ('gold', 'silver', 'sterling silver', \
+'gold-plated') if a visible hallmark or stamp (e.g. '925', '14K', \
+'sterling') confirms actual precious-metal content — a gold- or \
+silver-COLORED item without a hallmark is still 'metal', not \
+'gold'/'silver' (that's a composition claim, not a color one — color \
+goes in the color field instead), else null",
   "country_of_manufacture": "country if visible on item or packaging, else null",
   "upc": "barcode number if clearly legible, else null",
-  "item_specifics": "object of any other notable key-value attributes visible on the item (e.g. {\"Size\": \"Large\", \"Style\": \"Vintage\"}), or empty object"
+  "item_specifics": "object of any other notable key-value attributes \
+visible on the item (e.g. {\"Size\": \"Large\", \"Style\": \"Vintage\"}), \
+or empty object — this includes eBay jewelry-style aspects like 'Metal', \
+'Metal Purity', 'Base Metal': the SAME rule as the material field above \
+applies — leave these empty/blank unless a visible hallmark or stamp \
+confirms actual precious-metal content, never infer them from color or \
+shine alone. SAME RULE for any stone/gem aspect ('Main Stone', 'Main \
+Stone Creation', 'Main Stone Treatment', 'Gemstone', 'Total Carat \
+Weight'): a sparkly/clear faceted stone is 'Simulated'/'Glass'/ \
+'Rhinestone'/'Crystal' by default — only set 'Main Stone Creation' to \
+'Natural' or name a specific gemstone (diamond, ruby, etc.) if there is \
+a visible certification, marking, or the piece is clearly fine jewelry \
+construction, not costume jewelry; do not populate 'Total Carat Weight' \
+or any stone-authenticity field at all unless you have real evidence, \
+leave those keys out entirely rather than guessing a plausible-sounding \
+value"
 }"""
 
 _USER_PROMPT = f"""\
@@ -101,6 +150,93 @@ Respond with JSON matching this schema (null for any field you cannot determine)
     + """
 """
 )
+
+
+def _prompt_for_item(
+    item: Dict[str, Any],
+    cfg: Dict[str, Any],
+    *,
+    hint: str,
+    product_context: str,
+) -> str:
+    """Build the identify prompt, adding the category-group Set A targets.
+
+    The ordinary ``item_specifics`` catch-all stays in the schema. If group
+    metadata or taxonomy is unavailable, identification keeps that established
+    freeform behavior and records the degradation instead of using a partial
+    union or borrowing the selected-category Set B definition.
+    """
+    if product_context:
+        prompt = _USER_PROMPT_ENRICHED.replace("{product_context}", product_context)
+    elif hint:
+        prompt = _USER_PROMPT_HINTED.replace("{hint}", hint)
+    else:
+        prompt = _USER_PROMPT
+
+    # A category group is not guaranteed to exist yet on older catalog items:
+    # identifying the item is often the operation which discovers its category.
+    # Product lookups can still identify a grounded family of aspects that the
+    # first observation must not silently omit.
+    product_lookup = item.get("product_lookup") or {}
+    if product_lookup.get("source") == "open_library":
+        prompt += (
+            "\nSource-specific target aspects for this identified book:\n"
+            '["Author", "Book Title", "Format", "Language", '
+            '"Publication Year", "Publisher", "ISBN", "Topic"]\n'
+            "Include every grounded value for these names in item_specifics. "
+            "Use the supplied product lookup for exact bibliographic values and "
+            "the photos for values visible on the item; leave genuinely unknown "
+            "values absent.\n"
+        )
+
+    group_name = str(item.get("category_group") or "").strip()
+    groups_path = cfg.get("category_groups_path")
+    if not group_name or not groups_path:
+        return prompt
+
+    try:
+        groups = json.loads(Path(groups_path).read_text(encoding="utf-8"))
+        group = groups.get("groups", {}).get(group_name)
+        if group is None:
+            log.warning(
+                "ai_identify: Set A aspect targets unavailable for category "
+                "group %r: missing metadata",
+                group_name,
+            )
+            return prompt
+        category_ids = group.get("ebay_categories")
+        if category_ids is None:
+            category_ids = group.get("category_candidates", [])
+        if not category_ids:
+            log.warning(
+                "ai_identify: Set A aspect targets unavailable for category "
+                "group %r: empty category list",
+                group_name,
+            )
+            return prompt
+        aspects = get_category_group_aspects(cfg, category_ids)
+    except quota.QuotaBudgetExceeded:
+        raise
+    except Exception as exc:
+        log.warning(
+            "ai_identify: Set A aspect targets unavailable for category group %r: %s",
+            group_name,
+            exc,
+        )
+        return prompt
+
+    names = [str(aspect["name"]) for aspect in aspects if aspect.get("name")]
+    if not names:
+        return prompt
+    return (
+        f"{prompt}\n"
+        "Set A category-group target aspects (official eBay aspect-name union "
+        "across every category in this group):\n"
+        f"{json.dumps(names, ensure_ascii=False)}\n"
+        "Include every grounded value for these names in item_specifics. "
+        "Keep using item_specifics for other notable observable attributes too; "
+        "do not guess values merely to fill the target list.\n"
+    )
 
 
 def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX) -> tuple[str, int, int]:
@@ -155,6 +291,166 @@ class AIIdentifyWorker(QueueWorker):
 
         item = json.loads(json_path.read_text(encoding="utf-8"))
 
+        governed_keys = {
+            "treatment_id", "treatment_version", "graph_id",
+            "goal_profile_id", "goal_profile_version", "object_generation",
+            "condition_hash",
+        }
+        governed = any(key in payload for key in governed_keys)
+        if governed:
+            required = governed_keys | {"entity_id"}
+            if any(
+                not isinstance(payload.get(key), str) or not payload[key].strip()
+                for key in required
+            ):
+                raise HardFailure("ai_identify governed job has incomplete identity")
+            if payload["treatment_id"] != "ai-identify" or payload["treatment_version"] != "1":
+                raise HardFailure("ai_identify governed treatment identity mismatch")
+            if job.get("entity_type") != "item" or job.get("entity_id") != sku:
+                raise HardFailure("ai_identify governed entity envelope mismatch")
+            if payload["entity_id"] != sku or payload.get("object_id", sku) != sku:
+                raise HardFailure("ai_identify governed payload entity mismatch")
+            if item_generation(item) != payload["object_generation"]:
+                if "observation_checkpoint" not in payload:
+                    raise HardFailure("ai_identify governed object generation mismatch")
+            if not isinstance(job.get("job_id"), str) or not job["job_id"].strip():
+                raise HardFailure("ai_identify governed job_id missing")
+            if not isinstance(job.get("lease_token"), str) or not job["lease_token"].strip():
+                raise HardFailure("ai_identify governed lease token missing")
+
+        def success_receipt(
+            *, changed: bool, resulting_generation: str | None = None,
+        ) -> Dict[str, Any]:
+            if not governed:
+                return {"ok": True, "sku": sku}
+            resulting = resulting_generation or item_generation(
+                json.loads(json_path.read_text(encoding="utf-8"))
+            )
+            return {
+                "receipt_schema_id": "treatment-receipt/v1",
+                "treatment_id": "ai-identify",
+                "treatment_version": "1",
+                "graph_id": payload["graph_id"],
+                "goal_profile_id": payload["goal_profile_id"],
+                "goal_profile_version": payload["goal_profile_version"],
+                "object_generation": payload["object_generation"],
+                "condition_hash": payload["condition_hash"],
+                "entity_id": sku,
+                "outcome": "satisfied",
+                "established_conditions": ["ai_identified"],
+                "evidence": {
+                    "changed": changed,
+                    "resulting_generation": resulting,
+                },
+            }
+
+        def commit_governed(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+            expected = {
+                "schema": "ai-identify-observation/v1",
+                "sku": sku,
+                "expected_generation": payload["object_generation"],
+            }
+            if any(checkpoint.get(key) != value for key, value in expected.items()):
+                raise HardFailure("ai_identify checkpoint identity mismatch")
+            fields = checkpoint.get("fields")
+            if not isinstance(fields, dict):
+                raise HardFailure("ai_identify checkpoint fields missing")
+            mutation_payload = {
+                "schema": checkpoint["schema"],
+                "job_id": job["job_id"],
+                "graph_id": payload["graph_id"],
+                "fields": fields,
+            }
+            operation_id = operation_identity(
+                sku=sku,
+                kind="ai-identify",
+                expected_generation=payload["object_generation"],
+                payload=mutation_payload,
+            )
+            if checkpoint.get("operation_id") != operation_id:
+                raise HardFailure("ai_identify checkpoint operation identity mismatch")
+
+            def mutate(document: Dict[str, Any]) -> Dict[str, Any]:
+                if document.get("sku") != sku:
+                    raise ValueError("authoritative document SKU mismatch")
+                updated = dict(document)
+                for key, value in fields.items():
+                    if value is None:
+                        updated.pop(key, None)
+                    else:
+                        updated[key] = value
+                return updated
+
+            def project(_sku: str, document: Dict[str, Any]) -> Dict[str, Any]:
+                result = upsert_catalog_row(self.config, document)
+                if not isinstance(result, dict) or result.get("ok") is not True:
+                    raise RuntimeError("SQLite projection did not report success")
+                return result
+
+            data_root = Path(self.config.get("data_root", "/opt/TGW/data"))
+            journal_root = Path(self.config.get(
+                "item_mutation_journal_root",
+                data_root.parent / "var/item-mutations",
+            ))
+            result = mutate_item(
+                item_path=json_path,
+                archive_root=Path(self.config.get(
+                    "archive_root", data_root / "ItemArchive",
+                )),
+                journal_root=journal_root,
+                sku=sku,
+                kind="ai-identify",
+                expected_generation=payload["object_generation"],
+                payload=mutation_payload,
+                mutate=mutate,
+                project=project,
+                operation_id=operation_id,
+            )
+            status = str(result.status).upper()
+            if status == "REPAIR_REQUIRED":
+                result = reconcile_mutation(
+                    item_path=json_path,
+                    journal_root=journal_root,
+                    operation_id=operation_id,
+                    project=project,
+                )
+                status = str(result.status).upper()
+            if status != "COMMITTED":
+                outcome = {
+                    "CONFLICT": "conflict",
+                    "REPAIR_REQUIRED": "repair_required",
+                }.get(status, "failed")
+                receipt = success_receipt(
+                    changed=bool(result.changed),
+                    resulting_generation=result.resulting_generation,
+                )
+                receipt["outcome"] = outcome
+                receipt["established_conditions"] = []
+                receipt["evidence"].update({
+                    "operation_id": operation_id,
+                    "mutation_status": status,
+                    "detail": result.detail,
+                })
+                raise TreatmentFailure(
+                    f"ai-identify mutation did not commit: {status}", receipt,
+                )
+            receipt = success_receipt(
+                changed=bool(result.changed),
+                resulting_generation=result.resulting_generation,
+            )
+            receipt["evidence"].update({
+                "operation_id": operation_id,
+                "mutation_status": status,
+            })
+            return receipt
+
+        if governed and "observation_checkpoint" in payload:
+            durable_checkpoint = state_machine.checkpoint_running_job(
+                job["job_id"], self.owner, job["lease_token"],
+                payload["observation_checkpoint"],
+            )
+            return commit_governed(durable_checkpoint)
+
         already_identified = bool(item.get("ai_identified"))
         force_reidentify = bool(item.get("ai_reidentify"))
 
@@ -162,7 +458,7 @@ class AIIdentifyWorker(QueueWorker):
         if already_identified and not force_reidentify:
             log.info("skipping ai_identify for %s — already identified", sku)
             tgw_logging.log_event("ai_identify_skipped", sku=sku, reason="already_identified")
-            return
+            return success_receipt(changed=False)
 
         # Product lookup — run before Ollama; result cached in item JSON
         product_context = ""
@@ -186,13 +482,12 @@ class AIIdentifyWorker(QueueWorker):
 
         provider, model = get_task_model(self.config, "ai_identify")
 
-        if product_context:
-            # Use replace() not format() — the schema contains literal {} JSON braces
-            prompt = _USER_PROMPT_ENRICHED.replace('{product_context}', product_context)
-        elif hint:
-            prompt = _USER_PROMPT_HINTED.replace('{hint}', hint)
-        else:
-            prompt = _USER_PROMPT
+        prompt = _prompt_for_item(
+            item,
+            self.config,
+            hint=hint,
+            product_context=product_context,
+        )
 
         # Select photos — cloud providers get multiple images; Ollama gets one
         all_photos = _asset_ordered_photos(item, sku_dir)
@@ -212,9 +507,17 @@ class AIIdentifyWorker(QueueWorker):
         from tgw.image_hash import compute_dhash, lookup_hash, store_hash
 
         img_hash = compute_dhash(img_path)
+        import hashlib
+        cache_context = prompt if "Set A category-group target aspects" in prompt else (
+            product_context or hint or ""
+        )
+        context_sig = hashlib.sha256(
+            cache_context.encode("utf-8")
+        ).hexdigest()[:16] if cache_context else "no_context"
+        cache_key = f"{img_hash}:{context_sig}" if img_hash else None
         # Only use cache for single-photo calls — multi-photo gives richer results
         use_cache = len(candidate_photos) == 1
-        cached_result = lookup_hash(img_hash, "ai_identify") if (img_hash and use_cache) else None
+        cached_result = lookup_hash(cache_key, "ai_identify") if (cache_key and use_cache) else None
 
         raw: Optional[str] = None
         if cached_result is not None:
@@ -239,10 +542,14 @@ class AIIdentifyWorker(QueueWorker):
             try:
                 result = extract_json(raw)
             except Exception as exc:
-                raise HardFailure(f"ai_identify: model returned non-JSON for {sku}: {raw[:200]}") from exc
+                # audit#1143 #1269: 200 chars was too short to tell whether a
+                # failure was genuinely malformed or just missing its closing
+                # ```fence beyond the cutoff -- same fix as ebay_draft.py's
+                # #1249 code-review follow-up.
+                raise HardFailure(f"ai_identify: model returned non-JSON for {sku}: {raw[:2000]}") from exc
 
-            if img_hash and use_cache:
-                store_hash(img_hash, sku, "ai_identify", result)
+            if cache_key and use_cache:
+                store_hash(cache_key, sku, "ai_identify", result)
 
         def _str(key: str) -> str:
             v = result.get(key)
@@ -255,7 +562,7 @@ class AIIdentifyWorker(QueueWorker):
 
         # Extended inventory fields — fill canonical record, never discard
         brand = _str("brand")
-        model = _str("model")
+        item_model = _str("model")
         manufacturer = _str("manufacturer")
         mpn = _str("mpn")
         color = _str("color")
@@ -265,6 +572,40 @@ class AIIdentifyWorker(QueueWorker):
         ai_item_specifics = result.get("item_specifics") or {}
         if not isinstance(ai_item_specifics, dict):
             ai_item_specifics = {}
+        else:
+            ai_item_specifics = {
+                str(key): str(value).strip()
+                for key, value in ai_item_specifics.items()
+                if value is not None and str(value).strip()
+            }
+
+        # Project structured identification fields into the universal aspect
+        # record as well as their canonical top-level slots. Previously an AI
+        # response could correctly identify Brand/Model/Material yet leave the
+        # corresponding listing aspect absent. Existing operator values still
+        # win below when the accessor computes ``new_only``.
+        for aspect_name, aspect_value in (
+            ("Brand", brand),
+            ("Model", item_model),
+            ("Manufacturer", manufacturer),
+            ("MPN", mpn),
+            ("Color", color),
+            ("Material", material),
+            ("Country/Region of Manufacture", country_of_manufacture),
+            ("UPC", upc),
+        ):
+            if aspect_value:
+                ai_item_specifics.setdefault(aspect_name, aspect_value)
+        product_lookup = item.get("product_lookup") or {}
+        if product_lookup.get("source") == "open_library":
+            for aspect_name, lookup_key in (
+                ("Author", "brand"),
+                ("Book Title", "title"),
+                ("ISBN", "isbn"),
+            ):
+                lookup_value = str(product_lookup.get(lookup_key) or "").strip()
+                if lookup_value:
+                    ai_item_specifics.setdefault(aspect_name, lookup_value)
 
         if not title:
             raise HardFailure(f"ai_identify: empty title in model response for {sku}")
@@ -300,7 +641,7 @@ class AIIdentifyWorker(QueueWorker):
         _is_reidentify = bool(item.get("ai_identified"))  # True means this is a re-scan
         for _field, _val in [
             ("brand", brand),
-            ("model", model),
+            ("model", item_model),
             ("manufacturer", manufacturer),
             ("model_number", mpn),
             ("color", color),
@@ -312,10 +653,18 @@ class AIIdentifyWorker(QueueWorker):
                 item[_field] = _val
 
         # Merge AI-extracted item specifics into item_attributes (never overwrite existing keys)
+        # todo #1418: routed through tgw.inventory_record — the ONLY sanctioned
+        # writer of the Set A envelope. "existing wins" is preserved by only
+        # proposing updates for keys the record doesn't already have.
+        _ia_patch: Dict[str, Any] = {}
         if ai_item_specifics:
-            existing_attrs = item.get("item_attributes") or {}
-            merged_attrs = {**ai_item_specifics, **existing_attrs}  # existing wins
-            item["item_attributes"] = merged_attrs
+            existing_attrs = inventory_record.get_inventory_fields(item)
+            new_only = {k: v for k, v in ai_item_specifics.items() if k not in existing_attrs}
+            if new_only:
+                _ia_patch = inventory_record.set_inventory_fields(
+                    item, new_only, source="ai_identify", applied_by="system")
+                item["item_attributes"] = _ia_patch["item_attributes"]
+                item["item_attributes_history"] = _ia_patch["item_attributes_history"]
 
         # product_lookup already written above if lookup succeeded
 
@@ -361,7 +710,7 @@ class AIIdentifyWorker(QueueWorker):
                 "description": description,
                 "condition": condition,
                 "brand": brand or None,
-                "model": model or None,
+                "model": item_model or None,
                 "manufacturer": manufacturer or None,
                 "mpn": mpn or None,
                 "color": color or None,
@@ -408,8 +757,32 @@ class AIIdentifyWorker(QueueWorker):
         for _f in ("brand", "model", "manufacturer", "model_number", "color", "material", "country_of_manufacture", "upc"):
             if item.get(_f):
                 fence_fields[_f] = item[_f]
-        if item.get("item_attributes"):
-            fence_fields["item_attributes"] = item["item_attributes"]
+        if _ia_patch:
+            fence_fields["item_attributes"] = _ia_patch["item_attributes"]
+            fence_fields["item_attributes_history"] = _ia_patch["item_attributes_history"]
+        if governed:
+            mutation_payload = {
+                "schema": "ai-identify-observation/v1",
+                "job_id": job["job_id"],
+                "graph_id": payload["graph_id"],
+                "fields": fence_fields,
+            }
+            checkpoint = {
+                "schema": "ai-identify-observation/v1",
+                "sku": sku,
+                "expected_generation": payload["object_generation"],
+                "fields": fence_fields,
+                "operation_id": operation_identity(
+                    sku=sku,
+                    kind="ai-identify",
+                    expected_generation=payload["object_generation"],
+                    payload=mutation_payload,
+                ),
+            }
+            durable_checkpoint = state_machine.checkpoint_running_job(
+                job["job_id"], self.owner, job["lease_token"], checkpoint,
+            )
+            return commit_governed(durable_checkpoint)
         fence_patch_item(self.config, sku, fence_fields)
 
         log.info("ai_identify complete for %s: %r (eBay cat %s)", sku, title, ebay_category_id)
@@ -417,39 +790,10 @@ class AIIdentifyWorker(QueueWorker):
             "ai_identify_complete", sku=sku, title=title, category=category, condition=condition, hint=hint or None, ebay_category_id=ebay_category_id, ebay_category_name=ebay_category_name
         )
 
-        # Enqueue ebay_draft and alt_text unless this was a catalog-only run
-        catalog_only = bool(payload.get("catalog_only"))
-        if not catalog_only:
-            try:
-                state_machine.enqueue_job(
-                    queue_name="ebay_draft",
-                    payload={"sku": sku},
-                    dedupe_key=f"ebay_draft:{sku}",
-                    max_attempts=3,
-                )
-            except psycopg2.errors.UniqueViolation:
-                pass
-            try:
-                state_machine.enqueue_job(
-                    queue_name="alt_text",
-                    payload={"sku": sku},
-                    dedupe_key=f"alt_text:{sku}",
-                    max_attempts=3,
-                )
-            except psycopg2.errors.UniqueViolation:
-                pass
-
-        # Enqueue downstream rebuild
-        try:
-            state_machine.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": f"ai_identify:{sku}"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
-        except psycopg2.errors.UniqueViolation:
-            pass
+        # Phase 4: return a structured receipt instead of hardcoding successor
+        # enqueue. The scheduler reads this receipt and re-evaluates the item
+        # to pick the next eligible treatment (ebay-draft, alt-text, etc.).
+        return success_receipt(changed=True)
 
 
 def main() -> int:

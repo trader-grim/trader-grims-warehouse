@@ -1,0 +1,19 @@
+{
+  "schema": "tgw-agent-service-provider/v1",
+  "id": "promptcraft.receiver-profiles",
+  "version": 1,
+  "capability": "promptcraft.receiver-profiles@1",
+  "kind": "local-stdio-mcp-and-library",
+  "entrypoints": {
+    "cli": "bin/promptcraft",
+    "mcp": "bin/promptcraft-mcp",
+    "card_handoff": "bin/promptcraft-handoff"
+  },
+  "network": false,
+  "effects": "read-only",
+  "lineage": {
+    "source": "/opt/TGW/library/archive/catnanny-home-droppings-20260807/tgw-capability-lab",
+    "source_state": "untracked-working-implementation",
+    "recovered_at_plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
+  }
+}

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import secrets
 import sqlite3
@@ -24,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import psycopg2
+import psycopg2.errors
 import psycopg2.extras
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, Security, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -31,10 +33,21 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import draft_sync
+from . import draft_sync, inventory_record
 from .assets import ordered_photos as _ordered_photos
 from .config import DEFAULT_CONFIG, load_config
-from .items import atomic_write_json, locationupdate
+from .ebay.category_aspect_migration import (
+    apply_category_aspect_migration,
+    detect_category_orphaned_aspects,
+)
+from .ebay.description import build_listing_description
+from .ebay.draft_specifics import get_ebay_aspects, set_ebay_aspects
+from .ebay.draft_specifics import is_envelope as _is_ebay_draft_envelope
+from .ebay.inventory_diff import apply_inventory_diff, diff_ebay_draft_to_inventory
+from .item_mutation import item_generation
+from .items import _archive_before_overwrite, atomic_write_json, create_item, locationupdate
+from .operator_console_host import configured_console_mount
+from .operator_console_plugin import mount_operator_console
 from .queue import state_machine
 from .readiness import check_ebay, readiness_html
 from .resolver import load_item_doc
@@ -116,12 +129,38 @@ _pending_offers_cache_at: float = 0.0
 _PENDING_OFFERS_TTL = 300
 
 
+class CodingProvisionStart(BaseModel):
+    todo_id: int = Field(gt=0)
+    object_generation: str | None = None
+    source_commit: str | None = None
+
+
+class CodingWorkerClaim(BaseModel):
+    host: str = Field(min_length=1)
+    envelope_hash: str = Field(min_length=1)
+    location: Dict[str, Any]
+    snapshot: Dict[str, Any]
+
+
+class CodingWorkerLease(BaseModel):
+    lease_token: str = Field(min_length=1)
+
+
+class CodingWorkerComplete(CodingWorkerLease):
+    result: Dict[str, Any]
+
+
+class CodingWorkerFail(CodingWorkerLease):
+    error: str = Field(min_length=1, max_length=2000)
+    result: Dict[str, Any] | None = None
+
+
 def _get_listing_index() -> Dict[str, Path]:
     global _listing_index, _listing_index_built_at
     if time.time() - _listing_index_built_at > _LISTING_INDEX_TTL:
-        from .workers.ebay_legacy_sync import _build_listing_index
+        from .ebay.pull import build_listing_index
 
-        _listing_index = _build_listing_index(_cfg["itemdata_root"])
+        _listing_index = build_listing_index(_cfg["itemdata_root"])
         _listing_index_built_at = time.time()
         log.info("ebay_webhook: listing index rebuilt (%d entries)", len(_listing_index))
     return _listing_index
@@ -141,6 +180,7 @@ PIPELINE_ACTIONS = {
     "ebay_publish",
     "ebay_end_listing",
     "ebay_update",
+    "resync_photos",
     "accept_proposals",
     "dismiss_proposals",
     "catalog_rebuild",
@@ -206,8 +246,26 @@ app = FastAPI(
     openapi_url=None,
 )
 
+class _NoCacheStaticFiles(StaticFiles):
+    """Force revalidation on every request (Dave, 2026-07-17): a plain
+    StaticFiles mount lets browsers cache tgw.js/tgw.css indefinitely, so a
+    server-restarted fix (e.g. syncURLParam/getURLParam) can silently keep
+    running the OLD cached script and throw ReferenceErrors that look like
+    a broken fix rather than a stale cache. These files are small and
+    change often during active work — correctness here matters more than
+    saving a browser round-trip."""
+
+    def is_not_modified(self, *args, **kwargs) -> bool:  # pragma: no cover - trivial
+        return False
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+
 _STATIC_DIR = Path(__file__).parent / "static"
-app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+app.mount("/static", _NoCacheStaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
 # ---------------------------------------------------------------------------
@@ -269,16 +327,164 @@ def _safe_next_path(path: str) -> str:
 def _require_auth(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(_security),
     request: Request = None,
-) -> None:
-    if credentials and credentials.credentials == _api_key:
-        return
+) -> str:
+    if credentials and secrets.compare_digest(credentials.credentials.encode(), _api_key.encode()):
+        return "operator:api-key"
     tok = request.cookies.get(_SESSION_COOKIE) if request else None
     if tok and _sessions.get(tok, 0) > time.time():
-        return
+        return "operator:web-session"
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
 
 
 AUTH = Depends(_require_auth)
+
+# Consolidated PlanAuthority console. The late-bound host adapter performs no
+# database or Plan access at import time and reuses this service's auth seam.
+mount_operator_console(
+    app,
+    configured_console_mount(
+        lambda: _cfg,
+        require_operator=_require_auth,
+        require_executor=_require_auth,
+    ),
+)
+
+
+def _require_coding_worker(request: Request) -> str:
+    """Authenticate a coding worker with its dedicated referenced secret."""
+    coding = _cfg.get("coding")
+    if not isinstance(coding, dict):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="coding worker is not configured")
+    reference = coding.get("worker_credential_env")
+    supplied = request.headers.get("X-TGW-Worker-Authorization", "")
+    identity = request.headers.get("X-TGW-Worker-Identity", "")
+    expected = os.environ.get(reference) if isinstance(reference, str) and reference else None
+    if not expected or not supplied.startswith("Bearer ") or not identity:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid coding worker credential")
+    if not secrets.compare_digest(supplied.removeprefix("Bearer ").encode(), expected.encode()):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid coding worker credential")
+    if identity != coding.get("worker_identity"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid coding worker identity")
+    return identity
+
+
+WORKER_AUTH = Depends(_require_coding_worker)
+
+
+@app.get("/api/coding/worker/requests/next")
+def coding_worker_next(worker_identity: str = WORKER_AUTH):
+    from .coding_provision import next_request
+
+    try:
+        return next_request(_cfg, worker_identity) or {}
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/coding/requests", dependencies=[AUTH])
+def coding_provision_start(body: CodingProvisionStart):
+    """Persist a request-safe coding job; the tgw-lib worker resolves and
+    validates its local worktree envelope after claim."""
+    from .coding_provision import create_request
+
+    try:
+        return create_request(
+            _cfg, todo_id=body.todo_id,
+            object_generation=body.object_generation,
+            source_commit=body.source_commit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/coding/requests/{request_id}", dependencies=[AUTH])
+def coding_provision_status(request_id: str):
+    from .coding_provision import get_request
+
+    try:
+        return get_request(_cfg, request_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/coding/requests/{request_id}/stop", dependencies=[AUTH])
+def coding_provision_stop(request_id: str):
+    from .coding_provision import stop_request
+
+    try:
+        return stop_request(_cfg, request_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/coding/access-status", dependencies=[AUTH])
+def coding_access_status(request_id: str | None = None):
+    from .coding_provision import access_status
+
+    try:
+        return access_status(_cfg, request_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/coding/worker/requests/{request_id}")
+def coding_worker_request(request_id: str, worker_identity: str = WORKER_AUTH):
+    from .coding_provision import get_request
+
+    try:
+        document = get_request(_cfg, request_id)
+        if document.get("worker_identity") != worker_identity:
+            raise HTTPException(status_code=403, detail="request is assigned to another worker")
+        return document
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/coding/worker/requests/{request_id}/claim")
+def coding_worker_claim(request_id: str, body: CodingWorkerClaim, worker_identity: str = WORKER_AUTH):
+    from .coding_provision import claim_request
+
+    try:
+        return claim_request(_cfg, request_id=request_id, local_host=body.host,
+                             worker_identity=worker_identity, envelope_hash=body.envelope_hash,
+                             location=body.location, snapshot=body.snapshot)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/coding/worker/requests/{request_id}/start")
+def coding_worker_start(request_id: str, body: CodingWorkerLease, worker_identity: str = WORKER_AUTH):
+    from .coding_provision import start_request
+
+    try:
+        return start_request(_cfg, request_id=request_id, worker_identity=worker_identity,
+                             lease_token=body.lease_token)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/coding/worker/requests/{request_id}/complete")
+def coding_worker_complete(request_id: str, body: CodingWorkerComplete, worker_identity: str = WORKER_AUTH):
+    from .coding_provision import complete_request
+
+    try:
+        return complete_request(_cfg, request_id=request_id, worker_identity=worker_identity,
+                                lease_token=body.lease_token, result=body.result)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/coding/worker/requests/{request_id}/fail")
+def coding_worker_fail(request_id: str, body: CodingWorkerFail, worker_identity: str = WORKER_AUTH):
+    from .coding_provision import fail_request
+
+    try:
+        return fail_request(_cfg, request_id=request_id, worker_identity=worker_identity,
+                            lease_token=body.lease_token, error=body.error, result=body.result)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.middleware("http")
@@ -353,6 +559,12 @@ class ActionBody(BaseModel):
     options: Optional[Dict[str, Any]] = None
 
 
+class WorkflowGoalBody(BaseModel):
+    goal_profile_id: str = "tgw.ebay_listable"
+    scopes: List[str] = Field(default_factory=list)
+    authority_ttl_seconds: int = 300
+
+
 class SetTemplateBody(BaseModel):
     template_key: str
 
@@ -402,9 +614,37 @@ class PhotoOrderBody(BaseModel):
     order: List[str]
 
 
+class InventoryLockBody(BaseModel):
+    key: str
+    locked: bool
+
+
+class InventoryDiffApplyBody(BaseModel):
+    # todo #1417: the checked-subset of keys from the diff panel's default-
+    # checked checkboxes. Values are NEVER trusted from the client — the
+    # apply action re-diffs live and only writes keys still an active diff
+    # at call time (tgw.ebay.inventory_diff.apply_inventory_diff).
+    keys: List[str]
+
+
+class CategoryAspectMigrationApplyBody(BaseModel):
+    # todo #1471: the checked-subset of keys from the migration panel's
+    # default-checked (= discard from eBay, move to Set A) checkboxes.
+    # Values are NEVER trusted from the client — the apply action
+    # re-detects live and only migrates keys still actually orphaned at
+    # call time (tgw.ebay.category_aspect_migration.
+    # apply_category_aspect_migration).
+    keys: List[str]
+
+
 class AppendBody(BaseModel):
     op: str
     data: Dict[str, Any]
+    # PP-INTAKE-004 Phase 1a: caller signals the capture session is done —
+    # triggers the ai_reidentify refinement pass (or the fallback first-time
+    # identify, if the early-fire threshold was never reached) once the full
+    # photo set for this SKU exists.
+    session_complete: Optional[bool] = None
 
 
 class EbayWriteBody(BaseModel):
@@ -456,11 +696,17 @@ def list_items(
         clauses.append("location = ?")
         params.append(location)
     if status_filter == "__eligible__":
-        # Eligible for listing (Dave, s42): new / In Stock, and not currently on
-        # eBay (no Active listing, no PUBLISHED offer). Ended listings qualify —
-        # they can be relisted. Sold/disposed/archived excluded by the status
-        # allow-list. This is the feed for one-at-a-time listing runs.
-        clauses.append("LOWER(COALESCE(status, '')) IN ('new', 'in stock')")
+        # Eligible for listing (Dave, s42; blank-status fix #1377): new /
+        # In Stock, and not currently on eBay (no Active listing, no
+        # PUBLISHED offer). Ended listings qualify — they can be relisted.
+        # Sold/disposed/archived excluded by the status allow-list. Items
+        # with no status field at all (never stamped by the intake
+        # pipeline — a real, common gap, not a data error) count as
+        # eligible too, matching how the default "All" view already
+        # treats blank status as active/non-terminal (see the
+        # `if not status_filter` clause above). This is the feed for
+        # one-at-a-time listing runs.
+        clauses.append("(status IS NULL OR status = '' OR LOWER(status) IN ('new', 'in stock'))")
         clauses.append("(json_extract(data, '$.ebay_listing.status') IS NULL"
                        " OR json_extract(data, '$.ebay_listing.status') NOT IN ('Active', 'PUBLISHED'))")
         clauses.append("(json_extract(data, '$.ebay_offer.status') IS NULL"
@@ -608,6 +854,193 @@ def get_review_queue() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _workflow_attempt_rows(sku: str, limit: int = 100) -> List[Dict[str, Any]]:
+    """Join attempts by canonical entity identity, retaining legacy SKU rows."""
+    with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT job_id::text, queue_name, state, entity_type, entity_id,
+                       payload_json, attempt_count, max_attempts,
+                       error_code, error_detail, not_before,
+                       created_at, updated_at, finished_at
+                  FROM queue_jobs
+                 WHERE (entity_type = 'item' AND entity_id = %s)
+                    OR payload_json->>'sku' = %s
+                 ORDER BY created_at DESC
+                 LIMIT %s
+                """,
+                (sku, sku, limit),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+            for row in rows:
+                payload = row.get("payload_json") or {}
+                result = payload.get("result") if isinstance(payload, dict) else None
+                governed = isinstance(payload, dict) and all(
+                    payload.get(key) for key in ("treatment_id", "graph_id", "object_generation")
+                )
+                ambiguous = isinstance(result, dict) and result.get("outcome") in {
+                    "ambiguous", "reconciliation_required",
+                }
+                row["retry_allowed"] = (
+                    row.get("state") == "dead_letter" and not governed and not ambiguous
+                )
+            return rows
+
+
+def _workflow_reconciliation_rows(sku: str, limit: int = 100) -> Dict[str, Any]:
+    """Return only privacy-safe ledger columns needed to reconcile one item.
+
+    Request/authority JSON and provider result bodies are deliberately excluded.
+    This is observation only: it neither contacts a provider nor changes a ledger.
+    """
+    queries = {
+        "effects": """
+            SELECT effect_id, provider, operation, entity_type, entity_id,
+                   object_generation, graph_id, treatment_id, treatment_version,
+                   condition_hash, state, error_detail,
+                   created_at, dispatched_at, finished_at, updated_at
+              FROM provider_effects
+             WHERE entity_type = 'item' AND entity_id = %s
+             ORDER BY created_at DESC LIMIT %s
+        """,
+        "authorities": """
+            SELECT authority_id, operator_identity, surface, entity_id,
+                   goal_profile_id, goal_profile_version, object_generation,
+                   provider_identity, scopes, issued_at, expires_at,
+                   superseded_at, superseded_by
+              FROM operator_authorities
+             WHERE entity_id = %s
+             ORDER BY issued_at DESC LIMIT %s
+        """,
+        "observations": """
+            SELECT observation_id, observation_type, provider, provider_identity,
+                   sku, offer_id, object_generation, graph_id, condition_hash,
+                   content_identity, outcome, observed_at, created_at
+              FROM provider_observations
+             WHERE sku = %s
+             ORDER BY created_at DESC LIMIT %s
+        """,
+    }
+    result: Dict[str, Any] = {}
+    with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            for name, query in queries.items():
+                cur.execute(query, (sku, limit))
+                result[name] = [dict(row) for row in cur.fetchall()]
+    return result
+
+
+def _workflow_provider_identity() -> str:
+    migration = _cfg.get("workflow_migration")
+    if migration is None and isinstance(_cfg.get("raw"), dict):
+        migration = _cfg["raw"].get("workflow_migration")
+    value = migration.get("ebay_provider_identity") if isinstance(migration, dict) else None
+    return value if isinstance(value, str) else ""
+
+
+@app.get("/api/items/{sku}/workflow", dependencies=[AUTH])
+def item_workflow(sku: str) -> Dict[str, Any]:
+    """Return the current read-only workflow Action Card for one item."""
+    from .workflow.action_cards import build_item_action_card
+
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    try:
+        attempts = _workflow_attempt_rows(sku)
+        card = build_item_action_card(json_path, attempts)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"workflow projection unavailable: {exc}")
+    return {"ok": True, "workflow": card}
+
+
+@app.get("/api/items/{sku}/workflow-reconciliation", dependencies=[AUTH])
+def item_workflow_reconciliation(sku: str) -> Dict[str, Any]:
+    """Expose a read-only, privacy-safe reconciliation bundle for one item."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    try:
+        item = load_item_doc(json_path)
+        ledgers = _workflow_reconciliation_rows(sku)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"workflow reconciliation unavailable: {exc}"
+        ) from exc
+    offer = item.get("ebay_offer") if isinstance(item.get("ebay_offer"), dict) else {}
+    listing = item.get("ebay_listing") if isinstance(item.get("ebay_listing"), dict) else {}
+    return {
+        "ok": True,
+        "schema": "workflow-reconciliation/v1",
+        "entity_id": sku,
+        "provider_identity": _workflow_provider_identity(),
+        "canonical_markers": {
+            "stage": {
+                key: offer.get(key)
+                for key in ("provider_effect_id", "offer_id", "stage_content_identity")
+            },
+            "publish": {
+                key: listing.get(key)
+                for key in ("provider_effect_id", "listing_id", "offer_id", "published_at")
+            },
+        },
+        **ledgers,
+    }
+
+
+@app.post("/api/items/{sku}/workflow-goal")
+def request_workflow_goal(
+    sku: str, body: WorkflowGoalBody,
+    operator_identity: str = Depends(_require_auth),
+) -> Dict[str, Any]:
+    """Evaluate an operator goal; dispatch at most one local treatment."""
+    from .workflow.listing_migration import authorize_and_request_item_goal
+    from .workflow.profiles import get_profile
+
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    try:
+        goal = get_profile(body.goal_profile_id)
+    except KeyError:
+        raise HTTPException(status_code=400, detail="unknown workflow goal") from None
+    if not goal.identity.startswith("tgw."):
+        raise HTTPException(status_code=400, detail="only TGW item goals are accepted")
+    migration = _cfg.get("workflow_migration")
+    if migration is None and isinstance(_cfg.get("raw"), dict):
+        migration = _cfg["raw"].get("workflow_migration")
+    migration = migration if isinstance(migration, dict) else {}
+    provider_identity = migration.get("ebay_provider_identity", "")
+    if not isinstance(provider_identity, str) or not provider_identity.strip():
+        raise HTTPException(status_code=503, detail="provider identity is not configured")
+    try:
+        result, authority_id, authority_created = authorize_and_request_item_goal(
+            json_path, goal, operator_identity=operator_identity,
+            surface="http:item-workflow-goal", provider_identity=provider_identity,
+            scopes=tuple(body.scopes), ttl_seconds=body.authority_ttl_seconds,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "sku": sku,
+        "goal": {"id": goal.identity, "version": goal.version},
+        "graph_id": result.graph.graph_id,
+        "object_generation": result.graph.object_generation,
+        "dispatched": bool(result.dispatched and result.dispatched.enqueued),
+        "job_id": result.dispatched.job_id if result.dispatched else "",
+        "held_external": list(result.held_external),
+        "operator_gates": list(result.operator_gates),
+        "authority_id": authority_id,
+        "authority_created": authority_created,
+    }
+
+
 @app.get("/api/items/{sku}", dependencies=[AUTH])
 def get_item(sku: str) -> Dict[str, Any]:
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
@@ -649,7 +1082,7 @@ def get_item(sku: str) -> Dict[str, Any]:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT queue_name, state, attempt_count,
+                    SELECT job_id::text, queue_name, state, attempt_count,
                            created_at, updated_at, finished_at,
                            error_code, error_detail
                       FROM queue_jobs
@@ -677,12 +1110,56 @@ def get_item(sku: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@app.patch("/api/items/{sku}", dependencies=[AUTH])
-def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
+@app.patch("/api/items/{sku}")
+def patch_item(
+    sku: str, body: PatchBody, request: Request,
+    operator_identity: str = Depends(_require_auth),
+) -> Dict[str, Any]:
     if "sku" in body.fields:
         raise HTTPException(status_code=400, detail="sku field is immutable")
     if not body.fields:
         raise HTTPException(status_code=400, detail="no fields provided")
+
+    # Todo #1464 (Tigwa's field-set-boundary audit, invariant C12/C14): a
+    # caller-supplied FULL Set A/Set B envelope bypasses the sanctioned
+    # accessor's own diff/provenance logic entirely — _apply_patch's
+    # existing envelope branch just shallow-replaces whatever shape it's
+    # given, no history computed, no previous-value check. That's fine for
+    # ai_identify.py's own legitimate use (it builds the envelope itself via
+    # inventory_record.set_inventory_fields() before ever reaching HTTP —
+    # the fence call here is just transport for an already-sanctioned
+    # write), but nothing stopped ANY other caller with the shared API key
+    # from doing the same with an arbitrary, hand-built envelope and a
+    # forged/absent history — silently corrupting either set with no
+    # accessor ever having seen the change. A bare partial dict (the eBay
+    # Draft Editor's own normal save path, todo #1461) is unaffected — that
+    # already routes through the real accessor below and keeps working.
+    # Gate: only a machine (fence) caller — identified by the same
+    # X-TGW-Caller signal invariant C10's auto-redraft-loop guard already
+    # trusts elsewhere in this function — may submit an envelope-shaped
+    # value here; any operator/browser-originated request must send bare
+    # field updates and let the accessor build the envelope.
+    _caller_for_envelope_gate = request.headers.get("X-TGW-Caller", "")
+    _is_machine_caller = (_caller_for_envelope_gate.startswith("background:")
+                          or "worker:" in _caller_for_envelope_gate)
+    if not _is_machine_caller:
+        _ia = body.fields.get("item_attributes")
+        if isinstance(_ia, dict) and inventory_record.is_envelope(_ia):
+            raise HTTPException(
+                status_code=422,
+                detail=("item_attributes must be a bare field-update dict, not a "
+                        "full Set A envelope, from a non-machine caller — invariant "
+                        "C12/C14, todo #1464"),
+            )
+        _dl_for_gate = body.fields.get("draft_listing")
+        _isp = _dl_for_gate.get("item_specifics") if isinstance(_dl_for_gate, dict) else None
+        if isinstance(_isp, dict) and _is_ebay_draft_envelope(_isp):
+            raise HTTPException(
+                status_code=422,
+                detail=("draft_listing.item_specifics must be a bare field-update "
+                        "dict, not a full Set B envelope, from a non-machine caller "
+                        "— invariant C12/C14, todo #1464"),
+            )
 
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
@@ -715,7 +1192,45 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
         if _resolved is None:
             body.fields["pipeline_error"] = None
 
-    updated_keys = _apply_patch(json_path, body.fields)
+    # listing_description is a derived cache (AI description + boilerplate +
+    # picklist line, built by build_listing_description()) that stage_draft()
+    # prefers over the plain description field when pushing to eBay (sync.py
+    # ~line 453). If a patch edits draft_listing.description without also
+    # supplying listing_description, the cache goes stale and every future
+    # eBay push silently re-sends the old text — found live on
+    # tgw202605040949058, where 9 ebay_stage jobs "succeeded" while pushing
+    # stale AI text over the operator's edits. Regenerate it here so the
+    # cache can never outlive the field it's derived from.
+    if isinstance(_new_dl_fields, dict) and "description" in _new_dl_fields \
+            and "listing_description" not in _new_dl_fields:
+        _merged_dl_for_desc = {**(doc_before.get("draft_listing") or {}), **_new_dl_fields}
+        _item_for_desc = {**doc_before, "draft_listing": _merged_dl_for_desc}
+        _new_dl_fields["listing_description"] = build_listing_description(_item_for_desc, _cfg)
+
+    # PP-CONDITION-ENUM-001 / todo #1562: draft_listing.condition_enum is a
+    # known-vocabulary field (10 Inventory API enum strings) — a caller
+    # sending anything else (e.g. the raw human-readable "condition" label,
+    # which is exactly the corruption path that dead-lettered
+    # tgw202605051124483 at ebay_stage) must be REJECTED, not silently
+    # shallow-merged in by _apply_patch. Checked before _apply_patch runs so
+    # the bad value never reaches disk. Global-vocabulary check only (not
+    # narrowed to the item's category's allowed subset) — deliberately
+    # conservative: a value that isn't even a real enum is always wrong,
+    # while a real-but-category-mismatched enum is a softer case the
+    # Draft Editor's dropdown already surfaces for operator review.
+    if isinstance(_new_dl_fields, dict) and "condition_enum" in _new_dl_fields:
+        _ce = _new_dl_fields.get("condition_enum")
+        from .apis.ebay.conditions import is_known_condition_enum
+        if _ce and not is_known_condition_enum(_ce):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=422, content={
+                "ok": False,
+                "error": f"condition_enum {_ce!r} is not a valid eBay Inventory "
+                         f"API condition enum — rejected, not saved",
+                "field": "condition_enum",
+            })
+
+    updated_keys, resulting_generation = _apply_patch(json_path, body.fields)
 
     # Price edits leave a history trail (session 42): manual/UI price changes
     # previously appended nothing to price_history — Dave's $82.99 and every
@@ -803,19 +1318,22 @@ def patch_item(sku: str, body: PatchBody, request: Request) -> Dict[str, Any]:
         offer_id = (doc_before.get("ebay_offer") or {}).get("offer_id")
         if offer_id:
             try:
-                state_machine.enqueue_job(
-                    queue_name="ebay_stage",
-                    payload={"sku": sku, "force": True, "origin": "operator"},
-                    dedupe_key=f"ebay_stage:{sku}",
-                    max_attempts=2,
+                item_action(
+                    sku, ActionBody(action="ebay_update"),
+                    operator_identity=operator_identity,
                 )
-                log.info("auto-queued ebay_stage (push, no regen) for %s "
+                log.info("auto-dispatched ebay_stage (push, no regen) for %s "
                         "(draft_listing changed, offer_id present)", sku)
             except Exception as _eq:
                 if "unique" not in str(_eq).lower() and "duplicate" not in str(_eq).lower():
                     log.warning("failed to auto-enqueue ebay_stage for %s: %s", sku, _eq)
 
-    return {"ok": True, "sku": sku, "updated": updated_keys}
+    return {
+        "ok": True,
+        "sku": sku,
+        "updated": updated_keys,
+        "resulting_generation": resulting_generation,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -861,7 +1379,92 @@ def append_item(sku: str, body: AppendBody) -> Dict[str, Any]:
     _apply_patch(json_path, {field: lst})
     _enqueue_catalog_rebuild(f"append:{sku}:{body.op}")
 
+    # PP-INTAKE-004 Phase 1a: incremental-ID trigger. Only the photo-append
+    # path can move the running photo count, so only it needs to check.
+    if body.op == "photo":
+        _maybe_early_identify(json_path, sku, photo_count=len(lst))
+
+    if body.session_complete:
+        _maybe_session_complete_identify(json_path, sku)
+
     return {"ok": True, "sku": sku, "op": body.op, "field": field}
+
+
+def _maybe_early_identify(json_path: "Path", sku: str, photo_count: int) -> None:
+    """PP-INTAKE-004 Phase 1a: fire ai_identify the first time the running
+    photo count crosses ai_identify's own cloud batch size
+    (`_MAX_PHOTOS_CLOUD`, currently 6 — Dave, 2026-07-04: threshold = the ID
+    call's own batch size, not an arbitrary smaller number), mirroring what
+    `bundle_intake.py` does after its stability wait. Only fires once — the
+    guard is "hasn't already run" (`ai_identified` not yet true); once it
+    has, later photos land quietly and refinement is via the
+    `ai_reidentify` flag on session completion instead (see
+    `_maybe_session_complete_identify`), never a repeat of this early fire.
+    """
+    from tgw.workers.ai_identify import _MAX_PHOTOS_CLOUD
+
+    if photo_count < _MAX_PHOTOS_CLOUD:
+        return
+
+    doc = load_item_doc(json_path)
+    if doc.get("ai_identified"):
+        return  # already identified once; early-fire's job is done
+
+    try:
+        state_machine.enqueue_job(
+            queue_name="ai_identify",
+            payload={"sku": sku, "origin": "operator"},
+            entity_type="item",
+            entity_id=sku,
+            dedupe_key=f"ai_identify:{sku}",
+            max_attempts=3,
+        )
+        log.info(
+            "early ai_identify enqueued for %s (%d photos >= threshold %d)",
+            sku, photo_count, _MAX_PHOTOS_CLOUD,
+        )
+    except psycopg2.errors.UniqueViolation:
+        pass  # already queued, coalescing
+    except Exception as exc:
+        log.warning("failed to enqueue early ai_identify for %s: %s", sku, exc)
+
+
+def _maybe_session_complete_identify(json_path: "Path", sku: str) -> None:
+    """PP-INTAKE-004 Phase 1a: session-completion signal.
+
+    - If ai_identify already ran (early-fire path above, or any other
+      route) and the session is now complete, set `ai_reidentify: true` —
+      the existing re-scan mechanism (`workers/ai_identify.py` already
+      checks this flag and re-runs with the full photo set) gives one
+      refinement pass now that the full capture is in.
+    - If ai_identify never ran at all (fallback — e.g. a quick item that
+      only ever gets 2-3 shots, never crossing the early-fire threshold),
+      enqueue it directly with whatever smaller photo set exists rather
+      than waiting indefinitely for a batch that isn't coming.
+    """
+    doc = load_item_doc(json_path)
+    if doc.get("ai_identified"):
+        try:
+            _apply_patch(json_path, {"ai_reidentify": True})
+            log.info("session-complete: ai_reidentify set for %s", sku)
+        except Exception as exc:
+            log.warning("failed to set ai_reidentify for %s: %s", sku, exc)
+        return
+
+    try:
+        state_machine.enqueue_job(
+            queue_name="ai_identify",
+            payload={"sku": sku, "origin": "operator"},
+            entity_type="item",
+            entity_id=sku,
+            dedupe_key=f"ai_identify:{sku}",
+            max_attempts=3,
+        )
+        log.info("session-complete fallback: ai_identify enqueued for %s", sku)
+    except psycopg2.errors.UniqueViolation:
+        pass  # already queued, coalescing
+    except Exception as exc:
+        log.warning("failed to enqueue fallback ai_identify for %s: %s", sku, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -892,7 +1495,7 @@ def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
     if not any(v is not None for v in incoming.values()):
         raise HTTPException(status_code=400, detail="no eBay blocks provided")
 
-    changed_fields = _apply_ebay_write(
+    changed_fields, resulting_generation = _apply_ebay_write(
         json_path,
         sku,
         ebay_offer=body.ebay_offer,
@@ -902,7 +1505,12 @@ def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
         allow_protected=body.allow_protected,
     )
     _enqueue_catalog_rebuild(f"ebay_write:{sku}")
-    return {"ok": True, "sku": sku, "changed_fields": changed_fields}
+    return {
+        "ok": True,
+        "sku": sku,
+        "changed_fields": changed_fields,
+        "resulting_generation": resulting_generation,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -914,15 +1522,34 @@ def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
 def _enqueue_catalog_rebuild(reason: str) -> None:
     """Coalesced catalog rebuild — 30s delay, single dedupe key."""
     try:
-        state_machine.enqueue_job(
-            queue_name="catalog_rebuild",
-            payload={"reason": reason},
-            dedupe_key="catalog_rebuild:pending",
-            not_before=time.time() + 30,
-            max_attempts=3,
-        )
+        state_machine.enqueue_catalog_rebuild(reason)
     except Exception:
         pass
+
+
+def _enqueue_thumbnail_gen(sku: str, reason: str) -> None:
+    """Thumbnail regen — same enqueue shape as bundle_intake's initial-intake
+    call (PP-CATALOG-INCR-001 CI-3). Only call this when a write actually
+    touched image/photo_order — before this packet, thumbnail_gen was ONLY
+    ever enqueued once at initial bundle_intake, so a later photo reorder or
+    primary-photo change through the fence never refreshed the thumbnail at
+    all (a real latent gap, not just an over-triggering one)."""
+    try:
+        state_machine.enqueue_job(
+            queue_name='thumbnail_gen',
+            # C10 stamp — this fires from the HTTP fence in response to a
+            # write, same class as every other operator-adjacent enqueue in
+            # this file (invariant C10, test_operator_origin_sourcescan.py).
+            payload={'sku': sku, 'origin': 'operator'},
+            entity_type='item',
+            entity_id=sku,
+            dedupe_key=f'thumbnail_gen:{sku}',
+            max_attempts=3,
+        )
+    except psycopg2.errors.UniqueViolation:
+        pass  # already queued, coalescing
+    except Exception:
+        log.warning("thumbnail_gen enqueue failed for %s (%s)", sku, reason)
 
 
 def _persist_finding(json_path: "Path", sku: str, code: str, detail: str, source: str) -> None:
@@ -932,6 +1559,12 @@ def _persist_finding(json_path: "Path", sku: str, code: str, detail: str, source
     workers/ebay_stage.py, workers/ebay_publish.py). Best-effort: if the
     persist itself fails, that failure is only a log line — there is nowhere
     lower to record it.
+
+    _skip_catalog_upsert=True on the inner _apply_patch call: this write
+    must never be the trigger for its own recursive catalog-upsert-failure
+    finding (see _apply_patch's identical parameter) — a pipeline_error
+    write being one cycle behind in the SQLite catalog is low-stakes
+    compared to an infinite recursion if the upsert is persistently broken.
     """
     try:
         _apply_patch(json_path, {"pipeline_error": {
@@ -939,33 +1572,203 @@ def _persist_finding(json_path: "Path", sku: str, code: str, detail: str, source
             "detail": detail,
             "ts": datetime.now(timezone.utc).isoformat(),
             "source": source,
-        }})
+        }}, _skip_catalog_upsert=True)
     except Exception:
         log.exception("failed to persist %s finding for %s", code, sku)
 
 
-def _apply_patch(json_path: "Path", fields: Dict[str, Any]) -> List[str]:
+def _apply_patch(
+    json_path: "Path",
+    fields: Dict[str, Any],
+    _skip_catalog_upsert: bool = False,
+) -> Tuple[List[str], str]:
     """Core item patch: deep-merge dict fields, write atomically, schedule rebuild.
 
     Fields with value None are deleted from the document.
-    Returns the list of keys that were written or deleted.
+    Returns the keys written or deleted and the exact generation of the
+    document passed to the committing atomic write.  Callers that drive a
+    workflow continuation must use this generation instead of reopening the
+    item path after the write, because an independent writer may legitimately
+    commit between the fence write and a later pathname read.
+
+    _skip_catalog_upsert: True only for _persist_finding's own internal
+    {"pipeline_error": ...}-only recursive call — skips both the SQLite
+    upsert (avoiding infinite recursion if the upsert is persistently
+    broken) AND the implicit catalog_verified invalidation below (an
+    internal side-record write must never have field-presence side effects
+    on the caller's actual edit).
     """
     fields = dict(fields)
+    # Captured before the dmk-pop loop below removes draft_listing/
+    # item_attributes from `fields` — those two keys are still real changed
+    # keys for _changed_keys' purposes (audit-publish, thumbnail trigger)
+    # even though they're routed through the accessor path below instead of
+    # the plain doc.update(fields) merge. Code-review finding, 2026-07-18:
+    # using post-pop fields.keys() here silently dropped draft_listing/
+    # item_attributes edits from both the PATCH response's "updated" list
+    # and CI-1's mutation-audit stream.
+    _original_field_keys = list(fields.keys())
     doc = load_item_doc(json_path)
+    _before_doc = dict(doc)
     for dmk in ("draft_listing", "item_attributes"):
         if dmk in fields and isinstance(fields[dmk], dict):
             existing = doc.get(dmk) or {}
-            existing.update(fields.pop(dmk))
-            doc[dmk] = existing
+            incoming = fields.pop(dmk)
+            # todo #1418 / invariant C12: item_attributes is now a self-describing
+            # Set A envelope ({_set, version, updated_at, fields}), not a bare
+            # dict. A caller that already sends a full envelope (the sanctioned
+            # accessor's output, e.g. tgw.inventory_record.set_inventory_fields)
+            # is handled by the plain shallow-merge below — every envelope key
+            # gets overwritten wholesale, which is a correct full replace. A
+            # caller that still sends a bare partial dict of field updates (a
+            # legacy/UI path not yet migrated onto the accessor — see #1416)
+            # must NOT have those keys merged onto the envelope's top level
+            # (that would silently corrupt _set/version/fields with sibling
+            # scalar keys) — route it through the accessor instead so the
+            # envelope shape is always preserved.
+            if dmk == "item_attributes" and not inventory_record.is_envelope(incoming):
+                patch = inventory_record.set_inventory_fields(
+                    doc, incoming, source="http_patch", applied_by="operator")
+                doc["item_attributes"] = patch["item_attributes"]
+                doc["item_attributes_history"] = patch["item_attributes_history"]
+            elif dmk == "draft_listing":
+                # todo #1416 point 3: the eBay Draft Editor's aspects form
+                # (saveEbayDraft()) now sends its edits nested inside
+                # draft_listing.item_specifics, matching every other Draft
+                # Editor field (title, price, condition_enum, ...). Same
+                # envelope-corruption risk as item_attributes above applies
+                # here: a bare partial {name: value} dict of aspect edits
+                # must NOT be shallow-merged directly onto item_specifics's
+                # envelope (that would clobber _set/version/fields with
+                # sibling scalar keys) — route it through the sanctioned Set
+                # B accessor (tgw.ebay.draft_specifics) instead, same
+                # discipline as item_attributes's accessor routing above.
+                incoming_specifics = incoming.pop("item_specifics", None) \
+                    if isinstance(incoming, dict) else None
+                existing.update(incoming)
+                doc[dmk] = existing
+                if isinstance(incoming_specifics, dict) and not _is_ebay_draft_envelope(incoming_specifics):
+                    sp_patch = set_ebay_aspects(
+                        doc, incoming_specifics, source="http_patch", applied_by="operator")
+                    existing["item_specifics"] = sp_patch["item_specifics"]
+                    existing["item_specifics_history"] = sp_patch["item_specifics_history"]
+                elif incoming_specifics is not None:
+                    # Already a full envelope (accessor output moving onward, e.g.
+                    # accept_proposals) — plain replace, no re-diffing needed.
+                    existing["item_specifics"] = incoming_specifics
+                doc[dmk] = existing
+
+                # Padlock auto-sync (Dave, 2026-07-18): every eBay-draft save
+                # pushes its aspects into item_attributes for any key NOT
+                # explicitly locked — replaces the old "visit a separate
+                # diff panel and check off every field" two-step (todo
+                # #1417) as the default path; #1417's diff/apply endpoints
+                # stay for anything not covered by this sync.
+                _draft_fields: Dict[str, Any] = dict(get_ebay_aspects(doc))
+                if _draft_fields:
+                    _ia_sync = inventory_record.sync_from_draft(
+                        doc, _draft_fields, source="draft_sync", applied_by="operator")
+                    doc["item_attributes"] = _ia_sync["item_attributes"]
+                    doc["item_attributes_history"] = _ia_sync["item_attributes_history"]
+
+                # Same padlock idea, applied to the "base data" fields that
+                # live at the TOP LEVEL of the item, not inside item_attributes
+                # (title, description — Dave, 2026-07-18: "this worked for
+                # aspects/item specifics but not for title or any of the
+                # other base data"). These are what the page header and
+                # main fields panel actually display, so a fix that only
+                # touched item_attributes.fields never showed up where the
+                # operator was looking. Locked via the same locked_keys list
+                # (key names "title"/"description"), so one shared lock
+                # vocabulary covers both aspect-style and top-level facts.
+                for _base_key, _draft_val in (
+                    ("title", existing.get("title")),
+                    ("description", existing.get("description")),
+                ):
+                    if _draft_val and not inventory_record.is_locked(doc, _base_key):
+                        doc[_base_key] = _draft_val
+            else:
+                existing.update(incoming)
+                doc[dmk] = existing
     to_delete = [k for k, v in fields.items() if v is None]
     for k in to_delete:
         doc.pop(k, None)
         fields.pop(k)
     doc.update(fields)
-    if "catalog_verified" not in fields:
+    # Code-review fix, 2026-07-19: skip the implicit catalog_verified
+    # invalidation for internal side-record writes (_persist_finding's own
+    # {"pipeline_error": ...}-only recursive call). Without this guard, any
+    # ordinary field patch that happened to trigger a finding-persist (e.g.
+    # a failed sqlite upsert) would have its own catalog_verified value
+    # silently clobbered moments later by the unrelated internal write —
+    # exactly the "correction takes effect but a follow-up write silently
+    # reverts it" failure class invariant C14 exists to prevent, just
+    # self-inflicted by this function instead of a separate caller.
+    if not _skip_catalog_upsert and "catalog_verified" not in fields:
         doc.pop("catalog_verified", None)
+
+    # todo #1522 / invariant C14: an operator's direct edit (including a
+    # clear) of a top-level padlock-synced base field (title/description)
+    # must keep draft_listing's own copy of that field in agreement,
+    # otherwise the "Padlock auto-sync" block above silently resurrects
+    # the pre-edit value from a now-stale draft_listing on the very next
+    # unrelated draft_listing save (e.g. a price edit) — the base field
+    # never diverges from the draft in the first place, so there is
+    # nothing stale left for the auto-sync to overwrite it with. This
+    # mirrors base -> draft; the auto-sync block above still governs the
+    # opposite draft -> base direction and still honors the lock.
+    if isinstance(doc.get("draft_listing"), dict):
+        for _base_key in ("title", "description"):
+            if _base_key in fields:
+                doc["draft_listing"][_base_key] = fields[_base_key]
     atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
-    return list(fields.keys()) + to_delete
+    resulting_generation = item_generation(doc)
+    _sku_for_mutation = doc.get("sku") or json_path.stem
+    # Atomic per-item SQLite catalog upsert (PP-CATALOG-INCR-001 CI-2) — keeps
+    # the inventory webui's data source live-accurate without waiting for the
+    # periodic full rebuild. Best-effort: a catalog-projection hiccup must
+    # never fail a write that already succeeded against the source of truth.
+    # Code-review finding, 2026-07-18: a discard_revision-specific C11 guard
+    # was deleted on the premise this upsert made it redundant, but the
+    # upsert's own failure path was log-only — the invariant went
+    # unenforced. Fixed at the root here instead of restoring the
+    # endpoint-specific guard: any _apply_patch caller's upsert failure now
+    # persists a C11 finding (unless _skip_catalog_upsert, which also skips
+    # the finding-persist recursion guard's own inner call).
+    if not _skip_catalog_upsert:
+        try:
+            from .sqlite_catalog import upsert_catalog_row
+
+            upsert_catalog_row(_cfg, doc)
+        except Exception as _uc_exc:
+            log.warning("sqlite catalog upsert failed for %s: %s", _sku_for_mutation, _uc_exc)
+            _persist_finding(
+                json_path, _sku_for_mutation, "sqlite_catalog_upsert_failed",
+                f"SQLite catalog upsert failed after write: {_uc_exc}",
+                "apply_patch",
+            )
+    _changed_keys = _original_field_keys
+    # Publish to audit stream (PP-AIOPS-001 Phase 1 / PP-CATALOG-INCR-001 CI-1) —
+    # fire-and-forget. This is the real fence choke point essentially all write
+    # traffic (worker patches, bulk edits) goes through; items.py's _write_field
+    # already fed the stream for the CLI-only path, this closes the gap for the
+    # HTTP path, which is the one that matters for the incremental catalog design.
+    try:
+        from .apis.nats_client import publish_mutation
+
+        for _ck in _changed_keys:
+            publish_mutation(
+                sku=_sku_for_mutation, field=_ck,
+                old_value=_before_doc.get(_ck), new_value=doc.get(_ck),
+                source="http_patch",
+            )
+    except Exception:
+        pass
+    # Thumbnail regen (PP-CATALOG-INCR-001 CI-3) — only on the fields that
+    # actually affect what the thumbnail shows, not on every write.
+    if "image" in _changed_keys or "photo_order" in _changed_keys:
+        _enqueue_thumbnail_gen(_sku_for_mutation, reason=f"http_patch:{','.join(_changed_keys)}")
+    return _changed_keys, resulting_generation
 
 
 def _apply_ebay_write(
@@ -977,7 +1780,7 @@ def _apply_ebay_write(
     ebay_submitted: Optional[Dict[str, Any]] = None,
     ebay_live: Optional[Dict[str, Any]] = None,
     allow_protected: Optional[List[str]] = None,
-) -> List[str]:
+) -> Tuple[List[str], str]:
     """eBay block deep-merge with field protection — same logic as POST /ebay-write.
 
     Protected sub-fields (price_comps, staged_at, photo_verify) are restored
@@ -995,6 +1798,7 @@ def _apply_ebay_write(
         "ebay_live": ebay_live,
     }
     doc = load_item_doc(json_path)
+    _before_doc = dict(doc)
     changed: List[str] = []
     for block_key, incoming_block in incoming.items():
         if incoming_block is None:
@@ -1020,7 +1824,32 @@ def _apply_ebay_write(
         doc[block_key] = merged
         changed.append(block_key)
     atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
-    return changed
+    resulting_generation = item_generation(doc)
+    # SQLite catalog upsert — see _apply_patch's identical block (PP-CATALOG-INCR-001 CI-2/C11 fix).
+    try:
+        from .sqlite_catalog import upsert_catalog_row
+
+        upsert_catalog_row(_cfg, doc)
+    except Exception as _uc_exc:
+        log.warning("sqlite catalog upsert failed for %s: %s", sku, _uc_exc)
+        _persist_finding(
+            json_path, sku, "sqlite_catalog_upsert_failed",
+            f"SQLite catalog upsert failed after write: {_uc_exc}",
+            "apply_ebay_write",
+        )
+    # Publish to audit stream — see _apply_patch's identical block (PP-CATALOG-INCR-001 CI-1).
+    try:
+        from .apis.nats_client import publish_mutation
+
+        for _ck in changed:
+            publish_mutation(
+                sku=sku, field=_ck,
+                old_value=_before_doc.get(_ck), new_value=doc.get(_ck),
+                source="http_ebay_write",
+            )
+    except Exception:
+        pass
+    return changed, resulting_generation
 
 
 # ---------------------------------------------------------------------------
@@ -1037,25 +1866,22 @@ def create_item_endpoint(body: CreateItemBody) -> Dict[str, Any]:
             status_code=400,
             detail=f"invalid sku format {body.sku!r}; must match tgwYYYYMMDDHHMMSSmmm",
         )
-    item_dir = _cfg["itemdata_root"] / body.sku
-    json_path = item_dir / f"{body.sku}.json"
-    if json_path.exists():
+    try:
+        json_path = create_item(_cfg, body.sku, body.data)
+    except FileExistsError:
         raise HTTPException(status_code=409, detail=f"sku already exists: {body.sku}")
 
-    item_dir.mkdir(parents=True, exist_ok=True)
-    record = {"sku": body.sku, **body.data}
-    atomic_write_json(json_path, record, pretty=_cfg.get("pretty", True))
-
+    # Atomic per-item SQLite catalog upsert (PP-CATALOG-INCR-001 CI-4,
+    # 2026-07-18) — a brand-new item needs its first catalog row immediately,
+    # not after the hourly reconciliation timer; items.create_item() has no
+    # publish_mutation/upsert hook of its own (pre-existing gap, out of scope
+    # here), so this endpoint does it directly.
     try:
-        state_machine.enqueue_job(
-            queue_name="catalog_rebuild",
-            payload={"reason": f"create:{body.sku}"},
-            dedupe_key="catalog_rebuild:pending",
-            not_before=time.time() + 30,
-            max_attempts=3,
-        )
-    except Exception:
-        pass
+        from .sqlite_catalog import upsert_catalog_row
+
+        upsert_catalog_row(_cfg, load_item_doc(json_path))
+    except Exception as _uc_exc:
+        log.warning("sqlite catalog upsert failed for new item %s: %s", body.sku, _uc_exc)
 
     return {"ok": True, "sku": body.sku, "path": str(json_path)}
 
@@ -1102,13 +1928,7 @@ def bulk_apply(body: BulkBody) -> Dict[str, Any]:
     # item JSONs and must refresh the catalog.
     if result.get("count"):
         try:
-            state_machine.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": "http_bulk"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 30,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild("http_bulk")
         except Exception:
             pass
     return result
@@ -1122,8 +1942,11 @@ _BULK_PIPELINE_ACTIONS = {"ai_identify", "ebay_price", "ebay_draft", "ebay_stage
 _BULK_VALID_ACTIONS = _BULK_PIPELINE_ACTIONS | {"set_ready", "mark_sold", "delete", "approve", "list_now", "ebay_end_listing", "archive"}
 
 
-@app.post("/api/bulk/action", dependencies=[AUTH])
-def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
+@app.post("/api/bulk/action")
+def bulk_action(
+    body: BulkActionBody,
+    operator_identity: str = Depends(_require_auth),
+) -> Dict[str, Any]:
     """Fan out an action across a list of SKUs.
 
     Actions: ai_identify, ebay_price, ebay_draft, ebay_stage, set_ready,
@@ -1160,27 +1983,21 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
                 continue
             if body.action == "list_now":
                 try:
-                    state_machine.enqueue_job(
-                        queue_name="ebay_upload",
-                        payload={"sku": sku, "origin": "operator"},
-                        dedupe_key=f"ebay_upload:{sku}",
-                        max_attempts=5,
+                    result = item_action(
+                        sku, ActionBody(action="ebay_publish"),
+                        operator_identity=operator_identity,
                     )
-                except Exception:
-                    pass
-                try:
-                    state_machine.enqueue_job(
-                        queue_name="ebay_stage",
-                        payload={"sku": sku, "origin": "operator"},
-                        dedupe_key=f"ebay_stage:{sku}",
-                        max_attempts=5,
-                    )
+                    if not result.get("ok"):
+                        errors.append(
+                            f"{sku} (list): {result.get('detail') or result.get('status') or 'held'}"
+                        )
                 except Exception as exc:
-                    err = str(exc)
-                    if "unique" not in err.lower() and "duplicate" not in err.lower():
-                        errors.append(f"{sku} (stage): {err}")
+                    errors.append(f"{sku} (list): {exc}")
         _enqueue_catalog_rebuild(f"bulk_{body.action}")
-        return {"ok": bool(done), "count": len(done), "done": done, "errors": errors}
+        return {
+            "ok": bool(done) and not errors,
+            "count": len(done), "done": done, "errors": errors,
+        }
 
     if body.action in ("mark_sold", "delete", "archive"):
         status_map = {"mark_sold": "Sold", "delete": "deleted", "archive": "archived"}
@@ -1291,22 +2108,27 @@ def bulk_action(body: BulkActionBody) -> Dict[str, Any]:
             errors.append(f"{sku}: not found")
             continue
         try:
-            if body.action == "ai_identify":
-                _apply_patch(json_path, {"ai_reidentify": True})
-            state_machine.enqueue_job(
-                queue_name=body.action,
-                payload={"sku": sku, "origin": "operator"},
-                dedupe_key=f"{body.action}:{sku}",
-                max_attempts=5,
+            result = item_action(
+                sku, ActionBody(action=body.action),
+                operator_identity=operator_identity,
             )
-            queued.append(sku)
+            if result.get("ok"):
+                queued.append(sku)
+            else:
+                errors.append(
+                    f"{sku}: {result.get('detail') or result.get('status') or 'held'}"
+                )
         except Exception as exc:
             err = str(exc)
             if "unique" in err.lower() or "duplicate" in err.lower():
                 skipped.append(sku)
             else:
                 errors.append(f"{sku}: {err}")
-    return {"ok": True, "count": len(queued), "queued": queued, "skipped": skipped, "errors": errors}
+    return {
+        "ok": not errors,
+        "count": len(queued), "queued": queued, "skipped": skipped,
+        "errors": errors,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1327,8 +2149,53 @@ def get_thumbnail(sku: str):
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/items/{sku}/action", dependencies=[AUTH])
-def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
+def _normalize_draft_condition_for_provider(json_path: "Path") -> Dict[str, str] | None:
+    """Persist the nearest honest category-valid condition before dispatch.
+
+    eBay accepts an inventory-item PUT containing a globally valid condition
+    enum, but can reject the later publish because that enum is not valid for
+    the offer's category.  Authorization and staged-content identities must be
+    created *after* this deterministic downgrade, never around content the
+    provider will reject or silently reinterpret.
+    """
+    from .apis.ebay.conditions import (
+        allowed_conditions_for_category,
+        best_condition_for_enum,
+    )
+
+    doc = load_item_doc(json_path)
+    draft = doc.get("draft_listing")
+    if not isinstance(draft, dict):
+        return None
+    category_id = str(draft.get("category_id") or "").strip()
+    current = str(draft.get("condition_enum") or "").strip()
+    if not category_id or not current:
+        return None
+    allowed = allowed_conditions_for_category(_cfg, category_id)
+    if not allowed or any(item.get("condition_enum") == current for item in allowed):
+        return None
+    remap = best_condition_for_enum(_cfg, category_id, current)
+    if remap is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"condition {current!r} is not valid for eBay category "
+                    f"{category_id}; select a category-valid condition"),
+        )
+    updated = dict(draft)
+    updated.update({
+        "condition_id": remap["condition_id"],
+        "condition_label": remap["condition_label"],
+        "condition_enum": remap["condition_enum"],
+    })
+    _apply_patch(json_path, {"draft_listing": updated})
+    return remap
+
+
+@app.post("/api/items/{sku}/action")
+def item_action(
+    sku: str, body: ActionBody,
+    operator_identity: str = Depends(_require_auth),
+) -> Dict[str, Any]:
     action = body.action
     if action not in PIPELINE_ACTIONS:
         raise HTTPException(
@@ -1341,19 +2208,15 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
 
     try:
+        if action in {"ebay_stage", "ebay_publish", "ebay_update"}:
+            _normalize_draft_condition_for_provider(json_path)
         if action == "approve":
             # Human approval of AI draft — set status=Ready, no job enqueued
             _apply_patch(json_path, {"status": "Ready"})
             _enqueue_catalog_rebuild(f"approve:{sku}")
             return {"ok": True, "sku": sku, "action": "approve", "status": "Ready"}
         elif action == "catalog_rebuild":
-            job_id = state_machine.enqueue_job(
-                queue_name="catalog_rebuild",
-                payload={"reason": f"manual:{sku}"},
-                dedupe_key="catalog_rebuild:pending",
-                not_before=time.time() + 5,
-                max_attempts=3,
-            )
+            state_machine.enqueue_catalog_rebuild(f"manual:{sku}", delay_seconds=5.0)
         elif action == "archive":
             _apply_patch(json_path, {"status": "archived"})
             _enqueue_catalog_rebuild(f"archive:{sku}")
@@ -1435,19 +2298,60 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             delta = rev.get("delta") or {}
             if not delta:
                 return {"ok": False, "detail": "no revision_draft delta to accept"}
-            ia = doc.get("item_attributes") or {}
+            # todo #1416 point 4: accepted proposals target draft_listing.
+            # item_specifics (Set B), via the sanctioned tgw.ebay.draft_specifics
+            # accessor — NOT item_attributes (Set A). This is the action's own
+            # button banner's stated contract ("copies proposals into your
+            # draft — review then Update Listing to push to eBay"): the
+            # accepted values must land somewhere the existing "Update
+            # Listing"/ebay_stage push path actually reads from
+            # (sync.py:_build_offer_bodies reads ONLY item_specifics), which
+            # item_attributes never was. Prior to this fix the accepted delta
+            # was silently written to the wrong set and never reached eBay —
+            # confirmed live during this packet's investigation (two
+            # ebay_stage jobs "succeeded" while pushing unchanged content).
+            #
+            # NOT routed through revision.cmd_revise_apply (point 6): that
+            # function requires an existing Inventory API offer_id and pushes
+            # live immediately (fresh GET -> compose -> PUT, no staging), which
+            # would break accept_proposals' own two-step contract ("accept"
+            # stages, a separate "Update Listing" click pushes) and would hard-
+            # fail for any item with a pending revision_draft but no live offer
+            # yet (a normal pre-publish state). Both mechanisms remain
+            # legitimate, distinct consumers of the same revision_draft.delta
+            # shape for two different UI flows; what's fixed here is that
+            # accept_proposals now writes to the SET that the staged-push path
+            # actually reads, closing the boundary bug without collapsing two
+            # intentionally different flows into one.
+            dl_touched = False
+            dl_patch: Dict[str, Any] = {}
             if "item_specifics" in delta and isinstance(delta["item_specifics"], dict):
-                ia.update(delta["item_specifics"])
-                doc["item_attributes"] = ia
+                dl_patch = set_ebay_aspects(
+                    doc, delta["item_specifics"], source="accept_proposals",
+                    applied_by="operator")
+                dl_touched = True
             dl2 = doc.get("draft_listing") or {}
+            if dl_touched:
+                dl2 = dict(dl2)
+                dl2["item_specifics"] = dl_patch["item_specifics"]
+                dl2["item_specifics_history"] = dl_patch["item_specifics_history"]
             if "title" in delta:
                 dl2["title"] = delta["title"]
+                dl_touched = True
             if "description" in delta:
+                # Runner-review fix (todo #1416): accept_proposals is a
+                # separate endpoint (item_action) from patch_item(), which
+                # is the only place the #1415 listing_description
+                # regeneration lived. Without this, an accepted description
+                # proposal reintroduces the exact stale-push bug #1415 fixed
+                # (listing_description never regenerated, eBay pushes keep
+                # sending old text) through this second code path.
                 dl2["description"] = delta["description"]
+                _item_for_desc = {**doc, "draft_listing": dl2}
+                dl2["listing_description"] = build_listing_description(_item_for_desc, _cfg)
+                dl_touched = True
             proposal_fields: Dict[str, Any] = {"revision_draft": None}
-            if ia is not doc.get("item_attributes"):
-                proposal_fields["item_attributes"] = ia
-            if dl2 is not doc.get("draft_listing"):
+            if dl_touched:
                 proposal_fields["draft_listing"] = dl2
             _apply_patch(json_path, proposal_fields)
             _enqueue_catalog_rebuild(f"accept_proposals:{sku}")
@@ -1465,19 +2369,143 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             # Reads current draft_listing; run Re-draft first to incorporate aspect edits.
             # origin='operator': this button IS the inspection gate (invariant C9) —
             # ebay_stage refuses force updates of live listings without it.
-            job_id = state_machine.enqueue_job(
-                queue_name="ebay_stage",
-                payload={"sku": sku, "force": True, "origin": "operator"},
-                max_attempts=2,
-            )
+            #
+            # Todo #1469 (live incident, 2026-07-16): "Update Listing" calls
+            # saveEbayDraft() first (which PATCHes draft_listing and, per the
+            # auto-push logic above, ALREADY enqueues an ebay_stage job under
+            # dedupe_key f"ebay_stage:{sku}"), then this action fires as
+            # saveEbayDraft's own success callback. Without a matching
+            # dedupe_key here, this was a SECOND, unguarded ebay_stage
+            # enqueue for the same click — two near-simultaneous stage jobs
+            # racing to PUT the same item, confirmed live: "why is every item
+            # staging twice... not even close to the same as ui." Same key as
+            # the auto-push logic so the redundant attempt coalesces instead
+            # of racing.
+            migration = _cfg.get("workflow_migration")
+            if migration is None and isinstance(_cfg.get("raw"), dict):
+                migration = _cfg["raw"].get("workflow_migration")
+            migration = migration if isinstance(migration, dict) else {}
+            mode = migration.get("item_ebay_stage_fanout", "legacy")
+            if mode not in {"legacy", "workflow"}:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"invalid item_ebay_stage_fanout mode {mode!r}",
+                )
+            if mode == "workflow":
+                from .workflow.listing_migration import (
+                    authorize_and_dispatch_force_restage,
+                )
+
+                provider_identity = migration.get("ebay_provider_identity", "")
+                result, dispatched, authority_id, authority_created = (
+                    authorize_and_dispatch_force_restage(
+                        json_path,
+                        operator_identity=operator_identity,
+                        surface="http:item-action:ebay-update",
+                        provider_identity=provider_identity,
+                    )
+                )
+                return {
+                    "ok": True, "sku": sku, "action": action,
+                    "job_id": dispatched.job_id,
+                    "status": ("workflow_dispatched" if dispatched.enqueued
+                               else "already_queued"),
+                    "treatment_id": dispatched.treatment_id,
+                    "graph_id": result.graph.graph_id,
+                    "object_generation": result.graph.object_generation,
+                    "authority_id": authority_id,
+                    "authority_created": authority_created,
+                }
+            try:
+                job_id = state_machine.enqueue_job(
+                    queue_name="ebay_stage",
+                    payload={"sku": sku, "force": True, "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
+                    dedupe_key=f"ebay_stage:{sku}",
+                    max_attempts=2,
+                )
+            except psycopg2.errors.UniqueViolation:
+                job_id = None
             return {"ok": True, "sku": sku, "action": "ebay_update", "job_id": job_id}
 
-        elif action == "sync_from_ebay":
-            job_id = state_machine.enqueue_job(
-                queue_name="ebay_sync",
-                payload={"sku": sku, "reason": "manual", "origin": "operator"},
-                max_attempts=2,
+        elif action == "resync_photos":
+            # On-demand photo re-verify + re-push (Dave, 2026-07-17): photos
+            # don't need pushing on every "Update Listing" click, so this is
+            # a separate button rather than baked into ebay_update — see
+            # tgw.ebay.repush's module docstring.
+            #
+            # Live bug found same day (tgw202605041013227): photo_order can
+            # have more photos than ebay_photos (the EPS-hosted set) if
+            # ebay_upload only ran once and never re-ran after photos were
+            # added later. repush only re-PUTs already-hosted URLs — the
+            # Inventory API can't accept a raw local path — so resync alone
+            # can never fix this; the missing photos need ebay_upload first.
+            # Detect the gap and queue that instead of silently no-op'ing.
+            #
+            # Second live bug, same day (tgw202605051849352): photo_order
+            # itself can be empty/stale while 26 real files sit on disk —
+            # it's a display-order cache, not the source of truth. Using
+            # len(photo_order) here compared 0 local vs 1 hosted and found
+            # "no gap" on an item that was actually missing 25 photos.
+            # ordered_photos() is what ebay_upload.py itself trusts (falls
+            # back to a directory scan when photo_order is empty) — use
+            # the same source so this check can't disagree with upload.
+            from tgw.assets import ordered_photos
+            from tgw.workflow.item_snapshot import _photo_sync_state
+            doc = load_item_doc(json_path)
+            local_photo_count = len(ordered_photos(doc, json_path.parent))
+            hosted_count = len([
+                entry for entry in (doc.get("ebay_photos") or [])
+                if isinstance(entry, dict) and entry.get("url")
+            ])
+            photo_ready, photo_reason, photo_fingerprint = _photo_sync_state(
+                doc, json_path.parent,
             )
+            if not photo_ready:
+                job_id = state_machine.enqueue_job(
+                    queue_name="ebay_upload",
+                    payload={"sku": sku, "reason": "resync_photos_gap", "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
+                    dedupe_key=f"ebay_upload:{sku}",
+                    max_attempts=3,
+                )
+                return {
+                    "ok": True, "sku": sku, "action": "resync_photos",
+                    "upload_queued": True, "job_id": job_id,
+                    "local_photo_count": local_photo_count, "hosted_count": hosted_count,
+                    "photo_fingerprint": photo_fingerprint,
+                    "detail": f"{photo_reason} — upload/synchronization queued; "
+                              f"the workflow will re-evaluate after it completes",
+                }
+
+            # Synchronous (not queued) from here: single item, all photos
+            # already EPS-hosted, operator wants the confirmed count back
+            # immediately, not a "queued" toast.
+            from tgw.ebay.repush import _repush_one
+            result = _repush_one(_cfg, sku)
+            if not result.get("ok"):
+                return {"ok": False, "sku": sku, "action": "resync_photos",
+                        "detail": result.get("reason", "resync failed")}
+            return {
+                "ok": True, "sku": sku, "action": "resync_photos",
+                "submitted_count": result.get("submitted_count"),
+                "confirmed_count": result.get("confirmed_count"),
+            }
+
+        elif action == "sync_from_ebay":
+            try:
+                job_id = state_machine.enqueue_job(
+                    queue_name="ebay_sync",
+                    payload={"sku": sku, "reason": "manual", "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
+                    max_attempts=2,
+                    dedupe_key=f"ebay_sync:sku:{sku}",
+                )
+            except psycopg2.errors.UniqueViolation:
+                job_id = None
             return {"ok": True, "sku": sku, "action": "sync_from_ebay", "job_id": job_id}
 
         elif action == "reset_draft_from_live":
@@ -1503,6 +2531,8 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                     state_machine.enqueue_job(
                         queue_name="ebay_upload",
                         payload={"sku": sku, "origin": "operator"},
+                        entity_type="item",
+                        entity_id=sku,
                         dedupe_key=f"ebay_upload:{sku}",
                         max_attempts=5,
                     )
@@ -1525,32 +2555,207 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             return {"ok": False, "sku": sku, "detail": err}
 
         elif action == "ai_identify":
-            _apply_patch(json_path, {"ai_reidentify": True})
-            job_id = state_machine.enqueue_job(
-                queue_name="ai_identify",
-                payload={"sku": sku, "origin": "operator"},
-                dedupe_key=f"ai_identify:{sku}",
-                max_attempts=3,
+            migration = _cfg.get("workflow_migration")
+            if migration is None and isinstance(_cfg.get("raw"), dict):
+                migration = _cfg["raw"].get("workflow_migration")
+            migration = migration if isinstance(migration, dict) else {}
+            mode = migration.get("item_ai_identify_fanout", "legacy")
+            if mode not in {"legacy", "workflow"}:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"invalid item_ai_identify_fanout mode {mode!r}",
+                )
+            if mode == "workflow":
+                from .workflow.listing_migration import request_item_goal
+                from .workflow.profiles import TGW_EBAY_DRAFTED
+
+                # Durable pending intent: the evaluator and queued treatment
+                # must bind the exact generation visible to a fresh worker.
+                _apply_patch(json_path, {
+                    "ai_reidentify": True,
+                    "ai_redraft_requested": True,
+                })
+                result = request_item_goal(
+                    json_path, TGW_EBAY_DRAFTED, origin="operator",
+                    operator_identity=operator_identity,
+                    operator_surface="http:item-action:ai-identify",
+                )
+                if result.dispatched is None:
+                    return {
+                        "ok": False, "sku": sku, "action": action,
+                        "status": "held", "job_id": "",
+                        "held_external": list(result.held_external),
+                        "operator_gates": list(result.operator_gates),
+                        "ownership_conflicts": list(result.graph.ownership_conflicts),
+                        "reconciliation_gates": list(result.graph.reconciliation_gates),
+                    }
+                job_id = result.dispatched.job_id
+            else:
+                _apply_patch(json_path, {
+                    "ai_reidentify": True,
+                    "ai_redraft_requested": True,
+                })
+                job_id = state_machine.enqueue_job(
+                    queue_name="ai_identify",
+                    payload={"sku": sku, "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
+                    dedupe_key=f"ai_identify:{sku}",
+                    max_attempts=3,
+                )
+
+        elif action == "ebay_draft":
+            migration = _cfg.get("workflow_migration")
+            if migration is None and isinstance(_cfg.get("raw"), dict):
+                migration = _cfg["raw"].get("workflow_migration")
+            migration = migration if isinstance(migration, dict) else {}
+            mode = migration.get(
+                "item_ebay_draft_fanout",
+                migration.get("bundle_downstream", "legacy"),
             )
+            if mode not in {"legacy", "workflow"}:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"invalid item_ebay_draft_fanout mode {mode!r}",
+                )
+            _apply_patch(json_path, {"ai_redraft_requested": True})
+            if mode == "workflow":
+                from .workflow.listing_migration import request_item_goal
+                from .workflow.profiles import TGW_EBAY_DRAFTED
+
+                result = request_item_goal(
+                    json_path, TGW_EBAY_DRAFTED, origin="operator",
+                    operator_identity=operator_identity,
+                    operator_surface="http:item-action:ebay-draft",
+                )
+                if result.dispatched is None:
+                    return {
+                        "ok": False, "sku": sku, "action": action,
+                        "status": "held", "job_id": "",
+                        "held_external": list(result.held_external),
+                        "operator_gates": list(result.operator_gates),
+                        "ownership_conflicts": list(result.graph.ownership_conflicts),
+                        "reconciliation_gates": list(result.graph.reconciliation_gates),
+                    }
+                job_id = result.dispatched.job_id
+            else:
+                job_id = state_machine.enqueue_job(
+                    queue_name="ebay_draft",
+                    payload={"sku": sku, "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
+                    dedupe_key=f"ebay_draft:{sku}",
+                    max_attempts=5,
+                )
 
         elif action == "ebay_price":
-            # Clear price sub-fields so the worker runs fresh (load→strip→patch)
+            migration = _cfg.get("workflow_migration")
+            if migration is None and isinstance(_cfg.get("raw"), dict):
+                migration = _cfg["raw"].get("workflow_migration")
+            migration = migration if isinstance(migration, dict) else {}
+            mode = migration.get(
+                "item_ebay_price_fanout",
+                migration.get("bundle_downstream", "legacy"),
+            )
+            if mode not in {"legacy", "workflow"}:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"invalid item_ebay_price_fanout mode {mode!r}",
+                )
+            # Clear price sub-fields so the worker runs fresh.  _apply_patch is
+            # a deep merge, so omitting a key does not remove its old value;
+            # explicit nulls are the durable reset representation.
             _doc = load_item_doc(json_path)
             _eo = dict(_doc.get("ebay_offer") or {})
             for _k in ("price", "price_comps", "priced_at", "price_source", "target_price"):
-                _eo.pop(_k, None)
+                _eo[_k] = None
             _dl = dict(_doc.get("draft_listing") or {})
-            _dl.pop("price", None)
-            _dl.pop("price_confidence", None)
+            _dl["price"] = None
+            _dl["price_confidence"] = None
             _apply_patch(json_path, {"ebay_offer": _eo, "draft_listing": _dl})
-            job_id = state_machine.enqueue_job(
-                queue_name="ebay_price",
-                payload={"sku": sku, "origin": "operator"},
-                dedupe_key=f"ebay_price:{sku}",
-                max_attempts=5,
-            )
+            if mode == "workflow":
+                from .workflow.listing_migration import request_item_goal
+                from .workflow.profiles import TGW_EBAY_PRICED
+
+                result = request_item_goal(
+                    json_path, TGW_EBAY_PRICED, origin="operator",
+                    operator_identity=operator_identity,
+                    operator_surface="http:item-action:ebay-price",
+                )
+                if result.dispatched is None:
+                    return {
+                        "ok": False, "sku": sku, "action": action,
+                        "status": "held", "job_id": "",
+                        "held_external": list(result.held_external),
+                        "operator_gates": list(result.operator_gates),
+                        "ownership_conflicts": list(result.graph.ownership_conflicts),
+                        "reconciliation_gates": list(result.graph.reconciliation_gates),
+                    }
+                job_id = result.dispatched.job_id
+            else:
+                job_id = state_machine.enqueue_job(
+                    queue_name="ebay_price",
+                    payload={"sku": sku, "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
+                    dedupe_key=f"ebay_price:{sku}",
+                    max_attempts=5,
+                )
 
         elif action == "ebay_stage":
+            migration = _cfg.get("workflow_migration")
+            if migration is None and isinstance(_cfg.get("raw"), dict):
+                migration = _cfg["raw"].get("workflow_migration")
+            migration = migration if isinstance(migration, dict) else {}
+            mode = migration.get("item_ebay_stage_fanout", "legacy")
+            if mode not in {"legacy", "workflow"}:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"invalid item_ebay_stage_fanout mode {mode!r}",
+                )
+            if mode == "workflow":
+                from .workflow.listing_migration import authorize_and_request_item_goal
+                from .workflow.profiles import TGW_EBAY_STAGED
+
+                provider_identity = migration.get("ebay_provider_identity", "")
+                result, authority_id, authority_created = (
+                    authorize_and_request_item_goal(
+                        json_path, TGW_EBAY_STAGED,
+                        operator_identity=operator_identity,
+                        surface="http:item-action:ebay-stage",
+                        provider_identity=provider_identity,
+                        scopes=("upload", "stage"),
+                    )
+                )
+                if result.dispatched is None:
+                    already_satisfied = not any((
+                        result.graph.unmet_requirements,
+                        result.graph.explicit_requirements,
+                        result.graph.ownership_conflicts,
+                        result.graph.reconciliation_gates,
+                        result.held_external,
+                        result.operator_gates,
+                    ))
+                    return {
+                        "ok": already_satisfied, "sku": sku, "action": action,
+                        "status": ("already_satisfied" if already_satisfied
+                                   else "held"), "job_id": "",
+                        "graph_id": result.graph.graph_id,
+                        "object_generation": result.graph.object_generation,
+                        "held_external": list(result.held_external),
+                        "operator_gates": list(result.operator_gates),
+                        "authority_id": authority_id,
+                        "authority_created": authority_created,
+                    }
+                job_id = result.dispatched.job_id
+                return {
+                    "ok": True, "sku": sku, "action": action,
+                    "job_id": job_id, "status": "workflow_dispatched",
+                    "graph_id": result.graph.graph_id,
+                    "object_generation": result.graph.object_generation,
+                    "authority_id": authority_id,
+                    "authority_created": authority_created,
+                }
             _doc = load_item_doc(json_path)
             _has_photos = bool(
                 (_doc.get("draft_listing") or {}).get("imageUrls")
@@ -1561,6 +2766,8 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                     state_machine.enqueue_job(
                         queue_name="ebay_upload",
                         payload={"sku": sku, "origin": "operator"},
+                        entity_type="item",
+                        entity_id=sku,
                         dedupe_key=f"ebay_upload:{sku}",
                         max_attempts=5,
                     )
@@ -1569,11 +2776,67 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             job_id = state_machine.enqueue_job(
                 queue_name="ebay_stage",
                 payload={"sku": sku, "origin": "operator"},
+                entity_type="item",
+                entity_id=sku,
                 dedupe_key=f"ebay_stage:{sku}",
                 max_attempts=5,
             )
 
         elif action == "ebay_publish":
+            migration = _cfg.get("workflow_migration")
+            if migration is None and isinstance(_cfg.get("raw"), dict):
+                migration = _cfg["raw"].get("workflow_migration")
+            migration = migration if isinstance(migration, dict) else {}
+            mode = migration.get("ebay_publish_provider_effect", "legacy")
+            if mode not in {"legacy", "workflow"}:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"invalid ebay_publish_provider_effect mode {mode!r}",
+                )
+            if mode == "workflow":
+                from .workflow.listing_migration import (
+                    authorize_and_dispatch_next_listing_effect,
+                )
+
+                provider_identity = migration.get("ebay_provider_identity", "")
+                result, dispatched, authority_id, authority_created = (
+                    authorize_and_dispatch_next_listing_effect(
+                        json_path,
+                        operator_identity=operator_identity,
+                        surface="http:item-action:ebay-publish",
+                        provider_identity=provider_identity,
+                    )
+                )
+                if dispatched is None:
+                    already_satisfied = not any((
+                        result.graph.unmet_requirements,
+                        result.graph.explicit_requirements,
+                        result.graph.ownership_conflicts,
+                        result.graph.reconciliation_gates,
+                        result.held_external,
+                        result.operator_gates,
+                    ))
+                    return {
+                        "ok": already_satisfied, "sku": sku, "action": action,
+                        "status": ("already_satisfied" if already_satisfied else "held"),
+                        "job_id": "", "graph_id": result.graph.graph_id,
+                        "object_generation": result.graph.object_generation,
+                        "held_external": list(result.held_external),
+                        "operator_gates": list(result.operator_gates),
+                        "authority_id": authority_id,
+                        "authority_created": authority_created,
+                    }
+                return {
+                    "ok": True, "sku": sku, "action": action,
+                    "job_id": dispatched.job_id,
+                    "status": ("workflow_dispatched" if dispatched.enqueued
+                               else "already_queued"),
+                    "treatment_id": dispatched.treatment_id,
+                    "graph_id": result.graph.graph_id,
+                    "object_generation": result.graph.object_generation,
+                    "authority_id": authority_id,
+                    "authority_created": authority_created,
+                }
             _doc = load_item_doc(json_path)
             _offer_id = (_doc.get("ebay_offer") or {}).get("offer_id")
             _has_photos = bool(
@@ -1588,6 +2851,8 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                         state_machine.enqueue_job(
                             queue_name="ebay_upload",
                             payload={"sku": sku, "origin": "operator"},
+                            entity_type="item",
+                            entity_id=sku,
                             dedupe_key=f"ebay_upload:{sku}",
                             max_attempts=5,
                         )
@@ -1597,6 +2862,8 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                     state_machine.enqueue_job(
                         queue_name="ebay_stage",
                         payload={"sku": sku, "origin": "operator"},
+                        entity_type="item",
+                        entity_id=sku,
                         dedupe_key=f"ebay_stage:{sku}",
                         max_attempts=5,
                     )
@@ -1613,6 +2880,8 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
                     state_machine.enqueue_job(
                         queue_name="ebay_stage",
                         payload={"sku": sku, "force": True, "origin": "operator"},
+                        entity_type="item",
+                        entity_id=sku,
                         dedupe_key=f"ebay_stage:{sku}",
                         max_attempts=5,
                     )
@@ -1621,6 +2890,8 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             job_id = state_machine.enqueue_job(
                 queue_name="ebay_publish",
                 payload={"sku": sku, "origin": "operator"},
+                entity_type="item",
+                entity_id=sku,
                 dedupe_key=f"ebay_publish:{sku}",
                 max_attempts=10,
             )
@@ -1629,9 +2900,13 @@ def item_action(sku: str, body: ActionBody) -> Dict[str, Any]:
             job_id = state_machine.enqueue_job(
                 queue_name=action,
                 payload={"sku": sku, "origin": "operator"},
+                entity_type="item",
+                entity_id=sku,
                 dedupe_key=f"{action}:{sku}",
                 max_attempts=5,
             )
+    except HTTPException:
+        raise
     except Exception as e:
         err = str(e)
         if "unique" in err.lower() or "duplicate" in err.lower():
@@ -1703,6 +2978,106 @@ def queue_status() -> Dict[str, Any]:
         by_queue.setdefault(q, {})[s] = row["count"]
 
     return {"ok": True, "queues": by_queue}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/queue/daily_stats — date-scoped per-queue outcome counts
+# ---------------------------------------------------------------------------
+# GET /api/todos — list open todos (read-only operator access)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/todos", dependencies=[AUTH])
+def api_todos(agent: str = ""):
+    """Return open todos from the todo_items table."""
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor() as cur:
+                if agent:
+                    cur.execute(
+                        "SELECT id, agent, priority, body, added_at "
+                        "FROM todo_items WHERE state = %s AND agent = %s "
+                        "ORDER BY priority DESC, id",
+                        ("open", agent),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT id, agent, priority, body, added_at "
+                        "FROM todo_items WHERE state = %s "
+                        "ORDER BY priority DESC, id",
+                        ("open",),
+                    )
+                rows = cur.fetchall()
+        items = [
+            {
+                "id": r[0], "agent": r[1], "priority": r[2],
+                "title": (r[3] or "")[:200], "added": str(r[4]) if r[4] else "",
+            }
+            for r in rows
+        ]
+        return {"ok": True, "count": len(items), "items": items}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+# (PP-QUEUESTATS-001: queue_status() above is lifetime-cumulative and cannot
+#  answer "how many succeeded/failed TODAY" — this reads queue_daily_stats,
+#  a Postgres view over the append-only queue_job_history ledger, so retried
+#  jobs (which reset queue_jobs.finished_at back to NULL) still count for the
+#  day they actually succeeded/failed. Day boundary is midnight
+#  America/Los_Angeles, matching quota.py's eBay-reset convention.)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/queue/daily_stats", dependencies=[AUTH])
+def queue_daily_stats(date: Optional[str] = None) -> Dict[str, Any]:
+    """Per-queue succeeded/failed counts for one day (default: today, LA tz).
+
+    Also returns a by_hour breakdown per queue — deliberately not collapsed
+    to a single number, so this can serve as the baseline data source for
+    future per-queue surge/anomaly detection (not built yet, out of scope
+    for this endpoint) without a schema/API change later.
+    """
+    if date:
+        try:
+            stat_date = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    else:
+        stat_date = datetime.now(_DISPLAY_TZ).date()
+
+    try:
+        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT queue_name, stat_hour, state, job_count
+                      FROM queue_daily_stats
+                     WHERE stat_date = %s
+                     ORDER BY queue_name, stat_hour
+                    """,
+                    (stat_date,),
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"postgres error: {e}")
+
+    by_queue: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        q = row["queue_name"]
+        entry = by_queue.setdefault(q, {"succeeded": 0, "failed": 0, "dead_letter": 0, "by_hour": []})
+        state = row["state"]
+        count = int(row["job_count"])
+        if state in ("succeeded", "failed", "dead_letter"):
+            entry[state] += count
+        entry["by_hour"].append(
+            {
+                "hour": row["stat_hour"].isoformat() if row["stat_hour"] else None,
+                "state": state,
+                "count": count,
+            }
+        )
+
+    return {"ok": True, "date": stat_date.isoformat(), "tz": "America/Los_Angeles", "queues": by_queue}
 
 
 # ---------------------------------------------------------------------------
@@ -1840,19 +3215,27 @@ def system_workers() -> Dict[str, Any]:
     return {"ok": True, "workers": workers, "up": up, "total": len(units)}
 
 
-# ---------------------------------------------------------------------------
 # POST /api/jobs/{job_id}/requeue — re-enqueue a dead-letter job (Phase 3j)
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/jobs/{job_id}/requeue", dependencies=[AUTH])
-def requeue_job(job_id: str) -> Dict[str, Any]:
+@app.post("/api/jobs/{job_id}/requeue")
+def requeue_job(
+    job_id: str,
+    operator_identity: str = Depends(_require_auth),
+) -> Dict[str, Any]:
     """Re-enqueue a dead-letter job with a fresh dedupe key so it can run again."""
     try:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT job_id, queue_name, payload_json, state, max_attempts FROM queue_jobs WHERE job_id = %s",
+                    """
+                    SELECT job_id, queue_name, payload_json, state, max_attempts,
+                           entity_type, entity_id, operation, handler_family,
+                           priority
+                      FROM queue_jobs
+                     WHERE job_id = %s
+                    """,
                     (job_id,),
                 )
                 row = cur.fetchone()
@@ -1869,19 +3252,77 @@ def requeue_job(job_id: str) -> Dict[str, Any]:
         )
 
     payload = dict(row["payload_json"]) if row["payload_json"] else {}
-    sku = payload.get("sku") or job_id[:8]
+    payload_sku = payload.get("sku")
+    sku = payload_sku.strip() if isinstance(payload_sku, str) else ""
+    dedupe_entity = sku or job_id[:8]
     # PP-ACTIONCONSOLE-001 improvement loop: mark operator-triggered retries so
     # the ledger can be mined for "same failure, same manual fix, keeps working"
     # patterns — candidates for automatic retry policy.
     payload["operator_retry"] = True
     payload["origin"] = "operator"
     payload["retried_from_job"] = str(job_id)
-    new_dedupe = f"{row['queue_name']}:{sku}:requeue:{int(time.time())}"
+    new_dedupe = f"{row['queue_name']}:{dedupe_entity}:requeue:{time.time_ns()}"
+
+    # Old dead-letter rows predate the canonical entity manifest.  Re-enqueuing
+    # one with enqueue_job's generic defaults creates a fresh row that modern
+    # workers must reject before doing any useful work.  A payload-bound SKU is
+    # definitive per-item identity, so migrate it at this boundary.  Queue-level
+    # jobs without a SKU retain their recorded manifest instead.
+    if sku:
+        entity_type = "item"
+        entity_id = sku
+    else:
+        entity_type = row.get("entity_type") or "generic"
+        entity_id = row.get("entity_id") or ""
+
+    # A retry is a request to try the operation again *now*, not permission to
+    # replay a stale queue envelope.  Item jobs created before workflow
+    # migration lack the current graph/generation/authority bindings and modern
+    # provider workers must reject them.  Re-enter through the same item action
+    # dispatcher as the visible button so it evaluates current state and issues
+    # a fresh, exactly-bound job (or reports a truthful hold).
+    action_by_queue = {
+        "ai_identify": "ai_identify",
+        "ebay_draft": "ebay_draft",
+        "ebay_upload": "ebay_upload",
+        "ebay_price": "ebay_price",
+        "ebay_stage": "ebay_stage",
+        "ebay_publish": "ebay_publish",
+        "ebay_sync": "sync_from_ebay",
+        "thumbnail_gen": "thumbnail_gen",
+        "catalog_rebuild": "catalog_rebuild",
+    }
+    current_action = action_by_queue.get(str(row["queue_name"])) if sku else None
+    if current_action:
+        result = item_action(
+            sku, ActionBody(action=current_action),
+            operator_identity=operator_identity,
+        )
+        result = dict(result)
+        result["retried_from_job"] = str(job_id)
+        result["retry_mode"] = "current_item_action"
+        result["new_job_id"] = result.get("job_id") or ""
+        result["queue"] = str(row["queue_name"])
+        if not result.get("ok") and "detail" not in result:
+            result["detail"] = (
+                f"current {current_action} dispatch {result.get('status', 'held')}"
+            )
+        return result
 
     try:
         new_job_id = state_machine.enqueue_job(
             queue_name=row["queue_name"],
             payload=payload,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            operation=row.get("operation") or "run",
+            handler_family=row.get("handler_family") or row["queue_name"],
+            priority=(
+                row.get("priority")
+                if isinstance(row.get("priority"), int)
+                and not isinstance(row.get("priority"), bool)
+                else None
+            ),
             dedupe_key=new_dedupe,
             max_attempts=row.get("max_attempts") or 3,
         )
@@ -2072,28 +3513,281 @@ def ebay_category_children(parent_id: str = "") -> Dict[str, Any]:
 
 
 # GET /api/ebay/store-categories
-# Returns store categories from category-groups.json, sorted by name.
+# Live-authoritative eBay store custom categories (GetStore), TTL-cached;
+# falls back to category-groups.json's set only if the live call itself
+# raises (network/auth failure) — an empty live response is trusted as-is,
+# since a genuinely empty store has no custom categories to offer. Fixes
+# the store-category dropdown authority gap found in the 2026-07-18
+# Seller Hub UI triage: the option list used to come only from
+# category-groups.json, a local/config-assembled list never checked
+# against the live account (PP-SELLERHUB-001, todo #1546).
 # ---------------------------------------------------------------------------
+
+_LIVE_STORE_CATS_CACHE: Dict[str, Any] = {"data": None, "at": 0.0}
+_LIVE_STORE_CATS_TTL = 900  # 15 min — bounds live-call frequency without letting the list go stale for long
+
+
+def _store_categories_from_groups(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build valid Store Category options from the configured local groups.
+
+    Item editing uses this local source so its category selectors do not depend
+    on GetStore. The live adapter may use the same helper only as its fallback.
+    Preserve distinct category IDs even if their display names match, and never
+    emit an empty/``None`` ID as a selectable value.
+    """
+    seen: Dict[str, str] = {}
+    try:
+        cg_path = cfg.get("category_groups_path")
+        if cg_path and Path(cg_path).exists():
+            cg = json.loads(Path(cg_path).read_text())
+            for grp in cg.get("groups", cg).values():
+                name = str(grp.get("store_category") or grp.get("store_category_name") or "").strip()
+                raw_sid = grp.get("store_category_id")
+                if raw_sid is None:
+                    continue
+                sid = str(raw_sid).strip()
+                if name and sid and sid not in seen:
+                    seen[sid] = name
+    except Exception:
+        pass
+    return [{"id": sid, "name": name} for sid, name in sorted(seen.items(), key=lambda item: (item[1].casefold(), item[0]))]
+
+
+def _store_categories_snapshot(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, str]], Optional[str], Optional[str]]:
+    """Load the validated last-known-good GetStore snapshot for page rendering.
+
+    Returns (results, refreshed_at, error). A missing/corrupt snapshot is kept
+    distinct from a legitimate, successfully refreshed empty eBay result.
+    """
+    catalog_root = cfg.get("catalog_root")
+    path = (Path(catalog_root) / "ebay-store-categories.json") if catalog_root else None
+    if not path or not path.exists():
+        return [], None, "eBay Store category snapshot unavailable"
+    try:
+        payload = json.loads(path.read_text())
+        raw_results = payload["results"]
+        if not isinstance(raw_results, list):
+            raise ValueError("results is not a list")
+        seen: Dict[str, str] = {}
+        for row in raw_results:
+            if not isinstance(row, dict):
+                raise ValueError("result is not an object")
+            raw_id = row.get("id")
+            raw_name = row.get("name")
+            if not isinstance(raw_id, str) or not isinstance(raw_name, str):
+                raise ValueError("result id and name must be strings")
+            sid = raw_id.strip()
+            name = raw_name.strip()
+            if not sid or not name:
+                raise ValueError("result has a blank id or name")
+            if sid in seen and seen[sid] != name:
+                raise ValueError(f"duplicate id {sid!r} has conflicting names")
+            seen[sid] = name
+        results = [
+            {"id": sid, "name": name}
+            for sid, name in sorted(seen.items(), key=lambda item: (item[1].casefold(), item[0]))
+        ]
+        raw_refreshed_at = payload.get("refreshed_at")
+        if raw_refreshed_at is not None and not isinstance(raw_refreshed_at, str):
+            raise ValueError("refreshed_at must be a string or null")
+        return results, (raw_refreshed_at or "").strip() or None, None
+    except Exception as exc:
+        return [], None, f"eBay Store category snapshot invalid: {exc}"
+
+
+def _live_store_categories(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool]:
+    """Return (results, used_fallback)."""
+    now = time.time()
+    cached = _LIVE_STORE_CATS_CACHE["data"]
+    if cached is not None and (now - _LIVE_STORE_CATS_CACHE["at"]) < _LIVE_STORE_CATS_TTL:
+        return cached, False
+    try:
+        from .apis.ebay.trading import get_store_categories
+
+        live = get_store_categories(cfg)
+        if not isinstance(live, list):
+            raise ValueError("GetStore response is not a category list")
+        seen: Dict[str, str] = {}
+        for category in live:
+            if not isinstance(category, dict):
+                raise ValueError("GetStore category is not an object")
+            raw_id = category.get("id")
+            raw_name = category.get("name")
+            if not isinstance(raw_id, str) or not isinstance(raw_name, str):
+                raise ValueError("GetStore category id and name must be strings")
+            sid = raw_id.strip()
+            name = raw_name.strip()
+            if not sid or not name:
+                raise ValueError("GetStore category has a blank id or name")
+            if sid in seen and seen[sid] != name:
+                raise ValueError(f"duplicate Store category id {sid!r} has conflicting names")
+            seen[sid] = name
+        results = [
+            {"id": sid, "name": name}
+            for sid, name in sorted(seen.items(), key=lambda item: (item[1].casefold(), item[0]))
+        ]
+        catalog_root = cfg.get("catalog_root")
+        if not catalog_root:
+            raise RuntimeError("catalog_root is not configured; cannot persist Store category snapshot")
+        atomic_write_json(
+            Path(catalog_root) / "ebay-store-categories.json",
+            {
+                "source": "ebay_get_store",
+                "refreshed_at": datetime.now(timezone.utc).isoformat(),
+                "results": results,
+            },
+        )
+        _LIVE_STORE_CATS_CACHE["data"] = results
+        _LIVE_STORE_CATS_CACHE["at"] = now
+        return results, False
+    except Exception as exc:
+        snapshot, _refreshed_at, snapshot_error = _store_categories_snapshot(cfg)
+        if snapshot_error:
+            log.warning("live store-categories fetch failed and no valid eBay snapshot exists; using local mapping: %s", exc)
+            return _store_categories_from_groups(cfg), True
+        log.warning("live store-categories fetch failed; preserving last-known-good eBay snapshot: %s", exc)
+        # Never update the snapshot/cache timestamp on failure: the prior eBay
+        # observation remains intact and the next explicit refresh retries live.
+        return snapshot, True
 
 
 @app.get("/api/ebay/store-categories", dependencies=[AUTH])
 def ebay_store_categories() -> Dict[str, Any]:
-    try:
-        from .ebay.pricing import _groups_cache, _load_groups
+    """Return local Store-category reference data without crossing eBay."""
+    results, refreshed_at, error = _store_categories_snapshot(_cfg)
+    if error:
+        results = _store_categories_from_groups(_cfg)
+        return {
+            "ok": False,
+            "results": results,
+            "source": "local_mapping",
+            "refreshed_at": None,
+            "error": error,
+        }
+    return {
+        "ok": True,
+        "results": results,
+        "source": "snapshot",
+        "refreshed_at": refreshed_at,
+        "error": None,
+    }
 
-        _load_groups(_cfg)
-        groups = (_groups_cache or {}).get("groups", {})
-        seen: Dict[str, Any] = {}
-        for grp in groups.values():
-            name = grp.get("store_category") or grp.get("store_category_name") or ""
-            sid = grp.get("store_category_id")
-            if name and name not in seen:
-                seen[name] = sid
-        results = sorted([{"id": v, "name": k} for k, v in seen.items()], key=lambda x: x["name"])
-        return {"ok": True, "results": results}
+
+# ---------------------------------------------------------------------------
+# Live-authoritative fulfillment (shipping) policies — TTL-cached, falling
+# back to the static ebay-fulfillment-policies.json cache only if the live
+# call fails. Fixes the fulfillment-policy dropdown authority gap found in
+# the 2026-07-18 Seller Hub UI triage: the dropdown used to be driven only
+# by that static cache file, refreshed by nothing (PP-SELLERHUB-001, #1547).
+# ---------------------------------------------------------------------------
+
+_LIVE_FULFILLMENT_POLICIES_CACHE: Dict[str, Any] = {"data": None, "at": 0.0}
+_LIVE_FULFILLMENT_POLICIES_TTL = 900  # 15 min
+
+
+def _fulfillment_policies_snapshot(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], Optional[str], Optional[str]]:
+    """Load the validated last-known-good Account API fulfillment snapshot."""
+    catalog_root = cfg.get("catalog_root")
+    path = (Path(catalog_root) / "ebay-fulfillment-policies.json") if catalog_root else None
+    if not path or not path.exists():
+        return {}, None, "eBay fulfillment-policy snapshot unavailable"
+    try:
+        payload = json.loads(path.read_text())
+        raw = payload["fulfillment"]
+        if not isinstance(raw, dict):
+            raise ValueError("fulfillment is not an object")
+        results: Dict[str, str] = {}
+        for raw_id, raw_name in raw.items():
+            if not isinstance(raw_id, str) or not isinstance(raw_name, str):
+                raise ValueError("policy id and name must be strings")
+            policy_id = raw_id.strip()
+            name = raw_name.strip()
+            if not policy_id or not name:
+                raise ValueError("policy has a blank id or name")
+            results[policy_id] = name
+        raw_refreshed_at = payload.get("refreshed_at")
+        if raw_refreshed_at is not None and not isinstance(raw_refreshed_at, str):
+            raise ValueError("refreshed_at must be a string or null")
+        return results, (raw_refreshed_at or "").strip() or None, None
     except Exception as exc:
-        log.warning("store-categories error: %s", exc)
-        return {"ok": False, "detail": str(exc), "results": []}
+        return {}, None, f"eBay fulfillment-policy snapshot invalid: {exc}"
+
+
+def _live_fulfillment_policies(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], bool]:
+    """Return ({policy_id: name}, used_fallback)."""
+    now = time.time()
+    cached = _LIVE_FULFILLMENT_POLICIES_CACHE["data"]
+    if cached is not None and (now - _LIVE_FULFILLMENT_POLICIES_CACHE["at"]) < _LIVE_FULFILLMENT_POLICIES_TTL:
+        return cached, False
+    try:
+        from .ebay.sync import get_fulfillment_policies_full
+
+        live = get_fulfillment_policies_full(cfg)
+        if not isinstance(live, list):
+            raise ValueError("Account API response is not a fulfillment-policy list")
+        results: Dict[str, str] = {}
+        for policy in live:
+            if not isinstance(policy, dict):
+                raise ValueError("fulfillment policy is not an object")
+            raw_id = policy.get("id")
+            raw_name = policy.get("name")
+            if not isinstance(raw_id, str) or not isinstance(raw_name, str):
+                raise ValueError("fulfillment policy id and name must be strings")
+            policy_id = raw_id.strip()
+            name = raw_name.strip()
+            if not policy_id or not name:
+                raise ValueError("fulfillment policy has a blank id or name")
+            if policy_id in results and results[policy_id] != name:
+                raise ValueError(f"duplicate fulfillment policy id {policy_id!r} has conflicting names")
+            results[policy_id] = name
+        catalog_root = cfg.get("catalog_root")
+        if not catalog_root:
+            raise RuntimeError("catalog_root is not configured; cannot persist fulfillment-policy snapshot")
+        path = Path(catalog_root) / "ebay-fulfillment-policies.json"
+        payload: Dict[str, Any] = {}
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text())
+                if isinstance(existing, dict):
+                    payload = existing
+            except Exception:
+                pass
+        payload.update({
+            "source": "ebay_account_api",
+            "refreshed_at": datetime.now(timezone.utc).isoformat(),
+            "fulfillment": results,
+        })
+        atomic_write_json(path, payload)
+        _LIVE_FULFILLMENT_POLICIES_CACHE["data"] = results
+        _LIVE_FULFILLMENT_POLICIES_CACHE["at"] = now
+        return results, False
+    except Exception as exc:
+        snapshot, _refreshed_at, snapshot_error = _fulfillment_policies_snapshot(cfg)
+        if snapshot_error:
+            log.warning("live fulfillment-policy fetch failed and no valid snapshot exists: %s", exc)
+            return {}, True
+        log.warning("live fulfillment-policy fetch failed; preserving last-known-good snapshot: %s", exc)
+        return snapshot, True
+
+
+@app.post("/api/ebay/reference-data/refresh", dependencies=[AUTH])
+def refresh_ebay_reference_data() -> Dict[str, Any]:
+    """Explicitly reconcile stable eBay selector data into local snapshots."""
+    _LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+    _LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+    store_categories, store_preserved = _live_store_categories(_cfg)
+    fulfillment_policies, fulfillment_preserved = _live_fulfillment_policies(_cfg)
+    return {
+        "ok": not (store_preserved or fulfillment_preserved),
+        "store_categories": {
+            "count": len(store_categories),
+            "preserved_snapshot": store_preserved,
+        },
+        "fulfillment_policies": {
+            "count": len(fulfillment_policies),
+            "preserved_snapshot": fulfillment_preserved,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2270,6 +3964,132 @@ def set_photo_order(sku: str, body: PhotoOrderBody) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GET/POST /api/items/{sku}/inventory-diff[/apply] — eBay Draft -> Inventory
+# Record reverse flow (todo #1417, PP-LISTEDITOR-001). Deliberately its own,
+# separate code path from accept_proposals (the FORWARD proposal system,
+# revision_draft -> draft_listing.item_specifics) — different data, different
+# destination (item_attributes / Set A), no shared write path (spec point 6).
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/items/{sku}/inventory-diff", dependencies=[AUTH])
+def get_inventory_diff(sku: str) -> Dict[str, Any]:
+    """Read-only: current eBay-draft -> inventory-record diff for `sku`.
+    Never mutates anything, callable any time (spec point 2). Recomputed
+    live on every call — no stored "diff" or "dismissed" state (spec point
+    5; see this packet's result manifest for the sticky-vs-resurface
+    design confirmation)."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    doc = load_item_doc(json_path)
+    diffs = diff_ebay_draft_to_inventory(doc)
+    return {"ok": True, "sku": sku, "diffs": diffs}
+
+
+@app.post("/api/items/{sku}/inventory-lock", dependencies=[AUTH])
+def set_inventory_lock(sku: str, body: InventoryLockBody) -> Dict[str, Any]:
+    """Toggle whether one item_attributes key auto-syncs from the eBay
+    draft (Dave, 2026-07-18 padlock design). Locking/unlocking is metadata
+    about future sync behavior, not a fact about the item — never touches
+    item_attributes_history, unlike every other Set A write path here."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    doc = load_item_doc(json_path)
+    patch = inventory_record.set_locked(doc, body.key, body.locked)
+    _apply_patch(json_path, patch)
+    return {"ok": True, "sku": sku, "key": body.key, "locked": body.locked}
+
+
+@app.post("/api/items/{sku}/inventory-diff/apply", dependencies=[AUTH])
+def apply_inventory_diff_endpoint(sku: str, body: InventoryDiffApplyBody) -> Dict[str, Any]:
+    """Write ONLY the checked subset of keys into item_attributes (Set A),
+    with provenance (spec point 4). A genuinely new, explicit, named write
+    path into Set A — NOT routed through _apply_patch's generic dict merge
+    (this calls the sanctioned tgw.ebay.inventory_diff.apply_inventory_diff
+    function, itself built on tgw.inventory_record's accessor, then hands
+    the resulting full envelope onward to _apply_patch, which is safe: an
+    already-enveloped item_attributes value is a plain full replace, per
+    _apply_patch's own is_envelope() branch)."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    doc = load_item_doc(json_path)
+    patch = apply_inventory_diff(doc, body.keys, applied_by="operator")
+    if not patch:
+        # Nothing in the requested key set is still an active diff —
+        # idempotent no-op, not an error (spec point 5).
+        return {"ok": True, "sku": sku, "applied": [], "note": "no active diff for requested keys"}
+    _apply_patch(json_path, {
+        "item_attributes": patch["item_attributes"],
+        "item_attributes_history": patch["item_attributes_history"],
+    })
+    _enqueue_catalog_rebuild(f"inventory_diff_apply:{sku}")
+    return {"ok": True, "sku": sku, "applied": patch["applied_keys"]}
+
+
+# ---------------------------------------------------------------------------
+# GET/POST /api/items/{sku}/category-aspect-migration[/apply] — todo #1471,
+# PP-LISTEDITOR-001, invariant C14 lineage. A category change can leave Set B
+# (draft_listing.item_specifics) aspects the CURRENT category no longer
+# recognizes — eBay's own Seller Hub discards those; TGW's push doesn't
+# (confirmed live incident, todo #1470's companion finding). This panel
+# matches eBay's discard-as-default behavior WITHOUT deleting the data
+# (Prime Directive 1) — checked keys move into item_attributes (Set A)
+# instead of eBay, unchecked keys stay on eBay as (now legitimate, operator-
+# kept) custom aspects. Deliberately its own code path, same shape as
+# inventory-diff above but a different data source/destination/direction —
+# no shared write path (spec point 6 discipline, same as that panel).
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/items/{sku}/category-aspect-migration", dependencies=[AUTH])
+def get_category_aspect_migration(sku: str) -> Dict[str, Any]:
+    """Read-only: Set B aspects the item's CURRENT category no longer
+    recognizes. Never mutates anything, callable any time. Recomputed live
+    on every call — no stored/dismissed state, same idempotency discipline
+    as the inventory-diff panel."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    doc = load_item_doc(json_path)
+    orphaned = detect_category_orphaned_aspects(_cfg, doc)
+    return {"ok": True, "sku": sku, "orphaned": orphaned}
+
+
+@app.post("/api/items/{sku}/category-aspect-migration/apply", dependencies=[AUTH])
+def apply_category_aspect_migration_endpoint(
+    sku: str, body: CategoryAspectMigrationApplyBody
+) -> Dict[str, Any]:
+    """Move the checked subset of category-orphaned aspects from Set B
+    into Set A, removing them from Set B — a genuinely new, explicit,
+    named write path for BOTH sets, not routed through _apply_patch's
+    generic dict merge (calls the sanctioned
+    tgw.ebay.category_aspect_migration.apply_category_aspect_migration
+    function, itself built on the two sets' own accessors, then hands the
+    resulting full envelopes onward to _apply_patch — safe, same
+    already-enveloped-is-a-plain-replace branch the inventory-diff apply
+    endpoint above relies on)."""
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    doc = load_item_doc(json_path)
+    patch = apply_category_aspect_migration(doc, body.keys, cfg=_cfg, applied_by="operator")
+    if not patch:
+        # Nothing in the requested key set is still an active orphan —
+        # idempotent no-op, not an error (same reasoning as inventory-diff).
+        return {"ok": True, "sku": sku, "migrated": [], "note": "no active orphaned aspects for requested keys"}
+    _apply_patch(json_path, {
+        "item_attributes": patch["item_attributes"],
+        "item_attributes_history": patch["item_attributes_history"],
+        "draft_listing": patch["draft_listing"],
+    })
+    _enqueue_catalog_rebuild(f"category_aspect_migration_apply:{sku}")
+    return {"ok": True, "sku": sku, "migrated": patch["migrated_keys"]}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/items/{sku}/assets — ordered photo list (Stage 1 asset fence)
 # ---------------------------------------------------------------------------
 
@@ -2305,6 +4125,9 @@ def delete_asset(sku: str, filename: str) -> Dict[str, Any]:
         target.resolve().relative_to(sku_dir.resolve())
     except ValueError:
         raise HTTPException(status_code=400, detail="path traversal not allowed")
+    archive_root = _cfg.get("archive_root")
+    if archive_root:
+        _archive_before_overwrite(archive_root, target)
     target.unlink()
     doc = load_item_doc(json_path)
     order = doc.get("photo_order") or []
@@ -2394,6 +4217,7 @@ function initCatPicker(cfg){
   function selectCategory(cid,cname){
     hid.value=cid;
     if(bc)bc.textContent=cid+' \\u00b7 '+cname;
+    if(typeof flagFieldInvalid==='function')flagFieldInvalid(inp,false);
     inp.value='';
     dd.style.display='none';dd.innerHTML='';
     _idx=-1;_items=[];_pendingId=null;
@@ -2577,65 +4401,41 @@ function initCatSearch2(){
 """
 
 # Module-level constant — avoids nested quote hell in f-string script blocks
-_CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById('aspects-loading');\n  var form=document.getElementById('aspects-form');\n  if(!catId){if(loading)loading.textContent='No category.';return;}\n  var curCondSel=document.getElementById('dl-condition-select');\n  var curCondQ=curCondSel&&curCondSel.value?'?current_condition='+encodeURIComponent(curCondSel.value):'';\n  fetch('/api/ebay/category-context/'+encodeURIComponent(catId)+curCondQ,{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent='Context load failed.';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById('dl-condition-select');\n    if(sel&&d.conditions&&d.conditions.length){\n      var curVal=sel.value;\n      var stillValid=d.conditions.some(function(c){return c.enum===curVal;});\n      var html='';\n      if(!curVal)html+='<option value=\"\" selected disabled>\\u2014 select \\u2014</option>';\n      d.conditions.forEach(function(c){\n        html+='<option value=\"'+c.enum+'\"'+(c.enum===curVal?' selected':'')+'>'+c.label+'</option>';\n      });\n      if(curVal&&!stillValid){\n        if(d.condition_remap){\n          curVal=d.condition_remap.enum;\n          html=html.replace('<option value=\"'+curVal+'\"','<option value=\"'+curVal+'\" selected');\n        }else{\n          html+='<option value=\"'+curVal+'\" selected>'+curVal+' \\u2014 not valid for this category, please fix</option>';\n        }\n      }\n      sel.innerHTML=html;\n      if(d.condition_remap&&curVal===d.condition_remap.enum){\n        fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n          headers:authHeaders({'Content-Type':'application/json'}),\n          body:JSON.stringify({fields:{draft_listing:{condition_enum:curVal}}})});\n      }\n      var cn=document.getElementById('condition-policy-note');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 category changed, condition auto-matched to nearest same-or-worse: '+d.condition_remap.label:'')+((curVal&&!stillValid&&!d.condition_remap)?' \\u2014 current value invalid, please re-select':'');\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById('dl-ship-input');\n      var fhint=document.getElementById('dl-ship-hint');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n            headers:authHeaders({'Content-Type':'application/json'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent='suggested: '+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById('store-cat-hint');\n      if(sch)sch.textContent='suggested: '+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById('category-group-hint');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?' · typical $'+d.pricing.typical_used.toFixed(2):'';\n        var pf=d.pricing&&d.pricing.floor?' · floor $'+d.pricing.floor.toFixed(2):'';\n        gh.textContent='group: '+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display='none';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=d.aspects_error\n        ?'<span style=\"color:#e88;font-size:.82em\">Item specifics lookup failed (\\u2018'+d.aspects_error+'\\u2019) \\u2014 every eBay category has specifics; this is a lookup error, not an empty category. <a href=\"#\" onclick=\"loadCatCtx(\\''+catId+'\\');return false\" style=\"color:#8ac\">Retry</a></span>'\n        :'<span style=\"color:#556;font-size:.82em\">No specifics returned for this category \\u2014 unexpected, please verify manually</span>';\n      return;\n    }\n    var html='';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?'<span style=\"font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px\">REQ</span>'\n        :'<span style=\"font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px\">REC</span>';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||'').toString():'');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||'').toString():'');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||'').toString():'');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?'edit':'same';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?'proposed':'same';}\n      else{cur=liveVal;layer=liveVal?'live':'empty';}\n      cur=cur.replace(/\"/g,'&quot;');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?'#c44':(layer==='edit'?'#44c':(layer==='proposed'?'#884':'#444'));\n      var bg=reqEmpty?'#1a0a0a':(layer==='edit'?'#0a0a1a':(layer==='proposed'?'#1a1a00':'#1a1a1a'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer==='edit'||layer==='proposed')&&liveVal\n        ?'<div style=\"font-size:.7em;color:#445;margin-top:1px\">live: '+liveVal.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'\n        :'';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode==='SELECTION_ONLY'){\n        var opts=asp.allowed_values.map(function(v){\n          return '<option value=\"'+v+'\"'+(v===cur?' selected':'')+'>'+v+'</option>';\n        }).join('');\n        inp='<select data-aspect=\"'+asp.name+'\" style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em\"><option value=\"\">—</option>'+opts+'</select>';\n      }else{\n        var dlid='dl-asp-'+asp.name.replace(/[^a-zA-Z0-9]/g,'-');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?'<datalist id=\"'+dlid+'\">'+asp.allowed_values.map(function(v){return '<option value=\"'+v+'\"></option>';}).join('')+'</datalist>'\n          :'';\n        inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\" value=\"'+cur+'\"'\n           +' style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">'\n           +dlopts;\n      }\n      html+='<div class=\"frow\"'+(reqEmpty?' style=\"border-left:2px solid #944;padding-left:4px\"':'')+'>  <span class=\"fn\" style=\"font-size:.82em\">'+asp.name+badge+'</span><span class=\"fv\">'+inp+liveHint+'</span></div>';\n    });\n    \n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0){html='<div style=\"margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88\">'+missingReq+' required aspect'+(missingReq===1?'':'s')+' missing values — fill before staging</div>'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent='Category context load failed.';\n  });\n}\ndocument.addEventListener('DOMContentLoaded',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch==='function')initCatSearch();\n  if(typeof initCatSearch2==='function')initCatSearch2();\n});\n"
+_CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_PREFILL||{};\n  var loading=document.getElementById('aspects-loading');\n  var form=document.getElementById('aspects-form');\n  if(!catId){if(loading)loading.textContent='No category.';return;}\n  var curCondSel=document.getElementById('dl-condition-select');\n  var curCondQ=curCondSel&&curCondSel.value?'?current_condition='+encodeURIComponent(curCondSel.value):'';\n  fetch('/api/ebay/category-context/'+encodeURIComponent(catId)+curCondQ,{headers:authHeaders()})\n  .then(function(r){return r.json();}).then(function(d){\n    if(!d||!d.ok){if(loading)loading.textContent='Context load failed.';return;}\n    window._CAT_CTX=d;\n    var sel=document.getElementById('dl-condition-select');\n    if(sel&&d.conditions&&d.conditions.length){\n      var curVal=sel.value;\n      var stillValid=d.conditions.some(function(c){return c.enum===curVal;});\n      var html='';\n      if(!curVal)html+='<option value=\"\" selected disabled>\\u2014 select \\u2014</option>';\n      d.conditions.forEach(function(c){\n        html+='<option value=\"'+c.enum+'\"'+(c.enum===curVal?' selected':'')+'>'+c.label+'</option>';\n      });\n      if(curVal&&!stillValid){\n        if(d.condition_remap){\n          curVal=d.condition_remap.enum;\n          html=html.replace('<option value=\"'+curVal+'\"','<option value=\"'+curVal+'\" selected');\n        }else{\n          html+='<option value=\"'+curVal+'\" selected>'+curVal+' \\u2014 not valid for this category, please fix</option>';\n        }\n      }\n      sel.innerHTML=html;\n      flagFieldInvalid(sel,!!(curVal&&!stillValid&&!d.condition_remap));\n      if(d.condition_remap&&curVal===d.condition_remap.enum){\n        fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n          headers:authHeaders({'Content-Type':'application/json'}),\n          body:JSON.stringify({fields:{draft_listing:{condition_enum:curVal}}})});\n      }\n      var cn=document.getElementById('condition-policy-note');\n      var nl=d.conditions.length;\n      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 category changed, condition auto-matched to nearest same-or-worse: '+d.condition_remap.label:'')+((curVal&&!stillValid&&!d.condition_remap)?' \\u2014 current value invalid, please re-select':'');\n    }\n    if(d.fulfillment_policy_id){\n      var fsel=document.getElementById('dl-ship-input');\n      var fhint=document.getElementById('dl-ship-hint');\n      if(fsel&&!fsel.value){\n        for(var fi=0;fi<fsel.options.length;fi++){\n          if(fsel.options[fi].value===d.fulfillment_policy_id){fsel.value=d.fulfillment_policy_id;break;}\n        }\n        if(fsel.value){\n          fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',\n            headers:authHeaders({'Content-Type':'application/json'}),\n            body:JSON.stringify({fields:{draft_listing:{shipping_profile:fsel.value}}})});\n        }\n      }\n      if(fhint&&!fsel.value)fhint.textContent='suggested: '+d.fulfillment_policy_id;\n    }\n    if(d.store_category){\n      var sch=document.getElementById('store-cat-hint');\n      if(sch)sch.textContent='suggested: '+d.store_category;\n    }\n    if(d.group_name){\n      var gh=document.getElementById('category-group-hint');\n      if(gh){\n        var pt=d.pricing&&d.pricing.typical_used?' · typical $'+d.pricing.typical_used.toFixed(2):'';\n        var pf=d.pricing&&d.pricing.floor?' · floor $'+d.pricing.floor.toFixed(2):'';\n        gh.textContent='group: '+d.group_name+pf+pt;\n      }\n    }\n    if(loading)loading.style.display='none';\n    if(!form)return;\n    if(!d.aspects||!d.aspects.length){\n      form.innerHTML=d.aspects_error\n        ?'<span style=\"color:#e88;font-size:.82em\">Item specifics lookup failed (\\u2018'+d.aspects_error+'\\u2019) \\u2014 every eBay category has specifics; this is a lookup error, not an empty category. <a href=\"#\" onclick=\"loadCatCtx(\\''+catId+'\\');return false\" style=\"color:#8ac\">Retry</a></span>'\n        :'<span style=\"color:#556;font-size:.82em\">No specifics returned for this category \\u2014 unexpected, please verify manually</span>';\n      return;\n    }\n    var html='';\n    d.aspects.forEach(function(asp){\n      var badge=asp.required\n        ?'<span style=\"font-size:.7em;background:#3a1a1a;color:#c44;border-radius:3px;padding:1px 5px;margin-left:4px\">REQ</span>'\n        :'<span style=\"font-size:.7em;background:#2a2a0a;color:#aa0;border-radius:3px;padding:1px 5px;margin-left:4px\">REC</span>';\n      // Three-layer merge: operator edits (blue) > proposed (yellow) > live (baseline)\n      var liveVal=(window._LIVE_ASPECTS&&window._LIVE_ASPECTS[asp.name]!==undefined?(window._LIVE_ASPECTS[asp.name]||'').toString():'');\n      var proposedVal=(window._PROPOSED_ASPECTS&&window._PROPOSED_ASPECTS[asp.name]!==undefined?(window._PROPOSED_ASPECTS[asp.name]||'').toString():'');\n      var editVal=(prefill[asp.name]!==undefined?(prefill[asp.name]||'').toString():'');\n      var cur,layer;\n      if(editVal){cur=editVal;layer=(editVal!==liveVal)?'edit':'same';}\n      else if(proposedVal){cur=proposedVal;layer=(proposedVal!==liveVal)?'proposed':'same';}\n      else{cur=liveVal;layer=liveVal?'live':'empty';}\n      cur=cur.replace(/\"/g,'&quot;');\n      var reqEmpty=asp.required&&!cur;\n      // Colours by layer\n      var bord=reqEmpty?'#c44':(layer==='edit'?'#44c':(layer==='proposed'?'#884':'#444'));\n      var bg=reqEmpty?'#1a0a0a':(layer==='edit'?'#0a0a1a':(layer==='proposed'?'#1a1a00':'#1a1a1a'));\n      // Hint: show live value when overridden or proposed differs\n      var liveHint=(layer==='edit'||layer==='proposed')&&liveVal\n        ?'<div style=\"font-size:.7em;color:#445;margin-top:1px\">live: '+liveVal.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'\n        :'';\n      var inp;\n      if(asp.allowed_values&&asp.allowed_values.length&&asp.mode==='SELECTION_ONLY'){\n        var offList=cur&&asp.allowed_values.indexOf(cur)===-1;\n        var opts=asp.allowed_values.map(function(v){\n          return '<option value=\"'+v+'\"'+(v===cur?' selected':'')+'>'+v+'</option>';\n        }).join('');\n        if(offList)opts='<option value=\"'+cur+'\" selected>'+cur+' \\u2014 not in this category\\u2019s list, please verify</option>'+opts;\n        inp='<select data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" style=\"background:'+bg+';color:#eee;border:1px solid '+(offList?'#c84':bord)+';border-radius:3px;padding:2px 5px;font-size:.85em\"><option value=\"\">—</option>'+opts+'</select>';\n      }else{\n        var dlid='dl-asp-'+asp.name.replace(/[^a-zA-Z0-9]/g,'-');\n        var dlopts=asp.allowed_values&&asp.allowed_values.length\n          ?'<datalist id=\"'+dlid+'\">'+asp.allowed_values.map(function(v){return '<option value=\"'+v+'\"></option>';}).join('')+'</datalist>'\n          :'';\n        inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" value=\"'+cur+'\"'\n           +' style=\"background:'+bg+';color:#eee;border:1px solid '+bord+';border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">'\n           +dlopts;\n      }\n      html+='<div class=\"frow\"'+(reqEmpty?' style=\"border-left:2px solid #944;padding-left:4px\"':'')+'>  <span class=\"fn\" style=\"font-size:.82em\">'+asp.name+badge+'</span><span class=\"fv\">'+inp+liveHint+'</span></div>';\n    });\n    var covered={};\n    d.aspects.forEach(function(asp){covered[asp.name]=true;});\n    Object.keys(prefill).forEach(function(name){\n      if(covered[name])return;\n      var xcur=(prefill[name]||'').toString().replace(/\"/g,'&quot;');\n      var xkey=name.replace(/\"/g,'&quot;');\n      var xbadge='<span style=\"font-size:.7em;background:#1a2a3a;color:#8ac;border-radius:3px;padding:1px 5px;margin-left:4px\" title=\"A seller-defined custom aspect \u2014 not in this category\u2019s standard list, but a real eBay field, pushed live like any other\">CUSTOM ASPECT</span>';\n      var xcb='<input type=\"checkbox\" class=\"aspect-keep-cb\" data-aspect-key=\"'+xkey+'\" checked title=\"Checked = keep on this eBay listing. Uncheck = discard at Save (moved to the Inventory Record as a superset, never deleted).\" style=\"margin-right:4px;vertical-align:middle\">';\n      var xinp='<input type=\"text\" data-aspect=\"'+name+'\" data-initial=\"'+xcur+'\" value=\"'+xcur+'\" style=\"background:#1a1a2a;color:#eee;border:1px solid #446;border-radius:3px;padding:2px 5px;font-size:.85em;width:200px\">';\n      html+='<div class=\"frow\"><span class=\"fn\" style=\"font-size:.82em\">'+xcb+name+xbadge+'</span><span class=\"fv\">'+xinp+'</span></div>';\n    });\n\n    var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0){html='<div style=\"margin-bottom:8px;padding:5px 8px;background:#1a0808;border:1px solid #844;border-radius:3px;font-size:.78em;color:#e88\">'+missingReq+' required aspect'+(missingReq===1?'':'s')+' missing values — fill before staging</div>'+html;}form.innerHTML=html;\n  }).catch(function(){\n    if(loading)loading.textContent='Category context load failed.';\n  });\n}\ndocument.addEventListener('DOMContentLoaded',function(){\n  if(window._DL_CAT_ID)loadCatCtx(window._DL_CAT_ID);\n  if(typeof initCatSearch==='function')initCatSearch();\n  if(typeof initCatSearch2==='function')initCatSearch2();\n  if(typeof loadInventoryDiff==='function')loadInventoryDiff();\n});\n"
 
-# Custom context menu for gallery images — fetches bytes locally then POSTs to
-# Google Lens upload so the LAN-only URL is never sent to Google directly.
-_LENS_CTX_MENU_JS = """\
-(function(){
-  var menu=document.createElement('div');
-  menu.id='img-ctx-menu';
-  menu.style.cssText='display:none;position:fixed;z-index:9999;background:#1e1e1e;border:1px solid #444;border-radius:4px;padding:4px 0;min-width:200px;box-shadow:0 2px 8px rgba(0,0,0,.6);font-size:13px;';
-  function addItem(label,fn){
-    var d=document.createElement('div');
-    d.textContent=label;
-    d.style.cssText='padding:6px 14px;cursor:pointer;color:#ddd;';
-    d.onmouseenter=function(){this.style.background='#333';};
-    d.onmouseleave=function(){this.style.background='';};
-    d.onclick=function(){hide();fn();};
-    menu.appendChild(d);
-  }
-  var _src='';
-  function hide(){menu.style.display='none';}
-  async function lensSearch(){
-    try{
-      var resp=await fetch(_src);
-      var blob=await resp.blob();
-      var file=new File([blob],'photo.jpg',{type:blob.type||'image/jpeg'});
-      var form=document.createElement('form');
-      form.method='POST';
-      form.action='https://lens.google.com/upload';
-      form.enctype='multipart/form-data';
-      form.target='_blank';
-      var inp=document.createElement('input');
-      inp.type='file';
-      inp.name='encoded_image';
-      var dt=new DataTransfer();
-      dt.items.add(file);
-      inp.files=dt.files;
-      form.appendChild(inp);
-      document.body.appendChild(form);
-      form.submit();
-      document.body.removeChild(form);
-    }catch(e){alert('Lens search failed: '+e);}
-  }
-  addItem('Search with Google Lens',lensSearch);
-  document.body.appendChild(menu);
-  document.addEventListener('contextmenu',function(e){
-    var img=e.target.closest('img.main-photo,#lb-img,.strip img');
-    if(!img){hide();return;}
-    var src=img.src;
-    if(!src||src==='data:,'||src.startsWith('data:'))return;
-    e.preventDefault();
-    _src=src;
-    menu.style.left=Math.min(e.clientX,window.innerWidth-220)+'px';
-    menu.style.top=Math.min(e.clientY,window.innerHeight-60)+'px';
-    menu.style.display='block';
-  });
-  document.addEventListener('click',hide);
-  document.addEventListener('scroll',hide,{passive:true});
-})();
-"""
+# The category-context script predates Python formatting and is deliberately a
+# single quoted constant. Apply validation additions as exact substitutions so
+# missing required data has both a visible state and an accessible DOM state.
+_CATEGORY_CONTEXT_IIFE = (
+    _CATEGORY_CONTEXT_IIFE.replace(
+        "if(!catId){if(loading)loading.textContent='No category.';return;}",
+        "if(!catId){flagFieldInvalid('dl-cat-search',true);"
+        "if(loading){loading.textContent='Category required before item specifics can be checked.';"
+        "loading.style.color='#e88';}return;}",
+    )
+    .replace(
+        "var html='';\n    d.aspects.forEach",
+        "var html='';var missingReq=0;\n    d.aspects.forEach",
+    )
+    .replace(
+        "var reqEmpty=asp.required&&!cur;",
+        "var reqEmpty=asp.required&&!cur;if(reqEmpty)missingReq++;",
+    )
+    .replace(
+        "<select data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\"",
+        "<select data-aspect=\"'+asp.name+'\" data-required=\"'+(asp.required?'true':'false')+'\" "
+        "aria-invalid=\"'+(reqEmpty?'true':'false')+'\" data-initial=\"'+cur+'\"",
+    )
+    .replace(
+        " data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" value=\"'+cur+'\"",
+        " data-aspect=\"'+asp.name+'\" data-required=\"'+(asp.required?'true':'false')+'\" "
+        "aria-invalid=\"'+(reqEmpty?'true':'false')+'\" data-initial=\"'+cur+'\" value=\"'+cur+'\"",
+    )
+    .replace(
+        "var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0)",
+        "if(missingReq>0)",
+    )
+)
 
 # ---------------------------------------------------------------------------
 # GET /form/intake — intake landing page (HTML)
@@ -3412,6 +5212,290 @@ def todos_form(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# GET /form/runs — agent run trace dashboard (PP-AGENTTRACE-001 Phase 3, #1582)
+# ---------------------------------------------------------------------------
+
+_RUNS_EXTRA_CSS = """
+table.runs{width:100%;border-collapse:collapse;margin-top:10px}
+table.runs th,table.runs td{text-align:left;padding:8px 6px;border-bottom:1px solid #333;font-size:.85em;vertical-align:top}
+table.runs th{color:#aaa;font-size:.72em;text-transform:uppercase;letter-spacing:.04em}
+td.run-id{color:#4a8ade;font-family:monospace;font-size:.85em;white-space:nowrap}
+td.transcript{color:#666;font-size:.78em;word-break:break-all;max-width:260px}
+.st-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.78em}
+.st-completed{background:#1a3a1a;color:#7f7;border:1px solid #2a5a2a}
+.st-failed,.st-killed{background:#2a1a1a;color:#f77;border:1px solid #5a2a2a}
+.st-running,.st-escalated{background:#3a2a0a;color:#fb7;border:1px solid #6a4a1a}
+.runs-ctrl{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.runs-ctrl label{font-size:.85em;color:#aaa;margin:0}
+.runs-ctrl select{width:auto;padding:6px 10px;font-size:.85em}
+.runs-ctrl input[type=search]{padding:6px 10px;font-size:.85em;min-width:220px}
+.runs-total{font-size:.82em;color:#999;margin-bottom:6px}
+"""
+
+_RUNS_JS = """
+<script>
+(function() {
+  var agentSel = document.getElementById('runs-agent-sel');
+  var statusSel = document.getElementById('runs-status-sel');
+  var search = document.getElementById('runs-search');
+
+  function applyFilters() {
+    var agent = agentSel ? agentSel.value : '';
+    var st = statusSel ? statusSel.value : '';
+    var q = search ? search.value.trim().toLowerCase() : '';
+    document.querySelectorAll('tr[data-run-id]').forEach(function(row) {
+      var okAgent = (agent === '' || row.dataset.agent === agent);
+      var okStatus = (st === '' || row.dataset.status === st);
+      var okSearch = (q === '' || (row.dataset.search || '').indexOf(q) !== -1);
+      row.style.display = (okAgent && okStatus && okSearch) ? '' : 'none';
+    });
+  }
+
+  if (agentSel) agentSel.addEventListener('change', applyFilters);
+  if (statusSel) statusSel.addEventListener('change', applyFilters);
+  if (search) search.addEventListener('input', applyFilters);
+})();
+</script>
+"""
+
+
+def _runs_status_class(status: str) -> str:
+    status = (status or "").lower()
+    if status in ("completed",):
+        return "st-completed"
+    if status in ("failed", "killed"):
+        return "st-failed"
+    if status in ("running", "escalated"):
+        return "st-running"
+    return ""
+
+
+def _render_runs_html(rows) -> str:
+    """Build the agent-runs dashboard HTML (PP-AGENTTRACE-001 Phase 3).
+
+    Matches _render_todos_html()'s structure: _STATIC_HEAD/_STATIC_FOOT shared
+    dark theme, client-side filtering, escaped cells. Reuses
+    agent_trace_render's pure helpers (_short_run_id/_duration_cell) for
+    display-format parity with the Obsidian render (Phase 2)."""
+    import html as _html
+    from datetime import datetime, timezone
+
+    from tgw.agent_trace_render import _duration_cell, _short_run_id
+
+    head = (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>TGW Agent Runs</title>" + _STATIC_HEAD + "<style>" + _RUNS_EXTRA_CSS + "</style>"
+        "</head><body>"
+        "<h2>Agent Runs</h2>"
+    )
+    if not rows:
+        return (
+            head
+            + '<div class="allclear">✓ No agent runs recorded yet.</div>'
+            + _STATIC_FOOT
+            + "</body></html>"
+        )
+
+    agent_types = sorted({str(r.get("agent_type", "")) for r in rows if r.get("agent_type")})
+    statuses = sorted({str(r.get("status", "")) for r in rows if r.get("status")})
+
+    agent_opts = '<option value="">All agent types</option>' + "".join(
+        f'<option value="{_html.escape(a)}">{_html.escape(a)}</option>' for a in agent_types
+    )
+    status_opts = '<option value="">All statuses</option>' + "".join(
+        f'<option value="{_html.escape(s)}">{_html.escape(s)}</option>' for s in statuses
+    )
+
+    now = datetime.now(tz=timezone.utc)
+
+    parts = [
+        head,
+        '<div class="runs-ctrl">'
+        f'<label for="runs-agent-sel">Agent:</label><select id="runs-agent-sel">{agent_opts}</select>'
+        f'<label for="runs-status-sel">Status:</label><select id="runs-status-sel">{status_opts}</select>'
+        '<label for="runs-search">Search:</label>'
+        '<input type="search" id="runs-search" placeholder="pp_ref / todo_id / summary">'
+        "</div>",
+        f'<div class="runs-total">{len(rows)} run(s)</div>',
+        '<table class="runs"><tr>'
+        "<th>Run ID</th><th>Agent Type</th><th>PP/Todo</th><th>Host</th>"
+        "<th>Status</th><th>Started</th><th>Duration</th><th>Summary</th><th>Transcript</th>"
+        "</tr>",
+    ]
+
+    for row in rows:
+        run_id = str(row.get("run_id", ""))
+        agent_type = str(row.get("agent_type", ""))
+        status = str(row.get("status", ""))
+        pp_ref = row.get("pp_ref") or ""
+        todo_id = row.get("todo_id")
+        host = str(row.get("host", "") or "")
+        summary = str(row.get("summary", "") or "")
+        transcript_path = str(row.get("transcript_path", "") or "")
+        started = row.get("started_at")
+        started_str = started.strftime("%Y-%m-%d %H:%M UTC") if started else ""
+
+        ref_bits = []
+        if pp_ref:
+            ref_bits.append(
+                f'<a class="pp-badge" href="/docs/plan/TGW-Master-Plan.md" title="{_html.escape(pp_ref)}">{_html.escape(pp_ref)}</a>'
+            )
+        if todo_id is not None:
+            ref_bits.append(f"#{_html.escape(str(todo_id))}")
+        ref_cell = " ".join(ref_bits)
+
+        search_blob = " ".join(
+            str(x) for x in (pp_ref, todo_id if todo_id is not None else "", summary)
+        ).lower()
+
+        status_cls = _runs_status_class(status)
+
+        parts.append(
+            f'<tr data-run-id="{_html.escape(run_id)}" data-agent="{_html.escape(agent_type)}" '
+            f'data-status="{_html.escape(status)}" data-search="{_html.escape(search_blob)}">'
+            f'<td class="run-id" title="{_html.escape(run_id)}">{_html.escape(_short_run_id(run_id))}</td>'
+            f"<td>{_html.escape(agent_type)}</td>"
+            f"<td>{ref_cell}</td>"
+            f"<td>{_html.escape(host)}</td>"
+            f'<td><span class="st-badge {status_cls}">{_html.escape(status)}</span></td>'
+            f"<td>{_html.escape(started_str)}</td>"
+            f"<td>{_html.escape(_duration_cell(row, now))}</td>"
+            f"<td>{_html.escape(summary)}</td>"
+            f'<td class="transcript">{_html.escape(transcript_path)}</td>'
+            "</tr>"
+        )
+
+    parts.append("</table>")
+    parts.append(_STATIC_FOOT)
+    parts.append(_RUNS_JS)
+    parts.append("</body></html>")
+    return "".join(parts)
+
+
+@app.get("/form/runs")
+def runs_form(request: Request):
+    """Agent run trace dashboard — no Bearer auth (network trust via
+    _session_guard middleware), like /form/todos. Read-only view of the
+    agent_runs table (PP-AGENTTRACE-001 Phase 1/2)."""
+    from fastapi.responses import HTMLResponse
+
+    from tgw.queue import state_machine
+
+    try:
+        rows = state_machine.list_agent_runs()
+    except Exception as exc:  # DB down -> still render a page, don't 500
+        body = (
+            '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            "<title>TGW Agent Runs</title>" + _STATIC_HEAD + "<style>" + _RUNS_EXTRA_CSS + "</style>"
+            "</head><body>"
+            "<h2>Agent Runs</h2>"
+            f'<div class="msg err" style="display:block">agent_runs tracker unavailable: {exc}</div>' + _STATIC_FOOT + "</body></html>"
+        )
+        return HTMLResponse(body, status_code=200)
+    return HTMLResponse(_render_runs_html(rows))
+
+
+# ---------------------------------------------------------------------------
+# GET /form/search — full-text (recoll) search bar (PP-KNOWLEDGE-001 R2, #1147)
+# ---------------------------------------------------------------------------
+
+_SEARCH_EXTRA_CSS = """
+.search-bar{display:flex;gap:8px;margin-bottom:14px}
+.search-bar input[type=search]{flex:1;padding:10px 12px;font-size:1em}
+.search-bar button{padding:10px 18px}
+.search-meta{font-size:.82em;color:#999;margin-bottom:10px}
+.search-err{padding:10px 14px;border-radius:6px;background:#4a1a1a;color:#f77;margin-bottom:10px}
+table.results{width:100%;border-collapse:collapse}
+table.results th,table.results td{text-align:left;padding:8px 6px;border-bottom:1px solid #333;font-size:.88em;vertical-align:top}
+table.results th{color:#aaa;font-size:.72em;text-transform:uppercase;letter-spacing:.04em}
+td.mtype{color:#7af;white-space:nowrap;font-size:.82em}
+td.rsize{color:#999;white-space:nowrap;font-variant-numeric:tabular-nums}
+.rurl{color:#4a8ade;word-break:break-all;font-size:.85em}
+.rabs{color:#888;font-size:.82em;margin-top:2px}
+"""
+
+
+def _render_search_html(query: str, result: Optional[Dict[str, Any]]) -> str:
+    """Full-text search page — server-rendered, no-auth (network trust) like
+    /form/todos and /form/intake. GET-only (?q=...), so results are
+    bookmarkable/linkable and don't require client-side JS to work."""
+    import html as _html
+
+    head = (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>TGW Search</title>" + _STATIC_HEAD + "<style>" + _SEARCH_EXTRA_CSS + "</style>"
+        "</head><body>"
+        "<h2>Full-text Search</h2>"
+        '<form class="search-bar" method="get" action="/form/search">'
+        f'<input type="search" name="q" placeholder="search the whole knowledge index…" value="{_html.escape(query)}" autofocus>'
+        '<button type="submit">Search</button>'
+        "</form>"
+    )
+    parts = [head]
+    if result is None:
+        parts.append('<div class="search-meta">Type a query above — recoll query language: implicit AND, -exclude, field:term, "phrase", OR.</div>')
+    elif not result.get("ok"):
+        parts.append(f'<div class="search-err">{_html.escape(str(result.get("error", "search failed")))}</div>')
+    else:
+        parts.append(
+            f'<div class="search-meta">{result["count"]} result(s) for '
+            f'"{_html.escape(result["query"])}" — {result["elapsed_ms"]:.0f} ms</div>'
+        )
+        if result["results"]:
+            parts.append('<table class="results"><tr><th>Type</th><th>Result</th><th>Size</th></tr>')
+            for row in result["results"]:
+                url = row.get("url", "")
+                title = row.get("title") or url.rsplit("/", 1)[-1]
+                abstract = row.get("abstract", "")
+                size = row.get("fbytes", "")
+                size_str = f"{int(size):,} B" if size.isdigit() else ""
+                parts.append(
+                    '<tr>'
+                    f'<td class="mtype">{_html.escape(row.get("mtype", ""))}</td>'
+                    f'<td><div>{_html.escape(title)}</div>'
+                    f'<div class="rurl">{_html.escape(url)}</div>'
+                    + (f'<div class="rabs">{_html.escape(abstract.strip())}</div>' if abstract.strip() else "")
+                    + "</td>"
+                    f'<td class="rsize">{size_str}</td>'
+                    "</tr>"
+                )
+            parts.append("</table>")
+    parts.append(_STATIC_FOOT)
+    parts.append("</body></html>")
+    return "".join(parts)
+
+
+@app.get("/form/search")
+def search_form(q: str = ""):
+    """Web UI search bar over the recoll knowledge index (PP-KNOWLEDGE-001 R2,
+    todo #1147, Track R). No-auth form page, matching /form/todos/intake/bulk
+    (network trust). Empty q renders the bar with no results yet."""
+    from fastapi.responses import HTMLResponse
+
+    from tgw.search_full import run_full_text_search
+
+    q = (q or "").strip()
+    result = run_full_text_search(q) if q else None
+    return HTMLResponse(_render_search_html(q, result))
+
+
+@app.get("/api/search/full-text", dependencies=[AUTH])
+def api_search_full_text(q: str = "", limit: int = 20):
+    """JSON full-text search endpoint (PP-KNOWLEDGE-001 R2) — same recoll
+    query as /form/search and `tgw search --full-text`, for programmatic/
+    tablet-app callers. Auth-gated like the rest of /api/*."""
+    from tgw.search_full import run_full_text_search
+
+    result = run_full_text_search(q, limit=limit)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "search failed"))
+    return result
+
+
+# ---------------------------------------------------------------------------
 # GET /form/history/{sku_old} — historical-catalog lookup (todo #1054)
 # ---------------------------------------------------------------------------
 
@@ -3541,6 +5625,178 @@ async def suggest_submit(request: Request):
     except Exception as exc:  # vault path missing/unwritable → report, don't 500
         return HTMLResponse(_render_suggest_html(f"write failed: {exc}"))
     return HTMLResponse(_render_suggest_html(f"added: {result['written']}", ok=True))
+
+
+# ---------------------------------------------------------------------------
+# GET/POST /form/size-classes — config-backed shipping size-class editor
+# (PP-STORAGE-001, todo #1557). This only edits size_class_ranges in the main
+# API config; it does not invoke eBay or any listing workflow.
+# ---------------------------------------------------------------------------
+
+
+_SIZE_RANGE_FIELDS = (
+    ("weight_min", "Weight min (oz)", "weight_oz", 0),
+    ("weight_max", "Weight max (oz)", "weight_oz", 1),
+    ("length_min", "Length min (in)", "l", 0),
+    ("length_max", "Length max (in)", "l", 1),
+    ("width_min", "Width min (in)", "w", 0),
+    ("width_max", "Width max (in)", "w", 1),
+    ("height_min", "Height min (in)", "h", 0),
+    ("height_max", "Height max (in)", "h", 1),
+)
+
+
+def _size_class_config_path() -> Path:
+    """Return the exact config file used to start this server."""
+    return Path(_cfg.get("config_path", DEFAULT_CONFIG))
+
+
+def _read_size_class_config() -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Reload config from disk so the admin page never overwrites newer edits."""
+    from .config import load_json_strict
+
+    path = _size_class_config_path()
+    raw = load_json_strict(path)
+    if not isinstance(raw, dict):
+        raise ValueError("top-level config must be a JSON object")
+    ranges = raw.get("size_class_ranges", {})
+    if not isinstance(ranges, dict):
+        raise ValueError("size_class_ranges must be a JSON object")
+    return raw, ranges
+
+
+def _range_value(entry: Any, key: str, index: int) -> Any:
+    if not isinstance(entry, dict):
+        return None
+    if key == "weight_oz":
+        pair = entry.get(key)
+    else:
+        dims = entry.get("dims_in", {})
+        pair = dims.get(key) if isinstance(dims, dict) else None
+    return pair[index] if isinstance(pair, list) and len(pair) == 2 else None
+
+
+def _render_size_classes_html(
+    ranges: Dict[str, Any], msg: str = "", ok: bool = False
+) -> str:
+    import html as _html
+
+    banner = ""
+    if msg:
+        cls = "ok" if ok else "err"
+        banner = f'<div class="msg {cls}" style="display:block">{_html.escape(msg)}</div>'
+    rows = []
+    for name, entry in ranges.items():
+        values = []
+        for _, _, key, index in _SIZE_RANGE_FIELDS:
+            value = _range_value(entry, key, index)
+            values.append("—" if value is None else _html.escape(str(value)))
+        rows.append(
+            "<tr><td><button class=\"edit-size-class\" type=\"button\" "
+            f"data-name=\"{_html.escape(str(name), quote=True)}\">"
+            f"{_html.escape(str(name))}</button></td>"
+            + "".join(f"<td>{value}</td>" for value in values)
+            + "</tr>"
+        )
+    table_rows = "".join(rows) or '<tr><td colspan="9">No size classes configured yet.</td></tr>'
+    inputs = "".join(
+        f'<label>{label}<input type="number" inputmode="decimal" min="0" step="any" '
+        f'name="{field}" id="{field}" placeholder="unset"></label>'
+        for field, label, _, _ in _SIZE_RANGE_FIELDS
+    )
+    # JSON is embedded in a script element. Escaping every '<' prevents a
+    # pre-existing config string from terminating that element with </script>.
+    ranges_json = json.dumps(ranges).replace("<", "\\u003c")
+    return (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>TGW Size Classes</title>' + _STATIC_HEAD + '''<style>
+.size-table{width:100%;border-collapse:collapse;margin:12px 0 24px;font-size:.85em}
+.size-table th,.size-table td{border:1px solid #333;padding:7px;text-align:right}
+.size-table th:first-child,.size-table td:first-child{text-align:left}
+.edit-size-class{background:none;border:0;color:#8ac;text-decoration:underline;cursor:pointer;padding:0}
+.range-grid{display:grid;grid-template-columns:repeat(2,minmax(130px,1fr));gap:10px}
+@media(min-width:760px){.range-grid{grid-template-columns:repeat(4,minmax(130px,1fr))}}
+.range-grid label{margin:0}.range-grid input{width:100%;box-sizing:border-box}
+</style></head><body><h2>Shipping Size Classes</h2>'''
+        '<p>Blank bounds are saved as <code>null</code>. Click a class name to edit it.</p>'
+        + banner
+        + '<table class="size-table"><thead><tr><th>Class</th><th>Weight min</th><th>Weight max</th>'
+        '<th>Length min</th><th>Length max</th><th>Width min</th><th>Width max</th>'
+        '<th>Height min</th><th>Height max</th></tr></thead><tbody>' + table_rows + '</tbody></table>'
+        '<h3 id="editor-title">Add size class</h3><form method="post" action="/form/size-classes">'
+        '<label>Class name<input name="name" id="class-name" required maxlength="80" '
+        'pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" placeholder="e.g. medium_box"></label>'
+        '<div class="range-grid">' + inputs + '</div>'
+        '<button class="btn" type="submit">Save size class</button> '
+        '<button class="btn" type="button" id="clear-editor">Add another</button></form>'
+        f'<script>const sizeClassRanges={ranges_json};\n'
+        '''function clearEditor(){document.querySelector('form').reset();document.getElementById('class-name').readOnly=false;document.getElementById('editor-title').textContent='Add size class';}
+document.querySelectorAll('.edit-size-class').forEach(function(btn){btn.addEventListener('click',function(){var n=btn.dataset.name,e=sizeClassRanges[n]||{},d=e.dims_in||{};document.getElementById('class-name').value=n;document.getElementById('class-name').readOnly=true;var vals={weight_min:(e.weight_oz||[])[0],weight_max:(e.weight_oz||[])[1],length_min:(d.l||[])[0],length_max:(d.l||[])[1],width_min:(d.w||[])[0],width_max:(d.w||[])[1],height_min:(d.h||[])[0],height_max:(d.h||[])[1]};Object.keys(vals).forEach(function(k){document.getElementById(k).value=vals[k]==null?'':vals[k];});document.getElementById('editor-title').textContent='Edit '+n;document.getElementById('editor-title').scrollIntoView({behavior:'smooth'});});});
+document.getElementById('clear-editor').addEventListener('click',clearEditor);</script>'''
+        + _STATIC_FOOT + '</body></html>'
+    )
+
+
+@app.get("/form/size-classes")
+def size_classes_form():
+    try:
+        _, ranges = _read_size_class_config()
+        return HTMLResponse(_render_size_classes_html(ranges))
+    except Exception as exc:
+        return HTMLResponse(_render_size_classes_html({}, f"config read failed: {exc}"), status_code=500)
+
+
+@app.post("/form/size-classes")
+async def size_classes_submit(request: Request):
+    import math
+
+    form = await request.form()
+    name = str(form.get("name", "")).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", name):
+        try:
+            _, ranges = _read_size_class_config()
+        except Exception:
+            ranges = {}
+        return HTMLResponse(_render_size_classes_html(ranges, "invalid class name"), status_code=400)
+
+    parsed: Dict[str, Optional[float]] = {}
+    try:
+        for field, _, _, _ in _SIZE_RANGE_FIELDS:
+            text = str(form.get(field, "")).strip()
+            value = None if not text else float(text)
+            if value is not None and (not math.isfinite(value) or value < 0):
+                raise ValueError(f"{field.replace('_', ' ')} must be a non-negative number")
+            parsed[field] = value
+        for prefix in ("weight", "length", "width", "height"):
+            low, high = parsed[f"{prefix}_min"], parsed[f"{prefix}_max"]
+            if low is not None and high is not None and low > high:
+                raise ValueError(f"{prefix} minimum cannot exceed maximum")
+        raw, ranges = _read_size_class_config()
+        ranges[name] = {
+            "weight_oz": [parsed["weight_min"], parsed["weight_max"]],
+            "dims_in": {
+                "l": [parsed["length_min"], parsed["length_max"]],
+                "w": [parsed["width_min"], parsed["width_max"]],
+                "h": [parsed["height_min"], parsed["height_max"]],
+            },
+        }
+        raw["size_class_ranges"] = ranges
+        atomic_write_json(_size_class_config_path(), raw, pretty=True)
+        _cfg["raw"] = raw
+        return HTMLResponse(_render_size_classes_html(ranges, f"saved {name}", ok=True))
+    except ValueError as exc:
+        try:
+            _, ranges = _read_size_class_config()
+        except Exception:
+            ranges = {}
+        return HTMLResponse(_render_size_classes_html(ranges, str(exc)), status_code=400)
+    except Exception as exc:
+        try:
+            _, ranges = _read_size_class_config()
+        except Exception:
+            ranges = {}
+        return HTMLResponse(_render_size_classes_html(ranges, f"config write failed: {exc}"), status_code=500)
 
 
 # ---------------------------------------------------------------------------
@@ -3765,7 +6021,8 @@ _ITEMS_EXTRA_CSS = """
 .jtable th{color:#666;text-align:left;padding:4px 6px;border-bottom:1px solid #2a2a2a;
   font-weight:normal;font-size:.75em;text-transform:uppercase}
 .jtable td{padding:4px 6px;border-bottom:1px solid #1e1e1e;vertical-align:top}
-.js-done{color:#7f7}.js-pending,.js-running{color:#fb7}
+.js-succeeded{color:#7f7}.js-queued,.js-leased,.js-running{color:#7af}
+.js-retry-wait{color:#fb7}.js-cancelled{color:#888}
 .js-failed,.js-dead-letter{color:#f77}
 .ebay-links{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .ebay-btn{display:inline-block;padding:7px 13px;border-radius:6px;font-size:.82em;
@@ -3911,11 +6168,12 @@ const scls=s=>({{
   'in stock':'s-in-stock','listed':'s-listed','staged':'s-staged','sold':'s-sold'
 }})[(s||'').toLowerCase()]||'';
 function getLim(){{return parseInt(document.getElementById('pg-sel').value)||30;}}
-function setView(v){{
+function setView(v,skipLoad){{
   _view=v;
   document.getElementById('vt-card').classList.toggle('active',v==='card');
   document.getElementById('vt-list').classList.toggle('active',v==='list');
-  load(0);
+  syncURLParam('view',v==='list'?'list':'');
+  if(!skipLoad)load(0);
 }}
 function _ebayBadge(it){{
   const lid=it.ebay_listing_id,oid=it.ebay_offer_id,rat=it.ebay_ready_at;
@@ -4126,8 +6384,29 @@ async function _fetchPage(offset,append){{
 function load(o){{_off=0;_fetchPage(o??0,false);}}
 function loadMore(){{_fetchPage(_off,true);}}
 let _t;
-function df(){{clearTimeout(_t);_t=setTimeout(()=>load(0),300);}}
-initChips('#status-chips',()=>load(0));
+function df(){{
+  clearTimeout(_t);
+  syncURLParam('search',document.getElementById('sq').value);
+  syncURLParam('location',document.getElementById('loc').value);
+  _t=setTimeout(()=>load(0),300);
+}}
+initChips('#status-chips',c=>{{syncURLParam('status',c.dataset.s);load(0);}});
+document.getElementById('pg-sel').addEventListener('change',()=>syncURLParam('page_size',getLim()));
+
+// Restore view state from the URL (bookmark / Back-button return) before
+// the first load — reads back whatever syncURLParam() above last wrote.
+(function _restoreFromURL(){{
+  const st=getURLParam('status');
+  if(st){{
+    document.querySelectorAll('#status-chips .chip').forEach(c=>{{
+      c.classList.toggle('active',c.dataset.s===st);
+    }});
+  }}
+  const search=getURLParam('search'); if(search)document.getElementById('sq').value=search;
+  const loc=getURLParam('location'); if(loc)document.getElementById('loc').value=loc;
+  const ps=getURLParam('page_size'); if(ps)document.getElementById('pg-sel').value=ps;
+  const v=getURLParam('view'); if(v==='list')setView('list',true);
+}})();
 load(0);
 </script>
 </body>
@@ -4149,7 +6428,7 @@ _GENERIC_CONDITION_FALLBACK: List[Tuple[str, str]] = [
 ]
 
 
-def _build_condition_options(current_enum: str, category_id: str = "") -> str:
+def _build_condition_options(current_enum: str, category_id: str = "") -> Tuple[str, bool]:
     """Return <option> tags for eBay condition enum dropdown.
 
     Sourced from the item's real per-category eBay condition policy (Metadata API
@@ -4184,7 +6463,12 @@ def _build_condition_options(current_enum: str, category_id: str = "") -> str:
     # If the currently-saved enum isn't in the allowed set (e.g. a stale value from
     # before this fix, or the category changed since it was set), surface it anyway
     # so the operator sees and corrects it rather than have it silently vanish.
-    if current_enum and current_enum not in {v for v, _ in conds}:
+    # PP-CONDITION-ENUM-001 / todo #1562: this is also the invalid-flag signal
+    # the caller uses to redden the <select> border on initial page render —
+    # same shared flagFieldInvalid() treatment the dynamic loadCatCtx() JS
+    # re-render path already applies via its own `stillValid` check.
+    is_invalid = bool(current_enum) and current_enum not in {v for v, _ in conds}
+    if is_invalid:
         conds = [(current_enum, f"{current_enum} — not valid for this category, please fix")] + conds
 
     opts = []
@@ -4193,7 +6477,7 @@ def _build_condition_options(current_enum: str, category_id: str = "") -> str:
     for val, lbl in conds:
         sel = " selected" if val == current_enum else ""
         opts.append(f'<option value="{val}"{sel}>{lbl}</option>')
-    return "".join(opts)
+    return "".join(opts), is_invalid
 
 
 def _render_item_detail_html(
@@ -4203,22 +6487,111 @@ def _render_item_detail_html(
     videos: List[str],
     jobs: List[Dict[str, Any]],
     api_key: str = "",
+    workflow_card: Dict[str, Any] | None = None,
 ) -> str:
     import html as _html
 
     h = _html.escape
 
+    workflow_card_html = ""
+    photo_fingerprint: Dict[str, Any] | None = None
+    item_photos_fingerprint: Dict[str, Any] | None = None
+    if workflow_card:
+        goal = workflow_card.get("goal") or {}
+        fingerprints = workflow_card.get("fingerprints") or []
+        photo_fingerprint = next((
+            fp for fp in fingerprints
+            if fp.get("condition_id") == "photos_uploaded"
+        ), None)
+        item_photos_fingerprint = next((
+            fp for fp in fingerprints
+            if fp.get("condition_id") == "item_has_photos"
+        ), None)
+        photo_state_html = ""
+        if photo_fingerprint:
+            photo_ready = photo_fingerprint.get("result") == "true"
+            photo_reason = "; ".join(
+                str(reason) for reason in photo_fingerprint.get("reasons", [])
+            )
+            photo_state_html = (
+                f'<div id="photo-sync-fingerprint" style="margin:7px 0;padding:6px 9px;'
+                f'border-radius:5px;background:{"#102a18" if photo_ready else "#30220b"};'
+                f'color:{"#8e8" if photo_ready else "#fd8"}">'
+                f'<strong>{"Photo sync ready" if photo_ready else "Waiting for photo sync"}</strong>'
+                f' — {h(photo_reason)}</div>'
+            )
+        fp_html = "".join(
+            f'<li><code>{h(str(fp.get("condition_id", "")))}</code>: '
+            f'{h(str(fp.get("result", "")))} — '
+            f'{h("; ".join(str(reason) for reason in fp.get("reasons", [])))} '
+            f'<small>[{h(", ".join(str(ref.get("identity", "")) for ref in fp.get("evidence", []))) }]</small></li>'
+            for fp in fingerprints
+        )
+        actions = workflow_card.get("legal_actions") or []
+        actions_html = "".join(
+            f'<li><code>{h(str(action.get("treatment_id", "")))}</code> — '
+            f'{h(str(action.get("action", "")))}</li>' for action in actions
+        ) or "<li>None — waiting for evidence, authority, or goal satisfaction.</li>"
+        gates = list(workflow_card.get("operator_gates") or [])
+        waits = workflow_card.get("waiting_treatments") or []
+        waits_html = "".join(
+            f'<li><code>{h(str(wait.get("treatment_id", "")))}</code> — '
+            f'{h("; ".join(str(reason) for reason in wait.get("reasons", [])))}</li>'
+            for wait in waits
+        ) or "<li>None.</li>"
+        active = workflow_card.get("active_attempts") or []
+        active_html = "".join(
+            f'<li><code>{h(str(attempt.get("treatment_id") or attempt.get("queue_name") or ""))}</code> — '
+            f'{h(str(attempt.get("state", "")))}'
+            f'{" until " + h(str(attempt.get("not_before"))) if attempt.get("not_before") else ""} '
+            f'(job {h(str(attempt.get("job_id", "")))})</li>'
+            for attempt in active
+        ) or "<li>None.</li>"
+        gate_html = (
+            '<div style="color:#f99"><strong>Operator gates:</strong> '
+            + h(", ".join(str(gate) for gate in gates)) + "</div>"
+            if gates else ""
+        )
+        workflow_card_html = (
+            '<section id="workflow-action-card" style="border:1px solid #345;'
+            'background:#111a22;border-radius:8px;padding:10px 14px;margin:10px 0">'
+            '<h3 style="margin:0 0 6px">Workflow Action Card</h3>'
+            f'<div>Goal: <code>{h(str(goal.get("id", "")))}</code> '
+            f'v{h(str(goal.get("version", "")))}</div>'
+            f'<div style="font-size:.76em;color:#789">Generation '
+            f'{h(str(workflow_card.get("object_generation", "")))[:12]} · graph '
+            f'{h(str(workflow_card.get("graph_id", "")))[:12]}</div>'
+            f'{photo_state_html}{gate_html}<details><summary>Fingerprints ({len(fingerprints)})</summary>'
+            f'<ul>{fp_html}</ul></details><details><summary>Waits ({len(waits)})</summary>'
+            f'<ul>{waits_html}</ul></details><div><strong>Legal actions</strong><ul>{actions_html}</ul></div>'
+            f'<details><summary>Active attempts ({len(active)})</summary><ul>{active_html}</ul></details>'
+            f'<div style="font-size:.8em;color:#789">Attempt history: '
+            f'{len(workflow_card.get("attempts") or [])}</div></section>'
+        )
+
     def fv(key: str) -> str:
         v = item.get(key)
         return h(str(v)) if v is not None else '<span style="color:#444">—</span>'
 
-    def fr(label: str, val: str = "", key: str = "", editable: bool = False) -> str:
+    def fr(label: str, val: str = "", key: str = "", editable: bool = False, lockable: bool = False) -> str:
         display = val if val else fv(key)
+        # Padlock for top-level "base data" fields (Dave, 2026-07-18: title/
+        # description need the same follow-eBay-unless-locked behavior as
+        # item_attributes aspects — same toggleInventoryLock()/lock list,
+        # just keyed by the top-level field name instead of an aspect name).
+        lock_html = ""
+        if lockable and key:
+            _locked = inventory_record.is_locked(item, key)
+            lock_html = (
+                f" <button onclick='toggleInventoryLock({json.dumps(key)},{json.dumps(_locked)},this)' "
+                f'title="{"Locked — click to let this follow the eBay draft again" if _locked else "Unlocked — click to freeze this at its current value"}" '
+                f'style="background:none;border:none;cursor:pointer;font-size:.85em;padding:0 2px">{"🔒" if _locked else "🔓"}</button>'
+            )
         if editable and key:
             raw = item.get(key)
             raw_str = h(str(raw)) if raw is not None else ""
-            return f'<div class="frow"><span class="fn">{label}</span><span class="fv editable" data-field="{h(key)}" data-raw="{raw_str}" title="Double-click to edit">{display}</span></div>'
-        return f'<div class="frow"><span class="fn">{label}</span><span class="fv">{display}</span></div>'
+            return f'<div class="frow"><span class="fn">{label}</span><span class="fv editable" data-field="{h(key)}" data-raw="{raw_str}" title="Double-click to edit">{display}</span>{lock_html}</div>'
+        return f'<div class="frow"><span class="fn">{label}</span><span class="fv">{display}</span>{lock_html}</div>'
 
     # Gallery
     if images:
@@ -4296,7 +6669,6 @@ def _render_item_detail_html(
             f"}}"
             f"</script>"
         )
-        gallery_html += "<script>" + _LENS_CTX_MENU_JS + "</script>"
     else:
         gallery_html = '<div style="color:#555;padding:30px;text-align:center">No photos</div>'
 
@@ -4444,7 +6816,8 @@ def _render_item_detail_html(
         _dl_store_cat = str(dl.get("store_category_name") or dl.get("store_category") or "")
         _dl_ship = str(dl.get("shipping_profile") or dl.get("fulfillment_policy_id") or "")
         # Build item_specifics table
-        _specifics = dl.get("item_specifics") or {}
+        # todo #1418: Set B read via tgw.ebay.draft_specifics (the sanctioned accessor)
+        _specifics = get_ebay_aspects(item)
         if _specifics:
             _spec_rows = "".join(f'<tr><td class="spec-k">{h(k)}</td><td class="spec-v">{h(str(v))}</td></tr>' for k, v in sorted(_specifics.items()))
             _spec_html = f'<table class="spec-tbl"><tr><th>Aspect</th><th>Value</th></tr>{_spec_rows}</table>'
@@ -4527,13 +6900,24 @@ def _render_item_detail_html(
             ts = _local_ts(j.get("updated_at") or j.get("finished_at") or j.get("created_at"))
             _err_full = str(j.get("error_detail") or "")
             _err_short = _err_full[:80]
+            # PP-COHESION-001: retry_wait is a transient/expected backoff, not
+            # a fatal error like failed/dead_letter — give it a distinct
+            # warning (yellow) color instead of the same red so an operator
+            # scanning the pipeline log can tell "will retry itself" apart
+            # from "needs a human" at a glance (Dave, 2026-07-14).
+            if state in ("failed", "dead_letter"):
+                _err_color, _err_bg = "#f99", "#1a0a0a"
+            elif state == "retry_wait":
+                _err_color, _err_bg = "#fd8", "#2a2000"
+            else:
+                _err_color, _err_bg = "#f99", "#1a0a0a"
             if _err_full:
                 err = (
                     f'<details style="display:inline">'
-                    f'<summary style="cursor:pointer;color:#f99;font-size:.8em;list-style:none">'
+                    f'<summary style="cursor:pointer;color:{_err_color};font-size:.8em;list-style:none">'
                     f"{h(_err_short)}{'…' if len(_err_full) > 80 else ''}</summary>"
                     f'<pre style="white-space:pre-wrap;word-break:break-all;font-size:.75em;'
-                    f'color:#f99;margin:4px 0;padding:4px;background:#1a0a0a;border-radius:4px">'
+                    f'color:{_err_color};margin:4px 0;padding:4px;background:{_err_bg};border-radius:4px">'
                     f"{h(_err_full)}</pre>"
                     f"</details>"
                 )
@@ -4545,13 +6929,13 @@ def _render_item_detail_html(
             # PP-ACTIONCONSOLE-001: contextual repair — a Retry button appears
             # ONLY on actionable failure states (zero buttons in the happy path).
             _retry_btn = ""
-            if state == "dead_letter" and j.get("job_id"):
+            if state == "dead_letter" and j.get("job_id") and j.get("retry_allowed", True):
                 _retry_btn = (
                     f' <button class="act-btn" style="font-size:.72em;padding:1px 8px;'
                     f'background:#2a0d0d;border-color:#a44;color:#e88" '
                     f"onclick=\"retryJob('{h(str(j['job_id']))}')\">Retry</button>"
                 )
-            job_rows += f'<tr><td{tip_attr}>{h(qn)}</td><td class="{sc}">{h(state)}{_retry_btn}</td><td style="color:#666;font-size:.8em">{h(ts)}</td><td style="color:#f99;font-size:.8em">{err}</td></tr>'
+            job_rows += f'<tr><td{tip_attr}>{h(qn)}</td><td class="{sc}">{h(state)}{_retry_btn}</td><td style="color:#666;font-size:.8em">{h(ts)}</td><td style="color:{_err_color};font-size:.8em">{err}</td></tr>'
         jobs_html = f'<table class="jtable"><tr><th>Queue</th><th>State</th><th>Updated</th><th>Error</th></tr>{job_rows}</table>'
 
     title = item.get("title", "")
@@ -4737,19 +7121,32 @@ def _render_item_detail_html(
     if _display_eps:
         _eps_thumbs = "".join(
             f'<a href="{h(u)}" target="_blank" rel="noopener noreferrer"><img src="{h(u)}" style="height:80px;width:80px;object-fit:cover;border-radius:4px;border:1px solid #333;cursor:pointer"></a>'
-            for u in _display_eps[:12]
-        )
+            for u in _display_eps[:24]  # eBay's own per-listing max — the header count
+        )                               # already reports len(_display_eps); this cap must
+                                         # match it or the strip silently under-renders
+                                         # against its own label (Dave, 2026-07-17: an
+                                         # old [:12] slice made photos look missing that
+                                         # were actually live on eBay all along)
         _eps_strip_html = (
             f'<div id="eps-photos" class="dsec">'
             f"<h3>Photos on eBay"
             f' <span style="font-size:.7em;color:#555;font-weight:normal">'
-            f"EPS hosted · {len(_display_eps)} photo(s)</span></h3>"
+            f"EPS hosted · {len(_display_eps)} photo(s)</span>"
+            f' <button onclick="resyncPhotos()" style="font-size:.7em;margin-left:8px;padding:2px 8px;cursor:pointer">Resync Photos</button>'
+            f' <span id="resync-photos-result" style="font-size:.7em;color:#8af;margin-left:6px"></span>'
+            f"</h3>"
             f'<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">'
             f"{_eps_thumbs}</div>"
             f"</div>"
         )
     else:
-        _eps_strip_html = '<div id="eps-photos" class="dsec"><div style="color:#555;font-size:.85em">No photos on eBay yet — run ebay_upload to upload photos to EPS</div></div>'
+        _eps_strip_html = (
+            '<div id="eps-photos" class="dsec">'
+            '<div style="color:#555;font-size:.85em">No photos on eBay yet — run ebay_upload to upload photos to EPS'
+            ' <button onclick="resyncPhotos()" style="font-size:.9em;margin-left:8px;padding:2px 8px;cursor:pointer">Resync Photos</button>'
+            ' <span id="resync-photos-result" style="font-size:.9em;color:#8af;margin-left:6px"></span>'
+            '</div></div>'
+        )
 
     # ── Phase 1A: eBay live collapsible panel ──────────────────────────────────
     _el_synced = eb.get("synced_at") or ""
@@ -4929,19 +7326,26 @@ def _render_item_detail_html(
     else:
         _price_comps_bar = ""
 
-    # ── Three-layer aspect data: live (eBay) / proposed (pipeline) / edits (operator) ──
+    # ── Three-layer aspect data: live/current-draft (Set B) / proposed (pipeline, not
+    # yet accepted) / edits (operator, form's current value) ──
     import json as _json
 
-    _ia = item.get("item_attributes") or {}  # operator edits — highest priority
-    _spec = (dl or {}).get("item_specifics") or {}  # live on eBay — baseline
+    # todo #1416 point 3: the aspects form (#aspects-form / saveEbayDraft())
+    # is Set B's own editing surface — it prefills from and PATCHes into
+    # draft_listing.item_specifics ONLY, never item_attributes (Set A).
+    # Since operator edits now save directly into the same field this reads
+    # as "live," the prefill layer and the live layer are the same value by
+    # construction going forward (an operator's saved edit IS the current
+    # draft state) — no separate Set A "override" layer exists anymore.
+    _spec = get_ebay_aspects(item)  # Set B: current draft_listing.item_specifics
     _rev = item.get("revision_draft") or {}
     _rev_delta = _rev.get("delta") or {}
     _proposed_aspects = _rev_delta.get("item_specifics") or {}
     _has_proposals = bool(_rev_delta)
 
     _cat_id_for_aspects = str((dl or {}).get("category_id") or item.get("ebay_category_id") or "")
-    _aspects_prefill_json = _json.dumps(_ia)  # operator edits only
-    _live_aspects_json = _json.dumps(_spec)  # live eBay values
+    _aspects_prefill_json = _json.dumps(_spec)  # Set B current values — the form's own field
+    _live_aspects_json = _json.dumps(_spec)  # same Set B values, used as the "live" comparison baseline
     _proposed_aspects_json = _json.dumps(_proposed_aspects)  # pipeline proposals
     _aspects_cat_json = _json.dumps(_cat_id_for_aspects)
     _proposals_meta_json = _json.dumps(
@@ -4955,15 +7359,52 @@ def _render_item_detail_html(
     )
 
     # ── eBay Draft editor section (Phase 1B) ───────────────────────────────────
+    _dl_title_len = len((dl or {}).get("title") or "")
     _dl_title_val = h((dl or {}).get("title") or "")
     _dl_price_val = str((dl or {}).get("price") or "")
     _dl_cond_val = h((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "")
     _dl_cond_lbl = h((dl or {}).get("condition_label") or (dl or {}).get("condition_description") or "")
     _dl_desc_val = h((dl or {}).get("description") or item.get("description") or "")
-    _dl_cat_name = h(str((dl or {}).get("category_name") or ""))
-    _dl_cat_id_v = h(str((dl or {}).get("category_id") or ""))
+    # AI Identify resolves the authoritative eBay category before ebay_draft
+    # exists. The editor previously ignored that valid result until a draft was
+    # generated, rendering an empty category and hiding the category aspects.
+    _dl_cat_id_raw = str(
+        (dl or {}).get("category_id") or item.get("ebay_category_id") or ""
+    ).strip()
+    _dl_cat_name_raw = str(
+        (dl or {}).get("category_name") or item.get("ebay_category_name") or ""
+    ).strip()
+    _dl_cat_missing = not _dl_cat_id_raw or _dl_cat_id_raw == "99"
+    _dl_cat_name = h(_dl_cat_name_raw)
+    _dl_cat_id_v = h(_dl_cat_id_raw)
+    _dl_cat_warning_html = (
+        '<span style="color:#e88">Required — choose an eBay category before staging</span>'
+        if _dl_cat_missing else ""
+    )
+    _dl_cat_aria_invalid = "true" if _dl_cat_missing else "false"
+    _dl_cat_bg = "#1a0a0a" if _dl_cat_missing else "#1a1a1a"
+    _dl_cat_border = "#c44" if _dl_cat_missing else "#444"
     _dl_ship_val = str((dl or {}).get("shipping_profile") or (dl or {}).get("fulfillment_policy_id") or "")
     _dl_return_val = str((dl or {}).get("return_policy_id") or "")
+    # PP-OFFER-001 follow-up (todo #1256): Best Offer is a per-item Inventory
+    # API field (offer.listingPolicies.bestOfferTerms), not an account
+    # default -- previously not exposed anywhere in TGW, so whatever a
+    # listing showed was either an eBay category default or an untracked
+    # manual Seller Hub change (invariant C11 drift class).
+    # Tri-state (None/True/False), not a checkbox: audit#1143 code-review
+    # follow-up on #1256 -- a plain checkbox can't represent "unset," so
+    # saveEbayDraft() was unconditionally sending the checkbox's current
+    # (always-defined) checked state on every save, silently forcing
+    # best_offer_enabled=false the first time an operator saved ANY
+    # unrelated field on an item that had never touched Best Offer,
+    # defeating the "unset means don't touch" contract this same field
+    # documents in tgw.ebay.sync._build_offer_bodies.
+    _dl_bo_raw = (dl or {}).get("best_offer_enabled")
+    _dl_bo_select_val = "true" if _dl_bo_raw is True else ("false" if _dl_bo_raw is False else "")
+    _dl_bo_accept = (dl or {}).get("best_offer_auto_accept_price")
+    _dl_bo_decline = (dl or {}).get("best_offer_auto_decline_price")
+    _dl_bo_accept_val = h(str(_dl_bo_accept)) if _dl_bo_accept not in (None, "") else ""
+    _dl_bo_decline_val = h(str(_dl_bo_decline)) if _dl_bo_decline not in (None, "") else ""
     _dl_store_cat_id = str((dl or {}).get("store_category_id") or "")
     if not _dl_store_cat_id:
         _cg_key = item.get("category_group", "")
@@ -4978,52 +7419,78 @@ def _render_item_detail_html(
     _dl_store_cat2_id = str((dl or {}).get("secondary_store_category_id") or "")
     _dl_cat2_id_v = h(str((dl or {}).get("secondary_category_id") or ""))
     _dl_cat2_name = h(str((dl or {}).get("secondary_category_name") or ""))
-    _sc_list: list = []
-    try:
-        import json as _json_sc
-
-        _cg_path_sc = _cfg.get("category_groups_path")
-        if _cg_path_sc and Path(_cg_path_sc).exists():
-            _cg_sc = _json_sc.loads(Path(_cg_path_sc).read_text())
-            _seen_sc: set = set()
-            for _grp_sc in _cg_sc.get("groups", _cg_sc).values():
-                _sn = _grp_sc.get("store_category") or _grp_sc.get("store_category_name") or ""
-                _si = str(_grp_sc.get("store_category_id") or "")
-                if _sn and _si and _si not in _seen_sc:
-                    _seen_sc.add(_si)
-                    _sc_list.append((_sn, _si))
-            _sc_list.sort(key=lambda x: x[0])
-    except Exception:
-        _sc_list = []
+    # Item editing renders the validated last-known-good eBay snapshot. A
+    # missing/corrupt snapshot falls back to the local mapping only to preserve
+    # existing editability, and is visibly not represented as complete eBay data.
+    _sc_results, _sc_refreshed_at, _sc_error = _store_categories_snapshot(_cfg)
+    if _sc_error:
+        _sc_results = _store_categories_from_groups(_cfg)
+    _sc_list = [(r["name"], str(r["id"])) for r in _sc_results]
 
     def _store_cat_options_html(selected_id: str) -> str:
         opts = '<option value="">— not set —</option>'
+        known_ids = {store_id for _name, store_id in _sc_list}
+        if selected_id and selected_id not in known_ids:
+            stored_name = f"Stored category {selected_id}"
+            opts += (
+                f'<option value="{h(selected_id)}" data-name="{h(stored_name)}" selected>'
+                f'{h(stored_name)} — not in current snapshot</option>'
+            )
         opts += "".join(
-            f'<option value="{_si}" data-name="{h(_sn)}"{" selected" if _si == selected_id else ""}>{h(_sn)} ({_si})</option>'
+            f'<option value="{h(_si)}" data-name="{h(_sn)}"{" selected" if _si == selected_id else ""}>{h(_sn)} ({h(_si)})</option>'
             for _sn, _si in _sc_list
         )
         return opts
 
     _store_cat_opts_html = _store_cat_options_html(_dl_store_cat_id)
     _store_cat2_opts_html = _store_cat_options_html(_dl_store_cat2_id)
+    if _sc_error:
+        _store_cat_fallback_html = (
+            f'<span style="font-size:.7em;color:#c84;margin-left:6px" title="{h(_sc_error)}">'
+            f'⚠ local mapping only; eBay snapshot unavailable ({len(_sc_list)} mapped)</span>'
+        )
+    else:
+        _store_cat_fallback_html = (
+            f'<span style="font-size:.7em;color:#585;margin-left:6px" '
+            f'title="last successful GetStore refresh: {h(_sc_refreshed_at or "timestamp unavailable")}">'
+            f'eBay snapshot: {len(_sc_list)} categories</span>'
+        )
     import json as _json2
 
     _cat_root = _cfg.get("catalog_root")
     _pol_cache = (_cat_root / "ebay-fulfillment-policies.json") if _cat_root else None
-    _fulfillment_opts: dict = {}
     _return_opts: dict = {}
     if _pol_cache and _pol_cache.exists():
         try:
             _pd = _json2.loads(_pol_cache.read_text())
-            _fulfillment_opts = _pd.get("fulfillment", {})
             _return_opts = _pd.get("return", {})
             if not _dl_return_val and _return_opts:
                 _dl_return_val = next(iter(_return_opts))
         except Exception:
             pass
-    _ship_opts_html = "".join(
-        f'<option value="{pid}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({pid[:8]}…)</option>' for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: kv[1])
+    # Fulfillment selectors render only the validated last-known-good Account
+    # API snapshot. Reconciliation is explicit and never coupled to page load.
+    _fulfillment_opts, _fo_refreshed_at, _fo_error = _fulfillment_policies_snapshot(_cfg)
+    _ship_opts_html = ""
+    if _dl_ship_val and _dl_ship_val not in _fulfillment_opts:
+        _ship_opts_html += (
+            f'<option value="{h(_dl_ship_val)}" selected>'
+            f'{h(_dl_ship_val)} — not in current snapshot</option>'
+        )
+    _ship_opts_html += "".join(
+        f'<option value="{h(pid)}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({h(pid[:8])}…)</option>' for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: (kv[1].casefold(), kv[0]))
     )
+    if _fo_error:
+        _fo_fallback_html = (
+            f'<span style="font-size:.7em;color:#c84;margin-left:6px" title="{h(_fo_error)}">'
+            '⚠ eBay fulfillment-policy snapshot unavailable</span>'
+        )
+    else:
+        _fo_fallback_html = (
+            f'<span style="font-size:.7em;color:#585;margin-left:6px" '
+            f'title="last successful Account API refresh: {h(_fo_refreshed_at or "timestamp unavailable")}">'
+            f'eBay snapshot: {len(_fulfillment_opts)} fulfillment policies</span>'
+        )
     # Live fulfillment policy beside the selector (session 42: the selector kept
     # showing the operator's FC4 while eBay actually had FC8 — the divergence was
     # invisible). Mirrored home by ebay_sync; red when it disagrees with the draft.
@@ -5065,6 +7532,7 @@ def _render_item_detail_html(
                 "raw": _pe.get("raw", ""),
                 "at": _pe.get("at"),
                 "code": _pe.get("code"),
+                "field": _pe.get("field"),
             }
         elif _pe.get("detail") or _pe.get("code"):
             _pe_code = _pe.get("code")
@@ -5077,6 +7545,7 @@ def _render_item_detail_html(
                 "raw": _pe.get("raw", ""),
                 "at": _pe.get("ts"),
                 "code": _pe_code,
+                "field": _pe.get("field"),
             }
     if _pe_norm:
         _pe_when = _local_ts(_pe_norm["at"])
@@ -5099,7 +7568,20 @@ def _render_item_detail_html(
             f'<pre id="pipeline-error-raw" style="display:none;margin-top:8px;font-size:.75em;'
             f'color:#a77;white-space:pre-wrap;word-break:break-all;max-height:160px;overflow:auto">'
             f"</pre></div>"
-            f"<script>var _PE_RAW={_pe_raw_js};</script>"
+            # PP-CONDITION-ENUM-001 / todo #1562: when the persisted
+            # pipeline_error names the errant draft field (e.g. eBay's own
+            # "Could not serialize field [condition]" resolved to
+            # "condition_enum"), flag that field red on page load using the
+            # same shared flagFieldInvalid() the two condition-select render
+            # paths use — the operator sees the problem the moment the item
+            # opens, not just after touching the field. Only fields with a
+            # known rendered element are wired here; an unmapped field name
+            # (or none) is a no-op, not an error.
+            f"<script>var _PE_RAW={_pe_raw_js};var _PE_FIELD={_json.dumps(_pe_norm.get('field'))};"
+            f"document.addEventListener('DOMContentLoaded',function(){{"
+            f"  var _peFieldEls={{condition_enum:'dl-condition-select',title:'dl-title-input'}};"
+            f"  if(_PE_FIELD&&_peFieldEls[_PE_FIELD])flagFieldInvalid(_peFieldEls[_PE_FIELD],true);"
+            f"}});</script>"
         )
     else:
         _pipeline_error_html = ""
@@ -5114,6 +7596,14 @@ def _render_item_detail_html(
     # green = ready, yellow = working/pending, red = error/destructive,
     # grey = nothing to do. Operator-visible states only — "staged" stays hidden.
     _is_sold = str(item.get("status") or "").lower() == "sold"
+    _sold_quantity_raw = dl.get("quantity", item.get("quantity", 0))
+    try:
+        _sold_quantity = (
+            0 if isinstance(_sold_quantity_raw, bool)
+            else int(_sold_quantity_raw or 0)
+        )
+    except (TypeError, ValueError):
+        _sold_quantity = 0
     _working = any(
         j.get("state") in ("pending", "running", "claimed", "retry") for j in jobs
     )
@@ -5122,21 +7612,90 @@ def _render_item_detail_html(
     # is no longer an actionable state. Newer dead_letters are live failures.
     _baseline_at = item.get("baseline_at")
 
+    def _parse_ts(ts: str) -> Optional[datetime]:
+        """Parse a queue_jobs/item timestamp, normalizing to tz-aware UTC.
+
+        queue_jobs timestamps are stored in mixed shapes — some offset-aware
+        (e.g. '2026-07-25T00:29:18+00:00'), some offset-naive (e.g.
+        '2026-07-25T00:32:25') — but naive ones are already UTC in this
+        system. Comparing a naive and an aware datetime directly raises
+        TypeError, so every parsed value is normalized to aware-UTC here
+        before it's ever compared.
+        """
+        try:
+            dt = datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def _job_finished_at(j: Dict[str, Any]) -> Optional[datetime]:
+        """Best available terminal timestamp for comparing related jobs."""
+        ts = j.get("finished_at") or j.get("updated_at") or j.get("created_at")
+        if not ts:
+            return None
+        return _parse_ts(ts)
+
     def _after_baseline(j: Dict[str, Any]) -> bool:
         if not _baseline_at:
             return True
-        ts = j.get("finished_at") or j.get("updated_at") or j.get("created_at")
-        if not ts:
+        job_at = _job_finished_at(j)
+        if job_at is None:
             return True
-        try:
-            return datetime.fromisoformat(ts) > datetime.fromisoformat(_baseline_at)
-        except (ValueError, TypeError):
+        baseline_dt = _parse_ts(_baseline_at)
+        if baseline_dt is None:
             return True
+        return job_at > baseline_dt
+
+    def _superseded_by_success(j: Dict[str, Any]) -> bool:
+        """Keep terminal failures in history, but do not make an older failure
+        actionable after the same SKU's later successful queue step."""
+        failed_at = _job_finished_at(j)
+        queue_name = j.get("queue_name")
+        if failed_at is None or not queue_name:
+            return False
+        return any(
+            other.get("queue_name") == queue_name
+            and other.get("state") == "succeeded"
+            and (other_at := _job_finished_at(other)) is not None
+            and other_at > failed_at
+            for other in jobs
+        )
 
     _has_error = bool(_pe_norm) or any(
-        j.get("state") == "dead_letter" and _after_baseline(j) for j in jobs
+        j.get("state") == "dead_letter"
+        and _after_baseline(j)
+        and not _superseded_by_success(j)
+        for j in jobs
     )
-    _needs_price = bool(_pe_norm and _pe_norm.get("code") == "no_price_set")
+    _needs_photo_resync = bool(
+        photo_fingerprint
+        and photo_fingerprint.get("result") == "false"
+        and item_photos_fingerprint
+        and item_photos_fingerprint.get("result") == "true"
+    )
+    # A missing draft price is itself the actionable state.  Do not depend on
+    # a worker having also persisted the newer ``no_price_set`` finding: older
+    # ebay_price dead letters (and workers which correctly refuse to invent a
+    # price when no positive evidence exists) may leave only the empty draft
+    # field plus the queue ledger.  In that state Retry cannot help; the
+    # operator needs the price editor.
+    _needs_price = bool(
+        (dl.get("title") and dl.get("price") is None)
+        or (_pe_norm and _pe_norm.get("code") == "no_price_set")
+    )
+    # Also catches pre-existing findings written by the OLD path (an actual
+    # eBay API rejection, code='ebay_rejected', before the ebay_stage.py
+    # pre-flight guard existed) whose detail is specifically the 80-char
+    # title rejection — so already-dead-lettered items (e.g. tgw202605051752520)
+    # get the same "Trim Title" affordance without needing to be re-staged
+    # first just to get a fresh finding in the new shape.
+    _needs_title_trim = bool(_pe_norm and (
+        _pe_norm.get("code") == "title_too_long"
+        or (_pe_norm.get("code") == "ebay_rejected"
+            and "80 characters" in (_pe_norm.get("detail") or ""))
+    ))
     # Draft-vs-live divergence: does the draft differ from what eBay holds?
     _live_inv = (_ebay_live_raw.get("inventory_item") or {}) if _ebay_live_raw else {}
     _live_offer_raw = (_ebay_live_raw.get("offer") or {}) if _ebay_live_raw else {}
@@ -5179,8 +7738,11 @@ def _render_item_detail_html(
 
     _line: List[str] = []
     if _is_sold:
-        _line.append(_abtn("Relist", "relistItem()", "green",
-                           title="Stage and publish this item again"))
+        _line.append(_abtn(
+            "Sold", "", "grey", disabled=True,
+            title=("Sold status is authoritative — explicitly restore inventory "
+                   "and change status before relisting"),
+        ))
     elif _needs_price:
         # A guard finding with a known fix gets its affordance regardless of
         # listing state — Retry cannot resolve a missing price, the editor can.
@@ -5195,9 +7757,101 @@ def _render_item_detail_html(
         if not is_active and _has_draft:
             _line.append(_abtn("List on eBay", "listOnEbay()", "green",
                                title="Save draft, run every needed step, and publish"))
+    elif _needs_title_trim:
+        # Same shape as _needs_price: Retry cannot fix an over-length title,
+        # the editor can. The title field holds the FULL untruncated text
+        # (seo/title.py deliberately doesn't auto-truncate) — this scrolls to
+        # it so the operator can trim by double-click-deleting words, same
+        # workflow eBay's own bulk-CSV editor uses.
+        _line.append(_abtn(
+            "Trim Title",
+            "var t=document.getElementById('dl-title-input');"
+            "if(t){t.scrollIntoView({behavior:'smooth',block:'center'});t.focus();}",
+            "red",
+            title=(f"Title is {len((dl or {}).get('title') or '')} chars — "
+                   f"eBay allows at most 80. Trim it, then Save Draft and List on eBay.")))
+        if not is_active and _has_draft:
+            _line.append(_abtn("List on eBay", "listOnEbay()", "green",
+                               title="Save draft, run every needed step, and publish"))
+    elif _needs_photo_resync:
+        # Current condition evidence outranks historical failed attempts.  The
+        # resync endpoint queues the bounded ebay_upload treatment when local,
+        # hosted, or draft-order identities differ.  If that treatment cannot
+        # establish photos_uploaded, its ordinary worker failure is preserved as
+        # a dead letter with the real upload/synchronization error; retrying an
+        # older stage/evaluator job cannot repair this condition.
+        _line.append(_abtn(
+            "Resync Photos",
+            "resyncPhotos()",
+            "yellow",
+            title=("Synchronize current local photos with eBay and the draft order; "
+                   "a failed synchronization will be recorded as a dead letter"),
+        ))
     elif _has_error and not is_active:
-        _line.append(_abtn("Retry", "retryPipeline()", "red",
-                           title="Something failed — retry the failed step"))
+        def _job_reason_code(job: Dict[str, Any]) -> str:
+            """Read a worker reason from its persisted queue payload.
+
+            ``_workflow_attempt_rows`` returns database rows, where provider
+            results live under ``payload_json.result``.  Accepting a top-level
+            result as well keeps the renderer usable by callers which already
+            project that nested field, but the persisted shape is authoritative.
+            """
+            result = job.get("result")
+            if not isinstance(result, dict):
+                payload = job.get("payload_json")
+                result = payload.get("result") if isinstance(payload, dict) else None
+            evidence = result.get("evidence") if isinstance(result, dict) else None
+            if not isinstance(evidence, dict):
+                return ""
+            return str(evidence.get("reason_code") or "")
+
+        _retryable_failure = next((
+            j for j in jobs
+            if j.get("state") == "dead_letter"
+            and _after_baseline(j)
+            and not _superseded_by_success(j)
+            and j.get("job_id")
+            and j.get("retry_allowed", True)
+        ), None)
+        _receipt_identity_failure = next((
+            j for j in jobs
+            if j.get("queue_name") == "ebay_upload"
+            and j.get("state") == "dead_letter"
+            and _after_baseline(j)
+            and not _superseded_by_success(j)
+            and _job_reason_code(j) == "INVALID_RECEIPT_IDENTITY"
+        ), None)
+        if _retryable_failure:
+            _line.append(_abtn(
+                "Retry",
+                f"retryJob({h(_json.dumps(str(_retryable_failure['job_id'])))})",
+                "red",
+                title=f"Retry failed {_retryable_failure.get('queue_name') or 'pipeline'} job",
+            ))
+        elif _receipt_identity_failure and _has_draft:
+            # The failed job is intentionally not blind-retryable: its graph and
+            # receipt identities are stale.  Once a current draft exists, the
+            # safe recovery is a new operator-authorized publish evaluation,
+            # which binds the current graph/source/generation and leaves the old
+            # dead letter in the audit history.  Without this branch the page
+            # offered only "Needs attention", even after the receipt producer
+            # was corrected, leaving no way for the operator to launch that
+            # replacement attempt (live incident tgw202510161310076).
+            _line.append(_abtn(
+                "List on eBay",
+                "listOnEbay()",
+                "green",
+                title=("Start a fresh listing attempt with the current draft and "
+                       "current receipt identity; the historical failure is retained"),
+            ))
+        else:
+            _line.append(_abtn(
+                "Needs attention",
+                "var j=document.getElementById('jobs-section');"
+                "if(j)j.scrollIntoView({behavior:'smooth'});",
+                "red",
+                title="This failure requires reconciliation rather than a blind retry",
+            ))
     elif _working:
         _line.append(_abtn("Working…", "", "yellow", disabled=True,
                            title="Pipeline is running — refresh to update"))
@@ -5248,6 +7902,15 @@ def _render_item_detail_html(
     else:
         _line.append(_abtn("Prepare Listing", "prepareListing()", "green",
                            title="Run identification and draft the eBay listing"))
+
+    _line.append(_abtn(
+        "AI Reidentify" if item.get("ai_identified") else "AI Identify",
+        "triggerAction('ai_identify')",
+        "blue",
+        title=("Run image identification again using the current photos"
+               if item.get("ai_identified")
+               else "Run image identification using the current photos"),
+    ))
 
     if is_active and not _is_sold:
         # Always operator-accessible on a live item (Dave, s46): this is THE
@@ -5307,6 +7970,14 @@ def _render_item_detail_html(
             f"</div></div>"
         )
 
+    # PP-CONDITION-ENUM-001 / todo #1562: computed before the big f-string
+    # block below so the initial server-rendered <select> can be flagged red
+    # on first paint (via inline JS calling the shared flagFieldInvalid())
+    # the same way loadCatCtx()'s dynamic re-render already flags it —
+    # both render paths must use the one shared visual-flag mechanism.
+    _cond_opts_html, _cond_is_invalid = _build_condition_options(
+        (dl or {}).get("condition_enum") or (dl or {}).get("condition") or "", _cat_id_for_aspects)
+
     _ebay_draft_editor = (
         '<div id="dl-section" class="dsec">'
         "<h3>Listing</h3>" + f'<div class="frow" id="dl-title">'
@@ -5314,11 +7985,13 @@ def _render_item_detail_html(
         f'<span class="fn">eBay Title</span>'
         f'<span class="fv" style="flex:1">'
         f'<input id="dl-title-input" type="text" maxlength="80" value="{_dl_title_val}" '
-        f'style="width:100%;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'style="width:100%;background:#1a1a1a;color:#eee;'
+        f'border:1px solid {"#c44" if _dl_title_len > 80 else "#444"};'
         f'border-radius:4px;padding:4px 6px;font-size:.9em" '
         f"oninput=\"updateCharCount(this,80,'dl-title-count')\">"
-        f'<span id="dl-title-count" style="font-size:.75em;color:#556;margin-left:4px">'
-        f"{len((dl or {}).get('title') or '')}/80</span>"
+        f'<span id="dl-title-count" style="font-size:.75em;margin-left:4px;'
+        f'color:{"#c44" if _dl_title_len > 80 else ("#aa0" if _dl_title_len > 72 else "#556")}">'
+        f"{_dl_title_len}/80</span>"
         f"</span></div>"
         # Category — search to change
         f'<div class="frow" id="dl-category">'
@@ -5326,11 +7999,14 @@ def _render_item_detail_html(
         f'<span class="fv" style="flex:1;position:relative">'
         f'<div id="dl-cat-breadcrumb" style="font-size:.82em;color:#aaa;margin-bottom:3px">'
         f"{_dl_cat_id_v}{'&nbsp;·&nbsp;' + _dl_cat_name if _dl_cat_name else ''}"
+        f"{_dl_cat_warning_html}"
         f"</div>"
         f'<div style="display:flex;gap:4px;align-items:flex-start">'
         f'<input id="dl-cat-search" type="text" placeholder="Search name, type an ID, or Browse…" '
+        f'aria-invalid="{_dl_cat_aria_invalid}" '
         f'autocomplete="off" '
-        f'style="flex:1;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'style="flex:1;background:{_dl_cat_bg};color:#eee;'
+        f'border:1px solid {_dl_cat_border};'
         f'border-radius:4px;padding:3px 6px;font-size:.88em">'
         f'<a href="#" id="dl-cat-browse-btn" onclick="return false" '
         f'style="display:inline-block;padding:3px 8px;border-radius:4px;font-size:.8em;'
@@ -5376,6 +8052,7 @@ def _render_item_detail_html(
         f'<select id="dl-store-cat-select" '
         f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.88em">' + _store_cat_opts_html + "</select>"
         '<span id="store-cat-hint" style="font-size:.72em;color:#445;margin-left:8px"></span>'
+        + _store_cat_fallback_html +
         "</span></div>"
         # Secondary store category
         '<div class="frow" id="dl-store-category2">'
@@ -5384,13 +8061,34 @@ def _render_item_detail_html(
         '<select id="dl-store-cat2-select" '
         'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.88em">' + _store_cat2_opts_html + "</select>"
         "</span></div>"
+        # Best Offer (todo #1256) — per-item Inventory API field, not an
+        # account default; enabling/disabling here is now authoritative.
+        # Tri-state select, not a checkbox — "not set" is a real, distinct
+        # value (leave eBay's category default alone), not just "false".
+        f'<div class="frow" id="dl-best-offer">'
+        f'<span class="fn">Best Offer</span>'
+        f'<span class="fv">'
+        f'<select id="dl-best-offer-enabled" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.85em">'
+        f'<option value=""{" selected" if _dl_bo_select_val == "" else ""}>— not set (eBay default) —</option>'
+        f'<option value="true"{" selected" if _dl_bo_select_val == "true" else ""}>Enabled</option>'
+        f'<option value="false"{" selected" if _dl_bo_select_val == "false" else ""}>Disabled</option>'
+        f'</select>'
+        f'<input type="text" id="dl-best-offer-accept" placeholder="auto-accept $" value="{_dl_bo_accept_val}" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;'
+        f'font-size:.85em;width:110px;margin-left:8px">'
+        f'<input type="text" id="dl-best-offer-decline" placeholder="auto-decline $" value="{_dl_bo_decline_val}" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;'
+        f'font-size:.85em;width:110px;margin-left:6px">'
+        f"</span></div>"
         # Condition
         '<div class="frow" id="dl-condition">'
         '<span class="fn">Condition</span>'
         '<span class="fv">'
-        '<select id="dl-condition-select" '
-        'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px">'
-        + _build_condition_options((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "", _cat_id_for_aspects)
+        f'<select id="dl-condition-select" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid '
+        f'{"#c44" if _cond_is_invalid else "#444"};border-radius:4px;padding:3px 6px">'
+        + _cond_opts_html
         + f"</select>"
         f'<span id="condition-policy-note" style="font-size:.72em;color:#445;margin-left:8px"></span>'
         f"</span></div>"
@@ -5408,7 +8106,8 @@ def _render_item_detail_html(
         f'<span class="fn">Price</span>'
         f'<span class="fv" style="flex:1">'
         f'<input id="dl-price-input" type="number" step="0.01" min="0" value="{h(_dl_price_val)}" '
-        f'style="width:120px;background:#1a1a1a;color:#eee;border:1px solid #444;'
+        f'style="width:120px;background:#1a1a1a;color:#eee;'
+        f'border:1px solid {"#c44" if (dl or {}).get("price") is None else "#444"};'
         f'border-radius:4px;padding:4px 6px;font-size:.9em">'
         f"{_price_comps_bar}"
         f"</span></div>"
@@ -5476,6 +8175,7 @@ def _render_item_detail_html(
         f"{_ship_opts_html}"
         f"</select>"
         f'<span id="dl-ship-hint" style="font-size:.72em;color:#445;margin-left:8px"></span>'
+        f"{_fo_fallback_html}"
         f"{_live_ship_html}"
         f"</span></div>"
         f'<div class="frow" id="dl-returns">'
@@ -5492,10 +8192,56 @@ def _render_item_detail_html(
         f"Item Specifics / Aspects</div>"
         f'<div id="aspects-loading" style="color:#556;font-size:.82em">Loading aspects…</div>'
         f'<div id="aspects-form"></div>'
+        # Todo #1470 (live incident, 2026-07-16, Dave: "how will this account
+        # for custom aspect fields? that is where the solution lies"): a
+        # category-defined aspect is only ever whatever the Item Specifics
+        # lookup returns for the current category, but eBay's own Inventory
+        # API accepts additional seller-defined "custom aspects" beyond that
+        # list — real, intentional, buyer-visible fields. Without an explicit
+        # way to add one, every custom aspect on this item so far arrived by
+        # accident (an AI draft under a since-changed category), not by
+        # design — and the read-only "surface what's already stored" half of
+        # this fix alone would just recreate the same invisible-field problem
+        # the next time a category changes. This control lets an operator
+        # deliberately add one; addCustomAspect() appends a row with the same
+        # data-aspect/data-initial="" contract every other aspect input uses,
+        # so saveEbayDraft()'s existing collection loop picks it up with zero
+        # changes there.
+        f'<div style="margin-top:6px;display:flex;gap:6px;align-items:center">'
+        f'<input type="text" id="new-aspect-name" placeholder="Custom aspect name" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:3px;'
+        f'padding:2px 6px;font-size:.82em;width:160px">'
+        f'<input type="text" id="new-aspect-value" placeholder="Value" '
+        f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:3px;'
+        f'padding:2px 6px;font-size:.82em;width:160px">'
+        f'<button class="act-btn" style="font-size:.78em;padding:2px 8px" '
+        f'onclick="addCustomAspect()">+ Add custom aspect</button>'
+        f'<span id="new-aspect-msg" style="font-size:.78em;color:#c44"></span>'
         f"</div>"
-        # Draft save feedback (saving happens via the action line — List on eBay /
-        # Update Item save the draft first; PP-ACTIONCONSOLE-001 one-line consolidation)
+        f"</div>"
+        # Todo #1472 (Dave, 2026-07-16): the old standalone "Aspects not in
+        # this category" migration panel (a separate always-checked
+        # confirm()+immediate-apply flow, disconnected from the main Save)
+        # is retired here. Its checkbox-to-discard semantics now live
+        # inline in #aspects-form itself, alongside each custom/orphaned
+        # aspect's own input — one Save Draft click drives both. See
+        # `.aspect-keep-cb` in `_CATEGORY_CONTEXT_IIFE` and the
+        # saveEbayDraft() discard chain below; the underlying detect/apply
+        # endpoints (todo #1471) are unchanged, only re-wired to this
+        # single entry point instead of their own panel + button.
+        # Explicit Save (restored 2026-07-10, todo #1318): List on eBay / Update
+        # Item save the draft first as part of their own flow, but the
+        # _has_error-and-not-is_active action-line state renders ONLY "Retry"
+        # (which just scrolls to the error box — it never calls saveEbayDraft()).
+        # An operator fixing a rejected field (e.g. a too-long title) had no way
+        # to persist the edit at all without first clicking "Clear error" to
+        # reach a different action-line state — not discoverable, and the old
+        # rejected content kept getting resubmitted. This button covers every
+        # state, not just the error one, since draft edits should always be
+        # explicitly savable regardless of what the action line shows.
         f'<div style="margin-top:12px;display:flex;gap:8px;align-items:center">'
+        f'<button class="act-btn" onclick="saveEbayDraft()" '
+        f'style="background:#1a3a5a">Save Draft</button>'
         f'<span id="dl-save-msg" style="font-size:.82em;color:#4a4"></span>'
         f"</div>"
         + f"</div>"
@@ -5564,11 +8310,11 @@ def _render_item_detail_html(
         # listing workflow. Standalone at the top (own redesign effort later).
         + '<div id="catalog-section" class="dsec">'
         '<h3>Inventory Record <span style="color:#2a4a6a;font-size:.72em;font-weight:normal">dbl-click to edit · <a href="#" onclick="saveCatalog();return false" style="color:#4a8;font-size:.9em">Save to Catalog</a> <span id="catalog-save-msg" style="font-size:.82em;color:#4a4"></span></span></h3>'
-        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Canonical TGW data — never overwritten by marketplace sync</div>'
-        + fr("Title", key="title", editable=True)
+        '<div style="font-size:.73em;color:#556;margin-bottom:6px">Canonical TGW data — Title/Description follow the eBay draft unless 🔒 locked (Dave, 2026-07-18); everything else here is never overwritten by marketplace sync</div>'
+        + fr("Title", key="title", editable=True, lockable=True)
         + fr("Condition", key="condition", editable=True)
         + fr("AI hint", key="ai_hint", editable=True)
-        + fr("Description", key="description", editable=True)
+        + fr("Description", key="description", editable=True, lockable=True)
         + fr("Brand", key="brand", editable=True)
         + fr("Model", key="model", editable=True)
         + fr("Category group", key="category_group")
@@ -5594,26 +8340,104 @@ def _render_item_detail_html(
         + (fr("ISBN", h(str(item.get("isbn", "") or ""))) if item.get("isbn") else "")
         + (fr("Part number", h(str(item.get("part_number", "") or ""))) if item.get("part_number") else "")
         + (
-            lambda ia, isp: (
+            # todo #1416 point 5: this panel is explicitly labeled "Canonical
+            # TGW data — never overwritten by marketplace sync" (see the
+            # `<div>` a few lines up), so it must show Set A
+            # (`item_attributes`) UNMERGED — never blended with Set B
+            # (`draft_listing.item_specifics`) into one ambiguous key/value
+            # row, which was #1418's confirmed bug (`{**isp, **ia}`, Set A
+            # silently winning on any overlapping key with no way to tell
+            # which set a viewer was looking at). The eBay-side value is
+            # shown as a clearly-separate, dimmed secondary line under the
+            # same row only when it exists AND differs, so a viewer can
+            # compare without either value being ambiguous about its set.
+            # todo #1475 (Dave, 2026-07-16: "the initial item draft view after
+            # import should show all filled fields, not just the ones the
+            # eBay category requires or recommends... gives the operator all
+            # the data we have to choose from"): every Set A key not already
+            # present in Set B gets a "+ Add to listing" button, wired to
+            # addFromInventory() (shared row-builder with addCustomAspect(),
+            # #1472's own aspect-keep-cb pattern) — clicking it adds the value
+            # into #aspects-form as a custom aspect, same as if the operator
+            # typed it in themselves. Purely additive UI; no write happens
+            # until the operator clicks Add AND then Save Draft.
+            # Padlock design (Dave, 2026-07-18): a key with no lock icon set
+            # just always follows the eBay draft — that sync happens
+            # automatically on every Save Draft (_apply_patch), not from
+            # anything on this page. The lock icon is the ONLY thing this
+            # panel controls directly; clicking it flips the key's synced/
+            # frozen state and reloads so the row reflects it immediately.
+            lambda ia, isp, locked: (
                 (
                     '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
-                    '<div style="font-size:.75em;color:#556;margin-bottom:4px">Item specifics (edit in eBay Draft Editor below)</div>'
+                    '<div style="font-size:.75em;color:#556;margin-bottom:4px">Inventory Record specifics'
+                    ' <span style="font-weight:normal">— 🔓 follows the eBay draft automatically, 🔒 frozen at its current value</span></div>'
                     + "".join(
-                        f'<div class="frow"><span class="fn" style="font-size:.82em">{h(k)}</span><span class="fv" style="font-size:.82em">{h(str(v))}</span></div>'
-                        for k, v in sorted({**isp, **ia}.items())
+                        f'<div class="frow"><span class="fn" style="font-size:.82em">{h(k)}</span>'
+                        f'<span class="fv" style="font-size:.82em">{h(str(v))}'
+                        # Single-quoted onclick (Dave, 2026-07-18 live report:
+                        # "the lock buttons have no effect, but they are
+                        # there"): json.dumps() always double-quotes its
+                        # string output, and this attribute used to be
+                        # double-quoted too — the browser's HTML parser
+                        # terminated the attribute at the FIRST embedded `"`,
+                        # e.g. onclick="toggleInventoryLock(" was the entire
+                        # parsed value. Button rendered fine; click did
+                        # nothing, because there was no valid handler left to
+                        # run. Same latent bug existed in the pre-existing
+                        # "+ Add to listing" button below — fixed here too.
+                        + f" <button onclick='toggleInventoryLock({json.dumps(k)},{json.dumps(k in locked)},this)' "
+                          f'title="{"Locked — click to let this key follow the eBay draft again" if k in locked else "Unlocked — click to freeze this key at its current value"}" '
+                          f'style="background:none;border:none;cursor:pointer;font-size:.85em;padding:0 2px">{"🔒" if k in locked else "🔓"}</button>'
+                        + (
+                            f'<div style="font-size:.72em;color:#556;margin-top:1px">eBay value: {h(str(isp[k]))}</div>'
+                            if k in isp and str(isp[k]) != str(v)
+                            else (
+                                f'<button class="act-btn" style="font-size:.7em;padding:1px 6px;margin-left:8px" '
+                                f"onclick='addFromInventory({json.dumps(k)},{json.dumps(str(v))},this)'>+ Add to listing</button>"
+                                if k not in isp and k != "Title"
+                                else ""
+                            )
+                        )
+                        + "</span></div>"
+                        for k, v in sorted(ia.items())
                         if v
                     )
                     + "</div>"
                 )
-                if {**isp, **ia}
+                if ia
                 else (
                     '<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">'
-                    '<span style="font-size:.75em;color:#333">No item specifics yet — fill in eBay Draft Editor below</span>'
+                    '<span style="font-size:.75em;color:#333">No inventory record specifics yet — fill in eBay Draft Editor below</span>'
                     "</div>"
                 )
             )
-        )(item.get("item_attributes") or {}, (dl or {}).get("item_specifics") or {})
+        )(inventory_record.get_inventory_fields(item), get_ebay_aspects(item), set(inventory_record.get_locked_keys(item)))
         + "</div>"
+        # ── eBay -> Inventory Record sync panel (todo #1417, PP-LISTEDITOR-001).
+        # DELIBERATELY separate from the "Pipeline proposed changes" banner
+        # below (accept_proposals, forward direction, revision_draft ->
+        # draft_listing.item_specifics): this panel is the REVERSE direction
+        # (draft_listing.item_specifics -> item_attributes), a different data
+        # source and destination, its own button, no shared action name — an
+        # operator can never confuse the two (spec point 3). Populated by JS
+        # (loadInventoryDiff()) via GET /api/items/{sku}/inventory-diff so the
+        # diff is always freshly recomputed, never stale server-rendered state.
+        + '<div id="inv-diff-panel" class="dsec" style="display:none;margin-top:10px;'
+        'padding:10px 14px;background:#0a1a1a;border:1px solid #366;border-radius:4px">'
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
+        '<strong style="font-size:.85em;color:#8cc">eBay → Inventory Record sync</strong>'
+        '<span style="font-size:.72em;color:#568">values eBay/AI resolved that differ from the universal record</span>'
+        '</div>'
+        '<div style="font-size:.75em;color:#568;margin-bottom:8px">'
+        'Every row is checked by default — uncheck to skip a field. Unchecked/skipped '
+        'fields simply reappear here next time (nothing is dismissed).</div>'
+        '<div id="inv-diff-rows"></div>'
+        '<div style="display:flex;gap:8px;margin-top:8px">'
+        '<button class="act-btn act-publish" style="font-size:.78em;padding:3px 10px;'
+        'background:#0a1a1a;border-color:#366" onclick="applyInventoryDiff()">'
+        'Apply Checked to Inventory Record</button>'
+        '</div></div>'
         # ── eBay Listing — the draft/live workflow section (PP-ACTIONCONSOLE-001).
         # Visually separated from the Inventory Record above: its own header,
         # action line, and Editor/Live tabs.
@@ -5706,7 +8530,8 @@ def _render_item_detail_html(
         f"  if(!confirm('Retry this failed job?'))return;"
         f"  fetch('/api/jobs/'+jobId+'/requeue',{{method:'POST',headers:authHeaders()}})"
         f"  .then(function(r){{return r.json();}}).then(function(d){{"
-        f"    if(d.ok)location.reload();else alert('Retry failed: '+(d.detail||'error'));"
+        f"    if(d.ok)waitForAction(d.action||'',d.new_job_id||d.job_id||'');"
+        f"    else alert('Retry failed: '+(d.detail||'error'));"
         f"  }}).catch(function(e){{alert('Network error: '+e);}});"
         f"}}"
         f"function showTab(name){{"
@@ -5721,13 +8546,28 @@ def _render_item_detail_html(
         f"    body:JSON.stringify({{action:action}})"
         f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
         f"    if(d.ok&&(action==='archive'||action==='ebay_end_listing')){{window.location.href='/form/items';return;}}"
-        f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update'||action==='reset_draft_from_live')){{location.reload();return;}}"
+        f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='reset_draft_from_live')){{location.reload();return;}}"
+        f"    if(d.ok&&(action==='ai_identify'||action==='ebay_draft'||action==='ebay_price'||action==='ebay_upload'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update')){{waitForAction(action,d.job_id||'');return;}}"
         f"    alert(d.ok ? 'Action queued: '+action : 'Error: '+(d.detail||'failed'));"
         f"  }}).catch(function(e){{alert('Network error: '+e);}});"
         f"}}"
-        f"function approveForListing(){{"
-        f"  if(!confirm('Approve this item for listing?\\nIt will go live at the next dole cycle (up to 1 hour).\\nUse Publish Now to list immediately.'))return;"
-        f"  triggerAction('set_ready');"
+        f"function waitForAction(action,jobId){{"
+        f"  var deadline=Date.now()+120000;"
+        f"  var label=document.getElementById('pipeline-action-status');"
+        f"  if(!label){{label=document.createElement('div');label.id='pipeline-action-status';"
+        f"    label.style.cssText='position:fixed;right:16px;bottom:16px;padding:8px 12px;background:#182638;border:1px solid #4878a8;border-radius:5px;color:#bdddff;z-index:9999';document.body.appendChild(label);}}"
+        f"  label.textContent='Working: '+(action||'retry')+'…';"
+        f"  function poll(){{fetch('/api/items/'+_SKU,{{headers:authHeaders()}})"
+        f"    .then(function(r){{return r.json();}}).then(function(d){{"
+        f"      var item=(d&&d.item)||{{}};var jobs=item._queue_jobs||[];"
+        f"      var job=jobId?jobs.find(function(j){{return j.job_id===jobId;}}):null;"
+        f"      var active=job&&['queued','leased','running','retry_wait'].indexOf(job.state)>=0;"
+        f"      var aiPending=(action==='ai_identify'||action==='ebay_draft')&&"
+        f"        (item.ai_reidentify===true||item.ai_redraft_requested===true||jobs.some(function(j){{return ['ai_identify','ebay_draft'].indexOf(j.queue_name)>=0&&['queued','leased','running','retry_wait'].indexOf(j.state)>=0;}}));"
+        f"      if((job&&!active&&!aiPending)||(!jobId&&!aiPending)||Date.now()>=deadline){{location.reload();return;}}"
+        f"      setTimeout(poll,1500);"
+        f"    }}).catch(function(){{if(Date.now()>=deadline)location.reload();else setTimeout(poll,1500);}});}}"
+        f"  setTimeout(poll,750);"
         f"}}"
         f"function publishNow(){{"
         f"  if(!confirm('Publish this item to eBay NOW?\\nIt will go live immediately at the current offer price.'))return;"
@@ -5743,6 +8583,27 @@ def _render_item_detail_html(
         f"    if(d.ok)location.reload();else alert('Accept failed: '+(d.detail||'error'));"
         f"  }});"
         f"}}"
+        f"function resyncPhotos(){{"
+        f"  var el=document.getElementById('resync-photos-result');"
+        f"  if(el)el.textContent='resyncing…';"
+        f"  fetch('/api/items/'+_SKU+'/action',{{method:'POST',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{action:'resync_photos'}})}}"
+        f"  ).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(!el)return;"
+        f"    if(d.ok&&d.upload_queued){{el.textContent=d.detail;}}"
+        f"    else if(d.ok){{"
+        f"      el.textContent=d.confirmed_count+'/'+d.submitted_count+' confirmed live — reloading…';"
+        # Reload so the "Photos on eBay" strip (and everything else on the
+        # page) picks up the just-refreshed ebay_live/ebay_submitted data —
+        # otherwise the button reports success while the page keeps
+        # showing whatever was rendered at initial page load (Dave,
+        # 2026-07-17: "it says 24/24... but only one shows on the webui").
+        f"      setTimeout(function(){{location.reload();}},900);"
+        f"    }}"
+        f"    else{{el.textContent='failed: '+(d.detail||'error');}}"
+        f"  }}).catch(function(e){{if(el)el.textContent='network error';}});"
+        f"}}"
         f"function dismissProposals(){{"
         f"  fetch('/api/items/'+_SKU+'/action',{{method:'POST',"
         f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
@@ -5750,6 +8611,45 @@ def _render_item_detail_html(
         f"  ).then(function(r){{return r.json();}}).then(function(d){{"
         f"    if(d.ok)location.reload();else alert('Dismiss failed: '+(d.detail||'error'));"
         f"  }});"
+        f"}}"
+        # ── loadInventoryDiff / applyInventoryDiff — todo #1417, the REVERSE
+        # (eBay Draft -> Inventory Record) sync panel. Deliberately its own
+        # fetch/render/apply cycle, no shared code with accept/dismiss
+        # Proposals above (different data, different destination — spec
+        # point 6/3). Always re-fetches live on load; no client-cached diff
+        # state is trusted across a page action.
+        f"function loadInventoryDiff(){{"
+        f"  fetch('/api/items/'+_SKU+'/inventory-diff',{{headers:authHeaders()}})"
+        f"  .then(function(r){{return r.json();}}).then(function(d){{"
+        f"    var panel=document.getElementById('inv-diff-panel');"
+        f"    var rows=document.getElementById('inv-diff-rows');"
+        f"    if(!panel||!rows)return;"
+        f"    if(!d.ok||!d.diffs||!d.diffs.length){{panel.style.display='none';rows.innerHTML='';return;}}"
+        f"    var html='';"
+        f"    d.diffs.forEach(function(fd){{"
+        f"      var invVal=(fd.inventory_value===null||fd.inventory_value===undefined)?'(none)':String(fd.inventory_value);"
+        f"      html+='<div class=\"frow\"><span class=\"fn\" style=\"font-size:.82em\">'"
+        f"        +'<label><input type=\"checkbox\" class=\"inv-diff-cb\" data-key=\"'+fd.key.replace(/\"/g,'&quot;')+'\" checked> '"
+        f"        +fd.key+'</label></span>"
+        f"        <span class=\"fv\" style=\"font-size:.82em\">'+String(fd.ebay_value)"
+        f"        +'<div style=\"font-size:.72em;color:#568;margin-top:1px\">inventory record: '+invVal"
+        f"        +' &middot; source: '+(fd.source||'?')+(fd.detected_at?(' &middot; '+fd.detected_at):'')+'</div>'"
+        f"        +'</span></div>';"
+        f"    }});"
+        f"    rows.innerHTML=html;"
+        f"    panel.style.display='';"
+        f"  }}).catch(function(){{}});"
+        f"}}"
+        f"function applyInventoryDiff(){{"
+        f"  var checked=[];"
+        f"  document.querySelectorAll('.inv-diff-cb:checked').forEach(function(cb){{checked.push(cb.dataset.key);}});"
+        f"  if(!checked.length){{alert('No rows checked — nothing to apply.');return;}}"
+        f"  fetch('/api/items/'+_SKU+'/inventory-diff/apply',{{method:'POST',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{keys:checked}})}}"
+        f"  ).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok)location.reload();else alert('Apply failed: '+(d.detail||'error'));"
+        f"  }}).catch(function(e){{alert('Network error: '+e);}});"
         f"}}"
         f"function clearPipelineError(){{"
         f"  fetch('/api/items/'+_SKU,{{method:'PATCH',"
@@ -5817,10 +8717,24 @@ def _render_item_detail_html(
         f"    inp.addEventListener('blur',function(){{if(!inp.disabled)commit();}});"
         f"  }});"
         f"}});"
+        # ── flagFieldInvalid — PP-CONDITION-ENUM-001 / todo #1562 ──────────────
+        # One shared function for "flag this field red when invalid," so every
+        # draft field (title length, condition enum, and any future
+        # save-error-tagged field) gets the same visible treatment instead of
+        # each growing its own bespoke border-color check. Callable from
+        # inline onload code (no element handle needed — pass an id) or with
+        # an element reference directly.
+        f"function flagFieldInvalid(elOrId,isInvalid){{"
+        f"  var el=(typeof elOrId==='string')?document.getElementById(elOrId):elOrId;"
+        f"  if(!el)return;"
+        f"  el.style.borderColor=isInvalid?'#c44':'#444';"
+        f"  el.setAttribute('aria-invalid',isInvalid?'true':'false');"
+        f"}}"
         # ── updateCharCount ───────────────────────────────────────────────────
         f"function updateCharCount(inp,max,countId){{"
         f"  var n=inp.value.length;"
         f"  var el=document.getElementById(countId);"
+        f"  flagFieldInvalid(inp,n>max);"
         f"  if(!el)return;"
         f"  el.textContent=n+'/'+max;"
         f"  el.style.color=n>max?'#c44':(n>max*0.9?'#aa0':'#556');"
@@ -5870,28 +8784,156 @@ def _render_item_detail_html(
         f"  }}"
         f"  var scat2=document.getElementById('dl-store-cat2-select');"
         f"  if(scat2)dl.secondary_store_category_id=scat2.value||null;"
+        f"  var boSel=document.getElementById('dl-best-offer-enabled');"
+        f"  if(boSel&&boSel.value!=='')dl.best_offer_enabled=(boSel.value==='true');"
+        f"  var boAcc=document.getElementById('dl-best-offer-accept');"
+        f"  if(boAcc&&boAcc.value!==''){{var boAccN=parseFloat(boAcc.value);dl.best_offer_auto_accept_price=isNaN(boAccN)?null:boAccN;}}"
+        f"  var boDec=document.getElementById('dl-best-offer-decline');"
+        f"  if(boDec&&boDec.value!==''){{var boDecN=parseFloat(boDec.value);dl.best_offer_auto_decline_price=isNaN(boDecN)?null:boDecN;}}"
         f"  var cat2id=document.getElementById('dl-cat2-id');"
         f"  if(cat2id)dl.secondary_category_id=cat2id.value||null;"
+        # todo #1416 point 3: this form (#aspects-form) is Set B's own
+        # editing surface (draft_listing.item_specifics) — it must PATCH
+        # directly into draft_listing, exactly like every other Draft
+        # Editor field above (title/price/condition/etc.), never into
+        # item_attributes (Set A). The nested dl.item_specifics key is
+        # unwrapped server-side by _apply_patch's draft_listing branch
+        # through the sanctioned tgw.ebay.draft_specifics accessor.
+        #
+        # Todo #1461: this used to gate inclusion on `if(v)` — an operator
+        # clearing a field's value produced v==='' which was silently
+        # dropped from the payload entirely, so the backend's merge
+        # (set_ebay_aspects) never even saw an attempted change and the old
+        # value stuck forever ("delete Material, save, reverts every
+        # time" — confirmed live 2026-07-16, and it affected every aspect
+        # field uniformly since this loop is shared by all of them). Fix:
+        # compare against each input's `data-initial` (the value it was
+        # rendered with) and send the key whenever it actually changed,
+        # including a change TO empty — matches every other field on this
+        # form, which is always sent unconditionally if the element exists.
         f"  var aspInputs=document.querySelectorAll('#aspects-form [data-aspect]');"
         f"  var attrs={{}};"
         f"  aspInputs.forEach(function(el){{"
         f"    var k=el.dataset.aspect;var v=el.value.trim();"
-        f"    if(v)attrs[k]=v;"
+        f"    var init=el.dataset.initial||'';"
+        f"    if(v!==init)attrs[k]=v;"
         f"  }});"
+        f"  if(Object.keys(attrs).length)dl.item_specifics=attrs;"
         f"  var patch={{draft_listing:dl}};"
-        f"  if(Object.keys(attrs).length)patch.item_attributes=attrs;"
         f"  var msg=document.getElementById('dl-save-msg');"
+        # todo #1472 (Dave, 2026-07-16): "if the aspect is not in the list
+        # of required or recommended aspects it gets a check box, default
+        # checked, meaning keep... Unchecking means discard at save." A
+        # custom/orphaned aspect's `.aspect-keep-cb` (rendered above and in
+        # addCustomAspect()) is the discard signal — collected here so ONE
+        # Save Draft click drives both the normal field save AND the
+        # discard-to-Inventory-Record move, rather than the two disconnected
+        # actions (main Save + a separate always-checked migration panel)
+        # this replaces. Reuses #1471's sanctioned apply endpoint verbatim
+        # (its own live re-detection + Set B removal / Set A write) — no new
+        # merge path, spec point 6 discipline.
+        f"  var discardKeys=[];"
+        f"  document.querySelectorAll('.aspect-keep-cb:not(:checked)').forEach(function(cb){{discardKeys.push(cb.dataset.aspectKey);}});"
         f"  if(msg)msg.textContent='Saving…';"
         f"  fetch('/api/items/'+_SKU,{{"
         f"    method:'PATCH',"
         f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
         f"    body:JSON.stringify({{fields:patch}})"
         f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
-        f"    if(msg){{msg.textContent=d.ok?'✓ Saved':' Error: '+(d.detail||'failed');"
-        f"    msg.style.color=d.ok?'#4a4':'#c44';"
-        f"    if(d.ok)setTimeout(function(){{msg.textContent='';}},2000);}}"
-        f"    if(d.ok&&typeof done==='function')done();"
+        f"    if(!d.ok){{"
+        f"      if(msg){{msg.textContent=' Error: '+(d.detail||'failed');msg.style.color='#c44';}}"
+        f"      return;"
+        f"    }}"
+        f"    if(!discardKeys.length){{"
+        f"      if(msg){{msg.textContent='✓ Saved';msg.style.color='#4a4';setTimeout(function(){{msg.textContent='';}},2000);}}"
+        f"      if(typeof done==='function')done();"
+        f"      return;"
+        f"    }}"
+        f"    if(msg)msg.textContent='Saved — discarding '+discardKeys.length+' unchecked aspect(s)…';"
+        f"    fetch('/api/items/'+_SKU+'/category-aspect-migration/apply',{{"
+        f"      method:'POST',"
+        f"      headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"      body:JSON.stringify({{keys:discardKeys}})"
+        f"    }}).then(function(r2){{return r2.json();}}).then(function(d2){{"
+        f"      if(msg){{"
+        f"        msg.textContent=d2.ok?'✓ Saved (moved '+(d2.migrated?d2.migrated.length:0)+' to Inventory Record)':'Saved, but discard failed: '+(d2.detail||'error');"
+        f"        msg.style.color=d2.ok?'#4a4':'#c44';"
+        f"        if(d2.ok)setTimeout(function(){{msg.textContent='';}},2500);"
+        f"      }}"
+        f"      if(typeof done==='function')done();"
+        f"    }}).catch(function(e2){{if(msg){{msg.textContent='Saved, but discard network error';msg.style.color='#c44';}}}});"
         f"  }}).catch(function(e){{if(msg){{msg.textContent='Network error';msg.style.color='#c44';}}}});"
+        f"}}"
+        # ── buildAspectRow / addCustomAspect / addFromInventory ──────────────
+        # todo #1470: lets an operator deliberately add a seller-defined
+        # custom aspect (a real eBay Inventory API capability, not just
+        # leftover category-mismatch data). buildAspectRow() is the shared
+        # row-builder (same data-aspect/data-initial="" contract every other
+        # aspect input uses, so saveEbayDraft()'s collection loop and #1472's
+        # aspect-keep-cb discard checkbox pick it up unchanged) — used by
+        # both the manual "+ Add custom aspect" control and #1475's "+ Add
+        # to listing" buttons on the Inventory Record specifics panel above
+        # (Dave, 2026-07-16: "the initial item draft view after import
+        # should show all filled fields... gives the operator all the data
+        # we have to choose from").
+        f"function buildAspectRow(name,val){{"
+        f"  var esc=function(s){{return (s||'').replace(/\"/g,'&quot;');}};"
+        f"  var row=document.createElement('div');"
+        f"  row.className='frow';"
+        f"  row.innerHTML='<span class=\"fn\" style=\"font-size:.82em\">'"
+        f"    +'<input type=\"checkbox\" class=\"aspect-keep-cb\" data-aspect-key=\"'+esc(name)+'\" checked '"
+        f"    +'title=\"Checked = keep on this eBay listing. Uncheck = discard at Save (moved to the Inventory Record as a superset, never deleted).\" '"
+        f"    +'style=\"margin-right:4px;vertical-align:middle\">'+esc(name)"
+        f"    +'<span style=\"font-size:.7em;background:#1a2a3a;color:#8ac;border-radius:3px;'"
+        f"    +'padding:1px 5px;margin-left:4px\" title=\"A seller-defined custom aspect\">CUSTOM ASPECT</span></span>'"
+        f"    +'<span class=\"fv\"><input type=\"text\" data-aspect=\"'+esc(name)+'\" data-initial=\"\" value=\"'+esc(val)+'\"'"
+        f"    +' style=\"background:#1a1a2a;color:#eee;border:1px solid #446;border-radius:3px;'"
+        f"    +'padding:2px 5px;font-size:.85em;width:200px\"></span>';"
+        f"  return row;"
+        f"}}"
+        f"function addCustomAspect(){{"
+        f"  var nameEl=document.getElementById('new-aspect-name');"
+        f"  var valEl=document.getElementById('new-aspect-value');"
+        f"  var msgEl=document.getElementById('new-aspect-msg');"
+        f"  var name=(nameEl&&nameEl.value||'').trim();"
+        f"  var val=(valEl&&valEl.value||'').trim();"
+        f"  if(msgEl)msgEl.textContent='';"
+        f"  if(!name){{if(msgEl)msgEl.textContent='Name required';return;}}"
+        f"  var form=document.getElementById('aspects-form');"
+        f"  if(!form)return;"
+        f"  var existing=form.querySelectorAll('[data-aspect]');"
+        f"  for(var i=0;i<existing.length;i++){{"
+        f"    if(existing[i].dataset.aspect===name){{"
+        f"      if(msgEl)msgEl.textContent='Already exists — edit it above instead';"
+        f"      return;"
+        f"    }}"
+        f"  }}"
+        f"  form.appendChild(buildAspectRow(name,val));"
+        f"  if(nameEl)nameEl.value='';"
+        f"  if(valEl)valEl.value='';"
+        f"}}"
+        f"function addFromInventory(name,val,btn){{"
+        f"  var form=document.getElementById('aspects-form');"
+        f"  if(!form){{if(btn){{btn.disabled=true;btn.textContent='form not ready';}}return;}}"
+        f"  var existing=form.querySelectorAll('[data-aspect]');"
+        f"  for(var i=0;i<existing.length;i++){{"
+        f"    if(existing[i].dataset.aspect===name){{"
+        f"      if(!existing[i].value)existing[i].value=val;"
+        f"      if(btn){{btn.disabled=true;btn.textContent='✓ In listing';}}"
+        f"      return;"
+        f"    }}"
+        f"  }}"
+        f"  form.appendChild(buildAspectRow(name,val));"
+        f"  if(btn){{btn.disabled=true;btn.textContent='✓ Added — click Save Draft';}}"
+        f"}}"
+        f"function toggleInventoryLock(key,currentlyLocked,btn){{"
+        f"  if(btn)btn.disabled=true;"
+        f"  fetch('/api/items/'+_SKU+'/inventory-lock',{{method:'POST',"
+        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    body:JSON.stringify({{key:key,locked:!currentlyLocked}})}}"
+        f"  ).then(function(r){{return r.json();}}).then(function(d){{"
+        f"    if(d.ok)location.reload();else{{if(btn){{btn.disabled=false;}}alert('Lock toggle failed: '+(d.detail||'error'));}}"
+        f"  }}).catch(function(e){{if(btn)btn.disabled=false;alert('Network error: '+e);}});"
         f"}}"
         # ── saveAndReprice ────────────────────────────────────────────────────
         f"function saveAndReprice(){{"
@@ -5986,10 +9028,23 @@ def _render_item_detail_html(
         f"<title>{h(sku)} — TGW</title>" + _STATIC_HEAD + f"<style>{_ITEMS_EXTRA_CSS}</style>"
         f"</head>\n<body>\n"
         f'<a class="back" href="/form/items">← Inventory</a>\n'
+        # Fast jump straight back to a filtered inventory view (Dave,
+        # 2026-07-17): the browse page's status chips now persist their
+        # filter into the URL, so these can just be plain links to it —
+        # no JS/fetch needed here, matches the same filter values/labels.
+        f'<div class="chips" style="margin:4px 0 8px">'
+        f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items">All</a>'
+        f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items?status=__eligible__">Eligible</a>'
+        f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items?status=In+Stock">In Stock</a>'
+        f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items?status=Listed">Listed</a>'
+        f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items?status=Staged">Staged</a>'
+        f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items?status=Sold">Sold</a>'
+        f'</div>'
         f'<div class="sku-hdr">'
         f'<span class="slabel">{h(sku)}</span>'
         f'<span class="stitle">{h(title)}</span>'
         f"</div>\n"
+        f"{workflow_card_html}"
         f"{review_block_html}"
         f'<div class="detail-layout">'
         f'<div class="dleft">{gallery_html}{_left_log_html}</div>'
@@ -6033,29 +9088,24 @@ def item_detail_form(sku: str):
     videos: List[str] = [p.name for p in sorted(sku_dir.iterdir()) if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}]
 
     jobs: List[Dict[str, Any]] = []
+    workflow_card: Dict[str, Any] | None = None
     try:
-        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
-            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT job_id, queue_name, state, created_at, updated_at,
-                           finished_at, error_code, error_detail
-                      FROM queue_jobs
-                     WHERE payload_json->>'sku' = %s
-                     ORDER BY created_at DESC LIMIT 10
-                    """,
-                    (sku,),
-                )
-                jobs = [dict(r) for r in cur.fetchall()]
-                for j in jobs:
-                    for k in ("created_at", "updated_at", "finished_at"):
-                        if j[k] is not None:
-                            j[k] = j[k].isoformat()
+        attempts = _workflow_attempt_rows(sku)
+        jobs = attempts[:10]
+        for j in jobs:
+            for k in ("created_at", "finished_at"):
+                if j.get(k) is not None and hasattr(j[k], "isoformat"):
+                    j[k] = j[k].isoformat()
+        from .workflow.action_cards import build_item_action_card
+
+        workflow_card = build_item_action_card(json_path, attempts)
     except Exception as exc:
         log.warning("queue job fetch failed for %s: %s", sku, exc)
 
     return HTMLResponse(
-        _render_item_detail_html(sku, item, images, videos, jobs, ""),
+        _render_item_detail_html(
+            sku, item, images, videos, jobs, "", workflow_card=workflow_card,
+        ),
         headers={"Cache-Control": "no-store, no-cache"},
     )
 
@@ -6236,7 +9286,7 @@ ACTIONS: [{"type": "add_todo", "agent": "claude", "body": "Task description", "p
 ACTIONS: [{"type": "add_suggestion", "text": "text of suggestion"}]
 ACTIONS: [{"type": "none"}]
 
-Valid agents: claude, gemini, sokoban (database tasks), admin, operator.
+Valid agents: claude, gemini, sokoban (database tasks), admin, operator, tigwa.
 Priority: 10 (urgent) to 90 (low). Default 50.
 Always end with ACTIONS — use none when no action is warranted.\
 """
@@ -6773,8 +9823,15 @@ def apply_revision(sku: str, body: RevisionApplyBody) -> Dict[str, Any]:
             result["sync_job_id"] = state_machine.enqueue_job(
                 queue_name="ebay_sync",
                 payload={"sku": sku, "reason": "revision_apply", "origin": "operator"},
+                entity_type="item",
+                entity_id=sku,
                 max_attempts=2,
+                dedupe_key=f"ebay_sync:sku:{sku}",
             )
+        except psycopg2.errors.UniqueViolation:
+            # A sync for this sku is already pending — not an error, the
+            # existing job already covers this revision_apply follow-up.
+            result["sync_job_id"] = None
         except Exception as exc:
             log.exception("failed to enqueue post-revision ebay_sync for %s", sku)
             result["sync_job_id"] = None
@@ -6800,29 +9857,12 @@ def discard_revision(sku: str) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"read error: {exc}")
     if "revision_draft" not in doc:
         return {"ok": True, "sku": sku, "note": "no revision_draft present"}
+    # PP-CATALOG-INCR-001 CI-4 (2026-07-18): the catalog_rebuild enqueue +
+    # C11 not-queued guard that used to live here is now dead weight —
+    # _apply_patch above already synchronously upserts this SKU's SQLite
+    # catalog row (CI-2), so there is no longer a "did the rebuild get
+    # queued" question to guard against for this endpoint.
     _apply_patch(json_path, {"revision_draft": None})
-    try:
-        state_machine.enqueue_job(
-            queue_name="catalog_rebuild",
-            payload={"reason": f"revision_discard:{sku}"},
-            dedupe_key="catalog_rebuild:pending",
-            not_before=time.time() + 30,
-            max_attempts=3,
-        )
-    except Exception as exc:
-        # invariant C11: a skipped rebuild is a finding, not a swallowed
-        # exception — otherwise the catalog goes stale after a discard with
-        # no queryable trace of why.
-        if "unique" not in str(exc).lower() and "duplicate" not in str(exc).lower():
-            log.warning(
-                "failed to enqueue catalog_rebuild after revision discard for %s: %s",
-                sku, exc,
-            )
-            _persist_finding(
-                json_path, sku, "revision_discard_rebuild_not_queued",
-                f"catalog_rebuild enqueue failed after revision discard: {exc}",
-                "discard_revision",
-            )
     return {"ok": True, "sku": sku, "discarded": True}
 
 
@@ -7702,32 +10742,42 @@ function fmtAge(iso) {{
   return Math.floor(s/86400) + 'd ago';
 }}
 
-function renderQueues(data) {{
+function renderQueues(data, daily) {{
   var el = document.getElementById('queue-table');
   if (!data || !data.ok) {{
     el.innerHTML = '<div class="err-box">Failed to load queue status.</div>';
     return;
   }}
   var queues = data.queues || {{}};
+  var dailyQueues = (daily && daily.ok) ? (daily.queues || {{}}) : {{}};
+  var dailyOk = !!(daily && daily.ok);
   var names = Object.keys(queues).sort();
   if (names.length === 0) {{
     el.innerHTML = '<div class="empty-state">No queue activity.</div>';
     return;
   }}
   var html = '<table class="pl-table"><tr>' +
-    '<th>Queue</th><th>Pending</th><th>Running</th><th>Done today</th><th>Failed/DL</th></tr>';
+    '<th>Queue</th><th>Pending</th><th>Running</th>' +
+    '<th title="Succeeded today (' + (dailyOk ? escapeHtml(daily.date + ' ' + daily.tz) : 'date-scoped') +
+      '), from queue_daily_stats">Done today</th>' +
+    '<th title="Failed or dead-lettered today (' + (dailyOk ? escapeHtml(daily.date + ' ' + daily.tz) : 'date-scoped') +
+      '), from queue_daily_stats">Failed today</th>' +
+    '<th title="Lifetime dead-letter backlog awaiting review (queue_jobs, not date-scoped)">DL backlog</th></tr>';
   names.forEach(function(q) {{
     var s = queues[q] || {{}};
+    var d = dailyQueues[q] || {{succeeded: 0, failed: 0, dead_letter: 0}};
     var pending = (s.queued || 0) + (s.leased || 0) + (s.retry_wait || 0);
     var running = s.running || 0;
-    var done = s.succeeded || 0;
-    var dead = (s.dead_letter || 0) + (s.failed || 0);
+    var doneToday = dailyOk ? (d.succeeded || 0) : null;
+    var failedToday = dailyOk ? ((d.failed || 0) + (d.dead_letter || 0)) : null;
+    var dlBacklog = s.dead_letter || 0;
     html += '<tr>' +
       '<td class="qname">' + escapeHtml(q) + '</td>' +
       numCell(pending || null, 'n-queued') +
       numCell(running || null, 'n-run') +
-      numCell(done || null, 'n-done') +
-      numCell(dead || null, 'n-dead') +
+      (dailyOk ? numCell(doneToday || null, 'n-done') : '<td class="n-zero">?</td>') +
+      (dailyOk ? numCell(failedToday || null, 'n-dead') : '<td class="n-zero">?</td>') +
+      numCell(dlBacklog || null, 'n-dead') +
       '</tr>';
   }});
   html += '</table>';
@@ -7861,10 +10911,18 @@ async function cancelJob(jobId, flashId) {{
 
 async function loadAll() {{
   startCountdown();
-  // Queue depths
+  // Queue depths (current state) + daily outcome stats (date-scoped)
   try {{
     var r = await fetch('/api/queue/status', {{headers: authHeaders()}});
-    renderQueues(await r.json());
+    var statusData = await r.json();
+    var dailyData = null;
+    try {{
+      var rd = await fetch('/api/queue/daily_stats', {{headers: authHeaders()}});
+      dailyData = await rd.json();
+    }} catch(e2) {{
+      dailyData = null;
+    }}
+    renderQueues(statusData, dailyData);
   }} catch(e) {{
     document.getElementById('queue-table').innerHTML =
       '<div class="err-box">Network error: ' + escapeHtml(String(e)) + '</div>';
@@ -9139,11 +12197,11 @@ _DOCS_EXTRA_CSS = (
 
 
 def _vault_root() -> Path:
-    """Return the plan vault root from config, or fall back to repo-relative default."""
+    """Return the mutable documentation vault root used by the docs browser."""
     p = _cfg.get("plan_vault_path")
     if p:
         return Path(p)
-    return (Path(__file__).parent.parent.parent / "docs" / "TGW-Plan-Vault").resolve()
+    return Path("/opt/TGW/library/plans")
 
 
 def _list_docs_sections() -> list[tuple[str, list[tuple[str, str]]]]:
@@ -9269,7 +12327,7 @@ async def ebay_notification_webhook(request: Request) -> Dict[str, Any]:
     Always returns {"ack": "Success"} to prevent eBay retry storms.
     """
     from .apis.ebay.notifications import parse_sold_notification, verify_notification_signature
-    from .workers.ebay_legacy_sync import _mark_item_sold
+    from .ebay.pull import mark_item_sold as _mark_item_sold
 
     body = await request.body()
     log.debug("ebay_webhook: received %d bytes", len(body))
@@ -9314,16 +12372,38 @@ async def ebay_notification_webhook(request: Request) -> Dict[str, Any]:
         if did_mark:
             log.info("ebay_webhook: marked sold listing_id=%s", listing_id)
             try:
-                state_machine.enqueue_job(
-                    queue_name="catalog_rebuild",
-                    payload={"reason": "ebay_webhook_sold"},
-                    dedupe_key="catalog_rebuild:pending",
-                    not_before=time.time() + 30,
-                    max_attempts=3,
-                )
+                state_machine.enqueue_catalog_rebuild("ebay_webhook_sold")
             except Exception:
                 pass
     except Exception as exc:
         log.error("ebay_webhook: mark failed listing_id=%s: %s", listing_id, exc)
 
     return {"ack": "Success"}
+
+
+@app.post("/api/cli", dependencies=[AUTH])
+async def api_cli(request: Request):
+    import subprocess
+    body = await request.json()
+    cmd = body.get("command", "")
+    args = body.get("args", [])
+    BLOCKED = {"update","update-where","update-title","update-location",
+        "update-verified","update-status","set-shipping","bulk",
+        "price-freeship","hint","data-scrub","revise","alt-text",
+        "enqueue-sku","requeue-identify","resolve-legacy","ready",
+        "publish","alt-text-batch","ebay-pull","import-sold-csv",
+        "sku-migrate","migrate-unblock","migrate-restore",
+        "restart-workers","restart-ebay-token","nix-bundle-usb",
+        "set-context","clear-context","set-template","create-item",
+        "serve","flake"}
+    if cmd in BLOCKED:
+        return {"ok": False, "error": f"{cmd} is write-protected"}
+    fc = ["/opt/TGW/.venvironments/tgw/bin/tgw", cmd] + [str(a) for a in args]
+    try:
+        p = subprocess.run(fc, capture_output=True, text=True, timeout=30)
+        return {"ok": True, "command": cmd, "exit_code": p.returncode,
+                "stdout": p.stdout[:50000], "stderr": p.stderr[:5000]}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "timed out"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}

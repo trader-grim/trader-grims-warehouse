@@ -1,0 +1,70 @@
+{
+  "schema": "tgw-procedure-registry/v1",
+  "revision": "sha256:3fd90e890ee075a1e50432fc8b13ff48519764b9504b7c62d1e6442b68abf93d",
+  "procedures": {
+    "app-release-install/v1": {
+      "status": "active",
+      "effect_class": "infrastructure-mutation",
+      "host_role": "production",
+      "repository_id": "application",
+      "working_directory": "/opt/TGW",
+      "run_as": "root",
+      "argv": ["/opt/tgw-installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "install", "--archive", ":archive", "--generation", ":generation", "--commit", ":commit", "--tree", ":tree", "--archive-sha256", ":archive_sha256", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
+      "authority_gate": "explicit-deployment-approval",
+      "execution_policy": "registered-runner-only",
+      "direct_invocation_allowed": false,
+      "rollback_procedure": "app-release-rollback/v1",
+      "preconditions": ["exact-commit-tree-and-archive-digest-recorded", "current-generation-recorded", "controller-installer-independence-verified", "explicit-deployment-approval-recorded"],
+      "postconditions": ["selection-receipt-completed", "selected-release-manifest-verified", "application-health-verified"],
+      "evidence_schema": "tgw-procedure-receipt/v1"
+    },
+    "app-release-rollback/v1": {
+      "status": "active",
+      "effect_class": "infrastructure-mutation",
+      "host_role": "production",
+      "repository_id": "application",
+      "working_directory": "/opt/TGW",
+      "run_as": "root",
+      "argv": ["/opt/tgw-installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "rollback", "--receipt", ":receipt", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
+      "authority_gate": "explicit-deployment-approval",
+      "execution_policy": "registered-runner-only",
+      "direct_invocation_allowed": false,
+      "rollback_procedure": null,
+      "preconditions": ["completed-selection-receipt-verified", "current-generation-recorded", "rollback-generation-present"],
+      "postconditions": ["rollback-receipt-completed", "selected-release-manifest-verified", "application-health-verified"],
+      "evidence_schema": "tgw-procedure-receipt/v1"
+    },
+    "nixos-prod-rollback/v1": {
+      "status": "active",
+      "effect_class": "infrastructure-mutation",
+      "host_role": "production",
+      "repository_id": "tgw-flake",
+      "working_directory": "/home/db/tgw-flake",
+      "run_as": "root",
+      "argv": ["nixos-rebuild", "switch", "--rollback"],
+      "authority_gate": "explicit-deployment-approval",
+      "execution_policy": "registered-runner-only",
+      "direct_invocation_allowed": false,
+      "rollback_procedure": null,
+      "preconditions": ["current-system-closure-recorded", "rollback-generation-identified"],
+      "postconditions": ["new-system-closure-recorded", "failed-units-checked", "affected-services-verified"],
+      "evidence_schema": "tgw-procedure-receipt/v1"
+    },
+    "nixos-prod-switch/v1": {
+      "status": "active",
+      "effect_class": "infrastructure-mutation",
+      "host_role": "production",
+      "repository_id": "tgw-flake",
+      "working_directory": "/home/db/tgw-flake",
+      "run_as": "root",
+      "argv": ["nixos-rebuild", "switch", "--flake", "path:/home/db/tgw-flake#tgw-prod"],
+      "authority_gate": "explicit-deployment-approval",
+      "execution_policy": "registered-runner-only",
+      "direct_invocation_allowed": false,
+      "rollback_procedure": "nixos-prod-rollback/v1",
+      "preconditions": ["flake-worktree-attributed", "nix-evaluation-passed", "dry-activate-passed", "explicit-deployment-approval-recorded"],
+      "postconditions": ["new-system-closure-recorded", "failed-units-checked", "affected-services-verified", "selected-release-verified"],
+      "evidence_schema": "tgw-procedure-receipt/v1"
+    }
+  }
+}
