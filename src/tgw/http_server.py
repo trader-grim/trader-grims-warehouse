@@ -7699,6 +7699,23 @@ def _render_item_detail_html(
             _line.append(_abtn("List on eBay", "listOnEbay()", "green",
                                title="Save draft, run every needed step, and publish"))
     elif _has_error and not is_active:
+        def _job_reason_code(job: Dict[str, Any]) -> str:
+            """Read a worker reason from its persisted queue payload.
+
+            ``_workflow_attempt_rows`` returns database rows, where provider
+            results live under ``payload_json.result``.  Accepting a top-level
+            result as well keeps the renderer usable by callers which already
+            project that nested field, but the persisted shape is authoritative.
+            """
+            result = job.get("result")
+            if not isinstance(result, dict):
+                payload = job.get("payload_json")
+                result = payload.get("result") if isinstance(payload, dict) else None
+            evidence = result.get("evidence") if isinstance(result, dict) else None
+            if not isinstance(evidence, dict):
+                return ""
+            return str(evidence.get("reason_code") or "")
+
         _retryable_failure = next((
             j for j in jobs
             if j.get("state") == "dead_letter"
@@ -7713,10 +7730,7 @@ def _render_item_detail_html(
             and j.get("state") == "dead_letter"
             and _after_baseline(j)
             and not _superseded_by_success(j)
-            and isinstance(j.get("result"), dict)
-            and isinstance(j["result"].get("evidence"), dict)
-            and j["result"]["evidence"].get("reason_code")
-            == "INVALID_RECEIPT_IDENTITY"
+            and _job_reason_code(j) == "INVALID_RECEIPT_IDENTITY"
         ), None)
         if _retryable_failure:
             _line.append(_abtn(

@@ -6414,9 +6414,13 @@ def test_item_detail_receipt_identity_dead_letter_offers_new_current_graph_attem
         "job_id": "stale-receipt-job",
         "retry_allowed": False,
         "error_detail": "receipt binding rejected: INVALID_RECEIPT_IDENTITY",
-        "result": {
-            "outcome": "failed",
-            "evidence": {"reason_code": "INVALID_RECEIPT_IDENTITY"},
+        # Production queue rows retain worker results inside payload_json.
+        "payload_json": {
+            "sku": "tgw202510161310076",
+            "result": {
+                "outcome": "failed",
+                "evidence": {"reason_code": "INVALID_RECEIPT_IDENTITY"},
+            },
         },
     }]
 
