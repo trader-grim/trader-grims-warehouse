@@ -61,7 +61,7 @@ chmod 0600 "$PRIVATE_KEY"
 chown root:root "$PUBLIC_KEY"
 chmod 0644 "$PUBLIC_KEY"
 
-derived_public=$(ssh-keygen -y -f "$PRIVATE_KEY")
+derived_public=$(ssh-keygen -y -f "$PRIVATE_KEY" | awk '{print $1 " " $2}')
 stored_public=$(awk '{print $1 " " $2}' "$PUBLIC_KEY")
 if [ "$derived_public" != "$stored_public" ]; then
     echo "TGW GitHub public/private key mismatch" >&2
