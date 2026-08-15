@@ -40,11 +40,10 @@ from mcp.server import FastMCP
 # Constants
 # ---------------------------------------------------------------------------
 
-# Derived, not hardcoded (CI incident 2026-07-18, todo #1458 follow-up):
-# a literal '/opt/TGW/src/trader-grims-warehouse' only exists on tgw-prod.
-# _ensure_worktree() passes this as subprocess cwd, and GitHub's hosted
-# runner checks the repo out elsewhere -- a hardcoded cwd that doesn't
-# exist makes Popen raise FileNotFoundError before git even runs.
+# Derived, not hardcoded (CI incident 2026-07-18, todo #1458 follow-up).
+# _ensure_worktree() passes this as subprocess cwd, and workers may use any
+# worktree backed by the shared development repository.  A host-specific cwd
+# would make Popen fail before Git can validate the selected worktree.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _AIDER_BIN = Path('/home/tgw/.local/bin/aider')
 _AUDIT_LOG = Path.home() / '.local/share/aider-audit/usage.csv'

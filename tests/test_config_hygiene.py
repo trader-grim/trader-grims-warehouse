@@ -69,9 +69,7 @@ def test_log_root_is_resolved_once_at_the_config_boundary(tmp_path):
 
 def test_plan_roots_keep_mutable_and_authority_bindings_separate(tmp_path):
     cfg = load_config(_write_cfg(tmp_path, {}))
-    assert cfg["plan_vault_path"] == Path(
-        "/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault"
-    )
+    assert cfg["plan_vault_path"] == Path("/opt/TGW/library/plans")
     assert cfg["standalone_plan_root"] == Path("/opt/TGW/library/plans")
     assert cfg["plan_repository_root"] == cfg["standalone_plan_root"]
     assert cfg["plan_inbox_path"] == cfg["plan_vault_path"] / "inbox"
@@ -84,6 +82,18 @@ def test_plan_roots_keep_mutable_and_authority_bindings_separate(tmp_path):
         cfg["standalone_plan_root"] / "pp",
     )
     assert cfg["plan_update_master_path"] == cfg["plan_master_path"]
+
+
+def test_runtime_python_does_not_depend_on_legacy_production_source_checkout() -> None:
+    source_root = Path(__file__).parents[1] / "src" / "tgw"
+    legacy_root = "/opt/TGW/src/" + "trader-grims-warehouse"
+    offenders = [
+        path.relative_to(source_root)
+        for path in source_root.rglob("*.py")
+        if legacy_root in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == []
 
 
 def test_approved_plan_content_must_be_exact_clean_commit(tmp_path):
