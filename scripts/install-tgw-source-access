@@ -76,7 +76,8 @@ install -o root -g root -m 0644 \
     "$SOURCE_ROOT/config/environment/systemd/tgw-github-agent.service" \
     /etc/systemd/system/tgw-github-agent.service
 systemctl daemon-reload
-systemctl enable --now tgw-github-agent.service
+systemctl enable tgw-github-agent.service
+systemctl restart tgw-github-agent.service
 
 if [ ! -S "$AGENT_SOCKET" ]; then
     echo "TGW GitHub agent socket is absent" >&2
