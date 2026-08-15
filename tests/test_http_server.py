@@ -6466,6 +6466,62 @@ def test_item_detail_other_nonretryable_dead_letter_still_needs_attention():
     assert '>List on eBay</button>' not in action_line.group(1)
 
 
+def test_item_detail_sold_out_item_has_no_relist_action():
+    item = {
+        "sku": "tgw-sold",
+        "title": "Sold item",
+        "status": "sold",
+        "draft_listing": {
+            "title": "Sold item",
+            "price": 33.99,
+            "quantity": 0,
+        },
+        "ebay_listing": {
+            "listing_id": "227446147105",
+            "status": "Sold",
+        },
+        "ebay_offer": {
+            "offer_id": "266460592018",
+            "status": "UNPUBLISHED",
+        },
+    }
+
+    html = http_server._render_item_detail_html("tgw-sold", item, [], [], [])
+    action_line = re.search(
+        r'<div class="act-row" id="action-line">(.*?)</div>', html,
+    )
+
+    assert action_line is not None
+    assert '>Sold</button>' in action_line.group(1)
+    assert ' disabled' in action_line.group(1)
+    assert '>Relist</button>' not in action_line.group(1)
+    assert '>List on eBay</button>' not in action_line.group(1)
+
+
+def test_item_detail_restocked_sold_item_can_be_relisted():
+    item = {
+        "sku": "tgw-restocked",
+        "title": "Restocked item",
+        "status": "sold",
+        "draft_listing": {
+            "title": "Restocked item",
+            "price": 33.99,
+            "quantity": 1,
+        },
+    }
+
+    html = http_server._render_item_detail_html(
+        "tgw-restocked", item, [], [], [],
+    )
+    action_line = re.search(
+        r'<div class="act-row" id="action-line">(.*?)</div>', html,
+    )
+
+    assert action_line is not None
+    assert '>Relist</button>' in action_line.group(1)
+    assert 'onclick="relistItem()"' in action_line.group(1)
+
+
 def test_item_detail_missing_draft_price_shows_set_price_not_retry():
     """A pricing worker may correctly refuse to invent a price when it has no
     positive market evidence.  The empty draft price must still lead the

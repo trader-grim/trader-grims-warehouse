@@ -7596,6 +7596,14 @@ def _render_item_detail_html(
     # green = ready, yellow = working/pending, red = error/destructive,
     # grey = nothing to do. Operator-visible states only — "staged" stays hidden.
     _is_sold = str(item.get("status") or "").lower() == "sold"
+    _sold_quantity_raw = dl.get("quantity", item.get("quantity", 0))
+    try:
+        _sold_quantity = (
+            0 if isinstance(_sold_quantity_raw, bool)
+            else int(_sold_quantity_raw or 0)
+        )
+    except (TypeError, ValueError):
+        _sold_quantity = 0
     _working = any(
         j.get("state") in ("pending", "running", "claimed", "retry") for j in jobs
     )
@@ -7730,8 +7738,14 @@ def _render_item_detail_html(
 
     _line: List[str] = []
     if _is_sold:
-        _line.append(_abtn("Relist", "relistItem()", "green",
-                           title="Stage and publish this item again"))
+        if _sold_quantity > 0:
+            _line.append(_abtn("Relist", "relistItem()", "green",
+                               title="Stage and publish this restocked item again"))
+        else:
+            _line.append(_abtn(
+                "Sold", "", "grey", disabled=True,
+                title="Sold out — restore inventory quantity before relisting",
+            ))
     elif _needs_price:
         # A guard finding with a known fix gets its affordance regardless of
         # listing state — Retry cannot resolve a missing price, the editor can.
