@@ -17,4 +17,3 @@ done
 chgrp tgw-coders "$SOCKET"
 chmod 0660 "$SOCKET"
 SSH_AUTH_SOCK="$SOCKET" ssh-add "$PRIVATE_KEY"
-
