@@ -1,0 +1,33 @@
+[Unit]
+Description=TGW repository-scoped GitHub SSH agent
+After=local-fs.target
+
+[Service]
+Type=simple
+User=tgw-git
+Group=tgw-git
+SupplementaryGroups=tgw-coders
+RuntimeDirectory=tgw-github-agent
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/ssh-agent -D -a /run/tgw-github-agent/agent.sock
+ExecStartPost=/usr/bin/chgrp tgw-coders /run/tgw-github-agent
+ExecStartPost=/usr/bin/chmod 0750 /run/tgw-github-agent
+ExecStartPost=/usr/bin/chgrp tgw-coders /run/tgw-github-agent/agent.sock
+ExecStartPost=/usr/bin/chmod 0660 /run/tgw-github-agent/agent.sock
+ExecStartPost=/usr/bin/env SSH_AUTH_SOCK=/run/tgw-github-agent/agent.sock /usr/bin/ssh-add /etc/tgw/credentials/github/trader-grims-warehouse/id_ed25519
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target
+

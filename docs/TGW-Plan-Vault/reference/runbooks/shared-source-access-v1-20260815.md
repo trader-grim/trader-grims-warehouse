@@ -12,6 +12,7 @@ All admitted local coding harnesses use:
 - the canonical repository at `/opt/TGW/tgw-lib/src/trader-grims-warehouse`;
 - Unix group `tgw-coders` for local repository/worktree access;
 - SSH host alias `github-tgw-app` with one repository-scoped deploy credential;
+- a system SSH agent exposing only its socket to `tgw-coders`;
 - a root-owned GitHub host key and SSH policy;
 - individual Unix accounts and commit author identities for attribution.
 
@@ -50,10 +51,15 @@ The installer:
 2. installs `/etc/ssh/ssh_config.d/10-tgw-github-app.conf`;
 3. creates the repository-specific key only if both key files are absent;
 4. refuses partial or mismatched credential state;
-5. stores the private key as `root:tgw-coders` mode `0640`;
-6. prints only the public-key fingerprint and public-key path.
+5. stores the private key as `root:tgw-git` mode `0640` inside a root-only
+   directory;
+6. installs and starts `tgw-github-agent.service`;
+7. exposes only `/run/tgw-github-agent/agent.sock` to `tgw-coders`;
+8. prints only the public-key fingerprint and public-key path.
 
-It never overwrites an existing private key.
+It never overwrites an existing private key. Harness accounts cannot read the
+private key; OpenSSH uses the loaded identity through the group-accessible agent
+socket.
 
 ## One GitHub owner action
 
@@ -115,6 +121,7 @@ Each coding account should be able to run:
 
 ```bash
 ssh -G github-tgw-app | grep -E '^(hostname|user|identityfile|hostkeyalias) '
+SSH_AUTH_SOCK=/run/tgw-github-agent/agent.sock ssh-add -l
 git -c safe.directory=/opt/TGW/tgw-lib/src/trader-grims-warehouse \
   -C /opt/TGW/tgw-lib/src/trader-grims-warehouse ls-remote --heads origin
 ```
