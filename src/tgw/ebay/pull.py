@@ -954,12 +954,14 @@ def reconcile_sold_order_history(
 ) -> Dict[str, Any]:
     """Reconcile the complete visible GetOrders window against live inventory.
 
-    Current provider-active inventory wins only for *current availability*:
-    it restores a stale local ``sold`` status and quantity while retaining all
-    historic sale records.  A missing order on an active listing is appended
-    without decrementing again, because the provider quantity already reflects
-    the current available amount.  For listings no longer active, the normal
-    idempotent sold-marker owns the quantity/status transition.
+    A pre-existing local ``sold`` status is inventory authority.  A provider-
+    active listing for that record is reported as a conflict and is never used
+    to make the item available again.  This also recognizes the reconciliation
+    marker written by the short-lived v1 implementation, so an erroneous
+    ``sold`` -> ``In Stock`` transition is repaired on replay.  Missing order
+    history is still appended without decrementing active provider quantity.
+    For listings no longer active, the normal idempotent sold-marker owns the
+    quantity/status transition.
 
     The function never changes an eBay listing or offer.
     """
@@ -975,6 +977,8 @@ def reconcile_sold_order_history(
         'transactions': sum(len(values) for values in transactions.values()),
         'active_fetched': len(active_listings),
         'active_status_restored': 0,
+        'active_sold_local_restored': 0,
+        'active_sold_conflicts': [],
         'active_sales_recorded': 0,
         'inactive_sales_marked': 0,
         'already_recorded': 0,
@@ -1031,18 +1035,31 @@ def reconcile_sold_order_history(
             except (TypeError, ValueError) as exc:
                 raise ValueError('provider active quantity is invalid') from exc
             available = max(0, available - quantity_sold)
-            restore_status = (
-                str(item.get('status') or '').strip().lower() == 'sold'
-                and available > 0
+            reconciliation_marker = item.get('sold_reconciliation')
+            marker_proves_prior_sold = (
+                isinstance(reconciliation_marker, dict)
+                and reconciliation_marker.get('schema')
+                == 'tgw-sold-active-reconciliation/v1'
             )
-            if not missing and not restore_status:
+            local_sold = str(item.get('status') or '').strip().lower() == 'sold'
+            sold_authority = local_sold or marker_proves_prior_sold
+            if sold_authority:
+                stats['active_sold_conflicts'].append({
+                    'sku': sku,
+                    'listing_id': listing_id,
+                    'provider_available_quantity': available,
+                    'prior_sold_marker': marker_proves_prior_sold,
+                })
+            if not missing and not sold_authority:
                 stats['already_recorded'] += len(
                     transactions.get(listing_id, [])
                 )
                 continue
             if dry_run:
                 stats['active_sales_recorded'] += len(missing)
-                stats['active_status_restored'] += int(restore_status)
+                stats['active_sold_local_restored'] += int(
+                    marker_proves_prior_sold and not local_sold
+                )
                 continue
             fields: Dict[str, Any] = {}
             if missing:
@@ -1051,32 +1068,27 @@ def reconcile_sold_order_history(
                     *[_persisted_sale_record(record, synced_at)
                       for record in missing],
                 ]
-            if restore_status:
-                existing_listing = item.get('ebay_listing')
-                existing_listing = (
-                    dict(existing_listing)
-                    if isinstance(existing_listing, dict) else {}
-                )
+            if marker_proves_prior_sold and not local_sold:
+                draft = item.get('draft_listing')
+                draft = dict(draft) if isinstance(draft, dict) else {}
                 fields.update({
-                    'status': 'In Stock',
-                    'draft_listing': {'quantity': available},
-                    'ebay_listing': {
-                        **existing_listing,
-                        'listing_id': listing_id,
-                        'status': 'Active',
-                        'synced_at': synced_at,
-                    },
+                    'status': 'sold',
+                    'draft_listing': {**draft, 'quantity': 0},
                     'sold_reconciliation': {
-                        'schema': 'tgw-sold-active-reconciliation/v1',
+                        'schema': 'tgw-sold-active-conflict/v2',
                         'listing_id': listing_id,
                         'provider_status': str(listing.get('status') or 'Active'),
                         'provider_available_quantity': available,
                         'observed_at': synced_at,
+                        'resolution': 'held-sold-authority',
                     },
                 })
-            fence_patch_item(cfg, sku, fields)
+            if fields:
+                fence_patch_item(cfg, sku, fields)
             stats['active_sales_recorded'] += len(missing)
-            stats['active_status_restored'] += int(restore_status)
+            stats['active_sold_local_restored'] += int(
+                marker_proves_prior_sold and not local_sold
+            )
         except Exception as exc:
             stats['errors'].append({
                 'listing_id': listing_id,
@@ -1160,7 +1172,11 @@ def reconcile_sold_order_history(
                     'error': f'{type(exc).__name__}: {exc}',
                 })
 
-    stats['ok'] = not stats['errors']
+    stats['ok'] = not (
+        stats['errors']
+        or stats['active_unmatched']
+        or stats['active_sold_conflicts']
+    )
     return stats
 
 

@@ -351,12 +351,19 @@ def test_history_reconcile_active_custom_label_resolves_missing_listing_index(
 
     item = json.loads((tmp_path / "tgw456" / "tgw456.json").read_text())
     assert result["active_unmatched"] == []
-    assert result["active_status_restored"] == 1
-    assert item["status"] == "In Stock"
-    assert item["draft_listing"]["quantity"] == 1
+    assert result["active_status_restored"] == 0
+    assert result["ok"] is False
+    assert result["active_sold_conflicts"] == [{
+        "sku": "tgw456",
+        "listing_id": "L-ACTIVE",
+        "provider_available_quantity": 1,
+        "prior_sold_marker": False,
+    }]
+    assert item["status"] == "sold"
+    assert item["draft_listing"]["quantity"] == 0
 
 
-def test_history_reconcile_restores_provider_active_sold_inventory(tmp_path):
+def test_history_reconcile_holds_provider_active_sold_inventory(tmp_path):
     _write_item(tmp_path, "tgw-active", {
         "sku": "tgw-active",
         "status": "sold",
@@ -378,14 +385,46 @@ def test_history_reconcile_restores_provider_active_sold_inventory(tmp_path):
     )
 
     item = json.loads((tmp_path / "tgw-active" / "tgw-active.json").read_text())
-    assert result["ok"] is True
-    assert item["ebay_listing"]["status"] == "Active"
-    assert result["active_status_restored"] == 1
+    assert result["ok"] is False
+    assert item["ebay_listing"]["status"] == "Sold"
+    assert result["active_status_restored"] == 0
+    assert len(result["active_sold_conflicts"]) == 1
     assert result["active_sales_recorded"] == 1
-    assert item["status"] == "In Stock"
-    assert item["draft_listing"]["quantity"] == 4
+    assert item["status"] == "sold"
+    assert item["draft_listing"]["quantity"] == 0
     assert {sale["order_id"] for sale in item["ebay_sale"]} == {"OLD", "NEW"}
-    assert item["sold_reconciliation"]["provider_available_quantity"] == 4
+
+
+def test_history_reconcile_repairs_v1_sold_marker_without_relisting(tmp_path):
+    _write_item(tmp_path, "tgw-repair", {
+        "sku": "tgw-repair",
+        "status": "In Stock",
+        "draft_listing": {"quantity": 4, "title": "preserved"},
+        "ebay_listing": {"listing_id": "L-REPAIR", "status": "Active"},
+        "sold_reconciliation": {
+            "schema": "tgw-sold-active-reconciliation/v1",
+        },
+    })
+
+    result = pull.reconcile_sold_order_history(
+        {"itemdata_root": tmp_path, "api_key": "test-api-key"},
+        tmp_path,
+        [],
+        [{
+            "listing_id": "L-REPAIR", "custom_label": "tgw-repair",
+            "status": "Active", "quantity": 4,
+        }],
+        "2026-08-15T00:00:00Z",
+        dry_run=False,
+    )
+
+    item = json.loads((tmp_path / "tgw-repair" / "tgw-repair.json").read_text())
+    assert result["ok"] is False
+    assert result["active_sold_local_restored"] == 1
+    assert item["status"] == "sold"
+    assert item["draft_listing"] == {"quantity": 0, "title": "preserved"}
+    assert item["ebay_listing"]["status"] == "Active"
+    assert item["sold_reconciliation"]["schema"] == "tgw-sold-active-conflict/v2"
 
 
 def test_history_reconcile_active_sale_does_not_decrement_provider_quantity(tmp_path):
@@ -459,7 +498,8 @@ def test_history_reconcile_dry_run_leaves_active_sold_item_unchanged(tmp_path):
         dry_run=True,
     )
 
-    assert result["active_status_restored"] == 1
+    assert result["active_status_restored"] == 0
+    assert len(result["active_sold_conflicts"]) == 1
     assert result["active_sales_recorded"] == 1
     assert path.read_bytes() == before
 
