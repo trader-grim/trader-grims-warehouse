@@ -11,6 +11,8 @@ All admitted local coding harnesses use:
 
 - the canonical repository at `/opt/TGW/tgw-lib/src/trader-grims-warehouse`;
 - Unix group `tgw-coders` for local repository/worktree access;
+- a traverse-only `tgw-coders` ACL on `/opt/TGW/tgw-lib`, without granting the
+  broader `tgw-access` role;
 - SSH host alias `github-tgw-app` with one repository-scoped deploy credential;
 - a system SSH agent usable only by the dedicated `tgw-git` account;
 - a narrow, sudo-audited `tgw-source-git` command available to `tgw-coders`;
@@ -49,15 +51,16 @@ The installer:
 
 1. installs GitHub's pinned Ed25519 host key in
    `/etc/ssh/tgw_github_known_hosts`;
-2. installs `/etc/ssh/ssh_config.d/10-tgw-github-app.conf`;
-3. creates the repository-specific key only if both key files are absent;
-4. refuses partial or mismatched credential state;
-5. stores the private key as `tgw-git:tgw-git` mode `0600` inside a protected
+2. grants `tgw-coders` traverse-only access to the canonical library root;
+3. installs `/etc/ssh/ssh_config.d/10-tgw-github-app.conf`;
+4. creates the repository-specific key only if both key files are absent;
+5. refuses partial or mismatched credential state;
+6. stores the private key as `tgw-git:tgw-git` mode `0600` inside a protected
    directory and installs a separate public copy at `/etc/ssh/tgw_github_app.pub`;
-6. installs and starts `tgw-github-agent.service`;
-7. installs `tgw-source-git` and exact sudo rules for `status`, `fetch`, `dry-run`,
+7. installs and starts `tgw-github-agent.service`;
+8. installs `tgw-source-git` and exact sudo rules for `status`, `fetch`, `dry-run`,
    and `publish`;
-8. prints only the public-key fingerprint and public-key path.
+9. prints only the public-key fingerprint and public-key path.
 
 It never overwrites an existing private key. Harness accounts cannot read the
 private key or contact the SSH agent. They invoke the fixed repository operations as

@@ -22,6 +22,12 @@ if ! getent group tgw-coders >/dev/null; then
     exit 69
 fi
 
+if [ ! -d /opt/TGW/tgw-lib ]; then
+    echo "canonical TGW library root is absent" >&2
+    exit 69
+fi
+setfacl -m g:tgw-coders:--x /opt/TGW/tgw-lib
+
 case "$MODE" in
     prepare|activate) ;;
     *)
