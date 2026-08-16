@@ -10,6 +10,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import stat
 import threading
 from dataclasses import dataclass
@@ -64,15 +65,28 @@ class BootstrapGrant:
             raise ValueError("bootstrap authority permits exactly one deployment")
         if effect.kind.value != "approval-platform-bootstrap-deployment":
             raise ValueError("bootstrap authority permits only the exact platform bootstrap deployment")
-        manifest = validate_platform_bootstrap_effect(effect.parameters)
-        if (
-            manifest["target_host"] != value["target_host"]
-            or manifest["flake_commit"] != value["candidate_commit"]
-            or manifest["plan_commit"] != value["plan_commit"]
-            or manifest["solution_hash"] != value["solution_hash"]
-            or manifest["retirement_condition"] != value["retirement_condition"]
-            or value["root_id"] != "production-releases"
-        ):
+        if effect.parameters.get("schema") == "tgw-approval-application-bootstrap/v1":
+            expected_ref = f"candidate:{value['candidate_commit']}:application-bootstrap:v1"
+            matches = (
+                set(effect.parameters) == {"schema", "application_contract_ref", "application_contract_hash"}
+                and effect.parameters.get("application_contract_ref") == expected_ref
+                and isinstance(effect.parameters.get("application_contract_hash"), str)
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", effect.parameters["application_contract_hash"]) is not None
+                and value["plan_commit"] == "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99"
+                and value["solution_hash"] == "sha256:1c3684135769e5dcabcaf130c55df160a4cecc0d3ebcee6ccd129ab97cdd709b"
+                and value["target_host"] == "tgw-prod"
+                and value["retirement_condition"] == "W10:canonical-gate-operational"
+            )
+        else:
+            manifest = validate_platform_bootstrap_effect(effect.parameters)
+            matches = (
+                manifest["target_host"] == value["target_host"]
+                and manifest["flake_commit"] == value["candidate_commit"]
+                and manifest["plan_commit"] == value["plan_commit"]
+                and manifest["solution_hash"] == value["solution_hash"]
+                and manifest["retirement_condition"] == value["retirement_condition"]
+            )
+        if not matches or value["root_id"] != "production-releases":
             raise ValueError("bootstrap Plan, solution, target, candidate, root, or retirement binding does not match its effect")
         payload = dict(value)
         payload["effect_hash"] = effect.effect_hash

@@ -14,6 +14,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+from tgw.application_deployment_contract import (
+    ApplicationDeploymentContractResolver,
+    EFFECT_SCHEMA as APPLICATION_BOOTSTRAP_EFFECT_SCHEMA,
+    VerifiedApplicationDeploymentContract,
+)
 from tgw.bootstrap_authority import BootstrapConsumptionAmbiguous
 from tgw.bootstrap_deployment_contract import (
     BootstrapDeploymentContractResolver,
@@ -212,10 +217,22 @@ class TypedEffectHandlerRegistry:
         bootstrap_rollback: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         bootstrap_validate: Callable[[Mapping[str, Any]], None] | None = None,
         bootstrap_contract_resolver: BootstrapDeploymentContractResolver | None = None,
+        application_bootstrap_contract_resolver: ApplicationDeploymentContractResolver | None = None,
+        application_bootstrap_install: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        application_bootstrap_rollback: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         nixos_reviewed_evaluation: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         nixos_observer_render_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         nixos_a3_successor_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> None:
+        if application_bootstrap_contract_resolver is not None and any(
+            value is not None for value in (bootstrap_contract_resolver, bootstrap_validate)
+        ):
+            raise ValueError("application and legacy Nix bootstrap providers cannot share one controller")
+        if application_bootstrap_contract_resolver is not None and not all(
+            callable(value) for value in (application_bootstrap_install, application_bootstrap_rollback)
+        ):
+            raise ValueError("application bootstrap resolver requires exact install and rollback providers")
+        app_bootstrap = application_bootstrap_contract_resolver is not None
         self._providers = {
             EffectKind.CODING_RELEASE: ("immutable-release-installer@1", release_install, release_rollback),
             EffectKind.BOUNDED_FLAKE_PUSH: ("bounded-flake-push@1", flake_push, None),
@@ -223,9 +240,9 @@ class TypedEffectHandlerRegistry:
             EffectKind.DEPENDENCY_RESUBMIT: ("dependency-resubmit@1", dependency_resubmit, None),
             EffectKind.AUTHORITY_CANARY: ("authority-canary-receipt-only@1", _authority_canary, None),
             EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT: (
-                "a3-platform-bootstrap-install@1",
-                bootstrap_install or self._unavailable_bootstrap,
-                bootstrap_rollback or self._unavailable_bootstrap,
+                "governed-application-bootstrap-install@2" if app_bootstrap else "a3-platform-bootstrap-install@1",
+                application_bootstrap_install if app_bootstrap else (bootstrap_install or self._unavailable_bootstrap),
+                application_bootstrap_rollback if app_bootstrap else (bootstrap_rollback or self._unavailable_bootstrap),
             ),
             EffectKind.NIXOS_REVIEWED_EVALUATION: (
                 "nixos-reviewed-evaluation@1",
@@ -245,6 +262,7 @@ class TypedEffectHandlerRegistry:
         }
         self._bootstrap_validate = bootstrap_validate
         self._bootstrap_contract_resolver = bootstrap_contract_resolver
+        self._application_bootstrap_contract_resolver = application_bootstrap_contract_resolver
         self._a3_successor_binding = nixos_a3_successor_evaluation
         self._a3_successor_allow_fixture = bool(getattr(getattr(nixos_a3_successor_evaluation, "composition", None), "allow_fixture", False))
 
@@ -538,7 +556,27 @@ class TypedEffectHandlerRegistry:
             if parameters["purpose"] != "verify-plan-authority-roundtrip":
                 raise ValueError("authority canary purpose is outside the harmless registered bound")
         elif effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT:
-            if self._bootstrap_contract_resolver is not None:
+            if self._application_bootstrap_contract_resolver is not None:
+                parameters = _required(
+                    effect.parameters,
+                    {"schema", "application_contract_ref", "application_contract_hash"},
+                )
+                if parameters["schema"] != APPLICATION_BOOTSTRAP_EFFECT_SCHEMA:
+                    raise ValueError("application bootstrap effect schema is invalid")
+                verified = self._application_bootstrap_contract_resolver.resolve(
+                    parameters["application_contract_ref"],
+                    parameters["application_contract_hash"],
+                )
+                if not isinstance(verified, VerifiedApplicationDeploymentContract):
+                    raise ValueError("application bootstrap resolver returned an invalid verification")
+                if (
+                    verified.reference != parameters["application_contract_ref"]
+                    or verified.contract_hash != parameters["application_contract_hash"]
+                    or effect.generation != verified.intended_next_generation
+                ):
+                    raise ValueError("application bootstrap effect differs from its verified immutable contract")
+                parameters = verified.provider_parameters()
+            elif self._bootstrap_contract_resolver is not None:
                 parameters = _required(
                     effect.parameters,
                     {"bootstrap_contract_ref", "bootstrap_contract_hash"},
@@ -696,12 +734,16 @@ class TypedEffectHandlerRegistry:
         handler_id, handler, rollback = self._providers[effect.kind]
         if not (
             effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT
-            and self._bootstrap_contract_resolver is not None
+            and (
+                self._bootstrap_contract_resolver is not None
+                or self._application_bootstrap_contract_resolver is not None
+            )
         ):
             parameters["generation"] = effect.generation
         if (
             effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT
             and self._bootstrap_contract_resolver is None
+            and self._application_bootstrap_contract_resolver is None
         ):
             if self._bootstrap_validate is None:
                 raise ValueError("platform-bootstrap pre-authority validator is unavailable")
@@ -716,9 +758,12 @@ class AuthorityEffectController:
         self,
         registry: TypedEffectHandlerRegistry,
         authority: AuthorityExecutionStore | Callable[..., Mapping[str, Any]],
+        *,
+        terminal_recorder: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ):
         self.registry = registry
         self.authority = authority
+        self.terminal_recorder = terminal_recorder
         self._has_durable_methods = callable(
             getattr(authority, "begin_execution", None)
         ) and callable(getattr(authority, "complete_execution", None))
@@ -776,6 +821,34 @@ class AuthorityEffectController:
                 EffectOutcome.SUCCEEDED, evidence,
             )
         except RetryableEffect as exc:
+            if (
+                effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT
+                and self.registry._application_bootstrap_contract_resolver is not None
+            ):
+                # The one-use W09 grant is already consumed.  RETRY would
+                # falsely imply that this effect can be replayed, so reconcile
+                # the predecessor and record only a terminal outcome.
+                try:
+                    if rollback is None:
+                        raise RuntimeError("W09 reconciliation provider is absent")
+                    rolled_back = rollback(parameters)
+                    return self._finish(
+                        request_id, receipt_id, effect, handler_id, executor_principal,
+                        EffectOutcome.ROLLED_BACK, exc.evidence,
+                        rollback_receipt=str(rolled_back["receipt"]), detail=str(exc),
+                    )
+                except BootstrapStateAmbiguous as rollback_exc:
+                    return self._finish(
+                        request_id, receipt_id, effect, handler_id, executor_principal,
+                        EffectOutcome.AMBIGUOUS, tuple(sorted(set(exc.evidence + rollback_exc.evidence))),
+                        detail=f"effect={exc}; rollback={rollback_exc}",
+                    )
+                except Exception as rollback_exc:
+                    return self._finish(
+                        request_id, receipt_id, effect, handler_id, executor_principal,
+                        EffectOutcome.FAILED, exc.evidence,
+                        detail=f"effect={exc}; rollback={rollback_exc}",
+                    )
             return self._finish(
                 request_id, receipt_id, effect, handler_id, executor_principal,
                 EffectOutcome.RETRY, exc.evidence, detail=str(exc),
@@ -887,7 +960,7 @@ class AuthorityEffectController:
                 rollback_receipt=rollback_receipt,
                 detail=detail,
             )
-        return self._receipt(
+        receipt = self._receipt(
             request_id,
             authority_receipt_id,
             effect,
@@ -898,6 +971,39 @@ class AuthorityEffectController:
             detail=detail,
             executor_principal=executor_principal if durable else None,
         )
+        if not durable and self.terminal_recorder is not None:
+            try:
+                stored = self.terminal_recorder(receipt.sealed_mapping())
+                if (
+                    not isinstance(stored, Mapping)
+                    or stored.get("receipt_hash") != receipt.receipt_hash
+                    or not isinstance(stored.get("receipt"), str)
+                    or not stored["receipt"]
+                ):
+                    raise OSError("terminal recorder returned a mismatched receipt")
+            except Exception as exc:
+                evidence = ("effect-terminal-persistence:" + receipt.receipt_hash,)
+                if outcome is EffectOutcome.SUCCEEDED:
+                    # This is raised inside the handler try in ``execute``;
+                    # the existing BootstrapStateAmbiguous lane therefore
+                    # invokes the exact stage-aware rollback before recording
+                    # a ROLLED_BACK terminal.
+                    raise BootstrapStateAmbiguous(
+                        "successful provider result could not be durably terminated",
+                        evidence=evidence,
+                        rollback_required=True,
+                    ) from exc
+                # A second sink failure cannot truthfully be called FAILED or
+                # ROLLED_BACK: return a typed terminal ambiguity and retain a
+                # deterministic observation for external reconciliation.
+                return self._receipt(
+                    request_id, authority_receipt_id, effect, handler_id,
+                    EffectOutcome.AMBIGUOUS, evidence,
+                    rollback_receipt=rollback_receipt,
+                    detail="terminal execution receipt persistence is ambiguous",
+                    executor_principal=None,
+                )
+        return receipt
 
     @staticmethod
     def _receipt(

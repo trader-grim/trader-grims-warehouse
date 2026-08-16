@@ -2,26 +2,24 @@ from unittest.mock import Mock
 
 import pytest
 
-from tgw.deployment_runtime import DeploymentMounts, compose_deployment_controller
+from tgw.deployment_runtime import (
+    DeploymentMounts, ReleaseProviders, compose_application_bootstrap_controller,
+    compose_deployment_controller,
+)
 from tgw.effect_handlers import AuthorityEffectController
 
 
+def _providers():
+    return ReleaseProviders(*(Mock() for _ in range(11)))
+
+
 def _compose(tmp_path, **changes):
-    root = tmp_path / "releases"
-    root.mkdir(exist_ok=True)
-    artifact = tmp_path / "candidate.tar.gz"
-    artifact.write_bytes(b"archive")
+    root = tmp_path / "releases"; root.mkdir(exist_ok=True)
+    artifact = tmp_path / "candidate.tar.gz"; artifact.write_bytes(b"archive")
     values = {
         "mounts": DeploymentMounts("tgw-prod", "production-releases", root, "candidate:1", artifact),
-        "expected_host": "tgw-prod",
-        "consume_authority": Mock(),
-        "backup": Mock(),
-        "health": Mock(),
-        "migrate": Mock(),
-        "restore_migration_backup": Mock(),
-        "require_authority_schema": Mock(),
-        "flake_push": Mock(),
-        "flake_switch_record": Mock(),
+        "providers": _providers(), "expected_host": "tgw-prod", "consume_authority": Mock(),
+        "require_authority_schema": Mock(), "flake_push": Mock(), "flake_switch_record": Mock(),
         "dependency_resubmit": Mock(),
     }
     values.update(changes)
@@ -49,7 +47,7 @@ def test_missing_artifact_or_schema_fails_composition(tmp_path):
         _compose(tmp_path, require_authority_schema=Mock(side_effect=RuntimeError("schema absent")))
 
 
-def test_platform_bootstrap_installation_is_disabled_and_unmounted_by_default(tmp_path):
+def test_platform_bootstrap_is_disabled_and_unmounted_by_default(tmp_path):
     controller, _ = _compose(tmp_path)
     provider = controller.registry._providers[next(kind for kind in controller.registry._providers if kind.value == "approval-platform-bootstrap-deployment")]
     assert provider[0] == "a3-platform-bootstrap-install@1"
@@ -57,3 +55,8 @@ def test_platform_bootstrap_installation_is_disabled_and_unmounted_by_default(tm
         _compose(tmp_path, enable_platform_bootstrap=True)
     with pytest.raises(ValueError, match="installation is disabled"):
         _compose(tmp_path, platform_bootstrap=object())
+
+
+def test_w09_application_bootstrap_truthfully_holds_without_sealed_host_provider():
+    with pytest.raises(ValueError, match="concrete sealed tgw-prod"):
+        compose_application_bootstrap_controller()

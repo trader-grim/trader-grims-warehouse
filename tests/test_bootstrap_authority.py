@@ -176,6 +176,29 @@ def test_bootstrap_grant_rejects_legacy_coding_release_even_if_target_looks_rela
         _grant(effect=legacy)
 
 
+def test_bootstrap_grant_accepts_only_exact_w09_application_contract_binding():
+    commit = "b" * 40
+    effect = {
+        "kind": "approval-platform-bootstrap-deployment", "generation": "release-b",
+        "parameters": {
+            "schema": "tgw-approval-application-bootstrap/v1",
+            "application_contract_ref": f"candidate:{commit}:application-bootstrap:v1",
+            "application_contract_hash": "sha256:" + "1" * 64,
+        },
+    }
+    application_plan = "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99"
+    application_solution = "sha256:1c3684135769e5dcabcaf130c55df160a4cecc0d3ebcee6ccd129ab97cdd709b"
+    grant = _grant(effect=effect, plan_commit=application_plan, solution_hash=application_solution)
+    assert grant.effect.generation == "release-b"
+    for field, value in (
+        ("application_contract_ref", "candidate:" + "c" * 40 + ":application-bootstrap:v1"),
+        ("application_contract_hash", "sha256:not-a-digest"),
+    ):
+        bad = json.loads(json.dumps(effect)); bad["parameters"][field] = value
+        with pytest.raises(ValueError, match="does not match"):
+            _grant(effect=bad, plan_commit=application_plan, solution_hash=application_solution)
+
+
 def test_consumption_store_loops_short_writes_and_held_rereads(tmp_path, monkeypatch):
     grant = _grant()
     path = tmp_path / "short-consumption.json"
