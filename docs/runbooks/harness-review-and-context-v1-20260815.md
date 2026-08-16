@@ -44,9 +44,15 @@ The Tigwadev Claude compatibility location may also be linked with
 ## Configure MCP
 
 For Claude Code, add both entries in `etc/interfaces/claude/mcp-servers.json`
-at user scope with `claude mcp add-json --scope user`. For Codex and Hermes,
-register equivalent `tgw` and `tgw-context` servers using their native MCP
-commands. Keep MCP credentials and model authentication per account.
+at user scope with `claude mcp add-json --scope user`. Codex also supports both
+entries through its native MCP configuration. Keep MCP credentials and model
+authentication per account.
+
+Hermes currently supports the local stdio `tgw-context` server. Its native HTTP
+client rejected the production `tgw` server's legacy SSE endpoint with HTTP
+405, so the production inventory MCP is an explicit HOLD for Hermes. Do not
+hide that incompatibility behind an ad hoc proxy. Admit either a streamable-HTTP
+production endpoint or a reviewed adapter before enabling it.
 
 Do not restore `tgw-aider` until its `/home/tgw` runtime and legacy worktree
 assumptions are removed and Aider is installed and admitted.
@@ -76,3 +82,8 @@ For each account:
    admission without an execution card; and
 6. record authentication or unavailable-provider gaps separately from install
    success.
+
+The current installation matrix is tracked in
+`etc/interfaces/harness-review-installations.json`; it distinguishes skill,
+MCP, authentication, and automated-provider status so one cannot be mistaken
+for another.

@@ -78,4 +78,19 @@ def test_installation_catalog_does_not_confuse_skill_and_provider_status():
     assert harnesses["codex"]["automated_provider"] == "codex-isolated-review-runner"
     assert harnesses["claude"]["automated_provider"] == "unavailable-no-admitted-runner"
     assert harnesses["hermes"]["automated_provider"] == "unregistered"
+    assert harnesses["hermes"]["context_mcp"] == "configured"
+    assert harnesses["hermes"]["production_inventory_mcp"] == (
+        "hold-legacy-sse-incompatible"
+    )
+    assert harnesses["tigwadev-claude-recovery"]["context_mcp"] == (
+        "configured-for-codex-and-claude"
+    )
     assert harnesses["aider"]["interactive_review"] == "unavailable-not-installed"
+
+
+def test_runbook_does_not_claim_hermes_legacy_sse_compatibility():
+    text = (ROOT / "docs/runbooks/harness-review-and-context-v1-20260815.md").read_text()
+    assert "legacy SSE endpoint" in text
+    assert "405" in text
+    assert "explicit HOLD for Hermes" in text
+    assert "ad hoc proxy" in text

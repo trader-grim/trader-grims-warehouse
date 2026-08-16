@@ -10,35 +10,45 @@
       "account": "codex",
       "skill_destination": ".codex/skills",
       "interactive_review": "available",
-      "automated_provider": "codex-isolated-review-runner"
+      "automated_provider": "codex-isolated-review-runner",
+      "context_mcp": "configured",
+      "production_inventory_mcp": "configured"
     },
     {
       "id": "claude",
       "account": "claude",
       "skill_destination": ".claude/skills",
       "interactive_review": "available-after-login",
-      "automated_provider": "unavailable-no-admitted-runner"
+      "automated_provider": "unavailable-no-admitted-runner",
+      "context_mcp": "configured",
+      "production_inventory_mcp": "configured"
     },
     {
       "id": "hermes",
       "account": "hermes",
       "skill_destination": ".hermes/skills/tgw",
       "interactive_review": "available-in-training-boundaries",
-      "automated_provider": "unregistered"
+      "automated_provider": "unregistered",
+      "context_mcp": "configured",
+      "production_inventory_mcp": "hold-legacy-sse-incompatible"
     },
     {
       "id": "tigwadev-claude-recovery",
       "account": "tigwadev",
       "skill_destination": ".claude/skills",
       "interactive_review": "compatibility-install-only",
-      "automated_provider": "unregistered"
+      "automated_provider": "unregistered",
+      "context_mcp": "configured-for-codex-and-claude",
+      "production_inventory_mcp": "not-configured"
     },
     {
       "id": "aider",
       "account": null,
       "skill_destination": null,
       "interactive_review": "unavailable-not-installed",
-      "automated_provider": "unregistered"
+      "automated_provider": "unregistered",
+      "context_mcp": "not-configured",
+      "production_inventory_mcp": "not-configured"
     }
   ]
 }
