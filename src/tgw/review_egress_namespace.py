@@ -82,16 +82,18 @@ def commands(topology: Topology, action: str, *, broker_uid: int, worker_uid: in
 def execute(action: str, topology: Topology, *, broker_uid: int, worker_uid: int, invoke: Callable = subprocess.run) -> list[dict]:
     receipts = []
     for command in commands(topology, action, broker_uid=broker_uid, worker_uid=worker_uid):
-        stdin = command.pop() if command and command[-1].startswith("table inet tgw_review") else None
-        result = invoke(command, input=stdin, text=True, capture_output=True, check=False)
+        argv = list(command)
+        stdin = argv.pop() if argv and argv[-1].startswith("table inet tgw_review") else None
+        result = invoke(argv, input=stdin, text=True, capture_output=True, check=False)
         receipts.append({
-            "argv": command,
+            "argv": argv,
+            "stdin": stdin,
             "exit": result.returncode,
             "stdout_sha256": "sha256:" + sha256(result.stdout.encode()).hexdigest(),
             "stderr_sha256": "sha256:" + sha256(result.stderr.encode()).hexdigest(),
         })
         if result.returncode and action != "teardown":
-            raise NamespaceError(f"namespace {action} failed at fixed command {command}")
+            raise NamespaceError(f"namespace {action} failed at fixed command {argv}")
     return receipts
 
 

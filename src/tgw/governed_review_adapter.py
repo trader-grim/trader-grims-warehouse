@@ -37,6 +37,7 @@ from tgw.execution_resources import (
 )
 from tgw.review_contract import ReviewRunnerError
 from tgw.review_contract import validate_review_report as _validate_report
+from tgw.review_snapshot import snapshot_hash_entries
 
 EXECUTION_SCHEMA = "tgw-governed-review-execution/v1"
 IDENTITY_SCHEMA = "tgw-governed-review-provider-identity/v1"
@@ -491,13 +492,7 @@ def _held_snapshot(
         policy={"uid": trusted_uid, "gid": trusted_gid, "forbidden_mode": 0o022},
         label="governed review snapshot",
     )
-    digest = hashlib.sha256()
-    for relative in sorted(contents):
-        digest.update(relative.encode())
-        digest.update(b"\0")
-        digest.update(contents[relative])
-        digest.update(b"\0")
-    return _SHA256_PREFIX + digest.hexdigest(), manifest["root_identity"]
+    return snapshot_hash_entries(contents), manifest["root_identity"]
 
 
 def snapshot_hash(root: Path) -> str:

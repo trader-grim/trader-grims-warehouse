@@ -61,7 +61,7 @@ def test_real_broker_sigterm_writes_final_receipt(tmp_path):
         "allowed_hosts": ["chatgpt.com"],
         "expires_unix": int(time.time()) + 60,
         "max_connections": 1,
-        "max_bytes_each_direction": 1024,
+        "max_bytes_each_direction": 65536,
         "runtime_sha256": "sha256:" + "a" * 64,
         "credential_sha256": "sha256:" + "b" * 64,
     })

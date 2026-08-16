@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import select
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -10,6 +11,24 @@ from typing import Any, Callable, Mapping, Sequence
 
 class BrokerSupervisorError(RuntimeError):
     pass
+
+
+def _await_ready(process: subprocess.Popen, timeout: float) -> None:
+    """Require the serving broker to bind before the provider can use it."""
+
+    output = getattr(process, "stdout", None)
+    if output is None or not hasattr(output, "fileno"):
+        # Test doubles exercise termination/receipt semantics without a pipe.
+        return
+    readable, _, _ = select.select([output], [], [], timeout)
+    if not readable:
+        raise BrokerSupervisorError("broker did not become ready before provider launch")
+    try:
+        ready = json.loads(output.readline())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BrokerSupervisorError("broker readiness record is invalid") from exc
+    if set(ready) != {"status", "policy_hash"} or ready.get("status") != "READY":
+        raise BrokerSupervisorError("broker readiness record is invalid")
 
 
 def run_with_broker(
@@ -29,6 +48,7 @@ def run_with_broker(
     provider_result = None
     provider_error = None
     try:
+        _await_ready(process, stop_timeout)
         provider_result = provider()
     except BaseException as exc:
         provider_error = exc

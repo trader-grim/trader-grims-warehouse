@@ -18,6 +18,7 @@ from tgw.review_broker_supervisor import run_with_broker
 from tgw.review_contract import ReviewRunnerError
 from tgw.review_contract import validate_review_report as _validate_report
 from tgw.review_egress_broker import ReviewEgressPolicy
+from tgw.review_snapshot import snapshot_hash
 
 _PROMPTCRAFT = Path(__file__).resolve().parents[2] / "agent-services/providers/promptcraft"
 if str(_PROMPTCRAFT) not in sys.path:
@@ -31,23 +32,6 @@ def _canonical(value: Any) -> bytes:
 
 def _hash(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_canonical(value)).hexdigest()
-
-
-def snapshot_hash(root: Path) -> str:
-    digest = hashlib.sha256()
-    digest.update(b"tgw-review-snapshot/v2\0")
-    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
-        if path.is_symlink():
-            raise ReviewRunnerError("review snapshot cannot contain symlinks")
-        if not path.is_file() or ".git" in path.relative_to(root).parts:
-            continue
-        relative = path.relative_to(root).as_posix().encode()
-        content = path.read_bytes()
-        digest.update(len(relative).to_bytes(8, "big"))
-        digest.update(relative)
-        digest.update(len(content).to_bytes(8, "big"))
-        digest.update(content)
-    return "sha256:" + digest.hexdigest()
 
 
 def _verify_bound(value: Mapping[str, Any], field: str) -> None:

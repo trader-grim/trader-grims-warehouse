@@ -39,6 +39,8 @@ from tgw.governed_review_adapter import (
     validate_execution,
     validate_execution_handoff_binding,
 )
+from tgw.review_snapshot import snapshot_hash as portable_snapshot_hash
+from tgw.review_snapshot import snapshot_preimage
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "agent-services/providers/promptcraft"))
@@ -53,6 +55,23 @@ _CONTEXT_SIGNING_SEED = bytes.fromhex("42" * 32)
 def _hash(value):
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def test_governed_snapshot_hash_matches_canonical_unambiguous_framing(tmp_path):
+    source = tmp_path / "snapshot"
+    source.mkdir(mode=0o755)
+    (source / "a").write_bytes(b"X\0b\0Y")
+    (source / "a").chmod(0o644)
+
+    assert snapshot_hash(source) == portable_snapshot_hash(source)
+
+    other = tmp_path / "other"
+    other.mkdir(mode=0o755)
+    (other / "a").write_bytes(b"X")
+    (other / "a").chmod(0o644)
+    (other / "b").write_bytes(b"Y")
+    (other / "b").chmod(0o644)
+    assert snapshot_hash(source) != snapshot_hash(other)
 
 
 def _public_key(private_key):
@@ -151,16 +170,6 @@ def _context_service_bundle(
     return {**unsigned, "bundle_hash": _hash(unsigned)}
 
 
-def _snapshot_preimage(root):
-    value = bytearray()
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        value.extend(path.relative_to(root).as_posix().encode())
-        value.extend(b"\0")
-        value.extend(path.read_bytes())
-        value.extend(b"\0")
-    return bytes(value)
-
-
 def _resource_contents(handoff, source, sink_descriptor):
     contents = {
         "plan_input": b"resource:plan-input",
@@ -170,7 +179,7 @@ def _resource_contents(handoff, source, sink_descriptor):
         "authority_conditions": b"resource:authority",
         "candidate_evidence": b"resource:candidate",
     }
-    contents["source_tree"] = _snapshot_preimage(source)
+    contents["source_tree"] = snapshot_preimage(source)
     environment_ref = handoff["card"]["bindings"]["execution_environment"]["ref"]
     if environment_ref.startswith("file://"):
         contents["execution_environment"] = Path(

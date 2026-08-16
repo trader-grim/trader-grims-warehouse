@@ -17,6 +17,7 @@ import json
 import os
 import signal
 import socket
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,6 +66,8 @@ class ReviewEgressPolicy:
         for key in ("expires_unix", "max_connections", "max_bytes_each_direction"):
             if not isinstance(value[key], int) or value[key] <= 0:
                 raise BrokerError(f"{key} must be a positive integer")
+        if value["max_bytes_each_direction"] < 65536:
+            raise BrokerError("max_bytes_each_direction must cover one bounded ClientHello")
         for key in ("runtime_sha256", "credential_sha256"):
             digest = value[key]
             if not isinstance(digest, str) or len(digest) != 71 or not digest.startswith("sha256:"):
@@ -183,8 +186,18 @@ async def _relay(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, lim
 async def handle_tunnel(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, policy: ReviewEgressPolicy, sessions: list[dict[str, Any]]) -> None:
     session: dict[str, Any] = {"outcome": "denied"}
     started = time.monotonic()
+    if len(sessions) >= policy.max_connections:
+        session["reason"] = "BrokerError:review egress run bound is exhausted"
+        session["duration_ms"] = 0
+        sessions.append(session)
+        writer.close()
+        await writer.wait_closed()
+        return
+    # Reserve before the first await: completed sessions alone cannot bound
+    # simultaneous CONNECT requests.
+    sessions.append(session)
     try:
-        if time.time() >= policy.expires_unix or len(sessions) >= policy.max_connections:
+        if time.time() >= policy.expires_unix:
             raise BrokerError("review egress run bound is exhausted")
         header = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
         host = parse_connect(header, policy.allowed_hosts)
@@ -192,6 +205,8 @@ async def handle_tunnel(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         await writer.drain()
         hello = await asyncio.wait_for(reader.read(65536), timeout=5)
+        if len(hello) > policy.max_bytes_each_direction:
+            raise BrokerError("review TLS ClientHello exceeds byte bound")
         if tls_client_hello_sni(hello) != host:
             raise BrokerError("TLS SNI does not equal CONNECT host")
         upstream_reader, upstream_writer = await asyncio.open_connection(address, 443, family=family)
@@ -209,7 +224,6 @@ async def handle_tunnel(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         session["reason"] = type(exc).__name__ + ":" + str(exc)
     finally:
         session["duration_ms"] = int((time.monotonic() - started) * 1000)
-        sessions.append(session)
         writer.close()
         await writer.wait_closed()
 
@@ -222,13 +236,36 @@ async def serve(policy: ReviewEgressPolicy, bind_host: str, bind_port: int, rece
     server = await asyncio.start_server(lambda r, w: handle_tunnel(r, w, policy, sessions), bind_host, bind_port)
     try:
         async with server:
+            print(
+                json.dumps(
+                    {"status": "READY", "policy_hash": policy.policy_hash},
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
             await stop.wait()
     finally:
         loop.remove_signal_handler(signal.SIGTERM)
-        with receipt_path.open("xb") as receipt:
-            receipt.write(_canonical(audit_receipt(policy, sessions)) + b"\n")
-            receipt.flush()
-            os.fsync(receipt.fileno())
+        payload = _canonical(audit_receipt(policy, sessions)) + b"\n"
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{receipt_path.name}.", dir=receipt_path.parent,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as receipt:
+                receipt.write(payload)
+                receipt.flush()
+                os.fsync(receipt.fileno())
+            os.link(temporary, receipt_path)
+            directory = os.open(receipt_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
 
 
 def load_policy(path: Path) -> ReviewEgressPolicy:

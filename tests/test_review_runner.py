@@ -367,7 +367,7 @@ def test_network_review_rejects_unbound_or_denied_attestation(tmp_path):
     policy = {
         "run_id": "r", "allowed_hosts": ["chatgpt.com"],
         "expires_unix": int(time.time()) + 60, "max_connections": 1,
-        "max_bytes_each_direction": 1000, "runtime_sha256": digest(provider_path),
+        "max_bytes_each_direction": 65536, "runtime_sha256": digest(provider_path),
         "credential_sha256": digest(credential),
     }
     with pytest.raises(ValueError, match="attestation fields"):

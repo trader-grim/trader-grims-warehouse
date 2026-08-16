@@ -35,6 +35,8 @@ def test_policy_is_exact_hash_bound_and_rejects_generic_allowlists():
         _policy(allowed_hosts=["*.openai.com"])
     with pytest.raises(BrokerError, match="positive"):
         _policy(max_connections=0)
+    with pytest.raises(BrokerError, match="ClientHello"):
+        _policy(max_bytes_each_direction=65535)
 
 
 def test_connect_is_https_exact_host_only_and_forbids_proxy_identity_headers():
