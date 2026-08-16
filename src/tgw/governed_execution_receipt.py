@@ -149,6 +149,7 @@ def create_candidate_governed_execution_receipt(
         != role_receipt.get("harness_retrieval_attestation_hash")
         or role_receipt.get("selected_provider") != card["selected_provider"]
         or role_receipt.get("role") != card["role"]
+        or role_receipt.get("resource_service_descriptor_hash") != card["resource_service"]["descriptor_hash"]
         or role_receipt.get("resource_service_catalog_ref") != card["resource_service"]["catalog_ref"]
         or role_receipt.get("resource_service_catalog_hash") != card["resource_service"]["catalog_hash"]
     ):
@@ -183,6 +184,7 @@ def create_candidate_governed_execution_receipt(
         "service_id": card["resource_service"]["id"],
         "execution_identity": role_receipt["execution_identity"],
         "handoff_hash": role_receipt["handoff_hash"],
+        "resource_service_descriptor_hash": card["resource_service"]["descriptor_hash"],
         "resource_service_catalog_ref": card["resource_service"]["catalog_ref"],
         "resource_service_catalog_hash": card["resource_service"]["catalog_hash"],
         "role_receipt_hash": role_hash,
@@ -199,6 +201,7 @@ def verify_candidate_governed_execution_receipt(
         "schema", "status", "source_commit", "source_tree", "plan_commit", "role",
         "selected_provider", "card_hash", "resource_receipt_hash", "harness_retrieval_attestation_hash",
         "harness_retrieval_attestation", "service_id", "execution_identity", "handoff_hash",
+        "resource_service_descriptor_hash",
         "resource_service_catalog_ref", "resource_service_catalog_hash", "role_receipt_hash", "receipt_hash",
     }
     if not isinstance(receipt, Mapping) or set(receipt) != required or receipt.get("schema") != SCHEMA:
@@ -239,6 +242,8 @@ def verify_candidate_governed_execution_receipt(
         or not isinstance(receipt.get("service_id"), str)
         or not isinstance(receipt.get("execution_identity"), str)
         or not isinstance(receipt.get("handoff_hash"), str)
+        or not isinstance(receipt.get("resource_service_descriptor_hash"), str)
+        or _SHA256.fullmatch(receipt["resource_service_descriptor_hash"]) is None
         or not isinstance(receipt.get("resource_service_catalog_ref"), str)
         or not isinstance(receipt.get("resource_service_catalog_hash"), str)
         or _SHA256.fullmatch(receipt["resource_service_catalog_hash"]) is None

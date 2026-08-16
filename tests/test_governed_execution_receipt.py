@@ -231,6 +231,27 @@ def test_candidate_receipt_verifier_binds_service_execution_and_handoff_identiti
         )
 
 
+def test_candidate_receipt_refuses_a_role_descriptor_from_another_service(tmp_path):
+    _repo, commit, tree = candidate_repo(tmp_path)
+    card_value = card(tree)
+    resources = resource_receipt(card_value)
+    role = role_receipt(card_value, resources)
+    role["resource_service_descriptor_hash"] = "sha256:" + "f" * 64
+    unsigned_role = dict(role)
+    unsigned_role.pop("receipt_hash")
+    role["receipt_hash"] = canonical_hash(unsigned_role)
+
+    with pytest.raises(GovernedExecutionReceiptError, match="governed role receipt binding mismatch"):
+        create_candidate_governed_execution_receipt(
+            card=card_value,
+            resource_receipt=resources,
+            role_receipt=role,
+            source_commit=commit,
+            source_tree=tree,
+            plan_commit=PLAN_COMMIT,
+        )
+
+
 def test_candidate_binding_refuses_a_card_for_another_source_tree(tmp_path):
     _repo, commit, tree = candidate_repo(tmp_path)
     card_value = card(tree)
