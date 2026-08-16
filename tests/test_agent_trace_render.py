@@ -109,6 +109,7 @@ def _cfg(tmp_path):
     (vault / 'plan' / 'TGW-Master-Plan.md').write_text(
         '### PP-AGENTTRACE-001 — agent trace logging\n', encoding='utf-8')
     return {'plan_vault_path': vault,
+            'plan_render_root': tmp_path / 'rendered',
             'plan_master_path': vault / 'plan' / 'TGW-Master-Plan.md'}
 
 
@@ -127,6 +128,7 @@ def test_render_writes_file(tmp_path):
     assert '[[TGW-Master-Plan#PP-AGENTTRACE-001 — agent trace logging\\|PP-AGENTTRACE-001]]' in content
     # no temp file left behind
     assert not list(out.parent.glob('.agent-runs-*'))
+    assert 'plan' not in out.relative_to(tmp_path).parts
 
 
 def test_render_reports_tracker_failure(tmp_path):

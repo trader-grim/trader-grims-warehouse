@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -14,6 +15,8 @@ from typing import Any
 from .core import SourcePreconditionError, brief, build, coverage, query
 
 DEFAULT_PLAN_ROOT = Path("/opt/TGW/library/plans")
+_FULL_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_SOLUTION_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 RECEIVER_PROFILES = {
     "codex": "Retrieve cited Plan sources before implementation; run tests and return receipts.",
     "claude": "Retrieve cited Plan sources; independently review evidence and return a verdict receipt.",
@@ -53,6 +56,35 @@ def _selected_paths(root: Path) -> list[str]:
     if not paths:
         raise SourcePreconditionError("source_absent", str(root))
     return sorted(paths)
+
+
+def approved_plan_binding(
+    plan_root: Path | str, *, approved_plan_commit: str | None,
+    approved_solution_hash: str | None, git_path: str = "git",
+) -> dict[str, str]:
+    """Fail closed unless a consumer names one clean approved Plan snapshot.
+
+    A clean repository HEAD is not an approval.  This small, shared binding is
+    deliberately used by graph navigation as well as dispatch-facing callers,
+    so an MCP/launcher cannot silently substitute whichever Plan revision is
+    currently checked out.
+    """
+    if not isinstance(approved_plan_commit, str) or not _FULL_COMMIT.fullmatch(approved_plan_commit):
+        raise SourcePreconditionError("approved_plan_commit_required", "exact approved Plan commit required")
+    if not isinstance(approved_solution_hash, str) or not _SOLUTION_HASH.fullmatch(approved_solution_hash):
+        raise SourcePreconditionError("approved_solution_required", "exact approved Plan solution required")
+    root = Path(plan_root).resolve(strict=True)
+    if Path(_git(root, "rev-parse", "--show-toplevel", git_path=git_path)).resolve() != root:
+        raise SourcePreconditionError("plan_root_mismatch", str(root))
+    head = _git(root, "rev-parse", "HEAD^{commit}", git_path=git_path)
+    if head != approved_plan_commit:
+        raise SourcePreconditionError("approved_plan_mismatch", str(root))
+    if _git(root, "status", "--porcelain=v1", "--untracked-files=all", git_path=git_path):
+        raise SourcePreconditionError("source_changed", str(root))
+    return {
+        "plan_root": str(root), "plan_commit": approved_plan_commit,
+        "solution_hash": approved_solution_hash,
+    }
 
 
 def source_envelope(root: Path, allowlist: Path, *, git_path: str = "git") -> dict[str, Any]:
@@ -102,6 +134,8 @@ def live_plan_graph(
     plan_root: Path | str = DEFAULT_PLAN_ROOT, task: str = "", *,
     receiver: str = "codex", operation: str = "brief", limit: int = 12,
     git_path: str = "git", runtime_root: Path | str | None = None,
+    approved_plan_commit: str | None = None,
+    approved_solution_hash: str | None = None,
 ) -> dict[str, Any]:
     """Build and query one exact, clean standalone-Plan snapshot."""
     if not isinstance(task, str) or not task.strip():
@@ -115,7 +149,11 @@ def live_plan_graph(
     if operation not in {"brief", "query", "coverage"}:
         raise ValueError(f"unknown operation: {operation}")
 
-    root = Path(plan_root).resolve(strict=True)
+    binding = approved_plan_binding(
+        plan_root, approved_plan_commit=approved_plan_commit,
+        approved_solution_hash=approved_solution_hash, git_path=git_path,
+    )
+    root = Path(binding["plan_root"])
     runtime_base = (
         Path(runtime_root)
         if runtime_root is not None
@@ -140,6 +178,7 @@ def live_plan_graph(
     result.update({
         "ok": True, "plan_root": str(root), "plan_commit": envelope["head"],
         "plan_tree": envelope["tree"], "source_envelope": envelope["envelope_sha256"],
+        "approved_solution_hash": binding["solution_hash"],
         "receiver": receiver, "receiver_profile": RECEIVER_PROFILES[receiver],
         "canonical_authority": (
             "Standalone Plan Markdown at the bound commit remains canonical; "

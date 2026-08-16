@@ -3,14 +3,14 @@
 -REVIEW.md exists before its branch is stitched.
 
 Root cause (todo #1366, PP-HERMES-EA-001): `tgw-runner-review`'s mandated
-`docs/TGW-Plan-Vault/plan/packets/results/<id>-REVIEW.md` write (SKILL.md
+an immutable governed-review evidence root write (SKILL.md
 "Clean path — hand off to stitch" step) got silently skipped for 6 of 7
 concurrent-batch-stitched todos in one session (#1280/#1282/#1284/#1288/
 #1291/#1297), discovered and backfilled only after the fact
 (2026-07-13). Nothing mechanical caught the omission before merge. This
 script is that mechanical catch: given one or more todo ids, it checks
-that a `-REVIEW.md` file for each exists under
-`docs/TGW-Plan-Vault/plan/packets/results/`, and exits non-zero (with a
+that a `-REVIEW.md` file for each exists under the configured external
+review-evidence root, and exits non-zero (with a
 clear per-id report) if any are missing.
 
 This tool does NOT judge review *content* — that's tgw-runner-review's
@@ -34,13 +34,15 @@ Exit code: 0 if every checked id has a -REVIEW.md, 1 if any is missing.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import List
 
-RESULTS_DIR = Path(__file__).resolve().parents[1] / 'docs' / 'TGW-Plan-Vault' / 'plan' / 'packets' / 'results'
+_DEFAULT_RESULTS_DIR = Path('/opt/TGW/var/governed-review-evidence')
+RESULTS_DIR = Path(os.environ.get('TGW_REVIEW_RESULTS_DIR', _DEFAULT_RESULTS_DIR))
 
 # A -REVIEW.md filename may cover one id ("<id>-REVIEW.md") or a
 # hyphenated multi-id/slug batch ("<id>-<id2>-slug-REVIEW.md" or
@@ -69,7 +71,7 @@ def check_ids(todo_ids: List[str]) -> int:
     for todo_id in todo_ids:
         found = find_review_md(todo_id)
         if found is not None:
-            print(f'OK   #{todo_id}: {found.relative_to(RESULTS_DIR.parents[3])}')
+            print(f'OK   #{todo_id}: {found.relative_to(RESULTS_DIR)}')
         else:
             missing.append(todo_id)
             print(f'MISS #{todo_id}: no -REVIEW.md found under {RESULTS_DIR}')
@@ -113,7 +115,15 @@ def main(argv: List[str] | None = None) -> int:
         '--scan-branches', action='store_true',
         help='Derive todo ids from local todo/<id>-<slug> branches instead of args',
     )
+    parser.add_argument(
+        '--results-dir', type=Path,
+        help='external immutable review-evidence root (defaults to TGW_REVIEW_RESULTS_DIR)',
+    )
     args = parser.parse_args(argv)
+
+    if args.results_dir is not None:
+        global RESULTS_DIR
+        RESULTS_DIR = args.results_dir
 
     if args.scan_branches:
         todo_ids = _discover_branch_ids()

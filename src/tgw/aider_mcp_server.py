@@ -75,6 +75,15 @@ def _plan_runtime_binding() -> tuple[Path, str]:
     )
     return plan_root, git_path
 
+
+def _plan_approval_binding() -> tuple[str | None, str | None]:
+    """Read the exact approved Plan identities; missing values remain a hold."""
+    from tgw.config import load_config
+
+    config_path = Path(os.environ.get('TGW_CONFIG', '/opt/TGW/config/tgw-api-config.json'))
+    cfg = load_config(config_path)
+    return cfg.get('plan_approved_commit'), cfg.get('plan_approved_solution_hash')
+
 # ---------------------------------------------------------------------------
 # Secrets + audit helpers
 # ---------------------------------------------------------------------------
@@ -167,11 +176,14 @@ def _build_preflight_context(work_dir: Path) -> str:
         from tgw.plan_graph import live_plan_graph
 
         plan_root, git_path = _plan_runtime_binding()
+        approved_commit, approved_solution = _plan_approval_binding()
 
         packet = live_plan_graph(
             plan_root,
             'Aider worktree implementation context', receiver='aider', limit=8,
             git_path=git_path,
+            approved_plan_commit=approved_commit,
+            approved_solution_hash=approved_solution,
         )
         lines.extend([
             f"- Standalone Plan commit: {packet['plan_commit']}",

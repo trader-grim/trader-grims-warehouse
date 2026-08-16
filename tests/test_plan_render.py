@@ -144,6 +144,7 @@ def _cfg(tmp_path):
     (vault / 'plan' / 'TGW-Master-Plan.md').write_text(
         '### PP-FOO-001 — The Foo Project\n', encoding='utf-8')
     return {'plan_vault_path': vault,
+            'plan_render_root': tmp_path / 'rendered',
             'plan_master_path': vault / 'plan' / 'TGW-Master-Plan.md'}
 
 
@@ -163,6 +164,7 @@ def test_render_writes_file(tmp_path):
     assert '[[TGW-Master-Plan#PP-FOO-001 — The Foo Project\\|PP-FOO-001]]' in content
     # no temp file left behind
     assert not list(board.parent.glob('.taskboard-*'))
+    assert 'plan' not in board.relative_to(tmp_path).parts
 
 
 def test_render_reports_tracker_failure(tmp_path):

@@ -33,6 +33,11 @@ def test_find_review_md_missing_returns_none(tmp_path, monkeypatch):
     assert check_review_md.find_review_md('1366') is None
 
 
+def test_review_gate_default_is_not_the_source_plan_vault():
+    assert 'TGW-Plan-Vault' not in str(check_review_md.RESULTS_DIR)
+    assert check_review_md.RESULTS_DIR.is_absolute()
+
+
 def test_find_review_md_single_id_match(tmp_path, monkeypatch):
     _use_results_dir(monkeypatch, tmp_path)
     (tmp_path / '1366-REVIEW.md').write_text('status: cleared\n', encoding='utf-8')

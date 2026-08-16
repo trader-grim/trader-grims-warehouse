@@ -634,8 +634,15 @@ def tgw_get_plan_brief(pp: Annotated[str, alias_field('pp', 'PP')]) -> str:
 
     Returns JSON packet with canonical-source provenance and retrieval warnings.
     """
+    from tgw.plan_graph import approved_plan_binding
     from tgw.plan_render import plan_brief
     cfg = _get_cfg()
+    approved_plan_binding(
+        Path(cfg.get('standalone_plan_root') or '/opt/TGW/library/plans'),
+        approved_plan_commit=cfg.get('plan_approved_commit'),
+        approved_solution_hash=cfg.get('plan_approved_solution_hash'),
+        git_path=str(cfg.get('plan_git_path') or 'git'),
+    )
     return json.dumps(plan_brief(cfg, pp), ensure_ascii=False)
 
 
@@ -659,6 +666,8 @@ def tgw_get_plan_graph(
         return json.dumps(live_plan_graph(
             root, task, receiver=receiver, operation=operation, limit=limit,
             git_path=str(cfg.get('plan_git_path') or 'git'),
+            approved_plan_commit=cfg.get('plan_approved_commit'),
+            approved_solution_hash=cfg.get('plan_approved_solution_hash'),
         ), ensure_ascii=False)
     except Exception as exc:
         code = getattr(exc, 'code', None)

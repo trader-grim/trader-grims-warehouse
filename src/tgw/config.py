@@ -88,6 +88,9 @@ def load_config(path: Path) -> Dict[str, Any]:
     incoming_path = p("incoming_path", "/opt/TGW/incoming")
     plan_vault_path = p("plan_vault_path", "/opt/TGW/src/trader-grims-warehouse/docs/TGW-Plan-Vault")
     standalone_plan_root = p("standalone_plan_root", "/opt/TGW/library/plans")
+    # Generated operational views are runtime artifacts, never files inside
+    # either the mutable legacy vault or the immutable approved Plan checkout.
+    plan_render_root = p("plan_render_root", "/opt/TGW/var/plan-render")
     plan_repository_root = p("plan_repository_root", str(standalone_plan_root))
     plan_approved_commit = raw.get("plan_approved_commit")
     plan_approved_solution_hash = raw.get("plan_approved_solution_hash")
@@ -163,13 +166,19 @@ def load_config(path: Path) -> Dict[str, Any]:
     # PP-CAPTURE-001 P2 — KDE Connect device ID for quiet-check push notification
     kdeconnect_device_id: str = raw.get("kdeconnect_device_id", "")
 
-    # PP-PORTABLE-CATALOG-001 P3 — sync-conflict scan roots (default: vault + itemdata)
+    # The source-tree vault is an archived/inbox surface after W11.  It must
+    # never be an operational sync-conflict scan root.
     _raw_sync_roots = raw.get("sync_conflict_roots")
     sync_conflict_roots: list = (
         [Path(os.path.expanduser(r)) for r in _raw_sync_roots]
         if _raw_sync_roots is not None
-        else [plan_vault_path, itemdata_root]
+        else [itemdata_root]
     )
+    legacy_vault = plan_vault_path.resolve()
+    sync_conflict_roots = [
+        root for root in sync_conflict_roots
+        if not (root.resolve() == legacy_vault or legacy_vault in root.resolve().parents)
+    ]
 
     ebay_token_path = secrets_root / "ebay-token.json"
     ebay_credentials_path = secrets_root / "ebay-credentials.json"
@@ -273,6 +282,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         "incoming_path": incoming_path,
         "newitems_path": incoming_path / "newitems",
         "plan_vault_path": plan_vault_path,
+        "plan_render_root": plan_render_root,
         "standalone_plan_root": standalone_plan_root,
         "plan_repository_root": plan_repository_root,
         "plan_approved_commit": plan_approved_commit,

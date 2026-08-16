@@ -1,7 +1,7 @@
 """
 tgw.plan_render — generated taskboard renderer + plan reconciler (PP-PLANDB-001).
 
-Renders ``plan/TGW-Taskboard.md`` in the plan vault from the ``todo_items``
+Renders ``TGW-Taskboard.md`` in the configured operational render root from the ``todo_items``
 table: per-agent sections (ID / pri / size / task), blocker badges from
 ``depends_on``, Obsidian links to master-plan sections via ``pp_ref`` /
 ``plan_anchor``, and a done-this-week section.
@@ -67,7 +67,7 @@ _HEADER = """\
 
 
 def taskboard_path(cfg: Dict[str, Any]) -> Path:
-    return cfg['plan_vault_path'] / 'plan' / TASKBOARD_NAME
+    return Path(cfg.get('plan_render_root') or '/opt/TGW/var/plan-render') / TASKBOARD_NAME
 
 
 def _parse_size(body: str) -> str:
@@ -178,7 +178,7 @@ def build_taskboard(
 
 
 def render_taskboard(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Query the tracker and atomically (re)write plan/TGW-Taskboard.md."""
+    """Query the tracker and atomically write a non-authoritative runtime view."""
     from tgw.todo import todo_list
 
     try:
@@ -581,8 +581,8 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
 
     Pure, read-only, deterministic retrieval — never writes anything, never
     produces a model-written summary, and refuses missing or ambiguous PP
-    matches. Paths are derived from ``cfg['plan_master_path']`` and
-    ``cfg['plan_vault_path']`` — no Plan Vault root is hard-coded here, and
+    matches. Paths are derived from ``cfg['plan_master_path']`` and its
+    standalone Plan siblings — no mutable Plan Vault fallback exists, and
     this is the single implementation shared by the MCP tool (and any future
     CLI surface, per Tigwa's item 7 — not built here).
 
@@ -645,14 +645,13 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
             'warning': 'Exact section exceeds the packet limit; use the canonical source path and anchors.',
         }
 
-    # Linked PP details are canonical Plan material too.  Preserve the legacy
-    # fixture/config fallback, while production config supplies the standalone
-    # detail root explicitly.
+    # Linked PP details are canonical Plan material too.  The master Plan's
+    # own parent is the only fallback; a source-vault sibling is never valid.
     configured_roots = cfg.get('plan_detail_roots')
     if configured_roots is None:
         configured_roots = (
             cfg.get('plan_detail_root')
-            or (Path(cfg['plan_vault_path']) / 'plan' / 'pp'),
+            or (plan_master_path.parent / 'pp'),
         )
     detail_roots = tuple(Path(root) for root in configured_roots)
     detail_candidates = tuple(root / f'{query_pp}.md' for root in detail_roots)

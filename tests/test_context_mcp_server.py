@@ -52,6 +52,7 @@ def bound_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, 
     monkeypatch.setenv("TGW_CONTEXT_PLAN_ROOT", str(materialization))
     monkeypatch.setenv("TGW_CONTEXT_PLAN_REPOSITORY", str(plan_repository))
     monkeypatch.setenv("TGW_CONTEXT_PLAN_COMMIT", approved)
+    monkeypatch.setenv("TGW_CONTEXT_PLAN_SOLUTION", "sha256:" + "a" * 64)
     monkeypatch.setenv("TGW_CONTEXT_SOURCE_ROOT", str(source))
     monkeypatch.setenv("TGW_CONTEXT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     context._code_snapshot.cache_clear()
@@ -61,6 +62,7 @@ def bound_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, 
 def test_status_binds_approved_plan_evidence_and_committed_source(bound_context):
     status = context.context_status()
     assert status["plan"]["approved_commit"] == bound_context["approved"]
+    assert status["plan"]["approved_solution_hash"] == "sha256:" + "a" * 64
     assert status["plan"]["evidence_head"] == bound_context["evidence_head"]
     assert status["source"]["commit"] == bound_context["source_commit"]
     assert status["code_graph"]["commit"] == bound_context["source_commit"]

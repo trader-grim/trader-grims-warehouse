@@ -75,6 +75,19 @@ def test_plan_roots_keep_mutable_and_authority_bindings_separate(tmp_path):
         cfg["standalone_plan_root"] / "pp",
     )
     assert cfg["plan_update_master_path"] == cfg["plan_master_path"]
+    assert cfg["plan_render_root"] == Path("/opt/TGW/var/plan-render")
+    assert cfg["sync_conflict_roots"] == [cfg["itemdata_root"]]
+
+
+def test_legacy_plan_vault_is_filtered_from_operational_sync_scan(tmp_path):
+    vault = tmp_path / "legacy-vault"
+    catalog = tmp_path / "catalog"
+    cfg = load_config(_write_cfg(tmp_path, {
+        "plan_vault_path": str(vault),
+        "catalog_root": str(catalog),
+        "sync_conflict_roots": [str(vault), str(vault / "plan"), str(catalog)],
+    }))
+    assert cfg["sync_conflict_roots"] == [catalog]
 
 
 def test_approved_plan_content_must_be_exact_clean_commit(tmp_path):

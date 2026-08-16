@@ -54,11 +54,20 @@ def test_plan_binding_separates_approved_ref_from_evidence_head(tmp_path: Path):
     subprocess.run(["git", "commit", "-qm", "evidence"], cwd=root, check=True)
 
     script = Path(__file__).parents[1] / "agent-services/skills/tgw-plan/scripts/verify_plan_root.py"
+    solution = "sha256:" + "a" * 64
     result = subprocess.run(
-        [sys.executable, str(script), str(root), "refs/tgw/approved/test"],
+        [sys.executable, str(script), str(root), "refs/tgw/approved/test", solution],
         check=True, text=True, stdout=subprocess.PIPE,
     )
     binding = json.loads(result.stdout)
     assert binding["approved_commit"] == approved
     assert binding["head_commit"] != approved
+    assert binding["approved_solution_hash"] == solution
     assert binding["clean"] is True
+
+    unpinned = subprocess.run(
+        [sys.executable, str(script), str(root), "HEAD", solution],
+        check=False, text=True, capture_output=True,
+    )
+    assert unpinned.returncode != 0
+    assert "never HEAD" in unpinned.stderr

@@ -421,6 +421,15 @@ def test_run_scan_empty_roots(tmp_path):
     assert result["total"] == 0
 
 
+def test_run_scan_filters_legacy_plan_vault_even_when_old_config_names_it(tmp_path):
+    cfg = _make_cfg(tmp_path)
+    cfg["plan_vault_path"] = cfg["sync_conflict_roots"][0]
+    root = cfg["plan_vault_path"]
+    (root / "x.sync-conflict-20260101-120000-AABBCC.json").write_bytes(b"x")
+    result = run_scan(cfg, dry_run=True)
+    assert result["total"] == 0
+
+
 def test_run_scan_discards_identical(tmp_path):
     cfg = _make_cfg(tmp_path)
     root = cfg["sync_conflict_roots"][0]

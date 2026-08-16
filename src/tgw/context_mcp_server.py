@@ -88,6 +88,13 @@ def _approved_commit() -> str:
     return commit
 
 
+def _approved_solution() -> str:
+    solution = os.environ.get("TGW_CONTEXT_PLAN_SOLUTION", "")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", solution):
+        raise ContextError("TGW_CONTEXT_PLAN_SOLUTION must be an exact approved solution hash")
+    return solution
+
+
 def _bindings() -> dict[str, Any]:
     plan_root = _path_env("TGW_CONTEXT_PLAN_ROOT", "/opt/TGW/library/approved-plan")
     plan_repository = _path_env("TGW_CONTEXT_PLAN_REPOSITORY", "/opt/TGW/library/plans")
@@ -98,6 +105,7 @@ def _bindings() -> dict[str, Any]:
     if not runtime_root.is_absolute():
         raise ContextError("TGW_CONTEXT_RUNTIME_ROOT must be an absolute path")
     approved = _approved_commit()
+    solution = _approved_solution()
     if _git(plan_root, "rev-parse", "HEAD^{commit}") != approved:
         raise ContextError("approved Plan materialization does not match configured commit")
     if _git(plan_root, "status", "--porcelain=v1", "--untracked-files=all"):
@@ -111,6 +119,7 @@ def _bindings() -> dict[str, Any]:
         "plan_root": plan_root,
         "plan_repository": plan_repository,
         "plan_commit": approved,
+        "plan_solution_hash": solution,
         "plan_tree": _git(plan_root, "rev-parse", "HEAD^{tree}"),
         "plan_repository_head": _git(plan_repository, "rev-parse", "HEAD^{commit}"),
         "source_root": source_root,
@@ -185,6 +194,7 @@ def context_status() -> dict[str, Any]:
         "plan": {
             "repository": str(plan_root), "approved_materialization": str(binding["plan_root"]),
             "approved_commit": plan_commit, "approved_tree": binding["plan_tree"],
+            "approved_solution_hash": binding["plan_solution_hash"],
             "evidence_head": binding["plan_repository_head"], "sources": identities,
         },
         "source": {
@@ -206,6 +216,8 @@ def plan_graph(task: str, receiver: str = "codex", operation: str = "brief", lim
     result = live_plan_graph(
         binding["plan_root"], task, receiver=receiver, operation=operation, limit=limit,
         runtime_root=binding["runtime_root"],
+        approved_plan_commit=binding["plan_commit"],
+        approved_solution_hash=binding["plan_solution_hash"],
     )
     if result["plan_commit"] != binding["plan_commit"]:
         raise ContextError("Plan Graph did not bind the approved Plan commit")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -22,8 +23,8 @@ def git(root: Path, *args: str) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) not in {2, 3}:
-        raise SystemExit("usage: verify_plan_root.py PLAN_ROOT [APPROVED_REF]")
+    if len(sys.argv) != 4:
+        raise SystemExit("usage: verify_plan_root.py PLAN_ROOT APPROVED_REF APPROVED_SOLUTION_HASH")
     root = Path(sys.argv[1]).resolve()
     top = Path(git(root, "rev-parse", "--show-toplevel").strip()).resolve()
     if top != root:
@@ -35,7 +36,12 @@ def main() -> int:
     missing = [name for name in required if not (root / name).is_file()]
     if missing:
         raise SystemExit(f"missing canonical Plan files: {', '.join(missing)}")
-    approved_ref = sys.argv[2] if len(sys.argv) == 3 else "HEAD"
+    approved_ref = sys.argv[2]
+    approved_solution_hash = sys.argv[3]
+    if approved_ref == "HEAD":
+        raise SystemExit("APPROVED_REF must name a pinned approval, never HEAD")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", approved_solution_hash):
+        raise SystemExit("APPROVED_SOLUTION_HASH must be an exact solution hash")
     approved_commit = git(root, "rev-parse", "--verify", approved_ref).strip()
     payload = {
         "schema": "tgw-plan-repository-binding/v1",
@@ -43,6 +49,7 @@ def main() -> int:
         "head_commit": git(root, "rev-parse", "HEAD").strip(),
         "approved_ref": approved_ref,
         "approved_commit": approved_commit,
+        "approved_solution_hash": approved_solution_hash,
         "branch": git(root, "branch", "--show-current").strip() or None,
         "clean": not bool(git(root, "status", "--porcelain=v1")),
     }

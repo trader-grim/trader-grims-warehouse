@@ -2,7 +2,7 @@
 tgw.agent_trace_render — generated agent-runs Obsidian view (PP-AGENTTRACE-001
 Phase 2).
 
-Renders ``plan/TGW-Agent-Runs.md`` in the plan vault from the ``agent_runs``
+Renders ``TGW-Agent-Runs.md`` in the configured operational render root from the ``agent_runs``
 table (Phase 1): one row per recorded agent run (Claude sessions/subagents,
 tgw-coder, aider, etc.), most-recently-started first.
 
@@ -43,7 +43,7 @@ _HEADER = """\
 
 
 def agent_runs_doc_path(cfg: Dict[str, Any]) -> Path:
-    return cfg['plan_vault_path'] / 'plan' / AGENT_RUNS_DOC_NAME
+    return Path(cfg.get('plan_render_root') or '/opt/TGW/var/plan-render') / AGENT_RUNS_DOC_NAME
 
 
 def _md_escape(text: str) -> str:
@@ -137,7 +137,7 @@ def build_agent_runs_doc(
 
 
 def render_agent_runs_doc(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Query agent_runs and atomically (re)write plan/TGW-Agent-Runs.md."""
+    """Query agent_runs and atomically write a non-authoritative runtime view."""
     from tgw.queue import state_machine
 
     try:

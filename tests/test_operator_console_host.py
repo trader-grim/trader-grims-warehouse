@@ -123,7 +123,7 @@ def test_configured_mount_is_late_bound_and_reuses_auth_functions():
         mount.store.list()
 
 
-def test_canonical_http_app_mounts_console_and_uses_standalone_fallback():
+def test_canonical_http_app_mounts_console_and_refuses_unpinned_docs():
     from tgw import http_server
 
     client = TestClient(http_server.app)
@@ -131,4 +131,5 @@ def test_canonical_http_app_mounts_console_and_uses_standalone_fallback():
     site = client.get("/form/plan-authority", follow_redirects=False)
     assert site.status_code == 303
     assert site.headers["location"] == "/login?next=/form/plan-authority"
-    assert http_server._vault_root() == DEFAULT_PLAN_ROOT
+    with pytest.raises(Exception, match="approved_plan_commit_required"):
+        http_server._vault_root()

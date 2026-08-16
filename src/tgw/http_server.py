@@ -12220,12 +12220,21 @@ _DOCS_EXTRA_CSS = (
 )
 
 
+def _docs_plan_binding() -> dict[str, str]:
+    """Return the only public Plan-docs source: a pinned clean materialization."""
+    from tgw.plan_graph import approved_plan_binding
+
+    return approved_plan_binding(
+        Path(_cfg.get("standalone_plan_root") or "/opt/TGW/library/plans"),
+        approved_plan_commit=_cfg.get("plan_approved_commit"),
+        approved_solution_hash=_cfg.get("plan_approved_solution_hash"),
+        git_path=str(_cfg.get("plan_git_path") or "git"),
+    )
+
+
 def _vault_root() -> Path:
-    """Return the mutable documentation vault root used by the docs browser."""
-    p = _cfg.get("plan_vault_path")
-    if p:
-        return Path(p)
-    return Path("/opt/TGW/library/plans")
+    """Return the pinned standalone Plan docs root; never the legacy source vault."""
+    return Path(_docs_plan_binding()["plan_root"])
 
 
 def _list_docs_sections() -> list[tuple[str, list[tuple[str, str]]]]:
@@ -12262,7 +12271,7 @@ def _docs_sidebar_html(sections: list[tuple[str, list[tuple[str, str]]]], curren
     return "".join(parts)
 
 
-def _docs_page_html(title: str, body_html: str, sidebar_html: str) -> str:
+def _docs_page_html(title: str, body_html: str, sidebar_html: str, plan_commit: str) -> str:
     import html as _html
 
     return (
@@ -12273,6 +12282,8 @@ def _docs_page_html(title: str, body_html: str, sidebar_html: str) -> str:
         + _STATIC_HEAD
         + f"<style>{_DOCS_EXTRA_CSS}</style>"
         + "</head><body>"
+        + f'<div class="docs-plan-binding" data-plan-commit="{_html.escape(plan_commit)}">'
+        + f'Approved Plan: <code>{_html.escape(plan_commit)}</code></div>'
         + '<div class="docs-layout">'
         + sidebar_html
         + f'<main class="docs-content">{body_html}</main>'
@@ -12286,6 +12297,11 @@ def _docs_page_html(title: str, body_html: str, sidebar_html: str) -> str:
 def docs_index_redirect():
     """Redirect /docs to the runbook index."""
     from fastapi.responses import RedirectResponse
+
+    try:
+        _docs_plan_binding()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"approved Plan docs unavailable: {exc}")
 
     return RedirectResponse(url="/docs/reference/runbooks/INDEX.md", status_code=302)
 
@@ -12304,7 +12320,11 @@ def docs_page(path: str):
     if not path.lower().endswith(".md"):
         raise HTTPException(status_code=404, detail="only .md files are served here")
 
-    vault = _vault_root()
+    try:
+        binding = _docs_plan_binding()
+        vault = Path(binding["plan_root"])
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"approved Plan docs unavailable: {exc}")
     # Resolve to absolute path and check it stays within vault
     try:
         resolved = (vault / path).resolve()
@@ -12335,7 +12355,7 @@ def docs_page(path: str):
     sidebar_html = _docs_sidebar_html(sections, path)
     title = Path(path).stem.replace("-", " ").replace("_", " ")
 
-    return HTMLResponse(_docs_page_html(title, body_html, sidebar_html))
+    return HTMLResponse(_docs_page_html(title, body_html, sidebar_html, binding["plan_commit"]))
 
 
 # ---------------------------------------------------------------------------
