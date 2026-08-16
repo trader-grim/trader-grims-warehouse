@@ -8,7 +8,7 @@ import re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from tgw.plan_luet import LUET_REVISION, LUET_VERSION, PROVIDER_ID
 
@@ -19,6 +19,7 @@ class CandidateManifestError(ValueError):
 
 TEST_RECEIPT_SCHEMA = "tgw-candidate-test-receipt/v1"
 RELEASE_MANIFEST_SCHEMA = "tgw-release-manifest-v1"
+MIGRATION_SAFETY_RECEIPT_SCHEMA = "tgw-plan-authority-migration-receipt/v1"
 _GIT_OBJECT = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -31,10 +32,22 @@ def _git(repo: Path, *args: str, text: bool = True) -> str | bytes:
 @dataclass(frozen=True)
 class MigrationSafetyReceipt:
     schema: str
-    source_schema_hash: str
-    backup_hash: str
-    restored_hash: str
+    candidate_commit: str
+    candidate_tree: str
+    base_commit: str
+    base_tree: str
+    migration_path: str
+    migration_sha256: str
+    postgres_version: str
+    backup_sha256: str
+    source_schema_sha256: str
+    restored_schema_sha256: str
+    source_data_sha256: str
+    restored_data_sha256: str
+    migrated_schema_sha256: str
+    migrated_data_sha256: str
     verified: bool
+    receipt_hash: str
 
 
 def graph_hash(graph: Mapping[str, Any]) -> str:
@@ -219,25 +232,110 @@ def verify_luet_conformance_receipt(receipt: Mapping[str, Any], *, graph: Mappin
     return dict(receipt)
 
 
-def verify_backup_restore(
-    schema: bytes,
+def create_plan_authority_migration_receipt(
     *,
-    backup: Callable[[bytes], bytes],
-    restore: Callable[[bytes], bytes],
+    candidate_commit: str,
+    candidate_tree: str,
+    base_commit: str,
+    base_tree: str,
+    migration_path: str,
+    migration_source: bytes,
+    postgres_version: str,
+    backup: bytes,
+    source_schema: bytes,
+    restored_schema: bytes,
+    source_data: bytes,
+    restored_data: bytes,
+    migrated_schema: bytes,
+    migrated_data: bytes,
+    verified: bool,
 ) -> MigrationSafetyReceipt:
-    backup_body = backup(schema)
-    restored = restore(backup_body)
+    """Build a candidate-bound receipt from a real isolated-cluster proof."""
 
-    def digest(value: bytes) -> str:
-        return "sha256:" + hashlib.sha256(value).hexdigest()
+    def digest(blob: bytes) -> str:
+        return "sha256:" + hashlib.sha256(blob).hexdigest()
 
-    return MigrationSafetyReceipt(
-        "tgw-migration-backup-restore-receipt/v1",
-        digest(schema),
-        digest(backup_body),
-        digest(restored),
-        restored == schema,
-    )
+    value: dict[str, Any] = {
+        "schema": MIGRATION_SAFETY_RECEIPT_SCHEMA,
+        "candidate_commit": candidate_commit,
+        "candidate_tree": candidate_tree,
+        "base_commit": base_commit,
+        "base_tree": base_tree,
+        "migration_path": migration_path,
+        "migration_sha256": digest(migration_source),
+        "postgres_version": postgres_version,
+        "backup_sha256": digest(backup),
+        "source_schema_sha256": digest(source_schema),
+        "restored_schema_sha256": digest(restored_schema),
+        "source_data_sha256": digest(source_data),
+        "restored_data_sha256": digest(restored_data),
+        "migrated_schema_sha256": digest(migrated_schema),
+        "migrated_data_sha256": digest(migrated_data),
+        "verified": verified,
+    }
+    value["receipt_hash"] = _canonical_hash(value)
+    return MigrationSafetyReceipt(**value)
+
+
+def verify_plan_authority_migration_receipt(
+    receipt: MigrationSafetyReceipt | Mapping[str, Any],
+    *,
+    candidate_commit: str,
+    candidate_tree: str,
+    base_commit: str,
+    base_tree: str,
+    migration_paths: Sequence[str],
+    migration_source: bytes,
+) -> MigrationSafetyReceipt:
+    """Accept only a real, exact-candidate PlanAuthority migration proof.
+
+    A self-consistent byte transform is not enough: the receipt must identify
+    PostgreSQL 17, the one changed SQL file, both source identities, and equal
+    logical schema/data snapshots before backup and after restore.
+    """
+    value = asdict(receipt) if isinstance(receipt, MigrationSafetyReceipt) else dict(receipt)
+    required = {
+        "schema", "candidate_commit", "candidate_tree", "base_commit", "base_tree",
+        "migration_path", "migration_sha256", "postgres_version", "backup_sha256",
+        "source_schema_sha256", "restored_schema_sha256", "source_data_sha256",
+        "restored_data_sha256", "migrated_schema_sha256", "migrated_data_sha256",
+        "verified", "receipt_hash",
+    }
+    if set(value) != required or value.get("schema") != MIGRATION_SAFETY_RECEIPT_SCHEMA:
+        raise CandidateManifestError("migration receipt schema is invalid")
+    if tuple(migration_paths) != (value.get("migration_path"),):
+        raise CandidateManifestError("migration receipt does not cover exactly the candidate SQL changes")
+    if value.get("migration_path") != "src/tgw/plan_authority.sql":
+        raise CandidateManifestError("migration receipt is not for the PlanAuthority schema")
+    expected = {
+        "candidate_commit": candidate_commit,
+        "candidate_tree": candidate_tree,
+        "base_commit": base_commit,
+        "base_tree": base_tree,
+        "migration_sha256": "sha256:" + hashlib.sha256(migration_source).hexdigest(),
+    }
+    mismatched = [key for key, item in expected.items() if value.get(key) != item]
+    if mismatched:
+        raise CandidateManifestError(f"migration receipt candidate binding mismatch: {', '.join(mismatched)}")
+    if not isinstance(value.get("postgres_version"), str) or not re.fullmatch(r"PostgreSQL 17(?:\.\d+)+(?: \([^)]*\))?", value["postgres_version"]):
+        raise CandidateManifestError("migration receipt is not from PostgreSQL 17")
+    if value.get("verified") is not True:
+        raise CandidateManifestError("migration backup/restore was not verified")
+    for field in (
+        "migration_sha256", "backup_sha256", "source_schema_sha256", "restored_schema_sha256",
+        "source_data_sha256", "restored_data_sha256", "migrated_schema_sha256", "migrated_data_sha256",
+    ):
+        if not isinstance(value.get(field), str) or not _SHA256.fullmatch(value[field]):
+            raise CandidateManifestError("migration receipt hash is invalid")
+    if value["source_schema_sha256"] != value["restored_schema_sha256"]:
+        raise CandidateManifestError("migration backup did not restore the source schema")
+    if value["source_data_sha256"] != value["restored_data_sha256"]:
+        raise CandidateManifestError("migration backup did not restore the source data")
+    unsigned = dict(value)
+    claimed = unsigned.pop("receipt_hash")
+    if claimed != _canonical_hash(unsigned):
+        raise CandidateManifestError("migration receipt hash mismatch")
+    return MigrationSafetyReceipt(**value)
 
 
 def build_candidate_manifest(
@@ -253,7 +351,7 @@ def build_candidate_manifest(
     full_suite_receipt: Mapping[str, Any],
     graph: Mapping[str, Any] | None = None,
     conformance_receipt: Mapping[str, Any] | None = None,
-    migration_receipt: MigrationSafetyReceipt | None = None,
+    migration_receipt: MigrationSafetyReceipt | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe only committed Git objects; mutable worktree state is ignored."""
 
@@ -274,8 +372,23 @@ def build_candidate_manifest(
     archive = _git(repo, "archive", "--format=tar", exact_commit, text=False)
     changed = tuple(sorted(line for line in str(_git(repo, "diff", "--name-only", base, exact_commit)).splitlines() if line))
     migrations = tuple(path for path in changed if path.endswith(".sql") or "/migrations/" in path)
-    if migrations and (migration_receipt is None or not migration_receipt.verified):
-        raise CandidateManifestError("candidate changes database schema without a verified backup/restore receipt")
+    if migrations:
+        if migration_receipt is None:
+            raise CandidateManifestError("candidate changes database schema without a verified backup/restore receipt")
+        if len(migrations) != 1 or migrations[0] != "src/tgw/plan_authority.sql":
+            raise CandidateManifestError("candidate SQL changes require separately scoped migration proofs")
+        migration_source = _git(repo, "show", f"{exact_commit}:{migrations[0]}", text=False)
+        verified_migration = verify_plan_authority_migration_receipt(
+            migration_receipt,
+            candidate_commit=exact_commit,
+            candidate_tree=tree,
+            base_commit=base,
+            base_tree=base_tree,
+            migration_paths=migrations,
+            migration_source=migration_source,
+        )
+    else:
+        verified_migration = None
     focused = verify_test_receipt(
         focused_receipt, scope="focused", source_commit=exact_commit, source_tree=tree,
     )
@@ -307,7 +420,7 @@ def build_candidate_manifest(
         },
         "database": {
             "migration_paths": list(migrations),
-            "backup_restore": asdict(migration_receipt) if migration_receipt else None,
+            "backup_restore": asdict(verified_migration) if verified_migration else None,
         },
         "candidate_closed": True,
         "dispatchable": conformance["status"] == "VERIFIED",

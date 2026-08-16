@@ -7,8 +7,8 @@ import pytest
 from tgw.candidate_manifest import (
     CandidateManifestError,
     build_candidate_manifest,
+    create_plan_authority_migration_receipt,
     create_test_receipt,
-    verify_backup_restore,
 )
 
 
@@ -54,6 +54,45 @@ def _manifest(repo, base, **changes):
     return build_candidate_manifest(repo, **values)
 
 
+def _migration_receipt(repo: Path, base: str, **changes):
+    """A structurally complete receipt; the live-cluster script creates real ones."""
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, text=True).strip()
+    base_tree = subprocess.check_output(
+        ["git", "rev-parse", f"{base}^{{tree}}"], cwd=repo, text=True,
+    ).strip()
+    source = subprocess.check_output(
+        ["git", "show", f"{commit}:src/tgw/plan_authority.sql"], cwd=repo,
+    )
+    values = dict(
+        candidate_commit=commit,
+        candidate_tree=tree,
+        base_commit=base,
+        base_tree=base_tree,
+        migration_path="src/tgw/plan_authority.sql",
+        migration_source=source,
+        postgres_version="PostgreSQL 17.10",
+        backup=b"custom-format-pg-dump",
+        source_schema=b"v1 schema",
+        restored_schema=b"v1 schema",
+        source_data=b"v1 data",
+        restored_data=b"v1 data",
+        migrated_schema=b"v2 schema",
+        migrated_data=b"v2 data",
+        verified=True,
+    )
+    values.update(changes)
+    return create_plan_authority_migration_receipt(**values)
+
+
+def _commit_plan_authority_migration(repo: Path, source: str = "ALTER TABLE example ADD COLUMN name text;\n"):
+    path = repo / "src/tgw/plan_authority.sql"
+    path.parent.mkdir(parents=True)
+    path.write_text(source)
+    subprocess.run(["git", "add", str(path.relative_to(repo))], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "plan authority migration"], cwd=repo, check=True)
+
+
 def test_manifest_is_reproducible_from_closed_commit_and_ignores_dirty_worktree(tmp_path):
     repo, base = _repo(tmp_path)
     first = _manifest(repo, base)
@@ -68,28 +107,47 @@ def test_manifest_is_reproducible_from_closed_commit_and_ignores_dirty_worktree(
 
 def test_database_change_requires_verified_backup_restore(tmp_path):
     repo, base = _repo(tmp_path)
-    (repo / "schema.sql").write_text("CREATE TABLE example(id int);\n")
-    subprocess.run(["git", "add", "schema.sql"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-qm", "schema"], cwd=repo, check=True)
+    _commit_plan_authority_migration(repo)
 
     with pytest.raises(CandidateManifestError, match="backup/restore"):
         _manifest(repo, base)
 
-    receipt = verify_backup_restore(b"schema-v1", backup=lambda body: b"backup:" + body, restore=lambda body: body.removeprefix(b"backup:"))
+    receipt = _migration_receipt(repo, base)
     manifest = _manifest(repo, base, migration_receipt=receipt)
-    assert manifest["database"]["migration_paths"] == ["schema.sql"]
+    assert manifest["database"]["migration_paths"] == ["src/tgw/plan_authority.sql"]
     assert manifest["database"]["backup_restore"]["verified"] is True
 
 
 def test_failed_restore_cannot_admit_migration_candidate(tmp_path):
     repo, base = _repo(tmp_path)
-    (repo / "schema.sql").write_text("ALTER TABLE example ADD COLUMN name text;\n")
-    subprocess.run(["git", "add", "schema.sql"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-qm", "schema"], cwd=repo, check=True)
-    receipt = verify_backup_restore(b"schema", backup=lambda body: body, restore=lambda body: b"wrong")
+    _commit_plan_authority_migration(repo)
+    receipt = _migration_receipt(repo, base, restored_data=b"wrong", verified=False)
 
-    with pytest.raises(CandidateManifestError):
+    with pytest.raises(CandidateManifestError, match="not verified"):
         _manifest(repo, base, migration_receipt=receipt)
+
+
+def test_migration_receipt_cannot_bind_another_commit_tree_or_sql_source(tmp_path):
+    repo, base = _repo(tmp_path)
+    _commit_plan_authority_migration(repo, "CREATE TABLE proof_one(id int);\n")
+    receipt = _migration_receipt(repo, base)
+    (repo / "src/tgw/plan_authority.sql").write_text("CREATE TABLE proof_two(id int);\n")
+    subprocess.run(["git", "add", "src/tgw/plan_authority.sql"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "different migration"], cwd=repo, check=True)
+
+    with pytest.raises(CandidateManifestError, match="candidate binding mismatch"):
+        _manifest(repo, base, migration_receipt=receipt)
+
+
+def test_only_plan_authority_sql_has_a_receipt_protocol(tmp_path):
+    repo, base = _repo(tmp_path)
+    _commit_plan_authority_migration(repo)
+    (repo / "other.sql").write_text("CREATE TABLE unrelated(id int);\n")
+    subprocess.run(["git", "add", "other.sql"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "another migration"], cwd=repo, check=True)
+
+    with pytest.raises(CandidateManifestError, match="separately scoped"):
+        _manifest(repo, base, migration_receipt=_migration_receipt(repo, base))
 
 
 def test_manifest_hash_covers_plan_test_and_migration_bindings(tmp_path):
