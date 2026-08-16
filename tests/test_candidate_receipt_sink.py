@@ -17,6 +17,7 @@ from tgw.bootstrap_deployment_contract import (
 )
 from tgw.candidate_manifest import (
     build_candidate_manifest,
+    create_luet_conformance_receipt,
     create_migration_safety_receipt,
     create_test_output_artifact,
     create_test_receipt,
@@ -31,6 +32,7 @@ from tgw.candidate_receipt_sink import (
     RECEIPT_SINK_MANIFEST_SCHEMA,
     RECEIPT_SINK_SCHEMA,
     ROLLBACK_MANIFEST_SCHEMA,
+    W06_PLAN_MATERIALIZATION_SCHEMA,
     CandidateReceiptSinkError,
     PinnedGitReceiptSink,
     candidate_admission_gate,
@@ -40,6 +42,8 @@ from tgw.candidate_receipt_sink import (
     load_pinned_candidate_evidence_descriptor,
     load_receipt_sink_descriptor,
 )
+from tgw.plan_luet import PINNED_LUET_BINARY_SHA256, PROVIDER_ID
+from tgw.plan_solver import solve
 from tgw.candidate_review import PACKET_SCHEMA, RESULT_SCHEMA
 from tgw.execution_resources import (
     RESOURCE_SERVICE_CAPABILITIES,
@@ -145,6 +149,65 @@ def approved_plan_repository(tmp_path):
     commit = git(repo, "rev-parse", "HEAD")
     subprocess.run(["git", "update-ref", PLAN_APPROVED_REF, commit], cwd=repo, check=True)
     return repo, commit
+
+
+def w06_plan_materialization(tmp_path, *, plan_commit, corrupt=None):
+    """Retain a concrete W06 solve outside the mutable candidate and S/D/X."""
+
+    repo = tmp_path / "w06-plan-materialization"
+    _new_sink(repo, email="w06@example.invalid", name="W06 Plan evidence")
+    graph = {
+        "schema": "tgw-plan/v2",
+        "plan_commit": plan_commit,
+        "capabilities": ["candidate.admission@1"],
+        "providers": [{"id": "candidate-admission", "provides": ["candidate.admission@1"]}],
+        "observations": [],
+        "target": {
+            "id": "fixture-approved-plan",
+            "profile": "production",
+            "minimum_state": "operationally_verified",
+            "required_capabilities": ["candidate.admission@1"],
+        },
+    }
+    native = solve(graph, expected_plan_commit=plan_commit)
+    solution = solve(
+        graph,
+        expected_plan_commit=plan_commit,
+        conformance_result={
+            "provider_id": PROVIDER_ID,
+            "available": True,
+            "closure_hash": native["closure_hash"],
+        },
+    )
+    materialization = {
+        "schema": W06_PLAN_MATERIALIZATION_SCHEMA,
+        "plan_commit": plan_commit,
+        "graph": graph,
+        "graph_hash": object_hash(graph),
+        "solution": solution,
+        "solution_hash": solution["solution_hash"],
+        "closure_hash": solution["closure_hash"],
+        "provider_id": PROVIDER_ID,
+        "binary_sha256": PINNED_LUET_BINARY_SHA256,
+    }
+    if corrupt == "solution":
+        materialization["solution"] = {**solution, "dispatchable": False}
+    elif corrupt == "graph":
+        materialization["graph"] = {**graph, "plan_commit": "0" * 40}
+    raw = write_json(repo / "materialization.json", materialization)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "retain W06 Plan materialization"], cwd=repo, check=True)
+    pin = {
+        "schema": "tgw-pinned-git-w06-plan-materialization/v1",
+        "repository": str(repo.resolve()),
+        "commit": git(repo, "rev-parse", "HEAD"),
+        "tree": git(repo, "rev-parse", "HEAD^{tree}"),
+        "path": "materialization.json",
+        "content_sha256": digest(raw),
+    }
+    if corrupt == "missing":
+        pin["path"] = "absent-materialization.json"
+    return repo, pin, materialization
 
 
 def service_catalog(plan_commit):
@@ -497,7 +560,7 @@ def migration_receipt(repo, *, path, source_commit, source_tree, base_commit, ba
     ).__dict__
 
 
-def candidate_evidence(candidate_repo, *, source_commit, source_tree, plan_commit):
+def candidate_evidence(candidate_repo, *, source_commit, source_tree, plan_commit, w06_materialization):
     """Build S-only evidence before the external descriptor and any card exist."""
 
     base_commit = git(candidate_repo, "rev-parse", f"{source_commit}^")
@@ -551,18 +614,34 @@ def candidate_evidence(candidate_repo, *, source_commit, source_tree, plan_commi
         )
         for path in ("src/migrations/001.sql", "src/migrations/002.sql")
     ]
+    luet_receipt = create_luet_conformance_receipt(
+        {
+            "provider_id": PROVIDER_ID,
+            "available": True,
+            "status": "AGREEMENT",
+            "closure_hash": w06_materialization["closure_hash"],
+            "selected_providers": w06_materialization["solution"]["selected_providers"],
+        },
+        graph=w06_materialization["graph"],
+        plan_commit=plan_commit,
+        source_commit=source_commit,
+        source_tree=source_tree,
+        binary_sha256=PINNED_LUET_BINARY_SHA256,
+    )
     candidate_manifest = build_candidate_manifest(
         candidate_repo,
         commit=source_commit,
         base_commit=base_commit,
         predecessor_release=predecessor,
         plan_commit=plan_commit,
-        solution_hash="sha256:" + "1" * 64,
-        closure_hash="sha256:" + "2" * 64,
+        solution_hash=w06_materialization["solution_hash"],
+        closure_hash=w06_materialization["closure_hash"],
         focused_receipt=focused,
         full_suite_receipt=full,
         focused_output_artifact=focused_output,
         full_suite_output_artifact=full_output,
+        graph=w06_materialization["graph"],
+        conformance_receipt=luet_receipt,
         migration_receipts=migrations,
     )
     release = release_manifest(candidate_repo, source_commit, "candidate")
@@ -655,6 +734,7 @@ def candidate_evidence(candidate_repo, *, source_commit, source_tree, plan_commi
     ]
     return {
         "candidate_manifest": candidate_manifest,
+        "luet_conformance_receipt": luet_receipt,
         "focused_test_receipt": focused,
         "focused_test_output": focused_output,
         "full_suite_test_receipt": full,
@@ -769,6 +849,7 @@ def _candidate_evidence_sink(
     source_commit,
     source_tree,
     plan_commit,
+    w06_materialization,
     corrupt_w08=None,
 ):
     sink = tmp_path / "candidate-evidence-sink"
@@ -778,6 +859,7 @@ def _candidate_evidence_sink(
         source_commit=source_commit,
         source_tree=source_tree,
         plan_commit=plan_commit,
+        w06_materialization=w06_materialization,
     )
     if corrupt_w08 in {"focused", "full"}:
         key = "focused_test_receipt" if corrupt_w08 == "focused" else "full_suite_test_receipt"
@@ -809,6 +891,22 @@ def _candidate_evidence_sink(
         catalog = dict(evidence["qualified_execution_catalog"])
         catalog["services"] = [{**catalog["services"][0], "descriptor_hash": "sha256:" + "0" * 64}]
         evidence["qualified_execution_catalog"] = catalog
+    if corrupt_w08 == "luet-receipt":
+        receipt = dict(evidence["luet_conformance_receipt"])
+        receipt["source_tree"] = "0" * 40
+        evidence["luet_conformance_receipt"] = receipt
+    if corrupt_w08 in {"luet-provider", "luet-binary"}:
+        receipt = dict(evidence["luet_conformance_receipt"])
+        field = "provider_id" if corrupt_w08 == "luet-provider" else "binary_sha256"
+        receipt[field] = "forged-provider" if field == "provider_id" else "sha256:" + "0" * 64
+        unsigned = {key: value for key, value in receipt.items() if key != "receipt_hash"}
+        evidence["luet_conformance_receipt"] = {**unsigned, "receipt_hash": object_hash(unsigned)}
+    if corrupt_w08 == "manifest-conformance":
+        manifest = dict(evidence["candidate_manifest"])
+        manifest["conformance"] = {"status": "MISSING", "receipt_hash": None}
+        manifest["dispatchable"] = False
+        unsigned = {key: value for key, value in manifest.items() if key != "manifest_hash"}
+        evidence["candidate_manifest"] = {**unsigned, "manifest_hash": object_hash(unsigned)}
     artifacts = []
     pointers = {}
     for name, value in evidence.items():
@@ -862,6 +960,8 @@ def _candidate_evidence_sink(
         "migration_receipts": migration_pointers,
         "execution_proofs": execution_proof_pointers,
     }
+    if corrupt_w08 == "luet-missing":
+        bundle_unsigned.pop("luet_conformance_receipt")
     bundle = {**bundle_unsigned, "bundle_hash": object_hash(bundle_unsigned)}
     if corrupt_w08 != "missing":
         bundle_raw = write_json(sink / "bundles" / "candidate-evidence.json", bundle)
@@ -881,12 +981,13 @@ def _candidate_evidence_sink(
     return sink, descriptor, evidence
 
 
-def _pinned_candidate_evidence_descriptor(tmp_path, candidate_repo, candidate_sink_descriptor):
+def _pinned_candidate_evidence_descriptor(tmp_path, candidate_repo, candidate_sink_descriptor, w06_materialization_pin):
     authority = tmp_path / "candidate-evidence-descriptor-authority"
     _new_sink(authority, email="descriptor@example.invalid", name="Candidate evidence descriptor D")
     descriptor_content = {
         "schema": CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA,
         "candidate_evidence_sink": candidate_sink_descriptor,
+        "w06_plan_materialization": w06_materialization_pin,
     }
     raw = write_json(authority / "descriptor.json", descriptor_content)
     subprocess.run(["git", "add", "."], cwd=authority, check=True)
@@ -1034,19 +1135,27 @@ def pinned_sinks(
     corrupt_role=None,
     corrupt_sink_binding_role=None,
     corrupt_w08=None,
+    corrupt_w06_materialization=None,
 ):
+    _w06_repository, w06_materialization_pin, materialization = w06_plan_materialization(
+        tmp_path,
+        plan_commit=plan_commit,
+        corrupt=corrupt_w06_materialization,
+    )
     candidate_sink, candidate_sink_descriptor, evidence = _candidate_evidence_sink(
         tmp_path,
         candidate_repo=candidate_repo,
         source_commit=source_commit,
         source_tree=source_tree,
         plan_commit=plan_commit,
+        w06_materialization=materialization,
         corrupt_w08=corrupt_w08,
     )
     descriptor_authority, candidate_descriptor_config = _pinned_candidate_evidence_descriptor(
         tmp_path,
         candidate_repo,
         candidate_sink_descriptor,
+        w06_materialization_pin,
     )
     descriptor = load_pinned_candidate_evidence_descriptor(
         candidate_descriptor_config,
@@ -1095,7 +1204,7 @@ def test_acyclic_two_store_gate_reads_exact_committed_artifacts_and_cli_admits(t
     (execution_sink / "governed-execution" / "implementation" / "role_receipt.json").write_text("{}")
     descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
     binding = descriptor.card_binding()
-    assert binding["ref"] == "candidate-evidence:candidate-evidence-sink:descriptor:v2"
+    assert binding["ref"] == "candidate-evidence:candidate-evidence-sink:descriptor:v3"
     assert binding["hash"].startswith("sha256:")
     assert descriptor.identity["repository"] == str(authority.resolve())
     assert descriptor.candidate_evidence_sink_descriptor["repository"] == str(candidate_sink.resolve())
@@ -1105,6 +1214,8 @@ def test_acyclic_two_store_gate_reads_exact_committed_artifacts_and_cli_admits(t
     assert gate["source_commit"] == commit
     assert gate["plan_commit"] == plan_commit
     assert gate["candidate_evidence"] is not None
+    assert gate["luet_conformance_receipt_hash"] == gate["candidate_evidence"]["luet_conformance_receipt_hash"]
+    assert gate["w06_plan_materialization_hash"] == gate["candidate_evidence"]["w06_plan_materialization_hash"]
     assert len(gate["candidate_evidence"]["migration_receipt_hashes"]) == 2
     assert gate["independent_review_evidence"]["review_result_hash"].startswith("sha256:")
     assert gate["candidate_evidence_descriptor"]["descriptor_hash"] == descriptor.identity["descriptor_hash"]
@@ -1184,6 +1295,11 @@ def test_gate_rejects_a_legacy_or_substituted_card_receipt_sink_binding(tmp_path
         "execution-proof",
         "runner-descriptor",
         "signer-descriptor",
+        "luet-receipt",
+        "luet-provider",
+        "luet-binary",
+        "luet-missing",
+        "manifest-conformance",
     ],
 )
 def test_gate_requires_every_retained_s_or_x_evidence_artifact(tmp_path, corruption):
@@ -1208,6 +1324,27 @@ def test_gate_requires_every_retained_s_or_x_evidence_artifact(tmp_path, corrupt
         ]
     )
     assert gate["reasons"] == expected
+
+
+@pytest.mark.parametrize("corruption", ["solution", "graph", "missing"])
+def test_gate_requires_a_valid_d_pinned_w06_plan_materialization(tmp_path, corruption):
+    candidate, commit, tree = candidate_repository(tmp_path)
+    plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    _s, _d, _x, descriptor_config, execution_config = pinned_sinks(
+        tmp_path,
+        candidate_repo=candidate,
+        source_commit=commit,
+        source_tree=tree,
+        plan_commit=plan_commit,
+        corrupt_w06_materialization=corruption,
+    )
+    gate = _gate(candidate, plan_repository, descriptor_config, execution_config)
+    assert gate["allowed"] is False
+    assert gate["luet_conformance_receipt_hash"] is None
+    assert gate["reasons"] == [
+        "missing-or-invalid-candidate-evidence",
+        "missing-or-invalid-independent-review-evidence",
+    ]
 
 
 def test_gate_rejects_a_one_store_cycle_even_when_both_pins_are_individually_valid(tmp_path):

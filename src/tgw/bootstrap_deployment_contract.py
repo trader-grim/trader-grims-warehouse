@@ -431,7 +431,8 @@ def _verified_w08_evidence(
         )
         source_commit, source_tree = _candidate_identity(repo, candidate)
         evidence = verify_candidate_evidence_bundle(
-            candidate_sink, repository=repo, source_commit=source_commit, source_tree=source_tree,
+            candidate_sink, candidate_evidence_descriptor=candidate_evidence_descriptor,
+            repository=repo, source_commit=source_commit, source_tree=source_tree,
             plan_commit=plan_authority["approved_commit"],
         )
         admission = candidate_admission_gate(
@@ -628,7 +629,9 @@ class PinnedBootstrapDeploymentContractResolver:
             )
             source_commit, source_tree = _candidate_identity(self._repository, expected_commit)
             evidence = verify_candidate_evidence_bundle(
-                self._candidate_sink, repository=self._repository,
+                self._candidate_sink,
+                candidate_evidence_descriptor=self._candidate_evidence_descriptor,
+                repository=self._repository,
                 source_commit=source_commit, source_tree=source_tree,
                 plan_commit=plan_authority["approved_commit"],
             )

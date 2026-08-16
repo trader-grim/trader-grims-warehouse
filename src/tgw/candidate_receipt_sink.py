@@ -22,7 +22,9 @@ from typing import Any, Mapping
 
 from tgw.candidate_manifest import (
     CandidateManifestError,
+    graph_hash,
     load_candidate_test_plan,
+    verify_luet_conformance_receipt,
     verify_migration_safety_receipt,
     verify_predecessor_release,
     verify_test_receipt,
@@ -42,17 +44,25 @@ from tgw.qualified_execution_service import (
     validate_execution_proof,
     validate_execution_service_catalog,
 )
+from tgw.plan_luet import (
+    PINNED_LUET_BINARY_SHA256,
+    PROVIDER_ID,
+    normalize_conformance_graph,
+)
+from tgw.plan_solver import PlanResolutionError, solve, validate_for_dispatch
 
 RECEIPT_SINK_SCHEMA = "tgw-pinned-git-candidate-receipt-sink/v1"
 RECEIPT_SINK_MANIFEST_SCHEMA = "tgw-pinned-git-candidate-receipt-sink-manifest/v1"
 PINNED_CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA = "tgw-pinned-git-candidate-evidence-descriptor/v1"
-CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA = "tgw-candidate-evidence-descriptor/v1"
-CANDIDATE_EVIDENCE_CARD_BINDING_SCHEMA = "tgw-candidate-evidence-descriptor-card-binding/v2"
+CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA = "tgw-candidate-evidence-descriptor/v2"
+CANDIDATE_EVIDENCE_CARD_BINDING_SCHEMA = "tgw-candidate-evidence-descriptor-card-binding/v3"
+PINNED_W06_PLAN_MATERIALIZATION_SCHEMA = "tgw-pinned-git-w06-plan-materialization/v1"
+W06_PLAN_MATERIALIZATION_SCHEMA = "tgw-w06-approved-plan-materialization/v1"
 GOVERNED_EXECUTION_BUNDLE_SCHEMA = "tgw-candidate-governed-execution-bundle/v2"
 INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-independent-review-evidence-bundle/v3"
 GOVERNED_CANDIDATE_ADMISSION_SCHEMA = "tgw-governed-candidate-admission-gate/v2"
 GOVERNED_CANDIDATE_PLAN_AUTHORITY_SCHEMA = "tgw-governed-candidate-plan-authority/v1"
-CANDIDATE_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-evidence-bundle/v4"
+CANDIDATE_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-evidence-bundle/v5"
 ROLLBACK_MANIFEST_SCHEMA = "tgw-governed-candidate-rollback-manifest/v1"
 
 GOVERNED_ROLES = (
@@ -76,6 +86,7 @@ _BUNDLE_ARTIFACTS = (
 )
 _CANDIDATE_EVIDENCE_ARTIFACTS = (
     "candidate_manifest",
+    "luet_conformance_receipt",
     "focused_test_receipt",
     "focused_test_output",
     "full_suite_test_receipt",
@@ -277,6 +288,41 @@ def validate_pinned_candidate_evidence_descriptor(value: Mapping[str, Any]) -> d
     }
 
 
+def validate_pinned_w06_plan_materialization(value: Mapping[str, Any]) -> dict[str, str]:
+    """Validate D's immutable pointer to the W06 Plan materialization.
+
+    This object deliberately names a retained evidence commit rather than the
+    approved Plan commit itself.  A concrete solution cannot be committed into
+    the same Git object it names without a self-reference; admission compares
+    the materialization's declared Plan commit to the separately approved ref.
+    """
+
+    required = {"schema", "repository", "commit", "tree", "path", "content_sha256"}
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != required
+        or value.get("schema") != PINNED_W06_PLAN_MATERIALIZATION_SCHEMA
+    ):
+        raise CandidateReceiptSinkError("pinned W06 Plan materialization descriptor is invalid")
+    repository = value.get("repository")
+    if not isinstance(repository, str) or not repository or not Path(repository).is_absolute():
+        raise CandidateReceiptSinkError("pinned W06 Plan materialization repository must be absolute")
+    for field in ("commit", "tree"):
+        if not isinstance(value.get(field), str) or _GIT_OBJECT.fullmatch(value[field]) is None:
+            raise CandidateReceiptSinkError("pinned W06 Plan materialization Git identity is invalid")
+    content_hash = value.get("content_sha256")
+    if not isinstance(content_hash, str) or _SHA256.fullmatch(content_hash) is None:
+        raise CandidateReceiptSinkError("pinned W06 Plan materialization content hash is invalid")
+    return {
+        "schema": PINNED_W06_PLAN_MATERIALIZATION_SCHEMA,
+        "repository": repository,
+        "commit": value["commit"],
+        "tree": value["tree"],
+        "path": _safe_path(value.get("path"), label="pinned W06 Plan materialization path"),
+        "content_sha256": content_hash,
+    }
+
+
 class PinnedCandidateEvidenceDescriptor:
     """Load D from an independently pinned Git object before cards are created.
 
@@ -301,20 +347,34 @@ class PinnedCandidateEvidenceDescriptor:
         if _hash_bytes(raw) != self._pin["content_sha256"]:
             raise CandidateReceiptSinkError("pinned candidate evidence descriptor content hash mismatch")
         value = _object(raw, label="pinned candidate evidence descriptor")
-        required = {"schema", "candidate_evidence_sink"}
-        if set(value) != required or value.get("schema") != CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA or not isinstance(value.get("candidate_evidence_sink"), Mapping):
+        required = {"schema", "candidate_evidence_sink", "w06_plan_materialization"}
+        if (
+            set(value) != required
+            or value.get("schema") != CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA
+            or not isinstance(value.get("candidate_evidence_sink"), Mapping)
+            or not isinstance(value.get("w06_plan_materialization"), Mapping)
+        ):
             raise CandidateReceiptSinkError("candidate evidence descriptor is invalid")
         sink = validate_receipt_sink_descriptor(value["candidate_evidence_sink"])
+        materialization = validate_pinned_w06_plan_materialization(value["w06_plan_materialization"])
         try:
             sink_repository = Path(sink["repository"]).resolve(strict=True)
+            materialization_repository = Path(materialization["repository"]).resolve(strict=True)
         except OSError as exc:
-            raise CandidateReceiptSinkError("candidate evidence sink repository is unavailable") from exc
+            raise CandidateReceiptSinkError("candidate evidence or W06 materialization repository is unavailable") from exc
         if _paths_overlap(self._repository, sink_repository):
             raise CandidateReceiptSinkError("candidate evidence descriptor authority and evidence sink must be disjoint")
+        if _paths_overlap(self._repository, materialization_repository):
+            raise CandidateReceiptSinkError("candidate evidence descriptor authority and W06 materialization must be disjoint")
+        if _paths_overlap(sink_repository, materialization_repository):
+            raise CandidateReceiptSinkError("candidate evidence sink and W06 materialization must be disjoint")
+        if _paths_overlap(candidate_root, materialization_repository):
+            raise CandidateReceiptSinkError("W06 Plan materialization must be disjoint from the candidate repository")
         self._value = {
             "schema": CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA,
             "pin": self._pin,
             "candidate_evidence_sink": sink,
+            "w06_plan_materialization": materialization,
         }
 
     @property
@@ -324,6 +384,10 @@ class PinnedCandidateEvidenceDescriptor:
     @property
     def authority_repository(self) -> Path:
         return self._repository
+
+    @property
+    def w06_plan_materialization_pin(self) -> dict[str, str]:
+        return dict(self._value["w06_plan_materialization"])
 
     @property
     def identity(self) -> dict[str, str]:
@@ -337,12 +401,12 @@ class PinnedCandidateEvidenceDescriptor:
         }
 
     def card_binding(self) -> dict[str, str]:
-        """Return the v2 card binding over D and every dynamic S pin field."""
+        """Return the v3 card binding over D, S, and W06 Plan evidence."""
 
         sink = self._value["candidate_evidence_sink"]
         content = {"schema": CANDIDATE_EVIDENCE_CARD_BINDING_SCHEMA, "descriptor": self._value}
         return {
-            "ref": f"candidate-evidence:{sink['sink_id']}:descriptor:v2",
+            "ref": f"candidate-evidence:{sink['sink_id']}:descriptor:v3",
             "hash": _hash(content),
         }
 
@@ -366,6 +430,95 @@ def load_pinned_candidate_evidence_descriptor(
     except (OSError, json.JSONDecodeError) as exc:
         raise CandidateReceiptSinkError("pinned candidate evidence descriptor configuration is unreadable") from exc
     return PinnedCandidateEvidenceDescriptor(pin, candidate_repository=candidate_repository)
+
+
+def _load_w06_plan_materialization(
+    descriptor: PinnedCandidateEvidenceDescriptor,
+    *,
+    plan_commit: str,
+) -> dict[str, Any]:
+    """Load and rederive D-pinned W06 graph/solution evidence.
+
+    The materialization is a retained record of the approved Plan solve.  Its
+    own source commit may be newer than the approved Plan commit; that is why
+    both identities are verified independently instead of treating a receipt
+    hash as proof of an approved closure.
+    """
+
+    pin = descriptor.w06_plan_materialization_pin
+    try:
+        repository = Path(pin["repository"]).resolve(strict=True)
+    except OSError as exc:
+        raise CandidateReceiptSinkError("pinned W06 Plan materialization repository is unavailable") from exc
+    commit, tree = _candidate_identity(repository, pin["commit"])
+    if commit != pin["commit"] or tree != pin["tree"]:
+        raise CandidateReceiptSinkError("pinned W06 Plan materialization Git identity mismatch")
+    raw = _git(repository, "show", f"{commit}:{pin['path']}")
+    if _hash_bytes(raw) != pin["content_sha256"]:
+        raise CandidateReceiptSinkError("pinned W06 Plan materialization content hash mismatch")
+    value = _object(raw, label="pinned W06 Plan materialization")
+    required = {
+        "schema",
+        "plan_commit",
+        "graph",
+        "graph_hash",
+        "solution",
+        "solution_hash",
+        "closure_hash",
+        "provider_id",
+        "binary_sha256",
+    }
+    if set(value) != required or value.get("schema") != W06_PLAN_MATERIALIZATION_SCHEMA:
+        raise CandidateReceiptSinkError("W06 Plan materialization schema is invalid")
+    graph = value.get("graph")
+    solution = value.get("solution")
+    if not isinstance(graph, Mapping) or not isinstance(solution, Mapping):
+        raise CandidateReceiptSinkError("W06 Plan materialization graph or solution is invalid")
+    if (
+        value.get("plan_commit") != plan_commit
+        or value.get("graph_hash") != graph_hash(graph)
+        or value.get("provider_id") != PROVIDER_ID
+        or value.get("binary_sha256") != PINNED_LUET_BINARY_SHA256
+        or value.get("solution_hash") != solution.get("solution_hash")
+        or value.get("closure_hash") != solution.get("closure_hash")
+    ):
+        raise CandidateReceiptSinkError("W06 Plan materialization binding mismatch")
+    if (
+        not isinstance(value.get("solution_hash"), str)
+        or _SHA256.fullmatch(value["solution_hash"]) is None
+        or not isinstance(value.get("closure_hash"), str)
+        or _SHA256.fullmatch(value["closure_hash"]) is None
+    ):
+        raise CandidateReceiptSinkError("W06 Plan materialization solution identity is invalid")
+    try:
+        normalized_graph = normalize_conformance_graph(graph)
+        # Re-solve the exact retained graph.  The expected Luet closure comes
+        # from the signed/pinned materialization only after native derivation
+        # establishes that it is the sole dispatchable solution.
+        expected_solution = solve(
+            normalized_graph,
+            expected_plan_commit=plan_commit,
+            conformance_result={
+                "provider_id": PROVIDER_ID,
+                "available": True,
+                "closure_hash": value["closure_hash"],
+            },
+        )
+        validate_for_dispatch(solution, current_plan_commit=plan_commit)
+    except (PlanResolutionError, ValueError) as exc:
+        raise CandidateReceiptSinkError("W06 Plan materialization is not dispatchable") from exc
+    if dict(solution) != expected_solution:
+        raise CandidateReceiptSinkError("W06 Plan materialization solution does not match its exact graph")
+    return {
+        "pin": pin,
+        "materialization_hash": _hash(value),
+        "graph": dict(graph),
+        "graph_hash": value["graph_hash"],
+        "solution_hash": value["solution_hash"],
+        "closure_hash": value["closure_hash"],
+        "provider_id": value["provider_id"],
+        "binary_sha256": value["binary_sha256"],
+    }
 
 
 def _verify_card_candidate_evidence_binding(
@@ -731,6 +884,8 @@ def _verify_candidate_manifest_evidence(
     source_commit: str,
     source_tree: str,
     plan_commit: str,
+    w06_plan_materialization: Mapping[str, Any],
+    luet_conformance_receipt: Mapping[str, Any],
     focused_receipt: Mapping[str, Any],
     full_suite_receipt: Mapping[str, Any],
     focused_output_artifact: Mapping[str, Any],
@@ -748,6 +903,7 @@ def _verify_candidate_manifest_evidence(
         raise CandidateReceiptSinkError("candidate manifest cannot establish candidate identity") from exc
     source = manifest.get("source")
     plan = manifest.get("plan")
+    conformance = manifest.get("conformance")
     tests = manifest.get("tests")
     database = manifest.get("database")
     if (
@@ -755,6 +911,8 @@ def _verify_candidate_manifest_evidence(
         or set(source) != {"commit", "tree", "archive_sha256", "base_commit", "changed_paths"}
         or not isinstance(plan, Mapping)
         or set(plan) != {"commit", "solution_hash", "closure_hash"}
+        or not isinstance(conformance, Mapping)
+        or set(conformance) != {"status", "receipt_hash"}
         or not isinstance(tests, Mapping)
         or set(tests) != {"focused", "full_suite"}
         or not isinstance(database, Mapping)
@@ -809,6 +967,33 @@ def _verify_candidate_manifest_evidence(
         raise CandidateReceiptSinkError("candidate manifest Plan binding mismatch")
     if not all(isinstance(plan.get(field), str) and _SHA256.fullmatch(plan[field]) for field in ("solution_hash", "closure_hash")):
         raise CandidateReceiptSinkError("candidate manifest Plan solution binding is invalid")
+    if (
+        plan["solution_hash"] != w06_plan_materialization["solution_hash"]
+        or plan["closure_hash"] != w06_plan_materialization["closure_hash"]
+    ):
+        raise CandidateReceiptSinkError("candidate manifest does not bind the approved W06 Plan solution")
+    if (
+        conformance.get("status") != "VERIFIED"
+        or conformance.get("receipt_hash") != luet_conformance_receipt.get("receipt_hash")
+        or manifest.get("dispatchable") is not True
+    ):
+        raise CandidateReceiptSinkError("candidate manifest is not Luet-conformance verified and dispatchable")
+    try:
+        verified_luet = verify_luet_conformance_receipt(
+            luet_conformance_receipt,
+            graph=w06_plan_materialization["graph"],
+            plan_commit=plan_commit,
+            closure_hash=w06_plan_materialization["closure_hash"],
+            source_commit=source_commit,
+            source_tree=source_tree,
+        )
+    except CandidateManifestError as exc:
+        raise CandidateReceiptSinkError("retained Luet conformance receipt is invalid") from exc
+    if (
+        verified_luet["provider_id"] != w06_plan_materialization["provider_id"]
+        or verified_luet["binary_sha256"] != w06_plan_materialization["binary_sha256"]
+    ):
+        raise CandidateReceiptSinkError("retained Luet conformance receipt provider binding is invalid")
     if manifest.get("candidate_closed") is not True or manifest.get("installed") is not False:
         raise CandidateReceiptSinkError("candidate manifest must be closed and uninstalled")
     if tests.get("focused") != focused_receipt or tests.get("full_suite") != full_suite_receipt:
@@ -898,6 +1083,10 @@ def _verify_candidate_manifest_evidence(
     return {
         "manifest": dict(manifest),
         "manifest_hash": manifest_hash,
+        "luet_conformance_receipt_hash": verified_luet["receipt_hash"],
+        "w06_plan_materialization_hash": w06_plan_materialization["materialization_hash"],
+        "plan_graph_hash": w06_plan_materialization["graph_hash"],
+        "plan_solution_hash": w06_plan_materialization["solution_hash"],
         "base_commit": base_commit,
         "base_tree": base_tree,
         "focused_receipt": verified_focused,
@@ -1127,6 +1316,7 @@ def _verify_rollback_manifest(
 def verify_candidate_evidence_bundle(
     sink: PinnedGitReceiptSink,
     *,
+    candidate_evidence_descriptor: PinnedCandidateEvidenceDescriptor,
     repository: Path,
     source_commit: str,
     source_tree: str,
@@ -1140,6 +1330,14 @@ def verify_candidate_evidence_bundle(
     evidence.  Review execution is retained separately in X.
     """
 
+    if not isinstance(candidate_evidence_descriptor, PinnedCandidateEvidenceDescriptor):
+        raise CandidateReceiptSinkError("candidate evidence descriptor must pin W06 Plan materialization")
+    if sink.descriptor != candidate_evidence_descriptor.candidate_evidence_sink_descriptor:
+        raise CandidateReceiptSinkError("candidate evidence sink is not the descriptor-pinned S store")
+    materialization = _load_w06_plan_materialization(
+        candidate_evidence_descriptor,
+        plan_commit=plan_commit,
+    )
     bundle = validate_candidate_evidence_bundle(sink.fetch_object(candidate_evidence_bundle_ref(source_commit)))
     if bundle["source_commit"] != source_commit or bundle["source_tree"] != source_tree or bundle["plan_commit"] != plan_commit:
         raise CandidateReceiptSinkError("candidate evidence bundle binding mismatch")
@@ -1158,6 +1356,8 @@ def verify_candidate_evidence_bundle(
         source_commit=source_commit,
         source_tree=source_tree,
         plan_commit=plan_commit,
+        w06_plan_materialization=materialization,
+        luet_conformance_receipt=artifacts["luet_conformance_receipt"],
         focused_receipt=artifacts["focused_test_receipt"],
         full_suite_receipt=artifacts["full_suite_test_receipt"],
         focused_output_artifact=artifacts["focused_test_output"],
@@ -1183,6 +1383,10 @@ def verify_candidate_evidence_bundle(
     )
     return {
         "candidate_manifest_hash": candidate["manifest_hash"],
+        "luet_conformance_receipt_hash": candidate["luet_conformance_receipt_hash"],
+        "w06_plan_materialization_hash": candidate["w06_plan_materialization_hash"],
+        "plan_graph_hash": candidate["plan_graph_hash"],
+        "plan_solution_hash": candidate["plan_solution_hash"],
         "focused_test_receipt_hash": candidate["focused_receipt"]["receipt_hash"],
         "full_suite_test_receipt_hash": candidate["full_suite_receipt"]["receipt_hash"],
         "focused_test_output_artifact_hash": candidate["focused_output_artifact_hash"],
@@ -1357,9 +1561,27 @@ def candidate_admission_gate(
         candidate_evidence_descriptor.candidate_evidence_sink_descriptor,
         candidate_repository=repo,
     )
-    roots = (candidate_sink.repository, candidate_evidence_descriptor.authority_repository, execution_sink.repository)
-    if any(_paths_overlap(left, right) for index, left in enumerate(roots) for right in roots[index + 1 :]):
-        raise CandidateReceiptSinkError("candidate evidence sink, descriptor authority, and execution evidence sink must be disjoint")
+    try:
+        w06_materialization_repository = Path(
+            candidate_evidence_descriptor.w06_plan_materialization_pin["repository"]
+        ).resolve(strict=True)
+        approved_plan_repository = Path(plan_authority["repository"]).resolve(strict=True)
+    except OSError as exc:
+        raise CandidateReceiptSinkError("W06 materialization or approved Plan repository is unavailable") from exc
+    receipt_roots = (
+        candidate_sink.repository,
+        candidate_evidence_descriptor.authority_repository,
+        execution_sink.repository,
+        w06_materialization_repository,
+    )
+    if any(
+        _paths_overlap(left, right)
+        for index, left in enumerate(receipt_roots)
+        for right in receipt_roots[index + 1 :]
+    ):
+        raise CandidateReceiptSinkError("candidate evidence, descriptor, W06 materialization, and execution evidence roots must be disjoint")
+    if any(_paths_overlap(approved_plan_repository, root) for root in receipt_roots[:3]):
+        raise CandidateReceiptSinkError("approved Plan repository must be disjoint from candidate evidence, descriptor, and execution evidence roots")
     plan_commit = plan_authority["approved_commit"]
     source_commit, source_tree = _candidate_identity(repo, candidate)
     reasons: list[str] = []
@@ -1367,6 +1589,7 @@ def candidate_admission_gate(
     try:
         candidate_evidence = verify_candidate_evidence_bundle(
             candidate_sink,
+            candidate_evidence_descriptor=candidate_evidence_descriptor,
             repository=repo,
             source_commit=source_commit,
             source_tree=source_tree,
@@ -1433,6 +1656,14 @@ def candidate_admission_gate(
         "reasons": sorted(set(reasons)),
         "governed_execution_receipt_hashes": sorted(receipt["receipt_hash"] for receipt in governed_receipts),
         "bundle_hashes": sorted(bundle_hashes),
+        "luet_conformance_receipt_hash": (
+            candidate_evidence["luet_conformance_receipt_hash"] if candidate_evidence else None
+        ),
+        "w06_plan_materialization_hash": (
+            candidate_evidence["w06_plan_materialization_hash"] if candidate_evidence else None
+        ),
+        "plan_graph_hash": candidate_evidence["plan_graph_hash"] if candidate_evidence else None,
+        "plan_solution_hash": candidate_evidence["plan_solution_hash"] if candidate_evidence else None,
         "candidate_evidence": candidate_evidence,
         "independent_review_evidence": independent_review_evidence,
         "role_gate": role_gate,
