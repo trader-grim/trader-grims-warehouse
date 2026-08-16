@@ -34,7 +34,7 @@ from tgw.execution_resources import (
     issue_harness_retrieval_attestation,
 )
 
-SERVICE_CONFIG_SCHEMA = "tgw-governed-resource-service-config/v4"
+SERVICE_CONFIG_SCHEMA = "tgw-governed-resource-service-config/v5"
 # The resolver bounds the complete JSON response at 4 MiB.  Keep enough room
 # for base64 expansion and the response envelope, not merely the raw export.
 MAX_RESOURCE_BYTES = 3 * 1024 * 1024 - 1024
@@ -43,7 +43,7 @@ MAX_REQUEST_BYTES = 128 * 1024
 _CONFIG_FIELDS = {
     "schema", "service_id", "clients", "attestation_key_id",
     "attestation_private_key_env", "harness_run_ttl_seconds", "completed_run_ttl_seconds",
-    "max_completed_runs_per_client", "resources",
+    "max_open_runs_per_client", "max_completed_runs_per_client", "resources",
 }
 _CLIENT_FIELDS = {"id", "credential_env", "execution_identity", "role"}
 _RESOURCE_FIELDS = {"ref", "path", "content_hash"}
@@ -179,6 +179,7 @@ class ResourceServiceConfig:
     attestation_private_key_env: str
     harness_run_ttl_seconds: int
     completed_run_ttl_seconds: int
+    max_open_runs_per_client: int
     max_completed_runs_per_client: int
     resources: Mapping[str, FrozenResource]
 
@@ -194,6 +195,7 @@ class ResourceServiceConfig:
         attestation_private_key_env = value.get("attestation_private_key_env")
         harness_run_ttl_seconds = value.get("harness_run_ttl_seconds")
         completed_run_ttl_seconds = value.get("completed_run_ttl_seconds")
+        max_open_runs_per_client = value.get("max_open_runs_per_client")
         max_completed_runs_per_client = value.get("max_completed_runs_per_client")
         if not _valid_service_id(service_id):
             raise ResourceServiceConfigurationError("governed resource service identity is invalid")
@@ -244,6 +246,12 @@ class ResourceServiceConfig:
         ):
             raise ResourceServiceConfigurationError("governed resource service completed run TTL is invalid")
         if (
+            not isinstance(max_open_runs_per_client, int)
+            or isinstance(max_open_runs_per_client, bool)
+            or not 1 <= max_open_runs_per_client <= 10_000
+        ):
+            raise ResourceServiceConfigurationError("governed resource service open run capacity is invalid")
+        if (
             not isinstance(max_completed_runs_per_client, int)
             or isinstance(max_completed_runs_per_client, bool)
             or not 1 <= max_completed_runs_per_client <= 10_000
@@ -286,6 +294,7 @@ class ResourceServiceConfig:
             attestation_private_key_env=str(attestation_private_key_env),
             harness_run_ttl_seconds=harness_run_ttl_seconds,
             completed_run_ttl_seconds=completed_run_ttl_seconds,
+            max_open_runs_per_client=max_open_runs_per_client,
             max_completed_runs_per_client=max_completed_runs_per_client,
             resources=frozen,
         )
@@ -473,6 +482,12 @@ class _ResourceServiceState:
         }
         with self._lock:
             self._reclaim_expired_runs()
+            open_runs = sum(
+                run.client_id == client.client_id and run.attestation is None
+                for run in self._runs.values()
+            )
+            if open_runs >= self.config.max_open_runs_per_client:
+                raise _ProtocolError(429, "harness run capacity is exhausted")
             run_id = secrets.token_urlsafe(24)
             while run_id in self._runs:
                 run_id = secrets.token_urlsafe(24)

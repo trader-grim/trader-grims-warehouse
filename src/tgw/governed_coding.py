@@ -19,6 +19,7 @@ from tgw.execution_resources import (
     resource_service_descriptor_hash,
     validate_harness_retrieval_attestation,
     verify_card_resource_service,
+    verify_resource_service_registration,
 )
 from tgw.harness_registry import (
     ProviderHealth,
@@ -149,6 +150,11 @@ def dispatch_role(
             raise ResourceVerificationError("registered resource resolver is unavailable")
         verified_service, verified_catalog = verify_card_resource_service(
             card, resource_service, resource_service_catalog,
+        )
+        if not isinstance(resource_resolver, HTTPRegisteredResourceResolver):
+            raise ResourceVerificationError("registered resource resolver cannot check service health")
+        verify_resource_service_registration(
+            verified_catalog, verified_service, resolver=resource_resolver,
         )
         attestation_key = resource_service_attestation_key(
             verified_catalog, verified_service["id"], verified_service["client_id"],

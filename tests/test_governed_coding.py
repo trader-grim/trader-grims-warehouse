@@ -77,6 +77,10 @@ class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
     def fetch(self, ref):
         return self._delegate.fetch(ref)
 
+    def check_health(self, *, attestation_key_id):
+        if attestation_key_id != TEST_ATTESTATION_KEY_ID:
+            raise ResourceVerificationError("test resource service health identity is invalid")
+
     def verify_harness_retrieval_attestation(self, attestation, **kwargs):
         if attestation != {"attestation_hash": TEST_ATTESTATION_HASH}:
             raise ResourceVerificationError("test retrieval attestation is invalid")
@@ -101,6 +105,11 @@ class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
         return issue_harness_retrieval_attestation(
             payload, signing_private_key=TEST_ATTESTATION_PRIVATE_KEY,
         )
+
+
+class UnhealthyUnitAttestedResourceResolver(UnitAttestedResourceResolver):
+    def check_health(self, *, attestation_key_id):
+        raise ResourceVerificationError("qualified resource service health check failed")
 
 
 def runner(path: Path, *, fail_review=False, overclaim=False):
@@ -183,6 +192,7 @@ def setup(tmp_path, *, fail_review=False, overclaim=False):
 
 def dispatch(registry, health, bound_adapters, role, identity, **kwargs):
     template = kwargs.pop("card_template", card_template("card-" + role))
+    resolver = kwargs.pop("resource_resolver", resource_resolver())
     return dispatch_role(
         registry,
         health,
@@ -191,7 +201,7 @@ def dispatch(registry, health, bound_adapters, role, identity, **kwargs):
         card_template=template,
         execution_identity=identity,
         required_capabilities=["source-mutation"] if role == "implementation" else ["tests"],
-        resource_resolver=resource_resolver(),
+        resource_resolver=resolver,
         resource_service=RESOURCE_SERVICE,
         resource_service_catalog=RESOURCE_SERVICE_CATALOG,
         **kwargs,
@@ -221,6 +231,28 @@ def test_provider_selected_dispatch_returns_hash_bound_role_receipts(tmp_path):
         "reasons": [],
         "receipt_hashes": sorted([implementation["receipt_hash"], review["receipt_hash"], controller["receipt_hash"]]),
     }
+
+
+def test_direct_dispatch_requires_catalog_selected_service_health_before_launch(tmp_path):
+    registry, health, bound_adapters = setup(tmp_path)
+    launched = []
+
+    def should_not_launch(*args, **kwargs):
+        launched.append((args, kwargs))
+        raise AssertionError("dispatch launched after a failed resource service health check")
+
+    receipt = dispatch(
+        registry, health, bound_adapters, "implementation", "run:unhealthy-resource-service",
+        resource_resolver=UnhealthyUnitAttestedResourceResolver(), run=should_not_launch,
+    )
+
+    assert receipt["status"] == "HOLD"
+    assert receipt["outcome"] == "resource-verification"
+    assert receipt["artifacts"] == [{
+        "kind": "resource_verification",
+        "detail": "qualified resource service health check failed",
+    }]
+    assert launched == []
 
 
 def test_failed_review_receipt_blocks_admission(tmp_path):
@@ -295,7 +327,7 @@ def test_fake_nonempty_resource_hash_cannot_produce_a_passing_attested_role(tmp_
     }
 
 
-def test_core_dispatch_rejects_a_runner_without_a_registered_attestation_verifier(tmp_path):
+def test_core_dispatch_rejects_an_in_process_resolver_without_service_health(tmp_path):
     registry, health, bound_adapters = setup(tmp_path)
     receipt = dispatch_role(
         registry,
@@ -310,12 +342,12 @@ def test_core_dispatch_rejects_a_runner_without_a_registered_attestation_verifie
         resource_service_catalog=RESOURCE_SERVICE_CATALOG,
     )
 
-    assert receipt["status"] == "FAIL"
-    assert receipt["harness_retrieval_attestation_hash"] is None
-    assert receipt["artifacts"][-1] == {
-        "kind": "contract_failure",
-        "detail": "registered resource resolver cannot verify harness retrieval attestation",
-    }
+    assert receipt["status"] == "HOLD"
+    assert receipt["outcome"] == "resource-verification"
+    assert receipt["artifacts"] == [{
+        "kind": "resource_verification",
+        "detail": "registered resource resolver cannot check service health",
+    }]
 
 
 def test_same_execution_context_cannot_self_review_for_admission(tmp_path):

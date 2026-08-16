@@ -60,7 +60,10 @@ def _contents():
     }
 
 
-def _config_path(tmp_path, contents=None, *, signing_private_key=None, ttl=60, completed_ttl=60, max_completed=8):
+def _config_path(
+    tmp_path, contents=None, *, signing_private_key=None, ttl=60, completed_ttl=60,
+    max_open=8, max_completed=8,
+):
     contents = _contents() if contents is None else contents
     signing_private_key = signing_private_key or Ed25519PrivateKey.generate()
     exports = tmp_path / "exports"
@@ -74,7 +77,7 @@ def _config_path(tmp_path, contents=None, *, signing_private_key=None, ttl=60, c
     config_path.write_text(
         json.dumps(
             {
-                "schema": "tgw-governed-resource-service-config/v4",
+                "schema": "tgw-governed-resource-service-config/v5",
                 "service_id": "portable-resource-service",
                 "clients": [
                     {
@@ -94,6 +97,7 @@ def _config_path(tmp_path, contents=None, *, signing_private_key=None, ttl=60, c
                 "attestation_private_key_env": "TGW_PORTABLE_RESOURCE_SIGNING_KEY",
                 "harness_run_ttl_seconds": ttl,
                 "completed_run_ttl_seconds": completed_ttl,
+                "max_open_runs_per_client": max_open,
                 "max_completed_runs_per_client": max_completed,
                 "resources": resources,
             }
@@ -317,6 +321,44 @@ def test_service_refuses_bare_resource_reads_before_a_bound_run(tmp_path, monkey
         with pytest.raises(HTTPError) as error:
             _get(endpoint + "/v1/resources/plan%3Ainput", "review-token", run_id=run["run_id"])
         assert error.value.code == 403
+
+
+def test_open_harness_runs_are_bounded_per_authenticated_client(tmp_path, monkeypatch):
+    config_path, contents, signing_private_key = _config_path(tmp_path, max_open=1)
+    config = load_resource_service_config(config_path)
+    monkeypatch.setenv("TGW_PORTABLE_RESOURCE_TOKEN", "test-token")
+    monkeypatch.setenv("TGW_PORTABLE_REVIEW_TOKEN", "review-token")
+    with _server(
+        config,
+        {"portable-implementation-client": "test-token", "portable-review-client": "review-token"},
+        signing_private_key,
+    ) as endpoint:
+        resolver = HTTPRegisteredResourceResolver.from_descriptor(_descriptor(endpoint))
+        review_resolver = HTTPRegisteredResourceResolver.from_descriptor({
+            **_descriptor(endpoint),
+            "client_id": "portable-review-client",
+            "credential_env": "TGW_PORTABLE_REVIEW_TOKEN",
+        })
+        card = _card(contents)
+        receipt = card_resource_receipt(card)
+        first = resolver.begin_harness_run(
+            card_hash=card["card_hash"], role="implementation", execution_identity="portable-service-test",
+            handoff_hash="sha256:" + "1" * 64, resource_receipt_hash=receipt["receipt_hash"],
+            resources=card["bindings"],
+        )
+        saturated_payload = {key: value for key, value in first.items() if key != "run_id"}
+        saturated_payload["handoff_hash"] = "sha256:" + "2" * 64
+        with pytest.raises(HTTPError) as error:
+            _post(endpoint + "/v1/harness-runs", "test-token", saturated_payload)
+        assert error.value.code == 429
+        review = review_resolver.begin_harness_run(
+            card_hash=card["card_hash"], role="independent-review", execution_identity="portable-review-test",
+            handoff_hash="sha256:" + "3" * 64, resource_receipt_hash=receipt["receipt_hash"],
+            resources=card["bindings"],
+        )
+
+    assert first["client_id"] == "portable-implementation-client"
+    assert review["client_id"] == "portable-review-client"
 
 
 def test_completed_attestations_are_retained_only_after_return_and_bounded(tmp_path, monkeypatch):

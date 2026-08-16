@@ -144,6 +144,10 @@ class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
     def fetch(self, ref):
         return self._delegate.fetch(ref)
 
+    def check_health(self, *, attestation_key_id):
+        if attestation_key_id != TEST_ATTESTATION_KEY_ID:
+            raise ResourceVerificationError("test resource service health identity is invalid")
+
     def verify_harness_retrieval_attestation(self, attestation, **kwargs):
         if attestation != {"attestation_hash": TEST_ATTESTATION_HASH}:
             raise ResourceVerificationError("test retrieval attestation is invalid")
