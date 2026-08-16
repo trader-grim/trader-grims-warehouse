@@ -115,6 +115,9 @@ norecursedirs = ["nix", ".git", "__pycache__", "*.egg-info", "systemd"]
 # os.path.expandvars()), so tgw and db each get their own cache under
 # their own home and never write into the worktree tree at all.
 cache_dir = "$HOME/.cache/tgw-pytest"
+markers = [
+    "real_luet: opt-in pinned Luet binary integration coverage (requires TGW_LUET_BINARY)",
+]
 
 [tool.ruff]
 line-length = 200
