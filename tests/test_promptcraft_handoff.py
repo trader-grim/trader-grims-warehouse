@@ -18,6 +18,14 @@ from promptcraft.handoff import (  # noqa: E402
     verify_for_launcher,
 )
 
+RESOURCE_SERVICE = {
+    "schema": "tgw-registered-resource-service/v1",
+    "id": "promptcraft-resource-service",
+    "endpoint": "https://resources.invalid",
+    "credential_env": None,
+    "timeout_seconds": 5,
+}
+
 
 def card():
     def binding(ref, content):
@@ -31,6 +39,10 @@ def card():
             "role": "implementation",
             "selected_provider": "qualified-provider-17",
             "plan_commit": plan_commit,
+            "resource_service": {
+                "id": RESOURCE_SERVICE["id"],
+                "descriptor_hash": canonical_hash(RESOURCE_SERVICE),
+            },
             "bindings": {
                 "plan_input": binding("plan:PP-EXAMPLE@1", "plan input"),
                 "plan_commit": binding("plan-commit:fb9", plan_commit),
@@ -67,7 +79,11 @@ def resource_receipt(bound):
 def craft(bound=None):
     bound = bound or card()
     return craft_handoff(
-        {"card": bound.value, "resource_receipt": resource_receipt(bound)},
+        {
+            "card": bound.value,
+            "resource_receipt": resource_receipt(bound),
+            "resource_service": RESOURCE_SERVICE,
+        },
         receiver_identity="receiver-run-8",
     )
 
@@ -158,7 +174,11 @@ def test_cli_crafts_then_verifies_without_manual_transcription():
     executable = ROOT / "bin" / "promptcraft-handoff"
     crafted = subprocess.run(
         [str(executable), "craft", "--receiver-identity", "receiver-run-8"],
-        input=json.dumps({"card": card().value, "resource_receipt": resource_receipt(card())}),
+        input=json.dumps({
+            "card": card().value,
+            "resource_receipt": resource_receipt(card()),
+            "resource_service": RESOURCE_SERVICE,
+        }),
         text=True,
         capture_output=True,
         check=False,

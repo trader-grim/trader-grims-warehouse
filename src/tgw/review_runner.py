@@ -291,6 +291,10 @@ def run_review(
         "outcome": "satisfied" if passed else "failed",
         "established_conditions": ["reviewed"] if passed else [],
         "artifacts": [{"kind": "semantic_review", "report": report}],
+        # The runner receives the descriptor-bearing handoff, never copied
+        # card resources.  Echoing this checked receipt is required by the
+        # governed-role protocol before a review can be admitted.
+        "resource_receipt_hash": handoff["resource_receipt"]["receipt_hash"],
     }
 
 

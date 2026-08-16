@@ -72,6 +72,16 @@ def _bound_card(
             or _SHA256.fullmatch(binding["hash"]) is None
         ):
             raise GovernedExecutionReceiptError(f"execution card binding {name} is invalid")
+    resource_service = card.get("resource_service")
+    if (
+        not isinstance(resource_service, Mapping)
+        or set(resource_service) != {"id", "descriptor_hash"}
+        or not isinstance(resource_service["id"], str)
+        or not resource_service["id"]
+        or not isinstance(resource_service["descriptor_hash"], str)
+        or _SHA256.fullmatch(resource_service["descriptor_hash"]) is None
+    ):
+        raise GovernedExecutionReceiptError("execution card resource service binding is invalid")
     if bindings["source_tree"]["ref"] != f"git:tree:{source_tree}":
         raise GovernedExecutionReceiptError("execution card source tree does not match candidate")
     return claimed, bindings
@@ -122,6 +132,7 @@ def create_candidate_governed_execution_receipt(
     if (
         role_receipt.get("card_hash") != card_hash
         or role_receipt.get("resource_receipt_hash") != resource_hash
+        or role_receipt.get("harness_resource_receipt_hash") != resource_hash
         or role_receipt.get("selected_provider") != card["selected_provider"]
         or role_receipt.get("role") != card["role"]
     ):

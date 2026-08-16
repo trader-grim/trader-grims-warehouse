@@ -15,6 +15,13 @@ from tgw.governed_execution_receipt import (
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAN_COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
+RESOURCE_SERVICE = {
+    "schema": "tgw-registered-resource-service/v1",
+    "id": "candidate-resource-service",
+    "endpoint": "https://resources.invalid",
+    "credential_env": None,
+    "timeout_seconds": 5,
+}
 
 
 def canonical_hash(value):
@@ -48,6 +55,10 @@ def card(tree):
         "role": "implementation",
         "selected_provider": "candidate-runner",
         "plan_commit": PLAN_COMMIT,
+        "resource_service": {
+            "id": RESOURCE_SERVICE["id"],
+            "descriptor_hash": canonical_hash(RESOURCE_SERVICE),
+        },
         "bindings": {
             "plan_input": binding("plan:input", "Plan input"),
             "plan_commit": binding("plan:commit", PLAN_COMMIT),
@@ -87,6 +98,8 @@ def role_receipt(card_value, resource_value):
         "card_hash": card_value["card_hash"],
         "promptcraft_receipt_hash": "sha256:" + "a" * 64,
         "resource_receipt_hash": resource_value["receipt_hash"],
+        "harness_resource_receipt_hash": resource_value["receipt_hash"],
+        "resource_service_descriptor_hash": canonical_hash(RESOURCE_SERVICE),
         "outcome": "satisfied",
         "established_conditions": ["implemented"],
         "artifacts": [],

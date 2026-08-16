@@ -17,6 +17,14 @@ sys.path.insert(0, str(PROMPTCRAFT))
 
 from promptcraft.handoff import ExecutionCard, craft_handoff  # noqa: E402
 
+RESOURCE_SERVICE = {
+    "schema": "tgw-registered-resource-service/v1",
+    "id": "review-resource-service",
+    "endpoint": "https://resources.invalid",
+    "credential_env": None,
+    "timeout_seconds": 5,
+}
+
 
 def snapshot(tmp_path):
     source = tmp_path / "snapshot"
@@ -37,6 +45,12 @@ def handoff(source):
             "role": "independent-review",
             "selected_provider": "codex-isolated-review-runner",
             "plan_commit": plan_commit,
+            "resource_service": {
+                "id": RESOURCE_SERVICE["id"],
+                "descriptor_hash": "sha256:" + hashlib.sha256(
+                    json.dumps(RESOURCE_SERVICE, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+            },
             "bindings": {
                 "plan_input": binding("plan:p", "plan input"),
                 "plan_commit": binding("plan-commit:fb9", plan_commit),
@@ -65,7 +79,11 @@ def handoff(source):
         "receipt_hash": "sha256:" + hashlib.sha256(json.dumps(receipt_unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
     }
     return craft_handoff(
-        {"card": card.value, "resource_receipt": resource_receipt},
+        {
+            "card": card.value,
+            "resource_receipt": resource_receipt,
+            "resource_service": RESOURCE_SERVICE,
+        },
         receiver_identity="review-context:2",
     )
 
@@ -286,7 +304,8 @@ def simple_runner(path):
         "c={'implementation':['implemented'],"
         "'controller-verification':['controller_verified']}[r]\n"
         "print(json.dumps({'outcome':'satisfied',"
-        "'established_conditions':c,'artifacts':[]}))\n"
+        "'established_conditions':c,'artifacts':[],"
+        "'resource_receipt_hash':h['resource_receipt']['receipt_hash']}))\n"
     )
     path.chmod(0o755)
     return str(path)
@@ -307,7 +326,7 @@ def test_same_vendor_different_isolated_context_is_admissible(tmp_path):
     config = {"commands": {"codex-implement": [local], "controller-verify": [local], "harness-review": wrapper}}
     bound = adapters()
     health = observe_health(registry, coding_config=config, adapters=bound)
-    common = {"registry": registry, "health": health, "adapters": bound, "resource_resolver": resource_resolver(source)}
+    common = {"registry": registry, "health": health, "adapters": bound, "resource_resolver": resource_resolver(source), "resource_service": RESOURCE_SERVICE}
     implementation = dispatch_role(
         **common,
         role="implementation",
@@ -347,7 +366,7 @@ def test_failed_isolated_review_blocks_governed_admission(tmp_path):
     config = {"commands": {"codex-implement": [local], "controller-verify": [local], "harness-review": wrapper}}
     bound = adapters()
     health = observe_health(registry, coding_config=config, adapters=bound)
-    common = {"registry": registry, "health": health, "adapters": bound, "resource_resolver": resource_resolver(source)}
+    common = {"registry": registry, "health": health, "adapters": bound, "resource_resolver": resource_resolver(source), "resource_service": RESOURCE_SERVICE}
     implementation = dispatch_role(**common, role="implementation", card_template=card_template(source, "i"), execution_identity="ctx:i", required_capabilities=["source-mutation"])
     review = dispatch_role(**common, role="independent-review", card_template=card_template(source, "r"), execution_identity="ctx:r", required_capabilities=["isolated-snapshot-review"])
     controller = dispatch_role(**common, role="controller-verification", card_template=card_template(source, "c"), execution_identity="ctx:c", required_capabilities=["tests"])

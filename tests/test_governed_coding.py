@@ -18,6 +18,20 @@ RESOURCE_CONTENT = {
     "auth:a": "authority and conditions",
     "receipt:r": "receipt sink",
 }
+RESOURCE_SERVICE = {
+    "schema": "tgw-registered-resource-service/v1",
+    "id": "unit-resource-service",
+    "endpoint": "https://resources.invalid",
+    "credential_env": None,
+    "timeout_seconds": 5,
+}
+
+
+def service_hash():
+    import json
+    return "sha256:" + hashlib.sha256(
+        json.dumps(RESOURCE_SERVICE, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def runner(path: Path, *, fail_review=False, overclaim=False):
@@ -29,9 +43,12 @@ def runner(path: Path, *, fail_review=False, overclaim=False):
         f"fail_review={fail_review!r}\n"
         f"overclaim={overclaim!r}\n"
         "conditions={'implementation':['implemented'],'independent-review':['reviewed'],'controller-verification':['tested','linted','controller_verified']}[role]\n"
+        "resource_receipt_hash=handoff['resource_receipt']['receipt_hash']\n"
         "if overclaim and role=='implementation': conditions=['reviewed']\n"
-        "if fail_review and role=='independent-review': result={'outcome':'failed','established_conditions':[],'artifacts':[{'kind':'review','verdict':'FAIL'}]}\n"
-        "else: result={'outcome':'satisfied','established_conditions':conditions,'artifacts':[{'kind':'runner','role':role}]}\n"
+        "if fail_review and role=='independent-review':\n"
+        " result={'outcome':'failed','established_conditions':[],'artifacts':[{'kind':'review','verdict':'FAIL'}],'resource_receipt_hash':resource_receipt_hash}\n"
+        "else:\n"
+        " result={'outcome':'satisfied','established_conditions':conditions,'artifacts':[{'kind':'runner','role':role}],'resource_receipt_hash':resource_receipt_hash}\n"
         "print(json.dumps(result))\n"
     )
     path.chmod(0o755)
@@ -57,6 +74,7 @@ def card_template(card_id):
         "card_id": card_id,
         "solution_id": "sha256:solution",
         "plan_commit": PLAN_COMMIT,
+        "resource_service": {"id": RESOURCE_SERVICE["id"], "descriptor_hash": service_hash()},
         "bindings": {
             "plan_input": binding("plan:p"),
             "plan_commit": binding("plan-commit:fb9"),
@@ -98,6 +116,7 @@ def dispatch(registry, health, bound_adapters, role, identity, **kwargs):
         execution_identity=identity,
         required_capabilities=["source-mutation"] if role == "implementation" else ["tests"],
         resource_resolver=resource_resolver(),
+        resource_service=RESOURCE_SERVICE,
         **kwargs,
     )
 

@@ -144,6 +144,13 @@ def test_selection_fields_flow_mechanically_into_promptcraft_card(tmp_path):
     )
     provider_fields = execution_card_provider_fields(selection)
     plan_commit = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
+    resource_service = {
+        "schema": "tgw-registered-resource-service/v1",
+        "id": "registry-resource-service",
+        "endpoint": "https://resources.invalid",
+        "credential_env": None,
+        "timeout_seconds": 5,
+    }
 
     def binding(ref, content):
         return {"ref": ref, "hash": "sha256:" + hashlib.sha256(content.encode()).hexdigest()}
@@ -155,6 +162,12 @@ def test_selection_fields_flow_mechanically_into_promptcraft_card(tmp_path):
             "role": selection["role"],
             **provider_fields,
             "plan_commit": plan_commit,
+            "resource_service": {
+                "id": resource_service["id"],
+                "descriptor_hash": "sha256:" + hashlib.sha256(
+                    json.dumps(resource_service, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+            },
             "bindings": {
                 "plan_input": binding("plan:p", "plan"),
                 "plan_commit": binding("plan-commit:fb9", plan_commit),
@@ -183,7 +196,14 @@ def test_selection_fields_flow_mechanically_into_promptcraft_card(tmp_path):
         "receipt_hash": "sha256:" + hashlib.sha256(json.dumps(receipt_unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
     }
     invocation = verify_for_launcher(
-        craft_handoff({"card": card.value, "resource_receipt": resource_receipt}, receiver_identity="run:1")
+        craft_handoff(
+            {
+                "card": card.value,
+                "resource_receipt": resource_receipt,
+                "resource_service": resource_service,
+            },
+            receiver_identity="run:1",
+        )
     )
     assert invocation["selected_provider"] == selection["selected_provider"]
     assert provider_fields["receiver_profile"] == selection["receiver_profile"]

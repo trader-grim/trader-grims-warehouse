@@ -9,7 +9,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from tgw.execution_resources import HTTPRegisteredResourceResolver, ResourceVerificationError
+from tgw.execution_resources import (
+    HTTPRegisteredResourceResolver,
+    ResourceVerificationError,
+    load_resource_service_catalog,
+    verify_resource_service_registration,
+)
 from tgw.governed_coding import GovernedCodingError, dispatch_role
 from tgw.harness_registry import ProviderRegistryError, load_registry, observe_health
 from tgw.logging import announce_script_run
@@ -43,6 +48,7 @@ def main() -> int:
     parser.add_argument("--coding-config", type=Path, required=True)
     parser.add_argument("--card-template", type=Path, required=True)
     parser.add_argument("--resource-service", type=Path, required=True)
+    parser.add_argument("--resource-service-catalog", type=Path, required=True)
     parser.add_argument("--adapter", action="append", default=[], metavar="NAME=PATH")
     parser.add_argument("--role", choices=("implementation", "independent-review", "controller-verification"), required=True)
     parser.add_argument("--execution-identity", required=True)
@@ -53,8 +59,12 @@ def main() -> int:
         registry = load_registry(args.registry)
         coding_config = _object(args.coding_config, "coding config")
         card_template = _object(args.card_template, "card template")
-        resolver = HTTPRegisteredResourceResolver.from_descriptor(
-            _object(args.resource_service, "registered resource service")
+        resource_service = _object(args.resource_service, "registered resource service")
+        resolver = HTTPRegisteredResourceResolver.from_descriptor(resource_service)
+        resource_service = verify_resource_service_registration(
+            load_resource_service_catalog(args.resource_service_catalog),
+            resource_service,
+            resolver=resolver,
         )
         adapters = _adapters(args.adapter)
         health = observe_health(registry, coding_config=coding_config, adapters=adapters)
@@ -74,6 +84,7 @@ def main() -> int:
             required_capabilities=args.required_capability,
             independent_from=args.independent_from,
             resource_resolver=resolver,
+            resource_service=resource_service,
         )
         print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
         return 0 if receipt["status"] == "PASS" else 2

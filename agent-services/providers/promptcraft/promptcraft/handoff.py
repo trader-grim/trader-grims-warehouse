@@ -26,6 +26,7 @@ CARD_RESOURCE_NAMES = {
     "receipt_sink",
 }
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+RESOURCE_SERVICE_SCHEMA = "tgw-registered-resource-service/v1"
 
 
 class HandoffError(ValueError):
@@ -79,6 +80,7 @@ class ExecutionCard:
             "acceptance",
             "receiver_profile",
             "lease",
+            "resource_service",
             "card_hash",
         }
         missing = sorted(required - set(value))
@@ -105,6 +107,16 @@ class ExecutionCard:
                 raise HandoffError(f"binding {name} hash must be a sha256 content hash")
         if bindings["plan_graph"]["ref"] == bindings["codegraph_snapshot"]["ref"]:
             raise HandoffError("Plan Graph and CodeGraph must have distinct references")
+        service = value["resource_service"]
+        if (
+            not isinstance(service, Mapping)
+            or set(service) != {"id", "descriptor_hash"}
+            or not isinstance(service["id"], str)
+            or not service["id"]
+            or not isinstance(service["descriptor_hash"], str)
+            or _SHA256.fullmatch(service["descriptor_hash"]) is None
+        ):
+            raise HandoffError("resource_service must bind an id and descriptor hash")
         for field in ("authority", "exclusions", "acceptance"):
             if not isinstance(value[field], list) or not all(isinstance(item, str) for item in value[field]):
                 raise HandoffError(f"{field} must be a string list")
@@ -143,15 +155,43 @@ def _verified_resource_receipt(card: ExecutionCard, value: Any) -> Mapping[str, 
     return value
 
 
+def _verified_resource_service(card: ExecutionCard, value: Any) -> Mapping[str, Any]:
+    """Keep the actual registered retrieval endpoint in the launcher handoff.
+
+    Cards bind only an immutable descriptor hash.  The descriptor is transferred
+    mechanically here so that the selected harness, rather than a controller
+    with copied context, can fetch every card-bound resource itself.
+    """
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema", "id", "endpoint", "credential_env", "timeout_seconds",
+    }:
+        raise HandoffError("registered resource service descriptor is invalid")
+    if value["schema"] != RESOURCE_SERVICE_SCHEMA:
+        raise HandoffError("registered resource service descriptor schema is invalid")
+    if not all(isinstance(value[field], str) and value[field] for field in ("id", "endpoint")):
+        raise HandoffError("registered resource service descriptor identity is invalid")
+    if value["credential_env"] is not None and not isinstance(value["credential_env"], str):
+        raise HandoffError("registered resource service descriptor credential is invalid")
+    if not isinstance(value["timeout_seconds"], int) or isinstance(value["timeout_seconds"], bool):
+        raise HandoffError("registered resource service descriptor timeout is invalid")
+    descriptor_hash = _hash(value)
+    binding = card.value["resource_service"]
+    if binding["id"] != value["id"] or binding["descriptor_hash"] != descriptor_hash:
+        raise HandoffError("registered resource service descriptor is not card-bound")
+    return value
+
+
 def craft_handoff(value: Mapping[str, Any], *, receiver_identity: str) -> dict[str, Any]:
     """Adapt a verified card and return one immutable mechanical handoff."""
 
     if not receiver_identity:
         raise HandoffError("receiver identity is required")
-    if set(value) != {"card", "resource_receipt"}:
-        raise HandoffError("craft input must contain card and resource receipt")
+    if set(value) != {"card", "resource_receipt", "resource_service"}:
+        raise HandoffError("craft input must contain card, resource receipt, and resource service")
     card = ExecutionCard.from_mapping(value["card"])
     resource_receipt = _verified_resource_receipt(card, value["resource_receipt"])
+    resource_service = _verified_resource_service(card, value["resource_service"])
     profile_id = str(card.value["receiver_profile"]["id"])
     profile = harness_profile(profile_id)
     bindings = card.value["bindings"]
@@ -161,6 +201,7 @@ def craft_handoff(value: Mapping[str, Any], *, receiver_identity: str) -> dict[s
             f"Role: {card.value['role']}",
             f"Selected provider: {card.value['selected_provider']}",
             f"Plan commit: {card.value['plan_commit']}",
+            f"Registered resource service: {resource_service['id']} ({card.value['resource_service']['descriptor_hash']})",
             "Retrieve and verify these authoritative resources:",
             *[
                 f"- {name}: {binding['ref']} ({binding['hash']})"
@@ -205,6 +246,7 @@ def craft_handoff(value: Mapping[str, Any], *, receiver_identity: str) -> dict[s
         "schema": HANDOFF_SCHEMA,
         "card": card.value,
         "resource_receipt": resource_receipt,
+        "resource_service": resource_service,
         "instruction": instruction,
         "receipt": receipt,
     }
@@ -218,11 +260,12 @@ def verify_for_launcher(
 
     if handoff.get("schema") != HANDOFF_SCHEMA:
         raise HandoffError(f"expected {HANDOFF_SCHEMA}")
-    if set(handoff) != {"schema", "card", "resource_receipt", "instruction", "receipt", "handoff_hash"}:
+    if set(handoff) != {"schema", "card", "resource_receipt", "resource_service", "instruction", "receipt", "handoff_hash"}:
         raise HandoffError("launcher handoff fields are invalid")
     _verify_hash(handoff, "handoff_hash")
     card = ExecutionCard.from_mapping(handoff["card"])
     resource_receipt = _verified_resource_receipt(card, handoff.get("resource_receipt"))
+    resource_service = _verified_resource_service(card, handoff.get("resource_service"))
     receipt = handoff.get("receipt")
     if not isinstance(receipt, Mapping) or receipt.get("schema") != RECEIPT_SCHEMA:
         raise HandoffError("invalid Promptcraft receipt")
@@ -278,6 +321,7 @@ def verify_for_launcher(
         "receiver_identity": receipt["receiver_identity"],
         "instruction": instruction,
         "receipt_sink": card.value["bindings"]["receipt_sink"]["ref"],
+        "resource_service": resource_service,
         "resource_receipt_hash": resource_receipt["receipt_hash"],
         "lease": card.value["lease"],
     }
