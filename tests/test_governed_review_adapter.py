@@ -187,7 +187,7 @@ def _context_grant(identity, handoff, skill_contract_hash, *, now=None):
     now = now or datetime.now(timezone.utc)
     issued = now - timedelta(seconds=1)
     request = {
-        "schema": "tgw-context-review-broker-request/v1",
+        "schema": "tgw-context-review-broker-request/v2",
         "client_id": identity["context_bundle_service"]["client_id"],
         "challenge": "c" * 64,
         "skill_contract_hash": skill_contract_hash,
@@ -199,6 +199,12 @@ def _context_grant(identity, handoff, skill_contract_hash, *, now=None):
         ),
         "handoff_hash": handoff["handoff_hash"],
         "resource_receipt_hash": handoff["resource_receipt"]["receipt_hash"],
+        "resource_service_catalog_ref": identity[
+            "context_bundle_service"
+        ]["resource_service_catalog_ref"],
+        "resource_service_catalog_hash": identity[
+            "context_bundle_service"
+        ]["resource_service_catalog_hash"],
         "resources": {
             name: handoff["card"]["bindings"][name]
             for name in sorted(handoff["card"]["bindings"])

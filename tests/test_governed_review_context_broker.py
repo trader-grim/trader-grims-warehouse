@@ -19,10 +19,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from tgw import context_mcp_server
 from tgw.execution_resources import (
     CARD_RESOURCE_NAMES,
+    RESOURCE_SERVICE_CAPABILITIES,
     HTTPRegisteredResourceResolver,
     card_resource_receipt,
     content_hash,
     ed25519_public_key,
+    resource_service_catalog_hash,
+    resource_service_descriptor_hash,
     validate_harness_retrieval_attestation,
 )
 from tgw.governed_resource_service import (
@@ -137,6 +140,19 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
             "endpoint": f"http://127.0.0.1:{server.server_port}",
             "credential_env": "BROKER_TOKEN", "timeout_seconds": 5,
         }
+        backend_catalog = {
+            "schema": "tgw-registered-resource-service-catalog/v3",
+            "catalog_ref": "catalog:review-backend",
+            "plan_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+            "services": [{
+                "id": descriptor["id"], "client_id": descriptor["client_id"],
+                "descriptor_hash": resource_service_descriptor_hash(descriptor),
+                "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
+                "attestation_key_id": "review-source-key-1",
+                "attestation_public_key": ed25519_public_key(backend_private_key),
+            }],
+        }
+        backend_catalog_hash = resource_service_catalog_hash(backend_catalog)
         monkeypatch.setenv("BROKER_TOKEN", "backend-secret")
         backend = HTTPRegisteredResourceResolver.from_descriptor(descriptor)
         broker_clock = [0.0]
@@ -146,6 +162,8 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
             backend_execution_identity="review-context-broker-service",
             backend_attestation_key_id="review-source-key-1",
             backend_attestation_public_key=ed25519_public_key(backend_private_key),
+            backend_catalog_ref=backend_catalog["catalog_ref"],
+            backend_catalog_hash=backend_catalog_hash,
             service_id="review-context-service", client_id="review-provider",
             attestation_key_id="review-context-key-1",
             signing_private_key=broker_private_key,
@@ -163,7 +181,7 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
         handoff_hash = "sha256:" + "1" * 64
         skill_hash = "sha256:" + "2" * 64
         broker_request = {
-            "schema": "tgw-context-review-broker-request/v1",
+            "schema": "tgw-context-review-broker-request/v2",
             "client_id": "review-provider", "challenge": challenge,
             "skill_contract_hash": skill_hash,
             "card_hash": card["card_hash"], "role": "independent-review",
@@ -173,6 +191,8 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
             ),
             "handoff_hash": handoff_hash,
             "resource_receipt_hash": resource_receipt["receipt_hash"],
+            "resource_service_catalog_ref": backend_catalog["catalog_ref"],
+            "resource_service_catalog_hash": backend_catalog_hash,
             "resources": bindings,
             "issued_at": (grant_now - timedelta(seconds=1)).isoformat(),
             "not_before": (grant_now - timedelta(seconds=1)).isoformat(),
@@ -204,11 +224,13 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
         monkeypatch.setenv("BROKER_REQUEST", "config-request-secret")
         monkeypatch.setenv("BROKER_READBACK", "config-readback-secret")
         broker_config = {
-            "schema": "tgw-context-review-broker-config/v1",
+            "schema": "tgw-context-review-broker-config/v2",
             "backend_descriptor": descriptor,
             "backend_execution_identity": "review-context-broker-service",
             "backend_attestation_key_id": "review-source-key-1",
             "backend_attestation_public_key": ed25519_public_key(backend_private_key),
+            "backend_resource_service_catalog": backend_catalog,
+            "backend_resource_service_catalog_hash": backend_catalog_hash,
             "service_id": "review-context-service", "client_id": "review-provider",
             "attestation_key_id": "review-context-key-1",
             "attestation_public_key": ed25519_public_key(broker_private_key),
@@ -221,10 +243,47 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
                 "client_id": "review-provider", "credential_env": "BROKER_READBACK",
             }],
         }
+        wrong_backend_key = json.loads(json.dumps(broker_config))
+        wrong_backend_key["backend_attestation_public_key"] = ed25519_public_key(
+            Ed25519PrivateKey.generate()
+        )
+        with pytest.MonkeyPatch.context() as startup_guard:
+            startup_guard.setattr(
+                HTTPRegisteredResourceResolver,
+                "from_descriptor",
+                classmethod(lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("backend work preceded catalog key validation")
+                )),
+            )
+            with pytest.raises(ReviewContextBrokerError, match="backend is invalid"):
+                broker_server_from_config(
+                    wrong_backend_key, environment=os.environ,
+                    host="127.0.0.1", port=0,
+                )
         configured = broker_server_from_config(
             broker_config, environment=os.environ, host="127.0.0.1", port=0,
         )
+        configured_thread = threading.Thread(
+            target=configured.serve_forever, daemon=True,
+        )
+        configured_thread.start()
+        configured_endpoint = f"http://127.0.0.1:{configured.server_port}"
+        configured_request = Request(
+            configured_endpoint + "/v1/review-context",
+            data=json.dumps(broker_request).encode(), method="POST",
+            headers={
+                "Authorization": "Bearer config-request-secret",
+                "Content-Type": "application/json",
+            },
+        )
+        configured_bundle = json.loads(urlopen(configured_request).read())
+        assert configured_bundle["challenge"] == challenge
+        with pytest.raises(HTTPError) as configured_replay:
+            urlopen(configured_request)
+        assert configured_replay.value.code == 404
+        configured.shutdown()
         configured.server_close()
+        configured_thread.join(timeout=5)
         wrong_key = json.loads(json.dumps(broker_config))
         wrong_key["attestation_public_key"] = ed25519_public_key(
             Ed25519PrivateKey.generate()
@@ -245,6 +304,53 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
             broker_server_from_config(
                 malformed_backend, environment=os.environ, host="127.0.0.1", port=0,
             )
+        wrong_catalog_hash = {
+            **broker_config,
+            "backend_resource_service_catalog_hash": "sha256:" + "0" * 64,
+        }
+        with pytest.raises(ReviewContextBrokerError, match="backend is invalid"):
+            broker_server_from_config(
+                wrong_catalog_hash, environment=os.environ, host="127.0.0.1", port=0,
+            )
+        mutated_catalog = json.loads(json.dumps(broker_config))
+        mutated_catalog["backend_resource_service_catalog"]["services"][0][
+            "descriptor_hash"
+        ] = "sha256:" + "1" * 64
+        mutated_catalog["backend_resource_service_catalog_hash"] = (
+            resource_service_catalog_hash(
+                mutated_catalog["backend_resource_service_catalog"]
+            )
+        )
+        with pytest.raises(ReviewContextBrokerError, match="backend is invalid"):
+            broker_server_from_config(
+                mutated_catalog, environment=os.environ, host="127.0.0.1", port=0,
+            )
+        substituted_catalog = json.loads(json.dumps(broker_config))
+        substituted_public_key = ed25519_public_key(Ed25519PrivateKey.generate())
+        substituted_catalog["backend_attestation_public_key"] = substituted_public_key
+        substituted_catalog["backend_resource_service_catalog"]["services"][0][
+            "attestation_public_key"
+        ] = substituted_public_key
+        substituted_catalog["backend_resource_service_catalog_hash"] = (
+            resource_service_catalog_hash(
+                substituted_catalog["backend_resource_service_catalog"]
+            )
+        )
+        with pytest.MonkeyPatch.context() as startup_guard:
+            startup_guard.setattr(
+                HTTPRegisteredResourceResolver,
+                "from_descriptor",
+                classmethod(lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("backend work preceded card catalog validation")
+                )),
+            )
+            with pytest.raises(
+                ReviewContextBrokerError, match="request grant is invalid",
+            ):
+                broker_server_from_config(
+                    substituted_catalog, environment=os.environ,
+                    host="127.0.0.1", port=0,
+                )
         with pytest.raises(ReviewContextBrokerError, match="credentials are invalid"):
             create_review_context_broker_server(
                 broker, request_grants={"shared": broker_request},
@@ -318,6 +424,12 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
         monkeypatch.setenv("TGW_CONTEXT_REVIEW_BROKER_ENDPOINT", broker_endpoint)
         monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_ID", "review-context-service")
         monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_CLIENT_ID", "review-provider")
+        monkeypatch.setenv(
+            "TGW_CONTEXT_RESOURCE_SERVICE_CATALOG_REF", backend_catalog["catalog_ref"],
+        )
+        monkeypatch.setenv(
+            "TGW_CONTEXT_RESOURCE_SERVICE_CATALOG_HASH", backend_catalog_hash,
+        )
         monkeypatch.setenv("TGW_CONTEXT_ATTESTATION_KEY_ID", "review-context-key-1")
         monkeypatch.setenv(
             "TGW_CONTEXT_ATTESTATION_PUBLIC_KEY",

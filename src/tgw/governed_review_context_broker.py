@@ -37,11 +37,14 @@ from tgw.execution_resources import (
     HTTPRegisteredResourceResolver,
     ResourceVerificationError,
     issue_harness_retrieval_attestation,
+    resource_service_attestation_key,
+    resource_service_catalog_hash,
+    verify_resource_service_registration,
 )
 
-BROKER_REQUEST_SCHEMA = "tgw-context-review-broker-request/v1"
+BROKER_REQUEST_SCHEMA = "tgw-context-review-broker-request/v2"
 BROKER_BUNDLE_SCHEMA = "tgw-context-review-resource-bundle/v1"
-BROKER_CONFIG_SCHEMA = "tgw-context-review-broker-config/v1"
+BROKER_CONFIG_SCHEMA = "tgw-context-review-broker-config/v2"
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_BUNDLE_BYTES = 64 * 1024 * 1024
 MAX_GRANT_WINDOW_SECONDS = 900
@@ -63,6 +66,7 @@ class PrivilegedReviewContextBroker:
         backend_execution_identity: str,
         backend_attestation_key_id: str,
         backend_attestation_public_key: str,
+        backend_catalog_ref: str, backend_catalog_hash: str,
         service_id: str, client_id: str, attestation_key_id: str,
         signing_private_key: Ed25519PrivateKey | str | bytes,
         max_retained_runs: int = 1024,
@@ -74,6 +78,8 @@ class PrivilegedReviewContextBroker:
             not backend_execution_identity
             or not backend_attestation_key_id
             or not backend_attestation_public_key
+            or not backend_catalog_ref
+            or not backend_catalog_hash
             or not service_id
             or not client_id
             or not attestation_key_id
@@ -87,6 +93,8 @@ class PrivilegedReviewContextBroker:
         self._backend_execution_identity = backend_execution_identity
         self._backend_attestation_key_id = backend_attestation_key_id
         self._backend_attestation_public_key = backend_attestation_public_key
+        self._backend_catalog_ref = backend_catalog_ref
+        self._backend_catalog_hash = backend_catalog_hash
         self._service_id = service_id
         self._client_id = client_id
         self._attestation_key_id = attestation_key_id
@@ -102,12 +110,17 @@ class PrivilegedReviewContextBroker:
     def client_id(self) -> str:
         return self._client_id
 
+    @property
+    def backend_catalog_binding(self) -> tuple[str, str]:
+        return self._backend_catalog_ref, self._backend_catalog_hash
+
     @staticmethod
     def _request(value: Mapping[str, Any]) -> dict[str, Any]:
         required = {
             "schema", "card_hash", "role", "execution_identity",
             "handoff_hash", "resource_receipt_hash", "resources",
             "challenge", "skill_contract_hash", "client_id",
+            "resource_service_catalog_ref", "resource_service_catalog_hash",
             "issued_at", "not_before", "expires_at",
         }
         if (
@@ -120,6 +133,7 @@ class PrivilegedReviewContextBroker:
                 for name in (
                     "card_hash", "execution_identity", "handoff_hash",
                     "resource_receipt_hash", "client_id",
+                    "resource_service_catalog_ref", "resource_service_catalog_hash",
                 )
             )
             or not isinstance(value.get("challenge"), str)
@@ -127,6 +141,7 @@ class PrivilegedReviewContextBroker:
             or not set(value["challenge"]) <= set("0123456789abcdef")
             or not isinstance(value.get("skill_contract_hash"), str)
             or not value["skill_contract_hash"].startswith("sha256:")
+            or not value["resource_service_catalog_hash"].startswith("sha256:")
             or not isinstance(value.get("resources"), Mapping)
             or set(value["resources"]) != CARD_RESOURCE_NAMES
             or not all(
@@ -346,10 +361,16 @@ def create_review_context_broker_server(
         credential: PrivilegedReviewContextBroker._request(value)
         for credential, value in request_grants.items()
     }
+    catalog_ref, catalog_hash = broker.backend_catalog_binding
     if (
         not grants
         or any(not isinstance(key, str) or not key for key in grants)
         or any(grant["client_id"] != broker.client_id for grant in grants.values())
+        or any(
+            grant["resource_service_catalog_ref"] != catalog_ref
+            or grant["resource_service_catalog_hash"] != catalog_hash
+            for grant in grants.values()
+        )
         or set(readback_credentials) != {broker.client_id}
         or any(
             not isinstance(client, str) or not client
@@ -469,6 +490,8 @@ def broker_server_from_config(
     required = {
         "schema", "backend_descriptor", "backend_execution_identity",
         "backend_attestation_key_id", "backend_attestation_public_key",
+        "backend_resource_service_catalog",
+        "backend_resource_service_catalog_hash",
         "service_id", "client_id", "attestation_key_id",
         "attestation_public_key",
         "signing_private_key_env", "request_grants", "readback_clients",
@@ -504,12 +527,27 @@ def broker_server_from_config(
     ):
         raise ReviewContextBrokerError("review context broker signing identity differs")
     try:
-        backend = HTTPRegisteredResourceResolver.from_descriptor(
-            value["backend_descriptor"], environment=environment,
+        backend_catalog = value["backend_resource_service_catalog"]
+        backend_catalog_hash = resource_service_catalog_hash(backend_catalog)
+        if backend_catalog_hash != value["backend_resource_service_catalog_hash"]:
+            raise ResourceVerificationError(
+                "registered resource service catalog hash differs"
+            )
+        backend_descriptor = verify_resource_service_registration(
+            backend_catalog, value["backend_descriptor"],
         )
-        backend.check_health(
-            attestation_key_id=str(value["backend_attestation_key_id"]),
+        backend_key = resource_service_attestation_key(
+            backend_catalog, backend_descriptor["id"], backend_descriptor["client_id"],
         )
+        if (
+            backend_key["attestation_key_id"]
+            != value["backend_attestation_key_id"]
+            or backend_key["attestation_public_key"]
+            != value["backend_attestation_public_key"]
+        ):
+            raise ResourceVerificationError(
+                "registered resource service attestation identity differs"
+            )
     except ResourceVerificationError as exc:
         raise ReviewContextBrokerError("review context broker backend is invalid") from exc
     grants_value = value.get("request_grants")
@@ -522,7 +560,15 @@ def broker_server_from_config(
             raise ReviewContextBrokerError("review context broker request grant is invalid")
         credential = environment.get(str(item["credential_env"]), "")
         request = dict(item["request"]) if isinstance(item["request"], Mapping) else None
-        if not credential or request is None or request.get("client_id") != item["client_id"] or credential in request_grants:
+        if (
+            not credential
+            or request is None
+            or request.get("client_id") != item["client_id"]
+            or request.get("resource_service_catalog_ref")
+            != backend_catalog["catalog_ref"]
+            or request.get("resource_service_catalog_hash") != backend_catalog_hash
+            or credential in request_grants
+        ):
             raise ReviewContextBrokerError("review context broker request grant is invalid")
         request_grants[credential] = request
     readback_credentials = {}
@@ -539,11 +585,22 @@ def broker_server_from_config(
         readback_credentials[str(item["client_id"])] = credential
     if set(readback_credentials) != {str(value["client_id"])}:
         raise ReviewContextBrokerError("review context broker readback coverage is invalid")
+    try:
+        backend = HTTPRegisteredResourceResolver.from_descriptor(
+            backend_descriptor, environment=environment,
+        )
+        backend.check_health(
+            attestation_key_id=str(value["backend_attestation_key_id"]),
+        )
+    except ResourceVerificationError as exc:
+        raise ReviewContextBrokerError("review context broker backend is invalid") from exc
     broker = PrivilegedReviewContextBroker(
         backend=backend,
         backend_execution_identity=str(value["backend_execution_identity"]),
         backend_attestation_key_id=str(value["backend_attestation_key_id"]),
         backend_attestation_public_key=str(value["backend_attestation_public_key"]),
+        backend_catalog_ref=str(backend_catalog["catalog_ref"]),
+        backend_catalog_hash=backend_catalog_hash,
         service_id=str(value["service_id"]), client_id=str(value["client_id"]),
         attestation_key_id=str(value["attestation_key_id"]),
         signing_private_key=signing_private_key,

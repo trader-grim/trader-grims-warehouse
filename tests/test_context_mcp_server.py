@@ -178,6 +178,10 @@ def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):
     monkeypatch.setenv("TGW_CONTEXT_REVIEW_BROKER_ENDPOINT", "https://broker.invalid")
     monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_ID", "review-resources")
     monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_CLIENT_ID", "review-client")
+    monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_CATALOG_REF", "catalog:test")
+    monkeypatch.setenv(
+        "TGW_CONTEXT_RESOURCE_SERVICE_CATALOG_HASH", "sha256:" + "f" * 64,
+    )
     monkeypatch.setenv(
         "TGW_CONTEXT_REVIEW_SKILL_CONTRACT_HASH", "sha256:" + "e" * 64,
     )
@@ -187,7 +191,7 @@ def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):
     monkeypatch.setenv("TGW_CONTEXT_ATTESTATION_PUBLIC_KEY", public_key)
     now = datetime.now(timezone.utc)
     grant_request = {
-        "schema": "tgw-context-review-broker-request/v1",
+        "schema": "tgw-context-review-broker-request/v2",
         "client_id": "review-client", "challenge": "c" * 64,
         "skill_contract_hash": "sha256:" + "e" * 64,
         "card_hash": card["card_hash"], "role": "independent-review",
@@ -196,6 +200,8 @@ def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):
         ),
         "handoff_hash": "sha256:" + "d" * 64,
         "resource_receipt_hash": receipt["receipt_hash"],
+        "resource_service_catalog_ref": "catalog:test",
+        "resource_service_catalog_hash": "sha256:" + "f" * 64,
         "resources": bindings,
         "issued_at": (now - timedelta(seconds=1)).isoformat(),
         "not_before": (now - timedelta(seconds=1)).isoformat(),

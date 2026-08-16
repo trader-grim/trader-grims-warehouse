@@ -227,7 +227,11 @@ tgw-governed-review-context-broker \
 Its root-owned config carries only environment-variable names for secrets and
 one exact, fresh, time-bounded request grant. Startup derives the broker public
 key from the loaded private key and requires exact equality with the configured
-key, validates backend health/key identity, and requires unique, disjoint
+key. The same protected config embeds the exact qualified resource-service
+catalog and its hash. Startup requires the backend descriptor, service/client,
+capabilities, key ID, and Ed25519 public key to equal that catalog entry, then
+requires every preissued grant to carry the same card-bound catalog ref/hash,
+before backend health or server/grant arming. It also requires unique, disjoint
 request/readback credentials with exact client coverage. The request credential is consumed once; abandoned
 bundles expire, and the exact client-bound readback is also consumed once.
 The governed MCP daemon is separately started with

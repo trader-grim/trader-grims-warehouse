@@ -76,7 +76,8 @@ def _validate_context_grant(
         "schema", "client_id", "challenge", "skill_contract_hash",
         "card_hash", "role", "execution_identity", "handoff_hash",
         "resource_receipt_hash", "resources", "issued_at", "not_before",
-        "expires_at",
+        "expires_at", "resource_service_catalog_ref",
+        "resource_service_catalog_hash",
     }
     try:
         issued_at, not_before, expires_at = (
@@ -88,7 +89,7 @@ def _validate_context_grant(
     sandbox = provider_identity["sandbox_identity"]
     service = provider_identity["context_bundle_service"]
     expected = {
-        "schema": "tgw-context-review-broker-request/v1",
+        "schema": "tgw-context-review-broker-request/v2",
         "client_id": service["client_id"],
         "challenge": request.get("challenge"),
         "skill_contract_hash": skill_contract_hash,
@@ -98,6 +99,8 @@ def _validate_context_grant(
         ),
         "handoff_hash": handoff["handoff_hash"],
         "resource_receipt_hash": handoff["resource_receipt"]["receipt_hash"],
+        "resource_service_catalog_ref": service["resource_service_catalog_ref"],
+        "resource_service_catalog_hash": service["resource_service_catalog_hash"],
         "resources": {
             name: card["bindings"][name] for name in sorted(CARD_RESOURCE_NAMES)
         },

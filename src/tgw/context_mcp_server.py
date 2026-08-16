@@ -398,7 +398,7 @@ def _review_context_run(
         broker_factory = broker_factory or HTTPReviewContextBrokerClient
         broker = broker_factory(os.environ.get("TGW_CONTEXT_REVIEW_BROKER_ENDPOINT", ""))
         expected_request = {
-            "schema": "tgw-context-review-broker-request/v1",
+            "schema": "tgw-context-review-broker-request/v2",
             "client_id": client_id,
             "challenge": challenge,
             "skill_contract_hash": skill_contract_hash,
@@ -408,6 +408,12 @@ def _review_context_run(
             ),
             "handoff_hash": handoff_hash,
             "resource_receipt_hash": resource_receipt_hash,
+            "resource_service_catalog_ref": os.environ.get(
+                "TGW_CONTEXT_RESOURCE_SERVICE_CATALOG_REF", "",
+            ),
+            "resource_service_catalog_hash": os.environ.get(
+                "TGW_CONTEXT_RESOURCE_SERVICE_CATALOG_HASH", "",
+            ),
             "resources": {
                 name: card["bindings"][name] for name in sorted(CARD_RESOURCE_NAMES)
             },
