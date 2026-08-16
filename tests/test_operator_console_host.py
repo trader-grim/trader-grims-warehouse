@@ -187,6 +187,7 @@ def test_allowlisted_bootstrap_provider_sends_only_contract_binding(monkeypatch)
     import tgw.bootstrap_host_integration as host
 
     captured: dict[str, object] = {}
+    opener_handlers: list[object] = []
     binding = {
         "bootstrap_contract_ref": "candidate:" + "a" * 40 + ":bootstrap-deployment:v2",
         "bootstrap_contract_hash": "sha256:" + "b" * 64,
@@ -233,7 +234,16 @@ def test_allowlisted_bootstrap_provider_sends_only_contract_binding(monkeypatch)
             return _Response()
 
     monkeypatch.setenv("TGW_BOOTSTRAP_PROVIDER_TOKEN", "fixture-token")
-    monkeypatch.setattr(host, "build_opener", lambda *_: _Opener())
+    monkeypatch.setenv("http_proxy", "http://proxy.example.invalid:8080")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example.invalid:8080")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+
+    def no_proxy_opener(*handlers: object) -> _Opener:
+        opener_handlers.extend(handlers)
+        return _Opener()
+
+    monkeypatch.setattr(host, "build_opener", no_proxy_opener)
     provider = configured_bootstrap_deployment_provider({
         "bootstrap_provider_binding": {
             "schema": "tgw-bootstrap-provider-binding/v1",
@@ -254,6 +264,7 @@ def test_allowlisted_bootstrap_provider_sends_only_contract_binding(monkeypatch)
         "authorization": "Bearer fixture-token",
         "timeout": 9,
     }
+    assert any(isinstance(handler, host.ProxyHandler) and handler.proxies == {} for handler in opener_handlers)
     # An endpoint that can echo metadata but does not possess the pinned key
     # cannot make a bootstrap provider result authoritative.
     signing_key[0] = Ed25519PrivateKey.generate()

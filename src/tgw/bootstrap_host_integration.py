@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -119,7 +119,7 @@ class _ConfiguredBootstrapHttpProvider:
             method="POST",
         )
         try:
-            with build_opener(_NoRedirect()).open(request, timeout=self.timeout_seconds) as response:  # nosec: fixed host provider binding
+            with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=self.timeout_seconds) as response:  # nosec: fixed host provider binding
                 if response.status != 200:
                     raise BootstrapHostIntegrationError("bootstrap provider returned a non-success status")
                 raw = response.read(1024 * 1024 + 1)
