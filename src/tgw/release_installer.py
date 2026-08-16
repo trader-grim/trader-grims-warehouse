@@ -18,10 +18,11 @@ import tarfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 SCHEMA = "tgw-release-manifest-v1"
 RECEIPT_SCHEMA = "tgw-immutable-release-selection-v1"
+RUNTIME_SCHEMA = "tgw-release-runtime-files-v1"
 _HEX = re.compile(r"^[0-9a-f]+$")
 _GENERATION = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 
@@ -109,6 +110,34 @@ def _generation(value: str) -> str:
     if not _GENERATION.fullmatch(value):
         raise ReleaseError("unsafe generation name")
     return value
+
+
+def runtime_manifest_identity(
+    generation: str, files: Mapping[str, str],
+) -> dict[str, Any]:
+    """Return the exact composite overlay manifest bound to one generation."""
+    generation = _generation(generation)
+    normalized: dict[str, str] = {}
+    for relative, digest in files.items():
+        path = PurePosixPath(str(relative))
+        if (
+            path.is_absolute() or ".." in path.parts or not path.parts
+            or path.parts[0] != "config" or len(str(digest)) != 64
+            or not _HEX.fullmatch(str(digest))
+        ):
+            raise ReleaseError("runtime manifest input is invalid")
+        normalized[path.as_posix()] = str(digest)
+    if not normalized:
+        raise ReleaseError("runtime manifest input is absent")
+    unsigned = {
+        "schema": RUNTIME_SCHEMA,
+        "generation": generation,
+        "files": dict(sorted(normalized.items())),
+    }
+    return {
+        **unsigned,
+        "manifest_sha256": hashlib.sha256(_canonical(unsigned)).hexdigest(),
+    }
 
 
 def _layout(root: Path) -> None:
@@ -271,19 +300,138 @@ def verify(root: Path, generation: str) -> dict[str, Any]:
     expected = manifest.get("files")
     if not isinstance(expected, dict):
         raise ReleaseError("release files manifest is invalid")
+    runtime_manifest_path = release / ".runtime-manifest.json"
+    runtime_files: dict[str, str] = {}
+    runtime_manifest_hash: str | None = None
+    if runtime_manifest_path.exists():
+        runtime = _read_json(runtime_manifest_path)
+        if (
+            set(runtime) != {"schema", "generation", "files", "manifest_sha256"}
+            or runtime.get("schema") != RUNTIME_SCHEMA
+            or runtime.get("generation") != generation
+            or not isinstance(runtime.get("files"), dict)
+        ):
+            raise ReleaseError("release runtime manifest is invalid")
+        unsigned_runtime = dict(runtime)
+        runtime_manifest_hash = unsigned_runtime.pop("manifest_sha256")
+        if runtime_manifest_hash != hashlib.sha256(_canonical(unsigned_runtime)).hexdigest():
+            raise ReleaseError("release runtime manifest hash mismatch")
+        for relative, digest in runtime["files"].items():
+            runtime_path = PurePosixPath(str(relative))
+            if runtime_path.is_absolute() or ".." in runtime_path.parts or not runtime_path.parts or not isinstance(digest, str) or len(digest) != 64 or not _HEX.fullmatch(digest):
+                raise ReleaseError("release runtime file binding is invalid")
+        runtime_files = dict(runtime["files"])
     actual: dict[str, str] = {}
+    actual_runtime: dict[str, str] = {}
     for path in release.rglob("*"):
         relative = path.relative_to(release).as_posix()
         if path.is_symlink() or stat.S_IMODE(path.stat().st_mode) & 0o222:
             raise ReleaseError(f"mutable or linked release path: {relative}")
-        if path.is_file() and relative != ".release-manifest.json":
-            actual[relative] = _digest(path)
+        if path.is_file() and relative not in {".release-manifest.json", ".runtime-manifest.json"}:
+            if relative in runtime_files:
+                actual_runtime[relative] = _digest(path)
+            else:
+                actual[relative] = _digest(path)
     if actual != expected:
         raise ReleaseError("release content does not match manifest")
     content_hash = hashlib.sha256(_canonical(dict(sorted(actual.items())))).hexdigest()
     if content_hash != manifest.get("content_manifest_sha256"):
         raise ReleaseError("release content hash mismatch")
-    return {"generation": generation, "file_count": len(actual), "status": "PASS"}
+    if actual_runtime != runtime_files:
+        raise ReleaseError("release runtime content does not match manifest")
+    return {
+        "generation": generation, "file_count": len(actual), "status": "PASS",
+        "runtime_manifest_sha256": runtime_manifest_hash,
+    }
+
+
+def install_runtime_files(root: Path, generation: str, files: Mapping[str, bytes]) -> dict[str, Any]:
+    """Install exact host-owned config before an immutable generation is selected."""
+    generation = _generation(generation)
+    if not isinstance(files, Mapping) or not files:
+        raise ReleaseError("runtime files are absent")
+    normalized: dict[str, bytes] = {}
+    for relative, content in files.items():
+        path = PurePosixPath(str(relative))
+        if (
+            path.is_absolute() or ".." in path.parts or not path.parts or path.parts[0] != "config"
+            or not isinstance(content, bytes) or not content or len(content) > 1024 * 1024
+        ):
+            raise ReleaseError("runtime file is outside the exact config namespace")
+        normalized[path.as_posix()] = content
+    with _lock(root):
+        if current_generation(root) == generation:
+            raise ReleaseError("runtime files cannot be changed after generation selection")
+        verify(root, generation)
+        release = root / "releases" / generation
+        manifest_path = release / ".runtime-manifest.json"
+        expected_files = {path: hashlib.sha256(content).hexdigest() for path, content in sorted(normalized.items())}
+        runtime_manifest = runtime_manifest_identity(generation, expected_files)
+        if manifest_path.exists():
+            if _read_json(manifest_path) != runtime_manifest:
+                raise ReleaseError("runtime generation identity collision")
+            verification = verify(root, generation)
+            return {**verification, "verification_status": verification["status"], "status": "already-installed"}
+        created: list[Path] = []
+        created_directories: list[Path] = []
+        original_directory_modes: dict[Path, int] = {}
+        try:
+            original_directory_modes[release] = stat.S_IMODE(release.stat().st_mode)
+            os.chmod(release, 0o755)
+            for relative, content in normalized.items():
+                target = release.joinpath(*PurePosixPath(relative).parts)
+                current = release
+                for component in PurePosixPath(relative).parts[:-1]:
+                    current = current / component
+                    if not current.exists():
+                        current.mkdir(mode=0o700)
+                        created_directories.append(current)
+                    elif current.is_symlink() or not current.is_dir():
+                        raise ReleaseError("runtime file parent is unsafe")
+                    else:
+                        original_directory_modes.setdefault(
+                            current, stat.S_IMODE(current.stat().st_mode),
+                        )
+                    os.chmod(current, 0o700)
+                descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+                try:
+                    _write_all(descriptor, content)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                os.chmod(target, 0o400)
+                created.append(target)
+                for directory in reversed(created_directories):
+                    os.chmod(directory, 0o555)
+                for directory, mode in original_directory_modes.items():
+                    if directory != release:
+                        os.chmod(directory, mode)
+            _atomic_json(manifest_path, runtime_manifest, mode=0o400)
+            os.chmod(release, original_directory_modes[release])
+            verification = verify(root, generation)
+        except Exception:
+            for target in reversed(created):
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+            try:
+                manifest_path.unlink()
+            except OSError:
+                pass
+            for directory in reversed(created_directories):
+                try:
+                    os.chmod(directory, 0o700)
+                    directory.rmdir()
+                except OSError:
+                    pass
+            for directory, mode in reversed(tuple(original_directory_modes.items())):
+                try:
+                    os.chmod(directory, mode)
+                except OSError:
+                    pass
+            raise
+        return {**verification, "verification_status": verification["status"], "status": "installed"}
 
 
 def select(

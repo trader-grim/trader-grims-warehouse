@@ -11,6 +11,7 @@ import pytest
 import tgw.bootstrap_authority as authority_module
 from tgw.bootstrap_authority import (
     BootstrapAuthorityState,
+    ApplicationBootstrapGrant,
     BootstrapConsumptionAmbiguous,
     BootstrapGrant,
     BootstrapSessionAuthority,
@@ -188,8 +189,24 @@ def test_bootstrap_grant_accepts_only_exact_w09_application_contract_binding():
     }
     application_plan = "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99"
     application_solution = "sha256:1c3684135769e5dcabcaf130c55df160a4cecc0d3ebcee6ccd129ab97cdd709b"
-    grant = _grant(effect=effect, plan_commit=application_plan, solution_hash=application_solution)
+    value = {
+        "plan_commit": application_plan, "solution_hash": application_solution,
+        "target_host": "tgw-prod", "root_id": "production-releases",
+        "candidate_commit": commit, "effect": effect,
+        "expires_at": "2030-01-01T00:00:00Z", "deployment_uses": 1,
+        "retirement_condition": "W10:canonical-gate-operational",
+    }
+    grant = ApplicationBootstrapGrant.parse(value)
     assert grant.effect.generation == "release-b"
+    with pytest.raises(ValueError):
+        ApplicationBootstrapGrant.parse({
+            **value,
+            "effect": {
+                "kind": "approval-platform-bootstrap-deployment",
+                "generation": "platform-bb5c67d",
+                "parameters": _parameters(),
+            },
+        })
     for field, value in (
         ("application_contract_ref", "candidate:" + "c" * 40 + ":application-bootstrap:v1"),
         ("application_contract_hash", "sha256:not-a-digest"),

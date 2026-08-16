@@ -18,6 +18,24 @@ def _canonical(value: Any) -> bytes:
         raise ValueError("terminal receipt is not canonical JSON data") from exc
 
 
+def completion_store_descriptor_hash(
+    root: Path, *, sink_id: str, trusted_uid: int,
+) -> str:
+    """Bind a sink descriptor to its exact named root and inode policy."""
+    named = Path(root)
+    metadata = named.lstat()
+    descriptor = {
+        "schema": "tgw-immutable-effect-completion-store/v1",
+        "root": str(named),
+        "sink_id": sink_id,
+        "trusted_uid": trusted_uid,
+        "root_device": metadata.st_dev,
+        "root_inode": metadata.st_ino,
+        "root_mode": stat.S_IMODE(metadata.st_mode),
+    }
+    return "sha256:" + hashlib.sha256(_canonical(descriptor)).hexdigest()
+
+
 class ImmutableEffectCompletionStore:
     """Persist controller outcomes with held-root, same-inode verification."""
 
@@ -74,6 +92,12 @@ class ImmutableEffectCompletionStore:
             self.close()
             raise ValueError("terminal receipt root must be one held trusted mode-0700 directory")
         self._root_identity = (held.st_dev, held.st_ino, held.st_uid, stat.S_IMODE(held.st_mode))
+        expected_descriptor = completion_store_descriptor_hash(
+            self.root, sink_id=sink_id, trusted_uid=uid,
+        )
+        if descriptor_hash != expected_descriptor:
+            self.close()
+            raise ValueError("terminal receipt sink descriptor differs from its held root")
 
     def close(self) -> None:
         for name in ("_root_fd", "_parent_fd"):

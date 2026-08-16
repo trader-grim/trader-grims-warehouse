@@ -28,6 +28,8 @@ from tgw.candidate_receipt_sink import (
     validate_candidate_evidence_bundle,
     verify_candidate_evidence_bundle,
 )
+from tgw.plan_runtime_projection import validate_projection
+from tgw.release_installer import ReleaseError, runtime_manifest_identity
 
 SCHEMA = "tgw-governed-application-bootstrap-contract/v2"
 EFFECT_SCHEMA = "tgw-approval-application-bootstrap/v1"
@@ -36,6 +38,7 @@ SOLUTION_HASH = "sha256:1c3684135769e5dcabcaf130c55df160a4cecc0d3ebcee6ccd129ab9
 CLOSURE_HASH = "sha256:5d3e52999223f7df9a5421bd0a5f6549c9f0b2965b8cca55adb5c002492ae4a5"
 PROJECTION_PATH = "agent-services/plan-runtime/GOVERNED-EXECUTION-PLATFORM-f0a8cf22.json"
 CONFIG_PATH = "config/tgw-api-config.json"
+OPERATIONAL_CONFIG_SCHEMA = "tgw-production-operational-config/v1"
 MIGRATION_PATHS = (
     "src/tgw/plan_authority.sql",
     "src/tgw/queue/migrations/20260815_terminal_lease_expiry_fence.sql",
@@ -198,14 +201,27 @@ def validate_application_deployment_contract(value: Mapping[str, Any]) -> dict[s
     _sha(projection["content_sha256"], "runtime projection hash")
 
     runtime = _exact(contract["runtime_config"], {
-        "artifact_ref", "generation_path", "content_sha256", "executor_principal",
+        "artifact_ref", "generation_path", "content_sha256", "overlay_manifest_sha256",
+        "config_schema", "executor_principal",
         "operator_principals", "executor_credential_env", "credential_reference",
         "trusted_root", "trusted_uid", "forbidden_paths",
     }, "operational config")
     _contained_path(runtime["generation_path"], CONFIG_PATH, "operational config")
+    if runtime["config_schema"] != OPERATIONAL_CONFIG_SCHEMA:
+        raise ApplicationDeploymentContractError("operational config schema is invalid")
     if not isinstance(runtime["artifact_ref"], str) or not runtime["artifact_ref"].startswith("config:"):
         raise ApplicationDeploymentContractError("operational config artifact reference is invalid")
     _sha(runtime["content_sha256"], "operational config hash")
+    _sha(runtime["overlay_manifest_sha256"], "operational config overlay manifest hash")
+    try:
+        expected_overlay = runtime_manifest_identity(
+            str(raw_deployment.get("next_generation")),
+            {runtime["generation_path"]: runtime["content_sha256"].removeprefix("sha256:")},
+        )
+    except ReleaseError as exc:
+        raise ApplicationDeploymentContractError("operational config overlay is invalid") from exc
+    if runtime["overlay_manifest_sha256"] != "sha256:" + expected_overlay["manifest_sha256"]:
+        raise ApplicationDeploymentContractError("operational config overlay manifest is underbound")
     _identity(runtime["executor_principal"], "executor principal")
     _identity(runtime["credential_reference"], "credential reference")
     if not isinstance(runtime["executor_credential_env"], str) or re.fullmatch(r"[A-Z][A-Z0-9_]*", runtime["executor_credential_env"]) is None:
@@ -299,12 +315,16 @@ def _validate_projection(raw: bytes) -> None:
         projection = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ApplicationDeploymentContractError("runtime projection is invalid JSON") from exc
+    try:
+        projection = validate_projection(projection, expected_plan_commit=PLAN_COMMIT)
+    except ValueError as exc:
+        raise ApplicationDeploymentContractError(
+            "runtime projection canonical binding is invalid"
+        ) from exc
+    solution = projection["solution"]
     if (
-        not isinstance(projection, Mapping)
-        or projection.get("plan_commit") != PLAN_COMMIT
-        or projection.get("solution", {}).get("solution_hash") != SOLUTION_HASH
-        or projection.get("solution", {}).get("closure_hash") != CLOSURE_HASH
-        or projection.get("solution_sha256") != SOLUTION_HASH
+        solution.get("solution_hash") != SOLUTION_HASH
+        or solution.get("closure_hash") != CLOSURE_HASH
     ):
         raise ApplicationDeploymentContractError("runtime projection differs from retained Plan solution")
 
@@ -319,7 +339,9 @@ def _validate_runtime_config(raw: bytes, contract: Mapping[str, Any]) -> None:
     runtime = contract["runtime_config"]
     deployment = contract["deployment"]
     exact = {
+        "schema": runtime["config_schema"],
         "plan_approved_commit": PLAN_COMMIT,
+        "plan_approved_solution_hash": SOLUTION_HASH,
         "plan_approved_solution_hash": SOLUTION_HASH,
         "plan_projection_path": deployment["immutable_generation_path"] + "/" + PROJECTION_PATH,
         "plan_projection_root": deployment["immutable_generation_path"],
@@ -336,9 +358,35 @@ def _validate_runtime_config(raw: bytes, contract: Mapping[str, Any]) -> None:
     }
     if None in actual_operators or sorted(actual_operators) != runtime["operator_principals"]:
         raise ApplicationDeploymentContractError("operational config operator principals differ")
-    forbidden = {name for name in value if any(token in name.lower() for token in ("password", "private_key", "secret_bytes", "credential_value"))}
-    configured_paths = {str(item) for item in value.values() if isinstance(item, str) and item.startswith("/")}
-    if forbidden or any(path in configured_paths for path in runtime["forbidden_paths"]):
+    forbidden_key_tokens = {
+        "access_token", "refresh_token", "client_secret", "api_key", "password",
+        "private_key", "secret_bytes", "credential_value",
+    }
+    forbidden: set[str] = set()
+    configured_paths: set[str] = set()
+
+    def inspect(item: Any, location: str = "$") -> None:
+        if isinstance(item, Mapping):
+            for name, child in item.items():
+                key = str(name).lower()
+                if any(token in key for token in forbidden_key_tokens):
+                    forbidden.add(f"{location}.{name}")
+                inspect(child, f"{location}.{name}")
+        elif isinstance(item, list):
+            for index, child in enumerate(item):
+                inspect(child, f"{location}[{index}]")
+        elif isinstance(item, str) and item.startswith("/"):
+            configured_paths.add(item)
+
+    inspect(value)
+    forbidden_roots = tuple(PurePosixPath(path) for path in runtime["forbidden_paths"])
+    path_violation = any(
+        path == root or root in path.parents
+        for configured in configured_paths
+        for path in (PurePosixPath(configured),)
+        for root in forbidden_roots
+    )
+    if forbidden or path_violation:
         raise ApplicationDeploymentContractError("operational config contains secret material instead of a credential reference")
 
 
@@ -398,6 +446,17 @@ class VerifiedApplicationDeploymentContract:
             "predecessor_observation_ref": deployment["predecessor_observation_ref"],
             "predecessor_observation_hash": deployment["predecessor_observation_hash"],
             "immutable_generation_path": deployment["immutable_generation_path"],
+            "predecessor": {
+                "generation": deployment["prior_generation"],
+                "selector_target": f"/opt/TGW/releases/{deployment['prior_generation']}",
+                "commit": candidate["predecessor_commit"],
+                "tree": candidate["predecessor_tree"],
+                "archive_sha256": candidate["predecessor_archive_sha256"],
+                "release_manifest_hash": candidate["predecessor_release_manifest_hash"],
+                "content_manifest_sha256": candidate["predecessor_content_manifest_sha256"],
+                "projection_sha256": deployment["prior_projection_sha256"],
+                "runtime_config_sha256": deployment["prior_runtime_config_sha256"],
+            },
         }
 
 
@@ -459,6 +518,10 @@ class PinnedApplicationDeploymentContractResolver:
         ) = sinks
         self._candidate_objects, self._plan_objects, self._now = candidate_objects, plan_objects, now
         self._production = production
+        # This general resolver remains a review/test seam.  Production W09
+        # must supply a future held-object/root factory; arbitrary readers and
+        # caller clocks are deliberately not dispatch authority.
+        self.production_authority = False
 
     def resolve(self, reference: str, contract_hash: str) -> VerifiedApplicationDeploymentContract:
         match = re.fullmatch(r"candidate:([0-9a-f]{40}):application-bootstrap:v1", str(reference))

@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -9,18 +10,22 @@ from tgw.application_deployment_contract import (
     CLOSURE_HASH,
     MIGRATION_PATHS,
     PLAN_COMMIT,
+    OPERATIONAL_CONFIG_SCHEMA,
     PROJECTION_PATH,
     SCHEMA,
     SOLUTION_HASH,
     STAGES,
     ApplicationDeploymentContractError,
     VerifiedApplicationDeploymentContract,
+    _validate_projection,
+    _validate_runtime_config,
     validate_application_deployment_contract,
 )
 from tgw.effect_handlers import (
     AuthorityEffectController, EffectOutcome, RetryableEffect, TypedEffectHandlerRegistry,
 )
 from tgw.plan_authority import TypedEffect
+from tgw.release_installer import runtime_manifest_identity
 
 
 def _hash(value):
@@ -61,7 +66,8 @@ def _contract():
         },
         "runtime_config": {
             "artifact_ref": "config:candidate", "generation_path": "config/tgw-api-config.json",
-            "content_sha256": h("e"), "executor_principal": "executor:release",
+            "content_sha256": h("e"), "config_schema": OPERATIONAL_CONFIG_SCHEMA,
+            "executor_principal": "executor:release",
             "operator_principals": ["operator:api", "operator:session"],
             "executor_credential_env": "TGW_AUTHORITY_TOKEN", "credential_reference": "credential:tgw-release",
             "trusted_root": "/opt/TGW/releases/release-b", "trusted_uid": 0,
@@ -88,6 +94,14 @@ def _contract():
         },
         "operation_sink": {"sink_id": "w09-terminal", "descriptor_hash": h("0")},
     }
+    overlay = runtime_manifest_identity(
+        value["deployment"]["next_generation"],
+        {
+            value["runtime_config"]["generation_path"]:
+                value["runtime_config"]["content_sha256"].removeprefix("sha256:")
+        },
+    )
+    value["runtime_config"]["overlay_manifest_sha256"] = "sha256:" + overlay["manifest_sha256"]
     value["contract_hash"] = _hash(value)
     return value
 
@@ -114,6 +128,54 @@ def test_contract_binds_application_not_nix_masquerade_and_exact_stage_order():
         bad = copy.deepcopy(_contract()); mutate(bad)
         with pytest.raises(ApplicationDeploymentContractError):
             validate_application_deployment_contract(bad)
+
+
+def test_projection_binds_semantic_solution_separately_from_canonical_content_digest():
+    projection = Path(
+        "agent-services/plan-runtime/GOVERNED-EXECUTION-PLATFORM-f0a8cf22.json"
+    ).read_bytes()
+    value = json.loads(projection)
+    assert value["solution"]["solution_hash"] == SOLUTION_HASH
+    assert value["solution_sha256"] != SOLUTION_HASH
+    _validate_projection(projection)
+
+    value["solution_sha256"] = SOLUTION_HASH
+    with pytest.raises(ApplicationDeploymentContractError, match="canonical binding"):
+        _validate_projection(json.dumps(value).encode())
+
+
+def _runtime_config(contract):
+    runtime = contract["runtime_config"]
+    deployment = contract["deployment"]
+    return {
+        "schema": runtime["config_schema"],
+        "plan_approved_commit": PLAN_COMMIT,
+        "plan_approved_solution_hash": SOLUTION_HASH,
+        "plan_projection_path": deployment["immutable_generation_path"] + "/" + PROJECTION_PATH,
+        "plan_projection_root": deployment["immutable_generation_path"],
+        "plan_authority_executor_principal": runtime["executor_principal"],
+        "plan_authority_executor_credential_env": runtime["executor_credential_env"],
+        "plan_authority_executor_credential_ref": runtime["credential_reference"],
+        "plan_projection_trusted_uid": runtime["trusted_uid"],
+        "plan_authority_operator_api_principal": runtime["operator_principals"][0],
+        "plan_authority_operator_session_principal": runtime["operator_principals"][1],
+    }
+
+
+@pytest.mark.parametrize(
+    "addition",
+    [
+        {"ebay_access_token": "plaintext"},
+        {"nested": {"client_secret": "plaintext"}},
+        {"nested": {"retired_source": "/opt/TGW/src/neighbor"}},
+    ],
+)
+def test_runtime_config_rejects_recursive_secret_and_retired_path_substitution(addition):
+    contract = _contract()
+    value = _runtime_config(contract)
+    value.update(addition)
+    with pytest.raises(ApplicationDeploymentContractError, match="secret material"):
+        _validate_runtime_config(json.dumps(value).encode(), contract)
 
 
 def _application_controller(*, install, rollback, recorder):

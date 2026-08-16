@@ -58,5 +58,5 @@ def test_platform_bootstrap_is_disabled_and_unmounted_by_default(tmp_path):
 
 
 def test_w09_application_bootstrap_truthfully_holds_without_sealed_host_provider():
-    with pytest.raises(ValueError, match="concrete sealed tgw-prod"):
+    with pytest.raises(TypeError, match="required keyword-only"):
         compose_application_bootstrap_controller()

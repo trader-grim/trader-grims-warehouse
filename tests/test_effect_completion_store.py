@@ -4,7 +4,10 @@ from unittest.mock import Mock
 import pytest
 
 import tgw.effect_completion_store as store_module
-from tgw.effect_completion_store import ImmutableEffectCompletionStore
+from tgw.effect_completion_store import (
+    ImmutableEffectCompletionStore,
+    completion_store_descriptor_hash,
+)
 from tgw.effect_handlers import EffectExecutionReceipt, EffectOutcome
 
 
@@ -20,7 +23,9 @@ def _receipt():
 def _store(tmp_path):
     root = tmp_path / "terminal"; root.mkdir(mode=0o700)
     return ImmutableEffectCompletionStore(
-        root, sink_id="w09-terminal", descriptor_hash="sha256:" + "2" * 64,
+        root, sink_id="w09-terminal", descriptor_hash=completion_store_descriptor_hash(
+            root, sink_id="w09-terminal", trusted_uid=os.getuid(),
+        ),
         trusted_uid=os.getuid(),
     ), root
 
@@ -82,6 +87,19 @@ def test_store_detects_named_root_replacement_after_held_open(tmp_path):
     store.close()
 
 
+def test_store_descriptor_cannot_be_reused_for_a_neighboring_root(tmp_path):
+    first = tmp_path / "first"; first.mkdir(mode=0o700)
+    second = tmp_path / "second"; second.mkdir(mode=0o700)
+    descriptor = completion_store_descriptor_hash(
+        first, sink_id="w09-terminal", trusted_uid=os.getuid(),
+    )
+    with pytest.raises(ValueError, match="differs from its held root"):
+        ImmutableEffectCompletionStore(
+            second, sink_id="w09-terminal", descriptor_hash=descriptor,
+            trusted_uid=os.getuid(),
+        )
+
+
 def test_store_rejects_symlink_root_and_closes_descriptors(tmp_path):
     real = tmp_path / "real"; real.mkdir(mode=0o700)
     link = tmp_path / "link"; link.symlink_to(real, target_is_directory=True)
@@ -91,7 +109,9 @@ def test_store_rejects_symlink_root_and_closes_descriptors(tmp_path):
             trusted_uid=os.getuid(),
         )
     store = ImmutableEffectCompletionStore(
-        real, sink_id="w09-terminal", descriptor_hash="sha256:" + "2" * 64,
+        real, sink_id="w09-terminal", descriptor_hash=completion_store_descriptor_hash(
+            real, sink_id="w09-terminal", trusted_uid=os.getuid(),
+        ),
         trusted_uid=os.getuid(),
     )
     root_fd, parent_fd = store._root_fd, store._parent_fd

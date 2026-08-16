@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import stat
 import tarfile
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from tgw.release_installer import (
     ReleaseError,
     _atomic_json,
     current_generation,
+    install_runtime_files,
     materialize,
     recover,
     rollback,
@@ -145,6 +147,42 @@ def test_verify_rejects_changed_or_mutable_content(tmp_path: Path) -> None:
     os.chmod(file_path, 0o444)
     with pytest.raises(ReleaseError, match="does not match manifest"):
         verify(root, "release-a")
+
+
+def test_runtime_overlay_restores_preexisting_config_directory_and_rejects_collision(tmp_path: Path) -> None:
+    root = tmp_path / "tgw"
+    archive = tmp_path / "candidate.tar.gz"
+    digest = _archive(
+        archive,
+        {"config/existing.json": b"{}\n", "src/tgw/example.py": b"candidate\n"},
+        commit=COMMIT_B,
+    )
+    materialize(
+        root, archive, generation="release-b", commit=COMMIT_B, tree=TREE,
+        archive_sha256=digest,
+    )
+    result = install_runtime_files(
+        root, "release-b", {"config/tgw-api-config.json": b'{"schema":"runtime"}\n'},
+    )
+    assert result["status"] == "installed"
+    assert stat.S_IMODE((root / "releases/release-b/config").stat().st_mode) == 0o555
+    assert verify(root, "release-b")["runtime_manifest_sha256"]
+
+    root2 = tmp_path / "collision"
+    collision_archive = tmp_path / "collision.tar.gz"
+    collision_digest = _archive(
+        collision_archive, {"config/tgw-api-config.json": b"source-owned\n"}, commit=COMMIT_B,
+    )
+    materialize(
+        root2, collision_archive, generation="release-b", commit=COMMIT_B, tree=TREE,
+        archive_sha256=collision_digest,
+    )
+    with pytest.raises(FileExistsError):
+        install_runtime_files(
+            root2, "release-b", {"config/tgw-api-config.json": b"host-owned\n"},
+        )
+    assert stat.S_IMODE((root2 / "releases/release-b/config").stat().st_mode) == 0o555
+    assert verify(root2, "release-b")["status"] == "PASS"
 
 
 def test_recover_completes_landed_selector_swap(tmp_path: Path) -> None:

@@ -179,6 +179,14 @@ class MountedReleaseController:
         runtime_receipt = self._receipt(staged, statuses={"STAGED", "ALREADY_STAGED"}, label="generation runtime artifacts")
         if staged.get("generation_path") != parameters["immutable_generation_path"]:
             raise RuntimeError("runtime artifacts were not staged inside the immutable generation")
+        composite = verify(root, candidate.generation)
+        expected_overlay = str(
+            parameters["runtime_config"]["overlay_manifest_sha256"]
+        ).removeprefix("sha256:")
+        if composite.get("runtime_manifest_sha256") != expected_overlay:
+            raise RuntimeError(
+                "runtime artifacts do not match the exact composite release manifest"
+            )
         evidence += [runtime_receipt, self._stage(operation_id, "runtime-staged", [runtime_receipt])]
 
         activated = self._activate_generation(

@@ -10,7 +10,8 @@ from tgw.application_deployment_contract import (
     ApplicationDeploymentContractResolver,
     PinnedApplicationDeploymentContractResolver,
 )
-from tgw.bootstrap_authority import BootstrapSessionAuthority
+from tgw.application_release_provider import SshApplicationReleaseProvider
+from tgw.bootstrap_authority import ApplicationBootstrapGrant, BootstrapSessionAuthority
 from tgw.effect_handlers import AuthorityEffectController, TypedEffectHandlerRegistry
 from tgw.effect_completion_store import ImmutableEffectCompletionStore
 from tgw.nixos_a3_successor_evaluation import A3SuccessorEvaluationProvider
@@ -91,52 +92,72 @@ def _registry(
     )
 
 
-def _compose_application_bootstrap_controller(
-    mounts: DeploymentMounts,
-    providers: ReleaseProviders,
+def compose_application_bootstrap_controller(
     *,
     expected_host: str,
     authority: BootstrapSessionAuthority,
     application_resolver: PinnedApplicationDeploymentContractResolver,
     terminal_store: ImmutableEffectCompletionStore,
+    provider: SshApplicationReleaseProvider,
     flake_push: Provider,
     flake_switch_record: Provider,
     dependency_resubmit: Provider,
 ) -> AuthorityEffectController:
-    """Internal seam reserved for a sealed concrete tgw-prod provider."""
+    """Mount W09 only from the sealed SSH/helper production composition."""
     if type(authority) is not BootstrapSessionAuthority:
         raise ValueError("W09 bootstrap session authority is not mounted")
+    if type(authority.grant) is not ApplicationBootstrapGrant:
+        raise ValueError("W09 requires the disjoint application bootstrap grant")
     if type(application_resolver) is not PinnedApplicationDeploymentContractResolver:
         raise ValueError("pinned W09 application contract resolver is unavailable")
+    if application_resolver.production_authority is not True:
+        raise ValueError("W09 contract resolver is not a sealed production authority")
     if type(terminal_store) is not ImmutableEffectCompletionStore:
         raise ValueError("immutable W09 terminal receipt sink is unavailable")
+    if type(provider) is not SshApplicationReleaseProvider or provider.production_authority is not True:
+        raise ValueError("sealed tgw-prod application release provider is unavailable")
+    if expected_host != "tgw-prod" or provider.descriptor["target"]["host"] != expected_host:
+        raise ValueError("W09 provider target differs from exact production host")
     production = application_resolver._production
+    mounted_grant = authority.grant
+    mounted_sink = (
+        terminal_store.root,
+        terminal_store.sink_id,
+        terminal_store.descriptor_hash,
+    )
     if (
         terminal_store.sink_id != production.operation_sink_id
         or terminal_store.descriptor_hash != production.operation_sink_descriptor_hash
     ):
         raise ValueError("W09 terminal store differs from the pinned production operation sink")
-    release = _mounted_release(mounts, providers, expected_host=expected_host)
-    registry = _registry(
-        release, flake_push=flake_push, flake_switch_record=flake_switch_record,
-        dependency_resubmit=dependency_resubmit, application_resolver=application_resolver,
+    def unavailable_steady_state(_parameters: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise ValueError("steady-state coding release is not mounted in the one-use W09 controller")
+
+    registry = TypedEffectHandlerRegistry(
+        release_install=unavailable_steady_state,
+        release_rollback=unavailable_steady_state,
+        flake_push=flake_push,
+        flake_switch_record=flake_switch_record,
+        dependency_resubmit=dependency_resubmit,
+        application_bootstrap_contract_resolver=application_resolver,
+        application_bootstrap_install=provider.install,
+        application_bootstrap_rollback=provider.rollback,
     )
     def consume_exact(request_id: str, **binding: Any) -> Mapping[str, Any]:
+        if authority.grant is not mounted_grant:
+            raise ValueError("mounted W09 grant identity changed")
         return BootstrapSessionAuthority.consume(authority, request_id, **binding)
 
-    return AuthorityEffectController(registry, consume_exact, terminal_recorder=terminal_store.persist)
+    def persist_exact(receipt: Mapping[str, Any]) -> Mapping[str, str]:
+        if (
+            terminal_store.root,
+            terminal_store.sink_id,
+            terminal_store.descriptor_hash,
+        ) != mounted_sink:
+            raise ValueError("mounted W09 terminal sink identity changed")
+        return ImmutableEffectCompletionStore.persist(terminal_store, receipt)
 
-
-def compose_application_bootstrap_controller(*args: Any, **kwargs: Any) -> AuthorityEffectController:
-    """Truthful HOLD until the concrete root-owned W09 host provider exists.
-
-    The contract, authority adapter, and orchestrator are implemented, but a
-    caller-supplied ``ReleaseProviders`` bundle is not production evidence.
-    The future sealed provider factory must call the internal composition seam
-    only after binding its exact transport, executables, keys, host paths and
-    receipt stores.
-    """
-    raise ValueError("concrete sealed tgw-prod application release provider is not installed")
+    return AuthorityEffectController(registry, consume_exact, terminal_recorder=persist_exact)
 
 
 def compose_deployment_controller(

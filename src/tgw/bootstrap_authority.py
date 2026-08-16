@@ -94,6 +94,18 @@ class BootstrapGrant:
         return cls(_digest("bootstrap-grant", payload), effect=effect, expires_at=expires_at, **{key: value[key] for key in identities}, deployment_uses=1)
 
 
+@dataclass(frozen=True)
+class ApplicationBootstrapGrant(BootstrapGrant):
+    """Disjoint W09 grant type; a historical Nix switch cannot satisfy it."""
+
+    @classmethod
+    def parse(cls, value: Mapping[str, Any]) -> "ApplicationBootstrapGrant":
+        grant = super().parse(value)
+        if grant.effect.parameters.get("schema") != "tgw-approval-application-bootstrap/v1":
+            raise ValueError("W09 application bootstrap requires the exact application effect schema")
+        return grant
+
+
 class BootstrapAuthorityState(str, Enum):
     UNCONSUMED = "UNCONSUMED"
     SPENT = "SPENT"

@@ -9,12 +9,13 @@ from unittest.mock import Mock
 from tgw.effect_handlers import AuthorityEffectController, EffectOutcome, TypedEffectHandlerRegistry
 from tgw.plan_authority import TypedEffect
 from tgw.release_controller import MountedReleaseController
-from tgw.release_installer import materialize
+from tgw.release_installer import install_runtime_files, materialize, runtime_manifest_identity
 
 COMMIT_A, COMMIT_B, TREE = "a" * 40, "b" * 40, "c" * 40
 EXECUTOR = "executor:release-runner"
 MIGRATION = b"SELECT 1;\n"
 PROJECTION = b'{"projection":"exact"}\n'
+RUNTIME_CONFIG = b'{"schema":"test-runtime"}\n'
 
 
 def _hash_object(value):
@@ -79,7 +80,7 @@ def _fixture(tmp_path, health_status="HEALTHY"):
         "quiesce_services": provider("quiesce", {"status": "QUIESCED", "receipt": "quiesce:a"}),
         "backup": provider("backup", {"status": "BACKED_UP", "receipt": "backup:a"}),
         "migrate": provider("migrate", {"status": "APPLIED", "receipt": "migration:b", "applied_paths": ["src/tgw/migration.sql"]}),
-        "stage_runtime": provider("stage", {"status": "STAGED", "receipt": "runtime:b", "generation_path": "/opt/TGW/releases/release-b"}),
+        "stage_runtime": None,
         "activate_generation": provider("activate", {"status": "ACTIVATED", "receipt": "activate:b", "prior_generation": "release-a", "generation": "release-b"}),
         "restart_services": provider("restart", {"status": "RESTARTED", "receipt": "restart:b"}),
         "health": provider("health", {"status": health_status, "receipt": "health:b"}),
@@ -87,9 +88,6 @@ def _fixture(tmp_path, health_status="HEALTHY"):
         "record_stage": provider("journal", {"status": "RECORDED", "receipt": "journal:stage"}),
         "reconcile_predecessor": provider("reconcile", {"status": "RESTORED", "receipt": "restore:a", "generation": "release-a", "predecessor_healthy": True}),
     }
-    controller = MountedReleaseController(
-        roots={"tgw-staging": root}, artifacts={"artifact:candidate": candidate_archive}, **providers,
-    )
     parameters = {
         "generation": "release-b",
         "candidate_commit": COMMIT_B, "candidate_tree": TREE,
@@ -99,12 +97,32 @@ def _fixture(tmp_path, health_status="HEALTHY"):
         "migration_receipts": [_migration_receipt()], "projection": {
             "release_path": "projection.json", "content_sha256": "sha256:" + hashlib.sha256(PROJECTION).hexdigest(),
         },
-        "runtime_config": {"artifact_ref": "config:b", "content_sha256": "sha256:" + "8" * 64},
+        "runtime_config": {
+            "artifact_ref": "config:b",
+            "content_sha256": "sha256:" + hashlib.sha256(RUNTIME_CONFIG).hexdigest(),
+            "overlay_manifest_sha256": "sha256:" + runtime_manifest_identity(
+                "release-b", {"config/tgw-api-config.json": hashlib.sha256(RUNTIME_CONFIG).hexdigest()},
+            )["manifest_sha256"],
+        },
         "services": ["tgw-api.service"], "health_probes": ["api"],
         "immutable_generation_path": "/opt/TGW/releases/release-b",
         "predecessor_observation_hash": predecessor_hash,
         "nix_system_path": "/nix/store/system-a",
     }
+    def stage_runtime(_root_id, generation, _release, _projection, _config, _operation):
+        calls.append("stage")
+        installed = install_runtime_files(
+            root, generation, {"config/tgw-api-config.json": RUNTIME_CONFIG},
+        )
+        return {
+            "status": "STAGED", "receipt": "runtime:b",
+            "generation_path": "/opt/TGW/releases/release-b",
+            "runtime_manifest_sha256": installed["runtime_manifest_sha256"],
+        }
+    providers["stage_runtime"] = Mock(side_effect=stage_runtime)
+    controller = MountedReleaseController(
+        roots={"tgw-staging": root}, artifacts={"artifact:candidate": candidate_archive}, **providers,
+    )
     effect = TypedEffect.parse({"kind": "coding-release", "generation": "release-b", "parameters": {
         key: parameters[key] for key in (
             "candidate_commit", "candidate_tree", "archive_sha256", "artifact_ref", "root_id",
@@ -145,6 +163,27 @@ def test_preselection_failure_still_reconciles_without_assuming_selector_receipt
     providers["migrate"].side_effect = RuntimeError("migration failed")
     receipt = AuthorityEffectController(registry, _authority()).execute(
         request_id="migration-failure", effect=effect, executor_principal=EXECUTOR,
+    )
+    assert receipt.outcome is EffectOutcome.ROLLED_BACK
+    providers["activate_generation"].assert_not_called()
+    providers["reconcile_predecessor"].assert_called_once()
+
+
+def test_runtime_stage_cannot_mutate_sealed_candidate_before_activation(tmp_path):
+    root, _, registry, effect, providers, _, _ = _fixture(tmp_path)
+    legitimate_stage = providers["stage_runtime"].side_effect
+
+    def mutate(*args):
+        result = legitimate_stage(*args)
+        source = root / "releases/release-b/src/tgw/app.py"
+        source.chmod(0o600)
+        source.write_bytes(b"neighboring code")
+        source.chmod(0o400)
+        return result
+
+    providers["stage_runtime"].side_effect = mutate
+    receipt = AuthorityEffectController(registry, _authority()).execute(
+        request_id="runtime-mutation", effect=effect, executor_principal=EXECUTOR,
     )
     assert receipt.outcome is EffectOutcome.ROLLED_BACK
     providers["activate_generation"].assert_not_called()
