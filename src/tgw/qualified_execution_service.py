@@ -1161,12 +1161,12 @@ class QualifiedExecutionService:
         return result
 
     def execute(self, value: Mapping[str, Any], client: Client, *, reserved: bool = False) -> dict[str, Any]:
-        if self.config.clients.get(client.client_id) != client:
-            raise _ProtocolError(403, "qualified execution client grant is invalid")
         acquired = reserved or self.acquire_slot()
         if not acquired:
             raise _ProtocolError(429, "qualified execution request capacity is exhausted")
         try:
+            if self.config.clients.get(client.client_id) != client:
+                raise _ProtocolError(403, "qualified execution client grant is invalid")
             candidate = self._candidate(value, client)
             # Fresh signed identity is requested immediately before dispatch;
             # the confined runner is responsible for rehashing these executable
@@ -1312,6 +1312,7 @@ def create_qualified_execution_server(
             if not state.acquire_slot():
                 self.send_error(429)
                 return
+            reservation_owned = True
             try:
                 length = int(self.headers.get("Content-Length", "-1"))
                 if not 0 < length <= _MAX_REQUEST_BYTES:
@@ -1324,6 +1325,10 @@ def create_qualified_execution_server(
                 value = json.loads(raw.decode())
                 if not isinstance(value, Mapping):
                     raise _ProtocolError(400, "qualified execution request is invalid")
+                # ``execute(..., reserved=True)`` owns and releases this
+                # reservation in its own finally block, including execution
+                # failures.  Parsing/read failures above remain owned here.
+                reservation_owned = False
                 body = _canonical(state.execute(value, client, reserved=True))
                 if len(body) > _MAX_RESPONSE_BYTES:
                     raise _ProtocolError(507, "qualified execution response is too large")
@@ -1338,6 +1343,8 @@ def create_qualified_execution_server(
             except socket.timeout:
                 self.send_error(408, "qualified execution request body timed out")
             finally:
+                if reservation_owned:
+                    state.release_slot()
                 self.connection.settimeout(None)
 
         def do_GET(self) -> None:  # noqa: N802

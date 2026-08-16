@@ -5,14 +5,18 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import socket
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import tgw.qualified_execution_service as qualified_execution_service
 from tgw.candidate_manifest import create_test_output_artifact, create_test_receipt, load_candidate_test_plan
 from tgw.qualified_execution_service import (
     POLICY_SCHEMA,
@@ -571,3 +575,69 @@ def test_signer_retains_bounded_client_bound_proof_transcripts(tmp_path):
         assert retained == {"proof": proof, "transcript": response["results"][0]["transcript"]}
     finally:
         runner.stop()
+
+
+def test_malformed_or_timed_out_http_body_releases_the_reserved_signer_slot(tmp_path, monkeypatch):
+    config, runner, signer_key, descriptor, _catalog, candidate, tree, base, base_tree = configured(tmp_path)
+    runner.start()
+    signer = create_qualified_execution_server(
+        config,
+        {"fixture-client": "signer-secret"},
+        signing_private_key=signer_key,
+        environment={"RUNNER_TOKEN": runner.token},
+    )
+    thread = threading.Thread(target=signer.serve_forever, daemon=True)
+    thread.start()
+    endpoint = f"http://127.0.0.1:{signer.server_port}/v1/proofs"
+    client = QualifiedExecutionClient(
+        {**descriptor, "endpoint": f"http://127.0.0.1:{signer.server_port}"},
+        environment={"SIGNER_TOKEN": "signer-secret"},
+    )
+
+    def execute_valid():
+        return client.execute(
+            candidate_commit=candidate,
+            candidate_tree=tree,
+            base_commit=base,
+            base_tree=base_tree,
+            plan_commit=config.plan_commit,
+            profiles=["focused"],
+        )
+
+    try:
+        malformed = Request(endpoint, data=b"{", method="POST")
+        malformed.add_header("Content-Type", "application/json")
+        malformed.add_header("Authorization", "Bearer signer-secret")
+        with pytest.raises(HTTPError) as error:
+            urlopen(malformed, timeout=2)
+        assert error.value.code == 400
+        assert execute_valid()["results"][0]["proof"]["status"] == "PASS"
+
+        monkeypatch.setattr(qualified_execution_service, "_MAX_BODY_READ_SECONDS", 0.05)
+        stalled = socket.create_connection(("127.0.0.1", signer.server_port), timeout=2)
+        try:
+            stalled.sendall(b"POST /v1/proofs HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer signer-secret\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{")
+            stalled.settimeout(2)
+            assert b" 408 " in stalled.recv(4096)
+        finally:
+            stalled.close()
+        assert execute_valid()["results"][0]["proof"]["status"] == "PASS"
+    finally:
+        signer.shutdown()
+        signer.server_close()
+        thread.join(timeout=5)
+        runner.stop()
+
+
+def test_signer_slot_guard_rejects_double_release(tmp_path):
+    config, _runner, signer_key, _descriptor, _catalog, _candidate, _tree, _base, _base_tree = configured(tmp_path)
+    service = QualifiedExecutionService(
+        config,
+        {"fixture-client": "signer-secret"},
+        signing_private_key=signer_key,
+        environment={"RUNNER_TOKEN": "runner-to-signer-secret"},
+    )
+    assert service.acquire_slot() is True
+    service.release_slot()
+    with pytest.raises(ValueError):
+        service.release_slot()
