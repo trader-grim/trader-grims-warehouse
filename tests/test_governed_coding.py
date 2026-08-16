@@ -241,6 +241,28 @@ def test_fake_nonempty_resource_hash_holds_before_promptcraft_or_runner_launch(t
     ]
 
 
+def test_core_dispatch_rejects_a_runner_without_a_registered_attestation_verifier(tmp_path):
+    registry, health, bound_adapters = setup(tmp_path)
+    receipt = dispatch_role(
+        registry,
+        health,
+        role="implementation",
+        adapters=bound_adapters,
+        card_template=card_template("unattested-core-dispatch"),
+        execution_identity="run:unattested-core",
+        required_capabilities=["source-mutation"],
+        resource_resolver=RegisteredResourceResolver(RESOURCE_CONTENT),
+        resource_service=RESOURCE_SERVICE,
+    )
+
+    assert receipt["status"] == "FAIL"
+    assert receipt["harness_retrieval_attestation_hash"] is None
+    assert receipt["artifacts"][-1] == {
+        "kind": "contract_failure",
+        "detail": "registered resource resolver cannot verify harness retrieval attestation",
+    }
+
+
 def test_same_execution_context_cannot_self_review_for_admission(tmp_path):
     registry, health, bound_adapters = setup(tmp_path)
     implementation = dispatch(registry, health, bound_adapters, "implementation", "run:same")
