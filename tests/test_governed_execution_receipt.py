@@ -165,6 +165,31 @@ def test_candidate_receipt_rejects_a_structurally_plausible_but_tampered_attesta
         )
 
 
+def test_candidate_receipt_verifier_rejects_a_compact_forged_attestation(tmp_path):
+    _repo, commit, tree = candidate_repo(tmp_path)
+    card_value = card(tree)
+    resources = resource_receipt(card_value)
+    role = role_receipt(card_value, resources)
+    receipt = create_candidate_governed_execution_receipt(
+        card=card_value,
+        resource_receipt=resources,
+        role_receipt=role,
+        source_commit=commit,
+        source_tree=tree,
+        plan_commit=PLAN_COMMIT,
+    )
+    receipt["harness_retrieval_attestation"] = {"attestation_hash": "sha256:" + "e" * 64}
+    receipt["harness_retrieval_attestation_hash"] = "sha256:" + "e" * 64
+    unsigned = dict(receipt)
+    unsigned.pop("receipt_hash")
+    receipt["receipt_hash"] = canonical_hash(unsigned)
+
+    with pytest.raises(GovernedExecutionReceiptError, match="attestation is invalid"):
+        verify_candidate_governed_execution_receipt(
+            receipt, source_commit=commit, source_tree=tree, plan_commit=PLAN_COMMIT,
+        )
+
+
 def test_candidate_binding_refuses_a_card_for_another_source_tree(tmp_path):
     _repo, commit, tree = candidate_repo(tmp_path)
     card_value = card(tree)

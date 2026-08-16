@@ -209,6 +209,16 @@ def verify_candidate_governed_execution_receipt(
     attestation = receipt.get("harness_retrieval_attestation")
     if not isinstance(attestation, Mapping) or attestation.get("attestation_hash") != receipt["harness_retrieval_attestation_hash"]:
         raise GovernedExecutionReceiptError("candidate governed execution receipt attestation is invalid")
+    try:
+        validate_harness_retrieval_attestation(
+            attestation,
+            expected={
+                "card_hash": receipt["card_hash"], "role": receipt["role"],
+                "resource_receipt_hash": receipt["resource_receipt_hash"],
+            },
+        )
+    except ResourceVerificationError as exc:
+        raise GovernedExecutionReceiptError(f"candidate governed execution receipt attestation is invalid: {exc}") from exc
     if not isinstance(receipt.get("role"), str) or not isinstance(receipt.get("selected_provider"), str):
         raise GovernedExecutionReceiptError("candidate governed execution receipt role binding is invalid")
     return dict(receipt)
