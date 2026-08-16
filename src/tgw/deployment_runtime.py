@@ -73,6 +73,7 @@ def _registry(
     flake_switch_record: Provider,
     dependency_resubmit: Provider,
     application_resolver: ApplicationDeploymentContractResolver | None = None,
+    application_validate: Provider | None = None,
     platform_bootstrap: A3PlatformBootstrapProvider | None = None,
     bootstrap_contract_resolver=None,
     a3_successor_evaluation: A3SuccessorEvaluationProvider | None = None,
@@ -84,6 +85,7 @@ def _registry(
         application_bootstrap_contract_resolver=application_resolver,
         application_bootstrap_install=release.install if application_resolver is not None else None,
         application_bootstrap_rollback=release.rollback if application_resolver is not None else None,
+        application_bootstrap_validate=application_validate,
         bootstrap_install=platform_bootstrap.install if platform_bootstrap is not None else None,
         bootstrap_rollback=platform_bootstrap.rollback if platform_bootstrap is not None else None,
         bootstrap_validate=platform_bootstrap.preflight if platform_bootstrap is not None else None,
@@ -99,6 +101,8 @@ def compose_application_bootstrap_controller(
     application_resolver: PinnedApplicationDeploymentContractResolver,
     terminal_store: ImmutableEffectCompletionStore,
     provider: SshApplicationReleaseProvider,
+    controller_evidence: str,
+    terminal_precheck: Callable[[], None],
     flake_push: Provider,
     flake_switch_record: Provider,
     dependency_resubmit: Provider,
@@ -118,6 +122,10 @@ def compose_application_bootstrap_controller(
         raise ValueError("immutable W09 terminal receipt sink is unavailable")
     if type(provider) is not SshApplicationReleaseProvider or provider.production_authority is not True:
         raise ValueError("sealed tgw-prod application release provider is unavailable")
+    if not isinstance(controller_evidence, str) or not controller_evidence.startswith(
+        "w09-controller-config:sha256:"
+    ) or not callable(terminal_precheck):
+        raise ValueError("W09 controller config provenance is unavailable")
     if expected_host != "tgw-prod" or provider.descriptor["target"]["host"] != expected_host:
         raise ValueError("W09 provider target differs from exact production host")
     production = application_resolver._production
@@ -144,6 +152,7 @@ def compose_application_bootstrap_controller(
         application_bootstrap_contract_resolver=application_resolver,
         application_bootstrap_install=provider.install,
         application_bootstrap_rollback=provider.rollback,
+        application_bootstrap_validate=provider.preflight,
     )
     def consume_exact(request_id: str, **binding: Any) -> Mapping[str, Any]:
         if authority.grant is not mounted_grant:
@@ -151,6 +160,7 @@ def compose_application_bootstrap_controller(
         return BootstrapSessionAuthority.consume(authority, request_id, **binding)
 
     def persist_exact(receipt: Mapping[str, Any]) -> Mapping[str, str]:
+        terminal_precheck()
         if (
             terminal_store.root,
             terminal_store.sink_id,
@@ -159,7 +169,10 @@ def compose_application_bootstrap_controller(
             raise ValueError("mounted W09 terminal sink identity changed")
         return ImmutableEffectCompletionStore.persist(terminal_store, receipt)
 
-    return AuthorityEffectController(registry, consume_exact, terminal_recorder=persist_exact)
+    return AuthorityEffectController(
+        registry, consume_exact, terminal_recorder=persist_exact,
+        bound_evidence=(controller_evidence,),
+    )
 
 
 def compose_deployment_controller(

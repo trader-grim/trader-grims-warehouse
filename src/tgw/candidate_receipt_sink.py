@@ -17,15 +17,18 @@ import hashlib
 import json
 import re
 import subprocess
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping, Protocol
 
 import yaml
 
 from tgw.candidate_manifest import (
+    CANONICAL_TEST_PLAN_PATH,
     CandidateManifestError,
     graph_hash,
-    load_candidate_test_plan,
+    validate_candidate_test_plan,
     verify_luet_conformance_receipt,
     verify_migration_safety_receipt,
     verify_predecessor_release,
@@ -52,6 +55,19 @@ from tgw.qualified_execution_service import (
     QualifiedExecutionError,
     validate_execution_proof,
     validate_execution_service_catalog,
+)
+
+
+class ProtectedGitReader(Protocol):
+    """Exact held Git/repository authority used by production admission."""
+
+    def run_git(self, *arguments: str) -> bytes: ...
+    def run_git_status(self, *arguments: str) -> tuple[int, bytes]: ...
+    def postcheck(self) -> None: ...
+
+
+_PROTECTED_GIT_READERS: ContextVar[Mapping[Path, ProtectedGitReader] | None] = ContextVar(
+    "tgw_protected_git_readers", default=None,
 )
 
 RECEIPT_SINK_SCHEMA = "tgw-pinned-git-candidate-receipt-sink/v1"
@@ -118,6 +134,32 @@ class CandidateReceiptSinkError(ValueError):
     """The configured immutable receipt sink cannot establish candidate evidence."""
 
 
+@contextmanager
+def protected_git_object_reads(
+    readers: Mapping[Path, ProtectedGitReader],
+) -> Iterator[None]:
+    """Route every admission Git read through caller-held repository FDs."""
+
+    normalized = {Path(root).resolve(strict=True): reader for root, reader in readers.items()}
+    if len(normalized) != len(readers) or any(
+        not all(
+            callable(getattr(reader, name, None))
+            for name in ("run_git", "run_git_status", "postcheck")
+        )
+        for reader in normalized.values()
+    ):
+        raise CandidateReceiptSinkError("protected Git reader mapping is invalid")
+    token = _PROTECTED_GIT_READERS.set(normalized)
+    try:
+        for reader in normalized.values():
+            reader.postcheck()
+        yield
+        for reader in normalized.values():
+            reader.postcheck()
+    finally:
+        _PROTECTED_GIT_READERS.reset(token)
+
+
 def _canonical(value: Any) -> bytes:
     try:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
@@ -153,6 +195,15 @@ def _object(value: bytes, *, label: str) -> dict[str, Any]:
 
 
 def _git(repository: Path, *args: str) -> bytes:
+    readers = _PROTECTED_GIT_READERS.get()
+    if readers is not None:
+        try:
+            reader = readers[Path(repository).resolve(strict=True)]
+        except (KeyError, OSError) as exc:
+            raise CandidateReceiptSinkError(
+                "production admission attempted an unheld Git repository"
+            ) from exc
+        return reader.run_git(*args)
     try:
         return subprocess.run(
             ["git", *args],
@@ -162,6 +213,23 @@ def _git(repository: Path, *args: str) -> bytes:
         ).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         raise CandidateReceiptSinkError("pinned receipt sink Git object is unavailable") from exc
+
+
+def _git_status(repository: Path, *args: str) -> tuple[int, bytes]:
+    readers = _PROTECTED_GIT_READERS.get()
+    if readers is not None:
+        try:
+            reader = readers[Path(repository).resolve(strict=True)]
+        except (KeyError, OSError) as exc:
+            raise CandidateReceiptSinkError(
+                "production admission attempted an unheld Git repository"
+            ) from exc
+        return reader.run_git_status(*args)
+    try:
+        result = subprocess.run(["git", *args], cwd=repository, check=False, capture_output=True)
+    except OSError as exc:
+        raise CandidateReceiptSinkError("pinned receipt sink Git object is unavailable") from exc
+    return result.returncode, result.stdout
 
 
 def _candidate_identity(repository: Path, candidate: str) -> tuple[str, str]:
@@ -436,6 +504,12 @@ class PinnedCandidateEvidenceDescriptor:
     @property
     def candidate_evidence_sink_descriptor(self) -> dict[str, Any]:
         return dict(self._value["candidate_evidence_sink"])
+
+    @property
+    def pin(self) -> dict[str, Any]:
+        """Return the externally supplied Git pin for protected revalidation."""
+
+        return dict(self._pin)
 
     @property
     def authority_repository(self) -> Path:
@@ -982,13 +1056,10 @@ def _verify_candidate_manifest_evidence(
     base_tree = _git(repository, "rev-parse", f"{base_commit}^{{tree}}").decode().strip()
     if _GIT_OBJECT.fullmatch(base_tree) is None:
         raise CandidateReceiptSinkError("candidate manifest predecessor binding is invalid")
-    ancestry = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", base_commit, source_commit],
-        cwd=repository,
-        capture_output=True,
-        check=False,
+    ancestry_status, _ = _git_status(
+        repository, "merge-base", "--is-ancestor", base_commit, source_commit,
     )
-    if ancestry.returncode:
+    if ancestry_status:
         raise CandidateReceiptSinkError("candidate manifest predecessor is not an ancestor")
     predecessor = manifest.get("predecessor_release")
     if (
@@ -1046,7 +1117,21 @@ def _verify_candidate_manifest_evidence(
     if tests.get("focused") != focused_receipt or tests.get("full_suite") != full_suite_receipt:
         raise CandidateReceiptSinkError("sink test receipts do not match the candidate manifest")
     try:
-        test_plan = load_candidate_test_plan(repository, source_commit=source_commit)
+        test_plan_source = _candidate_blob(repository, source_commit, CANONICAL_TEST_PLAN_PATH)
+        try:
+            test_plan_value = json.loads(test_plan_source)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CandidateManifestError("candidate canonical test plan is unavailable") from exc
+        if not isinstance(test_plan_value, Mapping) or not isinstance(test_plan_value.get("runner"), Mapping):
+            raise CandidateManifestError("candidate canonical test plan is invalid")
+        runner_path = _safe_path(
+            test_plan_value["runner"].get("path"), label="candidate test plan runner path",
+        )
+        test_plan = validate_candidate_test_plan(
+            test_plan_value,
+            source=test_plan_source,
+            runner_source=_candidate_blob(repository, source_commit, runner_path),
+        )
         verified_focused = verify_test_receipt(
             focused_receipt,
             scope="focused",

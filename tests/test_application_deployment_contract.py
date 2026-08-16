@@ -85,6 +85,9 @@ def _contract():
             "predecessor_observation_ref": "observation:release-a", "predecessor_observation_hash": h("f"),
             "provider_observation_ref": "observation:w09-provider", "provider_observation_hash": h("0"),
             "prior_projection_sha256": None, "prior_runtime_config_sha256": h("2"),
+            "prior_database_identity_sha256": h("3"),
+            "prior_runtime_config_uid": 0, "prior_runtime_config_gid": 995,
+            "prior_runtime_config_mode": 0o640, "prior_runtime_config_size": 3336,
         },
         "services": ["tgw-api.service", "tgw-worker.target"],
         "health_probes": ["api", "authority", "queue"], "stage_order": list(STAGES),
@@ -185,6 +188,7 @@ def _application_controller(*, install, rollback, recorder):
         release_install=Mock(), release_rollback=Mock(), flake_push=Mock(), flake_switch_record=Mock(),
         dependency_resubmit=Mock(), application_bootstrap_contract_resolver=resolver,
         application_bootstrap_install=install, application_bootstrap_rollback=rollback,
+        application_bootstrap_validate=Mock(),
     )
     authority = Mock(return_value={"receipt_id": "bootstrap:consumed"})
     effect = TypedEffect.parse({
@@ -235,6 +239,30 @@ def test_consumed_w09_grant_never_returns_retry():
     result = controller.execute(request_id="w09", effect=effect)
     assert result.outcome is EffectOutcome.ROLLED_BACK
     assert result.outcome is not EffectOutcome.RETRY
+
+
+def test_application_provider_readiness_fails_before_one_use_authority_consumption():
+    verified = _verified(); resolver = Mock(); resolver.resolve.return_value = verified
+    readiness = Mock(side_effect=ValueError("provider observation expired"))
+    registry = TypedEffectHandlerRegistry(
+        release_install=Mock(), release_rollback=Mock(), flake_push=Mock(),
+        flake_switch_record=Mock(), dependency_resubmit=Mock(),
+        application_bootstrap_contract_resolver=resolver,
+        application_bootstrap_install=Mock(), application_bootstrap_rollback=Mock(),
+        application_bootstrap_validate=readiness,
+    )
+    authority = Mock()
+    effect = TypedEffect.parse({
+        "kind": "approval-platform-bootstrap-deployment", "generation": "release-b",
+        "parameters": {
+            "schema": "tgw-approval-application-bootstrap/v1",
+            "application_contract_ref": verified.reference,
+            "application_contract_hash": verified.contract_hash,
+        },
+    })
+    with pytest.raises(ValueError, match="expired"):
+        AuthorityEffectController(registry, authority).execute(request_id="w09", effect=effect)
+    authority.assert_not_called()
 
 
 def test_authenticated_remote_restore_is_terminal_without_second_rollback_dispatch():

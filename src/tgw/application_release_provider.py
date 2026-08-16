@@ -37,7 +37,8 @@ _SHA = re.compile(r"sha256:[0-9a-f]{64}\Z")
 def _memory_bootstrap(
     *, installer_sha256: str, transaction_sha256: str,
     helper_config_sha256: str, python_sha256: str, sudo_sha256: str,
-    nix_system_path: str,
+    python_path: str, sudo_path: str, python_stat: Mapping[str, int],
+    sudo_stat: Mapping[str, int], nix_system_path: str,
 ) -> str:
     """Return the reviewed isolated root bootstrap with controller-fixed digests."""
     expected = {
@@ -45,7 +46,7 @@ def _memory_bootstrap(
         "application_transaction": transaction_sha256,
         "helper_config": helper_config_sha256,
     }
-    return f'''import hashlib,json,pathlib,sys,types
+    return f'''import hashlib,json,os,pathlib,sys,types
 def read_exact(size):
     out=bytearray()
     while len(out)<size:
@@ -55,7 +56,13 @@ def read_exact(size):
     return bytes(out)
 def digest(raw): return "sha256:"+hashlib.sha256(raw).hexdigest()
 if digest(pathlib.Path("/proc/self/exe").read_bytes())!={python_sha256!r}: raise SystemExit(66)
-if digest(pathlib.Path({REMOTE_SUDO!r}).resolve().read_bytes())!={sudo_sha256!r}: raise SystemExit(66)
+if pathlib.Path({REMOTE_PYTHON!r}).resolve().as_posix()!={python_path!r}: raise SystemExit(66)
+if pathlib.Path({REMOTE_SUDO!r}).resolve().as_posix()!={sudo_path!r}: raise SystemExit(66)
+if digest(pathlib.Path({sudo_path!r}).read_bytes())!={sudo_sha256!r}: raise SystemExit(66)
+def file_stat(path):
+    value=os.stat(path,follow_symlinks=False)
+    return {{"uid":value.st_uid,"gid":value.st_gid,"mode":value.st_mode&4095,"size":value.st_size}}
+if file_stat({python_path!r})!={dict(python_stat)!r} or file_stat({sudo_path!r})!={dict(sudo_stat)!r}: raise SystemExit(66)
 if pathlib.Path("/run/current-system").resolve().as_posix()!={nix_system_path!r}: raise SystemExit(66)
 header_size=int.from_bytes(read_exact(8),"big")
 if header_size<1 or header_size>1048576: raise SystemExit(67)
@@ -197,16 +204,34 @@ def validate_provider_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ApplicationReleaseProviderError("provider candidate identity is invalid")
     boundary = _exact(descriptor["remote_boundary"], {
         "python_path", "python_sha256", "sudo_path", "sudo_sha256", "bootstrap_sha256", "config_path", "config_sha256",
-        "authorized_public_key", "nix_system_path",
+        "authorized_public_key", "nix_system_path", "credential_scope", "remote_command_sha256",
+        "python_stat", "sudo_stat",
     }, "provider remote boundary")
-    if boundary["python_path"] != REMOTE_PYTHON or boundary["sudo_path"] != REMOTE_SUDO or not str(boundary["config_path"]).startswith("/"):
+    if (
+        not re.fullmatch(r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/]+/bin/python3(?:\.[0-9]+)?", str(boundary["python_path"]))
+        or not re.fullmatch(r"/run/wrappers/wrappers\.[A-Za-z0-9]+/sudo", str(boundary["sudo_path"]))
+        or not str(boundary["config_path"]).startswith("/")
+    ):
         raise ApplicationReleaseProviderError("provider in-memory sudo boundary is invalid")
     if any(_SHA.fullmatch(str(boundary[name])) is None for name in ("python_sha256", "sudo_sha256", "bootstrap_sha256", "config_sha256")):
         raise ApplicationReleaseProviderError("provider remote boundary hash is invalid")
     if not str(boundary["nix_system_path"]).startswith("/nix/store/"):
         raise ApplicationReleaseProviderError("provider observed Nix prerequisite is invalid")
+    for name in ("python_stat", "sudo_stat"):
+        observed = _exact(boundary[name], {"uid", "gid", "mode", "size"}, f"provider {name}")
+        if (
+            observed["uid"] != 0 or observed["gid"] != 0
+            or not isinstance(observed["mode"], int) or not isinstance(observed["size"], int)
+            or observed["size"] <= 0
+        ):
+            raise ApplicationReleaseProviderError("provider remote executable stat is invalid")
     if re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]+={0,2}", str(boundary["authorized_public_key"])) is None:
         raise ApplicationReleaseProviderError("provider authorized public key is invalid")
+    if (
+        boundary["credential_scope"] != "pre-existing-db-operator-bootstrap"
+        or _SHA.fullmatch(str(boundary["remote_command_sha256"])) is None
+    ):
+        raise ApplicationReleaseProviderError("provider credential/command authority is misstated")
     bounds = _exact(descriptor["bounds"], {"timeout_seconds", "max_output_bytes", "max_diagnostic_bytes", "max_packet_bytes"}, "provider bounds")
     if not 1 <= int(bounds["timeout_seconds"]) <= 1800 or not 1024 <= int(bounds["max_output_bytes"]) <= 4 * 1024 * 1024 or not 1024 <= int(bounds["max_diagnostic_bytes"]) <= 1024 * 1024 or not 1024 <= int(bounds["max_packet_bytes"]) <= 192 * 1024 * 1024:
         raise ApplicationReleaseProviderError("provider bounds are invalid")
@@ -312,7 +337,11 @@ class SshApplicationReleaseProvider:
         prerequisite = _exact(prerequisite, {
             "schema", "receipt_id", "target_host", "observed_at", "expires_at",
             "python_sha256", "sudo_sha256", "nix_system_path", "predecessor_observation_hash",
-            "sudo_db_root_nopasswd", "authorized_public_key_sha256", "verified", "receipt_hash",
+            "python_path", "sudo_path",
+            "python_stat", "sudo_stat",
+            "helper_config_sha256", "remote_command_sha256",
+            "sudo_db_root_nopasswd", "authorized_public_key_sha256", "credential_scope",
+            "server_forced_command_restriction", "verified", "receipt_hash",
         }, "provider prerequisite receipt")
         prerequisite_unsigned = dict(prerequisite)
         prerequisite_claimed = prerequisite_unsigned.pop("receipt_hash")
@@ -322,8 +351,16 @@ class SshApplicationReleaseProvider:
             or prerequisite["target_host"] != "tgw-prod"
             or prerequisite["python_sha256"] != self.descriptor["remote_boundary"]["python_sha256"]
             or prerequisite["sudo_sha256"] != self.descriptor["remote_boundary"]["sudo_sha256"]
+            or prerequisite["python_path"] != self.descriptor["remote_boundary"]["python_path"]
+            or prerequisite["sudo_path"] != self.descriptor["remote_boundary"]["sudo_path"]
+            or prerequisite["python_stat"] != self.descriptor["remote_boundary"]["python_stat"]
+            or prerequisite["sudo_stat"] != self.descriptor["remote_boundary"]["sudo_stat"]
+            or prerequisite["helper_config_sha256"] != self.descriptor["remote_boundary"]["config_sha256"]
+            or prerequisite["remote_command_sha256"] != self.descriptor["remote_boundary"]["remote_command_sha256"]
             or prerequisite["nix_system_path"] != self.descriptor["remote_boundary"]["nix_system_path"]
             or prerequisite["sudo_db_root_nopasswd"] is not True
+            or prerequisite["credential_scope"] != "pre-existing-db-operator-bootstrap"
+            or prerequisite["server_forced_command_restriction"] != "not-claimed"
             or prerequisite["authorized_public_key_sha256"] != _hash_bytes(
                 (self.descriptor["remote_boundary"]["authorized_public_key"] + "\n").encode()
             )
@@ -348,11 +385,21 @@ class SshApplicationReleaseProvider:
             helper_config_sha256=self.descriptor["remote_boundary"]["config_sha256"],
             python_sha256=self.descriptor["remote_boundary"]["python_sha256"],
             sudo_sha256=self.descriptor["remote_boundary"]["sudo_sha256"],
+            python_path=self.descriptor["remote_boundary"]["python_path"],
+            sudo_path=self.descriptor["remote_boundary"]["sudo_path"],
+            python_stat=self.descriptor["remote_boundary"]["python_stat"],
+            sudo_stat=self.descriptor["remote_boundary"]["sudo_stat"],
             nix_system_path=self.descriptor["remote_boundary"]["nix_system_path"],
         )
         if _hash_bytes(bootstrap.encode()) != self.descriptor["remote_boundary"]["bootstrap_sha256"]:
             for fd in reversed(fds): os.close(fd)
             raise ApplicationReleaseProviderError("reviewed in-memory bootstrap binding differs")
+        remote_command = shlex.join([
+            REMOTE_SUDO, "-n", "--", REMOTE_PYTHON, "-I", "-S", "-c", bootstrap,
+        ])
+        if _hash_bytes(remote_command.encode()) != self.descriptor["remote_boundary"]["remote_command_sha256"]:
+            for fd in reversed(fds): os.close(fd)
+            raise ApplicationReleaseProviderError("reviewed remote command differs from its descriptor")
         try:
             sealed_private = _sealed("w09-key-crossmatch", raw_values[2])
         except Exception:
@@ -381,7 +428,7 @@ class SshApplicationReleaseProvider:
             != self.descriptor["remote_boundary"]["authorized_public_key"]
         ):
             for fd in reversed(fds): os.close(fd)
-            raise ApplicationReleaseProviderError("dedicated private/public SSH key authority differs")
+            raise ApplicationReleaseProviderError("db operator private/public SSH authority differs")
         self._fds, self._raw, self._identities = tuple(fds), tuple(raw_values), tuple(identities)
         self._prerequisite = _freeze(prerequisite)
         self._frozen = True
@@ -410,6 +457,26 @@ class SshApplicationReleaseProvider:
         ):
             raise ApplicationReleaseProviderError("effect parameters differ from mounted provider artifacts")
 
+    def preflight(self, parameters: Mapping[str, Any]) -> None:
+        """Revalidate every mounted input before the one-use grant is consumed."""
+
+        self._check_parameters(parameters)
+        try:
+            observed_at = datetime.fromisoformat(str(self._prerequisite["observed_at"]).replace("Z", "+00:00"))
+            expires_at = datetime.fromisoformat(str(self._prerequisite["expires_at"]).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ApplicationReleaseProviderError("mounted provider freshness is invalid") from exc
+        current = datetime.now(timezone.utc)
+        if not observed_at <= current <= expires_at:
+            raise ApplicationReleaseProviderError("mounted provider observation expired before authority consumption")
+        for (path, identity), fd, raw in zip(self._identities, self._fds, self._raw, strict=True):
+            if (
+                _inode_identity(os.fstat(fd)) != identity
+                or _hash_bytes(os.pread(fd, len(raw) + 1, 0)) != _hash_bytes(raw)
+                or _inode_identity(os.stat(path, follow_symlinks=False)) != identity
+            ):
+                raise ApplicationReleaseProviderError("mounted provider artifact changed before authority consumption")
+
     def _packet(self, action: str, parameters: Mapping[str, Any]) -> bytes:
         self._check_parameters(parameters)
         request_unsigned = {
@@ -435,14 +502,7 @@ class SshApplicationReleaseProvider:
         return len(header).to_bytes(8, "big") + header + b"".join(raw for _name, raw in bodies)
 
     def _dispatch(self, action: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
-        try:
-            observed_at = datetime.fromisoformat(str(self._prerequisite["observed_at"]).replace("Z", "+00:00"))
-            expires_at = datetime.fromisoformat(str(self._prerequisite["expires_at"]).replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ApplicationReleaseProviderError("mounted provider freshness is invalid") from exc
-        current = datetime.now(timezone.utc)
-        if not observed_at <= current <= expires_at:
-            raise ApplicationReleaseProviderError("mounted provider observation expired before dispatch")
+        self.preflight(parameters)
         packet = self._packet(action, parameters)
         bounds = self.descriptor["bounds"]
         if len(packet) > int(bounds["max_packet_bytes"]):
@@ -456,11 +516,15 @@ class SshApplicationReleaseProvider:
             helper_config_sha256=boundary["config_sha256"],
             python_sha256=boundary["python_sha256"],
             sudo_sha256=boundary["sudo_sha256"],
+            python_path=boundary["python_path"], sudo_path=boundary["sudo_path"],
+            python_stat=boundary["python_stat"], sudo_stat=boundary["sudo_stat"],
             nix_system_path=boundary["nix_system_path"],
         )
         remote_command = shlex.join([
             REMOTE_SUDO, "-n", "--", REMOTE_PYTHON, "-I", "-S", "-c", bootstrap,
         ])
+        if _hash_bytes(remote_command.encode()) != boundary["remote_command_sha256"]:
+            raise ApplicationReleaseProviderError("remote command changed after pre-authority readiness")
         sealed_hosts = _sealed("w09-app-hosts", self._raw[1])
         sealed_identity = -1
         try:

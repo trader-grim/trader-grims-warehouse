@@ -220,6 +220,7 @@ class TypedEffectHandlerRegistry:
         application_bootstrap_contract_resolver: ApplicationDeploymentContractResolver | None = None,
         application_bootstrap_install: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         application_bootstrap_rollback: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        application_bootstrap_validate: Callable[[Mapping[str, Any]], None] | None = None,
         nixos_reviewed_evaluation: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         nixos_observer_render_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         nixos_a3_successor_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
@@ -229,7 +230,10 @@ class TypedEffectHandlerRegistry:
         ):
             raise ValueError("application and legacy Nix bootstrap providers cannot share one controller")
         if application_bootstrap_contract_resolver is not None and not all(
-            callable(value) for value in (application_bootstrap_install, application_bootstrap_rollback)
+            callable(value) for value in (
+                application_bootstrap_install, application_bootstrap_rollback,
+                application_bootstrap_validate,
+            )
         ):
             raise ValueError("application bootstrap resolver requires exact install and rollback providers")
         app_bootstrap = application_bootstrap_contract_resolver is not None
@@ -263,6 +267,7 @@ class TypedEffectHandlerRegistry:
         self._bootstrap_validate = bootstrap_validate
         self._bootstrap_contract_resolver = bootstrap_contract_resolver
         self._application_bootstrap_contract_resolver = application_bootstrap_contract_resolver
+        self._application_bootstrap_validate = application_bootstrap_validate
         self._a3_successor_binding = nixos_a3_successor_evaluation
         self._a3_successor_allow_fixture = bool(getattr(getattr(nixos_a3_successor_evaluation, "composition", None), "allow_fixture", False))
 
@@ -576,6 +581,9 @@ class TypedEffectHandlerRegistry:
                 ):
                     raise ValueError("application bootstrap effect differs from its verified immutable contract")
                 parameters = verified.provider_parameters()
+                if self._application_bootstrap_validate is None:
+                    raise ValueError("application bootstrap pre-authority readiness is unavailable")
+                self._application_bootstrap_validate(parameters)
             elif self._bootstrap_contract_resolver is not None:
                 parameters = _required(
                     effect.parameters,
@@ -760,10 +768,14 @@ class AuthorityEffectController:
         authority: AuthorityExecutionStore | Callable[..., Mapping[str, Any]],
         *,
         terminal_recorder: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        bound_evidence: Sequence[str] = (),
     ):
         self.registry = registry
         self.authority = authority
         self.terminal_recorder = terminal_recorder
+        if any(not isinstance(item, str) or not item for item in bound_evidence):
+            raise ValueError("controller-bound evidence is invalid")
+        self._bound_evidence = tuple(sorted(set(bound_evidence)))
         self._has_durable_methods = callable(
             getattr(authority, "begin_execution", None)
         ) and callable(getattr(authority, "complete_execution", None))
@@ -963,6 +975,7 @@ class AuthorityEffectController:
         rollback_receipt: str | None = None,
         detail: str = "",
     ) -> EffectExecutionReceipt:
+        evidence = tuple(sorted(set(evidence + self._bound_evidence)))
         durable = self._uses_durable_authority(executor_principal)
         if durable:
             self.authority.complete_execution(

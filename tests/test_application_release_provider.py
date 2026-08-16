@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -50,10 +51,14 @@ def _descriptor(parameters=None):
         },
         "runtime_config": {"path": "/etc/tgw/runtime.json", "content_sha256": h("6")},
         "remote_boundary": {
-            "python_path": REMOTE_PYTHON, "python_sha256": h("b"),
-            "sudo_path": REMOTE_SUDO, "sudo_sha256": h("c"),
+            "python_path": "/nix/store/00000000000000000000000000000000-python3-3.13.5/bin/python3.13", "python_sha256": h("b"),
+            "sudo_path": "/run/wrappers/wrappers.ABC123/sudo", "sudo_sha256": h("c"),
             "bootstrap_sha256": h("d"), "config_path": "/etc/tgw/w09-memory-config.json",
             "config_sha256": h("7"), "nix_system_path": "/nix/store/system-tgw-prod",
+            "credential_scope": "pre-existing-db-operator-bootstrap",
+            "remote_command_sha256": h("d"),
+            "python_stat": {"uid": 0, "gid": 0, "mode": 0o555, "size": 15600},
+            "sudo_stat": {"uid": 0, "gid": 0, "mode": 0o4511, "size": 70712},
             "authorized_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         },
         "bounds": {
@@ -65,6 +70,20 @@ def _descriptor(parameters=None):
             "sha256": h("8"),
         },
     }
+    boundary = value["remote_boundary"]
+    bootstrap = _memory_bootstrap(
+        installer_sha256=value["transport"]["installer_source_sha256"],
+        transaction_sha256=value["transport"]["transaction_source_sha256"],
+        helper_config_sha256=boundary["config_sha256"],
+        python_sha256=boundary["python_sha256"], sudo_sha256=boundary["sudo_sha256"],
+        python_path=boundary["python_path"], sudo_path=boundary["sudo_path"],
+        python_stat=boundary["python_stat"], sudo_stat=boundary["sudo_stat"],
+        nix_system_path=boundary["nix_system_path"],
+    )
+    boundary["bootstrap_sha256"] = _hash_bytes(bootstrap.encode())
+    boundary["remote_command_sha256"] = _hash_bytes(shlex.join([
+        REMOTE_SUDO, "-n", "--", REMOTE_PYTHON, "-I", "-S", "-c", bootstrap,
+    ]).encode())
     value["descriptor_hash"] = _hash(value)
     return value
 
@@ -121,6 +140,10 @@ def test_memory_bootstrap_is_digest_bound_and_registers_modules_before_exec():
     bootstrap = _memory_bootstrap(
         installer_sha256=h("1"), transaction_sha256=h("2"),
         helper_config_sha256=h("3"), python_sha256=h("4"), sudo_sha256=h("5"),
+        python_path="/nix/store/00000000000000000000000000000000-python/bin/python3",
+        sudo_path="/run/wrappers/wrappers.ABC123/sudo",
+        python_stat={"uid": 0, "gid": 0, "mode": 0o555, "size": 1},
+        sudo_stat={"uid": 0, "gid": 0, "mode": 0o4511, "size": 1},
         nix_system_path="/nix/store/system-tgw-prod",
     )
     assert 'sys.modules["tgw"]=package' in bootstrap
@@ -132,7 +155,9 @@ def test_memory_bootstrap_is_digest_bound_and_registers_modules_before_exec():
 def test_memory_bootstrap_executes_exact_framed_modules_without_persistence(monkeypatch):
     python = os.path.realpath(sys.executable)
     python_raw = Path(python).read_bytes()
+    python_stat = Path(python).stat()
     monkeypatch.setattr(provider_module, "REMOTE_SUDO", python)
+    monkeypatch.setattr(provider_module, "REMOTE_PYTHON", python)
     installer = b"SCHEMA='fixture'\n"
     transaction = (
         b"import sys\n"
@@ -153,6 +178,15 @@ def test_memory_bootstrap_executes_exact_framed_modules_without_persistence(monk
         transaction_sha256=_hash_bytes(transaction),
         helper_config_sha256=_hash_bytes(config),
         python_sha256=_hash_bytes(python_raw), sudo_sha256=_hash_bytes(python_raw),
+        python_path=python, sudo_path=python,
+        python_stat={
+            "uid": python_stat.st_uid, "gid": python_stat.st_gid,
+            "mode": python_stat.st_mode & 0o7777, "size": python_stat.st_size,
+        },
+        sudo_stat={
+            "uid": python_stat.st_uid, "gid": python_stat.st_gid,
+            "mode": python_stat.st_mode & 0o7777, "size": python_stat.st_size,
+        },
         nix_system_path=str(Path("/run/current-system").resolve()),
     )
     unsigned = {
@@ -212,6 +246,7 @@ def test_second_seal_failure_closes_first_memfd(monkeypatch):
         raise OSError("second seal failed")
 
     monkeypatch.setattr(provider_module, "_sealed", seal)
+    monkeypatch.setattr(SshApplicationReleaseProvider, "preflight", lambda _self, _parameters: None)
     try:
         with pytest.raises(OSError, match="second seal"):
             provider._dispatch("rollback", parameters)
@@ -221,14 +256,18 @@ def test_second_seal_failure_closes_first_memfd(monkeypatch):
         provider.close()
 
 
-def test_dispatch_rechecks_observation_expiry_before_sealing_or_popen():
+def test_preflight_rechecks_observation_expiry_before_authority_consumption(monkeypatch):
     provider = object.__new__(SshApplicationReleaseProvider)
     object.__setattr__(provider, "_prerequisite", {
         "observed_at": "2020-01-01T00:00:00Z", "expires_at": "2020-01-02T00:00:00Z",
     })
+    object.__setattr__(provider, "_identities", ())
+    object.__setattr__(provider, "_fds", ())
+    object.__setattr__(provider, "_raw", ())
     object.__setattr__(provider, "_frozen", True)
-    with pytest.raises(ApplicationReleaseProviderError, match="expired before dispatch"):
-        provider._dispatch("install", {})
+    monkeypatch.setattr(SshApplicationReleaseProvider, "_check_parameters", lambda _self, _parameters: None)
+    with pytest.raises(ApplicationReleaseProviderError, match="expired before authority consumption"):
+        provider.preflight({})
 
 
 def test_popen_failure_is_typed_prelaunch_ambiguity_and_closes_seals(monkeypatch):
@@ -259,6 +298,7 @@ def test_popen_failure_is_typed_prelaunch_ambiguity_and_closes_seals(monkeypatch
     monkeypatch.setattr(
         provider_module.subprocess, "Popen", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("exec failed")),
     )
+    monkeypatch.setattr(SshApplicationReleaseProvider, "preflight", lambda _self, _parameters: None)
     try:
         with pytest.raises(BootstrapStateAmbiguous, match="before remote launch") as caught:
             provider._dispatch("install", parameters)

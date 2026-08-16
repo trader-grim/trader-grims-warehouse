@@ -134,6 +134,7 @@ def _safe_root(path: Path, *, mode: int = 0o700) -> None:
 def _validate_config(value: Any, *, expected_helper_sha256: str) -> dict[str, Any]:
     config = _exact(value, {
         "schema", "target_host", "root_id", "release_root", "current_selector", "active_config_path",
+        "active_config_metadata",
         "services", "health_probes", "executables", "database", "receipt_root", "backup_root",
         "unrelated_paths", "max_archive_bytes", "max_config_bytes", "command_timeout_seconds",
         "helper_sha256", "config_sha256",
@@ -149,13 +150,31 @@ def _validate_config(value: Any, *, expected_helper_sha256: str) -> dict[str, An
         or config["active_config_path"] != "/opt/TGW/config/tgw-api-config.json"
     ):
         raise ApplicationReleaseRemoteError("helper target paths are invalid")
+    active_config_metadata = _exact(
+        config["active_config_metadata"], {"uid", "gid", "mode"}, "active config metadata",
+    )
+    if (
+        active_config_metadata["uid"] != 0
+        or not isinstance(active_config_metadata["gid"], int) or active_config_metadata["gid"] < 0
+        or active_config_metadata["mode"] not in {0o400, 0o440, 0o600, 0o640}
+    ):
+        raise ApplicationReleaseRemoteError("active config metadata is invalid")
     for name in ("services", "health_probes", "unrelated_paths"):
         if not isinstance(config[name], list) or not config[name] or config[name] != sorted(set(config[name])):
             raise ApplicationReleaseRemoteError(f"helper {name} are invalid")
     executables = _exact(config["executables"], {"systemctl", "pg_dump", "pg_restore", "psql"}, "helper executables")
     for binding in executables.values():
-        item = _exact(binding, {"path", "sha256"}, "helper executable")
-        if not str(item["path"]).startswith("/run/current-system/sw/bin/") or _SHA.fullmatch(str(item["sha256"])) is None:
+        item = _exact(binding, {"path", "sha256", "uid", "gid", "mode", "size"}, "helper executable")
+        if (
+            re.fullmatch(
+                r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/]+/(?:s?bin)/[A-Za-z0-9._+-]+",
+                str(item["path"]),
+            ) is None
+            or _SHA.fullmatch(str(item["sha256"])) is None
+            or item["uid"] != 0 or item["gid"] != 0
+            or item["mode"] not in {0o555, 0o755}
+            or not isinstance(item["size"], int) or item["size"] <= 0
+        ):
             raise ApplicationReleaseRemoteError("helper executable binding is invalid")
     _exact(config["database"], {"name", "user", "host"}, "helper database")
     for name in ("receipt_root", "backup_root"):
@@ -198,7 +217,8 @@ def validate_request(
     predecessor = _exact(parameters["predecessor"], {
         "generation", "selector_target", "commit", "tree", "archive_sha256",
         "release_manifest_hash", "content_manifest_sha256", "projection_sha256",
-        "runtime_config_sha256",
+        "runtime_config_sha256", "database_identity_sha256",
+        "runtime_config_uid", "runtime_config_gid", "runtime_config_mode", "runtime_config_size",
     }, "release predecessor")
     if (
         predecessor["generation"] != parameters["expected_current"]
@@ -212,9 +232,19 @@ def validate_request(
         or any(_SHA.fullmatch(str(predecessor[name])) is None for name in (
             "archive_sha256", "release_manifest_hash", "content_manifest_sha256",
             "runtime_config_sha256",
+            "database_identity_sha256",
         ))
     ):
         raise ApplicationReleaseRemoteError("release predecessor identity is invalid")
+    if (
+        predecessor["runtime_config_uid"] != 0
+        or not isinstance(predecessor["runtime_config_gid"], int)
+        or predecessor["runtime_config_gid"] < 0
+        or predecessor["runtime_config_mode"] not in {0o400, 0o440, 0o600, 0o640}
+        or not isinstance(predecessor["runtime_config_size"], int)
+        or predecessor["runtime_config_size"] <= 0
+    ):
+        raise ApplicationReleaseRemoteError("release predecessor config metadata is invalid")
     projection = _exact(parameters["projection"], {"release_path", "content_sha256"}, "release projection")
     runtime_binding = _exact(parameters["runtime_config"], {
         "artifact_ref", "generation_path", "content_sha256", "overlay_manifest_sha256",
@@ -281,7 +311,9 @@ class HostRuntime:
             identity = (held.st_dev, held.st_ino, held.st_uid, held.st_gid, held.st_mode, held.st_size)
             if (
                 _hash_bytes(bytes(raw)) != binding["sha256"] or not stat.S_ISREG(held.st_mode)
-                or stat.S_IMODE(held.st_mode) not in {0o555, 0o755} or held.st_uid != 0 or held.st_nlink != 1
+                or stat.S_IMODE(held.st_mode) != binding["mode"]
+                or held.st_uid != binding["uid"] or held.st_gid != binding["gid"]
+                or held.st_size != binding["size"] or held.st_nlink < 1
                 or identity != (named.st_dev, named.st_ino, named.st_uid, named.st_gid, named.st_mode, named.st_size)
             ):
                 raise ApplicationReleaseRemoteError(f"held {executable} executable differs")
@@ -348,7 +380,28 @@ class HostRuntime:
 
     def restore(self, source: Path) -> None:
         db = self.config["database"]
-        self._run("pg_restore", ["--clean", "--if-exists", "-h", db["host"], "-U", db["user"], "-d", db["name"], str(source)])
+        self._run(
+            "pg_restore",
+            [
+                "--clean", "--if-exists", "--create", "--exit-on-error", "--no-owner",
+                "-h", db["host"], "-U", db["user"], "-d", "postgres", str(source),
+            ],
+        )
+
+    def database_identity(self) -> str:
+        """Hash deterministic schema and data using the held pg_dump."""
+
+        db = self.config["database"]
+        schema = self._run(
+            "pg_dump",
+            [
+                "--format=plain", "--no-owner", "--no-privileges", "--no-comments",
+                "--restrict-key=TGWW09DATABASEIDENTITY",
+                "-h", db["host"], "-U", db["user"], db["name"],
+            ],
+            limit=64 * 1024 * 1024,
+        )
+        return _hash_bytes(schema)
 
     def health(self) -> None:
         self.systemctl("is-active", self.config["services"])
@@ -361,7 +414,7 @@ class HostRuntime:
                     raise ApplicationReleaseRemoteError("health probe failed")
 
 
-def _write_once(path: Path, raw: bytes, mode: int) -> None:
+def _write_once(path: Path, raw: bytes, mode: int, *, uid: int | None = None, gid: int | None = None) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     try:
         offset = 0
@@ -369,6 +422,8 @@ def _write_once(path: Path, raw: bytes, mode: int) -> None:
             written = os.write(descriptor, raw[offset:])
             if written <= 0: raise OSError("short protected write")
             offset += written
+        if uid is not None or gid is not None:
+            os.fchown(descriptor, -1 if uid is None else uid, -1 if gid is None else gid)
         os.fchmod(descriptor, mode); os.fsync(descriptor)
     finally:
         os.close(descriptor)
@@ -379,9 +434,11 @@ def _write_once(path: Path, raw: bytes, mode: int) -> None:
         os.close(parent_fd)
 
 
-def _atomic(path: Path, raw: bytes, mode: int) -> None:
+def _atomic(
+    path: Path, raw: bytes, mode: int, *, uid: int | None = None, gid: int | None = None,
+) -> None:
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    _write_once(temporary, raw, mode)
+    _write_once(temporary, raw, mode, uid=uid, gid=gid)
     os.replace(temporary, path)
     descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try: os.fsync(descriptor)
@@ -454,29 +511,114 @@ def _stage(config: Mapping[str, Any], journal: dict[str, Any], stage: str, evide
     return _hash({"operation": journal["operation_id"], "stage": stage})
 
 
+def _active_config_identity(config: Mapping[str, Any]) -> tuple[bytes, dict[str, Any]]:
+    path = Path(config["active_config_path"])
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        held = os.fstat(fd)
+        raw = os.pread(fd, held.st_size + 1, 0)
+        named = os.stat(path, follow_symlinks=False)
+        identity = (held.st_dev, held.st_ino, held.st_uid, held.st_gid, held.st_mode, held.st_size)
+        if (
+            not stat.S_ISREG(held.st_mode) or held.st_nlink != 1 or len(raw) != held.st_size
+            or identity != (
+                named.st_dev, named.st_ino, named.st_uid, named.st_gid,
+                named.st_mode, named.st_size,
+            )
+        ):
+            raise ApplicationReleaseRemoteError("active config identity changed during observation")
+        return raw, {
+            "runtime_config_sha256": _hash_bytes(raw), "runtime_config_uid": held.st_uid,
+            "runtime_config_gid": held.st_gid, "runtime_config_mode": stat.S_IMODE(held.st_mode),
+            "runtime_config_size": held.st_size,
+        }
+    finally:
+        os.close(fd)
+
+
+def _predecessor_identity(
+    parameters: Mapping[str, Any], config: Mapping[str, Any], runtime: HostRuntime,
+) -> dict[str, Any]:
+    """Re-observe every bound predecessor fact from live immutable state."""
+
+    root = Path(config["release_root"])
+    generation = parameters["expected_current"]
+    release = root / "releases" / generation
+    if current_generation(root) != generation:
+        raise ApplicationReleaseRemoteError("selector does not name the bound predecessor")
+    selector = Path(config["current_selector"])
+    if selector.resolve(strict=True) != release.resolve(strict=True):
+        raise ApplicationReleaseRemoteError("selector target differs from the bound predecessor")
+    verification = verify(root, generation)
+    manifest = json.loads((release / ".release-manifest.json").read_bytes())
+    projection = release / PROJECTION_PATH
+    _config_raw, config_identity = _active_config_identity(config)
+    identity = {
+        "generation": generation,
+        "selector_target": str(release),
+        "commit": manifest.get("commit"),
+        "tree": manifest.get("git_tree"),
+        "archive_sha256": "sha256:" + str(manifest.get("archive_sha256")),
+        "release_manifest_hash": _hash(manifest),
+        "content_manifest_sha256": "sha256:" + str(manifest.get("content_manifest_sha256")),
+        "projection_sha256": _hash_bytes(projection.read_bytes()) if projection.is_file() else None,
+        **config_identity,
+        "database_identity_sha256": runtime.database_identity(),
+    }
+    if verification.get("status") != "PASS" or identity != parameters["predecessor"]:
+        raise ApplicationReleaseRemoteError("live predecessor identity differs from its W09 binding")
+    return identity
+
+
 def _reconcile(parameters: Mapping[str, Any], config: Mapping[str, Any], runtime: HostRuntime, journal: dict[str, Any]) -> dict[str, Any]:
     root = Path(config["release_root"]); operation = parameters["operation_id"]
     evidence: list[str] = []
     try:
         selection = root / "receipts" / f"{operation}.json"
-        if selection.exists() and current_generation(root) == parameters["generation"]:
+        selected_generation = current_generation(root)
+        if selected_generation == parameters["generation"] and not selection.exists():
+            raise ApplicationReleaseRemoteError("successor selected without its CAS receipt")
+        if selection.exists() and selected_generation == parameters["generation"]:
             restored = rollback(root, selection, expected_current=parameters["generation"], operation_id=operation + "-rollback")
             evidence.append("selector:" + restored["operation_id"])
+        elif selected_generation != parameters["expected_current"]:
+            raise ApplicationReleaseRemoteError("selector is neither bound predecessor nor successor")
         config_backup = Path(config["receipt_root"]) / f"{operation}.config.backup"
         active_config = Path(config["active_config_path"])
+        if "database-backed-up" in journal["stages"] and not config_backup.exists():
+            raise ApplicationReleaseRemoteError("required predecessor config backup is absent")
         if config_backup.exists():
-            _atomic(active_config, config_backup.read_bytes(), 0o640); evidence.append("config:restored")
+            predecessor_config = parameters["predecessor"]
+            backup_raw = config_backup.read_bytes()
+            if _hash_bytes(backup_raw) != predecessor_config["runtime_config_sha256"]:
+                raise ApplicationReleaseRemoteError("predecessor config backup differs from its binding")
+            _atomic(
+                active_config, backup_raw, predecessor_config["runtime_config_mode"],
+                uid=predecessor_config["runtime_config_uid"],
+                gid=predecessor_config["runtime_config_gid"],
+            )
+            evidence.append("config:restored")
         database_backup = Path(config["backup_root"]) / f"{operation}.dump"
-        if database_backup.exists() and any(
-            stage in journal["stages"]
-            for stage in ("migration-restore-required", "migrations-applied")
-        ):
+        restore_required = any(
+            stage in journal["stages"] for stage in ("migration-restore-required", "migrations-applied")
+        )
+        if restore_required and not database_backup.exists():
+            raise ApplicationReleaseRemoteError("required predecessor database backup is absent")
+        if database_backup.exists() and restore_required:
             runtime.restore(database_backup); evidence.append("database:restored")
+        predecessor = _predecessor_identity(parameters, config, runtime)
+        unrelated_evidence = next(
+            (item for item in journal.get("evidence", []) if isinstance(item, str) and item.startswith("unrelated:")),
+            None,
+        )
+        if unrelated_evidence is not None and _snapshot(config["unrelated_paths"]) != unrelated_evidence.removeprefix("unrelated:"):
+            raise ApplicationReleaseRemoteError("unrelated host state differs during reconciliation")
         runtime.systemctl("restart", config["services"]); runtime.health()
         evidence.extend(["services:predecessor", "health:predecessor"])
         receipt = _persist(Path(config["receipt_root"]), "rollback", {
             "schema": "tgw-w09-application-rollback/v1", "operation_id": operation,
-            "generation": parameters["expected_current"], "evidence": evidence,
+            "generation": parameters["expected_current"], "predecessor": predecessor,
+            "evidence": evidence,
         })
         return {"status": "RESTORED", "receipt": receipt, "generation": parameters["expected_current"], "predecessor_healthy": True, "evidence": evidence}
     except Exception as exc:
@@ -494,40 +636,32 @@ def execute(
         return _bound_response(parameters, result, config)
     root = Path(config["release_root"]); evidence: list[str] = []
     try:
-        predecessor_binding = parameters["predecessor"]
         if current_generation(root) != parameters["expected_current"] or os.readlink("/run/current-system") != parameters["nix_system_path"]:
             raise ApplicationReleaseRemoteError("fresh predecessor selector/Nix observation differs")
-        predecessor_release = root / "releases" / parameters["expected_current"]
-        predecessor_verification = verify(root, parameters["expected_current"])
-        predecessor_manifest = json.loads(
-            (predecessor_release / ".release-manifest.json").read_bytes()
-        )
-        prior_projection = predecessor_release / PROJECTION_PATH
-        actual_predecessor = {
-            "generation": parameters["expected_current"],
-            "selector_target": str(predecessor_release),
-            "commit": predecessor_manifest.get("commit"),
-            "tree": predecessor_manifest.get("git_tree"),
-            "archive_sha256": "sha256:" + str(predecessor_manifest.get("archive_sha256")),
-            "release_manifest_hash": _hash(predecessor_manifest),
-            "content_manifest_sha256": "sha256:" + str(predecessor_manifest.get("content_manifest_sha256")),
-            "projection_sha256": _hash_bytes(prior_projection.read_bytes()) if prior_projection.is_file() else None,
-            "runtime_config_sha256": _hash_bytes(Path(config["active_config_path"]).read_bytes()),
-        }
-        if predecessor_verification.get("status") != "PASS" or actual_predecessor != predecessor_binding:
-            raise ApplicationReleaseRemoteError("fresh predecessor release/config identity differs")
+        actual_predecessor = _predecessor_identity(parameters, config, runtime)
         runtime.systemctl("is-active", config["services"])
+        unrelated = _snapshot(config["unrelated_paths"])
         predecessor = _persist(Path(config["receipt_root"]), "preflight", {
             "schema": "tgw-w09-live-predecessor/v1", "bound_observation": parameters["predecessor_observation_hash"],
             "generation": parameters["expected_current"], "nix_system_path": parameters["nix_system_path"],
             "services": config["services"], "health_probes": config["health_probes"],
             "release": actual_predecessor,
+            "unrelated_snapshot": unrelated,
         })
-        unrelated = _snapshot(config["unrelated_paths"]); evidence += [predecessor, _stage(config, journal, "predecessor-verified", [predecessor])]
+        evidence += [predecessor, _stage(
+            config, journal, "predecessor-verified", [predecessor, "unrelated:" + unrelated],
+        )]
         runtime.quiesce(); evidence.append(_stage(config, journal, "services-quiesced", ["services:inactive"]))
         operation = parameters["operation_id"]
         config_backup = Path(config["receipt_root"]) / f"{operation}.config.backup"
-        if not config_backup.exists(): _write_once(config_backup, Path(config["active_config_path"]).read_bytes(), 0o400)
+        if not config_backup.exists():
+            config_raw, config_identity = _active_config_identity(config)
+            if any(
+                parameters["predecessor"].get(name) != value
+                for name, value in config_identity.items()
+            ):
+                raise ApplicationReleaseRemoteError("active config changed before backup")
+            _write_once(config_backup, config_raw, 0o400)
         database_backup = Path(config["backup_root"]) / f"{operation}.dump"
         if not database_backup.exists(): runtime.backup(database_backup)
         backup_receipt = "backup:" + _hash_bytes(database_backup.read_bytes())
@@ -561,7 +695,11 @@ def execute(
         verify(root, parameters["generation"])
         evidence.append(_stage(config, journal, "runtime-staged", ["runtime:" + str(installed["runtime_manifest_sha256"])]))
         selected = select(root, parameters["generation"], expected_current=parameters["expected_current"], operation_id=operation)
-        _atomic(Path(config["active_config_path"]), request["runtime_config_bytes"], 0o640)
+        successor_config = config["active_config_metadata"]
+        _atomic(
+            Path(config["active_config_path"]), request["runtime_config_bytes"],
+            successor_config["mode"], uid=successor_config["uid"], gid=successor_config["gid"],
+        )
         evidence.append(_stage(config, journal, "generation-activated", ["selection:" + selected["operation_id"]]))
         runtime.systemctl("restart", config["services"]); evidence.append(_stage(config, journal, "successor-restarted", ["services:successor"]))
         runtime.health()

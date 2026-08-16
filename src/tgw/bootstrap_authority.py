@@ -117,6 +117,30 @@ class BootstrapAuthorityState(str, Enum):
 class BootstrapSessionAuthority:
     """Redeem one immutable grant; absence/mismatch/expiry all fail closed."""
 
+    __slots__ = (
+        "__dict__",
+        "grant", "receipt_path", "_lock_name", "_directory_fd", "_root_identity",
+        "_state", "_spent_receipt_id", "_ambiguity_evidence", "_ambiguity_cause",
+        "_consume_lock", "_production_authority", "_grant_artifact", "_bindings_frozen",
+    )
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        raise TypeError("BootstrapSessionAuthority is sealed")
+
+    def __getattribute__(self, name: str) -> Any:
+        """Ignore instance-dictionary method shadows on production authority."""
+
+        if name not in {"_production_authority", "_bindings_frozen", "__class__"}:
+            try:
+                production = object.__getattribute__(self, "_production_authority")
+                frozen = object.__getattribute__(self, "_bindings_frozen")
+            except AttributeError:
+                production = frozen = False
+            class_value = getattr(type(self), name, None)
+            if production and frozen and callable(class_value):
+                return class_value.__get__(self, type(self))
+        return object.__getattribute__(self, name)
+
     def __setattr__(self, name: str, value: Any) -> None:
         immutable = {
             "grant", "receipt_path", "_production_authority", "_grant_artifact",
@@ -124,6 +148,12 @@ class BootstrapSessionAuthority:
         }
         if getattr(self, "_bindings_frozen", False) and name in immutable:
             raise AttributeError("bootstrap authority binding is immutable")
+        if (
+            getattr(self, "_bindings_frozen", False)
+            and getattr(self, "_production_authority", False)
+            and callable(getattr(type(self), name, None))
+        ):
+            raise AttributeError("production bootstrap authority methods cannot be shadowed")
         object.__setattr__(self, name, value)
 
     def __init__(

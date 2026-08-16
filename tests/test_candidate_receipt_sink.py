@@ -10,6 +10,7 @@ import pytest
 import yaml
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import tgw.candidate_receipt_sink as receipt_sink_module
 from tgw.bootstrap_deployment_contract import (
     BootstrapDeploymentContractError,
     PinnedBootstrapDeploymentContractResolver,
@@ -45,6 +46,7 @@ from tgw.candidate_receipt_sink import (
     independent_review_evidence_bundle_ref,
     load_pinned_candidate_evidence_descriptor,
     load_receipt_sink_descriptor,
+    protected_git_object_reads,
 )
 from tgw.candidate_review import PACKET_SCHEMA, REPORT_SCHEMA, RESULT_SCHEMA
 from tgw.execution_resources import (
@@ -77,6 +79,36 @@ TEST_ATTESTATION_KEY_ID = "candidate-sink-attestation-key-1"
 TEST_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
 TEST_EXECUTION_ATTESTATION_KEY_ID = "candidate-qualified-execution-key-1"
 TEST_EXECUTION_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
+
+
+def test_protected_git_context_routes_transitive_reads_and_rejects_unheld_roots(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    class Reader:
+        def __init__(self):
+            self.calls = []
+            self.checks = 0
+
+        def run_git(self, *arguments):
+            self.calls.append(arguments)
+            return b"held\n"
+
+        def run_git_status(self, *arguments):
+            return 0, b""
+
+        def postcheck(self):
+            self.checks += 1
+
+    reader = Reader()
+    with protected_git_object_reads({repository: reader}):
+        assert receipt_sink_module._git(
+            repository, "show", "a" * 40 + ":path",
+        ) == b"held\n"
+        with pytest.raises(CandidateReceiptSinkError, match="unheld"):
+            receipt_sink_module._git(tmp_path, "status")
+    assert reader.calls == [("show", "a" * 40 + ":path")]
+    assert reader.checks == 2
 TEST_RUNNER_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
 
 

@@ -5,6 +5,8 @@ from unittest.mock import Mock
 
 import pytest
 
+import tgw.application_release_remote as remote_module
+
 from tgw.application_release_remote import (
     ApplicationReleaseRemoteError,
     MIGRATION_PATHS,
@@ -50,6 +52,9 @@ def _request():
             "commit": "c" * 40, "tree": "d" * 40, "archive_sha256": h("a"),
             "release_manifest_hash": h("b"), "content_manifest_sha256": h("c"),
             "projection_sha256": None, "runtime_config_sha256": h("e"),
+            "database_identity_sha256": h("f"),
+            "runtime_config_uid": 0, "runtime_config_gid": 995,
+            "runtime_config_mode": 0o640, "runtime_config_size": len(runtime),
         },
     }
     unsigned = {
@@ -79,7 +84,7 @@ def test_request_rejects_migration_traversal_or_reordering_before_host_action():
         validate_request(bad, _config())
 
 
-def test_reconcile_restores_database_after_pre_dispatch_marker_even_without_applied_stage(tmp_path):
+def test_reconcile_restore_marker_without_exact_predecessor_state_is_ambiguous(tmp_path):
     root = tmp_path / "root"
     (root / "receipts").mkdir(parents=True)
     receipt_root = tmp_path / "receipts"; receipt_root.mkdir(mode=0o700)
@@ -99,5 +104,31 @@ def test_reconcile_restores_database_after_pre_dispatch_marker_even_without_appl
             "stages": ["migration-restore-required"], "evidence": [],
         },
     )
-    assert result["status"] == "RESTORED"
-    runtime.restore.assert_called_once_with(dump)
+    assert result["status"] == "AMBIGUOUS"
+    runtime.restore.assert_not_called()
+
+
+def test_reconcile_never_claims_restored_while_selector_names_neighbor_generation(
+    tmp_path, monkeypatch,
+):
+    root = tmp_path / "root"; (root / "receipts").mkdir(parents=True)
+    receipt_root = tmp_path / "receipts"; receipt_root.mkdir(mode=0o700)
+    backup_root = tmp_path / "backups"; backup_root.mkdir(mode=0o700)
+    runtime = Mock()
+    monkeypatch.setattr(remote_module, "current_generation", lambda _root: "release-c")
+    result = _reconcile(
+        {
+            "operation_id": "w09-operation", "generation": "release-b",
+            "expected_current": "release-a", "predecessor": {},
+        },
+        {
+            "release_root": str(root), "receipt_root": str(receipt_root),
+            "backup_root": str(backup_root), "active_config_path": str(tmp_path / "active.json"),
+            "services": ["tgw-api.service"], "unrelated_paths": [],
+        },
+        runtime,
+        {"operation_id": "w09-operation", "stages": [], "evidence": []},
+    )
+    assert result["status"] == "AMBIGUOUS"
+    assert result["generation"] == "release-c"
+    runtime.health.assert_not_called()

@@ -356,6 +356,19 @@ def test_constructor_rejects_root_swapped_to_world_writable_after_held_open(tmp_
     assert not receipt_path.exists()
 
 
+def test_production_authority_rejects_grant_replacement_and_method_shadowing():
+    authority = object.__new__(BootstrapSessionAuthority)
+    object.__setattr__(authority, "grant", _grant())
+    object.__setattr__(authority, "_production_authority", True)
+    object.__setattr__(authority, "_bindings_frozen", True)
+    with pytest.raises(AttributeError, match="immutable"):
+        authority.grant = _grant()
+    with pytest.raises(AttributeError, match="cannot be shadowed"):
+        authority.consume = lambda *_args, **_kwargs: {}
+    authority.__dict__["consume"] = lambda *_args, **_kwargs: {}
+    assert authority.consume.__func__ is BootstrapSessionAuthority.consume
+
+
 def test_successful_consume_stays_spent_after_receipt_is_unlinked(tmp_path):
     grant = _grant()
     path = tmp_path / "unlinked-after-success.json"
