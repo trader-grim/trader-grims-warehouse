@@ -45,7 +45,14 @@ def bound_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, 
     for path, content in {
         "plan/SPEC-plan-capability-graph-v2.md": "# Plan v2\n",
         "plan/TGW-Master-Plan.md": "# Master Plan\n",
-        "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml": "schema: fixture\n",
+        "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml": (
+            "work_units:\n"
+            "  - id: W10\n"
+            "    title: Prove the canonical gate\n"
+            "  - id: W11\n"
+            "    title: Cut over consumers\n"
+            "    requires: [W10]\n"
+        ),
         "plan/pp/PP-CONTEXT-001.md": "# PP\n",
         "reference/context.md": "# Context\n",
     }.items():
@@ -85,6 +92,15 @@ def test_status_binds_approved_plan_evidence_and_committed_source(bound_context)
     assert status["source"]["commit"] == bound_context["source_commit"]
     assert status["code_graph"]["commit"] == bound_context["source_commit"]
     assert status["scope_semantics"]["platform_w11_completion_implies_master_plan_completion"] is False
+
+
+def test_context_plan_graph_indexes_approved_execution_work_unit(bound_context):
+    result = context.plan_graph("W11")
+    assert result["status"] == "matched"
+    assert result["plan_commit"] == bound_context["approved"]
+    candidate = result["candidates"][0]
+    assert candidate["node_id"] == "work-unit:W11"
+    assert candidate["citation"]["path"] == "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml"
 
 
 def test_committed_plan_runbook_and_codegraph_ignore_dirty_bytes(bound_context):

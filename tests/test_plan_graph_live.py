@@ -19,6 +19,15 @@ def _plan_repo(tmp_path: Path) -> Path:
     (root / 'plan' / 'pp' / 'PP-ALPHA-001.md').write_text(
         '# PP-ALPHA-001\n\nThe widget boundary is exact.\n'
     )
+    (root / 'plan' / 'execution').mkdir()
+    (root / 'plan' / 'execution' / 'platform.yaml').write_text(
+        'work_units:\n'
+        '  - id: W10\n'
+        '    title: Prove the canonical gate\n'
+        '  - id: W11\n'
+        '    title: Cut over consumers and retire bootstrap paths\n'
+        '    requires: [W10]\n'
+    )
     (root / 'reference' / 'invariants.md').write_text('# Invariants\n\n## C12\nPreserve boundary.\n')
     subprocess.run(['git', 'init', '-q', str(root)], check=True)
     subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
@@ -57,6 +66,35 @@ def test_live_graph_binds_clean_standalone_commit_and_receiver(tmp_path):
     assert len(result['source_envelope']) == 64
     assert result['receiver'] == 'aider'
     assert result['detailed_pp_documents']
+
+
+def test_live_graph_indexes_execution_work_unit_ids(tmp_path):
+    root = _plan_repo(tmp_path)
+    result = live_plan_graph(root, 'W11', **_binding(root))
+    assert result['status'] == 'matched'
+    assert result['candidates'][0]['node_id'] == 'work-unit:W11'
+    assert result['candidates'][0]['citation']['path'] == 'plan/execution/platform.yaml'
+
+
+def test_live_graph_rejects_undeclared_execution_dependency(tmp_path):
+    root = _plan_repo(tmp_path)
+    (root / 'plan' / 'execution' / 'platform.yaml').write_text(
+        'work_units:\n'
+        '  - id: W11\n'
+        '    title: Cut over consumers and retire bootstrap paths\n'
+        '    requires: [W99]\n'
+    )
+    subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+    subprocess.run([
+        'git', '-C', str(root), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+        'commit', '-qm', 'invalid execution dependency',
+    ], check=True)
+    result = live_plan_graph(root, 'W11', operation='coverage', **_binding(root))
+    assert result['stale'] is True
+    assert {
+        'path': 'plan/execution/platform.yaml',
+        'reason': 'execution graph work unit requires an undeclared work unit',
+    } in result['unreviewed']
 
 
 def test_live_graph_refuses_dirty_plan_source(tmp_path):

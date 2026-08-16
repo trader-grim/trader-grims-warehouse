@@ -53,6 +53,13 @@ def _selected_paths(root: Path) -> list[str]:
                 for path in base.rglob("*.md")
                 if path.is_file() and not path.is_symlink()
             )
+    execution = root / "plan" / "execution"
+    if execution.is_dir():
+        paths.update(
+            path.relative_to(root).as_posix()
+            for path in execution.rglob("*.yaml")
+            if path.is_file() and not path.is_symlink()
+        )
     if not paths:
         raise SourcePreconditionError("source_absent", str(root))
     return sorted(paths)

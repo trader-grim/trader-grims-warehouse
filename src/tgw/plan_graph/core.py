@@ -16,6 +16,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
+import yaml
+
 SOURCE_REVISION = "90c0288ea11e660380f0f23ec8e28a164c971ce1"
 SCHEMA = "tgw-plan-graph-pilot-v3"
 WARNING = (
@@ -32,6 +34,7 @@ HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 INVARIANT_TOKEN_RE = re.compile(r"^(?:C|E)\d+[A-Z]?$", re.I)
 INVARIANT_REF_RE = re.compile(r"\b(?:C|E)\d+[A-Z]?\b", re.I)
 TODO_ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|")
+WORK_UNIT_RE = re.compile(r"^W\d{2}$")
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 REFERENCE_WORDS = ("audit", "runbook", "reference", "inventory", "boundary", "review")
 ACTOR_HEADING_RE = re.compile(r"^(.+?)\s+\((\d+)\s+open\)$", re.I)
@@ -248,6 +251,62 @@ def _node_type(rel: str) -> str:
     return "document"
 
 
+def _execution_work_units(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return strictly bounded execution-unit identities from an admitted YAML graph.
+
+    The execution graph is canonical Plan input, not prose.  It must therefore be
+    searchable by its stable work-unit IDs (for example ``W11``), while callers
+    still retrieve the cited YAML before acting.
+    """
+    if not (doc["path"].startswith("plan/execution/") and doc["path"].endswith(".yaml")):
+        return []
+    try:
+        value = yaml.safe_load(doc["raw"])
+    except yaml.YAMLError as exc:
+        doc["malformed"].append(f"invalid execution YAML: {exc}")
+        return []
+    units = value.get("work_units") if isinstance(value, dict) else None
+    if not isinstance(units, list):
+        doc["malformed"].append("execution graph has no work_units list")
+        return []
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in units:
+        if not isinstance(item, dict):
+            doc["malformed"].append("execution graph work unit is not a mapping")
+            return []
+        unit_id, title = item.get("id"), item.get("title")
+        requires = item.get("requires", [])
+        if (
+            not isinstance(unit_id, str) or not WORK_UNIT_RE.fullmatch(unit_id)
+            or not isinstance(title, str) or not title.strip()
+            or not isinstance(requires, list) or not all(isinstance(value, str) for value in requires)
+            or unit_id in seen
+        ):
+            doc["malformed"].append("execution graph work unit is malformed")
+            return []
+        line = next(
+            (number for number, line_text in enumerate(doc["lines"], 1)
+             if re.fullmatch(rf"\s*-\s+id:\s*{re.escape(unit_id)}\s*", line_text)),
+            None,
+        )
+        if line is None:
+            doc["malformed"].append(f"execution graph work unit {unit_id} has no canonical id line")
+            return []
+        seen.add(unit_id)
+        result.append({"id": unit_id, "title": title.strip(), "requires": sorted(set(requires)), "line": line})
+    declared = {unit["id"] for unit in result}
+    if any(
+        dependency not in declared
+        for unit in result
+        for dependency in unit["requires"]
+        if WORK_UNIT_RE.fullmatch(dependency)
+    ):
+        doc["malformed"].append("execution graph work unit requires an undeclared work unit")
+        return []
+    return result
+
+
 def _terms(value: str, aliases: bool = True) -> list[str]:
     """Normalize bounded word tokens; aliases bridge ordinary domain wording."""
     terms = [token for token in TOKEN_RE.findall(value.lower()) if len(token) > 1 and token not in STOP_WORDS]
@@ -343,11 +402,14 @@ def _source_docs(corpus: Path, allowlist: Path,
     for rel in paths:
         path = corpus / rel
         if bound is not None and rel in bound:
-            docs.append(_parse_document(rel, bound[rel]))
+            doc = _parse_document(rel, bound[rel])
         elif not path.is_file():
             missing.append(rel)
         else:
-            docs.append(_parse_document(rel, path.read_bytes()))
+            doc = _parse_document(rel, path.read_bytes())
+        if rel not in missing:
+            doc["execution_units"] = _execution_work_units(doc)
+            docs.append(doc)
     return paths, docs, missing
 
 
@@ -370,6 +432,7 @@ def _build_unchecked(corpus: Path, allowlist: Path, output: Path,
 
     for doc in docs:
         rel, lines, digest = doc["path"], doc["lines"], doc["sha256"]
+        execution_units = doc["execution_units"]
         doc_id = f"doc:{rel}"
         manifest.append(
             {
@@ -397,6 +460,30 @@ def _build_unchecked(corpus: Path, allowlist: Path, output: Path,
             source_revision=source_revision,
             derived=False,
         )
+        for unit in execution_units:
+            unit_id = f"work-unit:{unit['id']}"
+            cite = _citation(rel, unit["line"], f"{unit['id']} — {unit['title']}", digest, source_revision)
+            _add_node(
+                nodes, unit_id, type="work-unit", work_unit_id=unit["id"],
+                title=f"{unit['id']} — {unit['title']}", citation=cite,
+            )
+            edge(doc_id, "DEFINES", unit_id, f"{rel}:{unit['line']}")
+            index_entries.append(
+                {
+                    "id": unit_id, "type": "work-unit", "title": f"{unit['id']} — {unit['title']}",
+                    "identity": unit["id"],
+                    "title_normalized": " ".join(TOKEN_RE.findall(f"{unit['id']} {unit['title']}".lower())),
+                    "normalized": " ".join(TOKEN_RE.findall(
+                        f"{unit['id']} {unit['title']} {' '.join(unit['requires'])}".lower()
+                    )),
+                    "token_count": len(TOKEN_RE.findall(f"{unit['id']} {unit['title']}".lower())),
+                    "structural_container": False,
+                    "citation": cite,
+                }
+            )
+            for dependency in unit["requires"]:
+                if WORK_UNIT_RE.fullmatch(dependency):
+                    edge(unit_id, "REQUIRES", f"work-unit:{dependency}", f"{rel}:{unit['line']}")
         document_identity = (
             Path(rel).stem.upper() if _node_type(rel) == "detailed-pp" else None
         )
@@ -721,6 +808,8 @@ def _kind(term: str) -> tuple[str, str]:
         return "todo", todo.group(1)
     if INVARIANT_TOKEN_RE.fullmatch(value):
         return "invariant", value.upper()
+    if WORK_UNIT_RE.fullmatch(value):
+        return "work-unit", value.upper()
     if ASSIGNMENT_RE.search(value):
         return "assignment", value
     if len(value.split()) > 1:
@@ -798,6 +887,9 @@ def _ranked_candidates(
         elif kind == "invariant" and needle.lower() in words:
             first_title_word = entry.get("title_normalized", "").split()[:1]
             score = 8000 + (500 if first_title_word == [needle.lower()] else 0)
+            evidence = {"match": "exact_identifier"}
+        elif kind == "work-unit" and entry.get("identity") == needle:
+            score = IDENTITY_SCORES["exact_identifier"]
             evidence = {"match": "exact_identifier"}
         elif kind == "assignment":
             actor = entry.get("assigned_actor")
