@@ -30,9 +30,14 @@ def _repo(tmp_path: Path):
 def _manifest(repo, base, **changes):
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, text=True).strip()
+    base_tree = subprocess.check_output(["git", "rev-parse", f"{base}^{{tree}}"], cwd=repo, text=True).strip()
     values = dict(
         commit="HEAD",
         base_commit=base,
+        predecessor_release={
+            "schema": "tgw-release-manifest-v1", "generation": "previous",
+            "commit": base, "git_tree": base_tree, "archive_sha256": "a" * 64,
+        },
         plan_commit="plan-commit",
         solution_hash="sha256:solution",
         closure_hash="sha256:closure",
@@ -98,3 +103,35 @@ def test_manifest_hash_covers_plan_test_and_migration_bindings(tmp_path):
     ))
     assert first["manifest_hash"] != changed["manifest_hash"]
     json.dumps(first)
+
+
+def test_candidate_cannot_self_select_or_misbind_predecessor_release(tmp_path):
+    repo, base = _repo(tmp_path)
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, text=True).strip()
+    passing = create_test_receipt(
+        scope="focused", command=("pytest",), source_commit=commit, source_tree=tree, returncode=0,
+    )
+    full = create_test_receipt(
+        scope="full", command=("pytest", "-q"), source_commit=commit, source_tree=tree, returncode=0,
+    )
+    with pytest.raises(CandidateManifestError, match="cannot be the candidate"):
+        build_candidate_manifest(
+            repo, commit=commit, base_commit=commit,
+            predecessor_release={
+                "schema": "tgw-release-manifest-v1", "generation": "forged",
+                "commit": commit, "git_tree": tree, "archive_sha256": "a" * 64,
+            },
+            plan_commit="plan", solution_hash="sha256:solution", closure_hash="sha256:closure",
+            focused_receipt=passing, full_suite_receipt=full,
+        )
+    with pytest.raises(CandidateManifestError, match="does not match predecessor"):
+        build_candidate_manifest(
+            repo, commit=commit, base_commit=base,
+            predecessor_release={
+                "schema": "tgw-release-manifest-v1", "generation": "forged",
+                "commit": "b" * 40, "git_tree": "c" * 40, "archive_sha256": "a" * 64,
+            },
+            plan_commit="plan", solution_hash="sha256:solution", closure_hash="sha256:closure",
+            focused_receipt=passing, full_suite_receipt=full,
+        )

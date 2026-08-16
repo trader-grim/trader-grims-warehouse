@@ -315,6 +315,72 @@ class ApiClient {
     }
   }
 
+  // The Flutter surface projects the same HTTP-backed PlanAuthority records
+  // as web and CLI clients. It deliberately has no `/consume` method: only a
+  // separately authenticated registered executor can redeem an approval.
+  Future<ApiResponse<List<Map<String, dynamic>>>> getPlanAuthorityRequests({int limit = 100}) async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.get('/api/plan-authority/requests', queryParameters: {'limit': limit});
+      if (response.statusCode == 200) {
+        final List<dynamic> requests = response.data['requests'] ?? [];
+        return ApiResponse(ok: true, data: requests.map((value) => Map<String, dynamic>.from(value as Map)).toList());
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
+  Future<ApiResponse<Map<String, dynamic>>> getPlanAuthorityRequest(String requestId) async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.get('/api/plan-authority/requests/$requestId');
+      if (response.statusCode == 200) {
+        return ApiResponse(ok: true, data: Map<String, dynamic>.from(response.data));
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
+  Future<ApiResponse<Map<String, dynamic>>> createPlanAuthorityRequest(Map<String, dynamic> request) async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.post('/api/plan-authority/requests', data: request);
+      if (response.statusCode == 200) {
+        return ApiResponse(ok: true, data: Map<String, dynamic>.from(response.data));
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
+  Future<ApiResponse<Map<String, dynamic>>> decidePlanAuthorityRequest(
+    String requestId, {
+    required String kind,
+    required String reason,
+  }) async {
+    await ensureInitialized();
+    if (!{'approve', 'hold', 'reconcile'}.contains(kind) || reason.trim().isEmpty) {
+      return ApiResponse(ok: false, error: 'A valid authority decision and reason are required');
+    }
+    try {
+      final response = await _dio.post(
+        '/api/plan-authority/requests/$requestId/decisions',
+        data: {'kind': kind, 'reason': reason},
+      );
+      if (response.statusCode == 200) {
+        return ApiResponse(ok: true, data: Map<String, dynamic>.from(response.data));
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
   String getThumbnailUrl(String sku) {
     return '$_baseUrl/thumb/$sku';
   }

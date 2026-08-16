@@ -14,6 +14,7 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--base-commit", required=True)
+    parser.add_argument("--predecessor-release-manifest", type=Path, required=True)
     parser.add_argument("--plan-commit", required=True)
     parser.add_argument("--solution-hash", required=True)
     parser.add_argument("--closure-hash", required=True)
@@ -31,6 +32,7 @@ def main() -> int:
     )
     focused = json.loads(args.focused_receipt.read_text())
     full_suite = json.loads(args.full_suite_receipt.read_text())
+    predecessor = json.loads(args.predecessor_release_manifest.read_text())
     migration = MigrationSafetyReceipt(**json.loads(args.migration_receipt.read_text())) if args.migration_receipt else None
     graph = json.loads(args.graph.read_text()) if args.graph else None
     conformance = json.loads(args.luet_conformance_receipt.read_text()) if args.luet_conformance_receipt else None
@@ -38,6 +40,7 @@ def main() -> int:
         args.repo,
         commit=args.commit,
         base_commit=args.base_commit,
+        predecessor_release=predecessor,
         plan_commit=args.plan_commit,
         solution_hash=args.solution_hash,
         closure_hash=args.closure_hash,

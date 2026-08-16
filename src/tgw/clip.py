@@ -16,12 +16,15 @@ DB: ~/.local/share/tgw-clip/history.db
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 import sqlite3
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from tgw.plan_authority_client import PlanAuthorityHttpClient
 
 # Canonical TGW SKU: tgw + 15 digits (18 chars). Matches the pattern used by
 # the Qtile widgets and api.py clipboard action.
@@ -288,6 +291,11 @@ def cmd_clip(action: str, *, pattern: str = '', limit: int = 20,
              sku_only: bool = False, clip_id: Optional[int] = None,
              copy: bool = False, label: Optional[str] = None,
              requested_by: str = 'claude',
+             authority_url: Optional[str] = None,
+             authority_token: Optional[str] = None,
+             request_id: Optional[str] = None,
+             decision: Optional[str] = None,
+             reason: Optional[str] = None,
              db_path: Optional[Path] = None) -> Dict[str, Any]:
     """CLI handler for `tgw clip {list,last-sku,search,wipe,get,deliver}`."""
     if action == 'last-sku':
@@ -347,5 +355,34 @@ def cmd_clip(action: str, *, pattern: str = '', limit: int = 20,
                     pass
         return {'ok': True, 'id': row['id'], 'content': content,
                 'is_sku': bool(row['is_sku']), 'captured_at': row['captured_at']}
+
+    # PP-CLIP is an operator projection only: it never records an approval in
+    # its local SQLite history and it has no executor/consume method.  Every
+    # authority read or decision goes to the shared HTTP authority record.
+    if action in {'authority-list', 'authority-show', 'authority-decide'}:
+        if authority_url is not None or authority_token is not None:
+            if not authority_url or not authority_token:
+                return {'ok': False, 'error': 'authority URL and bearer token must be supplied together'}
+            client = PlanAuthorityHttpClient(authority_url.rstrip('/'), authority_token)
+        else:
+            try:
+                client = PlanAuthorityHttpClient.from_environment()
+            except Exception as exc:
+                return {'ok': False, 'error': str(exc)}
+        try:
+            if action == 'authority-list':
+                result = client.list_requests(limit=limit)
+            elif action == 'authority-show':
+                if not request_id:
+                    return {'ok': False, 'error': 'authority-show requires --request-id'}
+                result = client.get_request(request_id)
+            else:
+                if not request_id or not decision or not reason:
+                    return {'ok': False, 'error': 'authority-decide requires --request-id, --decision and --reason'}
+                result = client.decide(request_id, kind=decision, reason=reason)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+        print(json.dumps(result, sort_keys=True))
+        return {'ok': True, 'authority': result}
 
     return {'ok': False, 'error': f'unknown clip action: {action!r}'}

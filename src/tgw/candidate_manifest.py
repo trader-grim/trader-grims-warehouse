@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -17,6 +18,9 @@ class CandidateManifestError(ValueError):
 
 
 TEST_RECEIPT_SCHEMA = "tgw-candidate-test-receipt/v1"
+RELEASE_MANIFEST_SCHEMA = "tgw-release-manifest-v1"
+_GIT_OBJECT = re.compile(r"^[0-9a-f]{40}$")
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _git(repo: Path, *args: str, text: bool = True) -> str | bytes:
@@ -43,6 +47,15 @@ def _canonical_hash(value: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+def _is_pytest_command(command: Sequence[str]) -> bool:
+    """Keep a candidate receipt from claiming that a no-op is a test suite."""
+    names = [Path(item).name for item in command]
+    return any(name in {"pytest", "py.test"} for name in names) or any(
+        command[index:index + 2] == ["-m", "pytest"]
+        for index in range(len(command) - 1)
+    )
+
+
 def create_test_receipt(
     *,
     scope: str,
@@ -63,6 +76,8 @@ def create_test_receipt(
         raise CandidateManifestError("test receipt scope is invalid")
     if not command or not all(isinstance(item, str) and item for item in command):
         raise CandidateManifestError("test receipt command is invalid")
+    if not _is_pytest_command(command):
+        raise CandidateManifestError("candidate test receipt must run pytest")
     if not isinstance(returncode, int):
         raise CandidateManifestError("test receipt return code is invalid")
     receipt = {
@@ -99,6 +114,8 @@ def verify_test_receipt(
     command = receipt.get("command")
     if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
         raise CandidateManifestError("test receipt command is invalid")
+    if not _is_pytest_command(command):
+        raise CandidateManifestError("candidate test receipt must run pytest")
     for field in ("stdout_sha256", "stderr_sha256", "receipt_hash"):
         value = receipt.get(field)
         if not isinstance(value, str) or len(value) != 71 or not value.startswith("sha256:"):
@@ -108,6 +125,38 @@ def verify_test_receipt(
     if claimed != _canonical_hash(unsigned):
         raise CandidateManifestError("test receipt hash mismatch")
     return dict(receipt)
+
+
+def verify_predecessor_release(
+    predecessor: Mapping[str, Any], *, base_commit: str, base_tree: str,
+) -> dict[str, str]:
+    """Bind migration comparison to an immutable selected release manifest.
+
+    A caller cannot suppress SQL migration checks by simply choosing the
+    candidate itself (or an arbitrary newer commit) as ``base_commit``.  The
+    baseline must instead be the source identity declared by the release
+    manifest of the currently selected predecessor generation.
+    """
+    if predecessor.get("schema") != RELEASE_MANIFEST_SCHEMA:
+        raise CandidateManifestError("predecessor release manifest schema is invalid")
+    commit = predecessor.get("commit")
+    tree = predecessor.get("git_tree")
+    archive = predecessor.get("archive_sha256")
+    if not all(isinstance(value, str) for value in (commit, tree, archive)):
+        raise CandidateManifestError("predecessor release source identity is invalid")
+    if not _GIT_OBJECT.fullmatch(commit) or not _GIT_OBJECT.fullmatch(tree):
+        raise CandidateManifestError("predecessor release Git identity is invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", archive):
+        raise CandidateManifestError("predecessor release archive identity is invalid")
+    if commit != base_commit or tree != base_tree:
+        raise CandidateManifestError("base commit/tree does not match predecessor release")
+    return {
+        "generation": str(predecessor.get("generation", "")),
+        "commit": commit,
+        "tree": tree,
+        "archive_sha256": "sha256:" + archive,
+        "release_manifest_hash": _canonical_hash(predecessor),
+    }
 
 
 def create_luet_conformance_receipt(
@@ -196,6 +245,7 @@ def build_candidate_manifest(
     *,
     commit: str,
     base_commit: str,
+    predecessor_release: Mapping[str, Any],
     plan_commit: str,
     solution_hash: str,
     closure_hash: str,
@@ -210,6 +260,17 @@ def build_candidate_manifest(
     exact_commit = str(_git(repo, "rev-parse", f"{commit}^{{commit}}")).strip()
     tree = str(_git(repo, "rev-parse", f"{exact_commit}^{{tree}}")).strip()
     base = str(_git(repo, "rev-parse", f"{base_commit}^{{commit}}")).strip()
+    base_tree = str(_git(repo, "rev-parse", f"{base}^{{tree}}")).strip()
+    if base == exact_commit:
+        raise CandidateManifestError("candidate predecessor cannot be the candidate itself")
+    ancestry = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", base, exact_commit], cwd=repo,
+    )
+    if ancestry.returncode != 0:
+        raise CandidateManifestError("predecessor release is not an ancestor of candidate")
+    predecessor = verify_predecessor_release(
+        predecessor_release, base_commit=base, base_tree=base_tree,
+    )
     archive = _git(repo, "archive", "--format=tar", exact_commit, text=False)
     changed = tuple(sorted(line for line in str(_git(repo, "diff", "--name-only", base, exact_commit)).splitlines() if line))
     migrations = tuple(path for path in changed if path.endswith(".sql") or "/migrations/" in path)
@@ -237,6 +298,7 @@ def build_candidate_manifest(
             "base_commit": base,
             "changed_paths": list(changed),
         },
+        "predecessor_release": predecessor,
         "plan": {"commit": plan_commit, "solution_hash": solution_hash, "closure_hash": closure_hash},
         "conformance": conformance,
         "tests": {

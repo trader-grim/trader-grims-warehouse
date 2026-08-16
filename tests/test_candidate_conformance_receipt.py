@@ -19,12 +19,15 @@ def _repo(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
-    (repo / "source").write_text("candidate")
+    (repo / "source").write_text("baseline")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-qm", "candidate"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=repo, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    (repo / "source").write_text("candidate")
+    subprocess.run(["git", "commit", "-qam", "candidate"], cwd=repo, check=True)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, text=True).strip()
-    return repo, commit, tree
+    return repo, base, commit, tree
 
 
 def _receipt(graph, commit, tree):
@@ -48,10 +51,16 @@ def _receipt(graph, commit, tree):
 
 def _manifest(repo, commit, graph, receipt=None):
     tree = subprocess.check_output(["git", "rev-parse", f"{commit}^{{tree}}"], cwd=repo, text=True).strip()
+    base = subprocess.check_output(["git", "rev-parse", f"{commit}^"], cwd=repo, text=True).strip()
+    base_tree = subprocess.check_output(["git", "rev-parse", f"{base}^{{tree}}"], cwd=repo, text=True).strip()
     return build_candidate_manifest(
         repo,
         commit=commit,
-        base_commit=commit,
+        base_commit=base,
+        predecessor_release={
+            "schema": "tgw-release-manifest-v1", "generation": "previous",
+            "commit": base, "git_tree": base_tree, "archive_sha256": "a" * 64,
+        },
         plan_commit="plan",
         solution_hash="sha256:solution",
         closure_hash="sha256:closure",
@@ -69,7 +78,7 @@ def _manifest(repo, commit, graph, receipt=None):
 
 
 def test_persisted_pinned_receipt_enables_candidate_without_live_luet(tmp_path):
-    repo, commit, tree = _repo(tmp_path)
+    repo, _base, commit, tree = _repo(tmp_path)
     graph = {"schema": "tgw-plan/v2", "plan_commit": "plan"}
     receipt = _receipt(graph, commit, tree)
     manifest = _manifest(repo, commit, graph, receipt)
@@ -79,7 +88,7 @@ def test_persisted_pinned_receipt_enables_candidate_without_live_luet(tmp_path):
 
 @pytest.mark.parametrize("field", ["plan_commit", "graph_hash", "closure_hash", "source_commit", "source_tree", "luet_revision"])
 def test_stale_or_unpinned_receipt_is_rejected(tmp_path, field):
-    repo, commit, tree = _repo(tmp_path)
+    repo, _base, commit, tree = _repo(tmp_path)
     graph = {"schema": "tgw-plan/v2", "plan_commit": "plan"}
     receipt = _receipt(graph, commit, tree)
     receipt[field] = "stale"
@@ -88,16 +97,25 @@ def test_stale_or_unpinned_receipt_is_rejected(tmp_path, field):
 
 
 def test_missing_conformance_receipt_prepares_held_candidate_but_never_omits_test_proof(tmp_path):
-    repo, commit, _ = _repo(tmp_path)
+    repo, _base, commit, _ = _repo(tmp_path)
     manifest = _manifest(repo, commit, {"schema": "tgw-plan/v2"})
     assert manifest["conformance"]["status"] == "MISSING"
     assert manifest["dispatchable"] is False
     assert manifest["tests"]["full_suite"]["status"] == "PASS"
 
 
+def test_noop_command_cannot_be_recorded_as_candidate_test_evidence(tmp_path):
+    repo, _base, commit, tree = _repo(tmp_path)
+    with pytest.raises(CandidateManifestError, match="must run pytest"):
+        create_test_receipt(
+            scope="full", command=("true",), source_commit=commit, source_tree=tree,
+            returncode=0,
+        )
+
+
 @pytest.mark.parametrize("scope", ["focused", "full"])
 def test_missing_failing_or_wrong_candidate_test_proof_is_rejected(tmp_path, scope):
-    repo, commit, tree = _repo(tmp_path)
+    repo, base, commit, tree = _repo(tmp_path)
     receipt = create_test_receipt(
         scope=scope, command=("pytest",), source_commit=commit, source_tree=tree,
         returncode=1,
@@ -115,6 +133,12 @@ def test_missing_failing_or_wrong_candidate_test_proof_is_rejected(tmp_path, sco
     kwargs[f"{scope}_receipt" if scope == "focused" else "full_suite_receipt"] = receipt
     with pytest.raises(CandidateManifestError, match="not passing"):
         build_candidate_manifest(
-            repo, commit=commit, base_commit=commit, plan_commit="plan",
-            solution_hash="sha256:solution", closure_hash="sha256:closure", **kwargs,
+            repo, commit=commit, base_commit=base,
+            predecessor_release={
+                "schema": "tgw-release-manifest-v1", "generation": "previous",
+                "commit": base,
+                "git_tree": subprocess.check_output(["git", "rev-parse", f"{base}^{{tree}}"], cwd=repo, text=True).strip(),
+                "archive_sha256": "a" * 64,
+            },
+            plan_commit="plan", solution_hash="sha256:solution", closure_hash="sha256:closure", **kwargs,
         )

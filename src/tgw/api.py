@@ -645,8 +645,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--worker", default="", help="focus on a specific worker")
     p.add_argument("--launch", action="store_true", help="exec claude now (default: print the command)")
 
-    p = sub.add_parser("clip", help="TGW clipboard history store/query (PP-CLIP-001)")
-    p.add_argument("clip_action", choices=["list", "last-sku", "search", "wipe", "get", "deliver"])
+    p = sub.add_parser("clip", help="TGW clipboard history and PlanAuthority projection (PP-CLIP-001)")
+    p.add_argument("clip_action", choices=["list", "last-sku", "search", "wipe", "get", "deliver", "authority-list", "authority-show", "authority-decide"])
     p.add_argument("pattern", nargs="?", default="",
                    help="search pattern (for search) / content to deliver (for deliver)")
     p.add_argument("--limit", type=int, default=20, help="max rows (list/search)")
@@ -654,6 +654,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--id", type=int, default=None, metavar="ID",
                    help="get: clip entry ID to retrieve (prints full content)")
     p.add_argument("--copy", action="store_true", help="get: also copy content back to clipboard")
+    p.add_argument("--authority-url", help="PlanAuthority HTTP endpoint (otherwise TGW_AUTHORITY_URL)")
+    p.add_argument("--authority-token", help="PlanAuthority bearer token (otherwise TGW_AUTHORITY_BEARER_TOKEN)")
+    p.add_argument("--request-id", help="authority-show/authority-decide: authority request ID")
+    p.add_argument("--decision", choices=["approve", "hold", "reconcile"], help="authority-decide: explicit operator decision")
+    p.add_argument("--reason", help="authority-decide: durable operator reason")
     p.add_argument("--label", default=None, help="deliver: optional short human-readable description")
     p.add_argument("--requested-by", default="claude", dest="requested_by",
                    help="deliver: who requested the delivery (claude|tigwa); not yet persisted to schema")
@@ -4467,6 +4472,10 @@ def main() -> int:
                 sku_only=args.sku_only, clip_id=getattr(args, "id", None),
                 copy=getattr(args, "copy", False), label=getattr(args, "label", None),
                 requested_by=getattr(args, "requested_by", "claude"),
+                authority_url=getattr(args, "authority_url", None),
+                authority_token=getattr(args, "authority_token", None),
+                request_id=getattr(args, "request_id", None),
+                decision=getattr(args, "decision", None), reason=getattr(args, "reason", None),
             )
 
         elif args.op == "catlocmvall":
