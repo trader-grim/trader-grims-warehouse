@@ -30,7 +30,7 @@ The currently proven implementation is the `claude` account on tgw-lib:
   the exact non-symlink target before use);
 - discovered `tgw-review` skill link at
   `/home/claude/.claude/skills/tgw-review` (not an admitted execution input);
-- provider-neutral protected skill, remote context-service MCP config, and runtime
+- provider-neutral protected skill, loopback context-service MCP config, and runtime
   projections supplied by the review controller;
 - current first-party Claude authentication; and
 - receiver identity `claude:tgw-review`.
@@ -73,13 +73,13 @@ Before launch, the controller must create and freeze:
    evidence, and receipt-sink bindings;
 3. an unexpired independent-review execution card and Promptcraft handoff;
 4. the provider's exact executable, version, account identity, root-protected
-   generic-skill projection and source-provenance receipt, held remote-MCP
+   generic-skill projection and source-provenance receipt, held loopback-MCP
    config, minimal runtime closure, closed
    environment, fresh authentication-health evidence, and per-artifact owner
    policy;
 5. a registered, separately privileged context-broker service and public key
    capable of issuing a signed card/handoff/resource-retrieval attestation;
-   the external context service alone receives one pre-bound broker request
+   the separately operated loopback context service alone receives one pre-bound broker request
    credential, the controller receives a different readback credential, and
    both signing authorities remain unavailable to the provider; and
 6. a protected X-store descriptor whose exact reference and descriptor hash
@@ -97,10 +97,14 @@ escape. Named and held identities are rechecked, exactly one
 `tgw-code-review/v1` result is accepted, and the card-bound X-store must return
 an exact pinned readback.
 
-Each attempt creates a fresh 256-bit challenge. The challenge is disclosed in
-the governed prompt. A passing provider must use Skill and the nonempty exact MCP
+Before launch, the controller issues one root-held context grant containing a
+fresh 256-bit challenge, exact broker request hash, `issued_at`, `not_before`,
+and `expires_at`. Its entire lifetime may not exceed 15 minutes. The same exact
+request is installed as the broker's one-use grant; neither the challenge nor a
+test callback is generated after launch. The challenge and non-secret grant are
+disclosed in the governed prompt. A passing provider must use Skill and the nonempty exact MCP
 tool policy and call `tgw_context_bundle` with that challenge and exact skill
-contract hash. The external context service uses a request credential bound to
+contract hash. The separately operated context service uses a request credential bound to
 that exact client/challenge/card/handoff/skill/resource receipt and resource
 map; the privileged broker consumes it before retrieval. The broker retains the
 complete signed service attestation and fetched resource bundle under the exact
@@ -138,17 +142,21 @@ network policies:
 `{prompt}`, `{snapshot}`, and `{mcp_config}` must each occur exactly once. The
 adapter replaces executable and config inputs with held `/proc/self/fd`
 identities and maps the held source snapshot read-only. The held MCP config may
-name only the exact admitted external context-service SSE endpoint and contains
+name only the exact admitted loopback context-service SSE endpoint and contains
 no broker request or readback credential. Its
 bound Plan, source, CodeGraph, and environment bindings must exactly equal the
 retained card.
 
 The sandbox intentionally shares the host network because the selected model
 provider and admitted MCP route require it. This is not networkless isolation.
-The provider identity binds a sorted exact HTTPS endpoint allow-list and its
+The provider identity binds a sorted exact endpoint allow-list and its
 hash. Bubblewrap does not enforce an endpoint allow-list, so admission also
 requires a fresh Ed25519-signed `ENFORCED` receipt from the host egress
-controller for that exact policy. The context-service endpoint is admitted;
+controller for that exact policy. Model endpoints remain HTTPS. The governed
+context service is exact loopback HTTP SSE, and the separately controlled
+context service reaches the broker over exact loopback HTTP. Both shipped
+servers reject non-loopback binds; no unimplemented TLS proxy is claimed. The
+context-service endpoint is admitted;
 the privileged broker endpoint is explicitly forbidden from the provider
 namespace. A self-hash or caller assertion is a HOLD.
 
@@ -158,7 +166,8 @@ The provider emits `tgw-governed-review-execution/v1`. It binds the exact
 card/handoff, distinct execution-resource and Promptcraft receipts, Plan,
 source commit/tree/snapshot,
 CodeGraph/environment/resource bindings, provider identity, command policy,
-bounded lifecycle, output hashes, fully validated semantic result, and signed
+the full non-secret preissued context grant, bounded lifecycle, output hashes,
+fully validated semantic result, and signed
 registered-resource retrieval with exact resource-bundle hash. The execution
 record is published by the card-bound sink
 before it is returned.
@@ -186,7 +195,7 @@ final result.
 
 This source change is a candidate only. It is not installed or deployed. The
 current selected provider is HOLD, not disabled: its executable and existing
-credential are present, but the protected generic skill, remote MCP config,
+credential are present, but the protected generic skill, loopback MCP config,
 minimal runtime projections, separately privileged context broker
 and its protected backend credential/signing authority, registered signed
 context readback, X publisher, protected execution-environment authority, and
@@ -205,8 +214,7 @@ The installed fixed entry point is:
 tgw-governed-review --request /run/tgw-review/root-owned-request.json
 ```
 
-The separately protected loopback broker daemon is started behind the admitted
-TLS service boundary with:
+The separately protected loopback broker daemon is started with:
 
 ```bash
 tgw-governed-review-context-broker \
@@ -215,8 +223,12 @@ tgw-governed-review-context-broker \
 ```
 
 Its root-owned config carries only environment-variable names for secrets and
-one exact request grant. The request credential is consumed once; abandoned
+one exact, fresh, time-bounded request grant. The request credential is consumed once; abandoned
 bundles expire, and the exact client-bound readback is also consumed once.
+The governed MCP daemon is separately started with
+`--governed-review-sse`; it binds only loopback and exposes only the strict
+governed `tgw_context_bundle` surface. The ordinary context daemon is not an
+admitted provider endpoint.
 
 The request must be a bounded, root-owned, non-writable, single-link regular
 file. The entry point holds and rechecks that exact file through provider

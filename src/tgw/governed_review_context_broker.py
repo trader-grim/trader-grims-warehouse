@@ -18,9 +18,11 @@ import hashlib
 import hmac
 import json
 import os
+import socket
 import stat
 import threading
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -41,6 +43,7 @@ BROKER_BUNDLE_SCHEMA = "tgw-context-review-resource-bundle/v1"
 BROKER_CONFIG_SCHEMA = "tgw-context-review-broker-config/v1"
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_BUNDLE_BYTES = 64 * 1024 * 1024
+MAX_GRANT_WINDOW_SECONDS = 900
 
 
 class ReviewContextBrokerError(ValueError):
@@ -64,6 +67,7 @@ class PrivilegedReviewContextBroker:
         max_retained_runs: int = 1024,
         retained_ttl_seconds: int = 900,
         clock: Any = time.monotonic,
+        grant_clock: Any = lambda: datetime.now(timezone.utc),
     ) -> None:
         if (
             not backend_execution_identity
@@ -89,6 +93,7 @@ class PrivilegedReviewContextBroker:
         self._max_retained_runs = max_retained_runs
         self._retained_ttl_seconds = retained_ttl_seconds
         self._clock = clock
+        self._grant_clock = grant_clock
         self._bundles: dict[str, tuple[dict[str, Any], float]] = {}
         self._lock = threading.Lock()
 
@@ -98,6 +103,7 @@ class PrivilegedReviewContextBroker:
             "schema", "card_hash", "role", "execution_identity",
             "handoff_hash", "resource_receipt_hash", "resources",
             "challenge", "skill_contract_hash", "client_id",
+            "issued_at", "not_before", "expires_at",
         }
         if (
             not isinstance(value, Mapping)
@@ -113,12 +119,32 @@ class PrivilegedReviewContextBroker:
             )
             or not isinstance(value.get("challenge"), str)
             or len(value["challenge"]) != 64
+            or not set(value["challenge"]) <= set("0123456789abcdef")
             or not isinstance(value.get("skill_contract_hash"), str)
             or not value["skill_contract_hash"].startswith("sha256:")
             or not isinstance(value.get("resources"), Mapping)
             or set(value["resources"]) != CARD_RESOURCE_NAMES
+            or not all(
+                isinstance(value.get(name), str)
+                for name in ("issued_at", "not_before", "expires_at")
+            )
         ):
             raise ReviewContextBrokerError("review context broker request is invalid")
+        try:
+            issued_at, not_before, expires_at = (
+                datetime.fromisoformat(str(value[name]).replace("Z", "+00:00"))
+                for name in ("issued_at", "not_before", "expires_at")
+            )
+        except ValueError as exc:
+            raise ReviewContextBrokerError(
+                "review context broker grant time is invalid"
+            ) from exc
+        if (
+            any(item.tzinfo is None for item in (issued_at, not_before, expires_at))
+            or not issued_at <= not_before < expires_at
+            or (expires_at - issued_at).total_seconds() > MAX_GRANT_WINDOW_SECONDS
+        ):
+            raise ReviewContextBrokerError("review context broker grant window is invalid")
         resources = {}
         for name in sorted(CARD_RESOURCE_NAMES):
             binding = value["resources"][name]
@@ -134,10 +160,21 @@ class PrivilegedReviewContextBroker:
             resources[name] = dict(binding)
         return {**dict(value), "resources": resources}
 
-    def execute(self, value: Mapping[str, Any]) -> dict[str, Any]:
+    def validate_grant(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        """Validate exact client and wall-clock freshness before grant consumption."""
+
         request = self._request(value)
-        if request["client_id"] != self._client_id:
-            raise ReviewContextBrokerError("review context broker client identity differs")
+        now = self._grant_clock()
+        if not isinstance(now, datetime) or now.tzinfo is None:
+            raise ReviewContextBrokerError("review context broker clock is invalid")
+        not_before = datetime.fromisoformat(request["not_before"].replace("Z", "+00:00"))
+        expires_at = datetime.fromisoformat(request["expires_at"].replace("Z", "+00:00"))
+        if request["client_id"] != self._client_id or not not_before <= now < expires_at:
+            raise ReviewContextBrokerError("review context broker grant is not active")
+        return request
+
+    def execute(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        request = self.validate_grant(value)
         try:
             run = self._backend.begin_harness_run(
                 card_hash=request["card_hash"], role="independent-review",
@@ -362,6 +399,11 @@ def create_review_context_broker_server(
                 ):
                     self.send_error(404)
                     return
+                try:
+                    broker.validate_grant(normalized)
+                except ReviewContextBrokerError:
+                    self.send_error(404)
+                    return
                 del grants[credential or ""]
             try:
                 self._json(200, broker.execute(normalized))
@@ -403,6 +445,11 @@ def create_review_context_broker_server(
             except ReviewContextBrokerError:
                 self.send_error(404)
 
+    if host == "::1":
+        class IPv6ThreadingHTTPServer(ThreadingHTTPServer):
+            address_family = socket.AF_INET6
+
+        return IPv6ThreadingHTTPServer((host, port), Handler)
     return ThreadingHTTPServer((host, port), Handler)
 
 

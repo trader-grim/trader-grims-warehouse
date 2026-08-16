@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tomllib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -71,7 +72,7 @@ def _resource_service_catalog():
     service = {
         "schema": "tgw-registered-resource-service/v2",
         "id": "review-resources", "client_id": "review-client",
-        "endpoint": "https://context-broker.invalid",
+        "endpoint": "http://127.0.0.1:18788",
         "credential_env": "TGW_TEST_CONTEXT_CREDENTIAL", "timeout_seconds": 5,
     }
     catalog = {
@@ -128,16 +129,16 @@ def _context_attestation(identity, private_key, handoff, run_id, challenge):
     return attestation
 
 
-def _context_service_bundle(attestation, *, challenge, skill_contract_hash):
+def _context_service_bundle(
+    attestation, *, challenge, skill_contract_hash, resource_contents,
+):
     resources = {
         name: {
             **binding,
             "content_sha256": "sha256:" + hashlib.sha256(
-                f"resource:{name}".encode()
+                resource_contents[name]
             ).hexdigest(),
-            "content_base64": base64.b64encode(
-                f"resource:{name}".encode()
-            ).decode(),
+            "content_base64": base64.b64encode(resource_contents[name]).decode(),
         }
         for name, binding in attestation["resources"].items()
     }
@@ -148,6 +149,67 @@ def _context_service_bundle(attestation, *, challenge, skill_contract_hash):
         "retrieval_attestation": attestation, "resources": resources,
     }
     return {**unsigned, "bundle_hash": _hash(unsigned)}
+
+
+def _snapshot_preimage(root):
+    value = bytearray()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        value.extend(path.relative_to(root).as_posix().encode())
+        value.extend(b"\0")
+        value.extend(path.read_bytes())
+        value.extend(b"\0")
+    return bytes(value)
+
+
+def _resource_contents(handoff, source, sink_descriptor):
+    contents = {
+        "plan_input": b"resource:plan-input",
+        "plan_commit": b"resource:plan-commit",
+        "plan_graph": b"resource:plan-graph",
+        "codegraph_snapshot": b"resource:codegraph",
+        "authority_conditions": b"resource:authority",
+        "candidate_evidence": b"resource:candidate",
+    }
+    contents["source_tree"] = _snapshot_preimage(source)
+    environment_ref = handoff["card"]["bindings"]["execution_environment"]["ref"]
+    if environment_ref.startswith("file://"):
+        contents["execution_environment"] = Path(
+            environment_ref.removeprefix("file://")
+        ).read_bytes()
+    contents["receipt_sink"] = json.dumps(
+        {name: value for name, value in sink_descriptor.items() if name != "descriptor_hash"},
+        sort_keys=True, separators=(",", ":"),
+    ).encode()
+    return contents
+
+
+def _context_grant(identity, handoff, skill_contract_hash, *, now=None):
+    now = now or datetime.now(timezone.utc)
+    issued = now - timedelta(seconds=1)
+    request = {
+        "schema": "tgw-context-review-broker-request/v1",
+        "client_id": identity["context_bundle_service"]["client_id"],
+        "challenge": "c" * 64,
+        "skill_contract_hash": skill_contract_hash,
+        "card_hash": handoff["card"]["card_hash"], "role": "independent-review",
+        "execution_identity": (
+            f"governed-review:{'c' * 64}:"
+            f"uid={identity['sandbox_identity']['uid']}:"
+            f"gid={identity['sandbox_identity']['gid']}"
+        ),
+        "handoff_hash": handoff["handoff_hash"],
+        "resource_receipt_hash": handoff["resource_receipt"]["receipt_hash"],
+        "resources": {
+            name: handoff["card"]["bindings"][name]
+            for name in sorted(handoff["card"]["bindings"])
+        },
+        "issued_at": issued.isoformat(), "not_before": issued.isoformat(),
+        "expires_at": (now + timedelta(minutes=10)).isoformat(),
+    }
+    return {
+        "schema": "tgw-governed-review-context-grant/v1",
+        "request": request, "request_hash": _hash(request),
+    }
 
 
 def _fixture_skill_contract_hash(identity):
@@ -356,7 +418,8 @@ def _fixture(
     skill_artifact = _tree_artifact(skill)
     context_private_key = _context_signing_key()
     mcp = tmp_path / "mcp.json"
-    mcp_endpoint = "https://context-service.invalid/sse"
+    mcp_endpoint = "http://127.0.0.1:18766/sse"
+    broker_endpoint = "http://127.0.0.1:18788"
     mcp.write_text(json.dumps({
         "mcpServers": {"tgw-context": {
             "type": "sse", "url": mcp_endpoint,
@@ -396,7 +459,7 @@ def _fixture(
         "credential_env": "TGW_TEST_CONTEXT_CREDENTIAL",
         "timeout_seconds": 5,
         "service_id": "review-resources", "client_id": "review-client",
-        "broker_endpoint": "https://context-broker.invalid",
+        "broker_endpoint": broker_endpoint,
         "context_service_endpoint": mcp_endpoint,
         "resource_service_descriptor_hash": _hash(resource_service),
         "resource_service_catalog_ref": "catalog:test",
@@ -414,7 +477,7 @@ def _fixture(
     network_unsigned = {
         "schema": "tgw-governed-review-network-policy/v1",
         "mode": "shared-network-enforced-endpoints",
-        "endpoints": ["https://api.anthropic.com", mcp_endpoint],
+        "endpoints": sorted(["https://api.anthropic.com", mcp_endpoint]),
         "enforcement_key_id": "test-egress-key",
         "enforcement_public_key": _public_key(egress_private_key),
     }
@@ -517,10 +580,18 @@ def _run(
     source, executable, identity, environment, context_private_key, *,
     handoff=None, provider="claude", sink_descriptor=None,
     context_bundle_mutator=None, context_service_available=True,
+    context_grant=None, resource_bundle_mutator=None,
 ):
     sink_descriptor = sink_descriptor or _sink_descriptor()
     selected_handoff = handoff or _handoff(
         source, provider=provider, sink_descriptor=sink_descriptor,
+    )
+    skill_contract_hash = _fixture_skill_contract_hash(identity)
+    grant = context_grant or _context_grant(
+        identity, selected_handoff, skill_contract_hash,
+    )
+    resource_contents = _resource_contents(
+        selected_handoff, source, sink_descriptor,
     )
     retained = {}
 
@@ -545,10 +616,12 @@ def _run(
             context_bundle_mutator(attestation, run_id, challenge)
             if context_bundle_mutator else attestation
         )
-        return _context_service_bundle(
+        bundle = _context_service_bundle(
             selected, challenge=challenge,
-            skill_contract_hash=_fixture_skill_contract_hash(identity),
+            skill_contract_hash=skill_contract_hash,
+            resource_contents=resource_contents,
         )
+        return resource_bundle_mutator(bundle) if resource_bundle_mutator else bundle
 
     return run_governed_review(
         selected_handoff, snapshot=source,
@@ -560,8 +633,8 @@ def _run(
         publish_execution=publish,
         read_execution=lambda _publication: retained["execution"],
         read_context_bundle=read_context,
+        context_grant=grant,
         timeout_seconds=5,
-        challenge_source=lambda: "c" * 64,
     )
 
 
@@ -643,7 +716,9 @@ def test_non_test_request_composes_provider_and_pinned_sink_readback(tmp_path, m
     source, executable, identity, environment, context_private_key = _fixture(tmp_path)
     sink_descriptor = _sink_descriptor()
     handoff = _handoff(source, sink_descriptor=sink_descriptor)
-    monkeypatch.setattr(governed_adapter.secrets, "token_hex", lambda _size: "c" * 64)
+    skill_contract_hash = _fixture_skill_contract_hash(identity)
+    context_grant = _context_grant(identity, handoff, skill_contract_hash)
+    resource_contents = _resource_contents(handoff, source, sink_descriptor)
 
     class Sink:
         retained = None
@@ -713,7 +788,8 @@ def test_non_test_request_composes_provider_and_pinned_sink_readback(tmp_path, m
             )
             return _context_service_bundle(
                 attestation, challenge=challenge,
-                skill_contract_hash=_fixture_skill_contract_hash(identity),
+                skill_contract_hash=skill_contract_hash,
+                resource_contents=resource_contents,
             )
 
     monkeypatch.setattr(governed_adapter, "HTTPContextBundleClient", ContextClient)
@@ -727,6 +803,7 @@ def test_non_test_request_composes_provider_and_pinned_sink_readback(tmp_path, m
         "evidence_sink": sink_descriptor,
         "review_packet": _review_packet(source),
         "resource_service_catalog": _resource_service_catalog()[1],
+        "context_grant": context_grant,
     }
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(request))
@@ -898,8 +975,60 @@ def test_adversarial_semantic_non_consumption_and_x_substitution_hold(tmp_path):
         )
 
 
+def test_context_grant_is_preissued_exact_and_fresh(tmp_path):
+    values = _fixture(tmp_path)
+    handoff = _handoff(values[0])
+    skill_hash = _fixture_skill_contract_hash(values[2])
+    now = datetime.now(timezone.utc)
+    stale = _context_grant(
+        values[2], handoff, skill_hash, now=now - timedelta(minutes=20),
+    )
+    with pytest.raises(ReviewRunnerError, match="grant is stale"):
+        _run(*values, handoff=handoff, context_grant=stale)
+    future = _context_grant(
+        values[2], handoff, skill_hash, now=now + timedelta(minutes=5),
+    )
+    with pytest.raises(ReviewRunnerError, match="grant is stale"):
+        _run(*values, handoff=handoff, context_grant=future)
+    overlong = _context_grant(values[2], handoff, skill_hash, now=now)
+    overlong["request"]["expires_at"] = (now + timedelta(minutes=20)).isoformat()
+    overlong["request_hash"] = _hash(overlong["request"])
+    with pytest.raises(ReviewRunnerError, match="grant is stale"):
+        _run(*values, handoff=handoff, context_grant=overlong)
+    execution = _run(*values, handoff=handoff)
+    substituted = json.loads(json.dumps(execution))
+    substituted["invocation"]["context_grant"]["request"]["challenge"] = "d" * 64
+    unsigned = {
+        name: value for name, value in substituted.items() if name != "execution_hash"
+    }
+    substituted["execution_hash"] = _hash(unsigned)
+    with pytest.raises(ReviewRunnerError, match="context grant"):
+        validate_execution(substituted)
+
+
 def test_context_comparison_report_and_enforced_egress_are_not_claims(tmp_path):
     source, executable, identity, environment, private_key = _fixture(tmp_path)
+
+    def substituted_bytes(bundle):
+        changed = json.loads(json.dumps(bundle))
+        raw = b"attacker-controlled resource"
+        changed["resources"]["plan_graph"]["content_base64"] = base64.b64encode(
+            raw
+        ).decode()
+        changed["resources"]["plan_graph"]["content_sha256"] = (
+            "sha256:" + hashlib.sha256(raw).hexdigest()
+        )
+        unsigned = {
+            name: value for name, value in changed.items() if name != "bundle_hash"
+        }
+        changed["bundle_hash"] = _hash(unsigned)
+        return changed
+
+    with pytest.raises(ReviewRunnerError, match="resource content differs"):
+        _run(
+            source, executable, identity, environment, private_key,
+            resource_bundle_mutator=substituted_bytes,
+        )
 
     def stale_context(attestation, _run_id, _challenge):
         changed = {

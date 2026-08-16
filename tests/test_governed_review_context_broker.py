@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import threading
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -128,6 +129,7 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
         monkeypatch.setenv("BROKER_TOKEN", "backend-secret")
         backend = HTTPRegisteredResourceResolver.from_descriptor(descriptor)
         broker_clock = [0.0]
+        grant_now = datetime.now(timezone.utc)
         broker = PrivilegedReviewContextBroker(
             backend=backend,
             backend_execution_identity="review-context-broker-service",
@@ -137,6 +139,7 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
             attestation_key_id="review-context-key-1",
             signing_private_key=broker_private_key,
             retained_ttl_seconds=1, clock=lambda: broker_clock[0],
+            grant_clock=lambda: grant_now,
         )
         card_unsigned = {
             "role": "independent-review",
@@ -160,7 +163,32 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
             "handoff_hash": handoff_hash,
             "resource_receipt_hash": resource_receipt["receipt_hash"],
             "resources": bindings,
+            "issued_at": (grant_now - timedelta(seconds=1)).isoformat(),
+            "not_before": (grant_now - timedelta(seconds=1)).isoformat(),
+            "expires_at": (grant_now + timedelta(minutes=10)).isoformat(),
         }
+        stale_grant = {
+            **broker_request,
+            "issued_at": (grant_now - timedelta(minutes=20)).isoformat(),
+            "not_before": (grant_now - timedelta(minutes=20)).isoformat(),
+            "expires_at": (grant_now - timedelta(minutes=10)).isoformat(),
+        }
+        with pytest.raises(ReviewContextBrokerError, match="not active"):
+            broker.validate_grant(stale_grant)
+        future_grant = {
+            **broker_request,
+            "issued_at": (grant_now + timedelta(minutes=1)).isoformat(),
+            "not_before": (grant_now + timedelta(minutes=1)).isoformat(),
+            "expires_at": (grant_now + timedelta(minutes=2)).isoformat(),
+        }
+        with pytest.raises(ReviewContextBrokerError, match="not active"):
+            broker.validate_grant(future_grant)
+        overlong_grant = {
+            **broker_request,
+            "expires_at": (grant_now + timedelta(minutes=20)).isoformat(),
+        }
+        with pytest.raises(ReviewContextBrokerError, match="window"):
+            broker.validate_grant(overlong_grant)
         broker_server = create_review_context_broker_server(
             broker, request_grants={"one-use-request": broker_request},
             readback_credentials={
@@ -190,7 +218,12 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
         with pytest.raises(HTTPError) as wrong:
             post(wrong_client, "one-use-request")
         assert wrong.value.code == 404
-        service_bundle = post(broker_request, "one-use-request")
+        monkeypatch.setenv(
+            "TGW_CONTEXT_BROKER_REQUEST_CREDENTIAL", "one-use-request",
+        )
+        service_bundle = context_mcp_server.HTTPReviewContextBrokerClient(
+            broker_endpoint,
+        ).execute(broker_request)
         with pytest.raises(HTTPError) as replay:
             post(broker_request, "one-use-request")
         assert replay.value.code == 404
@@ -222,7 +255,7 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
             ))
         assert second_readback.value.code == 404
 
-        monkeypatch.setenv("TGW_CONTEXT_REVIEW_BROKER_ENDPOINT", "https://broker.invalid")
+        monkeypatch.setenv("TGW_CONTEXT_REVIEW_BROKER_ENDPOINT", broker_endpoint)
         monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_ID", "review-context-service")
         monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_CLIENT_ID", "review-provider")
         monkeypatch.setenv("TGW_CONTEXT_ATTESTATION_KEY_ID", "review-context-key-1")
@@ -233,6 +266,11 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
         monkeypatch.setenv("TGW_CONTEXT_REVIEW_SKILL_CONTRACT_HASH", skill_hash)
         monkeypatch.setenv("TGW_CONTEXT_REVIEW_UID", str(context_mcp_server.os.geteuid()))
         monkeypatch.setenv("TGW_CONTEXT_REVIEW_GID", str(context_mcp_server.os.getegid()))
+        grant = {
+            "schema": "tgw-governed-review-context-grant/v1",
+            "request": broker_request,
+            "request_hash": _hash(broker_request),
+        }
         class IssuedBundle:
             def __init__(self, _endpoint):
                 pass
@@ -250,11 +288,12 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
                 AssertionError("governed mode must not read local Plan/source")
             ),
         )
-        tool_result = json.loads(context_mcp_server.tgw_context_bundle(
+        tool_result = json.loads(context_mcp_server.governed_review_context_bundle(
             "review exact candidate", receiver="claude", challenge=challenge,
             card_json=json.dumps(card), handoff_hash=handoff_hash,
             resource_receipt_hash=resource_receipt["receipt_hash"],
             skill_contract_hash=skill_hash,
+            grant_json=json.dumps(grant),
         ))
         assert tool_result["registered_resources"]["plan_graph"]["content"] == (
             "protected plan_graph\n"
@@ -262,12 +301,18 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
         assert tool_result["registered_resource_retrieval"]["resource_bundle_hash"] == (
             service_bundle["bundle_hash"]
         )
+        omitted = json.loads(context_mcp_server.governed_review_context_bundle(
+            "review exact candidate", receiver="claude",
+        ))
+        assert omitted["ok"] is False
+        assert "complete" in omitted["error"]
 
         receipt, visible = context_mcp_server._review_context_run(
             challenge=challenge, card_json=json.dumps(card),
             handoff_hash=handoff_hash,
             resource_receipt_hash=resource_receipt["receipt_hash"],
             skill_contract_hash=skill_hash,
+            grant_json=json.dumps(grant),
             broker_factory=IssuedBundle,
         )
         retained_bundle = retained_service_bundle
@@ -300,6 +345,9 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
         substituted["resources"]["plan_graph"]["content_base64"] = (
             substituted["resources"]["codegraph_snapshot"]["content_base64"]
         )
+        substituted["resources"]["plan_graph"]["content_sha256"] = (
+            substituted["resources"]["codegraph_snapshot"]["content_sha256"]
+        )
         substituted_unsigned = {
             name: value for name, value in substituted.items()
             if name != "bundle_hash"
@@ -319,6 +367,7 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
                 handoff_hash=handoff_hash,
                 resource_receipt_hash=resource_receipt["receipt_hash"],
                 skill_contract_hash=skill_hash,
+                grant_json=json.dumps(grant),
                 broker_factory=SubstitutedBundle,
             )
         broker_server.shutdown()

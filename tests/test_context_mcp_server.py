@@ -4,12 +4,19 @@ import base64
 import hashlib
 import json
 import os
+import socket
 import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import anyio
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from mcp import ClientSession
+from mcp.client.sse import sse_client
 
 from tgw import context_mcp_server as context
 from tgw.execution_resources import (
@@ -178,11 +185,33 @@ def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):
     monkeypatch.setenv("TGW_CONTEXT_REVIEW_GID", str(os.getegid()))
     monkeypatch.setenv("TGW_CONTEXT_ATTESTATION_KEY_ID", "test-key")
     monkeypatch.setenv("TGW_CONTEXT_ATTESTATION_PUBLIC_KEY", public_key)
+    now = datetime.now(timezone.utc)
+    grant_request = {
+        "schema": "tgw-context-review-broker-request/v1",
+        "client_id": "review-client", "challenge": "c" * 64,
+        "skill_contract_hash": "sha256:" + "e" * 64,
+        "card_hash": card["card_hash"], "role": "independent-review",
+        "execution_identity": (
+            f"governed-review:{'c' * 64}:uid={os.geteuid()}:gid={os.getegid()}"
+        ),
+        "handoff_hash": "sha256:" + "d" * 64,
+        "resource_receipt_hash": receipt["receipt_hash"],
+        "resources": bindings,
+        "issued_at": (now - timedelta(seconds=1)).isoformat(),
+        "not_before": (now - timedelta(seconds=1)).isoformat(),
+        "expires_at": (now + timedelta(minutes=10)).isoformat(),
+    }
+    grant = {
+        "schema": "tgw-governed-review-context-grant/v1",
+        "request": grant_request,
+        "request_hash": context._sha(context._canonical(grant_request)),
+    }
     result, visible = context._review_context_run(
         challenge="c" * 64, card_json=json.dumps(card),
         handoff_hash="sha256:" + "d" * 64,
         resource_receipt_hash=receipt["receipt_hash"],
         skill_contract_hash="sha256:" + "e" * 64,
+        grant_json=json.dumps(grant),
         broker_factory=FakeBroker,
     )
     assert result == {
@@ -200,3 +229,60 @@ def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):
     } == contents
     assert observed["endpoint"] == "https://broker.invalid"
     assert observed["request"]["resources"] == bindings
+
+
+def test_governed_review_sse_is_loopback_only_and_exposes_only_bound_tool(monkeypatch):
+    monkeypatch.setenv("TGW_CONTEXT_MCP_HOST", "0.0.0.0")
+    with pytest.raises(ValueError, match="loopback"):
+        context._sse_binding(governed=True)
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    environment = {
+        **os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+        "TGW_CONTEXT_MCP_HOST": "127.0.0.1", "TGW_CONTEXT_MCP_PORT": str(port),
+    }
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m", "tgw.context_mcp_server", "--governed-review-sse",
+        ],
+        env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        for _attempt in range(50):
+            with socket.socket() as probe:
+                if probe.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("governed review SSE server did not start")
+        mcp_config = {
+            "mcpServers": {"tgw-context": {
+                "type": "sse", "url": f"http://127.0.0.1:{port}/sse",
+            }},
+        }
+
+        async def inspect_server() -> None:
+            async with sse_client(
+                mcp_config["mcpServers"]["tgw-context"]["url"],
+                timeout=2, sse_read_timeout=5,
+            ) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    tools = await session.list_tools()
+                    assert [tool.name for tool in tools.tools] == ["tgw_context_bundle"]
+                    result = await session.call_tool(
+                        "tgw_context_bundle", {"task": "must be governed"},
+                    )
+                    assert "arguments must be complete" in result.content[0].text
+
+        anyio.run(inspect_server)
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)

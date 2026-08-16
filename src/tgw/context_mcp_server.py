@@ -17,6 +17,7 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from mcp.server import FastMCP
@@ -305,7 +306,18 @@ class HTTPReviewContextBrokerClient:
     """Call the privileged broker from the separately operated context service."""
 
     def __init__(self, endpoint: str) -> None:
-        if not isinstance(endpoint, str) or not endpoint.startswith("https://"):
+        parsed = urlsplit(endpoint) if isinstance(endpoint, str) else None
+        if (
+            parsed is None
+            or parsed.scheme != "http"
+            or parsed.hostname not in {"127.0.0.1", "::1"}
+            or parsed.port is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
             raise ContextError("governed review context broker endpoint is invalid")
         credential = os.environ.get("TGW_CONTEXT_BROKER_REQUEST_CREDENTIAL", "")
         if not credential or any(character.isspace() for character in credential):
@@ -341,6 +353,7 @@ class HTTPReviewContextBrokerClient:
 def _review_context_run(
     *, challenge: str, card_json: str, handoff_hash: str,
     resource_receipt_hash: str, skill_contract_hash: str,
+    grant_json: str,
     broker_factory: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Fetch every review-card resource inside one authenticated service run."""
@@ -349,13 +362,25 @@ def _review_context_run(
         raise ContextError("governed review challenge is invalid")
     if not isinstance(card_json, str) or not card_json or len(card_json.encode()) > MAX_TEXT_BYTES:
         raise ContextError("governed review card framing is invalid")
+    if (
+        not isinstance(grant_json, str)
+        or not grant_json
+        or len(grant_json.encode()) > MAX_TEXT_BYTES
+    ):
+        raise ContextError("governed review grant framing is invalid")
     try:
         card = json.loads(card_json)
+        grant = json.loads(grant_json)
         receipt = card_resource_receipt(card)
     except (json.JSONDecodeError, ResourceVerificationError) as exc:
         raise ContextError("governed review card is invalid") from exc
     if (
         card.get("role") != "independent-review"
+        or not isinstance(grant, Mapping)
+        or set(grant) != {"schema", "request", "request_hash"}
+        or grant.get("schema") != "tgw-governed-review-context-grant/v1"
+        or not isinstance(grant.get("request"), Mapping)
+        or grant.get("request_hash") != _sha(_canonical(grant.get("request")))
         or receipt["receipt_hash"] != resource_receipt_hash
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", handoff_hash)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", skill_contract_hash)
@@ -372,7 +397,7 @@ def _review_context_run(
     try:
         broker_factory = broker_factory or HTTPReviewContextBrokerClient
         broker = broker_factory(os.environ.get("TGW_CONTEXT_REVIEW_BROKER_ENDPOINT", ""))
-        service_bundle = broker.execute({
+        expected_request = {
             "schema": "tgw-context-review-broker-request/v1",
             "client_id": client_id,
             "challenge": challenge,
@@ -386,7 +411,13 @@ def _review_context_run(
             "resources": {
                 name: card["bindings"][name] for name in sorted(CARD_RESOURCE_NAMES)
             },
-        })
+            "issued_at": grant["request"].get("issued_at"),
+            "not_before": grant["request"].get("not_before"),
+            "expires_at": grant["request"].get("expires_at"),
+        }
+        if grant["request"] != expected_request:
+            raise ResourceVerificationError("review context grant binding mismatch")
+        service_bundle = broker.execute(expected_request)
         if (
             not isinstance(service_bundle, Mapping)
             or service_bundle.get("schema") != "tgw-context-review-resource-bundle/v1"
@@ -438,7 +469,10 @@ def _review_context_run(
                 content = base64.b64decode(encoded["content_base64"], validate=True)
             except (TypeError, ValueError) as exc:
                 raise ResourceVerificationError("review context service resource encoding is invalid") from exc
-            if content_hash(content) != encoded["content_sha256"]:
+            if (
+                content_hash(content) != encoded["content_sha256"]
+                or content_hash(content) != binding["hash"]
+            ):
                 raise ResourceVerificationError("review context service resource content differs")
             visible_resources[name] = {
                 "ref": binding["ref"], "hash": binding["hash"],
@@ -459,6 +493,10 @@ def _review_context_run(
     return receipt, visible_resources
 
 mcp = FastMCP(name="tgw-context", instructions="Authoritative read-only TGW planning and coding context hosted on tgw-lib.")
+governed_review_mcp = FastMCP(
+    name="tgw-context-governed-review",
+    instructions="Governed-review-only registered TGW context retrieval.",
+)
 
 
 def _json_call(function: Any, *args: Any, **kwargs: Any) -> str:
@@ -474,27 +512,26 @@ def tgw_context_status() -> str:
     return _json_call(context_status)
 
 
-@mcp.tool()
-def tgw_context_bundle(
+def _tgw_context_bundle(
     task: str, receiver: str = "codex", limit: int = 12, challenge: str = "",
     card_json: str = "", handoff_hash: str = "", resource_receipt_hash: str = "",
-    skill_contract_hash: str = "",
+    skill_contract_hash: str = "", grant_json: str = "", *, governed_only: bool = False,
 ) -> str:
     """Return context; a governed review must also open and complete its bound retrieval run."""
 
     def result() -> dict[str, Any]:
         supplied = (
             challenge, card_json, handoff_hash, resource_receipt_hash,
-            skill_contract_hash,
+            skill_contract_hash, grant_json,
         )
-        if not any(supplied):
+        if not any(supplied) and not governed_only:
             return context_bundle(task, receiver, limit)
         if not all(supplied):
             raise ContextError("governed review context arguments must be complete")
         review_receipt, visible_resources = _review_context_run(
             challenge=challenge, card_json=card_json, handoff_hash=handoff_hash,
             resource_receipt_hash=resource_receipt_hash,
-            skill_contract_hash=skill_contract_hash,
+            skill_contract_hash=skill_contract_hash, grant_json=grant_json,
         )
         bundle = {
             "task": task, "receiver": receiver,
@@ -505,6 +542,35 @@ def tgw_context_bundle(
         return bundle
 
     return _json_call(result)
+
+
+@mcp.tool()
+def tgw_context_bundle(
+    task: str, receiver: str = "codex", limit: int = 12, challenge: str = "",
+    card_json: str = "", handoff_hash: str = "", resource_receipt_hash: str = "",
+    skill_contract_hash: str = "", grant_json: str = "",
+) -> str:
+    """Return ordinary context or complete an explicitly bound governed retrieval."""
+
+    return _tgw_context_bundle(
+        task, receiver, limit, challenge, card_json, handoff_hash,
+        resource_receipt_hash, skill_contract_hash, grant_json,
+    )
+
+
+@governed_review_mcp.tool(name="tgw_context_bundle")
+def governed_review_context_bundle(
+    task: str, receiver: str = "codex", limit: int = 12, challenge: str = "",
+    card_json: str = "", handoff_hash: str = "", resource_receipt_hash: str = "",
+    skill_contract_hash: str = "", grant_json: str = "",
+) -> str:
+    """Complete one fully bound governed-review registered-resource retrieval."""
+
+    return _tgw_context_bundle(
+        task, receiver, limit, challenge, card_json, handoff_hash,
+        resource_receipt_hash, skill_contract_hash, grant_json,
+        governed_only=True,
+    )
 
 
 @mcp.tool()
@@ -531,10 +597,12 @@ def tgw_context_code_graph(operation: str = "status", query: str = "", limit: in
     return _json_call(code_graph, operation, query, limit)
 
 
-def _sse_binding() -> tuple[str, int]:
+def _sse_binding(*, governed: bool = False) -> tuple[str, int]:
     host = os.environ.get("TGW_CONTEXT_MCP_HOST", "127.0.0.1").strip()
     if not host:
         raise ValueError("TGW_CONTEXT_MCP_HOST must not be empty")
+    if governed and host not in {"127.0.0.1", "::1"}:
+        raise ValueError("governed review MCP host must be loopback")
     try:
         port = int(os.environ.get("TGW_CONTEXT_MCP_PORT", "8766"))
     except ValueError as exc:
@@ -547,19 +615,22 @@ def _sse_binding() -> tuple[str, int]:
 def main() -> None:
     import sys
 
-    if "--sse" not in sys.argv:
+    governed = "--governed-review-sse" in sys.argv
+    if "--sse" not in sys.argv and not governed:
         mcp.run(transport="stdio")
         return
     from mcp.server.transport_security import TransportSecuritySettings
 
-    host, port = _sse_binding()
-    mcp.settings.host = host
-    mcp.settings.port = port
-    mcp.settings.transport_security = TransportSecuritySettings(
-        allowed_hosts=[f"{host}:{port}"],
-        allowed_origins=[f"http://{host}:{port}"],
+    host, port = _sse_binding(governed=governed)
+    server = governed_review_mcp if governed else mcp
+    server.settings.host = host
+    server.settings.port = port
+    authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    server.settings.transport_security = TransportSecuritySettings(
+        allowed_hosts=[authority],
+        allowed_origins=[f"http://{authority}"],
     )
-    mcp.run(transport="sse")
+    server.run(transport="sse")
 
 
 if __name__ == "__main__":
