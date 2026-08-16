@@ -35,9 +35,13 @@ from tgw.execution_resources import (
 )
 
 SERVICE_CONFIG_SCHEMA = "tgw-governed-resource-service-config/v5"
-# The resolver bounds the complete JSON response at 4 MiB.  Keep enough room
-# for base64 expansion and the response envelope, not merely the raw export.
-MAX_RESOURCE_BYTES = 3 * 1024 * 1024 - 1024
+# The resolver separately bounds the complete JSON response.  Keep enough
+# room for current exact resources while preserving the aggregate review cap.
+# A real TGW source-snapshot preimage and its CodeGraph are each larger than
+# the old fixture-sized 3 MiB bound.  Keep the per-resource limit below the
+# separately enforced 64 MiB aggregate review bundle while admitting the
+# current exact 12 MiB/8 MiB resources.
+MAX_RESOURCE_BYTES = 24 * 1024 * 1024
 MAX_REQUEST_BYTES = 128 * 1024
 
 _CONFIG_FIELDS = {

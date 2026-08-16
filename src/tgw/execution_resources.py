@@ -50,7 +50,8 @@ _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _KEY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _CLIENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _GIT_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
-_MAX_RESOURCE_RESPONSE_BYTES = 4 * 1024 * 1024
+# JSON/base64 expands a 24 MiB registered resource to roughly 32 MiB.
+_MAX_RESOURCE_RESPONSE_BYTES = 32 * 1024 * 1024 + 4096
 _RESOURCE_SERVICE_DESCRIPTOR_FIELDS = {
     "schema", "id", "client_id", "endpoint", "credential_env", "timeout_seconds",
 }

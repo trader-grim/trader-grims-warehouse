@@ -218,6 +218,16 @@ def test_portable_resource_service_implements_registered_protocol(tmp_path, monk
         assert resource_service_catalog_hash(catalog).startswith("sha256:")
 
 
+def test_resource_service_retains_a_realistic_snapshot_sized_resource(tmp_path):
+    content = b"s" * (4 * 1024 * 1024 + 1)
+    config_path, _contents_value, signing_private_key = _config_path(
+        tmp_path, contents={"source_tree": content},
+    )
+    config = load_resource_service_config(config_path)
+
+    assert config.resources[REFS["source_tree"]].content == content
+
+
 @pytest.mark.parametrize(
     ("forged_role", "forged_identity"),
     [
