@@ -8,6 +8,7 @@ import json
 import socket
 import subprocess
 import threading
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -706,3 +707,60 @@ def test_signer_slot_guard_rejects_double_release(tmp_path):
     service.release_slot()
     with pytest.raises(ValueError):
         service.release_slot()
+
+
+def test_runner_bearer_is_not_followed_to_a_redirect_target(tmp_path):
+    config, runner, signer_key, descriptor, _catalog, candidate, tree, base, base_tree = configured(tmp_path)
+    observed: list[tuple[str, str | None]] = []
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def _record(self):
+            observed.append((self.path, self.headers.get("Authorization")))
+
+        def do_POST(self):  # noqa: N802
+            self._record()
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{redirect.server_port}/redirect-target")
+            self.end_headers()
+
+        def do_GET(self):  # noqa: N802
+            self._record()
+            self.send_response(200)
+            self.end_headers()
+
+    redirect = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    redirect_thread = threading.Thread(target=redirect.serve_forever, daemon=True)
+    redirect_thread.start()
+    signer = create_qualified_execution_server(
+        replace(config, runner={**runner.descriptor, "endpoint": f"http://127.0.0.1:{redirect.server_port}"}),
+        {"fixture-client": "signer-secret"},
+        signing_private_key=signer_key,
+        environment={"RUNNER_TOKEN": runner.token},
+    )
+    signer_thread = threading.Thread(target=signer.serve_forever, daemon=True)
+    signer_thread.start()
+    try:
+        client = QualifiedExecutionClient(
+            {**descriptor, "endpoint": f"http://127.0.0.1:{signer.server_port}"},
+            environment={"SIGNER_TOKEN": "signer-secret"},
+        )
+        with pytest.raises(QualifiedExecutionError):
+            client.execute(
+                candidate_commit=candidate,
+                candidate_tree=tree,
+                base_commit=base,
+                base_tree=base_tree,
+                plan_commit=config.plan_commit,
+                profiles=["focused"],
+            )
+        assert observed == [("/v1/identity", f"Bearer {runner.token}")]
+    finally:
+        signer.shutdown()
+        signer.server_close()
+        signer_thread.join(timeout=5)
+        redirect.shutdown()
+        redirect.server_close()
+        redirect_thread.join(timeout=5)

@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -75,6 +75,13 @@ class _ProtocolError(ValueError):
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(detail)
         self.status = status
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    """Never resend the runner bearer to a redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
 
 
 def _canonical(value: Any) -> bytes:
@@ -1018,7 +1025,7 @@ class _RunnerClient:
         request.add_header("Content-Type", "application/json")
         request.add_header("Authorization", f"Bearer {self.token}")
         try:
-            with urlopen(request, timeout=self.descriptor["timeout_seconds"]) as response:  # nosec: externally provisioned runner descriptor
+            with build_opener(_NoRedirect()).open(request, timeout=self.descriptor["timeout_seconds"]) as response:  # nosec: externally provisioned runner descriptor
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except (HTTPError, URLError, OSError) as exc:
             raise QualifiedExecutionError("qualified runner request failed") from exc
