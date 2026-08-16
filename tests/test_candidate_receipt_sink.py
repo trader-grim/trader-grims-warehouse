@@ -11,7 +11,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from tgw.candidate_manifest import (
     build_candidate_manifest,
     create_migration_safety_receipt,
+    create_test_output_artifact,
     create_test_receipt,
+    load_candidate_test_plan,
 )
 from tgw.candidate_receipt_sink import (
     GOVERNED_EXECUTION_BUNDLE_SCHEMA,
@@ -68,6 +70,7 @@ def candidate_repository(tmp_path):
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
     (repo / "app.py").write_text("answer = 0\n")
+    _install_test_contract(repo)
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "baseline"], cwd=repo, check=True)
     (repo / "app.py").write_text("answer = 42\n")
@@ -77,6 +80,26 @@ def candidate_repository(tmp_path):
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "candidate"], cwd=repo, check=True)
     return repo, git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD^{tree}")
+
+
+def _install_test_contract(repo: Path):
+    runner = repo / "scripts" / "candidate-test-runner.py"
+    runner.parent.mkdir(parents=True, exist_ok=True)
+    runner.write_text("# fixture runner\n")
+    plan = repo / "agent-services" / "catalogs" / "governed-candidate-test-plan-v1.json"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text(json.dumps({
+        "schema": "tgw-candidate-test-plan/v1", "plan_id": "candidate-sink-fixture", "version": 1,
+        "runner": {
+            "path": "scripts/candidate-test-runner.py",
+            "sha256": "sha256:" + hashlib.sha256(runner.read_bytes()).hexdigest(),
+            "argv_prefix": ["-m", "pytest"],
+        },
+        "scopes": {
+            "focused": {"argv": ["-q", "tests/test_governed_resource_service.py"]},
+            "full": {"argv": ["-q"]},
+        },
+    }, sort_keys=True))
 
 
 def approved_plan_repository(tmp_path):
@@ -280,14 +303,27 @@ def reviewed_candidate_evidence(
     base_commit = git(candidate_repo, "rev-parse", f"{source_commit}^")
     base_tree = git(candidate_repo, "rev-parse", f"{base_commit}^{{tree}}")
     predecessor = release_manifest(candidate_repo, base_commit, "previous")
+    test_plan = load_candidate_test_plan(candidate_repo, source_commit=source_commit)
+    focused_command = test_plan["commands"]["focused"]
+    full_command = test_plan["commands"]["full"]
+    focused_output = create_test_output_artifact(
+        scope="focused", command=focused_command,
+        source_commit=source_commit, source_tree=source_tree,
+        stdout=b"focused passed\n", stderr=b"",
+    )
+    full_output = create_test_output_artifact(
+        scope="full", command=full_command,
+        source_commit=source_commit, source_tree=source_tree,
+        stdout=b"full suite passed\n", stderr=b"",
+    )
     focused = create_test_receipt(
-        scope="focused", command=("pytest", "tests/test_governed_resource_service.py"),
+        scope="focused", command=focused_command,
         source_commit=source_commit, source_tree=source_tree, returncode=0,
-        stdout=b"focused passed\n",
+        test_plan=test_plan, output_artifact=focused_output,
     )
     full = create_test_receipt(
-        scope="full", command=("pytest", "-q"), source_commit=source_commit,
-        source_tree=source_tree, returncode=0, stdout=b"full suite passed\n",
+        scope="full", command=full_command, source_commit=source_commit,
+        source_tree=source_tree, returncode=0, test_plan=test_plan, output_artifact=full_output,
     )
     migrations = [
         migration_receipt(
@@ -306,6 +342,8 @@ def reviewed_candidate_evidence(
         closure_hash="sha256:" + "2" * 64,
         focused_receipt=focused,
         full_suite_receipt=full,
+        focused_output_artifact=focused_output,
+        full_suite_output_artifact=full_output,
         migration_receipts=migrations,
     )
     review_packet_unsigned = {
@@ -357,7 +395,9 @@ def reviewed_candidate_evidence(
     return {
         "candidate_manifest": candidate_manifest,
         "focused_test_receipt": focused,
+        "focused_test_output": focused_output,
         "full_suite_test_receipt": full,
+        "full_suite_test_output": full_output,
         "migration_receipts": migrations,
         "review_packet": review_packet,
         "review_result": review_result,
@@ -449,6 +489,11 @@ def pinned_sink(
         receipt["command"] = ["pytest", "tests/not-the-retained-command"]
         receipt_unsigned = {field: item for field, item in receipt.items() if field != "receipt_hash"}
         w08[key] = {**receipt_unsigned, "receipt_hash": object_hash(receipt_unsigned)}
+    if corrupt_w08 == "focused-output":
+        output = dict(w08["focused_test_output"])
+        output["stdout_base64"] = "dGFtcGVyZWQ="
+        output_unsigned = {field: item for field, item in output.items() if field != "artifact_hash"}
+        w08["focused_test_output"] = {**output_unsigned, "artifact_hash": object_hash(output_unsigned)}
     if corrupt_w08 == "release":
         release = dict(w08["release_manifest"])
         release["archive_sha256"] = "0" * 64
@@ -638,7 +683,9 @@ def test_gate_holds_when_the_external_approved_plan_ref_moves(tmp_path):
     ]
 
 
-@pytest.mark.parametrize("corruption", ["missing", "focused", "full", "migration", "review", "release", "rollback"])
+@pytest.mark.parametrize("corruption", [
+    "missing", "focused", "full", "focused-output", "migration", "review", "release", "rollback",
+])
 def test_gate_requires_every_sink_retained_w08_artifact(tmp_path, corruption):
     candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -25,6 +26,25 @@ def test_candidate_test_runner_precedes_an_ambient_editable_package(tmp_path):
     (tests / "test_identity.py").write_text(
         "from tgw import IDENTITY\n\n\ndef test_candidate_package_wins():\n    assert IDENTITY == 'candidate'\n"
     )
+    runner = repo / "scripts" / "run_candidate_tests.py"
+    runner.parent.mkdir()
+    runner.write_bytes((ROOT / "scripts" / "run_candidate_tests.py").read_bytes())
+    plan = repo / "agent-services" / "catalogs" / "governed-candidate-test-plan-v1.json"
+    plan.parent.mkdir(parents=True)
+    plan.write_text(json.dumps({
+        "schema": "tgw-candidate-test-plan/v1",
+        "plan_id": "candidate-package-isolation",
+        "version": 1,
+        "runner": {
+            "path": "scripts/run_candidate_tests.py",
+            "sha256": "sha256:" + hashlib.sha256(runner.read_bytes()).hexdigest(),
+            "argv_prefix": ["-m", "pytest"],
+        },
+        "scopes": {
+            "focused": {"argv": ["-q", "tests/test_identity.py"]},
+            "full": {"argv": ["-q"]},
+        },
+    }, sort_keys=True))
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "base")
     (package / "__init__.py").write_text("IDENTITY = 'candidate'\n")
@@ -40,12 +60,7 @@ def test_candidate_test_runner_precedes_an_ambient_editable_package(tmp_path):
             "--repo", str(repo),
             "--candidate", "HEAD",
             "--scope", "focused",
-            "--",
-            sys.executable,
-            "-m",
-            "pytest",
-            "-q",
-            "tests/test_identity.py",
+            "--output-artifact", str(tmp_path / "focused-output.json"),
         ],
         text=True,
         capture_output=True,
@@ -60,3 +75,5 @@ def test_candidate_test_runner_precedes_an_ambient_editable_package(tmp_path):
     receipt = json.loads(completed.stdout)
     assert receipt["status"] == "PASS"
     assert receipt["scope"] == "focused"
+    output = json.loads((tmp_path / "focused-output.json").read_text())
+    assert receipt["output_artifact_hash"] == output["artifact_hash"]

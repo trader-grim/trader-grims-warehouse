@@ -9,8 +9,10 @@ from tgw.candidate_manifest import (
     CandidateManifestError,
     build_candidate_manifest,
     create_luet_conformance_receipt,
+    create_test_output_artifact,
     create_test_receipt,
     graph_hash,
+    load_candidate_test_plan,
 )
 from tgw.plan_luet import LUET_REVISION, LUET_VERSION, PINNED_LUET_BINARY_SHA256, PROVIDER_ID, normalize_conformance_graph
 
@@ -22,6 +24,7 @@ def _repo(tmp_path):
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
     (repo / "source").write_text("baseline")
+    _install_test_contract(repo)
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "baseline"], cwd=repo, check=True)
     base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
@@ -30,6 +33,36 @@ def _repo(tmp_path):
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, text=True).strip()
     return repo, base, commit, tree
+
+
+def _install_test_contract(repo: Path):
+    runner = repo / "scripts" / "candidate-test-runner.py"
+    runner.parent.mkdir(parents=True, exist_ok=True)
+    runner.write_text("# fixture runner\n")
+    plan = repo / "agent-services" / "catalogs" / "governed-candidate-test-plan-v1.json"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text(json.dumps({
+        "schema": "tgw-candidate-test-plan/v1", "plan_id": "fixture-candidate-tests", "version": 1,
+        "runner": {
+            "path": "scripts/candidate-test-runner.py",
+            "sha256": "sha256:" + hashlib.sha256(runner.read_bytes()).hexdigest(),
+            "argv_prefix": ["-m", "pytest"],
+        },
+        "scopes": {"focused": {"argv": ["-q", "tests/selected"]}, "full": {"argv": ["-q"]}},
+    }, sort_keys=True))
+
+
+def _test_evidence(repo: Path, commit: str, tree: str, scope: str, *, returncode: int = 0):
+    plan = load_candidate_test_plan(repo, source_commit=commit)
+    command = plan["commands"][scope]
+    output = create_test_output_artifact(
+        scope=scope, command=command, source_commit=commit, source_tree=tree,
+        stdout=b"fixture test output", stderr=b"",
+    )
+    return create_test_receipt(
+        scope=scope, command=command, source_commit=commit, source_tree=tree,
+        returncode=returncode, test_plan=plan, output_artifact=output,
+    ), output
 
 
 def _receipt(graph, commit, tree):
@@ -56,6 +89,8 @@ def _manifest(repo, commit, graph, receipt=None, *, plan_commit="plan"):
     tree = subprocess.check_output(["git", "rev-parse", f"{commit}^{{tree}}"], cwd=repo, text=True).strip()
     base = subprocess.check_output(["git", "rev-parse", f"{commit}^"], cwd=repo, text=True).strip()
     base_tree = subprocess.check_output(["git", "rev-parse", f"{base}^{{tree}}"], cwd=repo, text=True).strip()
+    focused, focused_output = _test_evidence(repo, commit, tree, "focused")
+    full, full_output = _test_evidence(repo, commit, tree, "full")
     return build_candidate_manifest(
         repo,
         commit=commit,
@@ -67,14 +102,10 @@ def _manifest(repo, commit, graph, receipt=None, *, plan_commit="plan"):
         plan_commit=plan_commit,
         solution_hash="sha256:solution",
         closure_hash="sha256:closure",
-        focused_receipt=create_test_receipt(
-            scope="focused", command=("pytest", "tests/selected"), source_commit=commit,
-            source_tree=tree, returncode=0,
-        ),
-        full_suite_receipt=create_test_receipt(
-            scope="full", command=("pytest", "-q"), source_commit=commit,
-            source_tree=tree, returncode=0,
-        ),
+        focused_receipt=focused,
+        full_suite_receipt=full,
+        focused_output_artifact=focused_output,
+        full_suite_output_artifact=full_output,
         graph=graph,
         conformance_receipt=receipt,
     )
@@ -130,31 +161,34 @@ def test_missing_conformance_receipt_prepares_held_candidate_but_never_omits_tes
 
 def test_noop_command_cannot_be_recorded_as_candidate_test_evidence(tmp_path):
     repo, _base, commit, tree = _repo(tmp_path)
-    with pytest.raises(CandidateManifestError, match="must run pytest"):
+    plan = load_candidate_test_plan(repo, source_commit=commit)
+    output = create_test_output_artifact(
+        scope="full", command=("true",), source_commit=commit, source_tree=tree,
+        stdout=b"", stderr=b"",
+    )
+    with pytest.raises(CandidateManifestError, match="canonical test plan command"):
         create_test_receipt(
             scope="full", command=("true",), source_commit=commit, source_tree=tree,
-            returncode=0,
+            returncode=0, test_plan=plan, output_artifact=output,
         )
 
 
 @pytest.mark.parametrize("scope", ["focused", "full"])
 def test_missing_failing_or_wrong_candidate_test_proof_is_rejected(tmp_path, scope):
     repo, base, commit, tree = _repo(tmp_path)
-    receipt = create_test_receipt(
-        scope=scope, command=("pytest",), source_commit=commit, source_tree=tree,
-        returncode=1,
-    )
+    receipt, failed_output = _test_evidence(repo, commit, tree, scope, returncode=1)
+    focused, focused_output = _test_evidence(repo, commit, tree, "focused")
+    full, full_output = _test_evidence(repo, commit, tree, "full")
     kwargs = {
-        "focused_receipt": create_test_receipt(
-            scope="focused", command=("pytest",), source_commit=commit, source_tree=tree,
-            returncode=0,
-        ),
-        "full_suite_receipt": create_test_receipt(
-            scope="full", command=("pytest", "-q"), source_commit=commit, source_tree=tree,
-            returncode=0,
-        ),
+        "focused_receipt": focused,
+        "full_suite_receipt": full,
+        "focused_output_artifact": focused_output,
+        "full_suite_output_artifact": full_output,
     }
-    kwargs[f"{scope}_receipt" if scope == "focused" else "full_suite_receipt"] = receipt
+    receipt_key = f"{scope}_receipt" if scope == "focused" else "full_suite_receipt"
+    output_key = f"{scope}_output_artifact" if scope == "focused" else "full_suite_output_artifact"
+    kwargs[receipt_key] = receipt
+    kwargs[output_key] = failed_output
     with pytest.raises(CandidateManifestError, match="not passing"):
         build_candidate_manifest(
             repo, commit=commit, base_commit=base,

@@ -22,6 +22,7 @@ from typing import Any, Mapping
 
 from tgw.candidate_manifest import (
     CandidateManifestError,
+    load_candidate_test_plan,
     verify_migration_safety_receipt,
     verify_predecessor_release,
     verify_test_receipt,
@@ -68,7 +69,9 @@ _BUNDLE_ARTIFACTS = (
 _REVIEWED_CANDIDATE_ARTIFACTS = (
     "candidate_manifest",
     "focused_test_receipt",
+    "focused_test_output",
     "full_suite_test_receipt",
+    "full_suite_test_output",
     "review_packet",
     "review_result",
     "release_manifest",
@@ -554,6 +557,7 @@ def validate_reviewed_candidate_evidence_bundle(value: Mapping[str, Any]) -> dic
 def _verify_candidate_manifest_evidence(
     manifest: Mapping[str, Any], *, repository: Path, source_commit: str, source_tree: str,
     plan_commit: str, focused_receipt: Mapping[str, Any], full_suite_receipt: Mapping[str, Any],
+    focused_output_artifact: Mapping[str, Any], full_suite_output_artifact: Mapping[str, Any],
     migration_receipts: list[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Re-derive every W08 manifest binding from exact source and sink blobs."""
@@ -619,11 +623,14 @@ def _verify_candidate_manifest_evidence(
     if tests.get("focused") != focused_receipt or tests.get("full_suite") != full_suite_receipt:
         raise CandidateReceiptSinkError("sink test receipts do not match the candidate manifest")
     try:
+        test_plan = load_candidate_test_plan(repository, source_commit=source_commit)
         verified_focused = verify_test_receipt(
             focused_receipt, scope="focused", source_commit=source_commit, source_tree=source_tree,
+            test_plan=test_plan, output_artifact=focused_output_artifact,
         )
         verified_full = verify_test_receipt(
             full_suite_receipt, scope="full", source_commit=source_commit, source_tree=source_tree,
+            test_plan=test_plan, output_artifact=full_suite_output_artifact,
         )
     except CandidateManifestError as exc:
         raise CandidateReceiptSinkError("candidate test evidence is invalid") from exc
@@ -683,6 +690,8 @@ def _verify_candidate_manifest_evidence(
         "base_tree": base_tree,
         "focused_receipt": verified_focused,
         "full_suite_receipt": verified_full,
+        "focused_output_artifact_hash": verified_focused["output_artifact_hash"],
+        "full_suite_output_artifact_hash": verified_full["output_artifact_hash"],
         "migration_receipts": verified_migrations,
     }
 
@@ -765,6 +774,8 @@ def verify_reviewed_candidate_evidence_bundle(
         source_commit=source_commit, source_tree=source_tree, plan_commit=plan_commit,
         focused_receipt=artifacts["focused_test_receipt"],
         full_suite_receipt=artifacts["full_suite_test_receipt"],
+        focused_output_artifact=artifacts["focused_test_output"],
+        full_suite_output_artifact=artifacts["full_suite_test_output"],
         migration_receipts=migration_artifacts,
     )
     try:
@@ -787,6 +798,8 @@ def verify_reviewed_candidate_evidence_bundle(
         "candidate_manifest_hash": candidate["manifest_hash"],
         "focused_test_receipt_hash": candidate["focused_receipt"]["receipt_hash"],
         "full_suite_test_receipt_hash": candidate["full_suite_receipt"]["receipt_hash"],
+        "focused_test_output_artifact_hash": candidate["focused_output_artifact_hash"],
+        "full_suite_test_output_artifact_hash": candidate["full_suite_output_artifact_hash"],
         "migration_receipt_hashes": sorted(receipt.receipt_hash for receipt in candidate["migration_receipts"]),
         "review_packet_hash": review["packet_hash"],
         "review_result_hash": review["result_hash"],

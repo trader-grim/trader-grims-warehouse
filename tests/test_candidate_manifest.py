@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -8,7 +9,9 @@ from tgw.candidate_manifest import (
     CandidateManifestError,
     build_candidate_manifest,
     create_migration_safety_receipt,
+    create_test_output_artifact,
     create_test_receipt,
+    load_candidate_test_plan,
 )
 
 
@@ -19,6 +22,7 @@ def _repo(tmp_path: Path):
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
     (repo / "app.py").write_text("old\n")
+    _install_test_contract(repo)
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
     base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
@@ -27,9 +31,39 @@ def _repo(tmp_path: Path):
     return repo, base
 
 
-def _manifest(repo, base, **changes):
+def _install_test_contract(repo: Path):
+    runner = repo / "scripts" / "candidate-test-runner.py"
+    runner.parent.mkdir(parents=True, exist_ok=True)
+    runner.write_text("# fixture runner\n")
+    runner_hash = "sha256:" + hashlib.sha256(runner.read_bytes()).hexdigest()
+    plan = repo / "agent-services" / "catalogs" / "governed-candidate-test-plan-v1.json"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text(json.dumps({
+        "schema": "tgw-candidate-test-plan/v1", "plan_id": "fixture-candidate-tests", "version": 1,
+        "runner": {"path": "scripts/candidate-test-runner.py", "sha256": runner_hash, "argv_prefix": ["-m", "pytest"]},
+        "scopes": {
+            "focused": {"argv": ["-q", "tests/selected"]},
+            "full": {"argv": ["-q"]},
+        },
+    }, sort_keys=True))
+
+
+def _test_evidence(repo: Path, scope: str, *, returncode: int = 0, stdout: bytes = b""):
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, text=True).strip()
+    plan = load_candidate_test_plan(repo, source_commit=commit)
+    command = plan["commands"][scope]
+    output = create_test_output_artifact(
+        scope=scope, command=command, source_commit=commit, source_tree=tree,
+        stdout=stdout, stderr=b"",
+    )
+    return create_test_receipt(
+        scope=scope, command=command, source_commit=commit, source_tree=tree,
+        returncode=returncode, test_plan=plan, output_artifact=output,
+    ), output
+
+
+def _manifest(repo, base, **changes):
     base_tree = subprocess.check_output(["git", "rev-parse", f"{base}^{{tree}}"], cwd=repo, text=True).strip()
     values = dict(
         commit="HEAD",
@@ -41,14 +75,10 @@ def _manifest(repo, base, **changes):
         plan_commit="plan-commit",
         solution_hash="sha256:solution",
         closure_hash="sha256:closure",
-        focused_receipt=create_test_receipt(
-            scope="focused", command=("pytest", "tests/selected"), source_commit=commit,
-            source_tree=tree, returncode=0,
-        ),
-        full_suite_receipt=create_test_receipt(
-            scope="full", command=("pytest", "-q"), source_commit=commit,
-            source_tree=tree, returncode=0,
-        ),
+        focused_receipt=_test_evidence(repo, "focused")[0],
+        full_suite_receipt=_test_evidence(repo, "full")[0],
+        focused_output_artifact=_test_evidence(repo, "focused")[1],
+        full_suite_output_artifact=_test_evidence(repo, "full")[1],
     )
     values.update(changes)
     return build_candidate_manifest(repo, **values)
@@ -243,12 +273,12 @@ def test_manifest_covers_authority_migration_and_queue_snapshot_as_separate_proo
 def test_manifest_hash_covers_plan_test_and_migration_bindings(tmp_path):
     repo, base = _repo(tmp_path)
     first = _manifest(repo, base)
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
-    tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, text=True).strip()
-    changed = _manifest(repo, base, focused_receipt=create_test_receipt(
-        scope="focused", command=("pytest", "tests/other"), source_commit=commit,
-        source_tree=tree, returncode=0,
-    ))
+    changed_receipt, changed_output = _test_evidence(repo, "focused", stdout=b"different output")
+    changed = _manifest(
+        repo, base,
+        focused_receipt=changed_receipt,
+        focused_output_artifact=changed_output,
+    )
     assert first["manifest_hash"] != changed["manifest_hash"]
     json.dumps(first)
 
@@ -257,12 +287,8 @@ def test_candidate_cannot_self_select_or_misbind_predecessor_release(tmp_path):
     repo, base = _repo(tmp_path)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, text=True).strip()
-    passing = create_test_receipt(
-        scope="focused", command=("pytest",), source_commit=commit, source_tree=tree, returncode=0,
-    )
-    full = create_test_receipt(
-        scope="full", command=("pytest", "-q"), source_commit=commit, source_tree=tree, returncode=0,
-    )
+    passing, passing_output = _test_evidence(repo, "focused")
+    full, full_output = _test_evidence(repo, "full")
     with pytest.raises(CandidateManifestError, match="cannot be the candidate"):
         build_candidate_manifest(
             repo, commit=commit, base_commit=commit,
@@ -272,6 +298,7 @@ def test_candidate_cannot_self_select_or_misbind_predecessor_release(tmp_path):
             },
             plan_commit="plan", solution_hash="sha256:solution", closure_hash="sha256:closure",
             focused_receipt=passing, full_suite_receipt=full,
+            focused_output_artifact=passing_output, full_suite_output_artifact=full_output,
         )
     with pytest.raises(CandidateManifestError, match="does not match predecessor"):
         build_candidate_manifest(
@@ -282,4 +309,5 @@ def test_candidate_cannot_self_select_or_misbind_predecessor_release(tmp_path):
             },
             plan_commit="plan", solution_hash="sha256:solution", closure_hash="sha256:closure",
             focused_receipt=passing, full_suite_receipt=full,
+            focused_output_artifact=passing_output, full_suite_output_artifact=full_output,
         )

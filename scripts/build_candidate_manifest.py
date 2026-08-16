@@ -20,6 +20,8 @@ def main() -> int:
     parser.add_argument("--closure-hash", required=True)
     parser.add_argument("--focused-receipt", type=Path, required=True)
     parser.add_argument("--full-suite-receipt", type=Path, required=True)
+    parser.add_argument("--focused-output-artifact", type=Path, required=True)
+    parser.add_argument("--full-suite-output-artifact", type=Path, required=True)
     parser.add_argument(
         "--migration-receipt", type=Path, action="append", default=[],
         help="one independently verified executable database-migration receipt; repeat per migration",
@@ -35,6 +37,8 @@ def main() -> int:
     )
     focused = json.loads(args.focused_receipt.read_text())
     full_suite = json.loads(args.full_suite_receipt.read_text())
+    focused_output = json.loads(args.focused_output_artifact.read_text())
+    full_suite_output = json.loads(args.full_suite_output_artifact.read_text())
     predecessor = json.loads(args.predecessor_release_manifest.read_text())
     migrations = [
         MigrationSafetyReceipt(**json.loads(path.read_text()))
@@ -52,6 +56,8 @@ def main() -> int:
         closure_hash=args.closure_hash,
         focused_receipt=focused,
         full_suite_receipt=full_suite,
+        focused_output_artifact=focused_output,
+        full_suite_output_artifact=full_suite_output,
         graph=graph,
         conformance_receipt=conformance,
         migration_receipts=migrations,

@@ -1,0 +1,26 @@
+{
+  "schema": "tgw-candidate-test-plan/v1",
+  "plan_id": "governed-execution-platform-candidate-tests",
+  "version": 1,
+  "runner": {
+    "path": "scripts/run_candidate_tests.py",
+    "sha256": "sha256:1ac55171b521d93978115bc5a6af5b27837a14b1d9e8a25e43f8c1406ff291d5",
+    "argv_prefix": ["-m", "pytest"]
+  },
+  "scopes": {
+    "focused": {
+      "argv": [
+        "-q",
+        "tests/test_candidate_manifest.py",
+        "tests/test_candidate_conformance_receipt.py",
+        "tests/test_candidate_receipt_sink.py",
+        "tests/test_governed_execution_receipt.py",
+        "tests/test_governed_resource_service.py",
+        "tests/test_governed_resource_service_server.py"
+      ]
+    },
+    "full": {
+      "argv": ["-q"]
+    }
+  }
+}

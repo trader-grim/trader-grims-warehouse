@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -23,11 +24,15 @@ class CandidateManifestError(ValueError):
     pass
 
 
-TEST_RECEIPT_SCHEMA = "tgw-candidate-test-receipt/v1"
+TEST_RECEIPT_SCHEMA = "tgw-candidate-test-receipt/v2"
+TEST_PLAN_SCHEMA = "tgw-candidate-test-plan/v1"
+TEST_OUTPUT_ARTIFACT_SCHEMA = "tgw-candidate-test-output/v1"
+CANONICAL_TEST_PLAN_PATH = "agent-services/catalogs/governed-candidate-test-plan-v1.json"
 RELEASE_MANIFEST_SCHEMA = "tgw-release-manifest-v1"
 MIGRATION_SAFETY_RECEIPT_SCHEMA = "tgw-database-migration-receipt/v2"
 _GIT_OBJECT = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_RELATIVE_PATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\Z")
 
 
 def _is_schema_snapshot_path(path: str) -> bool:
@@ -83,6 +88,163 @@ def _is_pytest_command(command: Sequence[str]) -> bool:
     )
 
 
+def _hash_bytes(value: bytes) -> str:
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def _canonical_base64(value: Any, *, label: str) -> bytes:
+    if not isinstance(value, str):
+        raise CandidateManifestError(f"{label} is invalid")
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (TypeError, ValueError) as exc:
+        raise CandidateManifestError(f"{label} is invalid") from exc
+    if base64.b64encode(decoded).decode("ascii") != value:
+        raise CandidateManifestError(f"{label} is invalid")
+    return decoded
+
+
+def _relative_path(value: Any, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or _RELATIVE_PATH.fullmatch(value) is None
+        or value.startswith("/")
+        or ".." in Path(value).parts
+    ):
+        raise CandidateManifestError(f"{label} is invalid")
+    return value
+
+
+def validate_candidate_test_plan(
+    value: Mapping[str, Any], *, source: bytes, runner_source: bytes,
+) -> dict[str, Any]:
+    """Validate one immutable candidate test plan and its runner pin.
+
+    A receipt cannot select its own test command.  The exact candidate instead
+    commits a small plan whose runner content hash and per-scope normalized
+    pytest argv are both checked before execution and again at admission.
+    """
+
+    required = {"schema", "plan_id", "version", "runner", "scopes"}
+    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != TEST_PLAN_SCHEMA:
+        raise CandidateManifestError("candidate test plan schema is invalid")
+    if not isinstance(value.get("plan_id"), str) or not value["plan_id"]:
+        raise CandidateManifestError("candidate test plan identity is invalid")
+    if not isinstance(value.get("version"), int) or isinstance(value["version"], bool) or value["version"] < 1:
+        raise CandidateManifestError("candidate test plan version is invalid")
+    runner = value.get("runner")
+    if not isinstance(runner, Mapping) or set(runner) != {"path", "sha256", "argv_prefix"}:
+        raise CandidateManifestError("candidate test plan runner is invalid")
+    runner_path = _relative_path(runner.get("path"), label="candidate test plan runner path")
+    runner_hash = runner.get("sha256")
+    if not isinstance(runner_hash, str) or _SHA256.fullmatch(runner_hash) is None or runner_hash != _hash_bytes(runner_source):
+        raise CandidateManifestError("candidate test plan runner hash is invalid")
+    argv_prefix = runner.get("argv_prefix")
+    if argv_prefix != ["-m", "pytest"]:
+        raise CandidateManifestError("candidate test plan runner command is invalid")
+    scopes = value.get("scopes")
+    if not isinstance(scopes, Mapping) or set(scopes) != {"focused", "full"}:
+        raise CandidateManifestError("candidate test plan scopes are invalid")
+    normalized_scopes: dict[str, list[str]] = {}
+    for scope in ("focused", "full"):
+        scope_value = scopes[scope]
+        if not isinstance(scope_value, Mapping) or set(scope_value) != {"argv"}:
+            raise CandidateManifestError("candidate test plan scope is invalid")
+        argv = scope_value["argv"]
+        if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
+            raise CandidateManifestError("candidate test plan command is invalid")
+        command = list(argv_prefix) + list(argv)
+        if not _is_pytest_command(command):
+            raise CandidateManifestError("candidate test plan must run pytest")
+        normalized_scopes[scope] = command
+    if normalized_scopes["full"] != ["-m", "pytest", "-q"]:
+        raise CandidateManifestError("candidate full-suite test plan must run the complete pytest suite")
+    focused_arguments = normalized_scopes["focused"][2:]
+    if not any(argument.startswith("tests/") for argument in focused_arguments):
+        raise CandidateManifestError("candidate focused test plan must name committed test paths")
+    return {
+        "path": CANONICAL_TEST_PLAN_PATH,
+        "sha256": _hash_bytes(source),
+        "plan_id": value["plan_id"],
+        "version": value["version"],
+        "runner_path": runner_path,
+        "runner_sha256": runner_hash,
+        "commands": normalized_scopes,
+    }
+
+
+def load_candidate_test_plan(repo: Path, *, source_commit: str) -> dict[str, Any]:
+    """Load the test plan and runner only from the exact closed candidate."""
+
+    try:
+        source = _git(repo, "show", f"{source_commit}:{CANONICAL_TEST_PLAN_PATH}", text=False)
+        value = json.loads(source)
+    except (subprocess.CalledProcessError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CandidateManifestError("candidate canonical test plan is unavailable") from exc
+    if not isinstance(value, Mapping):
+        raise CandidateManifestError("candidate canonical test plan is invalid")
+    runner = value.get("runner")
+    if not isinstance(runner, Mapping):
+        raise CandidateManifestError("candidate canonical test plan runner is invalid")
+    runner_path = _relative_path(runner.get("path"), label="candidate test plan runner path")
+    try:
+        runner_source = _git(repo, "show", f"{source_commit}:{runner_path}", text=False)
+    except subprocess.CalledProcessError as exc:
+        raise CandidateManifestError("candidate canonical test runner is unavailable") from exc
+    return validate_candidate_test_plan(value, source=bytes(source), runner_source=bytes(runner_source))
+
+
+def create_test_output_artifact(
+    *, scope: str, command: Sequence[str], source_commit: str, source_tree: str,
+    stdout: bytes, stderr: bytes,
+) -> dict[str, Any]:
+    """Create the retained, content-addressed output body for one test run."""
+
+    if scope not in {"focused", "full"}:
+        raise CandidateManifestError("test output scope is invalid")
+    if not command or not all(isinstance(item, str) and item for item in command):
+        raise CandidateManifestError("test output command is invalid")
+    if not isinstance(stdout, bytes) or not isinstance(stderr, bytes):
+        raise CandidateManifestError("test output body is invalid")
+    value = {
+        "schema": TEST_OUTPUT_ARTIFACT_SCHEMA,
+        "scope": scope,
+        "command": list(command),
+        "source_commit": source_commit,
+        "source_tree": source_tree,
+        "stdout_base64": base64.b64encode(stdout).decode("ascii"),
+        "stderr_base64": base64.b64encode(stderr).decode("ascii"),
+    }
+    return {**value, "artifact_hash": _canonical_hash(value)}
+
+
+def verify_test_output_artifact(
+    artifact: Mapping[str, Any], *, scope: str, command: Sequence[str], source_commit: str, source_tree: str,
+) -> dict[str, Any]:
+    """Verify that a retained output artifact is exact evidence for one run."""
+
+    required = {
+        "schema", "scope", "command", "source_commit", "source_tree",
+        "stdout_base64", "stderr_base64", "artifact_hash",
+    }
+    if not isinstance(artifact, Mapping) or set(artifact) != required or artifact.get("schema") != TEST_OUTPUT_ARTIFACT_SCHEMA:
+        raise CandidateManifestError("test output artifact schema is invalid")
+    if (
+        artifact.get("scope") != scope
+        or artifact.get("command") != list(command)
+        or artifact.get("source_commit") != source_commit
+        or artifact.get("source_tree") != source_tree
+    ):
+        raise CandidateManifestError("test output artifact binding mismatch")
+    stdout = _canonical_base64(artifact.get("stdout_base64"), label="test output stdout")
+    stderr = _canonical_base64(artifact.get("stderr_base64"), label="test output stderr")
+    unsigned = dict(artifact)
+    claimed = unsigned.pop("artifact_hash")
+    if not isinstance(claimed, str) or _SHA256.fullmatch(claimed) is None or claimed != _canonical_hash(unsigned):
+        raise CandidateManifestError("test output artifact hash mismatch")
+    return {**dict(artifact), "stdout": stdout, "stderr": stderr}
+
+
 def create_test_receipt(
     *,
     scope: str,
@@ -90,33 +252,37 @@ def create_test_receipt(
     source_commit: str,
     source_tree: str,
     returncode: int,
-    stdout: bytes = b"",
-    stderr: bytes = b"",
+    test_plan: Mapping[str, Any],
+    output_artifact: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Create an exact-candidate test receipt from an executed command.
-
-    The output bodies intentionally stay outside the compact manifest; their
-    hashes make the recorded outcome tamper evident while an evidence sink can
-    retain the full log.
-    """
+    """Create an exact-candidate test receipt from retained runner output."""
     if scope not in {"focused", "full"}:
         raise CandidateManifestError("test receipt scope is invalid")
     if not command or not all(isinstance(item, str) and item for item in command):
         raise CandidateManifestError("test receipt command is invalid")
-    if not _is_pytest_command(command):
-        raise CandidateManifestError("candidate test receipt must run pytest")
+    if not isinstance(test_plan, Mapping) or test_plan.get("commands", {}).get(scope) != list(command):
+        raise CandidateManifestError("candidate test receipt does not use the canonical test plan command")
     if not isinstance(returncode, int):
         raise CandidateManifestError("test receipt return code is invalid")
+    output = verify_test_output_artifact(
+        output_artifact, scope=scope, command=command,
+        source_commit=source_commit, source_tree=source_tree,
+    )
     receipt = {
         "schema": TEST_RECEIPT_SCHEMA,
         "scope": scope,
         "command": list(command),
         "source_commit": source_commit,
         "source_tree": source_tree,
+        "test_plan_path": test_plan["path"],
+        "test_plan_sha256": test_plan["sha256"],
+        "runner_path": test_plan["runner_path"],
+        "runner_sha256": test_plan["runner_sha256"],
         "returncode": returncode,
         "status": "PASS" if returncode == 0 else "FAIL",
-        "stdout_sha256": "sha256:" + hashlib.sha256(stdout).hexdigest(),
-        "stderr_sha256": "sha256:" + hashlib.sha256(stderr).hexdigest(),
+        "stdout_sha256": _hash_bytes(output["stdout"]),
+        "stderr_sha256": _hash_bytes(output["stderr"]),
+        "output_artifact_hash": output["artifact_hash"],
     }
     receipt["receipt_hash"] = _canonical_hash(receipt)
     return receipt
@@ -124,13 +290,15 @@ def create_test_receipt(
 
 def verify_test_receipt(
     receipt: Mapping[str, Any], *, scope: str, source_commit: str, source_tree: str,
+    test_plan: Mapping[str, Any], output_artifact: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Accept only a hash-bound successful test run for this candidate."""
     required = {
         "schema", "scope", "command", "source_commit", "source_tree", "returncode",
-        "status", "stdout_sha256", "stderr_sha256", "receipt_hash",
+        "test_plan_path", "test_plan_sha256", "runner_path", "runner_sha256",
+        "status", "stdout_sha256", "stderr_sha256", "output_artifact_hash", "receipt_hash",
     }
-    if set(receipt) != required or receipt.get("schema") != TEST_RECEIPT_SCHEMA:
+    if not isinstance(receipt, Mapping) or set(receipt) != required or receipt.get("schema") != TEST_RECEIPT_SCHEMA:
         raise CandidateManifestError("test receipt schema is invalid")
     if receipt.get("scope") != scope:
         raise CandidateManifestError("test receipt scope binding mismatch")
@@ -141,9 +309,26 @@ def verify_test_receipt(
     command = receipt.get("command")
     if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
         raise CandidateManifestError("test receipt command is invalid")
-    if not _is_pytest_command(command):
-        raise CandidateManifestError("candidate test receipt must run pytest")
-    for field in ("stdout_sha256", "stderr_sha256", "receipt_hash"):
+    if test_plan.get("commands", {}).get(scope) != command:
+        raise CandidateManifestError("candidate test receipt does not use the canonical test plan command")
+    if (
+        receipt.get("test_plan_path") != test_plan.get("path")
+        or receipt.get("test_plan_sha256") != test_plan.get("sha256")
+        or receipt.get("runner_path") != test_plan.get("runner_path")
+        or receipt.get("runner_sha256") != test_plan.get("runner_sha256")
+    ):
+        raise CandidateManifestError("candidate test receipt plan/runner binding mismatch")
+    output = verify_test_output_artifact(
+        output_artifact, scope=scope, command=command,
+        source_commit=source_commit, source_tree=source_tree,
+    )
+    if (
+        receipt.get("stdout_sha256") != _hash_bytes(output["stdout"])
+        or receipt.get("stderr_sha256") != _hash_bytes(output["stderr"])
+        or receipt.get("output_artifact_hash") != output["artifact_hash"]
+    ):
+        raise CandidateManifestError("candidate test receipt retained output binding mismatch")
+    for field in ("stdout_sha256", "stderr_sha256", "output_artifact_hash", "receipt_hash"):
         value = receipt.get(field)
         if not isinstance(value, str) or len(value) != 71 or not value.startswith("sha256:"):
             raise CandidateManifestError("test receipt hash is invalid")
@@ -416,6 +601,8 @@ def build_candidate_manifest(
     closure_hash: str,
     focused_receipt: Mapping[str, Any],
     full_suite_receipt: Mapping[str, Any],
+    focused_output_artifact: Mapping[str, Any],
+    full_suite_output_artifact: Mapping[str, Any],
     graph: Mapping[str, Any] | None = None,
     conformance_receipt: Mapping[str, Any] | None = None,
     migration_receipts: Sequence[MigrationSafetyReceipt | Mapping[str, Any]] = (),
@@ -496,11 +683,14 @@ def build_candidate_manifest(
         if migration_receipts:
             raise CandidateManifestError("candidate has no database SQL changes for supplied migration receipts")
         verified_migrations = []
+    test_plan = load_candidate_test_plan(repo, source_commit=exact_commit)
     focused = verify_test_receipt(
         focused_receipt, scope="focused", source_commit=exact_commit, source_tree=tree,
+        test_plan=test_plan, output_artifact=focused_output_artifact,
     )
     full_suite = verify_test_receipt(
         full_suite_receipt, scope="full", source_commit=exact_commit, source_tree=tree,
+        test_plan=test_plan, output_artifact=full_suite_output_artifact,
     )
     if conformance_receipt is not None:
         if graph is None:
