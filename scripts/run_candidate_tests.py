@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -44,7 +45,14 @@ def main() -> int:
             check=True, capture_output=True,
         )
         try:
-            completed = subprocess.run(command, cwd=candidate_root, capture_output=True)
+            # Tests must not depend on write access to the operator's live log
+            # directory.  The receipt still identifies the exact candidate,
+            # while all transient logging remains under its temporary sandbox.
+            environment = dict(os.environ)
+            environment.setdefault("TGW_LOG_ROOT", str(candidate_root / ".candidate-test-logs"))
+            completed = subprocess.run(
+                command, cwd=candidate_root, capture_output=True, env=environment,
+            )
         finally:
             subprocess.run(
                 ["git", "-C", str(repo), "worktree", "remove", "--force", str(candidate_root)],
