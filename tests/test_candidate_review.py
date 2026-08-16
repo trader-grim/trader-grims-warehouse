@@ -96,6 +96,7 @@ def governed_receipt(packet_value, *, passed):
         "execution_identity": "review-context:1",
         "card_hash": "sha256:card",
         "promptcraft_receipt_hash": "sha256:promptcraft",
+        "resource_receipt_hash": "sha256:resources",
         "outcome": "satisfied" if passed else "failed",
         "established_conditions": ["reviewed"] if passed else [],
         "artifacts": [],

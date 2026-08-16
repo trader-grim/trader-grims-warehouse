@@ -87,3 +87,41 @@ class PlanAuthorityHttpClient:
             "POST", f"/api/plan-authority/requests/{quote(request_id, safe='')}/decisions",
             {"kind": kind, "reason": reason},
         )
+
+
+def cmd_plan_authority(
+    action: str,
+    *,
+    request_id: str | None = None,
+    kind: str | None = None,
+    reason: str | None = None,
+    limit: int = 100,
+    endpoint: str | None = None,
+    bearer_token: str | None = None,
+) -> dict[str, Any]:
+    """Recovery CLI projection over the shared HTTP authority records only."""
+    try:
+        if endpoint is not None or bearer_token is not None:
+            if not endpoint or not bearer_token:
+                return {"ok": False, "error": "PlanAuthority endpoint and bearer token must be supplied together"}
+            client = PlanAuthorityHttpClient(endpoint.rstrip("/"), bearer_token)
+        else:
+            client = PlanAuthorityHttpClient.from_environment()
+    except (PlanAuthorityClientError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+    try:
+        if action == "list":
+            response = client.list_requests(limit=limit)
+        elif action == "show":
+            if not request_id:
+                return {"ok": False, "error": "show requires --request-id"}
+            response = client.get_request(request_id)
+        elif action == "decide":
+            if not request_id or not kind or not reason:
+                return {"ok": False, "error": "decide requires --request-id, --kind and --reason"}
+            response = client.decide(request_id, kind=kind, reason=reason)
+        else:
+            return {"ok": False, "error": f"unknown PlanAuthority action: {action}"}
+    except (PlanAuthorityClientError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "authority": response}

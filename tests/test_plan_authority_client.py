@@ -3,7 +3,8 @@ from unittest.mock import patch
 
 import pytest
 
-from tgw.plan_authority_client import PlanAuthorityClientError, PlanAuthorityHttpClient
+from tgw.authority_notifications import notify_authority_status
+from tgw.plan_authority_client import PlanAuthorityClientError, PlanAuthorityHttpClient, cmd_plan_authority
 
 
 class _Response:
@@ -50,3 +51,35 @@ def test_operator_client_surfaces_transport_error():
     with patch("tgw.plan_authority_client.urlopen", side_effect=OSError("offline")):
         with pytest.raises(PlanAuthorityClientError, match="failed"):
             client.list_requests()
+
+
+def test_recovery_cli_uses_the_same_client_and_has_no_local_authority_store(monkeypatch):
+    class Client:
+        @classmethod
+        def from_environment(cls):
+            return cls()
+
+        def get_request(self, request_id):
+            return {"request": {"request_id": request_id, "status": "pending"}}
+
+    monkeypatch.setattr("tgw.plan_authority_client.PlanAuthorityHttpClient", Client)
+    assert cmd_plan_authority("show", request_id="request:recovery") == {
+        "ok": True,
+        "authority": {"request": {"request_id": "request:recovery", "status": "pending"}},
+    }
+
+
+def test_notification_adapter_can_only_project_shared_authority_status():
+    delivered = []
+
+    class Client:
+        def get_request(self, request_id):
+            return {"request": {"request_id": request_id, "status": "pending", "effect": {"kind": "authority-canary"}}}
+
+    record = notify_authority_status(
+        Client(), request_id="request:notification",
+        deliver=lambda title, message, level: delivered.append((title, message, level)),
+    )
+    assert record["request_id"] == "request:notification"
+    assert delivered[0][0] == "PlanAuthority status"
+    assert "decide or reconcile" in delivered[0][1]

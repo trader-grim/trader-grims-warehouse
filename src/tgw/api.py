@@ -1078,6 +1078,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--endpoint", help="explicit endpoint override")
     p.add_argument("--api-key", help="explicit credential override")
 
+    p = sub.add_parser("plan-authority", help="recovery CLI projection over shared PlanAuthority HTTP records")
+    p.add_argument("authority_action", choices=["list", "show", "decide"])
+    p.add_argument("--request-id", help="show/decide: authority request ID")
+    p.add_argument("--kind", choices=["approve", "hold", "reconcile"], help="decide: explicit operator decision")
+    p.add_argument("--reason", help="decide: durable operator reason")
+    p.add_argument("--limit", type=int, default=100, help="list: maximum records")
+    p.add_argument("--endpoint", help="PlanAuthority HTTP endpoint (otherwise TGW_AUTHORITY_URL)")
+    p.add_argument("--api-key", dest="authority_api_key", help="PlanAuthority bearer token (otherwise TGW_AUTHORITY_BEARER_TOKEN)")
+
     p = sub.add_parser("plan", help="plan/taskboard operations (PP-PLANDB-001)")
     p.add_argument(
         "plan_op",
@@ -4476,6 +4485,15 @@ def main() -> int:
                 authority_token=getattr(args, "authority_token", None),
                 request_id=getattr(args, "request_id", None),
                 decision=getattr(args, "decision", None), reason=getattr(args, "reason", None),
+            )
+
+        elif args.op == "plan-authority":
+            from .plan_authority_client import cmd_plan_authority
+
+            result = cmd_plan_authority(
+                args.authority_action, request_id=args.request_id, kind=args.kind,
+                reason=args.reason, limit=args.limit, endpoint=args.endpoint,
+                bearer_token=args.authority_api_key,
             )
 
         elif args.op == "catlocmvall":
