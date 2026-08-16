@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -13,6 +14,18 @@ from .core import harness_profile
 CARD_SCHEMA = "tgw-execution-card/v1"
 RECEIPT_SCHEMA = "tgw-promptcraft-receipt/v1"
 HANDOFF_SCHEMA = "tgw-launcher-handoff/v1"
+RESOURCE_RECEIPT_SCHEMA = "tgw-execution-resource-receipt/v1"
+CARD_RESOURCE_NAMES = {
+    "plan_input",
+    "plan_commit",
+    "plan_graph",
+    "codegraph_snapshot",
+    "source_tree",
+    "execution_environment",
+    "authority_conditions",
+    "receipt_sink",
+}
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 class HandoffError(ValueError):
@@ -65,7 +78,6 @@ class ExecutionCard:
             "exclusions",
             "acceptance",
             "receiver_profile",
-            "receipt_sink",
             "lease",
             "card_hash",
         }
@@ -78,26 +90,21 @@ class ExecutionCard:
             "role",
             "selected_provider",
             "plan_commit",
-            "receipt_sink",
         ):
             if not isinstance(value[field], str) or not value[field]:
                 raise HandoffError(f"{field} must be a non-empty string")
         bindings = value["bindings"]
-        required_bindings = {
-            "plan_input",
-            "plan_graph",
-            "codegraph_snapshot",
-            "source_tree",
-            "execution_environment",
-            "authority_conditions",
-        }
-        if not isinstance(bindings, Mapping) or set(bindings) != required_bindings:
+        if not isinstance(bindings, Mapping) or set(bindings) != CARD_RESOURCE_NAMES:
             raise HandoffError("card bindings must contain the exact required resource set")
         for name, binding in bindings.items():
             if not isinstance(binding, Mapping) or set(binding) != {"ref", "hash"}:
                 raise HandoffError(f"binding {name} must contain only ref and hash")
             if not all(isinstance(binding[key], str) and binding[key] for key in ("ref", "hash")):
                 raise HandoffError(f"binding {name} values must be non-empty strings")
+            if _SHA256.fullmatch(binding["hash"]) is None:
+                raise HandoffError(f"binding {name} hash must be a sha256 content hash")
+        if bindings["plan_graph"]["ref"] == bindings["codegraph_snapshot"]["ref"]:
+            raise HandoffError("Plan Graph and CodeGraph must have distinct references")
         for field in ("authority", "exclusions", "acceptance"):
             if not isinstance(value[field], list) or not all(isinstance(item, str) for item in value[field]):
                 raise HandoffError(f"{field} must be a string list")
@@ -119,12 +126,32 @@ class ExecutionCard:
         return str(self.value["card_hash"])
 
 
-def craft_handoff(card_value: Mapping[str, Any], *, receiver_identity: str) -> dict[str, Any]:
+def _verified_resource_receipt(card: ExecutionCard, value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or value.get("schema") != RESOURCE_RECEIPT_SCHEMA:
+        raise HandoffError("invalid execution resource receipt")
+    required = {"schema", "card_hash", "plan_commit", "resources", "receipt_hash"}
+    if set(value) != required:
+        raise HandoffError("execution resource receipt fields are invalid")
+    _verify_hash(value, "receipt_hash")
+    if value["card_hash"] != card.hash:
+        raise HandoffError("execution resource receipt card hash mismatch")
+    if value["plan_commit"] != card.value["plan_commit"]:
+        raise HandoffError("execution resource receipt Plan commit mismatch")
+    expected = card.value["bindings"]
+    if value["resources"] != {name: expected[name] for name in sorted(expected)}:
+        raise HandoffError("execution resource receipt bindings mismatch")
+    return value
+
+
+def craft_handoff(value: Mapping[str, Any], *, receiver_identity: str) -> dict[str, Any]:
     """Adapt a verified card and return one immutable mechanical handoff."""
 
     if not receiver_identity:
         raise HandoffError("receiver identity is required")
-    card = ExecutionCard.from_mapping(card_value)
+    if set(value) != {"card", "resource_receipt"}:
+        raise HandoffError("craft input must contain card and resource receipt")
+    card = ExecutionCard.from_mapping(value["card"])
+    resource_receipt = _verified_resource_receipt(card, value["resource_receipt"])
     profile_id = str(card.value["receiver_profile"]["id"])
     profile = harness_profile(profile_id)
     bindings = card.value["bindings"]
@@ -147,7 +174,7 @@ def craft_handoff(card_value: Mapping[str, Any], *, receiver_identity: str) -> d
             *[f"- {item}" for item in card.value["exclusions"]],
             "Acceptance (exact; do not weaken):",
             *[f"- {item}" for item in card.value["acceptance"]],
-            f"Receipt sink: {card.value['receipt_sink']}",
+            f"Receipt sink: {bindings['receipt_sink']['ref']} ({bindings['receipt_sink']['hash']})",
             f"Lease: {json.dumps(card.value['lease'], sort_keys=True, separators=(',', ':'))}",
         ]
     ) + "\n"
@@ -157,6 +184,7 @@ def craft_handoff(card_value: Mapping[str, Any], *, receiver_identity: str) -> d
         "resource_hashes": {
             name: binding["hash"] for name, binding in sorted(bindings.items())
         },
+        "resource_receipt_hash": resource_receipt["receipt_hash"],
         "profile": {
             "id": profile_id,
             "version": card.value["receiver_profile"]["version"],
@@ -176,6 +204,7 @@ def craft_handoff(card_value: Mapping[str, Any], *, receiver_identity: str) -> d
     handoff_unsigned = {
         "schema": HANDOFF_SCHEMA,
         "card": card.value,
+        "resource_receipt": resource_receipt,
         "instruction": instruction,
         "receipt": receipt,
     }
@@ -189,14 +218,17 @@ def verify_for_launcher(
 
     if handoff.get("schema") != HANDOFF_SCHEMA:
         raise HandoffError(f"expected {HANDOFF_SCHEMA}")
+    if set(handoff) != {"schema", "card", "resource_receipt", "instruction", "receipt", "handoff_hash"}:
+        raise HandoffError("launcher handoff fields are invalid")
     _verify_hash(handoff, "handoff_hash")
     card = ExecutionCard.from_mapping(handoff["card"])
+    resource_receipt = _verified_resource_receipt(card, handoff.get("resource_receipt"))
     receipt = handoff.get("receipt")
     if not isinstance(receipt, Mapping) or receipt.get("schema") != RECEIPT_SCHEMA:
         raise HandoffError("invalid Promptcraft receipt")
     required_receipt = {
         "schema", "card_hash", "resource_hashes", "profile",
-        "rendered_instruction_hash", "receiver_identity", "intent_guard_hash",
+        "resource_receipt_hash", "rendered_instruction_hash", "receiver_identity", "intent_guard_hash",
         "result", "receipt_hash",
     }
     if set(receipt) != required_receipt:
@@ -213,6 +245,8 @@ def verify_for_launcher(
     }
     if receipt["resource_hashes"] != expected_resources:
         raise HandoffError("receipt resource hashes mismatch")
+    if receipt["resource_receipt_hash"] != resource_receipt["receipt_hash"]:
+        raise HandoffError("receipt resource receipt hash mismatch")
     instruction = handoff.get("instruction")
     if not isinstance(instruction, str) or receipt["rendered_instruction_hash"] != "sha256:" + hashlib.sha256(instruction.encode()).hexdigest():
         raise HandoffError("rendered instruction hash mismatch")
@@ -243,6 +277,7 @@ def verify_for_launcher(
         "selected_provider": card.value["selected_provider"],
         "receiver_identity": receipt["receiver_identity"],
         "instruction": instruction,
-        "receipt_sink": card.value["receipt_sink"],
+        "receipt_sink": card.value["bindings"]["receipt_sink"]["ref"],
+        "resource_receipt_hash": resource_receipt["receipt_hash"],
         "lease": card.value["lease"],
     }

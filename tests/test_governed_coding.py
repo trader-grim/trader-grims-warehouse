@@ -1,10 +1,23 @@
+import hashlib
 from pathlib import Path
 
+from tgw.execution_resources import RegisteredResourceResolver
 from tgw.governed_coding import admission_gate, dispatch_role
 from tgw.harness_registry import load_registry, observe_health
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "agent-services/catalogs/harness-providers-v1.json"
+PLAN_COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
+RESOURCE_CONTENT = {
+    "plan:p": "plan input",
+    "plan-commit:fb9": PLAN_COMMIT,
+    "graph:g": "plan graph",
+    "code:c": "code graph",
+    "git:s": "source tree",
+    "env:e": "execution environment",
+    "auth:a": "authority and conditions",
+    "receipt:r": "receipt sink",
+}
 
 
 def runner(path: Path, *, fail_review=False, overclaim=False):
@@ -34,24 +47,35 @@ def adapters():
 
 
 def card_template(card_id):
+    def binding(ref):
+        return {
+            "ref": ref,
+            "hash": "sha256:" + hashlib.sha256(RESOURCE_CONTENT[ref].encode()).hexdigest(),
+        }
+
     return {
         "card_id": card_id,
         "solution_id": "sha256:solution",
-        "plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+        "plan_commit": PLAN_COMMIT,
         "bindings": {
-            "plan_input": {"ref": "plan:p", "hash": "sha256:p"},
-            "plan_graph": {"ref": "graph:g", "hash": "sha256:g"},
-            "codegraph_snapshot": {"ref": "code:c", "hash": "sha256:c"},
-            "source_tree": {"ref": "git:s", "hash": "sha256:s"},
-            "execution_environment": {"ref": "env:e", "hash": "sha256:e"},
-            "authority_conditions": {"ref": "auth:a", "hash": "sha256:a"},
+            "plan_input": binding("plan:p"),
+            "plan_commit": binding("plan-commit:fb9"),
+            "plan_graph": binding("graph:g"),
+            "codegraph_snapshot": binding("code:c"),
+            "source_tree": binding("git:s"),
+            "execution_environment": binding("env:e"),
+            "authority_conditions": binding("auth:a"),
+            "receipt_sink": binding("receipt:r"),
         },
         "authority": ["local source and tests only"],
         "exclusions": ["no deployment"],
         "acceptance": ["role receipt passes"],
-        "receipt_sink": "receipt:r",
         "lease": {"id": "lease:l", "expires_at": "2027-08-11T23:00:00Z", "stop_policy": "hold"},
     }
+
+
+def resource_resolver():
+    return RegisteredResourceResolver(RESOURCE_CONTENT)
 
 
 def setup(tmp_path, *, fail_review=False, overclaim=False):
@@ -64,14 +88,16 @@ def setup(tmp_path, *, fail_review=False, overclaim=False):
 
 
 def dispatch(registry, health, bound_adapters, role, identity, **kwargs):
+    template = kwargs.pop("card_template", card_template("card-" + role))
     return dispatch_role(
         registry,
         health,
         role=role,
         adapters=bound_adapters,
-        card_template=card_template("card-" + role),
+        card_template=template,
         execution_identity=identity,
         required_capabilities=["source-mutation"] if role == "implementation" else ["tests"],
+        resource_resolver=resource_resolver(),
         **kwargs,
     )
 
@@ -148,6 +174,28 @@ def test_runner_cannot_establish_conditions_outside_selected_role(tmp_path):
     assert receipt["outcome"] == "failed"
     assert receipt["established_conditions"] == []
     assert any(item["kind"] == "contract_failure" for item in receipt["artifacts"])
+
+
+def test_fake_nonempty_resource_hash_holds_before_promptcraft_or_runner_launch(tmp_path):
+    registry, health, bound_adapters = setup(tmp_path)
+    fake = card_template("fake-resource-card")
+    fake["bindings"]["source_tree"]["hash"] = "sha256:" + "0" * 64
+
+    receipt = dispatch(
+        registry,
+        health,
+        bound_adapters,
+        "implementation",
+        "run:fake-resource",
+        card_template=fake,
+    )
+
+    assert receipt["status"] == "HOLD"
+    assert receipt["outcome"] == "resource-verification"
+    assert receipt["promptcraft_receipt_hash"] is None
+    assert receipt["artifacts"] == [
+        {"kind": "resource_verification", "detail": "registered resource source_tree content hash mismatch"}
+    ]
 
 
 def test_same_execution_context_cannot_self_review_for_admission(tmp_path):

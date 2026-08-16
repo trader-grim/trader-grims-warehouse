@@ -9,6 +9,11 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from tgw.execution_resources import (
+    ResourceResolver,
+    ResourceVerificationError,
+    verify_card_resources,
+)
 from tgw.harness_registry import (
     ProviderHealth,
     execution_card_provider_fields,
@@ -98,6 +103,7 @@ def dispatch_role(
     execution_identity: str,
     required_capabilities: Sequence[str] = (),
     independent_from: Sequence[str] = (),
+    resource_resolver: ResourceResolver | None = None,
     run: Run = subprocess.run,
 ) -> dict[str, Any]:
     """Select, adapt, execute, and bind one role result to an immutable receipt."""
@@ -122,6 +128,7 @@ def dispatch_role(
                 "execution_identity": execution_identity,
                 "card_hash": None,
                 "promptcraft_receipt_hash": None,
+                "resource_receipt_hash": None,
                 "outcome": "unavailable",
                 "established_conditions": [],
                 "artifacts": [{"kind": "provider_selection", "considered": selection["considered"]}],
@@ -129,8 +136,34 @@ def dispatch_role(
         )
     provider_fields = execution_card_provider_fields(selection)
     card = _card(card_template, provider_fields, role)
+    try:
+        if resource_resolver is None:
+            raise ResourceVerificationError("registered resource resolver is unavailable")
+        resource_receipt = verify_card_resources(card, resource_resolver)
+    except ResourceVerificationError as exc:
+        return _receipt(
+            {
+                "schema": RECEIPT_SCHEMA,
+                "status": "HOLD",
+                "role": role,
+                "selected_provider": selection["selected_provider"],
+                "execution_identity": execution_identity,
+                "card_hash": card["card_hash"],
+                "promptcraft_receipt_hash": None,
+                "resource_receipt_hash": None,
+                "outcome": "resource-verification",
+                "established_conditions": [],
+                "artifacts": [{"kind": "resource_verification", "detail": str(exc)}],
+            }
+        )
     promptcraft = _promptcraft_path(adapters)
-    handoff = _promptcraft(promptcraft, "craft", card, receiver_identity=execution_identity, run=run)
+    handoff = _promptcraft(
+        promptcraft,
+        "craft",
+        {"card": card, "resource_receipt": resource_receipt},
+        receiver_identity=execution_identity,
+        run=run,
+    )
     invocation = _promptcraft(promptcraft, "verify", handoff, receiver_identity=execution_identity, run=run)
     if invocation.get("selected_provider") != selection["selected_provider"]:
         raise GovernedCodingError("Promptcraft invocation provider does not match selection")
@@ -144,6 +177,7 @@ def dispatch_role(
             **os.environ,
             "TGW_EXECUTION_HANDOFF_HASH": str(handoff["handoff_hash"]),
             "TGW_EXECUTION_CARD_HASH": str(card["card_hash"]),
+            "TGW_EXECUTION_RESOURCE_RECEIPT_HASH": str(resource_receipt["receipt_hash"]),
         },
     )
     artifacts: list[Any] = []
@@ -184,6 +218,7 @@ def dispatch_role(
             "execution_identity": execution_identity,
             "card_hash": card["card_hash"],
             "promptcraft_receipt_hash": handoff["receipt"]["receipt_hash"],
+            "resource_receipt_hash": resource_receipt["receipt_hash"],
             "outcome": outcome,
             "established_conditions": established,
             "artifacts": artifacts,
@@ -208,6 +243,7 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
         not isinstance(receipt.get("selected_provider"), str)
         or not isinstance(receipt.get("card_hash"), str)
         or not isinstance(receipt.get("promptcraft_receipt_hash"), str)
+        or not isinstance(receipt.get("resource_receipt_hash"), str)
         or not _ROLE_REQUIRED[str(receipt["role"])]
         <= set(receipt.get("established_conditions", ()))
     ):

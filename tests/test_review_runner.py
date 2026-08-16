@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tgw.execution_resources import RegisteredResource, RegisteredResourceResolver
 from tgw.governed_coding import admission_gate, dispatch_role
 from tgw.harness_registry import load_registry, observe_health
 from tgw.review_runner import run_review, snapshot_hash
@@ -25,30 +26,63 @@ def snapshot(tmp_path):
 
 
 def handoff(source):
+    def binding(ref, content):
+        return {"ref": ref, "hash": "sha256:" + hashlib.sha256(content.encode()).hexdigest()}
+
+    plan_commit = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
     card = ExecutionCard.create(
         {
             "card_id": "review-card",
             "solution_id": "sha256:solution",
             "role": "independent-review",
             "selected_provider": "codex-isolated-review-runner",
-            "plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+            "plan_commit": plan_commit,
             "bindings": {
-                "plan_input": {"ref": "plan:p", "hash": "sha256:p"},
-                "plan_graph": {"ref": "graph:g", "hash": "sha256:g"},
-                "codegraph_snapshot": {"ref": "code:c", "hash": "sha256:c"},
+                "plan_input": binding("plan:p", "plan input"),
+                "plan_commit": binding("plan-commit:fb9", plan_commit),
+                "plan_graph": binding("graph:g", "plan graph"),
+                "codegraph_snapshot": binding("code:c", "code graph"),
                 "source_tree": {"ref": source.resolve().as_uri(), "hash": snapshot_hash(source)},
-                "execution_environment": {"ref": "env:e", "hash": "sha256:e"},
-                "authority_conditions": {"ref": "auth:a", "hash": "sha256:a"},
+                "execution_environment": binding("env:e", "environment"),
+                "authority_conditions": binding("auth:a", "authority and conditions"),
+                "receipt_sink": binding("receipt:r", "receipt sink"),
             },
             "authority": ["read-only semantic review"],
             "exclusions": ["no source mutation", "no deployment"],
             "acceptance": ["strict report validates"],
             "receiver_profile": {"id": "codex", "version": 1},
-            "receipt_sink": "receipt:r",
             "lease": {"id": "lease:l", "expires_at": "2027-08-11T23:00:00Z", "stop_policy": "hold"},
         }
     )
-    return craft_handoff(card.value, receiver_identity="review-context:2")
+    receipt_unsigned = {
+        "schema": "tgw-execution-resource-receipt/v1",
+        "card_hash": card.hash,
+        "plan_commit": plan_commit,
+        "resources": {name: value for name, value in sorted(card.value["bindings"].items())},
+    }
+    resource_receipt = {
+        **receipt_unsigned,
+        "receipt_hash": "sha256:" + hashlib.sha256(json.dumps(receipt_unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+    }
+    return craft_handoff(
+        {"card": card.value, "resource_receipt": resource_receipt},
+        receiver_identity="review-context:2",
+    )
+
+
+def resource_resolver(source):
+    return RegisteredResourceResolver(
+        {
+            "plan:p": "plan input",
+            "plan-commit:fb9": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+            "graph:g": "plan graph",
+            "code:c": "code graph",
+            source.resolve().as_uri(): RegisteredResource(source, snapshot_hash),
+            "env:e": "environment",
+            "auth:a": "authority and conditions",
+            "receipt:r": "receipt sink",
+        }
+    )
 
 
 def backend(path, verdict="PASS", mutate=False):
@@ -273,7 +307,7 @@ def test_same_vendor_different_isolated_context_is_admissible(tmp_path):
     config = {"commands": {"codex-implement": [local], "controller-verify": [local], "harness-review": wrapper}}
     bound = adapters()
     health = observe_health(registry, coding_config=config, adapters=bound)
-    common = {"registry": registry, "health": health, "adapters": bound}
+    common = {"registry": registry, "health": health, "adapters": bound, "resource_resolver": resource_resolver(source)}
     implementation = dispatch_role(
         **common,
         role="implementation",
@@ -313,7 +347,7 @@ def test_failed_isolated_review_blocks_governed_admission(tmp_path):
     config = {"commands": {"codex-implement": [local], "controller-verify": [local], "harness-review": wrapper}}
     bound = adapters()
     health = observe_health(registry, coding_config=config, adapters=bound)
-    common = {"registry": registry, "health": health, "adapters": bound}
+    common = {"registry": registry, "health": health, "adapters": bound, "resource_resolver": resource_resolver(source)}
     implementation = dispatch_role(**common, role="implementation", card_template=card_template(source, "i"), execution_identity="ctx:i", required_capabilities=["source-mutation"])
     review = dispatch_role(**common, role="independent-review", card_template=card_template(source, "r"), execution_identity="ctx:r", required_capabilities=["isolated-snapshot-review"])
     controller = dispatch_role(**common, role="controller-verification", card_template=card_template(source, "c"), execution_identity="ctx:c", required_capabilities=["tests"])
