@@ -73,7 +73,11 @@ class PlanAuthorityHttpClient:
         return self._request("GET", f"/api/plan-authority/requests?limit={limit}")
 
     def get_request(self, request_id: str) -> dict[str, Any]:
-        return self._request("GET", f"/api/plan-authority/requests/{quote(request_id, safe='')}")
+        # Read the console projection rather than a bare storage row: every
+        # adapter (including notification delivery) needs the canonical status,
+        # typed-effect summary, evidence, and legal actions computed from that
+        # one authority record.  Decisions remain on the authority endpoint.
+        return self._request("GET", f"/api/operator-console/requests/{quote(request_id, safe='')}")
 
     def create_request(self, request: Mapping[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/api/plan-authority/requests", request)

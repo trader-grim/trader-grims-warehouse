@@ -201,7 +201,7 @@ class _DecisionDialogState extends State<_DecisionDialog> {
           onPressed: () {
             final reason = _reason.text.trim();
             final evidence = _evidence.text
-                .split(RegExp(r'\\r?\\n'))
+                .split(RegExp(r'\r?\n'))
                 .map((item) => item.trim())
                 .where((item) => item.isNotEmpty)
                 .toList(growable: false);

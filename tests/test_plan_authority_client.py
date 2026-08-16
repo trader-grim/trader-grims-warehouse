@@ -54,6 +54,14 @@ def test_operator_client_can_submit_evidence_for_active_execution_reconciliation
     }
 
 
+def test_authority_detail_uses_the_shared_console_projection_not_a_raw_store_row():
+    client = PlanAuthorityHttpClient("https://authority.example", "operator-token")
+    with patch("tgw.plan_authority_client.urlopen", return_value=_Response({"request": {"status": "pending"}})) as request:
+        assert client.get_request("request/with space") == {"request": {"status": "pending"}}
+    outbound = request.call_args.args[0]
+    assert outbound.full_url.endswith("/api/operator-console/requests/request%2Fwith%20space")
+
+
 @pytest.mark.parametrize("endpoint", ["", "ftp://authority.example", "authority.example"])
 def test_operator_client_rejects_non_http_endpoint(endpoint):
     with pytest.raises(ValueError, match="HTTP"):
