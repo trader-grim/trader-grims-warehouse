@@ -195,15 +195,31 @@ def configured_console_mount(
     require_executor: Callable[[], Any],
     execute_effect: Callable[..., Any] | None = None,
     bootstrap_provider: TypedBootstrapDeploymentProvider | None = None,
+    bootstrap_provider_factory: Callable[[Mapping[str, Any]], TypedBootstrapDeploymentProvider | None] | None = None,
 ) -> OperatorConsoleMount:
+    if bootstrap_provider is not None and bootstrap_provider_factory is not None:
+        raise RuntimeError("bootstrap provider and provider factory cannot both be configured")
     store = ConfiguredAuthorityStore(config_provider)
+    if execute_effect is None:
+        # The HTTP module mounts routes before its lifespan loads configuration.
+        # Build the closed controller only at consume time, so a configured
+        # provider is visible then and malformed provider configuration fails
+        # before AuthorityEffectController can call begin_execution.
+        def execute_effect(*args: Any, **kwargs: Any) -> Any:
+            provider = bootstrap_provider
+            if bootstrap_provider_factory is not None:
+                try:
+                    provider = bootstrap_provider_factory(config_provider())
+                except BootstrapHostIntegrationError as exc:
+                    raise ValueError("bootstrap deployment provider cannot be mounted") from exc
+            return configured_execution_controller(
+                store, config_provider, bootstrap_provider=provider,
+            ).execute(*args, **kwargs)
     return OperatorConsoleMount(
         store=store,
         current_plan_commit=lambda: current_plan_commit(config_provider),
         load_solution=lambda identity: load_solution(config_provider, identity),
         require_operator=require_operator,
         require_executor=require_executor,
-        execute_effect=execute_effect or configured_execution_controller(
-            store, config_provider, bootstrap_provider=bootstrap_provider,
-        ).execute,
+        execute_effect=execute_effect,
     )

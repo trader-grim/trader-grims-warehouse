@@ -8,10 +8,15 @@ the observed closure transitions, health proof receipts, and rollback receipt.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from tgw.bootstrap_deployment_contract import (
     BootstrapDeploymentContractError,
@@ -25,7 +30,11 @@ from tgw.candidate_receipt_sink import (
 )
 
 PINNED_BOOTSTRAP_HOST_INTEGRATION_SCHEMA = "tgw-pinned-bootstrap-host-integration/v1"
+BOOTSTRAP_PROVIDER_BINDING_SCHEMA = "tgw-bootstrap-provider-binding/v1"
+BOOTSTRAP_PROVIDER_RESPONSE_SCHEMA = "tgw-bootstrap-provider-response/v1"
 _IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$")
+_CREDENTIAL_ENV = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class BootstrapHostIntegrationError(ValueError):
@@ -38,6 +47,126 @@ class TypedBootstrapDeploymentProvider(Protocol):
     def observe(self, binding: Mapping[str, str]) -> Mapping[str, Any]: ...
     def install(self, binding: Mapping[str, str]) -> Mapping[str, Any]: ...
     def rollback(self, binding: Mapping[str, str]) -> Mapping[str, Any]: ...
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    """A deployment provider response must come from its configured endpoint."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+@dataclass(frozen=True)
+class _ConfiguredBootstrapHttpProvider:
+    """The one host-owned remote bootstrap provider client.
+
+    The remote service, not tgw-http, owns the privileged target procedure.
+    This client can send only a verified contract reference and hash to three
+    fixed endpoints; it has no command, target, generation, or path surface.
+    """
+
+    endpoint: str
+    credential_env: str
+    provider_id: str
+    provider_identity: str
+    trust_anchor_sha256: str
+    timeout_seconds: int
+
+    def _call(self, operation: str, binding: Mapping[str, str]) -> Mapping[str, Any]:
+        normalized = _binding(binding)
+        secret = os.environ.get(self.credential_env)
+        if not secret:
+            raise BootstrapHostIntegrationError("bootstrap provider credential is unavailable")
+        request = Request(
+            f"{self.endpoint}/v1/bootstrap/{operation}",
+            data=json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {secret}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with build_opener(_NoRedirect()).open(request, timeout=self.timeout_seconds) as response:  # nosec: fixed host provider binding
+                if response.status != 200:
+                    raise BootstrapHostIntegrationError("bootstrap provider returned a non-success status")
+                raw = response.read(1024 * 1024 + 1)
+        except (HTTPError, URLError, OSError) as exc:
+            raise BootstrapHostIntegrationError("bootstrap provider is unavailable") from exc
+        if len(raw) > 1024 * 1024:
+            raise BootstrapHostIntegrationError("bootstrap provider response is too large")
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise BootstrapHostIntegrationError("bootstrap provider response is invalid") from exc
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "schema", "provider_id", "provider_identity", "trust_anchor_sha256", "result",
+        }:
+            raise BootstrapHostIntegrationError("bootstrap provider response is invalid")
+        if (
+            payload.get("schema") != BOOTSTRAP_PROVIDER_RESPONSE_SCHEMA
+            or payload.get("provider_id") != self.provider_id
+            or payload.get("provider_identity") != self.provider_identity
+            or payload.get("trust_anchor_sha256") != self.trust_anchor_sha256
+            or not isinstance(payload.get("result"), Mapping)
+        ):
+            raise BootstrapHostIntegrationError("bootstrap provider identity binding is invalid")
+        return dict(payload["result"])
+
+    def observe(self, binding: Mapping[str, str]) -> Mapping[str, Any]:
+        return self._call("observe", binding)
+
+    def install(self, binding: Mapping[str, str]) -> Mapping[str, Any]:
+        return self._call("install", binding)
+
+    def rollback(self, binding: Mapping[str, str]) -> Mapping[str, Any]:
+        return self._call("rollback", binding)
+
+
+def configured_bootstrap_deployment_provider(config: Mapping[str, Any]) -> TypedBootstrapDeploymentProvider | None:
+    """Resolve the one allowlisted, host-owned bootstrap provider binding.
+
+    A pin set without this independent binding remains deliberately unmounted.
+    There is no Python import, shell command, target, or procedure selector in
+    the configuration contract.
+    """
+    value = config.get("bootstrap_provider_binding")
+    if value is None:
+        return None
+    required = {
+        "schema", "provider_id", "endpoint", "credential_env", "timeout_seconds",
+        "provider_identity", "trust_anchor_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise BootstrapHostIntegrationError("bootstrap provider binding is invalid")
+    if value.get("schema") != BOOTSTRAP_PROVIDER_BINDING_SCHEMA:
+        raise BootstrapHostIntegrationError("bootstrap provider binding schema is invalid")
+    # This map is intentionally closed.  Adding a provider is a source review,
+    # not an operator-configurable import or command choice.
+    if value.get("provider_id") != "tgw-bootstrap-deployment-provider@1":
+        raise BootstrapHostIntegrationError("bootstrap provider identity is not allowlisted")
+    endpoint = value.get("endpoint")
+    parsed = urlsplit(endpoint) if isinstance(endpoint, str) else None
+    local_http = parsed and parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+    if not parsed or (parsed.scheme != "https" and not local_http) or not parsed.netloc or parsed.query or parsed.fragment:
+        raise BootstrapHostIntegrationError("bootstrap provider endpoint is invalid")
+    credential_env = value.get("credential_env")
+    provider_identity = value.get("provider_identity")
+    trust_anchor = value.get("trust_anchor_sha256")
+    timeout = value.get("timeout_seconds")
+    if (
+        not isinstance(credential_env, str) or _CREDENTIAL_ENV.fullmatch(credential_env) is None
+        or not isinstance(provider_identity, str) or _IDENTITY.fullmatch(provider_identity) is None
+        or not isinstance(trust_anchor, str) or _SHA256.fullmatch(trust_anchor) is None
+        or isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 60
+    ):
+        raise BootstrapHostIntegrationError("bootstrap provider binding is invalid")
+    return _ConfiguredBootstrapHttpProvider(
+        endpoint=endpoint.rstrip("/"), credential_env=credential_env,
+        provider_id="tgw-bootstrap-deployment-provider@1", provider_identity=provider_identity,
+        trust_anchor_sha256=trust_anchor, timeout_seconds=timeout,
+    )
 
 
 def _absolute_path(value: Any, *, label: str) -> Path:

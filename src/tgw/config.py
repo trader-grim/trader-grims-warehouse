@@ -324,6 +324,11 @@ def load_config(path: Path) -> Dict[str, Any]:
         # normalized setting so the canonical HTTP host can never silently
         # lose the deployment boundary configuration in ``raw``.
         "pinned_bootstrap_host_integration": raw.get("pinned_bootstrap_host_integration"),
+        # The independently configured, closed provider binding is intentionally
+        # distinct from the immutable S/D/X/Y evidence pins above.  Its strict
+        # allowlist/schema validation occurs at the authority execution boundary
+        # after the HTTP host has loaded this configuration.
+        "bootstrap_provider_binding": raw.get("bootstrap_provider_binding"),
         "plan_inbox_path": plan_vault_path / "inbox",
         # Canonical Plan intent lives only in the standalone repository.  The
         # mutable/synced Plan Vault remains the inbox and general docs surface,

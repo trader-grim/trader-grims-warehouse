@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 
 from . import draft_sync, inventory_record
 from .assets import ordered_photos as _ordered_photos
+from .bootstrap_host_integration import configured_bootstrap_deployment_provider
 from .config import DEFAULT_CONFIG, load_config
 from .ebay.category_aspect_migration import (
     apply_category_aspect_migration,
@@ -407,6 +408,7 @@ mount_operator_console(
         lambda: _cfg,
         require_operator=_require_plan_operator,
         require_executor=_require_plan_executor,
+        bootstrap_provider_factory=configured_bootstrap_deployment_provider,
     ),
 )
 

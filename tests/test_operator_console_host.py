@@ -4,8 +4,10 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tgw.bootstrap_host_integration import configured_bootstrap_deployment_provider
 from tgw.operator_console_host import (
     DEFAULT_PLAN_ROOT,
     ConfiguredAuthorityStore,
@@ -16,6 +18,7 @@ from tgw.operator_console_host import (
     load_solution,
     plan_root,
 )
+from tgw.operator_console_plugin import mount_operator_console
 from tgw.plan_authority import AuthorityPrincipal, PrincipalRole, TypedEffect
 
 
@@ -125,6 +128,105 @@ def test_configured_mount_is_late_bound_and_reuses_auth_functions():
     assert mount.execute_effect is not None
     with pytest.raises(RuntimeError, match="not configured"):
         mount.store.list()
+
+
+def test_standard_http_mount_resolves_bootstrap_provider_after_config_load_and_before_execution():
+    """Route mounting must not freeze the empty pre-lifespan config.
+
+    This exercises the mounted `/consume` route rather than only controller
+    injection.  An invalid provider binding is rejected after configuration is
+    populated but before the store can begin an authority execution attempt.
+    """
+    config: dict[str, object] = {}
+    effect = TypedEffect.parse({
+        "kind": "approval-platform-bootstrap-deployment",
+        "generation": "candidate-release",
+        "parameters": {
+            "bootstrap_contract_ref": "candidate:" + "a" * 40 + ":bootstrap-deployment:v2",
+            "bootstrap_contract_hash": "sha256:" + "b" * 64,
+        },
+    })
+    mount = configured_console_mount(
+        lambda: config,
+        require_operator=lambda: AuthorityPrincipal("operator:fixture", PrincipalRole.OPERATOR, "test"),
+        require_executor=lambda: AuthorityPrincipal("executor:fixture", PrincipalRole.EXECUTOR, "test"),
+        bootstrap_provider_factory=configured_bootstrap_deployment_provider,
+    )
+    mount.store.get = Mock(return_value={
+        "effect_kind": effect.kind,
+        "effect_generation": effect.generation,
+        "effect_parameters": effect.parameters,
+        "effect_hash": effect.effect_hash,
+    })
+    mount.store.begin_execution = Mock()
+    app = FastAPI()
+    mount_operator_console(app, mount)
+    # This is the post-lifespan state.  The route was mounted while `config`
+    # was empty, so success here proves execution resolves it lazily.
+    config["pinned_bootstrap_host_integration"] = {"schema": "not-used-before-provider-validation"}
+    config["bootstrap_provider_binding"] = {"schema": "wrong"}
+    response = TestClient(app).post("/api/plan-authority/requests/request:fixture/consume")
+    assert response.status_code == 409
+    assert "provider cannot be mounted" in response.json()["detail"]
+    mount.store.begin_execution.assert_not_called()
+
+
+def test_allowlisted_bootstrap_provider_sends_only_contract_binding(monkeypatch):
+    import tgw.bootstrap_host_integration as host
+
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status = 200
+
+        def read(self, _: int) -> bytes:
+            return json.dumps({
+                "schema": "tgw-bootstrap-provider-response/v1",
+                "provider_id": "tgw-bootstrap-deployment-provider@1",
+                "provider_identity": "provider:tgw-prod-bootstrap",
+                "trust_anchor_sha256": "sha256:" + "c" * 64,
+                "result": {"generation": "before", "closure": "/nix/store/fixture"},
+            }).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    class _Opener:
+        def open(self, request, *, timeout: int):  # type: ignore[no-untyped-def]
+            captured["url"] = request.full_url
+            captured["body"] = json.loads(request.data)
+            captured["authorization"] = request.headers["Authorization"]
+            captured["timeout"] = timeout
+            return _Response()
+
+    monkeypatch.setenv("TGW_BOOTSTRAP_PROVIDER_TOKEN", "fixture-token")
+    monkeypatch.setattr(host, "build_opener", lambda *_: _Opener())
+    provider = configured_bootstrap_deployment_provider({
+        "bootstrap_provider_binding": {
+            "schema": "tgw-bootstrap-provider-binding/v1",
+            "provider_id": "tgw-bootstrap-deployment-provider@1",
+            "endpoint": "https://bootstrap-provider.example.invalid",
+            "credential_env": "TGW_BOOTSTRAP_PROVIDER_TOKEN",
+            "timeout_seconds": 9,
+            "provider_identity": "provider:tgw-prod-bootstrap",
+            "trust_anchor_sha256": "sha256:" + "c" * 64,
+        },
+    })
+    assert provider is not None
+    binding = {
+        "bootstrap_contract_ref": "candidate:" + "a" * 40 + ":bootstrap-deployment:v2",
+        "bootstrap_contract_hash": "sha256:" + "b" * 64,
+    }
+    assert provider.observe(binding) == {"generation": "before", "closure": "/nix/store/fixture"}
+    assert captured == {
+        "url": "https://bootstrap-provider.example.invalid/v1/bootstrap/observe",
+        "body": binding,
+        "authorization": "Bearer fixture-token",
+        "timeout": 9,
+    }
 
 
 def test_configured_host_principals_are_named_role_bound_and_fail_closed():
