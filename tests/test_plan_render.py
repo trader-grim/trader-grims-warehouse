@@ -8,8 +8,11 @@ module; tests/test_mcp_server.py retains only FastMCP-boundary coverage.
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+
+import pytest
 
 from tgw.plan_render import (
     PLAN_BRIEF_MAX_SOURCE_BYTES,
@@ -139,13 +142,32 @@ def test_build_has_generated_warning():
 # ---------------------------------------------------------------------------
 
 def _cfg(tmp_path):
-    vault = tmp_path / 'vault'
-    (vault / 'plan').mkdir(parents=True)
-    (vault / 'plan' / 'TGW-Master-Plan.md').write_text(
-        '### PP-FOO-001 — The Foo Project\n', encoding='utf-8')
-    return {'plan_vault_path': vault,
-            'plan_render_root': tmp_path / 'rendered',
-            'plan_master_path': vault / 'plan' / 'TGW-Master-Plan.md'}
+    root = tmp_path / 'standalone-plan'
+    master = root / 'plan' / 'TGW-Master-Plan.md'
+    master.parent.mkdir(parents=True)
+    master.write_text('### PP-FOO-001 — The Approved Project\n', encoding='utf-8')
+    subprocess.run(['git', 'init', '-q', str(root)], check=True)
+    subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+    subprocess.run([
+        'git', '-C', str(root), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+        'commit', '-qm', 'approved Plan',
+    ], check=True)
+    commit = subprocess.check_output(
+        ['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True,
+    ).strip()
+    vault = tmp_path / 'legacy-vault'
+    legacy_master = vault / 'plan' / 'TGW-Master-Plan.md'
+    legacy_master.parent.mkdir(parents=True)
+    legacy_master.write_text('### PP-FOO-001 — Legacy Vault Plan\n', encoding='utf-8')
+    return {
+        'plan_vault_path': vault,
+        'plan_render_root': tmp_path / 'rendered',
+        # Prove rendering ignores this stale compatibility field.
+        'plan_master_path': legacy_master,
+        'standalone_plan_root': root,
+        'plan_approved_commit': commit,
+        'plan_approved_solution_hash': 'sha256:' + 'a' * 64,
+    }
 
 
 def test_render_writes_file(tmp_path):
@@ -157,11 +179,19 @@ def test_render_writes_file(tmp_path):
     assert result['ok'] is True
     assert result['open'] == 1
     assert result['done_week'] == 1
+    assert result['plan_identity'] == {
+        'plan_root': str(cfg['standalone_plan_root']),
+        'plan_commit': cfg['plan_approved_commit'],
+        'solution_hash': cfg['plan_approved_solution_hash'],
+        'master_plan_path': str(cfg['standalone_plan_root'] / 'plan' / 'TGW-Master-Plan.md'),
+    }
     board = taskboard_path(cfg)
     assert board.exists()
     content = board.read_text(encoding='utf-8')
     assert 'open task' in content
-    assert '[[TGW-Master-Plan#PP-FOO-001 — The Foo Project\\|PP-FOO-001]]' in content
+    assert '[[TGW-Master-Plan#PP-FOO-001 — The Approved Project\\|PP-FOO-001]]' in content
+    assert cfg['plan_approved_commit'] in content
+    assert cfg['plan_approved_solution_hash'] in content
     # no temp file left behind
     assert not list(board.parent.glob('.taskboard-*'))
     assert 'plan' not in board.relative_to(tmp_path).parts
@@ -173,7 +203,39 @@ def test_render_reports_tracker_failure(tmp_path):
         result = render_taskboard(cfg)
     assert result['ok'] is False
     assert 'db down' in result['error']
+    assert result['plan_identity']['plan_commit'] == cfg['plan_approved_commit']
     assert not taskboard_path(cfg).exists()
+
+
+@pytest.mark.parametrize(
+    ('field', 'code'),
+    [
+        ('plan_approved_commit', 'approved_plan_commit_required'),
+        ('plan_approved_solution_hash', 'approved_solution_required'),
+    ],
+)
+def test_render_refuses_unbound_plan_before_reading_tracker(tmp_path, field, code):
+    cfg = _cfg(tmp_path)
+    cfg.pop(field)
+    with patch('tgw.todo.todo_list') as todo_list:
+        result = render_taskboard(cfg)
+    assert result == {
+        'ok': False,
+        'error': f'approved Plan binding unavailable: {code}',
+        'code': code,
+    }
+    todo_list.assert_not_called()
+    assert not taskboard_path(cfg).exists()
+
+
+def test_render_refuses_dirty_or_mismatched_approved_plan_before_reading_tracker(tmp_path):
+    cfg = _cfg(tmp_path)
+    (cfg['standalone_plan_root'] / 'plan' / 'TGW-Master-Plan.md').write_text('dirty\n', encoding='utf-8')
+    with patch('tgw.todo.todo_list') as todo_list:
+        result = render_taskboard(cfg)
+    assert result['ok'] is False
+    assert result['code'] == 'source_changed'
+    todo_list.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

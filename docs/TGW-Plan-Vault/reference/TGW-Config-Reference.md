@@ -25,6 +25,13 @@ updated: 2026-07-09
 - `catalog_root` — `/opt/TGW/data/ItemCatalog` — all catalog outputs
 - `incoming_path` — `/opt/TGW/incoming` — intake staging area
 - `plan_vault_path` — `docs/TGW-Plan-Vault` — Obsidian vault
+- `standalone_plan_root` — `/opt/TGW/library/plans` — canonical Plan checkout
+- `plan_repository_root` — canonical Plan update repository; distinct from an
+  approved materialization when approval is configured
+- `plan_approved_commit` + `plan_approved_solution_hash` — exact required
+  authority binding for Plan render, trace, graph, and approval consumers
+- `plan_render_root` — `/opt/TGW/var/plan-render` — generated runtime views,
+  outside both the mutable vault and the approved Plan checkout
 
 ### Catalog outputs (derived from catalog_root if not in JSON)
 - `sqlite_catalog_path` — `catalog_root/tgwcatalog.db` — primary SQLite catalog
@@ -41,7 +48,9 @@ updated: 2026-07-09
 - `ebay_credentials_path` — `secrets_root/ebay-credentials.json`
 - `newitems_path` — `incoming_path/newitems/`
 - `plan_inbox_path` — `plan_vault_path/inbox/`
-- `plan_master_path` — `plan_vault_path/plan/TGW-Master-Plan.md`
+- `plan_master_path` — `standalone_plan_root/plan/TGW-Master-Plan.md`;
+  render consumers derive this path from the approved standalone materialization
+  and do not use a legacy-vault override
 
 ---
 

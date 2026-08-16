@@ -2,8 +2,8 @@
 tgw.workers.agent_run_render — Agent-runs render worker (PP-AGENTTRACE-001
 Phase 2).
 
-Claims an agent_run_render job and regenerates plan/TGW-Agent-Runs.md from
-the agent_runs table.
+Claims an agent_run_render job and regenerates the operational TGW-Agent-Runs
+view from the agent_runs table and an approved Plan binding.
 
 Jobs are enqueued with a 30s not_before and dedupe_key='agent_run_render:pending'
 so rapid successive start_agent_run()/end_agent_run() calls coalesce into a

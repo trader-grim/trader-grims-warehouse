@@ -23,9 +23,13 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
-from tgw.plan_render import _plan_heading_map
+from tgw.plan_render import (
+    PlanRenderBindingError,
+    _plan_heading_map,
+    approved_render_plan_identity,
+)
 
 AGENT_RUNS_DOC_NAME = 'TGW-Agent-Runs.md'
 
@@ -98,6 +102,7 @@ def build_agent_runs_doc(
     rows: List[Dict[str, Any]],
     headings: Optional[Dict[str, str]] = None,
     now: Optional[datetime] = None,
+    plan_identity: Optional[Mapping[str, str]] = None,
 ) -> str:
     """Pure renderer: agent_runs rows -> Obsidian markdown table.
 
@@ -109,6 +114,15 @@ def build_agent_runs_doc(
 
     lines = [
         _HEADER.format(n=_RUN_ID_DISPLAY_CHARS),
+        *(
+            [
+                '_Bound Plan: '
+                f'commit {plan_identity["plan_commit"]!r}, '
+                f'solution {plan_identity["solution_hash"]!r}.',
+                '',
+            ]
+            if plan_identity is not None else []
+        ),
         f'_Rendered {now.strftime("%Y-%m-%d %H:%M UTC")} — {len(rows)} run(s) shown._',
         '',
         '| Run ID | Agent Type | PP/Todo | Host | Status | Started | Duration | Summary |',
@@ -141,12 +155,21 @@ def render_agent_runs_doc(cfg: Dict[str, Any]) -> Dict[str, Any]:
     from tgw.queue import state_machine
 
     try:
+        plan_identity = approved_render_plan_identity(cfg)
+    except PlanRenderBindingError as exc:
+        return {'ok': False, 'error': str(exc), 'code': exc.code}
+
+    try:
         rows = state_machine.list_agent_runs()
     except Exception as exc:
-        return {'ok': False, 'error': f'agent_runs tracker unavailable: {exc}'}
+        return {
+            'ok': False,
+            'error': f'agent_runs tracker unavailable: {exc}',
+            'plan_identity': plan_identity,
+        }
 
-    headings = _plan_heading_map(cfg['plan_master_path'])
-    text = build_agent_runs_doc(rows, headings)
+    headings = _plan_heading_map(Path(plan_identity['master_plan_path']))
+    text = build_agent_runs_doc(rows, headings, plan_identity=plan_identity)
 
     out_path = agent_runs_doc_path(cfg)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -163,4 +186,4 @@ def render_agent_runs_doc(cfg: Dict[str, Any]) -> Dict[str, Any]:
             pass
         raise
 
-    return {'ok': True, 'path': str(out_path), 'count': len(rows)}
+    return {'ok': True, 'path': str(out_path), 'count': len(rows), 'plan_identity': plan_identity}

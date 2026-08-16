@@ -5757,8 +5757,11 @@ def main() -> int:
 
                 result = render_taskboard(cfg)
                 if result["ok"]:
+                    plan_identity = result["plan_identity"]
                     print(f"Taskboard rendered: {result['path']} "
-                          f"({result['open']} open, {result['done_week']} done this week)")
+                          f"({result['open']} open, {result['done_week']} done this week)\n"
+                          f"Bound Plan: {plan_identity['plan_commit']} "
+                          f"{plan_identity['solution_hash']}")
                 else:
                     print(f"Error: {result.get('error')}")
                 return 0 if result["ok"] else 1

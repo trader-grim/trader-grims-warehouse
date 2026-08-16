@@ -27,9 +27,10 @@ import re
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 TASKBOARD_NAME = 'TGW-Taskboard.md'
+DEFAULT_PLAN_ROOT = Path('/opt/TGW/library/plans')
 
 # ---------------------------------------------------------------------------
 # plan_brief — bounded, exact-source Master Plan retrieval (PP-KNOWLEDGE-001
@@ -68,6 +69,49 @@ _HEADER = """\
 
 def taskboard_path(cfg: Dict[str, Any]) -> Path:
     return Path(cfg.get('plan_render_root') or '/opt/TGW/var/plan-render') / TASKBOARD_NAME
+
+
+class PlanRenderBindingError(ValueError):
+    """A rendered Plan view cannot establish its approved source identity."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(f'approved Plan binding unavailable: {code}')
+
+
+def approved_render_plan_identity(cfg: Mapping[str, Any]) -> Dict[str, str]:
+    """Return the only Plan identity permitted to drive a rendered view.
+
+    Rendered taskboard and agent-trace views are operational artifacts, but
+    their links still shape operator decisions.  Never let a configured
+    legacy ``plan_master_path`` substitute for the exact clean standalone
+    Plan materialization approved with its solution.
+    """
+    from tgw.plan_graph import SourcePreconditionError, approved_plan_binding
+
+    try:
+        binding = approved_plan_binding(
+            Path(cfg.get('standalone_plan_root') or DEFAULT_PLAN_ROOT),
+            approved_plan_commit=cfg.get('plan_approved_commit'),
+            approved_solution_hash=cfg.get('plan_approved_solution_hash'),
+            git_path=str(cfg.get('plan_git_path') or 'git'),
+        )
+        root = Path(binding['plan_root'])
+        master = root / 'plan' / 'TGW-Master-Plan.md'
+        if not master.is_file():
+            raise PlanRenderBindingError('canonical_plan_unavailable')
+    except PlanRenderBindingError:
+        raise
+    except SourcePreconditionError as exc:
+        raise PlanRenderBindingError(exc.code) from exc
+    except (OSError, ValueError) as exc:
+        raise PlanRenderBindingError('canonical_plan_unavailable') from exc
+    return {
+        'plan_root': str(root),
+        'plan_commit': binding['plan_commit'],
+        'solution_hash': binding['solution_hash'],
+        'master_plan_path': str(master),
+    }
 
 
 def _parse_size(body: str) -> str:
@@ -118,6 +162,7 @@ def build_taskboard(
     items: List[Dict[str, Any]],
     headings: Dict[str, str],
     now: Optional[datetime] = None,
+    plan_identity: Optional[Mapping[str, str]] = None,
 ) -> str:
     """Pure renderer: todo rows (open + recently done) → taskboard markdown."""
     now = now or datetime.now(tz=timezone.utc)
@@ -131,6 +176,15 @@ def build_taskboard(
 
     lines = [
         _HEADER,
+        *(
+            [
+                '_Bound Plan: '
+                f'commit `{plan_identity["plan_commit"]}`, '
+                f'solution `{plan_identity["solution_hash"]}`._',
+                '',
+            ]
+            if plan_identity is not None else []
+        ),
         f'_Rendered {now.strftime("%Y-%m-%d %H:%M UTC")} — '
         f'{len(open_items)} open, {len(done_week)} done in the last {_DONE_WINDOW_DAYS} days._',
         '',
@@ -182,12 +236,21 @@ def render_taskboard(cfg: Dict[str, Any]) -> Dict[str, Any]:
     from tgw.todo import todo_list
 
     try:
+        plan_identity = approved_render_plan_identity(cfg)
+    except PlanRenderBindingError as exc:
+        return {'ok': False, 'error': str(exc), 'code': exc.code}
+
+    try:
         items = todo_list(show_all=True)
     except Exception as exc:
-        return {'ok': False, 'error': f'todo tracker unavailable: {exc}'}
+        return {
+            'ok': False,
+            'error': f'todo tracker unavailable: {exc}',
+            'plan_identity': plan_identity,
+        }
 
-    headings = _plan_heading_map(cfg['plan_master_path'])
-    text = build_taskboard(items, headings)
+    headings = _plan_heading_map(Path(plan_identity['master_plan_path']))
+    text = build_taskboard(items, headings, plan_identity=plan_identity)
 
     out_path = taskboard_path(cfg)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,7 +270,13 @@ def render_taskboard(cfg: Dict[str, Any]) -> Dict[str, Any]:
     open_count = sum(1 for i in items if not i.get('done_at'))
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=_DONE_WINDOW_DAYS)
     done_week = sum(1 for i in items if i.get('done_at') and i['done_at'] >= cutoff)
-    return {'ok': True, 'path': str(out_path), 'open': open_count, 'done_week': done_week}
+    return {
+        'ok': True,
+        'path': str(out_path),
+        'open': open_count,
+        'done_week': done_week,
+        'plan_identity': plan_identity,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 """
 tgw.workers.plan_render — Taskboard render worker (PP-PLANDB-001 Phase 2).
 
-Claims a plan_render job and regenerates plan/TGW-Taskboard.md from the
-todo_items table.
+Claims a plan_render job and regenerates the operational TGW-Taskboard.md
+view from the todo_items table and an approved Plan binding.
 
 Jobs are enqueued with a 30s not_before and dedupe_key='plan_render:pending'
 so rapid successive todo mutations coalesce into a single render
