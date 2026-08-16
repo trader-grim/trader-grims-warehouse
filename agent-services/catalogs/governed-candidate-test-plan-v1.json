@@ -4,7 +4,7 @@
   "version": 1,
   "runner": {
     "path": "scripts/run_candidate_tests.py",
-    "sha256": "sha256:1ac55171b521d93978115bc5a6af5b27837a14b1d9e8a25e43f8c1406ff291d5",
+    "sha256": "sha256:7a7ef777b98a8e12aede08c2f52a0300b54ce9ac5cb866120e530910d620835a",
     "argv_prefix": ["-m", "pytest"]
   },
   "scopes": {
