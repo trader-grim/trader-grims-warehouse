@@ -35,16 +35,18 @@ def _hash(value: Any) -> str:
 
 def snapshot_hash(root: Path) -> str:
     digest = hashlib.sha256()
+    digest.update(b"tgw-review-snapshot/v2\0")
     for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
         if path.is_symlink():
             raise ReviewRunnerError("review snapshot cannot contain symlinks")
         if not path.is_file() or ".git" in path.relative_to(root).parts:
             continue
-        relative = path.relative_to(root).as_posix()
-        digest.update(relative.encode())
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
+        relative = path.relative_to(root).as_posix().encode()
+        content = path.read_bytes()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
     return "sha256:" + digest.hexdigest()
 
 

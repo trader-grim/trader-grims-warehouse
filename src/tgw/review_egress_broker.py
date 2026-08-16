@@ -14,6 +14,8 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import os
+import signal
 import socket
 import time
 from dataclasses import dataclass
@@ -214,13 +216,19 @@ async def handle_tunnel(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 async def serve(policy: ReviewEgressPolicy, bind_host: str, bind_port: int, receipt_path: Path) -> None:
     sessions: list[dict[str, Any]] = []
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, stop.set)
     server = await asyncio.start_server(lambda r, w: handle_tunnel(r, w, policy, sessions), bind_host, bind_port)
     try:
         async with server:
-            await server.serve_forever()
+            await stop.wait()
     finally:
+        loop.remove_signal_handler(signal.SIGTERM)
         with receipt_path.open("xb") as receipt:
             receipt.write(_canonical(audit_receipt(policy, sessions)) + b"\n")
+            receipt.flush()
+            os.fsync(receipt.fileno())
 
 
 def load_policy(path: Path) -> ReviewEgressPolicy:

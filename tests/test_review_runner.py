@@ -202,6 +202,18 @@ def test_isolated_review_pass_establishes_reviewed_without_mutating_source(tmp_p
     assert result["artifacts"][0]["report"]["snapshot_hash"] == before
 
 
+def test_snapshot_hash_framing_distinguishes_file_boundaries(tmp_path):
+    one_file = tmp_path / "one"
+    two_files = tmp_path / "two"
+    one_file.mkdir()
+    two_files.mkdir()
+    (one_file / "a").write_bytes(b"\0b\0c")
+    (two_files / "a").write_bytes(b"")
+    (two_files / "b").write_bytes(b"c")
+
+    assert snapshot_hash(one_file) != snapshot_hash(two_files)
+
+
 def test_bwrap_translates_snapshot_path_and_clears_ambient_environment(tmp_path, monkeypatch):
     source = snapshot(tmp_path)
     monkeypatch.setenv("HOST_SECRET", "must-not-cross")
