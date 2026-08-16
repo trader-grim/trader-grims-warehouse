@@ -1,0 +1,44 @@
+{
+  "schema": "tgw-harness-review-installations/v1",
+  "canonical_skills": {
+    "tgw-plan": "agent-services/skills/tgw-plan",
+    "tgw-review": "agent-services/skills/tgw-review"
+  },
+  "harnesses": [
+    {
+      "id": "codex",
+      "account": "codex",
+      "skill_destination": ".codex/skills",
+      "interactive_review": "available",
+      "automated_provider": "codex-isolated-review-runner"
+    },
+    {
+      "id": "claude",
+      "account": "claude",
+      "skill_destination": ".claude/skills",
+      "interactive_review": "available-after-login",
+      "automated_provider": "unavailable-no-admitted-runner"
+    },
+    {
+      "id": "hermes",
+      "account": "hermes",
+      "skill_destination": ".hermes/skills/tgw",
+      "interactive_review": "available-in-training-boundaries",
+      "automated_provider": "unregistered"
+    },
+    {
+      "id": "tigwadev-claude-recovery",
+      "account": "tigwadev",
+      "skill_destination": ".claude/skills",
+      "interactive_review": "compatibility-install-only",
+      "automated_provider": "unregistered"
+    },
+    {
+      "id": "aider",
+      "account": null,
+      "skill_destination": null,
+      "interactive_review": "unavailable-not-installed",
+      "automated_provider": "unregistered"
+    }
+  ]
+}

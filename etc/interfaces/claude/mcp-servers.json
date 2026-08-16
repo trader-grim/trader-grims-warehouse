@@ -1,26 +1,21 @@
 {
   "mcpServers": {
     "tgw": {
-      "command": "sudo",
-      "args": [
-        "-u",
-        "tgw",
-        "/opt/TGW/.venvironments/tgw/bin/python",
-        "-m",
-        "tgw.mcp_server"
-      ],
-      "env": {}
+      "type": "sse",
+      "url": "http://100.107.99.66:8765/sse"
     },
-    "tgw-aider": {
-      "command": "sudo",
-      "args": [
-        "-u",
-        "tgw",
-        "/opt/TGW/.venvironments/tgw/bin/python",
-        "-m",
-        "tgw.aider_mcp_server"
-      ],
-      "env": {}
+    "tgw-context": {
+      "type": "stdio",
+      "command": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/python",
+      "args": ["-m", "tgw.context_mcp_server"],
+      "env": {
+        "PYTHONPATH": "/opt/TGW/tgw-lib/src/trader-grims-warehouse/src",
+        "TGW_CONTEXT_PLAN_COMMIT": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+        "TGW_CONTEXT_PLAN_REPOSITORY": "/opt/TGW/library/plans",
+        "TGW_CONTEXT_PLAN_ROOT": "/opt/TGW/library/approved/f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+        "TGW_CONTEXT_RUNTIME_ROOT": "/opt/TGW/tgw-lib/var/context",
+        "TGW_CONTEXT_SOURCE_ROOT": "/opt/TGW/tgw-lib/src/trader-grims-warehouse"
+      }
     }
   }
 }

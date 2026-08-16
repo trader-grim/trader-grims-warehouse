@@ -36,6 +36,12 @@ If `tgw-context` is unavailable, stop Plan-derived coding and report the missing
 context service.  Do not substitute `CLAUDE.md`, `docs/TGW-Plan-Vault`, a release,
 an actor worktree, or chat history as Plan authority.
 
+For source or candidate review, use the canonical shared `tgw-review` skill in
+`agent-services/skills/tgw-review`.  A visible skill is procedural context, not
+proof that the current harness is an admitted independent-review provider.  A
+governed review still requires the exact execution card, independent context,
+provider health, and validated receipt named by the approved Plan.
+
 - **Tigwa / Leotha (Hermes personas):** `docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md`
   is your real operating contract — roles, authority boundaries, the
   IN TRAINING scope, the branch-review exception, the emergency-override

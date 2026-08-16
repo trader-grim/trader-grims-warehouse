@@ -1,0 +1,4 @@
+interface:
+  display_name: "TGW Review"
+  short_description: "Review exact TGW candidates against bound Plan and evidence"
+  default_prompt: "Use $tgw-review to independently review this exact TGW candidate."
