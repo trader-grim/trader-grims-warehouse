@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from tgw.config import load_config
+from tgw.config import load_config, load_operational_config
 
 
 def _write_cfg(tmp_path: Path, data: dict) -> Path:
@@ -135,10 +135,19 @@ def test_approved_plan_content_must_be_exact_clean_commit(tmp_path):
     assert cfg["plan_update_master_path"] == (
         tmp_path / "repository" / "plan" / "TGW-Master-Plan.md"
     )
+    assert load_operational_config(config_path)["plan_approved_commit"] == approved
 
     (root / "unapproved").write_text("dirty\n")
     with pytest.raises(ValueError, match="not clean"):
         load_config(config_path)
+
+
+def test_operational_config_rejects_unbound_plan_authority(tmp_path):
+    """Only generic library loads may omit immutable Plan approval pins."""
+    path = _write_cfg(tmp_path, {})
+    assert load_config(path)["plan_approved_commit"] is None
+    with pytest.raises(ValueError, match="requires approved Plan commit and solution"):
+        load_operational_config(path)
 
 
 def test_approved_plan_requires_distinct_update_repository(tmp_path):

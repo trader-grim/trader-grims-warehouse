@@ -1,6 +1,6 @@
 # TGW Architecture Overview
 
-**Status:** living document. Created 2026-06-10 from the master plan, reference library,
+**Status:** living document. Created 2026-06-10 from the approved standalone Plan, reference library,
 source tree, live config, and systemd layout. Anything not verifiable from code or config is
 marked **ASSUMPTION**.
 
@@ -22,8 +22,9 @@ derived from or coordinated around those files.
 
 ## 2. Design principles (settled — do not relitigate)
 
-These are settled architecture decisions recorded in the master plan
-(`docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md § Settled architecture`):
+These are settled architecture decisions recorded in the approved standalone
+Plan materialization (§ Settled architecture). The synced vault is not an
+alternate Plan authority.
 
 | Principle | Meaning |
 |---|---|
@@ -95,7 +96,8 @@ Clients of the platform:
 | `velocity-stats.json` | `ItemCatalog/` | Per-category sold velocity aggregates (1,540 categories) | Derived |
 | Secrets | `/opt/TGW/secrets/*.json` | eBay credentials/token, tgw-http API key, lookup API keys | Canonical (operator-provisioned) |
 | Runtime state | `/opt/TGW/runtime/state/` (e.g. `ebay-sold-sync-state.json`) | Worker cursors/checkpoints | Canonical for the owning worker |
-| Plan vault | `docs/TGW-Plan-Vault/` (Syncthing-synced) | Master plan, suggestions, inbox, reference library | Canonical for planning (not runtime) |
+| Standalone Plan materialization | configured `standalone_plan_root` | Approved Plan Markdown and graph inputs | **YES — only when exact approved commit + solution are bound** |
+| Plan vault | `docs/TGW-Plan-Vault/` (Syncthing-synced) | Inbox, archive, research, and reference library | Non-authoritative supporting material |
 | Clipboard store | SQLite via `src/tgw/clip.py` (PP-CLIP-001) | Clipboard history for intake workflows | Peripheral |
 
 **Key consequence:** eBay itself holds state (offers, listings, sold orders) that TGW mirrors
@@ -246,4 +248,4 @@ change to config, secrets, workers, or paths.
 | Config keys & secrets | `docs/TGW-Plan-Vault/reference/TGW-Config-Reference.md` |
 | eBay error handling | `docs/TGW-Plan-Vault/reference/eBay-Error-Codes.md` |
 | Active bugs | `docs/TGW-Plan-Vault/reference/ISSUES.md` |
-| Plans / roadmap | `docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md` |
+| Plans / roadmap | Approved standalone Plan materialization (exact commit + solution required) |

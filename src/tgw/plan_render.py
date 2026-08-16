@@ -326,16 +326,24 @@ def plan_check(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     from tgw.todo import todo_list
 
-    plan_path = cfg.get('plan_master_path')
-    if not plan_path or not Path(plan_path).exists():
-        return {'ok': False, 'error': f'Master plan not found: {plan_path}', 'issues': [], 'counts': {}}
+    try:
+        plan_identity = approved_render_plan_identity(cfg)
+    except PlanRenderBindingError as exc:
+        return {
+            'ok': False, 'error': str(exc), 'code': exc.code,
+            'issues': [], 'counts': {},
+        }
+    plan_path = Path(plan_identity['master_plan_path'])
 
     pp_in_headings, done_in_headings, all_headings = _parse_plan_sections(Path(plan_path))
 
     try:
         items = todo_list(show_all=True)
     except Exception as exc:
-        return {'ok': False, 'error': f'todo tracker unavailable: {exc}', 'issues': [], 'counts': {}}
+        return {
+            'ok': False, 'error': f'todo tracker unavailable: {exc}',
+            'issues': [], 'counts': {}, 'plan_identity': plan_identity,
+        }
 
     open_items = [i for i in items if not i.get('done_at')]
     issues: List[Dict[str, Any]] = []
@@ -449,6 +457,7 @@ def plan_check(cfg: Dict[str, Any]) -> Dict[str, Any]:
     infos = sum(1 for i in issues if i['severity'] == 'info')
     return {
         'ok': True,
+        'plan_identity': plan_identity,
         'issues': issues,
         'counts': {'warnings': warnings, 'infos': infos},
         'summary': (
@@ -473,6 +482,12 @@ def format_plan_check(result: Dict[str, Any]) -> str:
     issues = result.get('issues', [])
     counts = result.get('counts', {})
     lines = [f"tgw plan check — {result['summary']}"]
+    identity = result.get('plan_identity') or {}
+    if identity:
+        lines.append(
+            f"Bound Plan: {identity.get('plan_commit', 'unknown')} "
+            f"{identity.get('solution_hash', 'unknown')}"
+        )
 
     if not issues:
         return '\n'.join(lines)
@@ -650,10 +665,10 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
 
     Pure, read-only, deterministic retrieval — never writes anything, never
     produces a model-written summary, and refuses missing or ambiguous PP
-    matches. Paths are derived from ``cfg['plan_master_path']`` and its
-    standalone Plan siblings — no mutable Plan Vault fallback exists, and
-    this is the single implementation shared by the MCP tool (and any future
-    CLI surface, per Tigwa's item 7 — not built here).
+    matches. Paths are derived only from the approved standalone Plan binding
+    and its canonical siblings — no mutable Plan Vault/config-path fallback
+    exists, and this is the single implementation shared by the MCP tool (and
+    any future CLI surface, per Tigwa's item 7 — not built here).
 
     A linked ``plan/pp/<PP>.md`` detail document, if present, is reported
     metadata-only (path/status/sha256/bytes) — its content is never inlined,
@@ -672,7 +687,12 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
             'code': 'invalid_pp_identifier',
         }
 
-    plan_master_path = Path(cfg['plan_master_path'])
+    try:
+        plan_identity = approved_render_plan_identity(cfg)
+    except PlanRenderBindingError as exc:
+        return {'ok': False, 'error': str(exc), 'code': exc.code}
+
+    plan_master_path = Path(plan_identity['master_plan_path'])
     try:
         raw, source = _canonical_plan_source(plan_master_path)
     except OSError as exc:
@@ -680,6 +700,7 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
             'ok': False,
             'error': str(exc),
             'code': 'canonical_plan_unavailable',
+            'plan_identity': plan_identity,
         }
 
     text = raw.decode('utf-8')
@@ -689,6 +710,7 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
             'ok': False,
             'code': 'pp_not_found',
             'query': {'pp': query_pp},
+            'plan_identity': plan_identity,
             'canonical_source': source,
             'warning': 'Read the full canonical Master Plan or select another PP; no heading was guessed.',
         }
@@ -697,6 +719,7 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
             'ok': False,
             'code': 'ambiguous_pp',
             'query': {'pp': query_pp},
+            'plan_identity': plan_identity,
             'canonical_source': source,
             'matches': [{key: section[key] for key in ('heading', 'line_start', 'line_end')}
                         for section in sections],
@@ -709,6 +732,7 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
             'ok': False,
             'code': 'section_too_large',
             'query': {'pp': query_pp},
+            'plan_identity': plan_identity,
             'canonical_source': source,
             'section': {key: section[key] for key in section if key != 'content'},
             'warning': 'Exact section exceeds the packet limit; use the canonical source path and anchors.',
@@ -716,13 +740,8 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
 
     # Linked PP details are canonical Plan material too.  The master Plan's
     # own parent is the only fallback; a source-vault sibling is never valid.
-    configured_roots = cfg.get('plan_detail_roots')
-    if configured_roots is None:
-        configured_roots = (
-            cfg.get('plan_detail_root')
-            or (plan_master_path.parent / 'pp'),
-        )
-    detail_roots = tuple(Path(root) for root in configured_roots)
+    plan_root = Path(plan_identity['plan_root'])
+    detail_roots = (plan_root / 'plan' / 'pp', plan_root / 'pp')
     detail_candidates = tuple(root / f'{query_pp}.md' for root in detail_roots)
     existing_details = tuple(path for path in detail_candidates if path.is_file())
     detail_path = existing_details[0] if len(existing_details) == 1 else detail_candidates[0]
@@ -754,6 +773,7 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
     return {
         'ok': True,
         'generator_version': PLAN_BRIEF_VERSION,
+        'plan_identity': plan_identity,
         'query': {'pp': query_pp},
         'canonical_source': source,
         'section': section,

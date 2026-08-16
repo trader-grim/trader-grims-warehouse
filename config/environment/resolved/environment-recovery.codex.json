@@ -6,13 +6,12 @@
   "actor": "codex",
   "allowed_paths": [
     "config/environment",
-    "docs/TGW-Plan-Vault/plan",
     "docs/TGW-Plan-Vault/reports/environment-recovery",
     "src/tgw",
     "tests"
   ],
   "authority_files": ["AGENTS.md"],
-  "context_id": "sha256:1edb869acc5e3ebc0c054935d51af8fef17ff89c35a4ab7ed1238543a87a29cf",
+  "context_id": "sha256:b46ebf64e6f58651cfd85dfe113ef62490dcb1fbbdd873f3ca3151849f6d0cb0",
   "effect_class": "local-reversible",
   "excluded_authority_files": ["CLAUDE.md"],
   "historical_context_grants_authority": false,
@@ -29,7 +28,7 @@
     "plan_version": 1,
     "scope_hash": "sha256:d8b20e93faa5c9e6893fbe029c85b21d1e8f37c0b61253be8000b2e3c0dca82e"
   },
-  "registry_revision": "sha256:64e7ca2dff5d8fdae10d77f0300a038bfcb55e1b2022841c530a6089d3024db4",
+  "registry_revision": "sha256:6f8c9ddae2e9ae0dd01ecd9dc2a3f1f4b0e3fe4231a2e1c9178dacfba54831ac",
   "repository": {
     "base_commit": "132966909be053b1bbfeddbf7bffd5ce201d3e6f",
     "branch": "recovery/pp-workflow-marketplace",
@@ -39,7 +38,7 @@
     "repository_id": "application"
   },
   "schema": "tgw-resolved-context/v1",
-  "task_hash": "sha256:a6d175a93b1fed64d4ad26b292fb20d86a479edee6d7539650b32abdc62e1445",
+  "task_hash": "sha256:a469d41a896642f4feafc86bcab2961182993424eadc013df0d575251101367b",
   "task_id": "environment-recovery-20260811",
   "unknowns": [
     "canonical application branch migration target",

@@ -57,12 +57,12 @@ _WORKTREES_ROOT = Path('/opt/TGW/var/worktrees')
 
 def _plan_runtime_binding() -> tuple[Path, str]:
     """Load the same standalone Plan root/Git binding as the primary MCP server."""
-    from tgw.config import load_config
+    from tgw.config import load_operational_config
 
     config_path = Path(
         os.environ.get('TGW_CONFIG', '/opt/TGW/config/tgw-api-config.json')
     )
-    cfg = load_config(config_path)
+    cfg = load_operational_config(config_path)
     plan_root = Path(
         os.environ.get(
             'TGW_STANDALONE_PLAN_VAULT',
@@ -78,10 +78,10 @@ def _plan_runtime_binding() -> tuple[Path, str]:
 
 def _plan_approval_binding() -> tuple[str | None, str | None]:
     """Read the exact approved Plan identities; missing values remain a hold."""
-    from tgw.config import load_config
+    from tgw.config import load_operational_config
 
     config_path = Path(os.environ.get('TGW_CONFIG', '/opt/TGW/config/tgw-api-config.json'))
-    cfg = load_config(config_path)
+    cfg = load_operational_config(config_path)
     return cfg.get('plan_approved_commit'), cfg.get('plan_approved_solution_hash')
 
 # ---------------------------------------------------------------------------

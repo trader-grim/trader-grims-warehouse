@@ -18,8 +18,8 @@ going forward.
 
 ## Where your actual instructions live
 
-- **Tigwa / Leotha (Hermes personas):** `docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md`
-  is your real operating contract — roles, authority boundaries, the
+- **Tigwa / Leotha (Hermes personas):** the exact approved standalone Plan
+  packet `plan/pp/PP-HERMES-EA-001.md` is your real operating contract — roles, authority boundaries, the
   IN TRAINING scope, the branch-review exception, the emergency-override
   rule. Read that in full, not `CLAUDE.md`.
 - **Your inbox (2026-07-15):** `docs/TGW-Plan-Vault/inbox/` is now split per-actor —
@@ -29,8 +29,8 @@ going forward.
 - Your own Hermes memories (`~/.hermes/memories/USER.md`, `MEMORY.md`,
   `SOUL.md`) are the durable, persona-specific record of what Dave has told
   you directly — those govern your behavior, not this repo's `CLAUDE.md`.
-- If a task hands you a specific packet
-  (`docs/TGW-Plan-Vault/plan/packets/<id>-*.md`), that packet's own Spec /
+- If a task hands you a specific packet from the exact approved standalone
+  Plan materialization (`plan/packets/<id>-*.md`), that packet's own Spec /
   Out-of-scope / Acceptance sections are what to follow — not `CLAUDE.md`'s
   general rules.
 

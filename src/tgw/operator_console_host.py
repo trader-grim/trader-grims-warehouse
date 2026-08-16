@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -19,7 +18,6 @@ from tgw.plan_authority import AuthorityPrincipal, PostgresAuthorityStore, Princ
 
 DEFAULT_PLAN_ROOT = Path("/opt/TGW/library/plans")
 _IDENTITY = re.compile(r"^[A-Za-z0-9:._-]+$")
-_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _SOLUTION_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -49,23 +47,23 @@ def plan_root(config: Mapping[str, Any]) -> Path:
     return Path(config.get("standalone_plan_root") or DEFAULT_PLAN_ROOT).resolve()
 
 
+def _approved_plan_identity(config: Mapping[str, Any]) -> Mapping[str, str]:
+    """Resolve the sole clean Plan snapshot permitted to drive the console."""
+    from tgw.plan_graph import SourcePreconditionError, approved_plan_binding
+
+    try:
+        return approved_plan_binding(
+            plan_root(config),
+            approved_plan_commit=config.get("plan_approved_commit"),
+            approved_solution_hash=config.get("plan_approved_solution_hash"),
+            git_path=str(config.get("plan_git_path") or "git"),
+        )
+    except SourcePreconditionError as exc:
+        raise RuntimeError(f"approved standalone Plan binding unavailable: {exc.code}") from exc
+
+
 def current_plan_commit(config_provider: Callable[[], Mapping[str, Any]]) -> str:
-    config = config_provider()
-    root = plan_root(config)
-    approved = config.get("plan_approved_commit")
-    if not isinstance(approved, str) or not _COMMIT.fullmatch(approved):
-        # Plan HEAD is an update source, not effect authority.  A host must
-        # explicitly bind the console to a frozen approved Plan materialization.
-        raise RuntimeError("exact approved standalone Plan commit is required")
-    ref = approved
-    git_path = str(config.get("plan_git_path") or "git")
-    result = subprocess.run(
-        [git_path, "-c", f"safe.directory={root}", "-C", str(root), "rev-parse", "--verify", f"{ref}^{{commit}}"],
-        check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    if result.returncode:
-        raise RuntimeError(f"standalone Plan commit unavailable: {result.stderr.strip()}")
-    return result.stdout.strip()
+    return _approved_plan_identity(config_provider())["plan_commit"]
 
 
 def load_solution(config_provider: Callable[[], Mapping[str, Any]], solution_hash: str) -> Mapping[str, Any]:
@@ -78,7 +76,14 @@ def load_solution(config_provider: Callable[[], Mapping[str, Any]], solution_has
         raise ValueError("exact approved Plan solution is required")
     if solution_hash != approved:
         raise ValueError("requested solution is not the approved Plan solution")
-    directory = plan_root(config) / "plan" / "execution" / "solutions"
+    binding = _approved_plan_identity(config)
+    raw_directory = config.get("plan_solution_root")
+    if not isinstance(raw_directory, (str, Path)) or not str(raw_directory):
+        raise ValueError("approved Plan solution store is required")
+    directory = Path(raw_directory).resolve()
+    source_root = Path(binding["plan_root"])
+    if directory == source_root or source_root in directory.parents:
+        raise ValueError("approved Plan solution store must be outside the Plan materialization")
     matches: list[Mapping[str, Any]] = []
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
         try:
@@ -89,7 +94,7 @@ def load_solution(config_provider: Callable[[], Mapping[str, Any]], solution_has
             matches.append(payload)
     if len(matches) != 1:
         raise ValueError(f"persisted Plan solution unavailable or ambiguous: {solution_hash}")
-    if matches[0].get("plan_commit") != current_plan_commit(config_provider):
+    if matches[0].get("plan_commit") != binding["plan_commit"]:
         raise ValueError("persisted Plan solution is not bound to the approved Plan commit")
     return matches[0]
 

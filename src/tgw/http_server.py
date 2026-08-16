@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 from . import draft_sync, inventory_record
 from .assets import ordered_photos as _ordered_photos
 from .bootstrap_host_integration import configured_bootstrap_deployment_provider
-from .config import DEFAULT_CONFIG, load_config
+from .config import DEFAULT_CONFIG
 from .ebay.category_aspect_migration import (
     apply_category_aspect_migration,
     detect_category_orphaned_aspects,
@@ -90,7 +90,7 @@ def _local_ts(raw: Any, fmt: str = "%Y-%m-%d %H:%M") -> str:
 # Worker pipeline tooltip text — sourced from TGW-Pipeline-Flow.md
 _WORKER_TOOLTIPS: Dict[str, str] = {
     "token_refresh": "OAuth token refresh via eBay API; fires when token expires within 30 min",
-    "pm_intake": "Reads plan-vault inbox notes → Ollama classifies → patches Master Plan",
+    "pm_intake": "Reads Plan-vault inbox notes → classifies → patches the separate Plan update repository",
     "catalog_rebuild": "Rebuilds JSON catalog + SQLite + location tree from all ItemData",
     "thumbnail_gen": "Generates SKU thumbnail from primary photo (Pillow)",
     "bundle_intake": "Polls incoming/newitems/, creates item stubs, enqueues ai_identify",
@@ -206,7 +206,8 @@ PIPELINE_ACTIONS = {
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _cfg, _api_key, _web_password
-    _cfg = load_config(DEFAULT_CONFIG)
+    from tgw.config import load_operational_config
+    _cfg = load_operational_config(DEFAULT_CONFIG)
     state_machine.init(_cfg["postgres_dsn"])
 
     key_path: Path = _cfg["secrets_root"] / "tgw-api-key.json"

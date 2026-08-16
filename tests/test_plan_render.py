@@ -299,15 +299,44 @@ PLAN_TEXT = """\
 """
 
 
-def _check_cfg(tmp_path):
-    vault = tmp_path / 'vault'
-    (vault / 'plan').mkdir(parents=True)
-    plan = vault / 'plan' / 'TGW-Master-Plan.md'
-    plan.write_text(PLAN_TEXT, encoding='utf-8')
+def _approved_plan_cfg(tmp_path, *, name='standalone-plan'):
+    root = tmp_path / name
+    root.mkdir()
+    subprocess.run(['git', 'init', '-q', str(root)], check=True)
+    subprocess.run([
+        'git', '-C', str(root), '-c', 'user.name=Test',
+        '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty',
+        '-qm', 'initial approved Plan',
+    ], check=True)
+    commit = subprocess.check_output(
+        ['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True,
+    ).strip()
     return {
-        'plan_vault_path': vault,
-        'plan_master_path': plan,
+        'standalone_plan_root': root,
+        'plan_approved_commit': commit,
+        'plan_approved_solution_hash': 'sha256:' + 'a' * 64,
     }
+
+
+def _commit_approved_plan(cfg, message='update approved Plan'):
+    root = cfg['standalone_plan_root']
+    subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+    subprocess.run([
+        'git', '-C', str(root), '-c', 'user.name=Test',
+        '-c', 'user.email=test@example.invalid', 'commit', '-qm', message,
+    ], check=True)
+    cfg['plan_approved_commit'] = subprocess.check_output(
+        ['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True,
+    ).strip()
+
+
+def _check_cfg(tmp_path):
+    cfg = _approved_plan_cfg(tmp_path)
+    plan = cfg['standalone_plan_root'] / 'plan' / 'TGW-Master-Plan.md'
+    plan.parent.mkdir(parents=True)
+    plan.write_text(PLAN_TEXT, encoding='utf-8')
+    _commit_approved_plan(cfg)
+    return cfg
 
 
 def _open_item(id, body='task', pp_ref=None, plan_anchor=None):
@@ -430,7 +459,7 @@ def test_plan_check_tracker_failure(tmp_path):
 
 
 def test_plan_check_missing_plan(tmp_path):
-    cfg = {'plan_master_path': tmp_path / 'nonexistent.md', 'plan_vault_path': tmp_path}
+    cfg = _approved_plan_cfg(tmp_path)
     result = plan_check(cfg)
     assert result['ok'] is False
 
@@ -607,17 +636,14 @@ def test_format_plan_status_truncates_long_body():
 # ---------------------------------------------------------------------------
 
 def _brief_cfg(tmp_path):
-    vault = tmp_path / 'plan-vault'
-    return {
-        'plan_vault_path': vault,
-        'plan_master_path': vault / 'plan' / 'TGW-Master-Plan.md',
-    }
+    return _approved_plan_cfg(tmp_path)
 
 
 def _write_plan(cfg, text):
-    path = cfg['plan_master_path']
+    path = cfg['standalone_plan_root'] / 'plan' / 'TGW-Master-Plan.md'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding='utf-8')
+    _commit_approved_plan(cfg)
     return path
 
 
@@ -630,7 +656,7 @@ def test_plan_brief_invalid_pp_identifier(tmp_path):
 
 def test_plan_brief_canonical_plan_unavailable(tmp_path):
     cfg = _brief_cfg(tmp_path)
-    # No plan file written — plan_master_path does not exist.
+    # No canonical Master Plan file is committed.
     out = plan_brief(cfg, 'PP-ALPHA-001')
     assert out['ok'] is False
     assert out['code'] == 'canonical_plan_unavailable'
@@ -642,7 +668,9 @@ def test_plan_brief_pp_not_found(tmp_path):
     out = plan_brief(cfg, 'PP-ALPHA-001')
     assert out['ok'] is False
     assert out['code'] == 'pp_not_found'
-    assert out['canonical_source']['path'] == str(cfg['plan_master_path'])
+    assert out['canonical_source']['path'] == str(
+        cfg['standalone_plan_root'] / 'plan' / 'TGW-Master-Plan.md'
+    )
 
 
 def test_plan_brief_ambiguous_pp(tmp_path):
@@ -734,10 +762,11 @@ def test_plan_brief_linked_detail_is_metadata_only_never_inlined(tmp_path):
     # content is never inlined even when well under the packet cap.
     cfg = _brief_cfg(tmp_path)
     _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
-    detail_path = cfg['plan_vault_path'] / 'plan' / 'pp' / 'PP-ALPHA-001.md'
+    detail_path = cfg['standalone_plan_root'] / 'plan' / 'pp' / 'PP-ALPHA-001.md'
     detail_path.parent.mkdir(parents=True)
     detail_bytes = b'# PP-ALPHA-001\nSmall detail doc, well under the cap.\n'
     detail_path.write_bytes(detail_bytes)
+    _commit_approved_plan(cfg)
 
     out = plan_brief(cfg, 'PP-ALPHA-001')
 
@@ -750,16 +779,16 @@ def test_plan_brief_linked_detail_is_metadata_only_never_inlined(tmp_path):
     assert 'content' not in detail
 
 
-def test_plan_brief_uses_explicit_standalone_detail_root(tmp_path):
+def test_plan_brief_ignores_configured_detail_root(tmp_path):
     cfg = _brief_cfg(tmp_path)
-    mutable_detail = cfg['plan_vault_path'] / 'plan' / 'pp' / 'PP-ALPHA-001.md'
+    mutable_detail = tmp_path / 'mutable-vault' / 'plan' / 'pp' / 'PP-ALPHA-001.md'
     mutable_detail.parent.mkdir(parents=True)
     mutable_detail.write_text('stale mutable detail', encoding='utf-8')
-    standalone_detail_root = tmp_path / 'standalone' / 'plan' / 'pp'
+    standalone_detail_root = cfg['standalone_plan_root'] / 'plan' / 'pp'
     standalone_detail_root.mkdir(parents=True)
     canonical_detail = standalone_detail_root / 'PP-ALPHA-001.md'
     canonical_detail.write_text('canonical detail', encoding='utf-8')
-    cfg['plan_detail_root'] = standalone_detail_root
+    cfg['plan_detail_root'] = mutable_detail.parent
     _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
 
     out = plan_brief(cfg, 'PP-ALPHA-001')
@@ -773,12 +802,10 @@ def test_plan_brief_uses_explicit_standalone_detail_root(tmp_path):
 
 def test_plan_brief_uses_secondary_canonical_detail_root(tmp_path):
     cfg = _brief_cfg(tmp_path)
-    first = tmp_path / 'standalone' / 'plan' / 'pp'
-    second = tmp_path / 'standalone' / 'pp'
+    second = cfg['standalone_plan_root'] / 'pp'
     second.mkdir(parents=True)
     canonical_detail = second / 'PP-ALPHA-001.md'
     canonical_detail.write_text('root detail', encoding='utf-8')
-    cfg['plan_detail_roots'] = (first, second)
     _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
 
     out = plan_brief(cfg, 'PP-ALPHA-001')
@@ -789,13 +816,12 @@ def test_plan_brief_uses_secondary_canonical_detail_root(tmp_path):
 
 def test_plan_brief_refuses_duplicate_canonical_details(tmp_path):
     cfg = _brief_cfg(tmp_path)
-    first = tmp_path / 'standalone' / 'plan' / 'pp'
-    second = tmp_path / 'standalone' / 'pp'
+    first = cfg['standalone_plan_root'] / 'plan' / 'pp'
+    second = cfg['standalone_plan_root'] / 'pp'
     first.mkdir(parents=True)
     second.mkdir(parents=True)
     for root in (first, second):
         (root / 'PP-ALPHA-001.md').write_text(str(root), encoding='utf-8')
-    cfg['plan_detail_roots'] = (first, second)
     _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
 
     out = plan_brief(cfg, 'PP-ALPHA-001')
@@ -817,9 +843,11 @@ def test_plan_brief_never_writes_anything(tmp_path):
     plan_brief(cfg, 'PP-MISSING-999')  # not_found path
     plan_brief(cfg, 'not-a-pp')  # invalid path
 
-    # No new files anywhere under the plan vault (read-only guarantee).
-    vault = cfg['plan_vault_path']
-    all_files = sorted(p for p in vault.rglob('*') if p.is_file())
+    # No new files anywhere under the approved Plan (read-only guarantee).
+    vault = cfg['standalone_plan_root']
+    all_files = sorted(
+        p for p in vault.rglob('*') if p.is_file() and '.git' not in p.relative_to(vault).parts
+    )
     assert all_files == [plan_path]
     assert plan_path.read_bytes() == before
     assert plan_path.stat().st_mtime == before_mtime

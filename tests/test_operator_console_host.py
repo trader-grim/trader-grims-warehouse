@@ -44,17 +44,20 @@ def _plan(tmp_path: Path) -> tuple[Path, str]:
 def test_standalone_plan_default_and_exact_commit(tmp_path: Path):
     assert plan_root({}) == DEFAULT_PLAN_ROOT
     root, commit = _plan(tmp_path)
-    with pytest.raises(RuntimeError, match="exact approved"):
+    with pytest.raises(RuntimeError, match="approved_plan_commit_required"):
         current_plan_commit(lambda: {"standalone_plan_root": root})
     assert current_plan_commit(lambda: {
         "standalone_plan_root": root, "plan_approved_commit": commit,
+        "plan_approved_solution_hash": "sha256:" + "a" * 64,
     }) == commit
 
     (root / "README.md").write_text("later Plan state\n")
     subprocess.run(["git", "-C", str(root), "commit", "-qam", "later"], check=True)
-    assert current_plan_commit(lambda: {
-        "standalone_plan_root": root, "plan_approved_commit": commit,
-    }) == commit
+    with pytest.raises(RuntimeError, match="approved_plan_mismatch"):
+        current_plan_commit(lambda: {
+            "standalone_plan_root": root, "plan_approved_commit": commit,
+            "plan_approved_solution_hash": "sha256:" + "a" * 64,
+        })
 
 
 def test_current_plan_commit_uses_configured_git_executable(tmp_path: Path):
@@ -65,6 +68,7 @@ def test_current_plan_commit_uses_configured_git_executable(tmp_path: Path):
     assert current_plan_commit(lambda: {
         "standalone_plan_root": root,
         "plan_approved_commit": commit,
+        "plan_approved_solution_hash": "sha256:" + "a" * 64,
         "plan_git_path": wrapper,
     }) == commit
 
@@ -72,20 +76,23 @@ def test_current_plan_commit_uses_configured_git_executable(tmp_path: Path):
 def test_solution_loader_fails_closed_and_checks_identity(tmp_path: Path):
     root, commit = _plan(tmp_path)
     identity = "sha256:" + "a" * 64
+    directory = tmp_path / "approved-solutions"
+
+    config = {
+        "standalone_plan_root": root,
+        "plan_approved_commit": commit,
+        "plan_approved_solution_hash": identity,
+        "plan_solution_root": directory,
+    }
 
     def provider():
-        return {
-            "standalone_plan_root": root,
-            "plan_approved_commit": commit,
-            "plan_approved_solution_hash": identity,
-        }
+        return config
     with pytest.raises(ValueError, match="unavailable"):
         load_solution(provider, identity)
     with pytest.raises(ValueError, match="invalid"):
         load_solution(provider, "../escape")
     with pytest.raises(ValueError, match="not the approved"):
         load_solution(provider, "sha256:" + "b" * 64)
-    directory = root / "plan" / "execution" / "solutions"
     directory.mkdir(parents=True)
     (directory / "governed-platform-solution.json").write_text(json.dumps({
         "solution_hash": identity, "plan_commit": commit,
@@ -102,7 +109,7 @@ def test_solution_loader_fails_closed_and_checks_identity(tmp_path: Path):
 def test_solution_loader_rejects_an_exact_hash_bound_to_an_unapproved_plan_commit(tmp_path: Path):
     root, approved = _plan(tmp_path)
     identity = "sha256:" + "c" * 64
-    directory = root / "plan" / "execution" / "solutions"
+    directory = tmp_path / "approved-solutions"
     directory.mkdir(parents=True)
     (directory / "solution.json").write_text(json.dumps({
         "solution_hash": identity, "plan_commit": "d" * 40,
@@ -112,6 +119,7 @@ def test_solution_loader_rejects_an_exact_hash_bound_to_an_unapproved_plan_commi
             "standalone_plan_root": root,
             "plan_approved_commit": approved,
             "plan_approved_solution_hash": identity,
+            "plan_solution_root": directory,
         }, identity)
 
 

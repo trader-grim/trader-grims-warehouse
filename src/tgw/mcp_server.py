@@ -52,8 +52,8 @@ _cfg: Dict[str, Any] = {}
 def _get_cfg() -> Dict[str, Any]:
     global _cfg
     if not _cfg:
-        from tgw.config import load_config
-        _cfg = load_config(_CONFIG_PATH)
+        from tgw.config import load_operational_config
+        _cfg = load_operational_config(_CONFIG_PATH)
     return _cfg
 
 
@@ -613,9 +613,8 @@ if not _READONLY:
 # Deterministic parser/retrieval logic lives in tgw.plan_render.plan_brief()
 # (PP-KNOWLEDGE-001 / todo #1439, #1520 follow-up refactor, Tigwa's v1
 # reviewed submission) — this tool is a thin delegate, not a second parser.
-# Paths come from cfg['plan_master_path'] / cfg['plan_detail_root']; no Plan
-# root is hard-coded in this module.  Mutable inbox/docs state remains under
-# cfg['plan_vault_path'] and is deliberately not a canonical read source.
+# The delegated binding derives paths only from the approved standalone Plan;
+# mutable inbox/docs state is deliberately not a canonical read source.
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -634,27 +633,9 @@ def tgw_get_plan_brief(pp: Annotated[str, alias_field('pp', 'PP')]) -> str:
 
     Returns JSON packet with canonical-source provenance and retrieval warnings.
     """
-    from tgw.plan_graph import approved_plan_binding
     from tgw.plan_render import plan_brief
     cfg = _get_cfg()
-    binding = approved_plan_binding(
-        Path(cfg.get('standalone_plan_root') or '/opt/TGW/library/plans'),
-        approved_plan_commit=cfg.get('plan_approved_commit'),
-        approved_solution_hash=cfg.get('plan_approved_solution_hash'),
-        git_path=str(cfg.get('plan_git_path') or 'git'),
-    )
-    # The brief must consume the very materialization that was validated
-    # above.  Configured master/detail paths can describe a mutable legacy
-    # vault, so do not carry them across this authority boundary.
-    root = Path(binding['plan_root'])
-    brief_cfg = dict(cfg)
-    brief_cfg.update({
-        'standalone_plan_root': root,
-        'plan_master_path': root / 'plan' / 'TGW-Master-Plan.md',
-        'plan_detail_root': root / 'plan' / 'pp',
-        'plan_detail_roots': (root / 'plan' / 'pp', root / 'pp'),
-    })
-    return json.dumps(plan_brief(brief_cfg, pp), ensure_ascii=False)
+    return json.dumps(plan_brief(cfg, pp), ensure_ascii=False)
 
 
 @mcp.tool()

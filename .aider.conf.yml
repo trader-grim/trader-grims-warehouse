@@ -1,5 +1,5 @@
 # Aider configuration for Trader Grim's Warehouse (TGW)
-# See docs/TGW-Plan-Vault/plan/next-process.md §2 for context on the Aider tier.
+# Aider follows the exact approved standalone Plan packet supplied for a task.
 #
 # Usage (per-task):
 #   git checkout -b task/<id>-<slug>
@@ -11,7 +11,7 @@
 #   Fast, cheap, good instruction-following in limited testing. Reserved for
 #   the "busywork" tier: XS/S mechanical coding tasks, monitoring/schlepping/
 #   merging — not architecture or eBay-invariant work (that stays Claude Code,
-#   per next-process.md's division of labor).
+#   per the supplied packet's division of labor).
 #   Requires: DEEPSEEK_API_KEY (loaded from /home/db/.env via env-file below
 #   for interactive use, or from secrets_root via aider_mcp_server.py's
 #   _load_api_keys() for the MCP-invoked path).

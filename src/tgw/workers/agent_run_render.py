@@ -22,7 +22,7 @@ from typing import Any, Dict
 
 import tgw.logging as tgw_logging
 from tgw.agent_trace_render import render_agent_runs_doc
-from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.config import DEFAULT_CONFIG
 from tgw.queue.worker_base import QueueWorker
 
 log = logging.getLogger(__name__)
@@ -53,7 +53,8 @@ def main() -> int:
     parser.add_argument('--config', default=str(DEFAULT_CONFIG))
     args = parser.parse_args()
 
-    cfg = load_config(Path(args.config))
+    from tgw.config import load_operational_config
+    cfg = load_operational_config(Path(args.config))
     worker = AgentRunRenderWorker(queue_name=QUEUE_NAME, config=cfg)
     worker.run()
     return 0

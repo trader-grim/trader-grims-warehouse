@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "plan/TGW-Master-Plan.md",
+                "file": "reference/PLAN-AUTHORITY-CUTOVER.md",
                 "mode": "preview",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "TGW-Master-Plan"
+              "title": "Plan authority cutover"
             }
           }
         ]
@@ -112,7 +112,7 @@
         "state": {
           "type": "backlink",
           "state": {
-            "file": "plan/TGW-Master-Plan-mindmap.md",
+            "file": "reference/PLAN-AUTHORITY-CUTOVER.md",
             "collapseAll": false,
             "extraContext": false,
             "sortOrder": "alphabetical",

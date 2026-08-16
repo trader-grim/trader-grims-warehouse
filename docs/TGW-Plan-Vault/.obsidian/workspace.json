@@ -94,7 +94,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "plan/TGW-Master-Plan.md",
+                "file": "reference/PLAN-AUTHORITY-CUTOVER.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +104,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for TGW-Master-Plan"
+              "title": "Backlinks for Plan authority cutover"
             }
           },
           {
@@ -113,12 +113,12 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "plan/TGW-Master-Plan.md",
+                "file": "reference/PLAN-AUTHORITY-CUTOVER.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Outgoing links from TGW-Master-Plan"
+              "title": "Outgoing links from Plan authority cutover"
             }
           },
           {
@@ -156,13 +156,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "plan/TGW-Master-Plan.md",
+                "file": "reference/PLAN-AUTHORITY-CUTOVER.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of TGW-Master-Plan"
+              "title": "Outline of Plan authority cutover"
             }
           }
         ]
@@ -185,7 +185,7 @@
   },
   "active": "babc512f62193402",
   "lastOpenFiles": [
-    "plan/TGW-Master-Plan.md",
+    "reference/PLAN-AUTHORITY-CUTOVER.md",
     "suggestions/SUGGESTIONS.md",
     "plan/PROPOSED-PLAN-2026-06-19.md",
     "plan/PLAN-backup-dr.md",

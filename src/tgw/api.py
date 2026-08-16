@@ -3687,14 +3687,19 @@ def cmd_classify_suggestions(
              new-work entries. plan_append and review_flag are listed in report only.
     """
     from tgw import suggestions as sug_mod
+    from tgw.plan_render import PlanRenderBindingError, approved_render_plan_identity
 
     suggestions_path = cfg['plan_vault_path'] / 'suggestions' / 'SUGGESTIONS.md'
-    master_plan_path: Path = cfg['plan_master_path']
+    try:
+        plan_identity = approved_render_plan_identity(cfg)
+    except PlanRenderBindingError as exc:
+        return {'ok': False, 'error': str(exc), 'code': exc.code}
+    master_plan_path = Path(plan_identity['master_plan_path'])
 
     entries = sug_mod.parse_pending(suggestions_path)
     if not entries:
         print('No unprocessed suggestions found.')
-        return {'ok': True, 'total': 0}
+        return {'ok': True, 'total': 0, 'plan_identity': plan_identity}
 
     if limit and limit > 0:
         entries = entries[:limit]
@@ -3707,10 +3712,14 @@ def cmd_classify_suggestions(
     classified = sug_mod.classify_batch(entries, plan_headings, cfg)
     if not classified:
         print('LLM returned no classifications.')
-        return {'ok': False, 'error': 'empty_response', 'total': len(entries)}
+        return {
+            'ok': False, 'error': 'empty_response', 'total': len(entries),
+            'plan_identity': plan_identity,
+        }
 
     result = sug_mod.apply_classifications(suggestions_path, entries, classified, write=apply)
     print(sug_mod.format_report(result, applied=apply))
+    result['plan_identity'] = plan_identity
     return result
 
 

@@ -376,6 +376,23 @@ def load_config(path: Path) -> Dict[str, Any]:
     }
 
 
+def load_operational_config(path: Path) -> Dict[str, Any]:
+    """Load configuration for a process that can consume Plan authority.
+
+    Generic library callers may load path configuration without a Plan checkout,
+    but a running CLI, host, MCP server, or Plan-facing worker must never do
+    so. Requiring both immutable approval pins here keeps that distinction
+    explicit and prevents an operational entrypoint from treating a mutable
+    path as a Plan source.
+    """
+    cfg = load_config(path)
+    if not cfg.get("plan_approved_commit") or not cfg.get("plan_approved_solution_hash"):
+        raise ValueError(
+            "operational configuration requires approved Plan commit and solution"
+        )
+    return cfg
+
+
 def load_coding_worker_config(path: Path) -> Dict[str, Any]:
     """Return the supported normalized config contract for coding workers.
 
