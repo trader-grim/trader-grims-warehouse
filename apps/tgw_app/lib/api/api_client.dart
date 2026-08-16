@@ -349,7 +349,7 @@ class ApiClient {
     await ensureInitialized();
     try {
       final response = await _dio.post('/api/plan-authority/requests', data: request);
-      if (response.statusCode == 200) {
+      if (response.statusCode == 201) {
         return ApiResponse(ok: true, data: Map<String, dynamic>.from(response.data));
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
@@ -362,6 +362,7 @@ class ApiClient {
     String requestId, {
     required String kind,
     required String reason,
+    List<String> reconciliationEvidence = const [],
   }) async {
     await ensureInitialized();
     if (!{'approve', 'hold', 'reconcile'}.contains(kind) || reason.trim().isEmpty) {
@@ -370,7 +371,12 @@ class ApiClient {
     try {
       final response = await _dio.post(
         '/api/plan-authority/requests/$requestId/decisions',
-        data: {'kind': kind, 'reason': reason},
+        data: {
+          'kind': kind,
+          'reason': reason,
+          if (reconciliationEvidence.isNotEmpty)
+            'reconciliation_evidence': reconciliationEvidence,
+        },
       );
       if (response.statusCode == 200) {
         return ApiResponse(ok: true, data: Map<String, dynamic>.from(response.data));

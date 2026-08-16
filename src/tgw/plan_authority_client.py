@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -78,14 +78,29 @@ class PlanAuthorityHttpClient:
     def create_request(self, request: Mapping[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/api/plan-authority/requests", request)
 
-    def decide(self, request_id: str, *, kind: str, reason: str) -> dict[str, Any]:
+    def decide(
+        self,
+        request_id: str,
+        *,
+        kind: str,
+        reason: str,
+        reconciliation_evidence: Sequence[str] = (),
+    ) -> dict[str, Any]:
         if kind not in {"approve", "hold", "reconcile"}:
             raise ValueError("authority decision kind is invalid")
         if not reason.strip():
             raise ValueError("authority decision reason is required")
+        if (
+            isinstance(reconciliation_evidence, (str, bytes))
+            or not all(isinstance(item, str) and item for item in reconciliation_evidence)
+        ):
+            raise ValueError("reconciliation evidence must be a sequence of non-empty identities")
+        payload: dict[str, Any] = {"kind": kind, "reason": reason}
+        if reconciliation_evidence:
+            payload["reconciliation_evidence"] = list(reconciliation_evidence)
         return self._request(
             "POST", f"/api/plan-authority/requests/{quote(request_id, safe='')}/decisions",
-            {"kind": kind, "reason": reason},
+            payload,
         )
 
 
@@ -95,6 +110,7 @@ def cmd_plan_authority(
     request_id: str | None = None,
     kind: str | None = None,
     reason: str | None = None,
+    reconciliation_evidence: Sequence[str] = (),
     limit: int = 100,
     endpoint: str | None = None,
     bearer_token: str | None = None,
@@ -119,7 +135,22 @@ def cmd_plan_authority(
         elif action == "decide":
             if not request_id or not kind or not reason:
                 return {"ok": False, "error": "decide requires --request-id, --kind and --reason"}
-            response = client.decide(request_id, kind=kind, reason=reason)
+            response = client.decide(
+                request_id, kind=kind, reason=reason,
+                reconciliation_evidence=reconciliation_evidence,
+            )
+        elif action == "notify":
+            if not request_id:
+                return {"ok": False, "error": "notify requires --request-id"}
+            # Delivery is deliberately a read-only projection: it first reads
+            # the canonical HTTP record and then invokes the ordinary TGW
+            # notifier.  It has neither a decision nor an execution surface.
+            from tgw.authority_notifications import notify_authority_status
+            from tgw.notify import notify
+
+            response = {"request": notify_authority_status(
+                client, request_id=request_id, deliver=notify,
+            )}
         else:
             return {"ok": False, "error": f"unknown PlanAuthority action: {action}"}
     except (PlanAuthorityClientError, ValueError) as exc:

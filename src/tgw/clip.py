@@ -22,7 +22,7 @@ import re
 import sqlite3
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from tgw.plan_authority_client import PlanAuthorityHttpClient
 
@@ -296,6 +296,7 @@ def cmd_clip(action: str, *, pattern: str = '', limit: int = 20,
              request_id: Optional[str] = None,
              decision: Optional[str] = None,
              reason: Optional[str] = None,
+             reconciliation_evidence: Sequence[str] = (),
              db_path: Optional[Path] = None) -> Dict[str, Any]:
     """CLI handler for `tgw clip {list,last-sku,search,wipe,get,deliver}`."""
     if action == 'last-sku':
@@ -379,7 +380,10 @@ def cmd_clip(action: str, *, pattern: str = '', limit: int = 20,
             else:
                 if not request_id or not decision or not reason:
                     return {'ok': False, 'error': 'authority-decide requires --request-id, --decision and --reason'}
-                result = client.decide(request_id, kind=decision, reason=reason)
+                result = client.decide(
+                    request_id, kind=decision, reason=reason,
+                    reconciliation_evidence=reconciliation_evidence,
+                )
         except Exception as exc:
             return {'ok': False, 'error': str(exc)}
         print(json.dumps(result, sort_keys=True))

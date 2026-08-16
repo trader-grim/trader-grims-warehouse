@@ -478,6 +478,18 @@ def create_authority_router(
 
     router = APIRouter(prefix="/api/plan-authority", tags=["plan-authority"])
 
+    def authenticated_operator_identity(value: Any) -> str:
+        """Bind mutation receipts to the identity returned by host auth.
+
+        Request JSON is untrusted.  In particular, it must never be able to
+        choose the principal recorded in a durable authority request or
+        decision.  The host's operator dependency is the only identity
+        authority for this router.
+        """
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(401, "authenticated operator identity is required")
+        return value.strip()
+
     @router.get("/requests", dependencies=[Depends(require_operator)])
     def list_requests(limit: int = 100):
         return {"schema": AUTHORITY_SCHEMA, "requests": store.list(limit)}
@@ -489,19 +501,23 @@ def create_authority_router(
             raise HTTPException(404, "request not found")
         return {"schema": AUTHORITY_SCHEMA, "request": row, "events": store.events(request_id)}
 
-    @router.post("/requests", status_code=201, dependencies=[Depends(require_operator)])
-    def request_effect(body: dict[str, Any]):
+    @router.post("/requests", status_code=201)
+    def request_effect(body: dict[str, Any], operator_identity: Any = Depends(require_operator)):
         try:
-            solution = load_solution(str(body["solution_hash"]))
-            request = AuthorityRequest.create(body, solution=solution, current_plan_commit=current_plan_commit())
+            payload = dict(body)
+            payload["requested_by"] = authenticated_operator_identity(operator_identity)
+            solution = load_solution(str(payload["solution_hash"]))
+            request = AuthorityRequest.create(payload, solution=solution, current_plan_commit=current_plan_commit())
             return {"schema": AUTHORITY_SCHEMA, "request": store.create_request(request)}
         except (KeyError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    @router.post("/requests/{request_id}/decisions", dependencies=[Depends(require_operator)])
-    def decide(request_id: str, body: dict[str, Any]):
+    @router.post("/requests/{request_id}/decisions")
+    def decide(request_id: str, body: dict[str, Any], operator_identity: Any = Depends(require_operator)):
         try:
-            return {"schema": AUTHORITY_SCHEMA, "request": store.decide(AuthorityDecision.create(request_id, body))}
+            payload = dict(body)
+            payload["decided_by"] = authenticated_operator_identity(operator_identity)
+            return {"schema": AUTHORITY_SCHEMA, "request": store.decide(AuthorityDecision.create(request_id, payload))}
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 

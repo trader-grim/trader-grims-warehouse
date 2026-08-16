@@ -40,6 +40,20 @@ def test_operator_decision_is_explicit_and_request_id_is_path_escaped():
     assert json.loads(outbound.data) == {"kind": "hold", "reason": "needs reconciliation"}
 
 
+def test_operator_client_can_submit_evidence_for_active_execution_reconciliation():
+    client = PlanAuthorityHttpClient("https://authority.example", "operator-token")
+    with patch("tgw.plan_authority_client.urlopen", return_value=_Response({"decision_id": "d"})) as request:
+        assert client.decide(
+            "request:active", kind="reconcile", reason="executor stopped",
+            reconciliation_evidence=["worker:exit-137", "provider:outcome-unknown"],
+        ) == {"decision_id": "d"}
+    outbound = request.call_args.args[0]
+    assert json.loads(outbound.data) == {
+        "kind": "reconcile", "reason": "executor stopped",
+        "reconciliation_evidence": ["worker:exit-137", "provider:outcome-unknown"],
+    }
+
+
 @pytest.mark.parametrize("endpoint", ["", "ftp://authority.example", "authority.example"])
 def test_operator_client_rejects_non_http_endpoint(endpoint):
     with pytest.raises(ValueError, match="HTTP"):
@@ -83,3 +97,24 @@ def test_notification_adapter_can_only_project_shared_authority_status():
     assert record["request_id"] == "request:notification"
     assert delivered[0][0] == "PlanAuthority status"
     assert "decide or reconcile" in delivered[0][1]
+
+
+def test_recovery_notification_reads_the_shared_record_and_has_no_mutation_path(monkeypatch):
+    delivered = []
+
+    class Client:
+        @classmethod
+        def from_environment(cls):
+            return cls()
+
+        def get_request(self, request_id):
+            return {"request": {"request_id": request_id, "status": "pending", "effect": {"kind": "authority-canary"}}}
+
+    monkeypatch.setattr("tgw.plan_authority_client.PlanAuthorityHttpClient", Client)
+    monkeypatch.setattr("tgw.notify.notify", lambda title, message, level: delivered.append((title, message, level)))
+    assert cmd_plan_authority("notify", request_id="request:notification") == {
+        "ok": True,
+        "authority": {"request": {"request_id": "request:notification", "status": "pending", "effect": {"kind": "authority-canary"}}},
+    }
+    assert delivered and delivered[0][0] == "PlanAuthority status"
+    assert not hasattr(Client(), "decide")

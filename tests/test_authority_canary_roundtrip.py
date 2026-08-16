@@ -135,7 +135,7 @@ def test_request_decision_consume_execution_receipt_and_hold_reconcile_paths():
     app = FastAPI()
     app.include_router(create_authority_router(
         store, current_plan_commit=lambda: COMMIT, load_solution=lambda _: solution,
-        require_operator=lambda: None, require_executor=lambda: None,
+        require_operator=lambda: "operator:canary-test", require_executor=lambda: "executor:canary-test",
         execute_effect=controller.execute,
     ))
     client = TestClient(app)
@@ -166,7 +166,7 @@ def test_http_reconcile_settles_an_abandoned_active_execution_as_ambiguous():
     app = FastAPI()
     app.include_router(create_authority_router(
         store, current_plan_commit=lambda: COMMIT, load_solution=lambda _: solution,
-        require_operator=lambda: None, require_executor=lambda: None,
+        require_operator=lambda: "operator:canary-test", require_executor=lambda: "executor:canary-test",
     ))
     client = TestClient(app)
     body = _body(solution, "w10-canary-abandoned")

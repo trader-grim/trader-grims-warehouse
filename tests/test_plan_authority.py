@@ -126,6 +126,7 @@ def test_http_api_is_one_projection_over_injected_canonical_store():
             return self.event_rows
 
         def decide(self, decision):
+            self.decision = decision
             self.event_rows.append({"event_type": "decided", "kind": decision.kind.value})
             return {"request_id": decision.request_id, "decision_kind": decision.kind.value}
 
@@ -140,22 +141,24 @@ def test_http_api_is_one_projection_over_injected_canonical_store():
             store,
             current_plan_commit=lambda: COMMIT,
             load_solution=lambda identity: solution if identity == solution["solution_hash"] else {},
-            require_operator=lambda: "operator",
+            require_operator=lambda: "operator:authenticated",
             require_executor=lambda: "executor",
         )
     )
     client = TestClient(app)
-    body = {**_data(), "solution_hash": solution["solution_hash"]}
+    body = {**_data(requested_by="caller:spoofed"), "solution_hash": solution["solution_hash"]}
 
     created = client.post("/api/plan-authority/requests", json=body)
     assert created.status_code == 201
     request_id = created.json()["request"]["request_id"]
+    assert store.request.requested_by == "operator:authenticated"
     assert client.get("/api/plan-authority/requests").json()["requests"] == [{"request_id": request_id}]
     decision = client.post(
         f"/api/plan-authority/requests/{request_id}/decisions",
-        json={"kind": "hold", "decided_by": "Dave", "reason": "needs reconciliation"},
+        json={"kind": "hold", "decided_by": "caller:spoofed", "reason": "needs reconciliation"},
     )
     assert decision.json()["request"]["decision_kind"] == "hold"
+    assert store.decision.decided_by == "operator:authenticated"
     detail = client.get(f"/api/plan-authority/requests/{request_id}").json()
     assert [event["event_type"] for event in detail["events"]] == ["requested", "decided"]
 
