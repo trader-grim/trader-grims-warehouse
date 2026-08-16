@@ -17,7 +17,7 @@ def test_live_schema_terminal_functions_reject_expired_leases():
             "$$;", 1
         )[0]
         assert "lease_expires_at IS NOT NULL" in body
-        assert "lease_expires_at > NOW()" in body
+        assert "lease_expires_at > clock_timestamp()" in body
 
 
 def _database(*, row=None, rowcount=0):

@@ -173,6 +173,35 @@ def _assert_upgraded(binary: Path, socket_dir: Path, port: int, dbname: str) -> 
         ),
         label="expired succeed_job lease",
     )
+    for job_id, token, function, arguments in (
+        (
+            "00000000-0000-0000-0000-000000000103",
+            "00000000-0000-0000-0000-000000000203",
+            "fail_job",
+            "'proof-worker', '00000000-0000-0000-0000-000000000203', 'proof', 'delayed'",
+        ),
+        (
+            "00000000-0000-0000-0000-000000000104",
+            "00000000-0000-0000-0000-000000000204",
+            "succeed_job",
+            "'proof-worker', '00000000-0000-0000-0000-000000000204', '{\"proof\":true}'::jsonb",
+        ),
+    ):
+        # NOW() remains the value at BEGIN.  The delay starts before the
+        # lease's 100ms expiry, so this assertion fails with the old NOW()
+        # predicate but passes only if the terminal statement checks current
+        # wall-clock time after waiting.
+        _expect_database_denial(
+            _db_command(
+                binary, socket_dir, port, dbname, "-c",
+                "BEGIN; "
+                f"UPDATE queue_jobs SET lease_expires_at = NOW() + interval '100 milliseconds' "
+                f"WHERE job_id = '{job_id}'; "
+                "SELECT pg_sleep(0.2); "
+                f"SELECT {function}('{job_id}', {arguments}); COMMIT;",
+            ),
+            label=f"terminal lease that expired after transaction start ({function}, {token})",
+        )
     failed = _run(_db_command(
         binary, socket_dir, port, dbname, "-A", "-t", "-c",
         "SELECT (fail_job('00000000-0000-0000-0000-000000000103', 'proof-worker', "
