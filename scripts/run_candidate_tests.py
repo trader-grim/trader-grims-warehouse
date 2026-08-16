@@ -50,6 +50,17 @@ def main() -> int:
             # while all transient logging remains under its temporary sandbox.
             environment = dict(os.environ)
             environment.setdefault("TGW_LOG_ROOT", str(candidate_root / ".candidate-test-logs"))
+            # An editable package in the parent process must never shadow the
+            # candidate being receipted.  Keep any explicitly supplied support
+            # paths after the detached candidate's own source tree so imports
+            # resolve to the bytes identified by ``source_tree`` above.
+            candidate_source = str(candidate_root / "src")
+            inherited_pythonpath = environment.get("PYTHONPATH", "")
+            environment["PYTHONPATH"] = (
+                candidate_source
+                if not inherited_pythonpath
+                else candidate_source + os.pathsep + inherited_pythonpath
+            )
             completed = subprocess.run(
                 command, cwd=candidate_root, capture_output=True, env=environment,
             )
