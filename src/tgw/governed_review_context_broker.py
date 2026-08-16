@@ -6,13 +6,25 @@ broker fetches every resource through its own fixed backend identity, verifies
 the backend service attestation, and then issues the provider-bound attestation
 which the controller independently reads back from the broker service.
 
-Deployment and secret issuance are deliberately external to this module.
+The daemon is loopback-only and consumes externally issued request/readback
+credentials; TLS termination and secret issuance remain deployment-owned.
 """
 
 from __future__ import annotations
 
+import argparse
+import base64
+import hashlib
+import hmac
+import json
+import os
+import stat
 import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Mapping, Protocol
+from urllib.parse import unquote, urlsplit
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -25,6 +37,10 @@ from tgw.execution_resources import (
 )
 
 BROKER_REQUEST_SCHEMA = "tgw-context-review-broker-request/v1"
+BROKER_BUNDLE_SCHEMA = "tgw-context-review-resource-bundle/v1"
+BROKER_CONFIG_SCHEMA = "tgw-context-review-broker-config/v1"
+MAX_REQUEST_BYTES = 1024 * 1024
+MAX_BUNDLE_BYTES = 64 * 1024 * 1024
 
 
 class ReviewContextBrokerError(ValueError):
@@ -46,6 +62,8 @@ class PrivilegedReviewContextBroker:
         service_id: str, client_id: str, attestation_key_id: str,
         signing_private_key: Ed25519PrivateKey | str | bytes,
         max_retained_runs: int = 1024,
+        retained_ttl_seconds: int = 900,
+        clock: Any = time.monotonic,
     ) -> None:
         if (
             not backend_execution_identity
@@ -56,6 +74,8 @@ class PrivilegedReviewContextBroker:
             or not attestation_key_id
             or not isinstance(max_retained_runs, int)
             or not 1 <= max_retained_runs <= 10_000
+            or not isinstance(retained_ttl_seconds, int)
+            or not 1 <= retained_ttl_seconds <= 86_400
         ):
             raise ReviewContextBrokerError("review context broker configuration is invalid")
         self._backend = backend
@@ -67,7 +87,9 @@ class PrivilegedReviewContextBroker:
         self._attestation_key_id = attestation_key_id
         self._signing_private_key = signing_private_key
         self._max_retained_runs = max_retained_runs
-        self._attestations: dict[str, dict[str, Any]] = {}
+        self._retained_ttl_seconds = retained_ttl_seconds
+        self._clock = clock
+        self._bundles: dict[str, tuple[dict[str, Any], float]] = {}
         self._lock = threading.Lock()
 
     @staticmethod
@@ -75,6 +97,7 @@ class PrivilegedReviewContextBroker:
         required = {
             "schema", "card_hash", "role", "execution_identity",
             "handoff_hash", "resource_receipt_hash", "resources",
+            "challenge", "skill_contract_hash", "client_id",
         }
         if (
             not isinstance(value, Mapping)
@@ -85,9 +108,13 @@ class PrivilegedReviewContextBroker:
                 isinstance(value.get(name), str) and value[name]
                 for name in (
                     "card_hash", "execution_identity", "handoff_hash",
-                    "resource_receipt_hash",
+                    "resource_receipt_hash", "client_id",
                 )
             )
+            or not isinstance(value.get("challenge"), str)
+            or len(value["challenge"]) != 64
+            or not isinstance(value.get("skill_contract_hash"), str)
+            or not value["skill_contract_hash"].startswith("sha256:")
             or not isinstance(value.get("resources"), Mapping)
             or set(value["resources"]) != CARD_RESOURCE_NAMES
         ):
@@ -109,6 +136,8 @@ class PrivilegedReviewContextBroker:
 
     def execute(self, value: Mapping[str, Any]) -> dict[str, Any]:
         request = self._request(value)
+        if request["client_id"] != self._client_id:
+            raise ReviewContextBrokerError("review context broker client identity differs")
         try:
             run = self._backend.begin_harness_run(
                 card_hash=request["card_hash"], role="independent-review",
@@ -118,11 +147,30 @@ class PrivilegedReviewContextBroker:
                 resources=request["resources"],
             )
             resolver: HarnessRunResolver = self._backend.for_harness_run(run)
+            fetched = {}
+            total_bytes = 0
             for name, binding in request["resources"].items():
-                if resolver.fetch(binding["ref"]).content_hash() != binding["hash"]:
+                resource = resolver.fetch(binding["ref"])
+                if resource.content_hash() != binding["hash"]:
                     raise ReviewContextBrokerError(
                         f"review context broker resource differs: {name}"
                     )
+                if not isinstance(resource.value, bytes):
+                    raise ReviewContextBrokerError(
+                        f"review context broker resource is not bytes: {name}"
+                    )
+                total_bytes += len(resource.value)
+                if total_bytes > MAX_BUNDLE_BYTES:
+                    raise ReviewContextBrokerError(
+                        "review context broker resource bundle exceeds its bound"
+                    )
+                fetched[name] = {
+                    "ref": binding["ref"], "hash": binding["hash"],
+                    "content_sha256": "sha256:" + hashlib.sha256(
+                        resource.value
+                    ).hexdigest(),
+                    "content_base64": base64.b64encode(resource.value).decode("ascii"),
+                }
             backend_attestation = self._backend.complete_harness_run(run)
             self._backend.verify_harness_retrieval_attestation(
                 backend_attestation,
@@ -152,19 +200,369 @@ class PrivilegedReviewContextBroker:
             },
             signing_private_key=self._signing_private_key,
         )
+        unsigned_bundle = {
+            "schema": BROKER_BUNDLE_SCHEMA,
+            "client_id": request["client_id"],
+            "challenge": request["challenge"],
+            "skill_contract_hash": request["skill_contract_hash"],
+            "retrieval_attestation": attestation,
+            "resources": fetched,
+        }
+        bundle = {**unsigned_bundle, "bundle_hash": _hash(unsigned_bundle)}
+        if len(_canonical(bundle)) > MAX_BUNDLE_BYTES:
+            raise ReviewContextBrokerError(
+                "review context broker encoded resource bundle exceeds its bound"
+            )
         with self._lock:
-            if len(self._attestations) >= self._max_retained_runs:
+            now = self._clock()
+            self._bundles = {
+                run_id: retained for run_id, retained in self._bundles.items()
+                if retained[1] > now
+            }
+            if len(self._bundles) >= self._max_retained_runs:
                 raise ReviewContextBrokerError("review context broker run capacity is exhausted")
-            if attestation["run_id"] in self._attestations:
+            if attestation["run_id"] in self._bundles:
                 raise ReviewContextBrokerError("review context broker run identity is duplicated")
-            self._attestations[attestation["run_id"]] = attestation
-        return dict(attestation)
+            self._bundles[attestation["run_id"]] = (
+                bundle, now + self._retained_ttl_seconds,
+            )
+        return dict(bundle)
+
+    def read_bundle(self, run_id: str, *, client_id: str, consume: bool = True) -> dict[str, Any]:
+        """Return one exact client-bound bundle and consume it by default."""
+
+        with self._lock:
+            retained = self._bundles.get(run_id)
+            if retained is None or retained[1] <= self._clock():
+                self._bundles.pop(run_id, None)
+                retained = None
+            elif retained[0].get("client_id") != client_id:
+                retained = None
+            elif consume:
+                del self._bundles[run_id]
+        if retained is None:
+            raise ReviewContextBrokerError("review context broker run is unavailable")
+        return dict(retained[0])
+
+    def read_bundle_by_challenge(
+        self, challenge: str, *, client_id: str, consume: bool = True,
+    ) -> dict[str, Any]:
+        """Consume the sole exact client/challenge bundle retained by the service."""
+
+        if not isinstance(challenge, str) or len(challenge) != 64:
+            raise ReviewContextBrokerError("review context broker challenge is invalid")
+        with self._lock:
+            now = self._clock()
+            self._bundles = {
+                run_id: retained for run_id, retained in self._bundles.items()
+                if retained[1] > now
+            }
+            matches = [
+                (run_id, retained) for run_id, retained in self._bundles.items()
+                if retained[0].get("client_id") == client_id
+                and retained[0].get("challenge") == challenge
+            ]
+            if len(matches) != 1:
+                raise ReviewContextBrokerError("review context broker challenge is unavailable")
+            run_id, retained = matches[0]
+            if consume:
+                del self._bundles[run_id]
+        return dict(retained[0])
 
     def read_attestation(self, run_id: str) -> dict[str, Any]:
-        """Controller-only service surface; HTTP/auth binding is deployment-owned."""
+        """Compatibility accessor for the signed part of a retained bundle."""
 
-        with self._lock:
-            attestation = self._attestations.get(run_id)
-        if attestation is None:
-            raise ReviewContextBrokerError("review context broker run is unavailable")
-        return dict(attestation)
+        return dict(self.read_bundle(run_id, client_id=self._client_id)["retrieval_attestation"])
+
+
+def _canonical(value: Any) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode()
+
+
+def _hash(value: Any) -> str:
+    return "sha256:" + hashlib.sha256(_canonical(value)).hexdigest()
+
+
+def create_review_context_broker_server(
+    broker: PrivilegedReviewContextBroker, *,
+    request_grants: Mapping[str, Mapping[str, Any]],
+    readback_credentials: Mapping[str, str],
+    host: str = "127.0.0.1", port: int = 0,
+) -> ThreadingHTTPServer:
+    """Create the authenticated one-attempt broker HTTP boundary.
+
+    Request bearer credentials are pre-bound to an exact client and request
+    body and are consumed before backend work. Readback uses a disjoint bearer
+    namespace. The provider receives neither credential.
+    """
+
+    if host not in {"127.0.0.1", "::1"} or not isinstance(port, int) or not 0 <= port <= 65535:
+        raise ReviewContextBrokerError("review context broker bind address is invalid")
+    grants = {
+        credential: PrivilegedReviewContextBroker._request(value)
+        for credential, value in request_grants.items()
+    }
+    if (
+        not grants
+        or any(not isinstance(key, str) or not key for key in grants)
+        or not readback_credentials
+        or any(
+            not isinstance(client, str) or not client
+            or not isinstance(credential, str) or not credential
+            for client, credential in readback_credentials.items()
+        )
+        or set(grants) & set(readback_credentials.values())
+    ):
+        raise ReviewContextBrokerError("review context broker credentials are invalid")
+    grants_lock = threading.Lock()
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            return
+
+        def _json(self, status: int, value: Mapping[str, Any]) -> None:
+            raw = _canonical(value)
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _bearer(self) -> str | None:
+            header = self.headers.get("Authorization", "")
+            return header[7:] if header.startswith("Bearer ") and len(header) > 7 else None
+
+        def do_POST(self) -> None:  # noqa: N802
+            if urlsplit(self.path).path != "/v1/review-context":
+                self.send_error(404)
+                return
+            raw_length = self.headers.get("Content-Length")
+            try:
+                length = int(raw_length) if raw_length is not None else -1
+            except ValueError:
+                length = -1
+            if self.headers.get_content_type() != "application/json" or not 0 <= length <= MAX_REQUEST_BYTES:
+                self.send_error(400)
+                return
+            try:
+                value = json.loads(self.rfile.read(length))
+                normalized = PrivilegedReviewContextBroker._request(value)
+            except (UnicodeDecodeError, json.JSONDecodeError, ReviewContextBrokerError):
+                self.send_error(400)
+                return
+            credential = self._bearer()
+            with grants_lock:
+                expected = grants.get(credential or "")
+                if expected is None or not hmac.compare_digest(
+                    _canonical(expected), _canonical(normalized)
+                ):
+                    self.send_error(404)
+                    return
+                del grants[credential or ""]
+            try:
+                self._json(200, broker.execute(normalized))
+            except ReviewContextBrokerError:
+                self.send_error(409)
+
+        def do_GET(self) -> None:  # noqa: N802
+            parsed = urlsplit(self.path)
+            run_prefix = "/v1/review-context-runs/"
+            challenge_prefix = "/v1/review-context-challenges/"
+            suffix = "/bundle"
+            if (
+                parsed.query
+                or not parsed.path.endswith(suffix)
+                or not parsed.path.startswith((run_prefix, challenge_prefix))
+            ):
+                self.send_error(404)
+                return
+            credential = self._bearer()
+            client_id = next((
+                client for client, expected in readback_credentials.items()
+                if credential is not None and hmac.compare_digest(credential, expected)
+            ), None)
+            if client_id is None:
+                self.send_error(404)
+                return
+            try:
+                if parsed.path.startswith(challenge_prefix):
+                    challenge = unquote(
+                        parsed.path[len(challenge_prefix):-len(suffix)]
+                    )
+                    bundle = broker.read_bundle_by_challenge(
+                        challenge, client_id=client_id,
+                    )
+                else:
+                    run_id = unquote(parsed.path[len(run_prefix):-len(suffix)])
+                    bundle = broker.read_bundle(run_id, client_id=client_id)
+                self._json(200, bundle)
+            except ReviewContextBrokerError:
+                self.send_error(404)
+
+    return ThreadingHTTPServer((host, port), Handler)
+
+
+def broker_server_from_config(
+    value: Mapping[str, Any], *, environment: Mapping[str, str],
+    host: str, port: int,
+) -> ThreadingHTTPServer:
+    """Construct the non-test service from one externally protected config."""
+
+    required = {
+        "schema", "backend_descriptor", "backend_execution_identity",
+        "backend_attestation_key_id", "backend_attestation_public_key",
+        "service_id", "client_id", "attestation_key_id",
+        "signing_private_key_env", "request_grants", "readback_clients",
+    }
+    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != BROKER_CONFIG_SCHEMA:
+        raise ReviewContextBrokerError("review context broker config is invalid")
+    signing_env = value.get("signing_private_key_env")
+    signing_key = environment.get(signing_env, "") if isinstance(signing_env, str) else ""
+    if not signing_key:
+        raise ReviewContextBrokerError("review context broker signing key is unavailable")
+    try:
+        backend = HTTPRegisteredResourceResolver.from_descriptor(
+            value["backend_descriptor"], environment=environment,
+        )
+    except ResourceVerificationError as exc:
+        raise ReviewContextBrokerError("review context broker backend is invalid") from exc
+    grants_value = value.get("request_grants")
+    readback_value = value.get("readback_clients")
+    if not isinstance(grants_value, list) or not grants_value or not isinstance(readback_value, list) or not readback_value:
+        raise ReviewContextBrokerError("review context broker client configuration is invalid")
+    request_grants = {}
+    for item in grants_value:
+        if not isinstance(item, Mapping) or set(item) != {"client_id", "credential_env", "request"}:
+            raise ReviewContextBrokerError("review context broker request grant is invalid")
+        credential = environment.get(str(item["credential_env"]), "")
+        request = dict(item["request"]) if isinstance(item["request"], Mapping) else None
+        if not credential or request is None or request.get("client_id") != item["client_id"] or credential in request_grants:
+            raise ReviewContextBrokerError("review context broker request grant is invalid")
+        request_grants[credential] = request
+    readback_credentials = {}
+    for item in readback_value:
+        if not isinstance(item, Mapping) or set(item) != {"client_id", "credential_env"}:
+            raise ReviewContextBrokerError("review context broker readback client is invalid")
+        credential = environment.get(str(item["credential_env"]), "")
+        if not credential or item["client_id"] in readback_credentials:
+            raise ReviewContextBrokerError("review context broker readback client is invalid")
+        readback_credentials[str(item["client_id"])] = credential
+    broker = PrivilegedReviewContextBroker(
+        backend=backend,
+        backend_execution_identity=str(value["backend_execution_identity"]),
+        backend_attestation_key_id=str(value["backend_attestation_key_id"]),
+        backend_attestation_public_key=str(value["backend_attestation_public_key"]),
+        service_id=str(value["service_id"]), client_id=str(value["client_id"]),
+        attestation_key_id=str(value["attestation_key_id"]),
+        signing_private_key=signing_key,
+    )
+    return create_review_context_broker_server(
+        broker, request_grants=request_grants,
+        readback_credentials=readback_credentials, host=host, port=port,
+    )
+
+
+def _load_protected_config(path: Path) -> tuple[dict[str, Any], int, tuple[int, ...]]:
+    """Open one root-protected config without following a replaceable leaf."""
+
+    resolved_parent = path.parent.resolve(strict=True)
+    for ancestor in (resolved_parent, *resolved_parent.parents):
+        value = ancestor.stat(follow_symlinks=False)
+        mode = stat.S_IMODE(value.st_mode)
+        if value.st_uid != 0 or mode & 0o022 and not mode & stat.S_ISVTX:
+            raise ReviewContextBrokerError(
+                "review context broker config ancestor is not protected"
+            )
+    named_before = path.lstat()
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        value = os.fstat(descriptor)
+        identity = (
+            value.st_dev, value.st_ino, value.st_uid, value.st_gid,
+            stat.S_IMODE(value.st_mode), value.st_nlink, value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns,
+        )
+        if (
+            not stat.S_ISREG(value.st_mode)
+            or value.st_uid != 0
+            or stat.S_IMODE(value.st_mode) & 0o022
+            or value.st_nlink != 1
+            or value.st_size < 2
+            or value.st_size > MAX_REQUEST_BYTES
+            or (named_before.st_dev, named_before.st_ino)
+            != (value.st_dev, value.st_ino)
+        ):
+            raise ReviewContextBrokerError("review context broker config is not protected")
+        raw = os.pread(descriptor, MAX_REQUEST_BYTES + 1, 0)
+        if len(raw) != value.st_size:
+            raise ReviewContextBrokerError("review context broker config changed during read")
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ReviewContextBrokerError("review context broker config is invalid")
+        return parsed, descriptor, identity
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _attach_config_guard(
+    server: ThreadingHTTPServer, *, path: Path, descriptor: int,
+    identity: tuple[int, ...],
+) -> None:
+    original_close = server.server_close
+
+    def guarded_close() -> None:
+        try:
+            value = os.fstat(descriptor)
+            current = (
+                value.st_dev, value.st_ino, value.st_uid, value.st_gid,
+                stat.S_IMODE(value.st_mode), value.st_nlink, value.st_size,
+                value.st_mtime_ns, value.st_ctime_ns,
+            )
+            named = path.lstat()
+            if current != identity or (named.st_dev, named.st_ino) != identity[:2]:
+                raise ReviewContextBrokerError(
+                    "review context broker config changed while held"
+                )
+        finally:
+            os.close(descriptor)
+            original_close()
+
+    server.server_close = guarded_close  # type: ignore[method-assign]
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="tgw-governed-review-context-broker")
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, required=True)
+    arguments = parser.parse_args(argv)
+    descriptor: int | None = None
+    try:
+        value, descriptor, identity = _load_protected_config(arguments.config)
+        server = broker_server_from_config(
+            value, environment=os.environ, host=arguments.host, port=arguments.port,
+        )
+        _attach_config_guard(
+            server, path=arguments.config, descriptor=descriptor, identity=identity,
+        )
+    except (OSError, json.JSONDecodeError, ReviewContextBrokerError) as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        print(json.dumps({"status": "HOLD", "reason": str(exc)}), file=os.sys.stderr)
+        return 2
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -137,7 +137,7 @@ def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):
 
         def execute(self, request):
             observed["request"] = request
-            return issue_harness_retrieval_attestation(
+            attestation = issue_harness_retrieval_attestation(
                 {
                     "schema": "tgw-registered-resource-retrieval-attestation/v3",
                     "service_id": "review-resources", "client_id": "review-client",
@@ -149,6 +149,24 @@ def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):
                     "resources": request["resources"], "attestation_key_id": "test-key",
                 }, signing_private_key=signing_key,
             )
+            unsigned_bundle = {
+                "schema": "tgw-context-review-resource-bundle/v1",
+                "client_id": "review-client", "challenge": request["challenge"],
+                "skill_contract_hash": request["skill_contract_hash"],
+                "retrieval_attestation": attestation,
+                "resources": {
+                    name: {
+                        **bindings[name],
+                        "content_sha256": content_hash(contents[name]),
+                        "content_base64": base64.b64encode(contents[name]).decode(),
+                    }
+                    for name in sorted(bindings)
+                },
+            }
+            return {
+                **unsigned_bundle,
+                "bundle_hash": context._sha(context._canonical(unsigned_bundle)),
+            }
 
     monkeypatch.setenv("TGW_CONTEXT_REVIEW_BROKER_ENDPOINT", "https://broker.invalid")
     monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_ID", "review-resources")
@@ -160,7 +178,7 @@ def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):
     monkeypatch.setenv("TGW_CONTEXT_REVIEW_GID", str(os.getegid()))
     monkeypatch.setenv("TGW_CONTEXT_ATTESTATION_KEY_ID", "test-key")
     monkeypatch.setenv("TGW_CONTEXT_ATTESTATION_PUBLIC_KEY", public_key)
-    result = context._review_context_run(
+    result, visible = context._review_context_run(
         challenge="c" * 64, card_json=json.dumps(card),
         handoff_hash="sha256:" + "d" * 64,
         resource_receipt_hash=receipt["receipt_hash"],
@@ -175,6 +193,10 @@ def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):
         "skill_contract_hash": "sha256:" + "e" * 64,
         "runtime_uid": os.geteuid(), "runtime_gid": os.getegid(),
         "retrieval_attestation": result["retrieval_attestation"],
+        "resource_bundle_hash": result["resource_bundle_hash"],
     }
+    assert {
+        name: visible[name]["content"].encode() for name in sorted(visible)
+    } == contents
     assert observed["endpoint"] == "https://broker.invalid"
     assert observed["request"]["resources"] == bindings

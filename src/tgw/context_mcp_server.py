@@ -7,11 +7,11 @@ or provider-effect operation.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import re
-import stat
 import subprocess
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
@@ -26,6 +26,7 @@ from tgw.execution_resources import (
     CARD_RESOURCE_NAMES,
     ResourceVerificationError,
     card_resource_receipt,
+    content_hash,
     validate_harness_retrieval_attestation,
 )
 from tgw.plan_graph import live_plan_graph
@@ -36,7 +37,7 @@ MAX_TEXT_BYTES = 2_000_000
 MAX_QUERY = 1_000
 MAX_LINES = 250
 MAX_RESULTS = 100
-MAX_REVIEW_RECEIPT_BYTES = 16 * 1024
+MAX_REVIEW_BUNDLE_BYTES = 64 * 1024 * 1024
 PLAN_PREFIXES = ("plan/", "pp/", "reference/")
 RUNBOOK_PREFIX = "docs/runbooks/"
 SCOPE_SEMANTICS = {
@@ -301,25 +302,32 @@ def context_bundle(task: str, receiver: str = "codex", limit: int = 12) -> dict[
 
 
 class HTTPReviewContextBrokerClient:
-    """Call the separately privileged broker; no service credential enters the harness."""
+    """Call the privileged broker from the separately operated context service."""
 
     def __init__(self, endpoint: str) -> None:
         if not isinstance(endpoint, str) or not endpoint.startswith("https://"):
             raise ContextError("governed review context broker endpoint is invalid")
+        credential = os.environ.get("TGW_CONTEXT_BROKER_REQUEST_CREDENTIAL", "")
+        if not credential or any(character.isspace() for character in credential):
+            raise ContextError("governed review context broker credential is unavailable")
         self.endpoint = endpoint.rstrip("/")
+        self.authorization = "Bearer " + credential
 
     def execute(self, request_value: Mapping[str, Any]) -> dict[str, Any]:
         raw = _canonical(request_value)
         request = Request(
             self.endpoint + "/v1/review-context", data=raw, method="POST",
-            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            headers={
+                "Accept": "application/json", "Content-Type": "application/json",
+                "Authorization": self.authorization,
+            },
         )
         try:
             with urlopen(request, timeout=30) as response:  # nosec: protected configured endpoint
-                body = response.read(MAX_REVIEW_RECEIPT_BYTES + 1)
+                body = response.read(MAX_REVIEW_BUNDLE_BYTES + 1)
         except (HTTPError, URLError, OSError) as exc:
             raise ContextError("governed review context broker failed") from exc
-        if len(body) > MAX_REVIEW_RECEIPT_BYTES:
+        if len(body) > MAX_REVIEW_BUNDLE_BYTES:
             raise ContextError("governed review context broker response exceeds its bound")
         try:
             value = json.loads(body)
@@ -333,8 +341,8 @@ class HTTPReviewContextBrokerClient:
 def _review_context_run(
     *, challenge: str, card_json: str, handoff_hash: str,
     resource_receipt_hash: str, skill_contract_hash: str,
-    broker_factory: Any = HTTPReviewContextBrokerClient,
-) -> dict[str, Any]:
+    broker_factory: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Fetch every review-card resource inside one authenticated service run."""
 
     if re.fullmatch(r"[0-9a-f]{64}", challenge) is None:
@@ -359,14 +367,16 @@ def _review_context_run(
         expected_gid = int(os.environ.get("TGW_CONTEXT_REVIEW_GID", ""))
     except ValueError as exc:
         raise ContextError("governed review runtime identity is invalid") from exc
-    if (os.geteuid(), os.getegid()) != (expected_uid, expected_gid):
-        raise ContextError("governed review runtime identity is invalid")
     service_id = os.environ.get("TGW_CONTEXT_RESOURCE_SERVICE_ID", "")
     client_id = os.environ.get("TGW_CONTEXT_RESOURCE_SERVICE_CLIENT_ID", "")
     try:
+        broker_factory = broker_factory or HTTPReviewContextBrokerClient
         broker = broker_factory(os.environ.get("TGW_CONTEXT_REVIEW_BROKER_ENDPOINT", ""))
-        attestation = broker.execute({
+        service_bundle = broker.execute({
             "schema": "tgw-context-review-broker-request/v1",
+            "client_id": client_id,
+            "challenge": challenge,
+            "skill_contract_hash": skill_contract_hash,
             "card_hash": card["card_hash"], "role": "independent-review",
             "execution_identity": (
                 f"governed-review:{challenge}:uid={expected_uid}:gid={expected_gid}"
@@ -377,6 +387,19 @@ def _review_context_run(
                 name: card["bindings"][name] for name in sorted(CARD_RESOURCE_NAMES)
             },
         })
+        if (
+            not isinstance(service_bundle, Mapping)
+            or service_bundle.get("schema") != "tgw-context-review-resource-bundle/v1"
+            or service_bundle.get("client_id") != client_id
+            or service_bundle.get("challenge") != challenge
+            or service_bundle.get("skill_contract_hash") != skill_contract_hash
+        ):
+            raise ResourceVerificationError("review context service bundle binding mismatch")
+        unsigned_bundle = dict(service_bundle)
+        claimed_bundle_hash = unsigned_bundle.pop("bundle_hash", None)
+        if claimed_bundle_hash != _sha(_canonical(unsigned_bundle)):
+            raise ResourceVerificationError("review context service bundle hash mismatch")
+        attestation = service_bundle.get("retrieval_attestation")
         attestation = validate_harness_retrieval_attestation(
             attestation,
             expected={
@@ -394,43 +417,46 @@ def _review_context_run(
             attestation_key_id=os.environ.get("TGW_CONTEXT_ATTESTATION_KEY_ID"),
             attestation_public_key=os.environ.get("TGW_CONTEXT_ATTESTATION_PUBLIC_KEY"),
         )
+        encoded_resources = service_bundle.get("resources")
+        if not isinstance(encoded_resources, Mapping) or set(encoded_resources) != CARD_RESOURCE_NAMES:
+            raise ResourceVerificationError("review context service resources are invalid")
+        visible_resources = {}
+        for name in sorted(CARD_RESOURCE_NAMES):
+            encoded = encoded_resources[name]
+            binding = card["bindings"][name]
+            if (
+                not isinstance(encoded, Mapping)
+                or set(encoded) != {
+                    "ref", "hash", "content_sha256", "content_base64",
+                }
+                or encoded.get("ref") != binding["ref"]
+                or encoded.get("hash") != binding["hash"]
+                or not isinstance(encoded.get("content_base64"), str)
+            ):
+                raise ResourceVerificationError("review context service resource binding mismatch")
+            try:
+                content = base64.b64decode(encoded["content_base64"], validate=True)
+            except (TypeError, ValueError) as exc:
+                raise ResourceVerificationError("review context service resource encoding is invalid") from exc
+            if content_hash(content) != encoded["content_sha256"]:
+                raise ResourceVerificationError("review context service resource content differs")
+            visible_resources[name] = {
+                "ref": binding["ref"], "hash": binding["hash"],
+                "content_sha256": encoded["content_sha256"],
+                "content": content.decode("utf-8", errors="replace"),
+            }
     except (KeyError, ResourceVerificationError, ValueError) as exc:
         raise ContextError("governed review registered context retrieval failed") from exc
-    return {
+    receipt = {
         "schema": "tgw-context-review-run/v1", "status": "PASS",
         "context_run_id": attestation["run_id"], "challenge": challenge,
         "card_hash": card["card_hash"], "resource_receipt_hash": resource_receipt_hash,
         "skill_contract_hash": skill_contract_hash,
-        "runtime_uid": os.geteuid(), "runtime_gid": os.getegid(),
+        "runtime_uid": expected_uid, "runtime_gid": expected_gid,
         "retrieval_attestation": attestation,
+        "resource_bundle_hash": service_bundle["bundle_hash"],
     }
-
-
-def _write_review_receipt(value: Mapping[str, Any]) -> None:
-    path = Path(os.environ.get("TGW_CONTEXT_REVIEW_RECEIPT_FILE", ""))
-    if not path.is_absolute():
-        raise ContextError("governed review receipt path must be absolute")
-    raw = _canonical(value)
-    if len(raw) > MAX_REVIEW_RECEIPT_BYTES:
-        raise ContextError("governed review receipt exceeds its bound")
-    try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
-    except OSError as exc:
-        raise ContextError("governed review receipt sink is unavailable") from exc
-    try:
-        value_stat = os.fstat(descriptor)
-        if not stat.S_ISREG(value_stat.st_mode) or value_stat.st_nlink not in {0, 1}:
-            raise ContextError("governed review receipt sink protection is invalid")
-        offset = 0
-        while offset < len(raw):
-            written = os.write(descriptor, raw[offset:])
-            if written <= 0:
-                raise ContextError("governed review receipt sink write failed")
-            offset += written
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
+    return receipt, visible_resources
 
 mcp = FastMCP(name="tgw-context", instructions="Authoritative read-only TGW planning and coding context hosted on tgw-lib.")
 
@@ -457,24 +483,25 @@ def tgw_context_bundle(
     """Return context; a governed review must also open and complete its bound retrieval run."""
 
     def result() -> dict[str, Any]:
-        bundle = context_bundle(task, receiver, limit)
         supplied = (
             challenge, card_json, handoff_hash, resource_receipt_hash,
             skill_contract_hash,
         )
-        if any(supplied):
-            if not all(supplied):
-                raise ContextError("governed review context arguments must be complete")
-            review_receipt = _review_context_run(
-                challenge=challenge, card_json=card_json, handoff_hash=handoff_hash,
-                resource_receipt_hash=resource_receipt_hash,
-                skill_contract_hash=skill_contract_hash,
-            )
-            _write_review_receipt(review_receipt)
-            bundle["governed_review"] = review_receipt
-            bundle["bundle_sha256"] = _sha(_canonical({
-                key: value for key, value in bundle.items() if key != "bundle_sha256"
-            }))
+        if not any(supplied):
+            return context_bundle(task, receiver, limit)
+        if not all(supplied):
+            raise ContextError("governed review context arguments must be complete")
+        review_receipt, visible_resources = _review_context_run(
+            challenge=challenge, card_json=card_json, handoff_hash=handoff_hash,
+            resource_receipt_hash=resource_receipt_hash,
+            skill_contract_hash=skill_contract_hash,
+        )
+        bundle = {
+            "task": task, "receiver": receiver,
+            "registered_resources": visible_resources,
+            "registered_resource_retrieval": review_receipt,
+        }
+        bundle["bundle_sha256"] = _sha(_canonical(bundle))
         return bundle
 
     return _json_call(result)

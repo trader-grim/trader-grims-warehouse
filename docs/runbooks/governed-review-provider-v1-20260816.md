@@ -30,7 +30,7 @@ The currently proven implementation is the `claude` account on tgw-lib:
   the exact non-symlink target before use);
 - discovered `tgw-review` skill link at
   `/home/claude/.claude/skills/tgw-review` (not an admitted execution input);
-- provider-neutral protected skill, context-provider, MCP-config, and runtime
+- provider-neutral protected skill, remote context-service MCP config, and runtime
   projections supplied by the review controller;
 - current first-party Claude authentication; and
 - receiver identity `claude:tgw-review`.
@@ -73,20 +73,21 @@ Before launch, the controller must create and freeze:
    evidence, and receipt-sink bindings;
 3. an unexpired independent-review execution card and Promptcraft handoff;
 4. the provider's exact executable, version, account identity, root-protected
-   generic-skill projection and source-provenance receipt, held MCP config,
-   held executable context-provider closure, minimal runtime closure, closed
+   generic-skill projection and source-provenance receipt, held remote-MCP
+   config, minimal runtime closure, closed
    environment, fresh authentication-health evidence, and per-artifact owner
    policy;
 5. a registered, separately privileged context-broker service and public key
    capable of issuing a signed card/handoff/resource-retrieval attestation;
-   the broker alone holds the backend resource-service credential and both
-   signing authorities remain unavailable to the provider; and
+   the external context service alone receives one pre-bound broker request
+   credential, the controller receives a different readback credential, and
+   both signing authorities remain unavailable to the provider; and
 6. a protected X-store descriptor whose exact reference and descriptor hash
    equal the card's `receipt_sink` binding, plus a fresh signed receipt from
    the host egress controller proving the admitted endpoint policy is active.
 
 The adapter holds the root-owned request, source root, sandbox, runtime,
-context provider, executable, skill, MCP config, and credential descriptors
+executable, skill, MCP config, and credential descriptors
 through use. It launches a minimal-root bubblewrap user/PID namespace as the
 exact selected provider uid/gid (never root for the current Claude profile), executes the
 held executable via `/proc/self/fd`, installs the exact protected skill into an
@@ -96,21 +97,29 @@ escape. Named and held identities are rechecked, exactly one
 `tgw-code-review/v1` result is accepted, and the card-bound X-store must return
 an exact pinned readback.
 
-Each attempt creates a fresh 256-bit challenge and a bounded held receipt file
-which is writable only by the selected sandbox uid. The challenge is disclosed in the
-governed prompt. A passing provider must use Skill and the nonempty exact MCP
+Each attempt creates a fresh 256-bit challenge. The challenge is disclosed in
+the governed prompt. A passing provider must use Skill and the nonempty exact MCP
 tool policy and call `tgw_context_bundle` with that challenge and exact skill
-contract hash. The MCP writes its completed run identity, observed uid/gid,
-card and skill identities plus the complete signed service attestation to the
-held receipt file; no provider-output field is trusted for this evidence. The
-adapter independently reads the same run back from the registered context
-broker with a controller-only credential and requires exact object equality.
+contract hash. The external context service uses a request credential bound to
+that exact client/challenge/card/handoff/skill/resource receipt and resource
+map; the privileged broker consumes it before retrieval. The broker retains the
+complete signed service attestation and fetched resource bundle under the exact
+client and challenge. No provider-output field or provider-writable file is
+trusted for this evidence. After the provider exits, the adapter independently
+consumes the sole matching bundle from the registered context broker with a
+distinct client-bound controller credential. A missing, duplicate, expired, or
+already-consumed challenge is a HOLD. The broker response includes the exact fetched bytes;
+the review-visible MCP result is decoded from those bytes, never from local
+Plan/source discovery.
 The signed retrieval attestation must
 bind that challenge and exact uid/gid, the exact card/handoff/resource receipt,
 and every card resource. The returned Plan,
-source, CodeGraph, and environment values are then compared byte-for-byte with
-the card. A report alone, or a provider echo of mounted hashes, is not context
-consumption evidence.
+source, CodeGraph, and environment references/hashes are compared with the
+card, while every returned byte payload is independently rehashed by both the
+MCP service and controller. This evidence is named registered-resource
+retrieval; it does not claim that MCP invocation itself is cryptographically
+exclusive. A report alone, or a provider echo of mounted hashes, is not
+retrieval evidence.
 
 For the current provider implementation, the registry may select an argv such
 as the following. The admission schema does not depend on this provider or
@@ -128,8 +137,9 @@ network policies:
 
 `{prompt}`, `{snapshot}`, and `{mcp_config}` must each occur exactly once. The
 adapter replaces executable and config inputs with held `/proc/self/fd`
-identities and maps the held source snapshot read-only. The MCP config may
-name only executable files within the held context-provider manifest. Its
+identities and maps the held source snapshot read-only. The held MCP config may
+name only the exact admitted external context-service SSE endpoint and contains
+no broker request or readback credential. Its
 bound Plan, source, CodeGraph, and environment bindings must exactly equal the
 retained card.
 
@@ -138,7 +148,9 @@ provider and admitted MCP route require it. This is not networkless isolation.
 The provider identity binds a sorted exact HTTPS endpoint allow-list and its
 hash. Bubblewrap does not enforce an endpoint allow-list, so admission also
 requires a fresh Ed25519-signed `ENFORCED` receipt from the host egress
-controller for that exact policy. A self-hash or caller assertion is a HOLD.
+controller for that exact policy. The context-service endpoint is admitted;
+the privileged broker endpoint is explicitly forbidden from the provider
+namespace. A self-hash or caller assertion is a HOLD.
 
 ## Evidence and admission
 
@@ -147,7 +159,8 @@ card/handoff, distinct execution-resource and Promptcraft receipts, Plan,
 source commit/tree/snapshot,
 CodeGraph/environment/resource bindings, provider identity, command policy,
 bounded lifecycle, output hashes, fully validated semantic result, and signed
-context consumption. The execution record is published by the card-bound sink
+registered-resource retrieval with exact resource-bundle hash. The execution
+record is published by the card-bound sink
 before it is returned.
 
 `tgw-integrated-candidate-review-result/v2` accepts exactly one execution
@@ -173,8 +186,8 @@ final result.
 
 This source change is a candidate only. It is not installed or deployed. The
 current selected provider is HOLD, not disabled: its executable and existing
-credential are present, but the protected generic skill, context-provider,
-MCP-config, minimal runtime projections, separately privileged context broker
+credential are present, but the protected generic skill, remote MCP config,
+minimal runtime projections, separately privileged context broker
 and its protected backend credential/signing authority, registered signed
 context readback, X publisher, protected execution-environment authority, and
 host egress enforcement have not been issued. Before first
@@ -191,6 +204,19 @@ The installed fixed entry point is:
 ```bash
 tgw-governed-review --request /run/tgw-review/root-owned-request.json
 ```
+
+The separately protected loopback broker daemon is started behind the admitted
+TLS service boundary with:
+
+```bash
+tgw-governed-review-context-broker \
+  --config /run/tgw-review/root-owned-broker-config.json \
+  --host 127.0.0.1 --port 8788
+```
+
+Its root-owned config carries only environment-variable names for secrets and
+one exact request grant. The request credential is consumed once; abandoned
+bundles expire, and the exact client-bound readback is also consumed once.
 
 The request must be a bounded, root-owned, non-writable, single-link regular
 file. The entry point holds and rechecks that exact file through provider

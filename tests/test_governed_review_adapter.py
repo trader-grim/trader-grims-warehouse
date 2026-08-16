@@ -128,6 +128,38 @@ def _context_attestation(identity, private_key, handoff, run_id, challenge):
     return attestation
 
 
+def _context_service_bundle(attestation, *, challenge, skill_contract_hash):
+    resources = {
+        name: {
+            **binding,
+            "content_sha256": "sha256:" + hashlib.sha256(
+                f"resource:{name}".encode()
+            ).hexdigest(),
+            "content_base64": base64.b64encode(
+                f"resource:{name}".encode()
+            ).decode(),
+        }
+        for name, binding in attestation["resources"].items()
+    }
+    unsigned = {
+        "schema": "tgw-context-review-resource-bundle/v1",
+        "client_id": "review-client", "challenge": challenge,
+        "skill_contract_hash": skill_contract_hash,
+        "retrieval_attestation": attestation, "resources": resources,
+    }
+    return {**unsigned, "bundle_hash": _hash(unsigned)}
+
+
+def _fixture_skill_contract_hash(identity):
+    skill_path = Path(identity["artifacts"]["skill_contract"]["resolved_path"])
+    skill_raw = (skill_path / "SKILL.md").read_bytes()
+    rendered = (
+        f"--- SKILL.md (sha256:{hashlib.sha256(skill_raw).hexdigest()}) ---\n"
+        + skill_raw.decode()
+    )
+    return "sha256:" + hashlib.sha256(rendered.encode()).hexdigest()
+
+
 def _file_hash(path):
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -186,7 +218,10 @@ def _tree_artifact(path):
 
 
 def _binding(name):
-    return {"ref": f"test:{name}", "hash": _hash(name)}
+    return {
+        "ref": f"test:{name}",
+        "hash": "sha256:" + hashlib.sha256(f"resource:{name}".encode()).hexdigest(),
+    }
 
 
 def _sink_descriptor():
@@ -305,37 +340,10 @@ def _fixture(
         "if (fork() == 0) { setsid(); close(1); close(2); sleep(30); _exit(0); }"
         if detach else ""
     )
-    context_receipt_code = ""
-    if consume_context:
-        context_receipt_code = r'''
-const char *prompt = 0;
-for (int i = 1; i < argc; i++) if (strstr(argv[i], "challenge=")) prompt = argv[i];
-if (!prompt) return 6;
-const char *challenge = strstr(prompt, "challenge=") + 10;
-const char *card_hash = strstr(prompt, "\"card_hash\":\"");
-if (!card_hash) return 7;
-card_hash = strstr(card_hash, "sha256:");
-const char *receipt_hash = strstr(prompt, "resource_receipt_hash=") + 22;
-const char *skill_hash = strstr(prompt, "skill_contract_hash=") + 20;
-FILE *receipt = fopen("/home/reviewer/.tgw-context/review-receipt", "w");
-if (!receipt) return 8;
-fprintf(receipt, "{\"schema\":\"tgw-context-review-run/v1\","
-                 "\"status\":\"PASS\","
-                 "\"context_run_id\":\"context-run\","
-                 "\"challenge\":\"%.*s\","
-                 "\"card_hash\":\"%.*s\","
-                 "\"resource_receipt_hash\":\"%.*s\","
-                 "\"skill_contract_hash\":\"%.*s\","
-                 "\"retrieval_attestation_hash\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
-                 "\"runtime_uid\":%d,\"runtime_gid\":%d}",
-        64, challenge, 71, card_hash, 71, receipt_hash, 71, skill_hash,
-        (int)geteuid(), (int)getegid());
-fclose(receipt);
-'''
     source_code.write_text(
         "#include <stdio.h>\n#include <string.h>\n#include <sys/stat.h>\n"
         "#include <unistd.h>\nint main(int argc, char **argv) {"
-        + mutation_code + detach_code + context_receipt_code
+        + mutation_code + detach_code
         + f"puts({json.dumps(payload)}); return 0; }}\n"
     )
     subprocess.run(["cc", "-static", "-o", executable, source_code], check=True)
@@ -346,31 +354,12 @@ fclose(receipt);
     (skill / "SKILL.md").chmod(0o444)
     skill.chmod(0o555)
     skill_artifact = _tree_artifact(skill)
-    skill_raw = (skill / "SKILL.md").read_bytes()
-    rendered_skill = (
-        f"--- SKILL.md (sha256:{hashlib.sha256(skill_raw).hexdigest()}) ---\n"
-        + skill_raw.decode()
-    )
-    skill_contract_hash = "sha256:" + hashlib.sha256(rendered_skill.encode()).hexdigest()
     context_private_key = _context_signing_key()
     mcp = tmp_path / "mcp.json"
-    mcp_command = "/opt/tgw-context/bin/tgw-context-mcp"
+    mcp_endpoint = "https://context-service.invalid/sse"
     mcp.write_text(json.dumps({
         "mcpServers": {"tgw-context": {
-            "command": mcp_command, "args": [],
-            "env": {
-                "TGW_CONTEXT_RESOURCE_SERVICE_ID": "review-resources",
-                "TGW_CONTEXT_RESOURCE_SERVICE_CLIENT_ID": "review-client",
-                "TGW_CONTEXT_REVIEW_BROKER_ENDPOINT": "https://context-broker.invalid",
-                "TGW_CONTEXT_ATTESTATION_KEY_ID": "context-test-key",
-                "TGW_CONTEXT_ATTESTATION_PUBLIC_KEY": _public_key(context_private_key),
-                "TGW_CONTEXT_REVIEW_RECEIPT_FILE": (
-                    "/home/reviewer/.tgw-context/review-receipt"
-                ),
-                "TGW_CONTEXT_REVIEW_SKILL_CONTRACT_HASH": skill_contract_hash,
-                "TGW_CONTEXT_REVIEW_UID": str(os.getuid()),
-                "TGW_CONTEXT_REVIEW_GID": str(os.getgid()),
-            },
+            "type": "sse", "url": mcp_endpoint,
         }},
     }))
     mcp.chmod(0o444)
@@ -386,12 +375,6 @@ fclose(receipt);
     for directory in sorted((item for item in runtime.rglob("*") if item.is_dir()), reverse=True):
         directory.chmod(0o555)
     runtime.chmod(0o555)
-    context = tmp_path / "context-provider"
-    (context / "bin").mkdir(parents=True)
-    (context / "bin/tgw-context-mcp").write_text("protected context provider\n")
-    (context / "bin/tgw-context-mcp").chmod(0o555)
-    (context / "bin").chmod(0o555)
-    context.chmod(0o555)
     environment = {
         "HOME": "/home/reviewer", "PATH": "/usr/bin", "USER": "claude",
         "LOGNAME": "claude", "LANG": "C",
@@ -414,6 +397,7 @@ fclose(receipt);
         "timeout_seconds": 5,
         "service_id": "review-resources", "client_id": "review-client",
         "broker_endpoint": "https://context-broker.invalid",
+        "context_service_endpoint": mcp_endpoint,
         "resource_service_descriptor_hash": _hash(resource_service),
         "resource_service_catalog_ref": "catalog:test",
         "resource_service_catalog_hash": resource_service_catalog_hash(
@@ -430,7 +414,7 @@ fclose(receipt);
     network_unsigned = {
         "schema": "tgw-governed-review-network-policy/v1",
         "mode": "shared-network-enforced-endpoints",
-        "endpoints": ["https://api.anthropic.com", "https://context-broker.invalid"],
+        "endpoints": ["https://api.anthropic.com", mcp_endpoint],
         "enforcement_key_id": "test-egress-key",
         "enforcement_public_key": _public_key(egress_private_key),
     }
@@ -454,41 +438,6 @@ fclose(receipt);
         "network_policy_hash": network_hash,
     }, sort_keys=True, separators=(",", ":")))
     execution_environment.chmod(0o444)
-    if consume_context is True:
-        fixed_challenge = "c" * 64
-        fixture_handoff = _handoff(source)
-        fixture_identity = {
-            "context_bundle_service": context_service,
-            "sandbox_identity": {"uid": os.getuid(), "gid": os.getgid()},
-        }
-        attestation = _context_attestation(
-            fixture_identity, context_private_key, fixture_handoff,
-            "context-run", fixed_challenge,
-        )
-        receipt_value = {
-            "schema": "tgw-context-review-run/v1", "status": "PASS",
-            "context_run_id": "context-run", "challenge": fixed_challenge,
-            "card_hash": fixture_handoff["card"]["card_hash"],
-            "resource_receipt_hash": fixture_handoff["resource_receipt"]["receipt_hash"],
-            "skill_contract_hash": skill_contract_hash,
-            "retrieval_attestation": attestation,
-            "runtime_uid": os.getuid(), "runtime_gid": os.getgid(),
-        }
-        receipt_literal = json.dumps(json.dumps(
-            receipt_value, sort_keys=True, separators=(",", ":"),
-        ))
-        context_receipt_code = (
-            'FILE *receipt = fopen("/home/reviewer/.tgw-context/review-receipt", "w");'
-            "if (!receipt) return 8;"
-            f"fputs({receipt_literal}, receipt);fclose(receipt);"
-        )
-        source_code.write_text(
-            "#include <stdio.h>\n#include <sys/stat.h>\n#include <unistd.h>\n"
-            "int main(void) {" + mutation_code + detach_code + context_receipt_code
-            + f"puts({json.dumps(payload)}); return 0; }}\n"
-        )
-        subprocess.run(["cc", "-static", "-o", executable, source_code], check=True)
-        executable.chmod(0o555)
     health_unsigned = {
         "schema": "tgw-governed-review-provider-health/v1", "provider": "claude",
         "account_identity": account_identity, "observed_at": "2026-08-16T00:00:00+00:00",
@@ -506,7 +455,6 @@ fclose(receipt);
         "artifacts": {
             "sandbox": _file_artifact(Path("/usr/bin/bwrap")),
             "runtime": _tree_artifact(runtime),
-            "context_provider": _tree_artifact(context),
             "executable": _file_artifact(executable), "skill_contract": skill_artifact,
             "mcp_config": _file_artifact(mcp), "credential": _secret_artifact(credential),
             "execution_environment": _file_artifact(execution_environment),
@@ -519,8 +467,7 @@ fclose(receipt);
             "home": "/home/reviewer",
             "skill_mount": "/home/reviewer/.claude/skills/tgw-review",
             "credential_mount": "/home/reviewer/.claude/.credentials.json",
-            "context_receipt_mount": "/home/reviewer/.tgw-context/review-receipt",
-            "workspace": "/tmp/workspace", "context_root": "/opt/tgw-context",
+            "workspace": "/tmp/workspace",
         },
         "context_bundle_service": context_service,
         "sandbox_identity": {"uid": os.getuid(), "gid": os.getgid()},
@@ -539,7 +486,7 @@ fclose(receipt);
                 "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/home",
             ]),
             "pid_namespace": True, "root_read_only": True,
-            "mcp_commands": [mcp_command],
+            "mcp_endpoints": [mcp_endpoint],
             "context_bindings": {
                 "plan_input": _binding("plan-input"),
                 "plan_commit": _binding("plan-commit"),
@@ -569,7 +516,7 @@ fclose(receipt);
 def _run(
     source, executable, identity, environment, context_private_key, *,
     handoff=None, provider="claude", sink_descriptor=None,
-    context_bundle_mutator=None,
+    context_bundle_mutator=None, context_service_available=True,
 ):
     sink_descriptor = sink_descriptor or _sink_descriptor()
     selected_handoff = handoff or _handoff(
@@ -587,13 +534,20 @@ def _run(
             "artifact_hash": _hash(execution),
         }
 
-    def read_context(run_id, challenge):
+    def read_context(challenge):
+        if not context_service_available:
+            raise ReviewRunnerError("governed review context challenge is unavailable")
+        run_id = "context-run"
         attestation = _context_attestation(
             identity, context_private_key, selected_handoff, run_id, challenge,
         )
-        return (
+        selected = (
             context_bundle_mutator(attestation, run_id, challenge)
             if context_bundle_mutator else attestation
+        )
+        return _context_service_bundle(
+            selected, challenge=challenge,
+            skill_contract_hash=_fixture_skill_contract_hash(identity),
         )
 
     return run_governed_review(
@@ -752,9 +706,14 @@ def test_non_test_request_composes_provider_and_pinned_sink_readback(tmp_path, m
         def __init__(self, _descriptor):
             pass
 
-        def read(self, run_id, challenge):
-            return _context_attestation(
+        def read(self, challenge):
+            run_id = "context-run"
+            attestation = _context_attestation(
                 identity, context_private_key, handoff, run_id, challenge,
+            )
+            return _context_service_bundle(
+                attestation, challenge=challenge,
+                skill_contract_hash=_fixture_skill_contract_hash(identity),
             )
 
     monkeypatch.setattr(governed_adapter, "HTTPContextBundleClient", ContextClient)
@@ -904,17 +863,6 @@ def test_context_closure_card_binding_and_network_policy_are_exact(tmp_path):
     with pytest.raises(ReviewRunnerError, match="network policy is invalid"):
         _run(source, executable, invalid_network, environment, identity_private_key)
 
-    context_command = Path(
-        identity["artifacts"]["context_provider"]["resolved_path"]
-    ) / "bin/tgw-context-mcp"
-    context_command.chmod(0o444)
-    non_executable = json.loads(json.dumps(identity))
-    non_executable["artifacts"]["context_provider"] = _tree_artifact(
-        context_command.parents[1]
-    )
-    with pytest.raises(ReviewRunnerError, match="outside the held context closure"):
-        _run(source, executable, non_executable, environment, identity_private_key)
-
     argv_mismatch = json.loads(json.dumps(identity))
     argv_mismatch["argv_template"].remove("--strict-mcp-config")
     argv_mismatch["argv_template_hash"] = _hash(argv_mismatch["argv_template"])
@@ -924,12 +872,12 @@ def test_context_closure_card_binding_and_network_policy_are_exact(tmp_path):
 
 def test_adversarial_semantic_non_consumption_and_x_substitution_hold(tmp_path):
     ignored = _fixture(tmp_path / "ignored", consume_context=False)
-    with pytest.raises(ReviewRunnerError, match="context receipt is missing"):
-        _run(*ignored)
+    with pytest.raises(ReviewRunnerError, match="context challenge is unavailable"):
+        _run(*ignored, context_service_available=False)
 
     forged = _fixture(tmp_path / "forged", consume_context="forged")
-    with pytest.raises(ReviewRunnerError, match="binding|unauthenticated"):
-        _run(*forged)
+    with pytest.raises(ReviewRunnerError, match="context challenge is unavailable"):
+        _run(*forged, context_service_available=False)
 
     source, executable, identity, environment, private_key = _fixture(
         tmp_path / "substitution",
@@ -964,26 +912,13 @@ def test_context_comparison_report_and_enforced_egress_are_not_claims(tmp_path):
             changed, signing_private_key=private_key,
         )
 
-    with pytest.raises(ReviewRunnerError, match="context attestation"):
+    with pytest.raises(
+        ReviewRunnerError,
+        match="context attestation|bundle readback differs|resource binding differs",
+    ):
         _run(
             source, executable, identity, environment, private_key,
             context_bundle_mutator=stale_context,
-        )
-
-    def substituted_run(attestation, _run_id, _challenge):
-        changed = {
-            key: value for key, value in attestation.items()
-            if key not in {"attestation_hash", "signature"}
-        }
-        changed["run_id"] = "different-context-run"
-        return issue_harness_retrieval_attestation(
-            changed, signing_private_key=private_key,
-        )
-
-    with pytest.raises(ReviewRunnerError, match="run identity|readback differs"):
-        _run(
-            source, executable, identity, environment, private_key,
-            context_bundle_mutator=substituted_run,
         )
 
     def root_runtime(attestation, _run_id, _challenge):
@@ -998,7 +933,7 @@ def test_context_comparison_report_and_enforced_egress_are_not_claims(tmp_path):
             changed, signing_private_key=private_key,
         )
 
-    with pytest.raises(ReviewRunnerError, match="context attestation"):
+    with pytest.raises(ReviewRunnerError, match="context attestation|bundle readback differs"):
         _run(
             source, executable, identity, environment, private_key,
             context_bundle_mutator=root_runtime,
@@ -1083,16 +1018,16 @@ def test_context_comparison_report_and_enforced_egress_are_not_claims(tmp_path):
 
     wrong_identity = json.loads(json.dumps(identity))
     wrong_identity["sandbox_identity"]["uid"] += 1
-    with pytest.raises(ReviewRunnerError, match="MCP config is not closure-bound"):
+    with pytest.raises(ReviewRunnerError, match="environment authority is invalid"):
         _run(source, executable, wrong_identity, environment, private_key)
 
     retained = _run(source, executable, identity, environment, private_key)
-    retained["context_consumption"]["runtime_identity"]["uid"] += 1
+    retained["registered_resource_retrieval"]["runtime_identity"]["uid"] += 1
     context_unsigned = {
-        key: value for key, value in retained["context_consumption"].items()
+        key: value for key, value in retained["registered_resource_retrieval"].items()
         if key != "bundle_hash"
     }
-    retained["context_consumption"]["bundle_hash"] = _hash(context_unsigned)
+    retained["registered_resource_retrieval"]["bundle_hash"] = _hash(context_unsigned)
     execution_unsigned = {
         key: value for key, value in retained.items() if key != "execution_hash"
     }

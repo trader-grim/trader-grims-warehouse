@@ -89,7 +89,7 @@ def create_governed_review_role_receipt(
         != normalized["promptcraft_receipt_hash"]
     ):
         raise ValueError("governed review role receipt handoff is not exact")
-    context = normalized["context_consumption"]
+    context = normalized["registered_resource_retrieval"]
     attestation = context["retrieval_attestation"]
     passed = normalized["review"]["verdict"] == "PASS"
     unsigned = {
