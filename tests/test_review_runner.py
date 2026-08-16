@@ -114,10 +114,20 @@ class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
     def fetch(self, ref):
         return self._delegate.fetch(ref)
 
-    def verify_harness_retrieval_attestation(self, attestation, **_kwargs):
+    def verify_harness_retrieval_attestation(self, attestation, **kwargs):
         if attestation != {"attestation_hash": TEST_ATTESTATION_HASH}:
             raise ResourceVerificationError("test retrieval attestation is invalid")
-        return dict(attestation)
+        unsigned = {
+            "schema": "tgw-registered-resource-retrieval-attestation/v1",
+            "service_id": RESOURCE_SERVICE["id"], "run_id": "unit-run",
+            **kwargs,
+        }
+        return {
+            **unsigned,
+            "attestation_hash": "sha256:" + hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
 
 
 def resource_resolver(source):

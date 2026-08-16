@@ -13,7 +13,12 @@ import json
 import re
 from typing import Any, Mapping
 
-from tgw.execution_resources import CARD_RESOURCE_NAMES, RESOURCE_RECEIPT_SCHEMA
+from tgw.execution_resources import (
+    CARD_RESOURCE_NAMES,
+    RESOURCE_RECEIPT_SCHEMA,
+    ResourceVerificationError,
+    validate_harness_retrieval_attestation,
+)
 from tgw.governed_coding import validate_receipt
 
 SCHEMA = "tgw-candidate-governed-execution-receipt/v1"
@@ -142,6 +147,18 @@ def create_candidate_governed_execution_receipt(
         or role_receipt.get("role") != card["role"]
     ):
         raise GovernedExecutionReceiptError("governed role receipt binding mismatch")
+    try:
+        validate_harness_retrieval_attestation(
+            role_receipt["harness_retrieval_attestation"],
+            expected={
+                "card_hash": card_hash, "role": card["role"],
+                "execution_identity": role_receipt["execution_identity"],
+                "resource_receipt_hash": resource_hash, "resources": {name: bindings[name] for name in sorted(bindings)},
+                "service_id": card["resource_service"]["id"],
+            },
+        )
+    except ResourceVerificationError as exc:
+        raise GovernedExecutionReceiptError(f"governed role retrieval attestation is invalid: {exc}") from exc
     role_hash = role_receipt.get("receipt_hash")
     if not isinstance(role_hash, str) or _SHA256.fullmatch(role_hash) is None:
         raise GovernedExecutionReceiptError("governed role receipt hash is invalid")

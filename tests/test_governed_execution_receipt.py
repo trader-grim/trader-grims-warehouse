@@ -89,6 +89,19 @@ def resource_receipt(card_value):
 
 
 def role_receipt(card_value, resource_value):
+    handoff_hash = "sha256:" + "b" * 64
+    attestation_unsigned = {
+        "schema": "tgw-registered-resource-retrieval-attestation/v1",
+        "service_id": RESOURCE_SERVICE["id"],
+        "run_id": "candidate-run",
+        "card_hash": card_value["card_hash"],
+        "role": "implementation",
+        "execution_identity": "candidate-context:1",
+        "handoff_hash": handoff_hash,
+        "resource_receipt_hash": resource_value["receipt_hash"],
+        "resources": {name: value for name, value in sorted(card_value["bindings"].items())},
+    }
+    attestation = {**attestation_unsigned, "attestation_hash": canonical_hash(attestation_unsigned)}
     unsigned = {
         "schema": "tgw-governed-coding-receipt/v1",
         "status": "PASS",
@@ -97,10 +110,11 @@ def role_receipt(card_value, resource_value):
         "execution_identity": "candidate-context:1",
         "card_hash": card_value["card_hash"],
         "promptcraft_receipt_hash": "sha256:" + "a" * 64,
+        "handoff_hash": handoff_hash,
         "resource_receipt_hash": resource_value["receipt_hash"],
         "harness_resource_receipt_hash": resource_value["receipt_hash"],
-        "harness_retrieval_attestation_hash": "sha256:" + "d" * 64,
-        "harness_retrieval_attestation": {"attestation_hash": "sha256:" + "d" * 64},
+        "harness_retrieval_attestation_hash": attestation["attestation_hash"],
+        "harness_retrieval_attestation": attestation,
         "resource_service_descriptor_hash": canonical_hash(RESOURCE_SERVICE),
         "outcome": "satisfied",
         "established_conditions": ["implemented"],
@@ -128,6 +142,27 @@ def test_candidate_receipt_binds_card_resources_and_role_to_exact_git_identity(t
         receipt, source_commit=commit, source_tree=tree, plan_commit=PLAN_COMMIT
     ) == receipt
     assert receipt["role_receipt_hash"] == role["receipt_hash"]
+
+
+def test_candidate_receipt_rejects_a_structurally_plausible_but_tampered_attestation(tmp_path):
+    _repo, commit, tree = candidate_repo(tmp_path)
+    card_value = card(tree)
+    resources = resource_receipt(card_value)
+    role = role_receipt(card_value, resources)
+    role["harness_retrieval_attestation"]["run_id"] = "substituted-run"
+    unsigned_role = dict(role)
+    unsigned_role.pop("receipt_hash")
+    role["receipt_hash"] = canonical_hash(unsigned_role)
+
+    with pytest.raises(GovernedExecutionReceiptError, match="attestation is invalid"):
+        create_candidate_governed_execution_receipt(
+            card=card_value,
+            resource_receipt=resources,
+            role_receipt=role,
+            source_commit=commit,
+            source_tree=tree,
+            plan_commit=PLAN_COMMIT,
+        )
 
 
 def test_candidate_binding_refuses_a_card_for_another_source_tree(tmp_path):

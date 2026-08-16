@@ -14,6 +14,7 @@ from tgw.execution_resources import (
     ResourceResolver,
     ResourceVerificationError,
     resource_service_descriptor_hash,
+    validate_harness_retrieval_attestation,
     verify_card_resource_service,
     verify_card_resources,
 )
@@ -227,13 +228,14 @@ def dispatch_role(
         attestation_error = "runner did not return a service-issued retrieval attestation"
     else:
         try:
-            verified_attestation = resource_resolver.verify_harness_retrieval_attestation(
+                verified_attestation = resource_resolver.verify_harness_retrieval_attestation(
                 harness_retrieval_attestation,
                 card_hash=card["card_hash"], role=role,
                 execution_identity=execution_identity, handoff_hash=handoff["handoff_hash"],
                 resource_receipt_hash=resource_receipt["receipt_hash"], resources=card["bindings"],
-            )
-            attestation_hash = str(verified_attestation["attestation_hash"])
+                )
+                attestation_hash = str(verified_attestation["attestation_hash"])
+                harness_retrieval_attestation = verified_attestation
         except ResourceVerificationError as exc:
             attestation_error = str(exc)
     valid_success = (
@@ -262,6 +264,7 @@ def dispatch_role(
             "execution_identity": execution_identity,
             "card_hash": card["card_hash"],
             "promptcraft_receipt_hash": handoff["receipt"]["receipt_hash"],
+            "handoff_hash": handoff["handoff_hash"],
             "resource_receipt_hash": resource_receipt["receipt_hash"],
             "harness_resource_receipt_hash": harness_resource_receipt_hash,
             "harness_retrieval_attestation_hash": attestation_hash,
@@ -292,6 +295,7 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
         not isinstance(receipt.get("selected_provider"), str)
         or not isinstance(receipt.get("card_hash"), str)
         or not isinstance(receipt.get("promptcraft_receipt_hash"), str)
+        or not isinstance(receipt.get("handoff_hash"), str)
         or not isinstance(receipt.get("resource_receipt_hash"), str)
         or receipt.get("harness_resource_receipt_hash") != receipt.get("resource_receipt_hash")
         or not isinstance(receipt.get("resource_service_descriptor_hash"), str)
@@ -302,6 +306,19 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
         <= set(receipt.get("established_conditions", ()))
     ):
         raise GovernedCodingError("passing governed coding receipt lacks role evidence")
+    if receipt.get("status") == "PASS":
+        try:
+            validate_harness_retrieval_attestation(
+                attestation,
+                expected={
+                    "card_hash": receipt["card_hash"], "role": receipt["role"],
+                    "execution_identity": receipt["execution_identity"],
+                    "handoff_hash": receipt["handoff_hash"],
+                    "resource_receipt_hash": receipt["resource_receipt_hash"],
+                },
+            )
+        except ResourceVerificationError as exc:
+            raise GovernedCodingError(f"passing governed coding receipt attestation is invalid: {exc}") from exc
 
 
 def admission_gate(receipts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

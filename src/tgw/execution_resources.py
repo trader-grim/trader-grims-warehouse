@@ -84,6 +84,52 @@ def _is_hash(value: Any) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
 
 
+def validate_harness_retrieval_attestation(
+    attestation: Mapping[str, Any], *, expected: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate a durable service retrieval record before it can become evidence.
+
+    A bare hash is not an attestation.  The record carries the service and run
+    identities plus every content-addressed card binding, and its hash covers
+    the complete canonical form.  ``expected`` lets the dispatch and candidate
+    paths bind it to their independently held card and handoff identities.
+    """
+    required = {
+        "schema", "service_id", "run_id", "card_hash", "role", "execution_identity",
+        "handoff_hash", "resource_receipt_hash", "resources", "attestation_hash",
+    }
+    if not isinstance(attestation, Mapping) or set(attestation) != required:
+        raise ResourceVerificationError("harness retrieval attestation is invalid")
+    if attestation.get("schema") != HARNESS_RETRIEVAL_ATTESTATION_SCHEMA:
+        raise ResourceVerificationError("harness retrieval attestation schema is invalid")
+    if not isinstance(attestation.get("service_id"), str) or _SERVICE_ID.fullmatch(attestation["service_id"]) is None:
+        raise ResourceVerificationError("harness retrieval attestation service identity is invalid")
+    if not isinstance(attestation.get("run_id"), str) or _RUN_ID.fullmatch(attestation["run_id"]) is None:
+        raise ResourceVerificationError("harness retrieval attestation run identity is invalid")
+    if not isinstance(attestation.get("role"), str) or not attestation["role"]:
+        raise ResourceVerificationError("harness retrieval attestation role is invalid")
+    if not isinstance(attestation.get("execution_identity"), str) or not attestation["execution_identity"]:
+        raise ResourceVerificationError("harness retrieval attestation execution identity is invalid")
+    for field in ("card_hash", "handoff_hash", "resource_receipt_hash", "attestation_hash"):
+        if not _is_hash(attestation.get(field)):
+            raise ResourceVerificationError("harness retrieval attestation hash is invalid")
+    resources = attestation.get("resources")
+    if not isinstance(resources, Mapping) or set(resources) != CARD_RESOURCE_NAMES:
+        raise ResourceVerificationError("harness retrieval attestation resources are invalid")
+    normalized_resources = {name: dict(resources[name]) for name in sorted(CARD_RESOURCE_NAMES)}
+    for name, binding in normalized_resources.items():
+        _binding(binding, name)
+    unsigned = dict(attestation)
+    claimed = unsigned.pop("attestation_hash")
+    if claimed != _hash(unsigned):
+        raise ResourceVerificationError("harness retrieval attestation hash mismatch")
+    if expected is not None:
+        for key, value in expected.items():
+            if attestation.get(key) != value:
+                raise ResourceVerificationError("harness retrieval attestation binding mismatch")
+    return {**dict(attestation), "resources": normalized_resources}
+
+
 def validate_resource_service_descriptor(descriptor: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize the sole portable resource-service descriptor contract."""
 
@@ -435,15 +481,10 @@ class HTTPRegisteredResourceResolver:
             self._endpoint + "/v1/harness-runs/" + quote(run_id, safe="") + "/complete",
             method="POST", value={"schema": HARNESS_RUN_SCHEMA, "run_id": run_id},
         ))
-        required = {
-            "schema", "service_id", "run_id", "card_hash", "role", "execution_identity",
-            "handoff_hash", "resource_receipt_hash", "resources", "attestation_hash",
-        }
-        if set(result) != required or result.get("schema") != HARNESS_RETRIEVAL_ATTESTATION_SCHEMA:
-            raise ResourceVerificationError("registered resource service retrieval attestation is invalid")
-        if result.get("service_id") != self._service_id or result.get("run_id") != run_id:
+        verified = validate_harness_retrieval_attestation(result)
+        if verified.get("service_id") != self._service_id or verified.get("run_id") != run_id:
             raise ResourceVerificationError("registered resource service retrieval attestation binding is invalid")
-        return result
+        return verified
 
     def verify_harness_retrieval_attestation(
         self, attestation: Mapping[str, Any], *, card_hash: str, role: str,
@@ -451,16 +492,15 @@ class HTTPRegisteredResourceResolver:
         resources: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Read back the service record; a runner cannot self-attest by echoing."""
-        if not isinstance(attestation, Mapping) or attestation.get("schema") != HARNESS_RETRIEVAL_ATTESTATION_SCHEMA:
-            raise ResourceVerificationError("harness retrieval attestation is invalid")
-        run_id = attestation.get("run_id")
+        local = validate_harness_retrieval_attestation(attestation)
+        run_id = local.get("run_id")
         if not isinstance(run_id, str) or _RUN_ID.fullmatch(run_id) is None:
             raise ResourceVerificationError("harness retrieval attestation run id is invalid")
         recorded = dict(self._json_request(
             self._endpoint + "/v1/harness-runs/" + quote(run_id, safe="") + "/attestation",
             method="GET",
         ))
-        if recorded != dict(attestation):
+        if recorded != local:
             raise ResourceVerificationError("harness retrieval attestation was not issued by the service")
         expected = {
             "schema": HARNESS_RETRIEVAL_ATTESTATION_SCHEMA, "service_id": self._service_id,
@@ -468,11 +508,7 @@ class HTTPRegisteredResourceResolver:
             "handoff_hash": handoff_hash, "resource_receipt_hash": resource_receipt_hash,
             "resources": {name: resources[name] for name in sorted(CARD_RESOURCE_NAMES)},
         }
-        if any(recorded.get(key) != value for key, value in expected.items()):
-            raise ResourceVerificationError("harness retrieval attestation binding mismatch")
-        if not _is_hash(recorded.get("attestation_hash")):
-            raise ResourceVerificationError("harness retrieval attestation hash is invalid")
-        return recorded
+        return validate_harness_retrieval_attestation(recorded, expected=expected)
 
     def fetch(self, ref: str) -> RegisteredResource:
         return self._fetch(ref)

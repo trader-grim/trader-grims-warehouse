@@ -88,18 +88,37 @@ def packet(tmp_path, *, configured=True):
 
 
 def governed_receipt(packet_value, *, passed):
+    card_hash = "sha256:" + "d" * 64
+    resource_receipt_hash = "sha256:" + "e" * 64
+    resources = {
+        name: {"ref": f"test:{name}", "hash": "sha256:" + "c" * 64}
+        for name in (
+            "plan_input", "plan_commit", "plan_graph", "codegraph_snapshot", "source_tree",
+            "execution_environment", "authority_conditions", "receipt_sink",
+        )
+    }
+    handoff_hash = "sha256:" + "b" * 64
+    attestation_unsigned = {
+        "schema": "tgw-registered-resource-retrieval-attestation/v1",
+        "service_id": "review-service", "run_id": "review-run", "card_hash": card_hash,
+        "role": "independent-review", "execution_identity": "review-context:1",
+        "handoff_hash": handoff_hash, "resource_receipt_hash": resource_receipt_hash,
+        "resources": resources,
+    }
+    attestation = {**attestation_unsigned, "attestation_hash": hash_object(attestation_unsigned)}
     unsigned = {
         "schema": "tgw-governed-coding-receipt/v1",
         "status": "PASS" if passed else "FAIL",
         "role": "independent-review",
         "selected_provider": packet_value["selected_provider"],
         "execution_identity": "review-context:1",
-        "card_hash": "sha256:card",
+        "card_hash": card_hash,
         "promptcraft_receipt_hash": "sha256:promptcraft",
-        "resource_receipt_hash": "sha256:resources",
-        "harness_resource_receipt_hash": "sha256:resources",
-        "harness_retrieval_attestation_hash": "sha256:" + "a" * 64,
-        "harness_retrieval_attestation": {"attestation_hash": "sha256:" + "a" * 64},
+        "handoff_hash": handoff_hash,
+        "resource_receipt_hash": resource_receipt_hash,
+        "harness_resource_receipt_hash": resource_receipt_hash,
+        "harness_retrieval_attestation_hash": attestation["attestation_hash"],
+        "harness_retrieval_attestation": attestation,
         "resource_service_descriptor_hash": "sha256:service",
         "outcome": "satisfied" if passed else "failed",
         "established_conditions": ["reviewed"] if passed else [],
