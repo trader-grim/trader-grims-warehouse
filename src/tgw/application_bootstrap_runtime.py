@@ -37,10 +37,25 @@ BUILD_ENVIRONMENT_SCHEMA = "tgw-w08-controller-build-environment/v1"
 SOURCE_SCHEMA = "tgw-w09-controller-bundle-receipt/v1"
 _SHA = re.compile(r"sha256:[0-9a-f]{64}")
 _GIT = re.compile(r"[0-9a-f]{40}")
+_COMPILER_PATH = re.compile(r"/[A-Za-z0-9._/-]+")
 
 
 class ControllerRuntimeError(ValueError):
     pass
+
+
+def _compiler_binding_path(value: Any) -> str:
+    """Return one canonical path safe for a quoted compiler definition."""
+
+    if (
+        not isinstance(value, str)
+        or _COMPILER_PATH.fullmatch(value) is None
+        or "//" in value
+        or any(part in {"", ".", ".."} for part in value.split("/")[1:])
+        or str(Path(value)) != value
+    ):
+        raise ControllerRuntimeError("controller compiler binding path is invalid")
+    return value
 
 
 def _validate_build_environment(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -125,6 +140,8 @@ def _run_build_trace(
     extra_fds: Sequence[int] = (),
 ) -> tuple[bytes, bytes, list[str]]:
     from tgw.a3_preintegration_observation import _run_held_bounded
+
+    binding_path = _compiler_binding_path(binding_path)
 
     command = [
         f"/proc/self/fd/{tracer_fd}",
@@ -583,6 +600,7 @@ def produce_launcher_build(
     trusted_uid: int = 0,
 ) -> dict[str, Any]:
     """Compile and attest one launcher through the pinned W08 build closure."""
+    binding_text = _compiler_binding_path(str(binding_path))
     held: list[int] = []
     postchecks: list[tuple[Mapping[str, Any], int, bool]] = []
     root_fd = -1
@@ -694,7 +712,7 @@ def produce_launcher_build(
             "launcher-"
             + launcher_source["sha256"].removeprefix("sha256:")
             + "-"
-            + hashlib.sha256(str(binding_path).encode()).hexdigest()
+            + hashlib.sha256(binding_text.encode()).hexdigest()
         )
         output_fd = os.open(
             output_name,
@@ -710,7 +728,7 @@ def produce_launcher_build(
             compiler_fd=compiler_fd,
             source_fd=source_fd,
             output_path=output_proc,
-            binding_path=str(binding_path),
+            binding_path=binding_text,
             environment=environment,
             cwd_fd=cwd_fd,
             extra_fds=(output_fd,),
@@ -1022,6 +1040,12 @@ def materialize_controller_runtime(
         build_directories = build.get("build_directories")
         trace_binding = build.get("trace")
         executed_argv = build.get("executed_argv")
+        try:
+            build_binding_path = _compiler_binding_path(build.get("binding_path"))
+        except ControllerRuntimeError as exc:
+            raise ControllerRuntimeError(
+                "controller launcher build evidence is underbound"
+            ) from exc
         expected_argv_tail = [
             "-f",
             "-qq",
@@ -1057,13 +1081,11 @@ def materialize_controller_runtime(
             or executed_argv[1:8] != expected_argv_tail
             or re.fullmatch(r"/proc/self/fd/[0-9]+", str(executed_argv[8])) is None
             or executed_argv[9:14] != ["-static", "-O2", "-Wall", "-Wextra", "-Werror"]
-            or executed_argv[14] != f'-DBINDING_PATH="{build.get("binding_path")}"'
+            or executed_argv[14] != f'-DBINDING_PATH="{build_binding_path}"'
             or executed_argv[15] != "-o"
             or re.fullmatch(r"/proc/[0-9]+/fd/[0-9]+", str(executed_argv[16])) is None
             or executed_argv[17:19] != ["-x", "c"]
             or re.fullmatch(r"/proc/[0-9]+/fd/[0-9]+", str(executed_argv[19])) is None
-            or not isinstance(build.get("binding_path"), str)
-            or not Path(build["binding_path"]).is_absolute()
         ):
             raise ControllerRuntimeError("controller launcher build evidence is underbound")
         environment_receipt, environment_receipt_fd = _read_json(
@@ -1200,7 +1222,7 @@ def materialize_controller_runtime(
         closure_name = f"{stem}.closure"
         config_name = f"{stem}.fds"
         receipt_name = f"{stem}.receipt.json"
-        if build["binding_path"] != str(Path(output_root) / config_name):
+        if build_binding_path != str(Path(output_root) / config_name):
             raise ControllerRuntimeError("controller launcher targets a different runtime config")
         manifest_identity = _write_once(root_fd, manifest_name, manifest_raw, 0o400)
         created.append(manifest_name)

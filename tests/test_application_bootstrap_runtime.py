@@ -205,6 +205,27 @@ def test_real_launcher_build_producer_pins_discovered_environment_and_static_out
     assert "$SCRATCH" in environment_receipt["accesses"]
 
 
+@pytest.mark.parametrize(
+    "binding_path",
+    [
+        Path('/etc/tgw/runtime" -DINJECTED=1 -DREST=".fds'),
+        Path("/etc/tgw/runtime\\escape.fds"),
+        Path("/etc/tgw/../runtime.fds"),
+    ],
+)
+def test_launcher_build_rejects_compiler_definition_path_injection(
+    tmp_path, binding_path,
+):
+    source_binding, source = _real_launcher_source_receipt(tmp_path)
+    with pytest.raises(runtime.ControllerRuntimeError, match="binding path"):
+        _real_launcher_build(
+            tmp_path,
+            source_binding=source_binding,
+            source=source,
+            binding_path=binding_path,
+        )
+
+
 def test_real_launcher_build_rejects_cwd_changed_after_environment_issue(tmp_path):
     source_binding, source = _real_launcher_source_receipt(tmp_path)
     with pytest.raises(runtime.ControllerRuntimeError, match="build cwd"):

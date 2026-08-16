@@ -183,7 +183,7 @@ def backend(path, verdict="PASS", mutate=False):
         "request=json.load(sys.stdin)\n"
         f"verdict={verdict!r}\n"
         f"mutate={mutate!r}\n"
-        "if mutate: pathlib.Path('app.py').write_text('mutated')\n"
+        "if mutate: pathlib.Path('/workspace/app.py').write_text('mutated')\n"
         "findings=[] if verdict=='PASS' else [{'severity':'high','path':'app.py','line':2,'message':'incorrect result'}]\n"
         "print(json.dumps({'schema':'tgw-code-review/v1','verdict':verdict,'snapshot_hash':request['snapshot_hash'],'summary':'review complete','findings':findings}))\n"
     )
@@ -216,6 +216,19 @@ def test_bwrap_translates_snapshot_path_and_clears_ambient_environment(tmp_path,
     )
     provider.chmod(0o755)
     assert run_review(handoff(source), [str(provider)])["outcome"] == "satisfied"
+
+
+def test_candidate_cannot_supply_provider_imports_or_cwd_modules(tmp_path):
+    source = snapshot(tmp_path)
+    (source / "json.py").write_text("raise RuntimeError('candidate cwd import')\n")
+    (source / "src").mkdir()
+    (source / "src/json.py").write_text(
+        "raise RuntimeError('candidate PYTHONPATH import')\n"
+    )
+
+    assert run_review(
+        handoff(source), [backend(tmp_path / "trusted-review-provider")]
+    )["outcome"] == "satisfied"
 
 
 def test_failed_semantic_review_never_establishes_reviewed(tmp_path):

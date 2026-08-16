@@ -92,7 +92,7 @@ def _sandbox_command(
         if Path(system_path).exists():
             command.extend(["--ro-bind", system_path, system_path])
     command.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
-    command.extend(["--ro-bind", str(snapshot), "/workspace", "--chdir", "/workspace"])
+    command.extend(["--ro-bind", str(snapshot), "/workspace"])
     if executable.name.startswith("python"):
         runtime = executable.parent.parent
         command.extend(["--ro-bind", str(runtime), "/runtime"])
@@ -101,9 +101,11 @@ def _sandbox_command(
         command.extend(["--ro-bind", str(executable), "/review-provider"])
         provider = ["/review-provider", *provider_argv[1:]]
     command.extend(["--setenv", "PATH", "/runtime/bin:/usr/bin:/bin"])
-    command.extend(["--setenv", "PYTHONPATH", "/workspace/src"])
     command.extend(["--setenv", "HOME", "/tmp/home"])
-    command.extend(["--dir", "/tmp/home"])
+    # The candidate is data for the reviewer, never its import root or cwd.
+    # Python places cwd on sys.path even without PYTHONPATH, so execute from an
+    # empty sandbox-owned directory and pass /workspace only in the request.
+    command.extend(["--dir", "/tmp/home", "--chdir", "/tmp/home"])
     if network_egress:
         if credential_file is None or not credential_file.is_file():
             raise ReviewRunnerError("declared network review credential is unavailable")
