@@ -38,11 +38,14 @@ NAVIGATION = {
 
 
 def _status(row: Mapping[str, Any], now: datetime) -> str:
-    if row.get("receipt_id") or row.get("consumed_at"):
-        return "consumed"
-    decision = row.get("decision_kind")
-    if decision:
-        return str(decision)
+    # The latest durable execution attempt is the source of truth.  A retry
+    # preserves the exact approval but remains visible instead of being
+    # collapsed into an indistinguishable "consumed" state.
+    outcome = row.get("outcome")
+    if outcome and outcome != "retry":
+        return str(outcome)
+    if row.get("receipt_id") and not row.get("completed_at"):
+        return "executing"
     expires = row.get("expires_at")
     if isinstance(expires, str):
         expires = datetime.fromisoformat(expires.replace("Z", "+00:00"))
@@ -51,6 +54,11 @@ def _status(row: Mapping[str, Any], now: datetime) -> str:
             expires = expires.replace(tzinfo=timezone.utc)
         if expires <= now:
             return "expired"
+    if outcome == "retry":
+        return "retry"
+    decision = row.get("decision_kind")
+    if decision:
+        return str(decision)
     return "pending"
 
 
@@ -60,7 +68,7 @@ def project_request(row: Mapping[str, Any], *, now: datetime | None = None) -> d
     actions = ["view-evidence"]
     if status == "pending":
         actions.extend(("approve", "hold", "reconcile"))
-    elif status == "approve":
+    elif status in {"approve", "retry"}:
         actions.append("consume-by-executor")
     return {
         "request_id": row.get("request_id"),
@@ -86,6 +94,15 @@ def project_request(row: Mapping[str, Any], *, now: datetime | None = None) -> d
             "at": row.get("decided_at"),
         } if row.get("decision_kind") else None,
         "receipt_id": row.get("receipt_id"),
+        "execution": {
+            "handler_id": row.get("handler_id"),
+            "started_at": row.get("started_at"),
+            "completed_at": row.get("completed_at"),
+            "outcome": row.get("outcome"),
+            "evidence": list(row.get("execution_evidence") or ()),
+            "rollback_receipt": row.get("rollback_receipt"),
+            "detail": row.get("detail") or "",
+        } if row.get("receipt_id") else None,
         "legal_actions": actions,
         "authority": AUTHORITY_SCHEMA,
     }
@@ -98,6 +115,7 @@ def create_operator_console_router(
     load_solution: Callable[[str], Mapping[str, Any]],
     require_operator: Callable[[], Any],
     require_executor: Callable[[], Any],
+    execute_effect: Callable[..., Any] | None = None,
 ) -> APIRouter:
     """Return one mountable router for UI, shared API, and authority writes."""
     router = APIRouter()
@@ -107,6 +125,7 @@ def create_operator_console_router(
         load_solution=load_solution,
         require_operator=require_operator,
         require_executor=require_executor,
+        execute_effect=execute_effect,
     ))
 
     @router.get("/api/operator-console/discovery", dependencies=[Depends(require_operator)])

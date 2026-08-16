@@ -90,6 +90,8 @@ def load_config(path: Path) -> Dict[str, Any]:
     standalone_plan_root = p("standalone_plan_root", "/opt/TGW/library/plans")
     plan_repository_root = p("plan_repository_root", str(standalone_plan_root))
     plan_approved_commit = raw.get("plan_approved_commit")
+    plan_approved_solution_hash = raw.get("plan_approved_solution_hash")
+    plan_authority_executor_credential_env = raw.get("plan_authority_executor_credential_env")
     plan_git_path = p("plan_git_path", "git")
 
     # If an approved commit is configured, every canonical path below must be
@@ -129,6 +131,18 @@ def load_config(path: Path) -> Dict[str, Any]:
             raise ValueError("standalone Plan materialization does not match approved commit")
         if status.returncode or status.stdout:
             raise ValueError("standalone Plan materialization is not clean")
+    if plan_approved_solution_hash is not None:
+        if not isinstance(plan_approved_solution_hash, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", plan_approved_solution_hash
+        ):
+            raise ValueError("plan_approved_solution_hash must be an exact solution hash")
+    if (plan_approved_commit is None) != (plan_approved_solution_hash is None):
+        raise ValueError("approved Plan commit and solution must be configured together")
+    if plan_authority_executor_credential_env is not None and (
+        not isinstance(plan_authority_executor_credential_env, str)
+        or not re.fullmatch(r"[A-Z][A-Z0-9_]*", plan_authority_executor_credential_env)
+    ):
+        raise ValueError("plan_authority_executor_credential_env must name an environment variable")
 
     full_catalog_path = p("full_catalog_path", str(catalog_root / "master-catalog.json"))
     search_catalog_path = p("search_catalog_path", str(catalog_root / "search-catalog.json"))
@@ -262,6 +276,8 @@ def load_config(path: Path) -> Dict[str, Any]:
         "standalone_plan_root": standalone_plan_root,
         "plan_repository_root": plan_repository_root,
         "plan_approved_commit": plan_approved_commit,
+        "plan_approved_solution_hash": plan_approved_solution_hash,
+        "plan_authority_executor_credential_env": plan_authority_executor_credential_env,
         "plan_git_path": plan_git_path,
         "plan_inbox_path": plan_vault_path / "inbox",
         # Canonical Plan intent lives only in the standalone repository.  The

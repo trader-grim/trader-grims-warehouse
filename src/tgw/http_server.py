@@ -336,6 +336,30 @@ def _require_auth(
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
 
 
+def _require_plan_executor(request: Request) -> str:
+    """Authenticate a dedicated effect executor, never an operator session.
+
+    Operator credentials may request/decide and inspect authority.  They cannot
+    redeem it: the executor needs its separately configured secret and a named
+    executor identity, which keeps the HTTP /consume capability out of the
+    normal browser/API-key role.
+    """
+    reference = _cfg.get("plan_authority_executor_credential_env")
+    supplied = request.headers.get("X-TGW-Executor-Authorization", "")
+    identity = request.headers.get("X-TGW-Executor-Identity", "")
+    expected = os.environ.get(reference) if isinstance(reference, str) else None
+    if (
+        not expected
+        or not identity
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}", identity)
+        or not supplied.startswith("Bearer ")
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid Plan authority executor")
+    if not secrets.compare_digest(supplied.removeprefix("Bearer ").encode(), expected.encode()):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid Plan authority executor")
+    return f"executor:{identity}"
+
+
 AUTH = Depends(_require_auth)
 
 # Consolidated PlanAuthority console. The late-bound host adapter performs no
@@ -345,7 +369,7 @@ mount_operator_console(
     configured_console_mount(
         lambda: _cfg,
         require_operator=_require_auth,
-        require_executor=_require_auth,
+        require_executor=_require_plan_executor,
     ),
 )
 

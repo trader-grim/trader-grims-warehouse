@@ -39,18 +39,24 @@ class OperatorConsoleMount:
     load_solution: Callable[[str], Mapping[str, Any]]
     require_operator: Callable[[], Any]
     require_executor: Callable[[], Any]
+    # Only a registered AuthorityEffectController (or equivalent closed
+    # dispatcher) may be mounted here.  ``None`` leaves /consume fail-closed.
+    execute_effect: Callable[..., Any] | None = None
 
 
 def mount_operator_console(app: FastAPI, config: OperatorConsoleMount) -> None:
     """Mount once, preserving the host's auth functions as dependencies."""
     if getattr(app.state, _MOUNTED_ATTRIBUTE, False):
         raise RuntimeError("operator console is already mounted")
+    if config.require_operator is config.require_executor:
+        raise RuntimeError("executor authorization must be separate from operator authorization")
     router = create_operator_console_router(
         config.store,
         current_plan_commit=config.current_plan_commit,
         load_solution=config.load_solution,
         require_operator=config.require_operator,
         require_executor=config.require_executor,
+        execute_effect=config.execute_effect,
     )
     existing = {
         (route.path, tuple(sorted(getattr(route, "methods", None) or ())))

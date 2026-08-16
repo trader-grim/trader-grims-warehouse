@@ -8,12 +8,14 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from tgw.effect_handlers import AuthorityEffectController, EffectHandlerError, TypedEffectHandlerRegistry
 from tgw.operator_console_plugin import OperatorConsoleMount
 from tgw.plan_authority import PostgresAuthorityStore
 
 DEFAULT_PLAN_ROOT = Path("/opt/TGW/library/plans")
 _IDENTITY = re.compile(r"^[A-Za-z0-9:._-]+$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_SOLUTION_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def plan_root(config: Mapping[str, Any]) -> Path:
@@ -24,9 +26,11 @@ def current_plan_commit(config_provider: Callable[[], Mapping[str, Any]]) -> str
     config = config_provider()
     root = plan_root(config)
     approved = config.get("plan_approved_commit")
-    if approved is not None and (not isinstance(approved, str) or not _COMMIT.fullmatch(approved)):
-        raise RuntimeError("approved standalone Plan commit is invalid")
-    ref = approved or "HEAD"
+    if not isinstance(approved, str) or not _COMMIT.fullmatch(approved):
+        # Plan HEAD is an update source, not effect authority.  A host must
+        # explicitly bind the console to a frozen approved Plan materialization.
+        raise RuntimeError("exact approved standalone Plan commit is required")
+    ref = approved
     git_path = str(config.get("plan_git_path") or "git")
     result = subprocess.run(
         [git_path, "-c", f"safe.directory={root}", "-C", str(root), "rev-parse", "--verify", f"{ref}^{{commit}}"],
@@ -41,7 +45,13 @@ def load_solution(config_provider: Callable[[], Mapping[str, Any]], solution_has
     """Load one exact persisted solution; absence remains an explicit hold."""
     if not _IDENTITY.fullmatch(solution_hash):
         raise ValueError("invalid solution identity")
-    directory = plan_root(config_provider()) / "plan" / "execution" / "solutions"
+    config = config_provider()
+    approved = config.get("plan_approved_solution_hash")
+    if not isinstance(approved, str) or not _SOLUTION_HASH.fullmatch(approved):
+        raise ValueError("exact approved Plan solution is required")
+    if solution_hash != approved:
+        raise ValueError("requested solution is not the approved Plan solution")
+    directory = plan_root(config) / "plan" / "execution" / "solutions"
     matches: list[Mapping[str, Any]] = []
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
         try:
@@ -52,6 +62,8 @@ def load_solution(config_provider: Callable[[], Mapping[str, Any]], solution_has
             matches.append(payload)
     if len(matches) != 1:
         raise ValueError(f"persisted Plan solution unavailable or ambiguous: {solution_hash}")
+    if matches[0].get("plan_commit") != current_plan_commit(config_provider):
+        raise ValueError("persisted Plan solution is not bound to the approved Plan commit")
     return matches[0]
 
 
@@ -73,8 +85,16 @@ class ConfiguredAuthorityStore:
     def decide(self, decision):
         return self._store().decide(decision)
 
-    def consume(self, request_id, *, effect_hash, generation):
-        return self._store().consume(request_id, effect_hash=effect_hash, generation=generation)
+    def begin_execution(self, request_id, *, effect_hash, generation, handler_id):
+        return self._store().begin_execution(
+            request_id, effect_hash=effect_hash, generation=generation, handler_id=handler_id,
+        )
+
+    def complete_execution(self, receipt_id, *, outcome, evidence=(), rollback_receipt=None, detail=""):
+        return self._store().complete_execution(
+            receipt_id, outcome=outcome, evidence=evidence,
+            rollback_receipt=rollback_receipt, detail=detail,
+        )
 
     def get(self, request_id):
         return self._store().get(request_id)
@@ -86,16 +106,53 @@ class ConfiguredAuthorityStore:
         return self._store().events(request_id)
 
 
+def _unmounted_provider(name: str) -> Callable[[Mapping[str, str]], Mapping[str, Any]]:
+    """Keep the closed registry mounted while refusing unavailable host effects.
+
+    The controller still writes a durable failed/rollback receipt.  No caller
+    can escape this path to invoke a command or ambient provider directly.
+    The receipt-only authority canary is registered inside
+    :class:`TypedEffectHandlerRegistry` and remains executable for end-to-end
+    authority health checks.
+    """
+    def unavailable(_: Mapping[str, str]) -> Mapping[str, Any]:
+        raise EffectHandlerError(f"registered {name} provider is unavailable on this host")
+    return unavailable
+
+
+def configured_execution_controller(store: ConfiguredAuthorityStore) -> AuthorityEffectController:
+    """Build the one host execution boundary over the canonical store.
+
+    Concrete provider mounting is deliberately explicit.  Until a host mounts
+    an allowlisted provider, its typed effect is denied *inside* the controller
+    and receives a durable outcome; it can never fall back to /consume's old
+    direct-redemption path.
+    """
+    registry = TypedEffectHandlerRegistry(
+        release_install=_unmounted_provider("coding-release"),
+        release_rollback=_unmounted_provider("coding-release rollback"),
+        flake_push=_unmounted_provider("bounded-flake-push"),
+        flake_switch_record=_unmounted_provider("flake-switch-record-only"),
+        dependency_resubmit=_unmounted_provider("dependency-resubmit"),
+        bootstrap_install=_unmounted_provider("approval-platform-bootstrap-deployment"),
+        bootstrap_rollback=_unmounted_provider("approval-platform-bootstrap-deployment rollback"),
+    )
+    return AuthorityEffectController(registry, store)
+
+
 def configured_console_mount(
     config_provider: Callable[[], Mapping[str, Any]],
     *,
     require_operator: Callable[[], Any],
     require_executor: Callable[[], Any],
+    execute_effect: Callable[..., Any] | None = None,
 ) -> OperatorConsoleMount:
+    store = ConfiguredAuthorityStore(config_provider)
     return OperatorConsoleMount(
-        store=ConfiguredAuthorityStore(config_provider),
+        store=store,
         current_plan_commit=lambda: current_plan_commit(config_provider),
         load_solution=lambda identity: load_solution(config_provider, identity),
         require_operator=require_operator,
         require_executor=require_executor,
+        execute_effect=execute_effect or configured_execution_controller(store).execute,
     )

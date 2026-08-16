@@ -74,7 +74,9 @@ def test_projection_reports_status_evidence_and_only_legal_actions():
     assert project_request(_row(decision_kind="approve"))["legal_actions"] == [
         "view-evidence", "consume-by-executor",
     ]
-    assert project_request(_row(receipt_id="receipt:done"))["status"] == "consumed"
+    assert project_request(_row(
+        receipt_id="receipt:done", completed_at=datetime.now(timezone.utc), outcome="succeeded",
+    ))["status"] == "succeeded"
 
 
 def test_mount_exposes_shared_api_site_and_canonical_authority_router():
@@ -116,10 +118,14 @@ def test_plugin_mount_uses_host_auth_and_returns_flutter_json():
         if authorization != "Bearer shared-host-token":
             raise HTTPException(401, "host auth rejected")
 
+    def executor_auth(authorization: str | None = Header(default=None)):
+        if authorization != "Bearer executor-token":
+            raise HTTPException(401, "executor auth rejected")
+
     config = OperatorConsoleMount(
         store=Store(_row()), current_plan_commit=lambda: "f" * 40,
         load_solution=lambda _: {}, require_operator=host_auth,
-        require_executor=host_auth,
+        require_executor=executor_auth,
     )
     mount_operator_console(app, config)
     client = TestClient(app)

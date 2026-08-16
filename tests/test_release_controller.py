@@ -13,6 +13,13 @@ from tgw.release_installer import materialize
 COMMIT_A, COMMIT_B, TREE = "a" * 40, "b" * 40, "c" * 40
 
 
+def _authority(receipt_id="authority:approved"):
+    store = Mock()
+    store.begin_execution.return_value = {"receipt_id": receipt_id}
+    store.complete_execution.return_value = {}
+    return store
+
+
 def _archive(path: Path, commit: str, body: bytes) -> str:
     with tarfile.open(path, "w:gz", pax_headers={"comment": commit}) as archive:
         info = tarfile.TarInfo("src/tgw/app.py")
@@ -50,7 +57,7 @@ def _fixture(tmp_path, health_status="healthy"):
 
 def test_reviewed_candidate_installs_by_exact_hash_with_backup_selection_and_health_receipts(tmp_path):
     root, _, registry, effect, backup, health = _fixture(tmp_path)
-    authority = Mock(return_value={"receipt_id": "authority:approved"})
+    authority = _authority()
 
     receipt = AuthorityEffectController(registry, authority).execute(request_id="request:release-b", effect=effect)
 
@@ -67,7 +74,7 @@ def test_reviewed_candidate_installs_by_exact_hash_with_backup_selection_and_hea
 def test_failed_generation_health_rolls_back_using_exact_selection_receipt(tmp_path):
     root, _, registry, effect, _, _ = _fixture(tmp_path, health_status="unhealthy")
 
-    receipt = AuthorityEffectController(registry, Mock(return_value={"receipt_id": "authority:approved"})).execute(request_id="request:release-b", effect=effect)
+    receipt = AuthorityEffectController(registry, _authority()).execute(request_id="request:release-b", effect=effect)
 
     assert receipt.outcome is EffectOutcome.ROLLED_BACK
     assert receipt.rollback_receipt == "rollback:install-b-rollback"
@@ -78,7 +85,7 @@ def test_unknown_mount_fails_without_touching_registered_root(tmp_path):
     root, _, registry, effect, _, _ = _fixture(tmp_path)
     bad = TypedEffect.parse({"kind": "coding-release", "generation": effect.generation, "parameters": {**effect.parameters, "root_id": "production-not-mounted"}})
 
-    receipt = AuthorityEffectController(registry, Mock(return_value={"receipt_id": "authority:approved"})).execute(request_id="r", effect=bad)
+    receipt = AuthorityEffectController(registry, _authority()).execute(request_id="r", effect=bad)
 
     assert receipt.outcome is EffectOutcome.FAILED
     assert os.readlink(root / "current") == "releases/release-a"

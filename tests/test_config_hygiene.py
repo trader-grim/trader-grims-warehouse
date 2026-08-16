@@ -95,6 +95,7 @@ def test_approved_plan_content_must_be_exact_clean_commit(tmp_path):
         "standalone_plan_root": str(root),
         "plan_repository_root": str(tmp_path / "repository"),
         "plan_approved_commit": approved,
+        "plan_approved_solution_hash": "sha256:" + "a" * 64,
         "plan_git_path": "git",
     })
 

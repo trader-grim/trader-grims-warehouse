@@ -12,7 +12,7 @@ import json
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from tgw.plan_authority import EffectKind, TypedEffect
 
@@ -39,6 +39,29 @@ class EffectOutcome(str, Enum):
     AMBIGUOUS = "ambiguous"
     ROLLED_BACK = "rolled_back"
     FAILED = "failed"
+
+
+class AuthorityExecutionStore(Protocol):
+    """The only authority seam an effect controller may use.
+
+    In particular this intentionally has no eager ``consume`` operation:
+    authority becomes terminal only when the durable provider outcome is
+    written back through ``complete_execution``.
+    """
+
+    def begin_execution(
+        self, request_id: str, *, effect_hash: str, generation: str, handler_id: str,
+    ) -> Mapping[str, Any]: ...
+
+    def complete_execution(
+        self,
+        receipt_id: str,
+        *,
+        outcome: str,
+        evidence: Sequence[str] = (),
+        rollback_receipt: str | None = None,
+        detail: str = "",
+    ) -> Mapping[str, Any]: ...
 
 
 def _canonical(value: Any) -> bytes:
@@ -197,33 +220,71 @@ class TypedEffectHandlerRegistry:
 
 
 class AuthorityEffectController:
-    """Atomically redeems authority before invoking one registered provider."""
+    """Invoke exactly one registered provider through durable authority state.
 
-    def __init__(self, registry: TypedEffectHandlerRegistry, consume_authority: Callable[..., Mapping[str, Any]]):
+    ``begin_execution`` records an ambiguity fence before the handler call;
+    completion records the handler outcome atomically with the authority state.
+    A retry is therefore recoverable, while a crash or ambiguous provider result
+    cannot be silently replayed.
+    """
+
+    def __init__(self, registry: TypedEffectHandlerRegistry, authority_store: AuthorityExecutionStore):
         self.registry = registry
-        self.consume_authority = consume_authority
+        self.authority_store = authority_store
 
     def execute(self, *, request_id: str, effect: TypedEffect) -> EffectExecutionReceipt:
         handler_id, parameters, handler, rollback = self.registry.prepare(effect)
-        authority = self.consume_authority(request_id, effect_hash=effect.effect_hash, generation=effect.generation)
+        authority = self.authority_store.begin_execution(
+            request_id,
+            effect_hash=effect.effect_hash,
+            generation=effect.generation,
+            handler_id=handler_id,
+        )
         receipt_id = str(authority["receipt_id"])
         try:
             result = handler(parameters)
             evidence = tuple(sorted(str(item) for item in result.get("evidence", ())))
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.SUCCEEDED, evidence)
+            return self._complete(request_id, receipt_id, effect, handler_id, EffectOutcome.SUCCEEDED, evidence)
         except RetryableEffect as exc:
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.RETRY, (), detail=str(exc))
+            return self._complete(request_id, receipt_id, effect, handler_id, EffectOutcome.RETRY, (), detail=str(exc))
         except AmbiguousEffect as exc:
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, (), detail=str(exc))
+            return self._complete(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, (), detail=str(exc))
         except Exception as exc:
             if rollback is not None:
                 try:
                     rolled_back = rollback(parameters)
                     rollback_receipt = str(rolled_back["receipt"])
-                    return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.ROLLED_BACK, (), rollback_receipt=rollback_receipt, detail=str(exc))
+                    return self._complete(request_id, receipt_id, effect, handler_id, EffectOutcome.ROLLED_BACK, (), rollback_receipt=rollback_receipt, detail=str(exc))
                 except Exception as rollback_exc:
-                    return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.FAILED, (), detail=f"effect={exc}; rollback={rollback_exc}")
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.FAILED, (), detail=str(exc))
+                    return self._complete(request_id, receipt_id, effect, handler_id, EffectOutcome.FAILED, (), detail=f"effect={exc}; rollback={rollback_exc}")
+            return self._complete(request_id, receipt_id, effect, handler_id, EffectOutcome.FAILED, (), detail=str(exc))
+
+    def _complete(
+        self,
+        request_id: str,
+        authority_receipt_id: str,
+        effect: TypedEffect,
+        handler_id: str,
+        outcome: EffectOutcome,
+        evidence: tuple[str, ...],
+        *,
+        rollback_receipt: str | None = None,
+        detail: str = "",
+    ) -> EffectExecutionReceipt:
+        # Do not hide a persistence failure: the already-durable active attempt
+        # remains an explicit ambiguity fence and needs reconciliation, not an
+        # unsafe automatic retry.
+        self.authority_store.complete_execution(
+            authority_receipt_id,
+            outcome=outcome.value,
+            evidence=evidence,
+            rollback_receipt=rollback_receipt,
+            detail=detail,
+        )
+        return self._receipt(
+            request_id, authority_receipt_id, effect, handler_id, outcome,
+            evidence, rollback_receipt=rollback_receipt, detail=detail,
+        )
 
     @staticmethod
     def _receipt(
