@@ -11,14 +11,22 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 
 from mcp.server import FastMCP
 
 from tgw.code_graph import CodeGraphService, build_snapshot
+from tgw.execution_resources import (
+    CARD_RESOURCE_NAMES,
+    HTTPRegisteredResourceResolver,
+    ResourceVerificationError,
+    card_resource_receipt,
+    verify_card_resources,
+)
 from tgw.plan_graph import live_plan_graph
 
 SCHEMA = "tgw-context-service/v1"
@@ -27,6 +35,8 @@ MAX_TEXT_BYTES = 2_000_000
 MAX_QUERY = 1_000
 MAX_LINES = 250
 MAX_RESULTS = 100
+MAX_CREDENTIAL_BYTES = 4096
+MAX_REVIEW_RECEIPT_BYTES = 16 * 1024
 PLAN_PREFIXES = ("plan/", "pp/", "reference/")
 RUNBOOK_PREFIX = "docs/runbooks/"
 SCOPE_SEMANTICS = {
@@ -290,6 +300,138 @@ def context_bundle(task: str, receiver: str = "codex", limit: int = 12) -> dict[
     return result
 
 
+def _context_service_credential() -> str:
+    path_text = os.environ.get("TGW_CONTEXT_RESOURCE_SERVICE_CREDENTIAL_FILE", "")
+    path = Path(path_text)
+    if not path.is_absolute():
+        raise ContextError("context resource service credential path must be absolute")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ContextError("context resource service credential is unavailable") from exc
+    try:
+        expected_uid = int(os.environ.get("TGW_CONTEXT_REVIEW_UID", ""))
+        value = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(value.st_mode)
+            or value.st_uid != expected_uid
+            or value.st_nlink != 1
+            or stat.S_IMODE(value.st_mode) & 0o077
+            or value.st_size < 1
+            or value.st_size > MAX_CREDENTIAL_BYTES
+        ):
+            raise ContextError("context resource service credential protection is invalid")
+        raw = os.pread(descriptor, MAX_CREDENTIAL_BYTES + 1, 0)
+        after = os.fstat(descriptor)
+        named = os.stat(path, follow_symlinks=False)
+        if (
+            len(raw) != value.st_size
+            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            != (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+            or (named.st_dev, named.st_ino) != (value.st_dev, value.st_ino)
+        ):
+            raise ContextError("context resource service credential changed during read")
+    finally:
+        os.close(descriptor)
+    try:
+        credential = raw.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ContextError("context resource service credential is not text") from exc
+    if not credential or any(character.isspace() for character in credential):
+        raise ContextError("context resource service credential is invalid")
+    return credential
+
+
+def _review_context_run(
+    *, challenge: str, card_json: str, handoff_hash: str,
+    resource_receipt_hash: str, skill_contract_hash: str,
+    resolver_factory: Any = HTTPRegisteredResourceResolver,
+    credential_reader: Any = _context_service_credential,
+) -> dict[str, Any]:
+    """Fetch every review-card resource inside one authenticated service run."""
+
+    if re.fullmatch(r"[0-9a-f]{64}", challenge) is None:
+        raise ContextError("governed review challenge is invalid")
+    if not isinstance(card_json, str) or not card_json or len(card_json.encode()) > MAX_TEXT_BYTES:
+        raise ContextError("governed review card framing is invalid")
+    try:
+        card = json.loads(card_json)
+        receipt = card_resource_receipt(card)
+    except (json.JSONDecodeError, ResourceVerificationError) as exc:
+        raise ContextError("governed review card is invalid") from exc
+    if (
+        card.get("role") != "independent-review"
+        or receipt["receipt_hash"] != resource_receipt_hash
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", handoff_hash)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", skill_contract_hash)
+        or skill_contract_hash != os.environ.get("TGW_CONTEXT_REVIEW_SKILL_CONTRACT_HASH")
+    ):
+        raise ContextError("governed review context binding is invalid")
+    try:
+        expected_uid = int(os.environ.get("TGW_CONTEXT_REVIEW_UID", ""))
+        expected_gid = int(os.environ.get("TGW_CONTEXT_REVIEW_GID", ""))
+    except ValueError as exc:
+        raise ContextError("governed review runtime identity is invalid") from exc
+    if (os.geteuid(), os.getegid()) != (expected_uid, expected_gid):
+        raise ContextError("governed review runtime identity is invalid")
+    endpoint = os.environ.get("TGW_CONTEXT_RESOURCE_SERVICE_ENDPOINT", "")
+    service_id = os.environ.get("TGW_CONTEXT_RESOURCE_SERVICE_ID", "")
+    client_id = os.environ.get("TGW_CONTEXT_RESOURCE_SERVICE_CLIENT_ID", "")
+    try:
+        resolver = resolver_factory(
+            service_id=service_id, client_id=client_id, endpoint=endpoint,
+            credential=credential_reader(),
+        )
+        run = resolver.begin_harness_run(
+            card_hash=card["card_hash"], role="independent-review",
+            execution_identity=(
+                f"governed-review:{challenge}:uid={expected_uid}:gid={expected_gid}"
+            ),
+            handoff_hash=handoff_hash, resource_receipt_hash=resource_receipt_hash,
+            resources={name: card["bindings"][name] for name in sorted(CARD_RESOURCE_NAMES)},
+        )
+        verified_receipt = verify_card_resources(card, resolver.for_harness_run(run))
+        attestation = resolver.complete_harness_run(run)
+    except (KeyError, ResourceVerificationError) as exc:
+        raise ContextError("governed review registered context retrieval failed") from exc
+    if verified_receipt != receipt or attestation.get("run_id") != run.get("run_id"):
+        raise ContextError("governed review registered context completion is invalid")
+    return {
+        "schema": "tgw-context-review-run/v1", "status": "PASS",
+        "context_run_id": run["run_id"], "challenge": challenge,
+        "card_hash": card["card_hash"], "resource_receipt_hash": resource_receipt_hash,
+        "skill_contract_hash": skill_contract_hash,
+        "runtime_uid": os.geteuid(), "runtime_gid": os.getegid(),
+        "retrieval_attestation_hash": attestation.get("attestation_hash"),
+    }
+
+
+def _write_review_receipt(value: Mapping[str, Any]) -> None:
+    path = Path(os.environ.get("TGW_CONTEXT_REVIEW_RECEIPT_FILE", ""))
+    if not path.is_absolute():
+        raise ContextError("governed review receipt path must be absolute")
+    raw = _canonical(value)
+    if len(raw) > MAX_REVIEW_RECEIPT_BYTES:
+        raise ContextError("governed review receipt exceeds its bound")
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ContextError("governed review receipt sink is unavailable") from exc
+    try:
+        value_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(value_stat.st_mode) or value_stat.st_nlink not in {0, 1}:
+            raise ContextError("governed review receipt sink protection is invalid")
+        offset = 0
+        while offset < len(raw):
+            written = os.write(descriptor, raw[offset:])
+            if written <= 0:
+                raise ContextError("governed review receipt sink write failed")
+            offset += written
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 mcp = FastMCP(name="tgw-context", instructions="Authoritative read-only TGW planning and coding context hosted on tgw-lib.")
 
 
@@ -307,9 +449,35 @@ def tgw_context_status() -> str:
 
 
 @mcp.tool()
-def tgw_context_bundle(task: str, receiver: str = "codex", limit: int = 12) -> str:
-    """Return bounded authoritative starting context for one task."""
-    return _json_call(context_bundle, task, receiver, limit)
+def tgw_context_bundle(
+    task: str, receiver: str = "codex", limit: int = 12, challenge: str = "",
+    card_json: str = "", handoff_hash: str = "", resource_receipt_hash: str = "",
+    skill_contract_hash: str = "",
+) -> str:
+    """Return context; a governed review must also open and complete its bound retrieval run."""
+
+    def result() -> dict[str, Any]:
+        bundle = context_bundle(task, receiver, limit)
+        supplied = (
+            challenge, card_json, handoff_hash, resource_receipt_hash,
+            skill_contract_hash,
+        )
+        if any(supplied):
+            if not all(supplied):
+                raise ContextError("governed review context arguments must be complete")
+            review_receipt = _review_context_run(
+                challenge=challenge, card_json=card_json, handoff_hash=handoff_hash,
+                resource_receipt_hash=resource_receipt_hash,
+                skill_contract_hash=skill_contract_hash,
+            )
+            _write_review_receipt(review_receipt)
+            bundle["governed_review"] = review_receipt
+            bundle["bundle_sha256"] = _sha(_canonical({
+                key: value for key, value in bundle.items() if key != "bundle_sha256"
+            }))
+        return bundle
+
+    return _json_call(result)
 
 
 @mcp.tool()

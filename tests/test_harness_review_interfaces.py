@@ -78,12 +78,20 @@ def test_installation_catalog_does_not_confuse_skill_and_provider_status():
     assert harnesses["codex"]["automated_provider"] == "codex-isolated-review-runner"
     assert harnesses["claude"]["interactive_review"] == "available"
     assert harnesses["claude"]["model_authentication"] == "configured"
-    assert harnesses["claude"]["automated_provider"] == "unavailable-no-admitted-runner"
+    assert harnesses["claude"]["automated_provider"] == (
+        "governed-review-selected-hold-not-installed"
+    )
     assert harnesses["claude"]["governed_execution_adapter"] == (
         "implemented-not-installed"
     )
     assert harnesses["claude"]["protected_review_projection"] == "not-installed"
+    assert harnesses["claude"]["context_bundle_service"] == "not-installed"
+    assert harnesses["claude"]["review_evidence_sink"] == "not-installed"
     assert harnesses["claude"]["review_egress_policy"] == "not-installed"
+    assert harnesses["claude"]["governed_runtime_identity"] == {
+        "uid": 1006, "gid": 1006,
+    }
+    assert harnesses["claude"]["live_readiness"] == "HOLD_NOT_INSTALLED"
     assert harnesses["hermes"]["automated_provider"] == "unregistered"
     assert harnesses["hermes"]["context_mcp"] == "configured"
     assert harnesses["hermes"]["production_inventory_mcp"] == (

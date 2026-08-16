@@ -77,17 +77,36 @@ Before launch, the controller must create and freeze:
    held executable context-provider closure, minimal runtime closure, closed
    environment, fresh authentication-health evidence, and per-artifact owner
    policy;
-5. an X-store publisher bound by the card's `receipt_sink` binding.
+5. a registered context-bundle service and public key capable of issuing a
+   signed card/handoff/resource-retrieval attestation; and
+6. a protected X-store descriptor whose exact reference and descriptor hash
+   equal the card's `receipt_sink` binding, plus a fresh signed receipt from
+   the host egress controller proving the admitted endpoint policy is active.
 
 The adapter holds the root-owned request, source root, sandbox, runtime,
 context provider, executable, skill, MCP config, and credential descriptors
-through use. It launches a minimal-root bubblewrap PID namespace, executes the
+through use. It launches a minimal-root bubblewrap user/PID namespace as the
+exact selected provider uid/gid (never root for the current Claude profile), executes the
 held executable via `/proc/self/fd`, installs the exact protected skill into an
 ephemeral HOME, and passes the held MCP config with strict settings. Time and
 combined output are bounded; PID-namespace teardown proves descendants cannot
 escape. Named and held identities are rechecked, exactly one
 `tgw-code-review/v1` result is accepted, and the card-bound X-store must return
 an exact pinned readback.
+
+Each attempt creates a fresh 256-bit challenge and a bounded held receipt file
+which is writable only by the selected sandbox uid. The challenge is disclosed in the
+governed prompt. A passing provider must use Skill and the nonempty exact MCP
+tool policy and call `tgw_context_bundle` with that challenge and exact skill
+contract hash. The MCP writes its completed run identity, observed uid/gid,
+card, skill, and attestation hashes to the held receipt file; no provider-output
+field is trusted for this evidence. The adapter independently reads the run
+back from the registered context service. The signed retrieval attestation must
+bind that challenge and exact uid/gid, the exact card/handoff/resource receipt,
+and every card resource. The returned Plan,
+source, CodeGraph, and environment values are then compared byte-for-byte with
+the card. A report alone, or a provider echo of mounted hashes, is not context
+consumption evidence.
 
 For the current provider implementation, the registry may select an argv such
 as the following. The admission schema does not depend on this provider or
@@ -113,17 +132,18 @@ retained card.
 The sandbox intentionally shares the host network because the selected model
 provider and admitted MCP route require it. This is not networkless isolation.
 The provider identity binds a sorted exact HTTPS endpoint allow-list and its
-hash as admission evidence. Production additionally needs the corresponding
-host egress enforcement; the adapter does not claim bubblewrap enforces an
-endpoint allow-list.
+hash. Bubblewrap does not enforce an endpoint allow-list, so admission also
+requires a fresh Ed25519-signed `ENFORCED` receipt from the host egress
+controller for that exact policy. A self-hash or caller assertion is a HOLD.
 
 ## Evidence and admission
 
 The provider emits `tgw-governed-review-execution/v1`. It binds the exact
 card/handoff/Promptcraft receipt, Plan, source commit/tree/snapshot,
 CodeGraph/environment/resource bindings, provider identity, command policy,
-bounded lifecycle, output hashes, and semantic result. The execution record is
-published by the card-bound sink before it is returned.
+bounded lifecycle, output hashes, fully validated semantic result, and signed
+context consumption. The execution record is published by the card-bound sink
+before it is returned.
 
 `tgw-integrated-candidate-review-result/v2` accepts exactly one execution
 binding:
@@ -136,13 +156,18 @@ result, governed execution, card, handoff, and Promptcraft receipt. Admission
 rehashes all objects, verifies the Promptcraft lease at the recorded start
 time, cross-binds provider/source/Plan/snapshot, requires a PASS result, and
 requires the independent governed receipt to name the retained execution.
+The fixed producer does not stop at an execution summary: it derives the
+governed role receipt, packet/report/result, publishes all seven artifacts,
+publishes the v4 pointer bundle, and reads every object back from X before
+returning its final result.
 
 ## Installation status
 
 This source change is a candidate only. It is not installed or deployed. The
 current selected provider is HOLD, not disabled: its executable and existing
 credential are present, but the protected generic skill, context-provider,
-MCP-config, and minimal runtime projections have not been issued. Before first
+MCP-config, minimal runtime projections, registered signed context readback,
+X publisher, and host egress enforcement have not been issued. Before first
 production use, the release operator must install a reviewed successor,
 provision those root-owned projections plus snapshot staging and the X-store,
 capture a fresh provider identity/health receipt, prove the matching egress

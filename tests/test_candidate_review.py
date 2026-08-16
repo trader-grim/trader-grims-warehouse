@@ -11,7 +11,6 @@ from tgw.candidate_review import (
     create_review_report,
     create_review_result,
     generate_review_packet,
-    validate_review_report,
     validate_review_result,
 )
 from tgw.execute_candidate_review import REVIEW_LEASE_SECONDS, _card
@@ -143,8 +142,6 @@ def governed_receipt(packet_value, *, passed):
 
 
 def report(packet_value, *, semantic="PASS", security="PASS"):
-    passed = semantic == security == "PASS"
-
     def dimension(verdict, message):
         findings = []
         if verdict == "FAIL":
@@ -312,9 +309,19 @@ def test_governed_review_card_lease_is_fresh_bounded_and_attempt_specific(tmp_pa
     codegraph = {"ref": "codegraph:snapshot:1", "hash": "sha256:" + "6" * 64}
     environment = {"ref": "environment:manifest:1", "hash": "sha256:" + "7" * 64}
     review_input = {"ref": "review:input:1", "hash": "sha256:" + "5" * 64}
-    first = _card(manifest(), packet_value, observed_at=observed, candidate_evidence_binding=binding, receipt_sink_binding={"ref": "x:review", "hash": "sha256:" + "4" * 64}, codegraph_binding=codegraph, execution_environment_binding=environment, review_input_binding=review_input)["lease"]
+    common = {
+        "candidate_evidence_binding": binding,
+        "receipt_sink_binding": {"ref": "x:review", "hash": "sha256:" + "4" * 64},
+        "codegraph_binding": codegraph,
+        "execution_environment_binding": environment,
+        "review_input_binding": review_input,
+    }
+    first = _card(
+        manifest(), packet_value, observed_at=observed, **common,
+    )["lease"]
     second = _card(
-        manifest(), packet_value, observed_at=observed + timedelta(seconds=1), candidate_evidence_binding=binding, receipt_sink_binding={"ref": "x:review", "hash": "sha256:" + "4" * 64}, codegraph_binding=codegraph, execution_environment_binding=environment, review_input_binding=review_input
+        manifest(), packet_value, observed_at=observed + timedelta(seconds=1),
+        **common,
     )["lease"]
 
     assert datetime.fromisoformat(first["expires_at"].replace("Z", "+00:00")) == (
@@ -326,9 +333,29 @@ def test_governed_review_card_lease_is_fresh_bounded_and_attempt_specific(tmp_pa
 
 def test_governed_review_card_rejects_an_unzoned_observation_time(tmp_path):
     packet_value, _ = packet(tmp_path)
+    common = {
+        "candidate_evidence_binding": {
+            "ref": "evidence:d", "hash": "sha256:" + "8" * 64,
+        },
+        "receipt_sink_binding": {
+            "ref": "x:review", "hash": "sha256:" + "4" * 64,
+        },
+        "codegraph_binding": {
+            "ref": "codegraph:1", "hash": "sha256:" + "6" * 64,
+        },
+        "execution_environment_binding": {
+            "ref": "env:1", "hash": "sha256:" + "7" * 64,
+        },
+        "review_input_binding": {
+            "ref": "review:1", "hash": "sha256:" + "5" * 64,
+        },
+    }
 
     with pytest.raises(ValueError, match="include a timezone"):
-        _card(manifest(), packet_value, observed_at=datetime(2026, 8, 16, 12, 0), candidate_evidence_binding={"ref": "evidence:d", "hash": "sha256:" + "8" * 64}, receipt_sink_binding={"ref": "x:review", "hash": "sha256:" + "4" * 64}, codegraph_binding={"ref": "codegraph:1", "hash": "sha256:" + "6" * 64}, execution_environment_binding={"ref": "env:1", "hash": "sha256:" + "7" * 64}, review_input_binding={"ref": "review:1", "hash": "sha256:" + "5" * 64})
+        _card(
+            manifest(), packet_value,
+            observed_at=datetime(2026, 8, 16, 12, 0), **common,
+        )
 
 
 def test_governed_review_card_rejects_source_and_argv_substitution(tmp_path):

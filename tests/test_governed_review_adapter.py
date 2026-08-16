@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import os
@@ -7,8 +8,16 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import tgw.governed_review_adapter as governed_adapter
+from tgw.candidate_receipt_sink import (
+    CandidateReceiptSinkError,
+    validate_independent_review_evidence_bundle,
+    verify_independent_review_evidence_bundle,
+)
+from tgw.execution_resources import issue_harness_retrieval_attestation
 from tgw.governed_review_adapter import (
     IDENTITY_SCHEMA,
     ReviewRunnerError,
@@ -33,6 +42,54 @@ TREE = "a3f5dead560681b1227d243d7f87854ea2563dcd"
 def _hash(value):
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _public_key(private_key):
+    raw = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return base64.b64encode(raw).decode()
+
+
+def _signed_receipt(unsigned, private_key):
+    receipt_hash = _hash(unsigned)
+    signature = private_key.sign(
+        json.dumps(
+            {**unsigned, "receipt_hash": receipt_hash},
+            sort_keys=True, separators=(",", ":"),
+        ).encode()
+    )
+    return {
+        **unsigned, "receipt_hash": receipt_hash,
+        "signature": base64.b64encode(signature).decode(),
+    }
+
+
+def _context_attestation(identity, private_key, handoff, run_id, challenge):
+    card = handoff["card"]
+    service = identity["context_bundle_service"]
+    attestation = issue_harness_retrieval_attestation(
+        {
+            "schema": "tgw-registered-resource-retrieval-attestation/v3",
+            "service_id": service["service_id"], "client_id": service["client_id"],
+            "run_id": run_id, "card_hash": card["card_hash"],
+            "role": "independent-review",
+            "execution_identity": (
+                f"governed-review:{challenge}:"
+                f"uid={identity['sandbox_identity']['uid']}:"
+                f"gid={identity['sandbox_identity']['gid']}"
+            ),
+            "handoff_hash": handoff["handoff_hash"],
+            "resource_receipt_hash": handoff["receipt"]["receipt_hash"],
+            "resources": {
+                name: card["bindings"][name] for name in sorted(card["bindings"])
+            },
+            "attestation_key_id": service["attestation_key_id"],
+        },
+        signing_private_key=private_key,
+    )
+    return attestation
 
 
 def _file_hash(path):
@@ -96,7 +153,19 @@ def _binding(name):
     return {"ref": f"test:{name}", "hash": _hash(name)}
 
 
-def _handoff(source, *, provider="claude"):
+def _sink_descriptor():
+    unsigned = {
+        "schema": "tgw-governed-review-evidence-sink-client/v1",
+        "sink_ref": "test:governed-review-x",
+        "endpoint": "https://evidence.invalid",
+        "credential_env": "TGW_TEST_REVIEW_X_CREDENTIAL",
+        "timeout_seconds": 5,
+    }
+    return {**unsigned, "descriptor_hash": _hash(unsigned)}
+
+
+def _handoff(source, *, provider="claude", sink_descriptor=None):
+    sink_descriptor = sink_descriptor or _sink_descriptor()
     service = {
         "schema": "tgw-registered-resource-service/v2", "id": "review-resources",
         "client_id": "review-client", "endpoint": "https://resources.invalid",
@@ -118,7 +187,11 @@ def _handoff(source, *, provider="claude"):
             "source_tree": {"ref": source.resolve().as_uri(), "hash": snapshot_hash(source)},
             "execution_environment": _binding("environment"),
             "authority_conditions": _binding("authority"),
-            "candidate_evidence": _binding("candidate"), "receipt_sink": _binding("sink"),
+            "candidate_evidence": _binding("candidate"),
+            "receipt_sink": {
+                "ref": sink_descriptor["sink_ref"],
+                "hash": sink_descriptor["descriptor_hash"],
+            },
         },
         "authority": ["read-only review"], "exclusions": ["mutation", "deployment"],
         "acceptance": ["tgw-code-review/v1"],
@@ -137,7 +210,35 @@ def _handoff(source, *, provider="claude"):
     )
 
 
-def _fixture(tmp_path, *, malformed=False, failed=False, mutate=False, detach=False):
+def _review_packet(source, *, provider="claude"):
+    unsigned = {
+        "schema": "tgw-integrated-candidate-review-packet/v1",
+        "status": "EXECUTABLE", "candidate_manifest_hash": _hash("candidate-manifest"),
+        "candidate_source": {
+            "commit": COMMIT, "tree": TREE, "archive_sha256": _hash("archive"),
+        },
+        "plan": {
+            "commit": PLAN, "solution_hash": _hash("solution"),
+            "closure_hash": _hash("closure"),
+        },
+        "snapshot": {"ref": source.resolve().as_uri(), "hash": snapshot_hash(source)},
+        "required_dimensions": ["semantic", "security"],
+        "review_contract": {
+            "schema": "tgw-integrated-candidate-review-result/v2",
+            "pass_requires": "both dimensions PASS with zero findings",
+            "source_mutation": "forbidden", "authority_broadening": "forbidden",
+        },
+        "selected_provider": provider,
+        "receiver_profile": {"id": "test-provider", "version": 1},
+        "runner_argv": ["governed-review"], "hold": None,
+    }
+    return {**unsigned, "packet_hash": _hash(unsigned)}
+
+
+def _fixture(
+    tmp_path, *, malformed=False, failed=False, mutate=False, detach=False,
+    consume_context=True,
+):
     tmp_path.mkdir(parents=True, exist_ok=True)
     source = tmp_path / "snapshot"
     source.mkdir()
@@ -153,7 +254,10 @@ def _fixture(tmp_path, *, malformed=False, failed=False, mutate=False, detach=Fa
     if malformed:
         payload = "not-json"
     else:
-        payload = json.dumps({"is_error": False, "result": json.dumps(review)})
+        payload_value = {"is_error": False, "result": json.dumps(review)}
+        if consume_context:
+            payload_value["context_run_id"] = "context-run"
+        payload = json.dumps(payload_value)
     executable = tmp_path / "provider"
     source_code = tmp_path / "provider.c"
     mutation_code = (
@@ -164,9 +268,37 @@ def _fixture(tmp_path, *, malformed=False, failed=False, mutate=False, detach=Fa
         "if (fork() == 0) { setsid(); close(1); close(2); sleep(30); _exit(0); }"
         if detach else ""
     )
+    context_receipt_code = ""
+    if consume_context:
+        context_receipt_code = r'''
+const char *prompt = 0;
+for (int i = 1; i < argc; i++) if (strstr(argv[i], "challenge=")) prompt = argv[i];
+if (!prompt) return 6;
+const char *challenge = strstr(prompt, "challenge=") + 10;
+const char *card_hash = strstr(prompt, "\"card_hash\":\"");
+if (!card_hash) return 7;
+card_hash = strstr(card_hash, "sha256:");
+const char *receipt_hash = strstr(prompt, "resource_receipt_hash=") + 22;
+const char *skill_hash = strstr(prompt, "skill_contract_hash=") + 20;
+FILE *receipt = fopen("/home/reviewer/.tgw-context/review-receipt", "w");
+if (!receipt) return 8;
+fprintf(receipt, "{\"schema\":\"tgw-context-review-run/v1\","
+                 "\"status\":\"PASS\","
+                 "\"context_run_id\":\"context-run\","
+                 "\"challenge\":\"%.*s\","
+                 "\"card_hash\":\"%.*s\","
+                 "\"resource_receipt_hash\":\"%.*s\","
+                 "\"skill_contract_hash\":\"%.*s\","
+                 "\"retrieval_attestation_hash\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
+                 "\"runtime_uid\":%d,\"runtime_gid\":%d}",
+        64, challenge, 71, card_hash, 71, receipt_hash, 71, skill_hash,
+        (int)geteuid(), (int)getegid());
+fclose(receipt);
+'''
     source_code.write_text(
-        "#include <stdio.h>\n#include <sys/stat.h>\n#include <unistd.h>\nint main(void) {"
-        + mutation_code + detach_code
+        "#include <stdio.h>\n#include <string.h>\n#include <sys/stat.h>\n"
+        "#include <unistd.h>\nint main(int argc, char **argv) {"
+        + mutation_code + detach_code + context_receipt_code
         + f"puts({json.dumps(payload)}); return 0; }}\n"
     )
     subprocess.run(["cc", "-static", "-o", executable, source_code], check=True)
@@ -176,15 +308,41 @@ def _fixture(tmp_path, *, malformed=False, failed=False, mutate=False, detach=Fa
     (skill / "SKILL.md").write_text("provider-neutral tgw-review\n")
     (skill / "SKILL.md").chmod(0o444)
     skill.chmod(0o555)
+    skill_artifact = _tree_artifact(skill)
+    skill_raw = (skill / "SKILL.md").read_bytes()
+    rendered_skill = (
+        f"--- SKILL.md (sha256:{hashlib.sha256(skill_raw).hexdigest()}) ---\n"
+        + skill_raw.decode()
+    )
+    skill_contract_hash = "sha256:" + hashlib.sha256(rendered_skill.encode()).hexdigest()
     mcp = tmp_path / "mcp.json"
     mcp_command = "/opt/tgw-context/bin/tgw-context-mcp"
     mcp.write_text(json.dumps({
-        "mcpServers": {"tgw-context": {"command": mcp_command, "args": []}},
+        "mcpServers": {"tgw-context": {
+            "command": mcp_command, "args": [],
+            "env": {
+                "TGW_CONTEXT_RESOURCE_SERVICE_ENDPOINT": "https://context.invalid",
+                "TGW_CONTEXT_RESOURCE_SERVICE_ID": "review-resources",
+                "TGW_CONTEXT_RESOURCE_SERVICE_CLIENT_ID": "review-client",
+                "TGW_CONTEXT_RESOURCE_SERVICE_CREDENTIAL_FILE": (
+                    "/home/reviewer/.tgw-context/credential"
+                ),
+                "TGW_CONTEXT_REVIEW_RECEIPT_FILE": (
+                    "/home/reviewer/.tgw-context/review-receipt"
+                ),
+                "TGW_CONTEXT_REVIEW_SKILL_CONTRACT_HASH": skill_contract_hash,
+                "TGW_CONTEXT_REVIEW_UID": str(os.getuid()),
+                "TGW_CONTEXT_REVIEW_GID": str(os.getgid()),
+            },
+        }},
     }))
     mcp.chmod(0o444)
     credential = tmp_path / "credential.json"
     credential.write_text('{"subscription":"test"}\n')
     credential.chmod(0o400)
+    context_credential = tmp_path / "context-credential"
+    context_credential.write_text("test-context-credential\n")
+    context_credential.chmod(0o400)
     runtime = tmp_path / "runtime"
     for relative in ("usr", "lib", "lib64", "etc/ssl"):
         (runtime / relative).mkdir(parents=True, exist_ok=True)
@@ -204,7 +362,8 @@ def _fixture(tmp_path, *, malformed=False, failed=False, mutate=False, detach=Fa
         "HOME": "/home/reviewer", "PATH": "/usr/bin", "USER": "claude",
         "LOGNAME": "claude", "LANG": "C",
     }
-    tool_argument = "Read,Glob,Grep,Skill,mcp__tgw-context__brief"
+    required_mcp_tool = "mcp__tgw-context__tgw_context_bundle"
+    tool_argument = f"Read,Glob,Grep,Skill,{required_mcp_tool}"
     denied_argument = "Bash,Edit,Write,NotebookEdit"
     provider_argv = [
         str(executable), "-p", "{prompt}", "--tools", tool_argument,
@@ -213,12 +372,24 @@ def _fixture(tmp_path, *, malformed=False, failed=False, mutate=False, detach=Fa
         "--add-dir", "{snapshot}", "--output-format", "json",
     ]
     account_identity = _hash("claude-account")
+    context_private_key = Ed25519PrivateKey.generate()
+    context_service_unsigned = {
+        "schema": "tgw-context-bundle-service/v1",
+        "endpoint": "https://context.invalid",
+        "credential_env": "TGW_TEST_CONTEXT_CREDENTIAL",
+        "service_id": "review-resources", "client_id": "review-client",
+        "attestation_key_id": "context-test-key",
+        "attestation_public_key": _public_key(context_private_key),
+    }
+    context_service = {
+        **context_service_unsigned,
+        "descriptor_hash": _hash(context_service_unsigned),
+    }
     health_unsigned = {
         "schema": "tgw-governed-review-provider-health/v1", "provider": "claude",
         "account_identity": account_identity, "observed_at": "2026-08-16T00:00:00+00:00",
         "expires_at": "2026-08-17T00:00:00+00:00", "status": "AUTHENTICATED",
     }
-    skill_artifact = _tree_artifact(skill)
     provenance_unsigned = {
         "schema": "tgw-review-skill-projection-receipt/v1",
         "source_ref": "test:canonical-tgw-review",
@@ -234,6 +405,7 @@ def _fixture(tmp_path, *, malformed=False, failed=False, mutate=False, detach=Fa
             "context_provider": _tree_artifact(context),
             "executable": _file_artifact(executable), "skill_contract": skill_artifact,
             "mcp_config": _file_artifact(mcp), "credential": _secret_artifact(credential),
+            "context_service_credential": _secret_artifact(context_credential),
         },
         "skill_source_provenance": {
             **provenance_unsigned,
@@ -243,18 +415,23 @@ def _fixture(tmp_path, *, malformed=False, failed=False, mutate=False, detach=Fa
             "home": "/home/reviewer",
             "skill_mount": "/home/reviewer/.claude/skills/tgw-review",
             "credential_mount": "/home/reviewer/.claude/.credentials.json",
+            "context_credential_mount": "/home/reviewer/.tgw-context/credential",
+            "context_receipt_mount": "/home/reviewer/.tgw-context/review-receipt",
             "workspace": "/tmp/workspace", "context_root": "/opt/tgw-context",
         },
+        "context_bundle_service": context_service,
+        "sandbox_identity": {"uid": os.getuid(), "gid": os.getgid()},
         "environment_sha256": _hash(environment), "argv_template": provider_argv,
         "argv_template_hash": _hash(provider_argv),
         "command_policy": {
             "tool_policy": [
-                "Read", "Glob", "Grep", "Skill", "mcp__tgw-context__brief",
+                "Read", "Glob", "Grep", "Skill", required_mcp_tool,
             ],
             "read_only": True,
             "settings_sources_disabled": True, "held_mcp_config": True,
             "held_skill_contract": True, "sandbox_profile_hash": _hash([
-                "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
+                "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+                "--unshare-cgroup",
                 "--die-with-parent", "--new-session", "--tmpfs", "/", "--proc", "/proc",
                 "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/home",
             ]),
@@ -275,25 +452,44 @@ def _fixture(tmp_path, *, malformed=False, failed=False, mutate=False, detach=Fa
                 ["--mcp-config", "{mcp_config}", "--strict-mcp-config"],
             ],
             "forbidden_argv_tokens": ["--dangerously-skip-permissions"],
+            "required_mcp_tools": [required_mcp_tool],
         },
-        "network_policy": {
-            "schema": "tgw-governed-review-network-policy/v1",
-            "mode": "shared-network-admitted-endpoints",
-            "endpoints": ["https://api.anthropic.com"],
-            "policy_hash": _hash({
-                "schema": "tgw-governed-review-network-policy/v1",
-                "mode": "shared-network-admitted-endpoints",
-                "endpoints": ["https://api.anthropic.com"],
-            }),
-        },
+        "network_policy": None,
         "health": {**health_unsigned, "evidence_hash": _hash(health_unsigned)},
     }
-    return source, executable, identity, environment
+    egress_private_key = Ed25519PrivateKey.generate()
+    network_unsigned = {
+        "schema": "tgw-governed-review-network-policy/v1",
+        "mode": "shared-network-enforced-endpoints",
+        "endpoints": ["https://api.anthropic.com", "https://context.invalid"],
+        "enforcement_key_id": "test-egress-key",
+        "enforcement_public_key": _public_key(egress_private_key),
+    }
+    network_hash = _hash(network_unsigned)
+    enforcement_unsigned = {
+        "schema": "tgw-governed-review-egress-enforcement/v1",
+        "status": "ENFORCED", "policy_hash": network_hash,
+        "enforcement_id": "test-egress", "observed_at": "2026-08-16T00:00:00+00:00",
+        "expires_at": "2026-08-17T00:00:00+00:00", "key_id": "test-egress-key",
+    }
+    identity["network_policy"] = {
+        **network_unsigned, "policy_hash": network_hash,
+        "enforcement_receipt": _signed_receipt(enforcement_unsigned, egress_private_key),
+    }
+    return source, executable, identity, environment, context_private_key
 
 
-def _run(source, executable, identity, environment, *, handoff=None, provider="claude"):
-    selected_handoff = handoff or _handoff(source, provider=provider)
+def _run(
+    source, executable, identity, environment, context_private_key, *,
+    handoff=None, provider="claude", sink_descriptor=None,
+    context_bundle_mutator=None,
+):
+    sink_descriptor = sink_descriptor or _sink_descriptor()
+    selected_handoff = handoff or _handoff(
+        source, provider=provider, sink_descriptor=sink_descriptor,
+    )
     retained = {}
+
     def publish(execution):
         retained["execution"] = execution
         return {
@@ -303,14 +499,26 @@ def _run(source, executable, identity, environment, *, handoff=None, provider="c
             "artifact_ref": "candidate:review-execution",
             "artifact_hash": _hash(execution),
         }
+
+    def read_context(run_id, challenge):
+        attestation = _context_attestation(
+            identity, context_private_key, selected_handoff, run_id, challenge,
+        )
+        return (
+            context_bundle_mutator(attestation, run_id, challenge)
+            if context_bundle_mutator else attestation
+        )
+
     return run_governed_review(
         selected_handoff, snapshot=source,
         source_commit=COMMIT, source_tree=TREE, plan_commit=PLAN, provider=provider,
         provider_identity=identity,
         provider_argv=identity["argv_template"],
         environment=environment, trusted_uid=os.getuid(), trusted_gid=os.getgid(),
+        evidence_sink_descriptor=sink_descriptor,
         publish_execution=publish,
         read_execution=lambda _publication: retained["execution"],
+        read_context_bundle=read_context,
         timeout_seconds=5,
     )
 
@@ -390,11 +598,14 @@ def test_pid_namespace_reaps_sets_id_descendant(tmp_path):
 
 
 def test_non_test_request_composes_provider_and_pinned_sink_readback(tmp_path, monkeypatch):
-    source, executable, identity, environment = _fixture(tmp_path)
-    handoff = _handoff(source)
+    source, executable, identity, environment, context_private_key = _fixture(tmp_path)
+    sink_descriptor = _sink_descriptor()
+    handoff = _handoff(source, sink_descriptor=sink_descriptor)
 
     class Sink:
         retained = None
+        artifacts = {}
+        tamper_readback = None
 
         def __init__(self, _descriptor):
             pass
@@ -412,7 +623,41 @@ def test_non_test_request_composes_provider_and_pinned_sink_readback(tmp_path, m
         def read(self, _publication):
             return self.retained
 
+        def publish_artifact(self, artifact_ref, value):
+            self.artifacts[artifact_ref] = value
+            return {"ref": artifact_ref, "content_sha256": _hash(value)}
+
+        def read_artifact(self, pointer):
+            if self.tamper_readback == "artifact" and pointer["ref"].endswith(
+                ":review_report"
+            ):
+                return {"tampered": True}
+            if self.tamper_readback == "bundle" and pointer["ref"].endswith(
+                ":independent-review-evidence:v3"
+            ):
+                return {"tampered": True}
+            return self.artifacts[pointer["ref"]]
+
+        def fetch_bytes(self, artifact_ref):
+            return json.dumps(
+                self.artifacts[artifact_ref], sort_keys=True, separators=(",", ":"),
+            ).encode()
+
+        def fetch_object(self, artifact_ref):
+            return self.artifacts[artifact_ref]
+
     monkeypatch.setattr(governed_adapter, "HTTPReviewEvidenceSink", Sink)
+
+    class ContextClient:
+        def __init__(self, _descriptor):
+            pass
+
+        def read(self, run_id, challenge):
+            return _context_attestation(
+                identity, context_private_key, handoff, run_id, challenge,
+            )
+
+    monkeypatch.setattr(governed_adapter, "HTTPContextBundleClient", ContextClient)
     request = {
         "schema": "tgw-governed-review-request/v1", "handoff": handoff,
         "snapshot": str(source), "source_commit": COMMIT, "source_tree": TREE,
@@ -420,13 +665,51 @@ def test_non_test_request_composes_provider_and_pinned_sink_readback(tmp_path, m
         "provider_argv": identity["argv_template"], "environment": environment,
         "trusted_uid": os.getuid(), "trusted_gid": os.getgid(),
         "timeout_seconds": 5, "output_limit": 8 * 1024 * 1024,
-        "evidence_sink": {"test": True},
+        "evidence_sink": sink_descriptor,
+        "review_packet": _review_packet(source),
     }
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(request))
     request_path.chmod(0o444)
     subprocess.run(["sudo", "-n", "chown", "0:0", request_path], check=True)
-    assert execute_request(request_path)["review"]["verdict"] == "PASS"
+    finalized = execute_request(request_path)
+    assert finalized["execution"]["review"]["verdict"] == "PASS"
+    assert set(finalized["evidence_bundle"]) == {
+        "schema", "source_commit", "source_tree", "plan_commit",
+        "review_packet", "review_report", "review_result",
+        "governed_review_execution", "review_card", "review_handoff",
+        "promptcraft_receipt", "bundle_hash",
+    }
+    assert validate_independent_review_evidence_bundle(
+        finalized["evidence_bundle"],
+    )["bundle_hash"] == finalized["evidence_bundle"]["bundle_hash"]
+    verified = verify_independent_review_evidence_bundle(
+        Sink(None), source_commit=COMMIT, source_tree=TREE, plan_commit=PLAN,
+        candidate_manifest_hash=finalized["packet"]["candidate_manifest_hash"],
+        independent_review_receipt=finalized["governed_review_receipt"],
+    )
+    assert verified["governed_review_execution_hash"] == (
+        finalized["execution"]["execution_hash"]
+    )
+
+    report_ref = finalized["evidence_bundle"]["review_report"]["ref"]
+    retained_report = Sink.artifacts[report_ref]
+    Sink.artifacts[report_ref] = {"tampered": True}
+    with pytest.raises(CandidateReceiptSinkError, match="artifact hash mismatch"):
+        verify_independent_review_evidence_bundle(
+            Sink(None), source_commit=COMMIT, source_tree=TREE, plan_commit=PLAN,
+            candidate_manifest_hash=finalized["packet"]["candidate_manifest_hash"],
+            independent_review_receipt=finalized["governed_review_receipt"],
+        )
+    Sink.artifacts[report_ref] = retained_report
+
+    Sink.tamper_readback = "artifact"
+    with pytest.raises(ValueError, match="review_report artifact X readback differs"):
+        execute_request(request_path)
+    Sink.tamper_readback = "bundle"
+    with pytest.raises(ValueError, match="bundle X readback differs"):
+        execute_request(request_path)
+    Sink.tamper_readback = None
 
     original_body = request_path.read_bytes()
     displaced = tmp_path / "request-original.json"
@@ -452,12 +735,12 @@ def test_stale_health_mutation_tool_and_unbound_mcp_command_hold(tmp_path):
     }
     stale["health"] = {**stale_unsigned, "evidence_hash": _hash(stale_unsigned)}
     with pytest.raises(ReviewRunnerError, match="health is stale"):
-        _run(values[0], values[1], stale, values[3])
+        _run(values[0], values[1], stale, values[3], values[4])
 
     mutation_tool = json.loads(json.dumps(values[2]))
     mutation_tool["command_policy"]["tool_policy"].append("Bash")
     with pytest.raises(ReviewRunnerError, match="mutation tools"):
-        _run(values[0], values[1], mutation_tool, values[3])
+        _run(values[0], values[1], mutation_tool, values[3], values[4])
 
     mcp = Path(values[2]["artifacts"]["mcp_config"]["resolved_path"])
     mcp.chmod(0o644)
@@ -466,30 +749,31 @@ def test_stale_health_mutation_tool_and_unbound_mcp_command_hold(tmp_path):
     }))
     mcp.chmod(0o444)
     with pytest.raises(ReviewRunnerError, match="configured identity|content mismatch"):
-        _run(values[0], values[1], values[2], values[3])
+        _run(values[0], values[1], values[2], values[3], values[4])
 
 
 def test_context_closure_card_binding_and_network_policy_are_exact(tmp_path):
-    source, executable, identity, environment = _fixture(tmp_path)
+    source, executable, identity, environment, identity_private_key = _fixture(tmp_path)
 
     stale_context = json.loads(json.dumps(identity))
     stale_context["command_policy"]["context_bindings"]["codegraph_snapshot"] = (
         _binding("stale-codegraph")
     )
     with pytest.raises(ReviewRunnerError, match="context bindings are stale"):
-        _run(source, executable, stale_context, environment)
+        _run(source, executable, stale_context, environment, identity_private_key)
 
     invalid_network = json.loads(json.dumps(identity))
     unsigned = {
         "schema": "tgw-governed-review-network-policy/v1",
         "mode": "shared-network-admitted-endpoints",
         "endpoints": ["https://user:secret@api.anthropic.com"],
+        "enforcement_key_id": "invalid", "enforcement_public_key": "invalid",
     }
     invalid_network["network_policy"] = {
         **unsigned, "policy_hash": _hash(unsigned),
     }
     with pytest.raises(ReviewRunnerError, match="network policy is invalid"):
-        _run(source, executable, invalid_network, environment)
+        _run(source, executable, invalid_network, environment, identity_private_key)
 
     context_command = Path(
         identity["artifacts"]["context_provider"]["resolved_path"]
@@ -500,10 +784,112 @@ def test_context_closure_card_binding_and_network_policy_are_exact(tmp_path):
         context_command.parents[1]
     )
     with pytest.raises(ReviewRunnerError, match="outside the held context closure"):
-        _run(source, executable, non_executable, environment)
+        _run(source, executable, non_executable, environment, identity_private_key)
 
     argv_mismatch = json.loads(json.dumps(identity))
     argv_mismatch["argv_template"].remove("--strict-mcp-config")
     argv_mismatch["argv_template_hash"] = _hash(argv_mismatch["argv_template"])
     with pytest.raises(ReviewRunnerError, match="policy is not enforced by argv"):
-        _run(source, executable, argv_mismatch, environment)
+        _run(source, executable, argv_mismatch, environment, identity_private_key)
+
+
+def test_adversarial_semantic_non_consumption_and_x_substitution_hold(tmp_path):
+    ignored = _fixture(tmp_path / "ignored", consume_context=False)
+    with pytest.raises(ReviewRunnerError, match="context receipt is missing"):
+        _run(*ignored)
+
+    source, executable, identity, environment, private_key = _fixture(
+        tmp_path / "substitution",
+    )
+    original_sink = _sink_descriptor()
+    handoff = _handoff(source, sink_descriptor=original_sink)
+    substituted_unsigned = {
+        **{key: value for key, value in original_sink.items() if key != "descriptor_hash"},
+        "endpoint": "https://echo.invalid",
+    }
+    substituted = {
+        **substituted_unsigned, "descriptor_hash": _hash(substituted_unsigned),
+    }
+    with pytest.raises(ReviewRunnerError, match="differs from the review card"):
+        _run(
+            source, executable, identity, environment, private_key,
+            handoff=handoff, sink_descriptor=substituted,
+        )
+
+
+def test_context_comparison_report_and_enforced_egress_are_not_claims(tmp_path):
+    source, executable, identity, environment, private_key = _fixture(tmp_path)
+
+    def stale_context(attestation, _run_id, _challenge):
+        changed = {
+            key: value for key, value in attestation.items()
+            if key not in {"attestation_hash", "signature"}
+        }
+        changed["resources"] = json.loads(json.dumps(changed["resources"]))
+        changed["resources"]["codegraph_snapshot"] = _binding("wrong-codegraph")
+        return issue_harness_retrieval_attestation(
+            changed, signing_private_key=private_key,
+        )
+
+    with pytest.raises(ReviewRunnerError, match="context attestation"):
+        _run(
+            source, executable, identity, environment, private_key,
+            context_bundle_mutator=stale_context,
+        )
+
+    def root_runtime(attestation, _run_id, _challenge):
+        changed = {
+            key: value for key, value in attestation.items()
+            if key not in {"attestation_hash", "signature"}
+        }
+        changed["execution_identity"] = (
+            f"governed-review:{changed['execution_identity'].split(':')[1]}:uid=0:gid=0"
+        )
+        return issue_harness_retrieval_attestation(
+            changed, signing_private_key=private_key,
+        )
+
+    with pytest.raises(ReviewRunnerError, match="context attestation"):
+        _run(
+            source, executable, identity, environment, private_key,
+            context_bundle_mutator=root_runtime,
+        )
+
+    execution = _run(source, executable, identity, environment, private_key)
+    malformed_report = json.loads(json.dumps(execution))
+    malformed_report["review"]["findings"] = [{"message": "missing required fields"}]
+    unsigned_execution = {
+        key: value for key, value in malformed_report.items() if key != "execution_hash"
+    }
+    malformed_report["execution_hash"] = _hash(unsigned_execution)
+    with pytest.raises(ReviewRunnerError, match="finding is invalid"):
+        validate_execution(malformed_report)
+
+    unenforced = json.loads(json.dumps(identity))
+    unenforced["network_policy"]["enforcement_receipt"]["status"] = "CLAIMED"
+    with pytest.raises(ReviewRunnerError, match="egress policy|receipt hash"):
+        _run(source, executable, unenforced, environment, private_key)
+
+    missing_tools = json.loads(json.dumps(identity))
+    missing_tools["command_policy"]["required_mcp_tools"] = []
+    with pytest.raises(ReviewRunnerError, match="command policy is invalid"):
+        _run(source, executable, missing_tools, environment, private_key)
+
+    wrong_identity = json.loads(json.dumps(identity))
+    wrong_identity["sandbox_identity"]["uid"] += 1
+    with pytest.raises(ReviewRunnerError, match="MCP config is not closure-bound"):
+        _run(source, executable, wrong_identity, environment, private_key)
+
+    retained = _run(source, executable, identity, environment, private_key)
+    retained["context_consumption"]["runtime_identity"]["uid"] += 1
+    context_unsigned = {
+        key: value for key, value in retained["context_consumption"].items()
+        if key != "bundle_hash"
+    }
+    retained["context_consumption"]["bundle_hash"] = _hash(context_unsigned)
+    execution_unsigned = {
+        key: value for key, value in retained.items() if key != "execution_hash"
+    }
+    retained["execution_hash"] = _hash(execution_unsigned)
+    with pytest.raises(ReviewRunnerError, match="context comparison"):
+        validate_execution(retained)

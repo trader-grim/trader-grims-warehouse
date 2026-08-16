@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from tgw import context_mcp_server as context
+from tgw.execution_resources import (
+    CARD_RESOURCE_NAMES,
+    RegisteredResourceResolver,
+    card_resource_receipt,
+    content_hash,
+)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -93,3 +101,76 @@ def test_fail_closed_path_and_materialization_checks_and_read_only_surface(bound
     }
     payload = json.loads(context.tgw_context_status())
     assert payload["ok"] is False
+
+
+def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):
+    contents = {
+        name: ("a" * 40 if name == "plan_commit" else f"resource:{name}").encode()
+        for name in CARD_RESOURCE_NAMES
+    }
+    bindings = {
+        name: {"ref": f"resource:{name}", "hash": content_hash(contents[name])}
+        for name in CARD_RESOURCE_NAMES
+    }
+    unsigned = {
+        "schema": "tgw-execution-card/v1", "role": "independent-review",
+        "plan_commit": "a" * 40, "bindings": bindings,
+    }
+    card = {
+        **unsigned,
+        "card_hash": "sha256:" + hashlib.sha256(context._canonical(unsigned)).hexdigest(),
+    }
+    receipt = card_resource_receipt(card)
+    observed = {}
+
+    class FakeResolver:
+        def __init__(self, **kwargs):
+            observed["configuration"] = kwargs
+            self.resources = RegisteredResourceResolver({
+                f"resource:{name}": value for name, value in contents.items()
+            })
+
+        def begin_harness_run(self, **kwargs):
+            observed["begin"] = kwargs
+            return {
+                "schema": "tgw-registered-resource-harness-run/v2",
+                "service_id": "review-resources", "client_id": "review-client",
+                "run_id": "run-bound-context", **kwargs,
+            }
+
+        def for_harness_run(self, run):
+            observed["run"] = run
+            return self.resources
+
+        def complete_harness_run(self, run):
+            return {"run_id": run["run_id"], "attestation_hash": "sha256:" + "b" * 64}
+
+    monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_ENDPOINT", "https://context.invalid")
+    monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_ID", "review-resources")
+    monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_CLIENT_ID", "review-client")
+    monkeypatch.setenv(
+        "TGW_CONTEXT_REVIEW_SKILL_CONTRACT_HASH", "sha256:" + "e" * 64,
+    )
+    monkeypatch.setenv("TGW_CONTEXT_REVIEW_UID", str(os.geteuid()))
+    monkeypatch.setenv("TGW_CONTEXT_REVIEW_GID", str(os.getegid()))
+    result = context._review_context_run(
+        challenge="c" * 64, card_json=json.dumps(card),
+        handoff_hash="sha256:" + "d" * 64,
+        resource_receipt_hash=receipt["receipt_hash"],
+        skill_contract_hash="sha256:" + "e" * 64,
+        resolver_factory=FakeResolver, credential_reader=lambda: "secret",
+    )
+    assert result == {
+        "schema": "tgw-context-review-run/v1", "status": "PASS",
+        "context_run_id": "run-bound-context", "challenge": "c" * 64,
+        "card_hash": card["card_hash"],
+        "resource_receipt_hash": receipt["receipt_hash"],
+        "skill_contract_hash": "sha256:" + "e" * 64,
+        "runtime_uid": os.geteuid(), "runtime_gid": os.getegid(),
+        "retrieval_attestation_hash": "sha256:" + "b" * 64,
+    }
+    assert observed["configuration"] == {
+        "service_id": "review-resources", "client_id": "review-client",
+        "endpoint": "https://context.invalid", "credential": "secret",
+    }
+    assert observed["begin"]["resources"] == bindings

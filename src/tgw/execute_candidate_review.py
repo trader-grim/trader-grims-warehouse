@@ -21,7 +21,7 @@ from tgw.candidate_review import (
     validate_review_result,
 )
 from tgw.execution_resources import HTTPRegisteredResourceResolver
-from tgw.governed_coding import dispatch_role
+from tgw.governed_coding import dispatch_role, validate_receipt
 from tgw.governed_review_adapter import validate_execution as validate_governed_review_execution
 from tgw.harness_registry import load_registry, observe_health
 from tgw.qualified_execution_service import QualifiedExecutionClient
@@ -68,6 +68,97 @@ def finalize_governed_review(
     return {
         "packet": dict(packet), "report": report, "execution": normalized,
         "result": result, "validation": validate_review_result(packet, report, result),
+    }
+
+
+def create_governed_review_role_receipt(
+    execution: Mapping[str, Any], handoff: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive the acyclic governed role receipt from the completed execution."""
+
+    normalized = validate_governed_review_execution(execution)
+    card = handoff.get("card")
+    promptcraft_receipt = handoff.get("receipt")
+    if (
+        not isinstance(card, Mapping)
+        or not isinstance(promptcraft_receipt, Mapping)
+        or card.get("card_hash") != normalized["card_hash"]
+        or handoff.get("handoff_hash") != normalized["handoff_hash"]
+        or promptcraft_receipt.get("receipt_hash")
+        != normalized["promptcraft_receipt_hash"]
+    ):
+        raise ValueError("governed review role receipt handoff is not exact")
+    context = normalized["context_consumption"]
+    attestation = context["retrieval_attestation"]
+    passed = normalized["review"]["verdict"] == "PASS"
+    unsigned = {
+        "schema": "tgw-governed-coding-receipt/v1",
+        "status": "PASS" if passed else "FAIL",
+        "role": "independent-review",
+        "selected_provider": normalized["provider"],
+        "execution_identity": attestation["execution_identity"],
+        "card_hash": normalized["card_hash"],
+        "promptcraft_receipt_hash": normalized["promptcraft_receipt_hash"],
+        "handoff_hash": normalized["handoff_hash"],
+        "resource_receipt_hash": normalized["promptcraft_receipt_hash"],
+        "harness_resource_receipt_hash": normalized["promptcraft_receipt_hash"],
+        "harness_retrieval_attestation_hash": attestation["attestation_hash"],
+        "harness_retrieval_attestation": dict(attestation),
+        "resource_service_descriptor_hash": card["resource_service"]["descriptor_hash"],
+        "resource_service_client_id": card["resource_service"]["client_id"],
+        "resource_service_catalog_ref": card["resource_service"]["catalog_ref"],
+        "resource_service_catalog_hash": card["resource_service"]["catalog_hash"],
+        "outcome": "satisfied" if passed else "failed",
+        "established_conditions": ["reviewed"] if passed else [],
+        "artifacts": [
+            {"kind": "governed_review_execution", "execution_hash": normalized["execution_hash"]},
+            {"kind": "tgw_context_bundle", "bundle_hash": context["bundle_hash"]},
+        ],
+    }
+    receipt = {**unsigned, "receipt_hash": _hash(unsigned)}
+    validate_receipt(receipt)
+    return receipt
+
+
+def finalize_and_publish_governed_review(
+    packet: Mapping[str, Any], execution: Mapping[str, Any],
+    handoff: Mapping[str, Any], sink: Any,
+) -> dict[str, Any]:
+    """Create and pin the complete seven-artifact governed review bundle."""
+
+    role_receipt = create_governed_review_role_receipt(execution, handoff)
+    finalized = finalize_governed_review(packet, execution, role_receipt)
+    source = finalized["execution"]["source"]
+    plan_commit = finalized["execution"]["plan_commit"]
+    prefix = f"candidate:{source['commit']}:independent-review"
+    artifacts = {
+        "review_packet": finalized["packet"],
+        "review_report": finalized["report"],
+        "review_result": finalized["result"],
+        "governed_review_execution": finalized["execution"],
+        "review_card": dict(handoff["card"]),
+        "review_handoff": dict(handoff),
+        "promptcraft_receipt": dict(handoff["receipt"]),
+    }
+    pointers = {}
+    for name, value in artifacts.items():
+        pointer = sink.publish_artifact(f"{prefix}:{name}", value)
+        if sink.read_artifact(pointer) != value:
+            raise ValueError(f"governed review {name} artifact X readback differs")
+        pointers[name] = pointer
+    unsigned_bundle = {
+        "schema": "tgw-candidate-independent-review-evidence-bundle/v4",
+        "source_commit": source["commit"], "source_tree": source["tree"],
+        "plan_commit": plan_commit, **pointers,
+    }
+    bundle = {**unsigned_bundle, "bundle_hash": _hash(unsigned_bundle)}
+    bundle_ref = f"candidate:{source['commit']}:independent-review-evidence:v3"
+    bundle_pointer = sink.publish_artifact(bundle_ref, bundle)
+    if sink.read_artifact(bundle_pointer) != bundle:
+        raise ValueError("governed review bundle X readback differs")
+    return {
+        **finalized, "governed_review_receipt": role_receipt,
+        "evidence_bundle": bundle, "evidence_bundle_pointer": bundle_pointer,
     }
 
 
@@ -287,14 +378,16 @@ def main() -> int:
         from tgw.governed_review_adapter import execute_request
 
         try:
-            execution = execute_request(arguments.governed_request)
+            finalized = execute_request(arguments.governed_request)
         except (OSError, ValueError) as exc:
             parser.error(str(exc))
         print(json.dumps({
             "schema": "tgw-governed-review-result-summary/v1",
-            "provider": execution["provider"],
-            "execution_hash": execution["execution_hash"],
-            "verdict": execution["review"]["verdict"],
+            "provider": finalized["execution"]["provider"],
+            "execution_hash": finalized["execution"]["execution_hash"],
+            "verdict": finalized["review"]["overall"],
+            "result_hash": finalized["result"]["result_hash"],
+            "evidence_bundle_hash": finalized["evidence_bundle"]["bundle_hash"],
         }, sort_keys=True, separators=(",", ":")))
         return 0
     parser.error(
