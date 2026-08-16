@@ -1,0 +1,23 @@
+{
+  "schema": "tgw-qualified-execution-service-installation-template/v1",
+  "installation_status": "NOT_INSTALLED",
+  "service_entry_point": "tgw.qualified_execution_service:main",
+  "runtime_config_schema": "tgw-qualified-execution-service-config/v1",
+  "descriptor_template": {
+    "schema": "tgw-qualified-execution-service/v1",
+    "id": null,
+    "client_id": null,
+    "endpoint": null,
+    "credential_env": null,
+    "timeout_seconds": null
+  },
+  "qualification_requirements": {
+    "catalog_schema": "tgw-qualified-execution-service-catalog/v1",
+    "proof_schema": "tgw-qualified-execution-proof/v1",
+    "transcript_schema": "tgw-qualified-execution-transcript/v1",
+    "attestation_key_requirement": "The externally installed runtime names an environment variable holding its raw base64 Ed25519 private key. Catalogs pin only the matching public key and key identifier; no credential, endpoint, repository, or key is present here.",
+    "policy_requirement": "Runtime configuration maps each credential to one client_id and exact profile grants, pins one external Plan commit, an explicit bounded active-request capacity, runtime interpreter/dependency/environment digests, and exact allowlisted test command/runner, migration runner, or review runner profiles. The service itself resolves the candidate/base trees and performs execution.",
+    "retention_requirement": "A PASS proof requires the complete retained transcript. Candidate admission S must retain one signed test/migration proof pair for every receipt; independent-review X retains a separate review proof pair whose signed input hashes equal the exact review packet and result bytes.",
+    "launch_rule": "This template is not a service configuration and must not be passed to a launcher, card, or admission gate. Deployment must provision the isolated repository checkout, policy configuration, client credentials, signing key, and immutable catalog separately."
+  }
+}

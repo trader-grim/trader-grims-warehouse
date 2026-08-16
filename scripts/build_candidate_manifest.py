@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Build a candidate manifest for diagnostics or qualified service input.
+
+This local helper does not create the qualified execution proofs required by
+the S admission bundle and therefore cannot self-admit a candidate.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -23,7 +29,10 @@ def main() -> int:
     parser.add_argument("--focused-output-artifact", type=Path, required=True)
     parser.add_argument("--full-suite-output-artifact", type=Path, required=True)
     parser.add_argument(
-        "--migration-receipt", type=Path, action="append", default=[],
+        "--migration-receipt",
+        type=Path,
+        action="append",
+        default=[],
         help="one independently verified executable database-migration receipt; repeat per migration",
     )
     parser.add_argument("--graph", type=Path)
@@ -40,10 +49,7 @@ def main() -> int:
     focused_output = json.loads(args.focused_output_artifact.read_text())
     full_suite_output = json.loads(args.full_suite_output_artifact.read_text())
     predecessor = json.loads(args.predecessor_release_manifest.read_text())
-    migrations = [
-        MigrationSafetyReceipt(**json.loads(path.read_text()))
-        for path in args.migration_receipt
-    ]
+    migrations = [MigrationSafetyReceipt(**json.loads(path.read_text())) for path in args.migration_receipt]
     graph = json.loads(args.graph.read_text()) if args.graph else None
     conformance = json.loads(args.luet_conformance_receipt.read_text()) if args.luet_conformance_receipt else None
     manifest = build_candidate_manifest(

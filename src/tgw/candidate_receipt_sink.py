@@ -37,6 +37,11 @@ from tgw.governed_execution_receipt import (
     GovernedExecutionReceiptError,
     verify_candidate_governed_execution_receipt,
 )
+from tgw.qualified_execution_service import (
+    QualifiedExecutionError,
+    validate_execution_proof,
+    validate_execution_service_catalog,
+)
 
 RECEIPT_SINK_SCHEMA = "tgw-pinned-git-candidate-receipt-sink/v1"
 RECEIPT_SINK_MANIFEST_SCHEMA = "tgw-pinned-git-candidate-receipt-sink-manifest/v1"
@@ -44,10 +49,10 @@ PINNED_CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA = "tgw-pinned-git-candidate-evidence
 CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA = "tgw-candidate-evidence-descriptor/v1"
 CANDIDATE_EVIDENCE_CARD_BINDING_SCHEMA = "tgw-candidate-evidence-descriptor-card-binding/v2"
 GOVERNED_EXECUTION_BUNDLE_SCHEMA = "tgw-candidate-governed-execution-bundle/v2"
-INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-independent-review-evidence-bundle/v1"
+INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-independent-review-evidence-bundle/v2"
 GOVERNED_CANDIDATE_ADMISSION_SCHEMA = "tgw-governed-candidate-admission-gate/v2"
 GOVERNED_CANDIDATE_PLAN_AUTHORITY_SCHEMA = "tgw-governed-candidate-plan-authority/v1"
-CANDIDATE_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-evidence-bundle/v2"
+CANDIDATE_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-evidence-bundle/v3"
 ROLLBACK_MANIFEST_SCHEMA = "tgw-governed-candidate-rollback-manifest/v1"
 
 GOVERNED_ROLES = (
@@ -77,8 +82,15 @@ _CANDIDATE_EVIDENCE_ARTIFACTS = (
     "full_suite_test_output",
     "release_manifest",
     "rollback_manifest",
+    "qualified_execution_catalog",
 )
-_INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS = ("review_packet", "review_result")
+_INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS = (
+    "review_packet",
+    "review_result",
+    "qualified_execution_catalog",
+    "review_execution_proof",
+    "review_execution_transcript",
+)
 
 
 class CandidateReceiptSinkError(ValueError):
@@ -122,7 +134,10 @@ def _object(value: bytes, *, label: str) -> dict[str, Any]:
 def _git(repository: Path, *args: str) -> bytes:
     try:
         return subprocess.run(
-            ["git", *args], cwd=repository, check=True, capture_output=True,
+            ["git", *args],
+            cwd=repository,
+            check=True,
+            capture_output=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         raise CandidateReceiptSinkError("pinned receipt sink Git object is unavailable") from exc
@@ -172,7 +187,7 @@ def candidate_evidence_bundle_ref(source_commit: str) -> str:
 
     if _GIT_OBJECT.fullmatch(source_commit) is None:
         raise CandidateReceiptSinkError("candidate evidence bundle identity is invalid")
-    return f"candidate:{source_commit}:candidate-evidence:v2"
+    return f"candidate:{source_commit}:candidate-evidence:v3"
 
 
 def independent_review_evidence_bundle_ref(source_commit: str) -> str:
@@ -180,14 +195,19 @@ def independent_review_evidence_bundle_ref(source_commit: str) -> str:
 
     if _GIT_OBJECT.fullmatch(source_commit) is None:
         raise CandidateReceiptSinkError("independent review evidence bundle identity is invalid")
-    return f"candidate:{source_commit}:independent-review-evidence:v1"
+    return f"candidate:{source_commit}:independent-review-evidence:v2"
 
 
 def validate_receipt_sink_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
     """Validate a configuration which pins a Git receipt sink, not a mutable ref."""
 
     required = {
-        "schema", "sink_id", "repository", "commit", "tree", "manifest_path",
+        "schema",
+        "sink_id",
+        "repository",
+        "commit",
+        "tree",
+        "manifest_path",
         "manifest_content_sha256",
     }
     if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != RECEIPT_SINK_SCHEMA:
@@ -234,11 +254,7 @@ def validate_pinned_candidate_evidence_descriptor(value: Mapping[str, Any]) -> d
     """Validate an immutable Git pin for the external S descriptor object."""
 
     required = {"schema", "repository", "commit", "tree", "path", "content_sha256"}
-    if (
-        not isinstance(value, Mapping)
-        or set(value) != required
-        or value.get("schema") != PINNED_CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA
-    ):
+    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != PINNED_CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA:
         raise CandidateReceiptSinkError("pinned candidate evidence descriptor is invalid")
     repository = value.get("repository")
     if not isinstance(repository, str) or not repository or not Path(repository).is_absolute():
@@ -284,11 +300,7 @@ class PinnedCandidateEvidenceDescriptor:
             raise CandidateReceiptSinkError("pinned candidate evidence descriptor content hash mismatch")
         value = _object(raw, label="pinned candidate evidence descriptor")
         required = {"schema", "candidate_evidence_sink"}
-        if (
-            set(value) != required
-            or value.get("schema") != CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA
-            or not isinstance(value.get("candidate_evidence_sink"), Mapping)
-        ):
+        if set(value) != required or value.get("schema") != CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA or not isinstance(value.get("candidate_evidence_sink"), Mapping):
             raise CandidateReceiptSinkError("candidate evidence descriptor is invalid")
         sink = validate_receipt_sink_descriptor(value["candidate_evidence_sink"])
         try:
@@ -334,7 +346,9 @@ class PinnedCandidateEvidenceDescriptor:
 
 
 def load_pinned_candidate_evidence_descriptor(
-    path: str | Path, *, candidate_repository: Path,
+    path: str | Path,
+    *,
+    candidate_repository: Path,
 ) -> PinnedCandidateEvidenceDescriptor:
     """Load the external D pin; a candidate-local or loose descriptor is refused."""
 
@@ -353,14 +367,13 @@ def load_pinned_candidate_evidence_descriptor(
 
 
 def _verify_card_candidate_evidence_binding(
-    card: Mapping[str, Any], descriptor: PinnedCandidateEvidenceDescriptor,
+    card: Mapping[str, Any],
+    descriptor: PinnedCandidateEvidenceDescriptor,
 ) -> None:
     bindings = card.get("bindings") if isinstance(card, Mapping) else None
     binding = bindings.get("receipt_sink") if isinstance(bindings, Mapping) else None
     if binding != descriptor.card_binding():
-        raise CandidateReceiptSinkError(
-            "execution card candidate-evidence descriptor binding is missing, legacy, or mismatched"
-        )
+        raise CandidateReceiptSinkError("execution card candidate-evidence descriptor binding is missing, legacy, or mismatched")
 
 
 def _validate_manifest(value: Mapping[str, Any], *, descriptor: Mapping[str, Any]) -> dict[str, Any]:
@@ -468,8 +481,13 @@ def validate_governed_execution_bundle(value: Mapping[str, Any]) -> dict[str, An
     """Validate the compact pointer bundle stored by a receipt sink."""
 
     required = {
-        "schema", "source_commit", "source_tree", "plan_commit", "role",
-        *_BUNDLE_ARTIFACTS, "bundle_hash",
+        "schema",
+        "source_commit",
+        "source_tree",
+        "plan_commit",
+        "role",
+        *_BUNDLE_ARTIFACTS,
+        "bundle_hash",
     }
     if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != GOVERNED_EXECUTION_BUNDLE_SCHEMA:
         raise CandidateReceiptSinkError("governed execution evidence bundle is invalid")
@@ -509,12 +527,7 @@ def _artifact_pointer(value: Any, *, label: str) -> dict[str, str]:
         raise CandidateReceiptSinkError(f"{label} artifact pointer is invalid")
     ref = value.get("ref")
     digest = value.get("content_sha256")
-    if (
-        not isinstance(ref, str)
-        or _ARTIFACT_REF.fullmatch(ref) is None
-        or not isinstance(digest, str)
-        or _SHA256.fullmatch(digest) is None
-    ):
+    if not isinstance(ref, str) or _ARTIFACT_REF.fullmatch(ref) is None or not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
         raise CandidateReceiptSinkError(f"{label} artifact pointer is invalid")
     return {"ref": ref, "content_sha256": digest}
 
@@ -532,10 +545,7 @@ def _candidate_archive_sha256(repository: Path, commit: str) -> str:
 def _candidate_changed_paths(repository: Path, base_commit: str, source_commit: str) -> list[str]:
     raw = _git(repository, "diff", "--name-only", base_commit, source_commit).decode()
     paths = sorted(path for path in raw.splitlines() if path)
-    if any(
-        PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts
-        for path in paths
-    ):
+    if any(PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts for path in paths):
         raise CandidateReceiptSinkError("candidate changed path is invalid")
     return paths
 
@@ -563,7 +573,11 @@ def _candidate_file_hashes(repository: Path, commit: str) -> dict[str, str]:
 
 
 def _validate_release_manifest(
-    value: Mapping[str, Any], *, repository: Path, commit: str, tree: str,
+    value: Mapping[str, Any],
+    *,
+    repository: Path,
+    commit: str,
+    tree: str,
 ) -> dict[str, Any]:
     """Check a release-installer manifest against the exact committed source.
 
@@ -575,14 +589,18 @@ def _validate_release_manifest(
     """
 
     required = {
-        "schema", "generation", "commit", "tree", "git_tree", "src_root",
-        "archive_sha256", "content_manifest_sha256", "file_count", "files",
+        "schema",
+        "generation",
+        "commit",
+        "tree",
+        "git_tree",
+        "src_root",
+        "archive_sha256",
+        "content_manifest_sha256",
+        "file_count",
+        "files",
     }
-    if (
-        not isinstance(value, Mapping)
-        or set(value) != required
-        or value.get("schema") != "tgw-release-manifest-v1"
-    ):
+    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != "tgw-release-manifest-v1":
         raise CandidateReceiptSinkError("candidate release manifest schema is invalid")
     generation = value.get("generation")
     if not isinstance(generation, str) or _RELEASE_GENERATION.fullmatch(generation) is None:
@@ -595,12 +613,7 @@ def _validate_release_manifest(
     if value.get("archive_sha256") != archive_sha256:
         raise CandidateReceiptSinkError("candidate release manifest archive hash mismatch")
     files = value.get("files")
-    if (
-        not isinstance(files, Mapping)
-        or not files
-        or not isinstance(value.get("file_count"), int)
-        or value["file_count"] != len(files)
-    ):
+    if not isinstance(files, Mapping) or not files or not isinstance(value.get("file_count"), int) or value["file_count"] != len(files):
         raise CandidateReceiptSinkError("candidate release manifest files are invalid")
     for path, digest in files.items():
         if (
@@ -614,9 +627,7 @@ def _validate_release_manifest(
             raise CandidateReceiptSinkError("candidate release manifest files are invalid")
     if dict(files) != _candidate_file_hashes(repository, commit):
         raise CandidateReceiptSinkError("candidate release manifest files do not match source")
-    expected_content_hash = hashlib.sha256(
-        (json.dumps(dict(sorted(files.items())), sort_keys=True, separators=(",", ":")) + "\n").encode()
-    ).hexdigest()
+    expected_content_hash = hashlib.sha256((json.dumps(dict(sorted(files.items())), sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest()
     if value.get("content_manifest_sha256") != expected_content_hash:
         raise CandidateReceiptSinkError("candidate release manifest content hash is invalid")
     return dict(value)
@@ -626,14 +637,16 @@ def validate_candidate_evidence_bundle(value: Mapping[str, Any]) -> dict[str, An
     """Validate S's compact immutable candidate-evidence pointer bundle."""
 
     required = {
-        "schema", "source_commit", "source_tree", "plan_commit",
-        *_CANDIDATE_EVIDENCE_ARTIFACTS, "migration_receipts", "bundle_hash",
+        "schema",
+        "source_commit",
+        "source_tree",
+        "plan_commit",
+        *_CANDIDATE_EVIDENCE_ARTIFACTS,
+        "migration_receipts",
+        "execution_proofs",
+        "bundle_hash",
     }
-    if (
-        not isinstance(value, Mapping)
-        or set(value) != required
-        or value.get("schema") != CANDIDATE_EVIDENCE_BUNDLE_SCHEMA
-    ):
+    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != CANDIDATE_EVIDENCE_BUNDLE_SCHEMA:
         raise CandidateReceiptSinkError("candidate evidence bundle is invalid")
     for field in ("source_commit", "source_tree", "plan_commit"):
         if not isinstance(value.get(field), str) or _GIT_OBJECT.fullmatch(value[field]) is None:
@@ -657,6 +670,20 @@ def validate_candidate_evidence_bundle(value: Mapping[str, Any]) -> dict[str, An
         refs.add(pointer["ref"])
         normalized_migrations.append(pointer)
     result["migration_receipts"] = normalized_migrations
+    execution_proofs = value.get("execution_proofs")
+    if not isinstance(execution_proofs, list) or not execution_proofs:
+        raise CandidateReceiptSinkError("candidate qualified execution proof pointers are invalid")
+    normalized_proofs: list[dict[str, dict[str, str]]] = []
+    for item in execution_proofs:
+        if not isinstance(item, Mapping) or set(item) != {"proof", "transcript"}:
+            raise CandidateReceiptSinkError("candidate qualified execution proof pointers are invalid")
+        proof = _artifact_pointer(item["proof"], label="candidate qualified execution proof")
+        transcript = _artifact_pointer(item["transcript"], label="candidate qualified execution transcript")
+        if proof["ref"] in refs or transcript["ref"] in refs or proof["ref"] == transcript["ref"]:
+            raise CandidateReceiptSinkError("candidate evidence bundle reuses an artifact")
+        refs.update((proof["ref"], transcript["ref"]))
+        normalized_proofs.append({"proof": proof, "transcript": transcript})
+    result["execution_proofs"] = normalized_proofs
     unsigned = dict(value)
     claimed = unsigned.pop("bundle_hash")
     if not isinstance(claimed, str) or _SHA256.fullmatch(claimed) is None or claimed != _hash(unsigned):
@@ -668,14 +695,14 @@ def validate_independent_review_evidence_bundle(value: Mapping[str, Any]) -> dic
     """Validate X's review pointers, which are deliberately outside S."""
 
     required = {
-        "schema", "source_commit", "source_tree", "plan_commit",
-        *_INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS, "bundle_hash",
+        "schema",
+        "source_commit",
+        "source_tree",
+        "plan_commit",
+        *_INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS,
+        "bundle_hash",
     }
-    if (
-        not isinstance(value, Mapping)
-        or set(value) != required
-        or value.get("schema") != INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA
-    ):
+    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA:
         raise CandidateReceiptSinkError("independent review evidence bundle is invalid")
     for field in ("source_commit", "source_tree", "plan_commit"):
         if not isinstance(value.get(field), str) or _GIT_OBJECT.fullmatch(value[field]) is None:
@@ -696,10 +723,19 @@ def validate_independent_review_evidence_bundle(value: Mapping[str, Any]) -> dic
 
 
 def _verify_candidate_manifest_evidence(
-    manifest: Mapping[str, Any], *, repository: Path, source_commit: str, source_tree: str,
-    plan_commit: str, focused_receipt: Mapping[str, Any], full_suite_receipt: Mapping[str, Any],
-    focused_output_artifact: Mapping[str, Any], full_suite_output_artifact: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    *,
+    repository: Path,
+    source_commit: str,
+    source_tree: str,
+    plan_commit: str,
+    focused_receipt: Mapping[str, Any],
+    full_suite_receipt: Mapping[str, Any],
+    focused_output_artifact: Mapping[str, Any],
+    full_suite_output_artifact: Mapping[str, Any],
     migration_receipts: list[Mapping[str, Any]],
+    qualified_execution_catalog: Mapping[str, Any],
+    execution_proofs: list[tuple[Mapping[str, Any], Mapping[str, Any]]],
 ) -> dict[str, Any]:
     """Re-derive every W08 manifest binding from exact source and sink blobs."""
 
@@ -719,8 +755,12 @@ def _verify_candidate_manifest_evidence(
         or not isinstance(tests, Mapping)
         or set(tests) != {"focused", "full_suite"}
         or not isinstance(database, Mapping)
-        or set(database) != {
-            "changed_sql_paths", "migration_paths", "schema_snapshot_paths", "backup_restore",
+        or set(database)
+        != {
+            "changed_sql_paths",
+            "migration_paths",
+            "schema_snapshot_paths",
+            "backup_restore",
         }
     ):
         raise CandidateReceiptSinkError("candidate manifest W08 fields are invalid")
@@ -736,15 +776,22 @@ def _verify_candidate_manifest_evidence(
         raise CandidateReceiptSinkError("candidate manifest predecessor binding is invalid")
     ancestry = subprocess.run(
         ["git", "merge-base", "--is-ancestor", base_commit, source_commit],
-        cwd=repository, capture_output=True, check=False,
+        cwd=repository,
+        capture_output=True,
+        check=False,
     )
     if ancestry.returncode:
         raise CandidateReceiptSinkError("candidate manifest predecessor is not an ancestor")
     predecessor = manifest.get("predecessor_release")
     if (
         not isinstance(predecessor, Mapping)
-        or set(predecessor) != {
-            "generation", "commit", "tree", "archive_sha256", "release_manifest_hash",
+        or set(predecessor)
+        != {
+            "generation",
+            "commit",
+            "tree",
+            "archive_sha256",
+            "release_manifest_hash",
         }
         or not isinstance(predecessor.get("generation"), str)
         or predecessor.get("commit") != base_commit
@@ -766,12 +813,20 @@ def _verify_candidate_manifest_evidence(
     try:
         test_plan = load_candidate_test_plan(repository, source_commit=source_commit)
         verified_focused = verify_test_receipt(
-            focused_receipt, scope="focused", source_commit=source_commit, source_tree=source_tree,
-            test_plan=test_plan, output_artifact=focused_output_artifact,
+            focused_receipt,
+            scope="focused",
+            source_commit=source_commit,
+            source_tree=source_tree,
+            test_plan=test_plan,
+            output_artifact=focused_output_artifact,
         )
         verified_full = verify_test_receipt(
-            full_suite_receipt, scope="full", source_commit=source_commit, source_tree=source_tree,
-            test_plan=test_plan, output_artifact=full_suite_output_artifact,
+            full_suite_receipt,
+            scope="full",
+            source_commit=source_commit,
+            source_tree=source_tree,
+            test_plan=test_plan,
+            output_artifact=full_suite_output_artifact,
         )
     except CandidateManifestError as exc:
         raise CandidateReceiptSinkError("candidate test evidence is invalid") from exc
@@ -796,11 +851,7 @@ def _verify_candidate_manifest_evidence(
         if not isinstance(path, str) or path in migration_paths or path not in changed_sql:
             raise CandidateReceiptSinkError("candidate migration evidence does not cover exact SQL changes")
         snapshot_path = receipt.get("schema_snapshot_path")
-        snapshot = (
-            _candidate_blob(repository, source_commit, snapshot_path)
-            if isinstance(snapshot_path, str) and snapshot_path in changed_sql
-            else None
-        )
+        snapshot = _candidate_blob(repository, source_commit, snapshot_path) if isinstance(snapshot_path, str) and snapshot_path in changed_sql else None
         if snapshot_path is not None and snapshot is None:
             raise CandidateReceiptSinkError("candidate migration snapshot binding is invalid")
         try:
@@ -824,6 +875,22 @@ def _verify_candidate_manifest_evidence(
         raise CandidateReceiptSinkError("candidate migration evidence does not cover every SQL change")
     if database.get("migration_paths") != sorted(migration_paths) or database.get("schema_snapshot_paths") != sorted(snapshot_paths):
         raise CandidateReceiptSinkError("candidate migration path summaries are invalid")
+    _verify_qualified_candidate_execution(
+        catalog=qualified_execution_catalog,
+        proofs=execution_proofs,
+        repository=repository,
+        source_commit=source_commit,
+        source_tree=source_tree,
+        base_commit=base_commit,
+        base_tree=base_tree,
+        plan_commit=plan_commit,
+        test_plan=test_plan,
+        focused_receipt=focused_receipt,
+        full_suite_receipt=full_suite_receipt,
+        focused_output=focused_output_artifact,
+        full_suite_output=full_suite_output_artifact,
+        migration_receipts=migration_receipts,
+    )
     return {
         "manifest": dict(manifest),
         "manifest_hash": manifest_hash,
@@ -834,24 +901,181 @@ def _verify_candidate_manifest_evidence(
         "focused_output_artifact_hash": verified_focused["output_artifact_hash"],
         "full_suite_output_artifact_hash": verified_full["output_artifact_hash"],
         "migration_receipts": verified_migrations,
+        "qualified_execution_proof_hashes": sorted(proof["proof_hash"] for proof, _ in execution_proofs),
     }
 
 
+def _service_has_execution_capability(
+    catalog: Mapping[str, Any],
+    *,
+    service_id: str,
+    client_id: str,
+    capability: str,
+) -> None:
+    try:
+        normalized = validate_execution_service_catalog(catalog)
+    except QualifiedExecutionError as exc:
+        raise CandidateReceiptSinkError("qualified execution catalog is invalid") from exc
+    service = next(
+        (item for item in normalized["services"] if item["id"] == service_id and item["client_id"] == client_id),
+        None,
+    )
+    if service is None or capability not in service["capabilities"]:
+        raise CandidateReceiptSinkError("qualified execution service lacks required capability")
+
+
+def _verified_execution_proof(
+    proof: Mapping[str, Any],
+    transcript: Mapping[str, Any],
+    *,
+    catalog: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    capability: str,
+) -> dict[str, Any]:
+    try:
+        normalized = validate_execution_proof(proof, transcript, catalog=catalog, expected=expected)
+    except QualifiedExecutionError as exc:
+        raise CandidateReceiptSinkError("candidate qualified execution proof is invalid") from exc
+    if normalized["status"] != "PASS":
+        raise CandidateReceiptSinkError("candidate qualified execution did not pass")
+    _service_has_execution_capability(
+        catalog,
+        service_id=normalized["service_id"],
+        client_id=normalized["client_id"],
+        capability=capability,
+    )
+    return normalized
+
+
+def _verify_qualified_candidate_execution(
+    *,
+    catalog: Mapping[str, Any],
+    proofs: list[tuple[Mapping[str, Any], Mapping[str, Any]]],
+    repository: Path,
+    source_commit: str,
+    source_tree: str,
+    base_commit: str,
+    base_tree: str,
+    plan_commit: str,
+    test_plan: Mapping[str, Any],
+    focused_receipt: Mapping[str, Any],
+    full_suite_receipt: Mapping[str, Any],
+    focused_output: Mapping[str, Any],
+    full_suite_output: Mapping[str, Any],
+    migration_receipts: list[Mapping[str, Any]],
+) -> None:
+    """Require one signed service run for every retained test/migration fact."""
+
+    common = {
+        "candidate_commit": source_commit,
+        "candidate_tree": source_tree,
+        "base_commit": base_commit,
+        "base_tree": base_tree,
+        "plan_commit": plan_commit,
+    }
+    expected_tests = {
+        "focused": {
+            "scope": "focused",
+            "test_plan_path": test_plan["path"],
+            "test_plan_sha256": test_plan["sha256"],
+            "test_runner_path": test_plan["runner_path"],
+            "test_runner_sha256": test_plan["runner_sha256"],
+            "test_receipt_hash": focused_receipt["receipt_hash"],
+            "test_output_artifact_hash": focused_output["artifact_hash"],
+        },
+        "full": {
+            "scope": "full",
+            "test_plan_path": test_plan["path"],
+            "test_plan_sha256": test_plan["sha256"],
+            "test_runner_path": test_plan["runner_path"],
+            "test_runner_sha256": test_plan["runner_sha256"],
+            "test_receipt_hash": full_suite_receipt["receipt_hash"],
+            "test_output_artifact_hash": full_suite_output["artifact_hash"],
+        },
+    }
+    expected_migration_inputs: dict[str, dict[str, Any]] = {}
+    for receipt in migration_receipts:
+        path = receipt["migration_path"]
+        snapshot_path = receipt["schema_snapshot_path"]
+        expected_migration_inputs[receipt["migration_path"]] = {
+            "migration_path": path,
+            "migration_sha256": _hash_bytes(_candidate_blob(repository, source_commit, path)),
+            "schema_snapshot_path": snapshot_path,
+            "schema_snapshot_sha256": (_hash_bytes(_candidate_blob(repository, source_commit, snapshot_path)) if snapshot_path is not None else None),
+            "migration_receipt_hash": receipt["receipt_hash"],
+        }
+    found_tests: dict[str, str] = {}
+    found_migrations: dict[str, str] = {}
+    seen_proofs: set[str] = set()
+    for proof, transcript in proofs:
+        kind = proof.get("kind") if isinstance(proof, Mapping) else None
+        if kind == "test":
+            normalized = _verified_execution_proof(
+                proof,
+                transcript,
+                catalog=catalog,
+                expected=common,
+                capability="candidate-test-execution",
+            )
+            inputs = normalized["inputs"]
+            scope = inputs.get("scope")
+            if scope not in expected_tests or inputs != expected_tests[scope] or scope in found_tests:
+                raise CandidateReceiptSinkError("qualified test proof inputs are not exact")
+            found_tests[scope] = normalized["proof_hash"]
+        elif kind == "migration":
+            normalized = _verified_execution_proof(
+                proof,
+                transcript,
+                catalog=catalog,
+                expected=common,
+                capability="postgresql-migration-execution",
+            )
+            inputs = normalized["inputs"]
+            path = inputs.get("migration_path")
+            expected_inputs = expected_migration_inputs.get(path)
+            if expected_inputs is None or path in found_migrations:
+                raise CandidateReceiptSinkError("qualified migration proof inputs are not exact")
+            if any(inputs.get(field) != item for field, item in expected_inputs.items()):
+                raise CandidateReceiptSinkError("qualified migration proof inputs are not exact")
+            if (
+                set(inputs) != set(expected_inputs) | {"runner_path", "runner_sha256"}
+                or not isinstance(inputs.get("runner_path"), str)
+                or not inputs["runner_path"]
+                or not _SHA256.fullmatch(str(inputs.get("runner_sha256")))
+            ):
+                raise CandidateReceiptSinkError("qualified migration proof runner binding is invalid")
+            found_migrations[path] = normalized["proof_hash"]
+        else:
+            raise CandidateReceiptSinkError("candidate evidence includes a non-test/non-migration execution proof")
+        proof_hash = proof.get("proof_hash") if isinstance(proof, Mapping) else None
+        if not isinstance(proof_hash, str) or proof_hash in seen_proofs:
+            raise CandidateReceiptSinkError("candidate qualified execution proof is reused")
+        seen_proofs.add(proof_hash)
+    if set(found_tests) != set(expected_tests) or set(found_migrations) != set(expected_migration_inputs):
+        raise CandidateReceiptSinkError("candidate qualified execution coverage is incomplete")
+
+
 def _verify_rollback_manifest(
-    value: Mapping[str, Any], *, candidate: Mapping[str, Any], release_manifest: Mapping[str, Any],
-    repository: Path, source_commit: str, source_tree: str,
+    value: Mapping[str, Any],
+    *,
+    candidate: Mapping[str, Any],
+    release_manifest: Mapping[str, Any],
+    repository: Path,
+    source_commit: str,
+    source_tree: str,
 ) -> dict[str, Any]:
     """Require a hash-bound rollback target equal to the selected predecessor."""
 
     required = {
-        "schema", "candidate_commit", "candidate_tree", "candidate_manifest_hash",
-        "release_manifest_hash", "rollback_release_manifest", "manifest_hash",
+        "schema",
+        "candidate_commit",
+        "candidate_tree",
+        "candidate_manifest_hash",
+        "release_manifest_hash",
+        "rollback_release_manifest",
+        "manifest_hash",
     }
-    if (
-        not isinstance(value, Mapping)
-        or set(value) != required
-        or value.get("schema") != ROLLBACK_MANIFEST_SCHEMA
-    ):
+    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != ROLLBACK_MANIFEST_SCHEMA:
         raise CandidateReceiptSinkError("candidate rollback manifest schema is invalid")
     unsigned = dict(value)
     claimed = unsigned.pop("manifest_hash")
@@ -869,21 +1093,29 @@ def _verify_rollback_manifest(
         raise CandidateReceiptSinkError("candidate rollback release manifest is invalid")
     try:
         predecessor = verify_predecessor_release(
-            rollback_release, base_commit=candidate["base_commit"], base_tree=candidate["base_tree"],
+            rollback_release,
+            base_commit=candidate["base_commit"],
+            base_tree=candidate["base_tree"],
         )
     except CandidateManifestError as exc:
         raise CandidateReceiptSinkError("candidate rollback release manifest is invalid") from exc
     if predecessor != candidate["manifest"]["predecessor_release"]:
         raise CandidateReceiptSinkError("candidate rollback target does not match the selected predecessor")
     _validate_release_manifest(
-        rollback_release, repository=repository,
-        commit=candidate["base_commit"], tree=candidate["base_tree"],
+        rollback_release,
+        repository=repository,
+        commit=candidate["base_commit"],
+        tree=candidate["base_tree"],
     )
     return dict(value)
 
 
 def verify_candidate_evidence_bundle(
-    sink: PinnedGitReceiptSink, *, repository: Path, source_commit: str, source_tree: str,
+    sink: PinnedGitReceiptSink,
+    *,
+    repository: Path,
+    source_commit: str,
+    source_tree: str,
     plan_commit: str,
 ) -> dict[str, Any]:
     """Verify W08 evidence retained by exact candidate-evidence store S.
@@ -894,39 +1126,45 @@ def verify_candidate_evidence_bundle(
     evidence.  Review execution is retained separately in X.
     """
 
-    bundle = validate_candidate_evidence_bundle(
-        sink.fetch_object(candidate_evidence_bundle_ref(source_commit))
-    )
-    if (
-        bundle["source_commit"] != source_commit
-        or bundle["source_tree"] != source_tree
-        or bundle["plan_commit"] != plan_commit
-    ):
+    bundle = validate_candidate_evidence_bundle(sink.fetch_object(candidate_evidence_bundle_ref(source_commit)))
+    if bundle["source_commit"] != source_commit or bundle["source_tree"] != source_tree or bundle["plan_commit"] != plan_commit:
         raise CandidateReceiptSinkError("candidate evidence bundle binding mismatch")
-    artifacts = {
-        name: _bundle_artifact(sink, bundle[name])
-        for name in _CANDIDATE_EVIDENCE_ARTIFACTS
-    }
-    migration_artifacts = [
-        _bundle_artifact(sink, pointer)
-        for pointer in bundle["migration_receipts"]
+    artifacts = {name: _bundle_artifact(sink, bundle[name]) for name in _CANDIDATE_EVIDENCE_ARTIFACTS}
+    migration_artifacts = [_bundle_artifact(sink, pointer) for pointer in bundle["migration_receipts"]]
+    execution_proofs = [
+        (
+            _bundle_artifact(sink, pointer["proof"]),
+            _bundle_artifact(sink, pointer["transcript"]),
+        )
+        for pointer in bundle["execution_proofs"]
     ]
     candidate = _verify_candidate_manifest_evidence(
-        artifacts["candidate_manifest"], repository=repository,
-        source_commit=source_commit, source_tree=source_tree, plan_commit=plan_commit,
+        artifacts["candidate_manifest"],
+        repository=repository,
+        source_commit=source_commit,
+        source_tree=source_tree,
+        plan_commit=plan_commit,
         focused_receipt=artifacts["focused_test_receipt"],
         full_suite_receipt=artifacts["full_suite_test_receipt"],
         focused_output_artifact=artifacts["focused_test_output"],
         full_suite_output_artifact=artifacts["full_suite_test_output"],
         migration_receipts=migration_artifacts,
+        qualified_execution_catalog=artifacts["qualified_execution_catalog"],
+        execution_proofs=execution_proofs,
     )
     release_manifest = _validate_release_manifest(
-        artifacts["release_manifest"], repository=repository,
-        commit=source_commit, tree=source_tree,
+        artifacts["release_manifest"],
+        repository=repository,
+        commit=source_commit,
+        tree=source_tree,
     )
     rollback_manifest = _verify_rollback_manifest(
-        artifacts["rollback_manifest"], candidate=candidate, release_manifest=release_manifest,
-        repository=repository, source_commit=source_commit, source_tree=source_tree,
+        artifacts["rollback_manifest"],
+        candidate=candidate,
+        release_manifest=release_manifest,
+        repository=repository,
+        source_commit=source_commit,
+        source_tree=source_tree,
     )
     return {
         "candidate_manifest_hash": candidate["manifest_hash"],
@@ -935,6 +1173,7 @@ def verify_candidate_evidence_bundle(
         "focused_test_output_artifact_hash": candidate["focused_output_artifact_hash"],
         "full_suite_test_output_artifact_hash": candidate["full_suite_output_artifact_hash"],
         "migration_receipt_hashes": sorted(receipt.receipt_hash for receipt in candidate["migration_receipts"]),
+        "qualified_execution_proof_hashes": candidate["qualified_execution_proof_hashes"],
         "release_manifest_hash": _hash(release_manifest),
         "rollback_manifest_hash": rollback_manifest["manifest_hash"],
         "bundle_hash": bundle["bundle_hash"],
@@ -942,24 +1181,20 @@ def verify_candidate_evidence_bundle(
 
 
 def verify_independent_review_evidence_bundle(
-    sink: PinnedGitReceiptSink, *, source_commit: str, source_tree: str, plan_commit: str,
-    candidate_manifest_hash: str, independent_review_receipt: Mapping[str, Any],
+    sink: PinnedGitReceiptSink,
+    *,
+    source_commit: str,
+    source_tree: str,
+    plan_commit: str,
+    candidate_manifest_hash: str,
+    independent_review_receipt: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Verify semantic/security review from X against S's candidate identity."""
 
-    bundle = validate_independent_review_evidence_bundle(
-        sink.fetch_object(independent_review_evidence_bundle_ref(source_commit))
-    )
-    if (
-        bundle["source_commit"] != source_commit
-        or bundle["source_tree"] != source_tree
-        or bundle["plan_commit"] != plan_commit
-    ):
+    bundle = validate_independent_review_evidence_bundle(sink.fetch_object(independent_review_evidence_bundle_ref(source_commit)))
+    if bundle["source_commit"] != source_commit or bundle["source_tree"] != source_tree or bundle["plan_commit"] != plan_commit:
         raise CandidateReceiptSinkError("independent review evidence bundle binding mismatch")
-    artifacts = {
-        name: _bundle_artifact(sink, bundle[name])
-        for name in _INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS
-    }
+    artifacts = {name: _bundle_artifact(sink, bundle[name]) for name in _INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS}
     try:
         review = validate_review_result(artifacts["review_packet"], artifacts["review_result"])
     except CandidateReviewError as exc:
@@ -968,29 +1203,56 @@ def verify_independent_review_evidence_bundle(
         raise CandidateReceiptSinkError("candidate semantic/security review did not pass")
     if artifacts["review_result"].get("governed_review_receipt") != independent_review_receipt:
         raise CandidateReceiptSinkError("candidate review does not use the retained independent review receipt")
+    common = {
+        "candidate_commit": source_commit,
+        "candidate_tree": source_tree,
+        "plan_commit": plan_commit,
+    }
+    normalized_proof = _verified_execution_proof(
+        artifacts["review_execution_proof"],
+        artifacts["review_execution_transcript"],
+        catalog=artifacts["qualified_execution_catalog"],
+        expected=common,
+        capability="candidate-review-execution",
+    )
+    inputs = normalized_proof["inputs"]
+    expected_inputs = {
+        "review_packet_content_sha256": _hash(artifacts["review_packet"]),
+        "review_packet_hash": review["packet_hash"],
+        "review_result_content_sha256": _hash(artifacts["review_result"]),
+        "review_result_hash": review["result_hash"],
+    }
+    if normalized_proof["kind"] != "review" or any(inputs.get(field) != item for field, item in expected_inputs.items()):
+        raise CandidateReceiptSinkError("qualified review proof does not bind retained packet/result")
+    if (
+        set(inputs) != set(expected_inputs) | {"runner_path", "runner_sha256"}
+        or not isinstance(inputs.get("runner_path"), str)
+        or not inputs["runner_path"]
+        or not _SHA256.fullmatch(str(inputs.get("runner_sha256")))
+    ):
+        raise CandidateReceiptSinkError("qualified review proof runner binding is invalid")
     return {
         "candidate_manifest_hash": candidate_manifest_hash,
         "review_packet_hash": review["packet_hash"],
         "review_result_hash": review["result_hash"],
+        "qualified_execution_proof_hash": normalized_proof["proof_hash"],
         "bundle_hash": bundle["bundle_hash"],
     }
 
 
 def verify_governed_execution_bundle(
-    execution_sink: PinnedGitReceiptSink, *, candidate_evidence_descriptor: PinnedCandidateEvidenceDescriptor,
-    source_commit: str, source_tree: str, plan_commit: str, role: str,
+    execution_sink: PinnedGitReceiptSink,
+    *,
+    candidate_evidence_descriptor: PinnedCandidateEvidenceDescriptor,
+    source_commit: str,
+    source_tree: str,
+    plan_commit: str,
+    role: str,
 ) -> dict[str, Any]:
     """Fetch X evidence and bind every card to exact external S descriptor D."""
 
-    bundle = validate_governed_execution_bundle(
-        execution_sink.fetch_object(governed_execution_bundle_ref(source_commit, role))
-    )
-    if (
-        bundle["source_commit"] != source_commit
-        or bundle["source_tree"] != source_tree
-        or bundle["plan_commit"] != plan_commit
-        or bundle["role"] != role
-    ):
+    bundle = validate_governed_execution_bundle(execution_sink.fetch_object(governed_execution_bundle_ref(source_commit, role)))
+    if bundle["source_commit"] != source_commit or bundle["source_tree"] != source_tree or bundle["plan_commit"] != plan_commit or bundle["role"] != role:
         raise CandidateReceiptSinkError("governed execution evidence bundle candidate binding mismatch")
     artifacts = {name: _bundle_artifact(execution_sink, bundle[name]) for name in _BUNDLE_ARTIFACTS}
     _verify_card_candidate_evidence_binding(artifacts["card"], candidate_evidence_descriptor)
@@ -1013,7 +1275,10 @@ def verify_governed_execution_bundle(
 
 
 def resolve_approved_plan_authority(
-    repository: Path, *, approved_ref: str, candidate_repository: Path,
+    repository: Path,
+    *,
+    approved_ref: str,
+    candidate_repository: Path,
 ) -> dict[str, str]:
     """Resolve one externally configured approved Plan reference.
 
@@ -1047,7 +1312,11 @@ def resolve_approved_plan_authority(
 
 
 def candidate_admission_gate(
-    repository: Path, *, candidate: str, plan_repository: Path, plan_approved_ref: str,
+    repository: Path,
+    *,
+    candidate: str,
+    plan_repository: Path,
+    plan_approved_ref: str,
     candidate_evidence_descriptor: PinnedCandidateEvidenceDescriptor,
     execution_sink: PinnedGitReceiptSink,
 ) -> dict[str, Any]:
@@ -1058,7 +1327,9 @@ def candidate_admission_gate(
     except OSError as exc:
         raise CandidateReceiptSinkError("candidate repository is unavailable") from exc
     plan_authority = resolve_approved_plan_authority(
-        plan_repository, approved_ref=plan_approved_ref, candidate_repository=repo,
+        plan_repository,
+        approved_ref=plan_approved_ref,
+        candidate_repository=repo,
     )
     if not isinstance(candidate_evidence_descriptor, PinnedCandidateEvidenceDescriptor):
         raise CandidateReceiptSinkError("candidate evidence descriptor must be externally pinned")
@@ -1069,18 +1340,19 @@ def candidate_admission_gate(
         candidate_repository=repo,
     )
     roots = (candidate_sink.repository, candidate_evidence_descriptor.authority_repository, execution_sink.repository)
-    if any(_paths_overlap(left, right) for index, left in enumerate(roots) for right in roots[index + 1:]):
-        raise CandidateReceiptSinkError(
-            "candidate evidence sink, descriptor authority, and execution evidence sink must be disjoint"
-        )
+    if any(_paths_overlap(left, right) for index, left in enumerate(roots) for right in roots[index + 1 :]):
+        raise CandidateReceiptSinkError("candidate evidence sink, descriptor authority, and execution evidence sink must be disjoint")
     plan_commit = plan_authority["approved_commit"]
     source_commit, source_tree = _candidate_identity(repo, candidate)
     reasons: list[str] = []
     candidate_evidence: dict[str, Any] | None = None
     try:
         candidate_evidence = verify_candidate_evidence_bundle(
-            candidate_sink, repository=repo, source_commit=source_commit,
-            source_tree=source_tree, plan_commit=plan_commit,
+            candidate_sink,
+            repository=repo,
+            source_commit=source_commit,
+            source_tree=source_tree,
+            plan_commit=plan_commit,
         )
     except CandidateReceiptSinkError:
         reasons.append("missing-or-invalid-candidate-evidence")
@@ -1090,8 +1362,12 @@ def candidate_admission_gate(
     for role in GOVERNED_ROLES:
         try:
             verified = verify_governed_execution_bundle(
-                execution_sink, candidate_evidence_descriptor=candidate_evidence_descriptor,
-                source_commit=source_commit, source_tree=source_tree, plan_commit=plan_commit, role=role,
+                execution_sink,
+                candidate_evidence_descriptor=candidate_evidence_descriptor,
+                source_commit=source_commit,
+                source_tree=source_tree,
+                plan_commit=plan_commit,
+                role=role,
             )
         except CandidateReceiptSinkError:
             reasons.append(f"missing-or-invalid-governed-evidence:{role}")
@@ -1109,7 +1385,9 @@ def candidate_admission_gate(
     else:
         try:
             independent_review_evidence = verify_independent_review_evidence_bundle(
-                execution_sink, source_commit=source_commit, source_tree=source_tree,
+                execution_sink,
+                source_commit=source_commit,
+                source_tree=source_tree,
                 plan_commit=plan_commit,
                 candidate_manifest_hash=candidate_evidence["candidate_manifest_hash"],
                 independent_review_receipt=independent_review_receipt,

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Run one committed candidate test plan and retain its output evidence."""
+"""Diagnostic helper for one committed candidate test plan.
+
+Its unsigned output and receipt cannot admit a candidate. Admission requires
+the separately configured qualified-execution service to retain a signed
+proof and complete transcript in S.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -37,7 +43,8 @@ def main() -> int:
     try:
         test_plan = load_candidate_test_plan(repo, source_commit=commit)
         candidate_runner = subprocess.check_output(
-            ["git", "show", f"{commit}:{test_plan['runner_path']}"], cwd=repo,
+            ["git", "show", f"{commit}:{test_plan['runner_path']}"],
+            cwd=repo,
         )
     except (OSError, subprocess.CalledProcessError, ValueError) as exc:
         parser.error(f"candidate canonical test plan is unavailable: {exc}")
@@ -50,8 +57,12 @@ def main() -> int:
     plan_command = test_plan["commands"][args.scope]
     command = [os.sys.executable, *plan_command]
     announce_script_run(
-        "run_candidate_tests.py", "run the canonical test plan against the exact closed candidate",
-        candidate=commit, scope=args.scope, test_plan=test_plan["sha256"], runner=test_plan["runner_sha256"],
+        "run_candidate_tests.py",
+        "run the canonical test plan against the exact closed candidate",
+        candidate=commit,
+        scope=args.scope,
+        test_plan=test_plan["sha256"],
+        runner=test_plan["runner_sha256"],
     )
     # A receipt must describe the closed object, not whichever tracked or
     # untracked files happen to be present in the caller's worktree.  A
@@ -61,7 +72,8 @@ def main() -> int:
         candidate_root = Path(temporary) / "candidate"
         subprocess.run(
             ["git", "-C", str(repo), "worktree", "add", "--detach", str(candidate_root), commit],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         try:
             # Tests must not depend on write access to the operator's live log
@@ -75,27 +87,36 @@ def main() -> int:
             # resolve to the bytes identified by ``source_tree`` above.
             candidate_source = str(candidate_root / "src")
             inherited_pythonpath = environment.get("PYTHONPATH", "")
-            environment["PYTHONPATH"] = (
-                candidate_source
-                if not inherited_pythonpath
-                else candidate_source + os.pathsep + inherited_pythonpath
-            )
+            environment["PYTHONPATH"] = candidate_source if not inherited_pythonpath else candidate_source + os.pathsep + inherited_pythonpath
             completed = subprocess.run(
-                command, cwd=candidate_root, capture_output=True, env=environment,
+                command,
+                cwd=candidate_root,
+                capture_output=True,
+                env=environment,
             )
         finally:
             subprocess.run(
                 ["git", "-C", str(repo), "worktree", "remove", "--force", str(candidate_root)],
-                check=True, capture_output=True,
+                check=True,
+                capture_output=True,
             )
     output = create_test_output_artifact(
-        scope=args.scope, command=plan_command,
-        source_commit=commit, source_tree=tree, stdout=completed.stdout, stderr=completed.stderr,
+        scope=args.scope,
+        command=plan_command,
+        source_commit=commit,
+        source_tree=tree,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
     )
     output_path.write_text(json.dumps(output, sort_keys=True, separators=(",", ":")), encoding="utf-8")
     receipt = create_test_receipt(
-        scope=args.scope, command=plan_command, source_commit=commit, source_tree=tree,
-        returncode=completed.returncode, test_plan=test_plan, output_artifact=output,
+        scope=args.scope,
+        command=plan_command,
+        source_commit=commit,
+        source_tree=tree,
+        returncode=completed.returncode,
+        test_plan=test_plan,
+        output_artifact=output,
     )
     print(json.dumps(receipt, indent=2, sort_keys=True))
     return completed.returncode
