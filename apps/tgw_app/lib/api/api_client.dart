@@ -321,7 +321,7 @@ class ApiClient {
   Future<ApiResponse<List<Map<String, dynamic>>>> getPlanAuthorityRequests({int limit = 100}) async {
     await ensureInitialized();
     try {
-      final response = await _dio.get('/api/plan-authority/requests', queryParameters: {'limit': limit});
+      final response = await _dio.get('/api/operator-console/requests', queryParameters: {'limit': limit});
       if (response.statusCode == 200) {
         final List<dynamic> requests = response.data['requests'] ?? [];
         return ApiResponse(ok: true, data: requests.map((value) => Map<String, dynamic>.from(value as Map)).toList());
@@ -335,7 +335,7 @@ class ApiClient {
   Future<ApiResponse<Map<String, dynamic>>> getPlanAuthorityRequest(String requestId) async {
     await ensureInitialized();
     try {
-      final response = await _dio.get('/api/plan-authority/requests/$requestId');
+      final response = await _dio.get('/api/operator-console/requests/$requestId');
       if (response.statusCode == 200) {
         return ApiResponse(ok: true, data: Map<String, dynamic>.from(response.data));
       }

@@ -4,6 +4,7 @@ import 'features/home/home_screen.dart';
 import 'features/browse/browse_screen.dart';
 import 'features/item/item_screen.dart';
 import 'features/review/review_queue_screen.dart';
+import 'features/review/plan_authority_screen.dart';
 import 'features/settings/settings_screen.dart';
 import 'providers/providers.dart';
 
@@ -40,6 +41,7 @@ class _MainShellState extends ConsumerState<MainShell> {
       BrowseScreen(onItemTap: _openItem),
       ReviewQueueScreen(onItemTap: _openItem),
       ItemScreen(sku: _selectedSku),
+      const PlanAuthorityScreen(),
       const SettingsScreen(),
     ];
 
@@ -69,6 +71,7 @@ class _MainShellState extends ConsumerState<MainShell> {
           NavigationDestination(icon: Icon(Icons.grid_view), label: 'Browse'),
           NavigationDestination(icon: Icon(Icons.rate_review_outlined), label: 'Review'),
           NavigationDestination(icon: Icon(Icons.inventory_2), label: 'Item'),
+          NavigationDestination(icon: Icon(Icons.verified_user_outlined), label: 'Authority'),
           NavigationDestination(icon: Icon(Icons.settings), label: 'Settings'),
         ],
       ),
