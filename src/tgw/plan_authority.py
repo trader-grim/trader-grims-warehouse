@@ -139,6 +139,7 @@ class AuthorityDecision:
     kind: DecisionKind
     decided_by: str
     reason: str
+    reconciliation_evidence: tuple[str, ...]
     decided_at: datetime
 
     @classmethod
@@ -147,9 +148,23 @@ class AuthorityDecision:
         decided_by, reason = data.get("decided_by"), data.get("reason")
         if not isinstance(decided_by, str) or not decided_by or not isinstance(reason, str) or not reason:
             raise ValueError("decided_by and reason are required")
+        evidence = data.get("reconciliation_evidence", ())
+        if (
+            not isinstance(evidence, Sequence)
+            or isinstance(evidence, (str, bytes))
+            or not all(isinstance(item, str) and item for item in evidence)
+        ):
+            raise ValueError("reconciliation_evidence must be a sequence of identities")
+        if kind is not DecisionKind.RECONCILE and evidence:
+            raise ValueError("reconciliation_evidence is only valid for reconcile decisions")
         decided_at = now or datetime.now(timezone.utc)
-        payload = {"request_id": request_id, "kind": kind.value, "decided_by": decided_by, "reason": reason, "decided_at": decided_at.isoformat()}
-        return cls(_identity("decision", payload), request_id, kind, decided_by, reason, decided_at)
+        normalized_evidence = tuple(sorted(set(evidence)))
+        payload = {
+            "request_id": request_id, "kind": kind.value, "decided_by": decided_by,
+            "reason": reason, "reconciliation_evidence": normalized_evidence,
+            "decided_at": decided_at.isoformat(),
+        }
+        return cls(_identity("decision", payload), request_id, kind, decided_by, reason, normalized_evidence, decided_at)
 
 
 class AuthorityStore(Protocol):
@@ -214,24 +229,31 @@ class PostgresAuthorityStore:
                 (decision.request_id,),
             )
             request = cur.fetchone()
-            if request is None or request["expires_at"] <= decision.decided_at:
-                raise ValueError("request is absent or expired")
+            if request is None:
+                raise ValueError("request is absent")
             cur.execute(
-                """SELECT outcome FROM plan_authority_effect_receipts
-                    WHERE request_id=%s
-                    ORDER BY started_at DESC, receipt_id DESC LIMIT 1""",
+                """SELECT * FROM plan_authority_effect_receipts
+                    WHERE request_id=%s AND completed_at IS NULL FOR UPDATE""",
                 (decision.request_id,),
             )
-            latest_effect = cur.fetchone()
-            if latest_effect is not None and latest_effect["outcome"] != "retry":
-                raise ValueError("request has a terminal execution outcome")
-            cur.execute(
-                """SELECT receipt_id FROM plan_authority_effect_receipts
-                    WHERE request_id=%s AND completed_at IS NULL LIMIT 1""",
-                (decision.request_id,),
-            )
-            if cur.fetchone() is not None:
-                raise ValueError("request has an unresolved execution attempt")
+            active_attempt = cur.fetchone()
+            if request["expires_at"] <= decision.decided_at and active_attempt is None:
+                raise ValueError("request is expired")
+            if active_attempt is not None:
+                if decision.kind is not DecisionKind.RECONCILE:
+                    raise ValueError("request has an unresolved execution attempt; reconcile it explicitly")
+                if not decision.reconciliation_evidence:
+                    raise ValueError("active execution reconciliation requires evidence")
+            else:
+                cur.execute(
+                    """SELECT outcome FROM plan_authority_effect_receipts
+                        WHERE request_id=%s
+                        ORDER BY started_at DESC, receipt_id DESC LIMIT 1""",
+                    (decision.request_id,),
+                )
+                latest_effect = cur.fetchone()
+                if latest_effect is not None and latest_effect["outcome"] != "retry":
+                    raise ValueError("request has a terminal execution outcome")
             cur.execute(
                 """SELECT decision_kind FROM plan_authority_decisions
                     WHERE request_id=%s ORDER BY decided_at DESC, decision_id DESC LIMIT 1""",
@@ -249,16 +271,44 @@ class PostgresAuthorityStore:
             }
             if decision.kind.value not in allowed.get(prior_kind, set()):
                 raise ValueError(f"invalid authority transition {prior_kind or 'pending'} -> {decision.kind.value}")
+            settled_receipt_id = None
+            if active_attempt is not None:
+                settled_receipt_id = str(active_attempt["receipt_id"])
+                cur.execute(
+                    """UPDATE plan_authority_effect_receipts
+                          SET outcome='ambiguous', evidence=%s::jsonb,
+                              detail=%s, completed_at=%s
+                        WHERE receipt_id=%s AND completed_at IS NULL""",
+                    (
+                        json.dumps(list(decision.reconciliation_evidence)),
+                        f"reconciled active execution as ambiguous: {decision.reason}",
+                        decision.decided_at,
+                        settled_receipt_id,
+                    ),
+                )
+                if cur.rowcount != 1:  # pragma: no cover - lock above is the invariant
+                    raise ValueError("active execution changed before reconciliation")
             cur.execute(
                 """INSERT INTO plan_authority_decisions
-                   (decision_id,request_id,decision_kind,decided_by,reason,decided_at)
-                   VALUES (%s,%s,%s,%s,%s,%s) RETURNING *""",
+                   (decision_id,request_id,decision_kind,decided_by,reason,reconciliation_evidence,decided_at)
+                   VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s) RETURNING *""",
                 (decision.decision_id, decision.request_id, decision.kind.value,
-                 decision.decided_by, decision.reason, decision.decided_at),
+                 decision.decided_by, decision.reason,
+                 json.dumps(list(decision.reconciliation_evidence)), decision.decided_at),
             )
             row = cur.fetchone()
+            if settled_receipt_id is not None:
+                self._event(cur, decision.request_id, "execution-reconciled", {
+                    "receipt_id": settled_receipt_id,
+                    "outcome": "ambiguous",
+                    "evidence": list(decision.reconciliation_evidence),
+                })
             self._event(cur, decision.request_id, "decided", asdict(decision))
-            return dict(row)
+            result = dict(row)
+            if settled_receipt_id is not None:
+                result["settled_receipt_id"] = settled_receipt_id
+                result["execution_outcome"] = "ambiguous"
+            return result
 
     def begin_execution(
         self,
@@ -392,7 +442,7 @@ class PostgresAuthorityStore:
     def _request_projection_sql(tail: str) -> str:
         """Use latest decision/attempt, never a lossy multi-row join."""
         return f"""SELECT r.*,d.decision_id,d.decision_kind,d.decided_by,
-                          d.reason AS decision_reason,d.decided_at,
+                          d.reason AS decision_reason,d.reconciliation_evidence,d.decided_at,
                           e.receipt_id,e.started_at,e.completed_at,e.outcome,
                           e.handler_id,e.evidence AS execution_evidence,
                           e.rollback_receipt,e.detail,

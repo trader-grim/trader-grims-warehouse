@@ -77,6 +77,15 @@ def test_projection_reports_status_evidence_and_only_legal_actions():
     assert project_request(_row(
         receipt_id="receipt:done", completed_at=datetime.now(timezone.utc), outcome="succeeded",
     ))["status"] == "succeeded"
+    active = project_request(_row(receipt_id="receipt:active"))
+    assert active["status"] == "reconciliation_required"
+    assert active["reconciliation_required"] is True
+    assert active["legal_actions"] == ["view-evidence", "reconcile"]
+    ambiguous = project_request(_row(
+        receipt_id="receipt:ambiguous", completed_at=datetime.now(timezone.utc), outcome="ambiguous",
+    ))
+    assert ambiguous["status"] == "ambiguous"
+    assert ambiguous["reconciliation_required"] is True
 
 
 def test_mount_exposes_shared_api_site_and_canonical_authority_router():

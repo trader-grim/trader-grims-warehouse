@@ -45,7 +45,9 @@ def _status(row: Mapping[str, Any], now: datetime) -> str:
     if outcome and outcome != "retry":
         return str(outcome)
     if row.get("receipt_id") and not row.get("completed_at"):
-        return "executing"
+        # An executor can no longer report a result.  Do not infer that its
+        # provider was not called: require an evidence-bearing reconciliation.
+        return "reconciliation_required"
     expires = row.get("expires_at")
     if isinstance(expires, str):
         expires = datetime.fromisoformat(expires.replace("Z", "+00:00"))
@@ -68,6 +70,8 @@ def project_request(row: Mapping[str, Any], *, now: datetime | None = None) -> d
     actions = ["view-evidence"]
     if status == "pending":
         actions.extend(("approve", "hold", "reconcile"))
+    elif status == "reconciliation_required":
+        actions.append("reconcile")
     elif status in {"approve", "retry"}:
         actions.append("consume-by-executor")
     return {
@@ -91,6 +95,7 @@ def project_request(row: Mapping[str, Any], *, now: datetime | None = None) -> d
             "kind": row.get("decision_kind"),
             "by": row.get("decided_by"),
             "reason": row.get("decision_reason"),
+            "reconciliation_evidence": list(row.get("reconciliation_evidence") or ()),
             "at": row.get("decided_at"),
         } if row.get("decision_kind") else None,
         "receipt_id": row.get("receipt_id"),
@@ -103,6 +108,7 @@ def project_request(row: Mapping[str, Any], *, now: datetime | None = None) -> d
             "rollback_receipt": row.get("rollback_receipt"),
             "detail": row.get("detail") or "",
         } if row.get("receipt_id") else None,
+        "reconciliation_required": status in {"reconciliation_required", "ambiguous"},
         "legal_actions": actions,
         "authority": AUTHORITY_SCHEMA,
     }

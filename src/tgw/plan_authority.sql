@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS plan_authority_decisions (
     decision_kind text NOT NULL CHECK (decision_kind IN ('approve','hold','reconcile')),
     decided_by text NOT NULL,
     reason text NOT NULL,
+    reconciliation_evidence jsonb NOT NULL DEFAULT '[]'::jsonb,
     decided_at timestamptz NOT NULL
 );
 
@@ -58,6 +59,8 @@ CREATE INDEX IF NOT EXISTS plan_authority_events_request_idx
 -- the original schema; IF EXISTS keeps fresh and upgraded databases aligned.
 ALTER TABLE plan_authority_decisions
     DROP CONSTRAINT IF EXISTS plan_authority_decisions_request_id_key;
+ALTER TABLE plan_authority_decisions
+    ADD COLUMN IF NOT EXISTS reconciliation_evidence jsonb NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE plan_authority_effect_receipts
     DROP CONSTRAINT IF EXISTS plan_authority_effect_receipts_request_id_key;
 ALTER TABLE plan_authority_effect_receipts

@@ -14,6 +14,7 @@ from pathlib import Path
 import psycopg2
 import pytest
 
+from tgw.operator_console import project_request
 from tgw.plan_authority import AuthorityDecision, AuthorityRequest, PostgresAuthorityStore
 from tgw.plan_solver import solve
 
@@ -119,7 +120,7 @@ def test_postgres_preserves_full_decision_history_and_retry_then_terminal_receip
     ]
 
 
-def test_postgres_active_attempt_is_a_durable_ambiguity_fence():
+def test_postgres_reconcile_settles_an_active_attempt_as_auditable_ambiguity():
     store = PostgresAuthorityStore(_DSN)
     request = _request()
     store.create_request(request)
@@ -131,11 +132,36 @@ def test_postgres_active_attempt_is_a_durable_ambiguity_fence():
         generation=request.effect.generation, handler_id="authority-canary-receipt-only@1",
     )
     assert store.get(request.request_id)["receipt_id"] == attempt["receipt_id"]
+    assert project_request(store.get(request.request_id))["status"] == "reconciliation_required"
     with pytest.raises(ValueError, match="already executing"):
         store.begin_execution(
             request.request_id, effect_hash=request.effect.effect_hash,
             generation=request.effect.generation, handler_id="authority-canary-receipt-only@1",
         )
+    with pytest.raises(ValueError, match="requires evidence"):
+        store.decide(AuthorityDecision.create(request.request_id, {
+            "kind": "reconcile", "decided_by": "operator:postgres", "reason": "executor exited",
+        }))
+    settled = store.decide(AuthorityDecision.create(request.request_id, {
+        "kind": "reconcile", "decided_by": "operator:postgres", "reason": "executor exited",
+        "reconciliation_evidence": ["worker:exit-137", "provider:result-unknown"],
+    }))
+    assert settled["settled_receipt_id"] == attempt["receipt_id"]
+    assert settled["execution_outcome"] == "ambiguous"
+    row = store.get(request.request_id)
+    assert row["decision_kind"] == "reconcile"
+    assert row["outcome"] == "ambiguous"
+    assert row["execution_evidence"] == ["provider:result-unknown", "worker:exit-137"]
+    assert project_request(row)["status"] == "ambiguous"
+    assert project_request(row)["reconciliation_required"] is True
+    with pytest.raises(ValueError, match="terminal"):
+        store.begin_execution(
+            request.request_id, effect_hash=request.effect.effect_hash,
+            generation=request.effect.generation, handler_id="authority-canary-receipt-only@1",
+        )
+    assert [event["event_type"] for event in store.events(request.request_id)] == [
+        "requested", "decided", "execution-started", "execution-reconciled", "decided",
+    ]
 
 
 def test_postgres_migrates_v1_single_decision_and_eager_consumption_schema():
@@ -181,6 +207,12 @@ def test_postgres_migrates_v1_single_decision_and_eager_consumption_schema():
              WHERE conrelid='plan_authority_decisions'::regclass AND contype='u'
         """)
         assert cursor.fetchall() == []
+        cursor.execute("""
+            SELECT column_name FROM information_schema.columns
+             WHERE table_name='plan_authority_decisions'
+               AND column_name='reconciliation_evidence'
+        """)
+        assert cursor.fetchall() == [("reconciliation_evidence",)]
         cursor.execute("""
             SELECT conname FROM pg_constraint
              WHERE conrelid='plan_authority_effect_receipts'::regclass AND contype='u'
