@@ -22,7 +22,8 @@ went (Dave, s45) "extremely well." Do not dilute the steps.
 ### 1. Load the packet — and ONLY the packet
 
 - `sudo -u tgw tgw todo brief <id>` for the task brief.
-- If `docs/TGW-Plan-Vault/plan/packets/<id>-*.md` exists, read it; its
+- Resolve the approved Plan binding first. If its `plan/packets/<id>-*.md`
+  exists, read it; its
   **Context budget** section is a HARD ceiling on what you may load.
 - Do NOT read the full master plan, FUTURE-IDEAS, or unrelated reference docs.
   Easing the burden of the huge plan is the point of packets. If the packet

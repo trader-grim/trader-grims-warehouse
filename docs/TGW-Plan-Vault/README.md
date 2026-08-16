@@ -1,10 +1,16 @@
 # TGW Plan Vault
 
-This folder is an Obsidian vault. Open Obsidian → "Open folder as vault" → point it here.
+This folder is a retained historical/reference Obsidian vault. It is not
+operational Plan authority. Operational consumers must resolve the exact
+approved Plan commit and solution through `approved_plan_binding`; the local
+`plan/` tree remains available only for history and separately controlled
+authoring.
 
 ## Layout
-- `plan/` — the living spec, decisions, and execution tasks
-  - `TGW-Master-Plan.md` — **start here.** The markmap hub. Renders as a mind-map.
+- `plan/` — retained historical and authoring material; never an operational
+  authority source
+  - `TGW-Master-Plan.md` — retained markmap index; do not select it as the
+    current Plan.
   - `DECISION-queue-architecture.md` — settled queue design + reasoning
   - `TASKS-phase1-queue.md` — bite-sized tasks to hand to Sonnet/Haiku
 - `reference/` — starter code and distilled context for executor models
@@ -12,10 +18,12 @@ This folder is an Obsidian vault. Open Obsidian → "Open folder as vault" → p
 - `inbox/` — drop a plan note here; the PM-intake worker (Phase 2) will file it
 - `suggestions/` — `tgw suggest "..."` appends here for the next session
 
-## To see the mind-map
-Install the **Markmap** community plugin in Obsidian, open `TGW-Master-Plan.md`,
-and use the Markmap view. The YAML frontmatter already sets the expand level.
+## To see historical material
+Install the **Markmap** community plugin in Obsidian and open the retained
+index if historical visualization is needed. The YAML frontmatter already
+sets the expand level.
 
 ## To brief another model
-Paste `TGW-Master-Plan.md` for full context, then the relevant `TASKS-*.md`
-and any `reference/*.py` the task names. Each task is one execution session.
+Use the exact approved Plan materialization selected by the runtime binding,
+then only the packet and references it names. Do not substitute this vault's
+historical files for that binding.

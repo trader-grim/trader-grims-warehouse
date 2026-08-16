@@ -46,10 +46,10 @@ For each new memory, write it to the memory directory at
 `/home/db/.claude/projects/-opt-TGW-src-trader-grims-warehouse/memory/` following the
 type schema (user / feedback / project / reference) and update `MEMORY.md` with a pointer.
 
-### 4. Update handoff.md
+### 4. Keep the handoff in the inbox breadcrumb
 
-Append a brief entry to `docs/TGW-Plan-Vault/plan/handoff.md` section "What Changed This Session"
-with:
+The approved Plan materialization is immutable. Add the following to this
+session's inbox breadcrumb instead; do not write a source-tree Plan handoff:
 - Session date
 - What was done (bullet list)
 - What is still open

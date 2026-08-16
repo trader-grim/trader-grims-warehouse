@@ -15,7 +15,7 @@ def test_real_instruction_inventory_is_hashed_classified_and_inert():
     result = audit_instructions(ROOT, load_registry(REGISTRY), observed_at="2026-08-11T09:05:00-07:00")
     paths = {item["path"] for item in result["sources"]}
     assert {"AGENTS.md", "CLAUDE.md", ".claude/agents/nix-flake-maintainer.md"} <= paths
-    assert "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md" in paths
+    assert "docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md" not in paths
     assert all(item["sha256"].startswith("sha256:") for item in result["sources"])
     assert result["commands_executed_from_sources"] is False
     assert result["source_files_modified"] is False

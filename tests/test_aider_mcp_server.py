@@ -12,6 +12,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 import tgw.aider_mcp_server as ams
 
 # ---------------------------------------------------------------------------
@@ -336,6 +338,11 @@ def test_build_preflight_uses_configured_plan_git(tmp_path, monkeypatch):
         '_plan_runtime_binding',
         lambda: (Path('/opt/TGW/library/plans'), '/run/current-system/sw/bin/git'),
     )
+    monkeypatch.setattr(
+        ams,
+        '_plan_approval_binding',
+        lambda: ('a' * 40, 'sha256:' + 'b' * 64),
+    )
 
     def fake_live_plan_graph(root, task, **kwargs):
         observed.update(root=root, task=task, **kwargs)
@@ -356,26 +363,25 @@ def test_build_preflight_uses_configured_plan_git(tmp_path, monkeypatch):
     assert 'Standalone Plan commit: fb9fee3' in context
 
 
-def test_plan_runtime_binding_defaults_to_standalone_root(tmp_path, monkeypatch):
+def test_plan_runtime_binding_rejects_unbound_operational_config(tmp_path, monkeypatch):
     config_path = tmp_path / 'config.json'
     config_path.write_text(json.dumps({'secrets_root': str(tmp_path / 'secrets')}))
     monkeypatch.setenv('TGW_CONFIG', str(config_path))
     monkeypatch.delenv('TGW_STANDALONE_PLAN_VAULT', raising=False)
     monkeypatch.delenv('TGW_STANDALONE_PLAN_GIT', raising=False)
 
-    root, git_path = ams._plan_runtime_binding()
-
-    assert root == Path('/opt/TGW/library/plans')
-    assert git_path == 'git'
+    with pytest.raises(ValueError, match='requires approved Plan commit and solution'):
+        ams._plan_runtime_binding()
 
 
 def test_plan_runtime_binding_honors_explicit_config(tmp_path, monkeypatch):
     config_path = tmp_path / 'config.json'
-    config_path.write_text(json.dumps({
-        'secrets_root': str(tmp_path / 'secrets'),
-        'standalone_plan_root': '~/plans',
+    monkeypatch.setattr('tgw.config.load_operational_config', lambda _: {
+        'standalone_plan_root': Path('~/plans').expanduser(),
         'plan_git_path': '/run/current-system/sw/bin/git',
-    }))
+        'plan_approved_commit': 'a' * 40,
+        'plan_approved_solution_hash': 'sha256:' + 'b' * 64,
+    })
     monkeypatch.setenv('TGW_CONFIG', str(config_path))
     monkeypatch.delenv('TGW_STANDALONE_PLAN_VAULT', raising=False)
     monkeypatch.delenv('TGW_STANDALONE_PLAN_GIT', raising=False)

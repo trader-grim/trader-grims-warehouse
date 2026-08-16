@@ -6,7 +6,7 @@ description: Check a completed task branch + result manifest against its work-pa
 # TGW Runner Review
 
 Review exactly ONE task branch, produced by the branch-per-task contract
-(`docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md` §"Tigwa as branch-review
+(the bound approved Plan materialization's `plan/pp/PP-HERMES-EA-001.md` §"Tigwa as branch-review
 enforcer"). This skill is written generically on purpose: "Tigwa" is this
 project's convenient name for whichever agent currently fills the reviewer
 role, not a hardcoded dependency. Any executive monitor invoking this skill
@@ -23,11 +23,11 @@ hands off to a human/Claude stitch step; it does not merge to main itself.
 
 ## Inputs — load ONLY these, same context discipline as tgw-packet/tgw-coder
 
-- `docs/TGW-Plan-Vault/plan/packets/<id>-*.md` — the packet's Spec,
+- The bound approved Plan materialization's `plan/packets/<id>-*.md` — the packet's Spec,
   Out-of-scope, and Acceptance sections.
-- `docs/TGW-Plan-Vault/plan/packets/results/<id>-RESULT.md` — the executor's
-  result manifest (status, files touched, live evidence, deviations,
-  out-of-scope findings filed).
+- The task's separate execution/evidence store — the executor's result
+  manifest (status, files touched, live evidence, deviations, out-of-scope
+  findings filed). The approved Plan materialization is read-only.
 - The `todo/<id>-<slug>` branch diff — read via `git diff main todo/<id>-<slug>`
   or `git show todo/<id>-<slug>:<path>` from the shared repo checkout; no
   need to `cd` into the executor's worktree (`/opt/TGW/var/worktrees/<id>-<slug>`,
@@ -73,7 +73,7 @@ override, don't wave it through.
 ### 3. Out-of-control trigger list — explicit, not subjective
 
 This list is authoritative in
-`docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md` — if the two ever
+the bound approved Plan materialization's `plan/pp/PP-HERMES-EA-001.md` — if the two ever
 disagree, that doc wins and this skill needs updating, not the reverse.
 
 - Spec deviation not resolved within the fix-attempt cap (below).
@@ -108,7 +108,7 @@ If any of these fire and are not resolvable within the cap below:
 
 ### 5. Escalate
 
-- Write `docs/TGW-Plan-Vault/plan/packets/results/<id>-ESCALATION.md`:
+- Write `<id>-ESCALATION.md` to the task's separate execution/evidence store:
   which trigger fired, what was tried, current branch/diff state, and the
   specific decision needed from Dave.
 - Surface it through whatever channel is actually live for this reviewer
@@ -122,7 +122,7 @@ If any of these fire and are not resolvable within the cap below:
 
 If steps 2–4 pass with no unresolved trigger:
 
-- Write `docs/TGW-Plan-Vault/plan/packets/results/<id>-REVIEW.md`:
+- Write `<id>-REVIEW.md` to the task's separate execution/evidence store:
   `status: cleared`, reviewer identity, which packet/spec sections were
   checked, and a one-line summary.
 - This is a **silent pass-through** — normal case, Dave does not need to
