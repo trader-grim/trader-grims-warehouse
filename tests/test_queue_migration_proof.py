@@ -63,7 +63,17 @@ def test_real_postgresql17_queue_backup_restore_and_explicit_migration_produce_b
         "git", "show", f"{BASE}:{SNAPSHOT_PATH}",
     ], cwd=ROOT))
     _install_test_contract(repo)
-    subprocess.run(["git", "add", SNAPSHOT_PATH], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "add",
+            SNAPSHOT_PATH,
+            "scripts/candidate-test-runner.py",
+            "agent-services/catalogs/governed-candidate-test-plan-v1.json",
+        ],
+        cwd=repo,
+        check=True,
+    )
     subprocess.run(["git", "commit", "-qm", "queue predecessor release"], cwd=repo, check=True)
     base = _git(repo, "rev-parse", "HEAD")
 
