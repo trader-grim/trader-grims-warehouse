@@ -853,6 +853,7 @@ def run_governed_review(
     expected_snapshot = card["bindings"]["source_tree"]["hash"]
     snapshot_named_before = _command_identity(snapshot)
     snapshot_fd = os.open(snapshot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    held: dict[str, Any] | None = None
     try:
         before_hash, before_identity = _held_snapshot(
             snapshot_fd, trusted_uid=trusted_uid, trusted_gid=trusted_gid,
@@ -870,13 +871,30 @@ def run_governed_review(
             raise ReviewRunnerError("governed review context bindings are stale")
     except Exception:
         os.close(snapshot_fd)
+        if held is not None:
+            for descriptor in (
+                held["sandbox_fd"], held["runtime_fd"], held["executable_fd"],
+                held["skill_fd"], held["mcp_fd"], held["credential_fd"],
+                held["execution_environment_fd"],
+            ):
+                os.close(descriptor)
         raise
-    context_grant = _validate_context_grant(
-        context_grant, card=card, handoff=handoff,
-        provider_identity=provider_identity,
-        skill_contract_hash=held["skill_contract_hash"],
-        observed_at=execution_observed_at,
-    )
+    try:
+        context_grant = _validate_context_grant(
+            context_grant, card=card, handoff=handoff,
+            provider_identity=provider_identity,
+            skill_contract_hash=held["skill_contract_hash"],
+            observed_at=execution_observed_at,
+        )
+    except Exception:
+        os.close(snapshot_fd)
+        for descriptor in (
+            held["sandbox_fd"], held["runtime_fd"], held["executable_fd"],
+            held["skill_fd"], held["mcp_fd"], held["credential_fd"],
+            held["execution_environment_fd"],
+        ):
+            os.close(descriptor)
+        raise
     challenge = context_grant["request"]["challenge"]
     card_json = _canonical(card).decode("utf-8")
     grant_json = _canonical(context_grant).decode("utf-8")

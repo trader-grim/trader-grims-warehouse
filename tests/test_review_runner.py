@@ -214,6 +214,19 @@ def test_snapshot_hash_framing_distinguishes_file_boundaries(tmp_path):
     assert snapshot_hash(one_file) != snapshot_hash(two_files)
 
 
+def test_snapshot_hash_includes_git_named_regular_directories(tmp_path):
+    source = tmp_path / "snapshot"
+    source.mkdir()
+    fixture_git = source / "tests" / "fixture" / ".git"
+    fixture_git.mkdir(parents=True)
+    payload = fixture_git / "payload"
+    payload.write_bytes(b"first")
+    first = snapshot_hash(source)
+    payload.write_bytes(b"second")
+
+    assert snapshot_hash(source) != first
+
+
 def test_bwrap_translates_snapshot_path_and_clears_ambient_environment(tmp_path, monkeypatch):
     source = snapshot(tmp_path)
     monkeypatch.setenv("HOST_SECRET", "must-not-cross")

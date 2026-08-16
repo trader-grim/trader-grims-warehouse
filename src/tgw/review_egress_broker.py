@@ -187,15 +187,13 @@ async def handle_tunnel(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     session: dict[str, Any] = {"outcome": "denied"}
     started = time.monotonic()
     if len(sessions) >= policy.max_connections:
-        session["reason"] = "BrokerError:review egress run bound is exhausted"
-        session["duration_ms"] = 0
-        sessions.append(session)
         writer.close()
         await writer.wait_closed()
         return
     # Reserve before the first await: completed sessions alone cannot bound
     # simultaneous CONNECT requests.
     sessions.append(session)
+    upstream_writer: asyncio.StreamWriter | None = None
     try:
         if time.time() >= policy.expires_unix:
             raise BrokerError("review egress run bound is exhausted")
@@ -224,6 +222,9 @@ async def handle_tunnel(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         session["reason"] = type(exc).__name__ + ":" + str(exc)
     finally:
         session["duration_ms"] = int((time.monotonic() - started) * 1000)
+        if upstream_writer is not None:
+            upstream_writer.close()
+            await upstream_writer.wait_closed()
         writer.close()
         await writer.wait_closed()
 
@@ -233,17 +234,29 @@ async def serve(policy: ReviewEgressPolicy, bind_host: str, bind_port: int, rece
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, stop.set)
-    server = await asyncio.start_server(lambda r, w: handle_tunnel(r, w, policy, sessions), bind_host, bind_port)
+    tasks: set[asyncio.Task[None]] = set()
+
+    def connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.create_task(handle_tunnel(reader, writer, policy, sessions))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    server = await asyncio.start_server(connection, bind_host, bind_port)
     try:
-        async with server:
-            print(
-                json.dumps(
-                    {"status": "READY", "policy_hash": policy.policy_hash},
-                    sort_keys=True,
-                ),
-                flush=True,
-            )
-            await stop.wait()
+        print(
+            json.dumps(
+                {"status": "READY", "policy_hash": policy.policy_hash},
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        await stop.wait()
+        server.close()
+        await server.wait_closed()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         loop.remove_signal_handler(signal.SIGTERM)
         payload = _canonical(audit_receipt(policy, sessions)) + b"\n"
@@ -289,7 +302,7 @@ def main() -> int:
     if not isinstance(bind, Mapping) or bind.get("host") in {None, "0.0.0.0", "::"} or not isinstance(bind.get("port"), int):
         raise SystemExit("attested broker bind is invalid")
     if args.receipt is None:
-        print(json.dumps({"status": "READY", "policy_hash": policy.policy_hash}, sort_keys=True))
+        print(json.dumps({"status": "CHECKED", "policy_hash": policy.policy_hash}, sort_keys=True))
         return 0
     asyncio.run(serve(policy, str(bind["host"]), int(bind["port"]), args.receipt))
     return 0

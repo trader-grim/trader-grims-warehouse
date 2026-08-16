@@ -17,8 +17,6 @@ def snapshot_preimage_entries(entries: Mapping[str, bytes]) -> bytes:
     for relative in sorted(entries):
         if not isinstance(relative, str) or not relative or "\0" in relative:
             raise ValueError("review snapshot path is invalid")
-        if ".git" in Path(relative).parts:
-            continue
         content = entries[relative]
         if not isinstance(content, bytes):
             raise ValueError("review snapshot content is invalid")
@@ -41,7 +39,7 @@ def snapshot_hash(root: Path) -> str:
     for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
         if path.is_symlink():
             raise ValueError("review snapshot cannot contain symlinks")
-        if not path.is_file() or ".git" in path.relative_to(root).parts:
+        if not path.is_file():
             continue
         entries[path.relative_to(root).as_posix()] = path.read_bytes()
     return snapshot_hash_entries(entries)
@@ -54,7 +52,7 @@ def snapshot_preimage(root: Path) -> bytes:
     for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
         if path.is_symlink():
             raise ValueError("review snapshot cannot contain symlinks")
-        if not path.is_file() or ".git" in path.relative_to(root).parts:
+        if not path.is_file():
             continue
         entries[path.relative_to(root).as_posix()] = path.read_bytes()
     return snapshot_preimage_entries(entries)
