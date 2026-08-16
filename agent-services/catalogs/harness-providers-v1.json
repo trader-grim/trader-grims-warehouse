@@ -41,6 +41,16 @@
       "runner": {"kind": "unavailable", "reason": "Claude runner is not present in the admitted canonical source tree"},
       "adapter_requirements": ["tgw-plan", "promptcraft"],
       "preference": 110
+    },
+    {
+      "id": "claude",
+      "vendor_family": "claude",
+      "receiver_profile": {"id": "claude-code", "version": 1},
+      "qualified_roles": ["independent-review"],
+      "capabilities": ["repository-shell", "git-inspection", "governed-interactive-review"],
+      "runner": {"kind": "configured-argv", "key": "governed-review"},
+      "adapter_requirements": ["tgw-plan", "promptcraft", "promptcraft-card-handoff"],
+      "preference": 140
     }
   ]
 }

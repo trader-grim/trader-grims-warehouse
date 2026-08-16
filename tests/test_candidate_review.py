@@ -1,17 +1,19 @@
 import hashlib
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import tgw.governed_review_adapter as governed_adapter
+from tgw import execute_candidate_review
 from tgw.candidate_review import (
     CandidateReviewError,
     create_review_report,
     create_review_result,
     generate_review_packet,
-    validate_review_report,
     validate_review_result,
 )
 from tgw.execute_candidate_review import REVIEW_LEASE_SECONDS, _card
@@ -143,8 +145,6 @@ def governed_receipt(packet_value, *, passed):
 
 
 def report(packet_value, *, semantic="PASS", security="PASS"):
-    passed = semantic == security == "PASS"
-
     def dimension(verdict, message):
         findings = []
         if verdict == "FAIL":
@@ -178,6 +178,21 @@ def result(packet_value, *, semantic="PASS", security="PASS"):
     )
 
 
+def test_governed_interactive_result_is_provider_neutral_and_qes_optional(tmp_path):
+    packet_value, _ = packet(tmp_path)
+    review_report = report(packet_value)
+    review_result = create_review_result(
+        packet_value,
+        review_report,
+        governed_receipt(packet_value, passed=True),
+        governed_review_execution_hash="sha256:" + "8" * 64,
+    )
+    validation = validate_review_result(packet_value, review_report, review_result)
+    assert "qualified_execution_proof_hash" not in review_result
+    assert validation["review_execution_kind"] == "governed-interactive"
+    assert validation["review_execution_provider"] == packet_value["selected_provider"]
+
+
 def test_generator_emits_executable_packet_without_invoking_configured_runner(tmp_path):
     value, marker = packet(tmp_path)
 
@@ -201,6 +216,25 @@ def test_generator_emits_exact_hold_when_isolated_runner_is_not_configured(tmp_p
     )
     assert any("not present" in reason for reason in claude["reasons"])
     assert marker.exists() is False
+
+
+def test_generator_selects_configured_provider_neutral_interactive_review(tmp_path):
+    registry = load_registry(REGISTRY)
+    runner = executable(tmp_path / "governed-review")
+    health = observe_health(
+        registry,
+        coding_config={"commands": {"governed-review": [runner, "{prompt}", "{snapshot}"]}},
+        adapters=adapters(),
+    )
+    source = snapshot(tmp_path)
+    value = generate_review_packet(
+        manifest(), registry, health, adapters=adapters(),
+        snapshot_ref=source.resolve().as_uri(), snapshot_hash=snapshot_hash(source),
+        required_capabilities=("governed-interactive-review",),
+    )
+    assert value["status"] == "EXECUTABLE"
+    assert value["selected_provider"] == "claude"
+    assert value["receiver_profile"] == {"id": "claude-code", "version": 1}
 
 
 def test_result_validator_accepts_both_dimensions_only_when_receipt_is_bound(tmp_path):
@@ -278,9 +312,19 @@ def test_governed_review_card_lease_is_fresh_bounded_and_attempt_specific(tmp_pa
     codegraph = {"ref": "codegraph:snapshot:1", "hash": "sha256:" + "6" * 64}
     environment = {"ref": "environment:manifest:1", "hash": "sha256:" + "7" * 64}
     review_input = {"ref": "review:input:1", "hash": "sha256:" + "5" * 64}
-    first = _card(manifest(), packet_value, observed_at=observed, candidate_evidence_binding=binding, receipt_sink_binding={"ref": "x:review", "hash": "sha256:" + "4" * 64}, codegraph_binding=codegraph, execution_environment_binding=environment, review_input_binding=review_input)["lease"]
+    common = {
+        "candidate_evidence_binding": binding,
+        "receipt_sink_binding": {"ref": "x:review", "hash": "sha256:" + "4" * 64},
+        "codegraph_binding": codegraph,
+        "execution_environment_binding": environment,
+        "review_input_binding": review_input,
+    }
+    first = _card(
+        manifest(), packet_value, observed_at=observed, **common,
+    )["lease"]
     second = _card(
-        manifest(), packet_value, observed_at=observed + timedelta(seconds=1), candidate_evidence_binding=binding, receipt_sink_binding={"ref": "x:review", "hash": "sha256:" + "4" * 64}, codegraph_binding=codegraph, execution_environment_binding=environment, review_input_binding=review_input
+        manifest(), packet_value, observed_at=observed + timedelta(seconds=1),
+        **common,
     )["lease"]
 
     assert datetime.fromisoformat(first["expires_at"].replace("Z", "+00:00")) == (
@@ -292,9 +336,29 @@ def test_governed_review_card_lease_is_fresh_bounded_and_attempt_specific(tmp_pa
 
 def test_governed_review_card_rejects_an_unzoned_observation_time(tmp_path):
     packet_value, _ = packet(tmp_path)
+    common = {
+        "candidate_evidence_binding": {
+            "ref": "evidence:d", "hash": "sha256:" + "8" * 64,
+        },
+        "receipt_sink_binding": {
+            "ref": "x:review", "hash": "sha256:" + "4" * 64,
+        },
+        "codegraph_binding": {
+            "ref": "codegraph:1", "hash": "sha256:" + "6" * 64,
+        },
+        "execution_environment_binding": {
+            "ref": "env:1", "hash": "sha256:" + "7" * 64,
+        },
+        "review_input_binding": {
+            "ref": "review:1", "hash": "sha256:" + "5" * 64,
+        },
+    }
 
     with pytest.raises(ValueError, match="include a timezone"):
-        _card(manifest(), packet_value, observed_at=datetime(2026, 8, 16, 12, 0), candidate_evidence_binding={"ref": "evidence:d", "hash": "sha256:" + "8" * 64}, receipt_sink_binding={"ref": "x:review", "hash": "sha256:" + "4" * 64}, codegraph_binding={"ref": "codegraph:1", "hash": "sha256:" + "6" * 64}, execution_environment_binding={"ref": "env:1", "hash": "sha256:" + "7" * 64}, review_input_binding={"ref": "review:1", "hash": "sha256:" + "5" * 64})
+        _card(
+            manifest(), packet_value,
+            observed_at=datetime(2026, 8, 16, 12, 0), **common,
+        )
 
 
 def test_governed_review_card_rejects_source_and_argv_substitution(tmp_path):
@@ -314,3 +378,24 @@ def test_governed_review_card_rejects_source_and_argv_substitution(tmp_path):
             codegraph_binding={"ref": "codegraph:1", "hash": "sha256:" + "6" * 64},
             **{**common, "execution_environment_binding": {"ref": "env:argv", "hash": hash_object(packet_value["runner_argv"])}},
         )
+
+
+def test_governed_request_cli_reports_finalized_result(
+    tmp_path, monkeypatch, capsys,
+):
+    request = tmp_path / "request.json"
+    request.write_text("{}")
+    finalized = {
+        "execution": {"provider": "claude", "execution_hash": "sha256:" + "1" * 64},
+        "result": {"status": "PASS", "result_hash": "sha256:" + "2" * 64},
+        "evidence_bundle": {"bundle_hash": "sha256:" + "3" * 64},
+    }
+    monkeypatch.setattr(governed_adapter, "execute_request", lambda _path: finalized)
+    monkeypatch.setattr(sys, "argv", ["tgw-execute-candidate-review", "--governed-request", str(request)])
+    assert execute_candidate_review.main() == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "schema": "tgw-governed-review-result-summary/v1", "provider": "claude",
+        "execution_hash": "sha256:" + "1" * 64, "verdict": "PASS",
+        "result_hash": "sha256:" + "2" * 64,
+        "evidence_bundle_hash": "sha256:" + "3" * 64,
+    }

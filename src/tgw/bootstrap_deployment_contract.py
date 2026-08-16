@@ -187,31 +187,40 @@ def _governed_admission_binding(value: Mapping[str, Any]) -> dict[str, Any]:
     """Retain the exact independent X admission result needed by deployment.
 
     ``gate_hash`` commits to the whole admission result.  The review packet,
-    result, qualified execution proof, and X review bundle are repeated here
+    result, governed execution evidence, and X review bundle are repeated here
     deliberately so an operator can inspect the production-facing contract
     without silently treating S-only candidate evidence as reviewed.
     """
     review = value.get("independent_review_evidence")
     if value.get("allowed") is not True or not isinstance(review, Mapping):
         raise BootstrapDeploymentContractError("candidate is not admitted by governed independent review")
-    required_review = {
+    common_review = {
         "candidate_manifest_hash",
         "review_packet_hash",
         "review_result_hash",
-        "qualified_execution_proof_hash",
         "bundle_hash",
     }
-    if set(review) != required_review:
+    qes_review = common_review | {"qualified_execution_proof_hash"}
+    governed_review = common_review | {
+        "governed_review_execution_hash", "review_execution_provider",
+    }
+    if set(review) not in (qes_review, governed_review):
         raise BootstrapDeploymentContractError("governed independent review binding is invalid")
+    normalized_review = {
+        name: _hash_value(review.get(name), label=f"independent review {name}")
+        for name in sorted(set(review) - {"review_execution_provider"})
+    }
+    if "review_execution_provider" in review:
+        provider = review["review_execution_provider"]
+        if not isinstance(provider, str) or not provider:
+            raise BootstrapDeploymentContractError("governed review provider identity is invalid")
+        normalized_review["review_execution_provider"] = provider
     return {
         "gate_hash": _hash_value(value.get("gate_hash"), label="governed admission gate hash"),
         "execution_evidence_sink": _validate_sink_identity(
             value.get("execution_evidence_sink"), label="execution evidence sink",
         ),
-        "independent_review": {
-            name: _hash_value(review.get(name), label=f"independent review {name}")
-            for name in sorted(required_review)
-        },
+        "independent_review": normalized_review,
     }
 
 
@@ -221,26 +230,31 @@ def _validate_governed_admission_binding(value: Any) -> dict[str, Any]:
         fields={"gate_hash", "execution_evidence_sink", "independent_review"},
         label="governed admission binding",
     )
-    review = _mapping(
-        binding.get("independent_review"),
-        fields={
-            "candidate_manifest_hash",
-            "review_packet_hash",
-            "review_result_hash",
-            "qualified_execution_proof_hash",
-            "bundle_hash",
-        },
-        label="governed independent review binding",
-    )
+    review_value = binding.get("independent_review")
+    if not isinstance(review_value, Mapping):
+        raise BootstrapDeploymentContractError("governed independent review binding is invalid")
+    common = {"candidate_manifest_hash", "review_packet_hash", "review_result_hash", "bundle_hash"}
+    if set(review_value) not in (
+        common | {"qualified_execution_proof_hash"},
+        common | {"governed_review_execution_hash", "review_execution_provider"},
+    ):
+        raise BootstrapDeploymentContractError("governed independent review binding is invalid")
+    review = dict(review_value)
+    normalized_review = {
+        name: _hash_value(review.get(name), label=f"independent review {name}")
+        for name in sorted(set(review) - {"review_execution_provider"})
+    }
+    if "review_execution_provider" in review:
+        provider = review["review_execution_provider"]
+        if not isinstance(provider, str) or not provider:
+            raise BootstrapDeploymentContractError("governed review provider identity is invalid")
+        normalized_review["review_execution_provider"] = provider
     return {
         "gate_hash": _hash_value(binding.get("gate_hash"), label="governed admission gate hash"),
         "execution_evidence_sink": _validate_sink_identity(
             binding.get("execution_evidence_sink"), label="execution evidence sink",
         ),
-        "independent_review": {
-            name: _hash_value(review.get(name), label=f"independent review {name}")
-            for name in sorted(review)
-        },
+        "independent_review": normalized_review,
     }
 
 
