@@ -19,7 +19,10 @@ def _canonical(value: Any) -> bytes:
 
 
 def completion_store_descriptor_hash(
-    root: Path, *, sink_id: str, trusted_uid: int,
+    root: Path,
+    *,
+    sink_id: str,
+    trusted_uid: int,
 ) -> str:
     """Bind a sink descriptor to its exact named root and inode policy."""
     named = Path(root)
@@ -40,13 +43,19 @@ class ImmutableEffectCompletionStore:
     """Persist controller outcomes with held-root, same-inode verification."""
 
     def __init__(
-        self, root: Path, *, sink_id: str, descriptor_hash: str,
+        self,
+        root: Path,
+        *,
+        sink_id: str,
+        descriptor_hash: str,
         trusted_uid: int | None = None,
     ) -> None:
         self.root = Path(root)
         uid = os.getuid() if trusted_uid is None else trusted_uid
         if (
-            not self.root.is_absolute() or self.root.parent == self.root or ".." in self.root.parts
+            not self.root.is_absolute()
+            or self.root.parent == self.root
+            or ".." in self.root.parts
             or re.fullmatch(r"[a-z][a-z0-9-]{0,63}", sink_id) is None
             or re.fullmatch(r"sha256:[0-9a-f]{64}", descriptor_hash) is None
         ):
@@ -63,14 +72,16 @@ class ImmutableEffectCompletionStore:
                 mode = stat.S_IMODE(held.st_mode)
                 sticky_root = held.st_uid == 0 and bool(mode & stat.S_ISVTX)
                 if (
-                    not stat.S_ISDIR(held.st_mode) or held.st_uid not in {0, uid}
+                    not stat.S_ISDIR(held.st_mode)
+                    or held.st_uid not in {0, uid}
                     or (mode & 0o022 and not sticky_root)
                     or (before.st_dev, before.st_ino) != (held.st_dev, held.st_ino)
                     or (after.st_dev, after.st_ino) != (held.st_dev, held.st_ino)
                 ):
                     os.close(next_fd)
                     raise ValueError("terminal receipt sink has an unsafe ancestor")
-                os.close(parent_fd); parent_fd = next_fd
+                os.close(parent_fd)
+                parent_fd = next_fd
             self._parent_fd, parent_fd = parent_fd, -1
         finally:
             if parent_fd >= 0:
@@ -83,9 +94,12 @@ class ImmutableEffectCompletionStore:
             held = os.fstat(self._root_fd)
             after = os.stat(self.root.name, dir_fd=self._parent_fd, follow_symlinks=False)
         except Exception:
-            self.close(); raise
+            self.close()
+            raise
         if (
-            not stat.S_ISDIR(held.st_mode) or held.st_uid != uid or stat.S_IMODE(held.st_mode) != 0o700
+            not stat.S_ISDIR(held.st_mode)
+            or held.st_uid != uid
+            or stat.S_IMODE(held.st_mode) != 0o700
             or (before.st_dev, before.st_ino) != (held.st_dev, held.st_ino)
             or (after.st_dev, after.st_ino) != (held.st_dev, held.st_ino)
         ):
@@ -93,7 +107,9 @@ class ImmutableEffectCompletionStore:
             raise ValueError("terminal receipt root must be one held trusted mode-0700 directory")
         self._root_identity = (held.st_dev, held.st_ino, held.st_uid, stat.S_IMODE(held.st_mode))
         expected_descriptor = completion_store_descriptor_hash(
-            self.root, sink_id=sink_id, trusted_uid=uid,
+            self.root,
+            sink_id=sink_id,
+            trusted_uid=uid,
         )
         if descriptor_hash != expected_descriptor:
             self.close()
@@ -103,8 +119,10 @@ class ImmutableEffectCompletionStore:
         for name in ("_root_fd", "_parent_fd"):
             fd = getattr(self, name, -1)
             if fd >= 0:
-                try: os.close(fd)
-                except OSError: pass
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
                 setattr(self, name, -1)
 
     def __del__(self) -> None:
@@ -114,18 +132,17 @@ class ImmutableEffectCompletionStore:
         parent, held = os.fstat(self._parent_fd), os.fstat(self._root_fd)
         named = os.stat(self.root.name, dir_fd=self._parent_fd, follow_symlinks=False)
         observed = (held.st_dev, held.st_ino, held.st_uid, stat.S_IMODE(held.st_mode))
-        if (
-            (parent.st_dev, parent.st_ino, parent.st_uid, stat.S_IMODE(parent.st_mode)) != self._parent_identity
-            or observed != self._root_identity or (named.st_dev, named.st_ino) != observed[:2]
-        ):
+        if (parent.st_dev, parent.st_ino, parent.st_uid, stat.S_IMODE(parent.st_mode)) != self._parent_identity or observed != self._root_identity or (named.st_dev, named.st_ino) != observed[:2]:
             raise OSError("terminal receipt root identity changed")
 
     @staticmethod
     def _read(fd: int, maximum: int) -> bytes:
-        os.lseek(fd, 0, os.SEEK_SET); content = bytearray()
+        os.lseek(fd, 0, os.SEEK_SET)
+        content = bytearray()
         while len(content) <= maximum:
             block = os.read(fd, min(64 * 1024, maximum + 1 - len(content)))
-            if not block: break
+            if not block:
+                break
             content.extend(block)
         if len(content) > maximum:
             raise OSError("terminal receipt exceeds its exact size")
@@ -134,11 +151,15 @@ class ImmutableEffectCompletionStore:
     def _verify_named(self, name: str, raw: bytes, inode: tuple[int, int] | None = None) -> tuple[int, int]:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self._root_fd)
         try:
-            metadata = os.fstat(fd); identity = (metadata.st_dev, metadata.st_ino)
+            metadata = os.fstat(fd)
+            identity = (metadata.st_dev, metadata.st_ino)
             if (
-                not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != self._root_identity[2]
-                or stat.S_IMODE(metadata.st_mode) != 0o400 or metadata.st_nlink != 1
-                or metadata.st_size != len(raw) or (inode is not None and identity != inode)
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != self._root_identity[2]
+                or stat.S_IMODE(metadata.st_mode) != 0o400
+                or metadata.st_nlink != 1
+                or metadata.st_size != len(raw)
+                or (inode is not None and identity != inode)
                 or self._read(fd, len(raw)) != raw
             ):
                 raise OSError("terminal receipt named readback mismatch")
@@ -149,7 +170,8 @@ class ImmutableEffectCompletionStore:
     def persist(self, receipt: Mapping[str, Any]) -> dict[str, str]:
         if not isinstance(receipt, Mapping):
             raise ValueError("terminal execution receipt is invalid")
-        unsigned = dict(receipt); claimed = unsigned.pop("receipt_hash", None)
+        unsigned = dict(receipt)
+        claimed = unsigned.pop("receipt_hash", None)
         expected = "sha256:" + hashlib.sha256(_canonical(unsigned)).hexdigest()
         if claimed != expected:
             raise ValueError("terminal execution receipt self-hash is invalid")
@@ -168,7 +190,8 @@ class ImmutableEffectCompletionStore:
                 offset = 0
                 while offset < len(raw):
                     written = os.write(fd, raw[offset:])
-                    if written <= 0: raise OSError("terminal receipt short write")
+                    if written <= 0:
+                        raise OSError("terminal receipt short write")
                     offset += written
                 os.fsync(fd)
                 held = os.fstat(fd)
@@ -178,12 +201,14 @@ class ImmutableEffectCompletionStore:
                 os.close(fd)
             inode = self._verify_named(name, raw, (held.st_dev, held.st_ino))
             os.fsync(self._root_fd)
-            self._verify_root(); self._verify_named(name, raw, inode)
+            self._verify_root()
+            self._verify_named(name, raw, inode)
             cleanup = False
         finally:
             if cleanup:
                 try:
-                    os.unlink(name, dir_fd=self._root_fd); os.fsync(self._root_fd)
+                    os.unlink(name, dir_fd=self._root_fd)
+                    os.fsync(self._root_fd)
                 except OSError as exc:
                     raise OSError("terminal receipt cleanup is ambiguous") from exc
         return {"receipt": f"effect-terminal:{self.sink_id}:{expected}", "receipt_hash": expected}

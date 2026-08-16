@@ -9,8 +9,8 @@ import pytest
 from scripts.build_plan_runtime_projection import git_show
 from scripts.solve_governed_platform import plan_commit
 from tgw.operator_console_host import current_plan_commit, load_solution
-from tgw.plan_runtime_projection import load_projection, validate_projection
 from tgw.plan_render import PlanRenderBindingError, approved_render_plan_identity
+from tgw.plan_runtime_projection import load_projection, validate_projection
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECTION = ROOT / "agent-services/plan-runtime/GOVERNED-EXECUTION-PLATFORM-f0a8cf22.json"
@@ -108,8 +108,11 @@ def test_projection_builder_reads_only_the_exact_full_plan_commit(tmp_path: Path
     subprocess.run(["git", "add", relative], cwd=plan_root, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "approved"], cwd=plan_root, check=True)
     commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=plan_root, check=True,
-        text=True, stdout=subprocess.PIPE,
+        ["git", "rev-parse", "HEAD"],
+        cwd=plan_root,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
     ).stdout.strip()
 
     source.write_text("unapproved working-tree bytes\n", encoding="utf-8")

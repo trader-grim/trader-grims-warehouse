@@ -3,7 +3,9 @@ from unittest.mock import Mock
 import pytest
 
 from tgw.deployment_runtime import (
-    DeploymentMounts, ReleaseProviders, compose_application_bootstrap_controller,
+    DeploymentMounts,
+    ReleaseProviders,
+    compose_application_bootstrap_controller,
     compose_deployment_controller,
 )
 from tgw.effect_handlers import AuthorityEffectController
@@ -14,12 +16,18 @@ def _providers():
 
 
 def _compose(tmp_path, **changes):
-    root = tmp_path / "releases"; root.mkdir(exist_ok=True)
-    artifact = tmp_path / "candidate.tar.gz"; artifact.write_bytes(b"archive")
+    root = tmp_path / "releases"
+    root.mkdir(exist_ok=True)
+    artifact = tmp_path / "candidate.tar.gz"
+    artifact.write_bytes(b"archive")
     values = {
         "mounts": DeploymentMounts("tgw-prod", "production-releases", root, "candidate:1", artifact),
-        "providers": _providers(), "expected_host": "tgw-prod", "consume_authority": Mock(),
-        "require_authority_schema": Mock(), "flake_push": Mock(), "flake_switch_record": Mock(),
+        "providers": _providers(),
+        "expected_host": "tgw-prod",
+        "consume_authority": Mock(),
+        "require_authority_schema": Mock(),
+        "flake_push": Mock(),
+        "flake_switch_record": Mock(),
         "dependency_resubmit": Mock(),
     }
     values.update(changes)
