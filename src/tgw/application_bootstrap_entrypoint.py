@@ -88,11 +88,7 @@ def _held_config(path: Path) -> tuple[dict[str, Any], int, bytes, tuple[int, ...
 def _protected_ancestors(path: Path, trusted_uid: int = 0) -> None:
     for ancestor in (path.parent, *path.parents):
         metadata = ancestor.lstat()
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid not in {0, trusted_uid}
-            or stat.S_IMODE(metadata.st_mode) & 0o022
-        ):
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid not in {0, trusted_uid} or stat.S_IMODE(metadata.st_mode) & 0o022:
             raise ValueError(f"controller runtime ancestor is not root-protected: {ancestor}")
 
 
@@ -250,17 +246,10 @@ def _tree_digest(root: Path, *, trusted_uid: int, trusted_gid: int) -> str:
         if count > 100_000:
             raise ValueError("controller runtime tree exceeds its entry bound")
         relative = path.relative_to(root).as_posix()
-        if (
-            path.suffix in {".pyc", ".pyo"}
-            or "__pycache__" in path.relative_to(root).parts
-        ):
+        if path.suffix in {".pyc", ".pyo"} or "__pycache__" in path.relative_to(root).parts:
             raise ValueError("controller runtime tree contains bytecode")
         item = os.lstat(path)
-        if (
-            item.st_uid != trusted_uid
-            or item.st_gid != trusted_gid
-            or (not stat.S_ISLNK(item.st_mode) and item.st_mode & 0o022)
-        ):
+        if item.st_uid != trusted_uid or item.st_gid != trusted_gid or (not stat.S_ISLNK(item.st_mode) and item.st_mode & 0o022):
             raise ValueError("controller runtime tree content is not protected")
         digest.update(
             _canonical(
@@ -412,12 +401,7 @@ def _revalidate_runtime_tree(
         named.st_mtime_ns,
         named.st_ctime_ns,
     )
-    if (
-        observed != identity
-        or named_identity != identity
-        or _tree_digest(Path(f"/proc/self/fd/{fd}"), trusted_uid=uid, trusted_gid=gid)
-        != expected_hash
-    ):
+    if observed != identity or named_identity != identity or _tree_digest(Path(f"/proc/self/fd/{fd}"), trusted_uid=uid, trusted_gid=gid) != expected_hash:
         raise OSError(f"controller runtime tree changed: {path}")
 
 
@@ -563,20 +547,12 @@ def _hold_controller_runtime(
         ):
             raise ValueError("controller runtime manifest hash/schema is invalid")
         paths = [item.get("path") if isinstance(item, Mapping) else None for item in manifest["files"]]
-        if any(
-            not isinstance(path, str)
-            or Path(path).suffix in {".pyc", ".pyo"}
-            or "__pycache__" in Path(path).parts
-            for path in paths
-        ):
+        if any(not isinstance(path, str) or Path(path).suffix in {".pyc", ".pyo"} or "__pycache__" in Path(path).parts for path in paths):
             raise ValueError("controller runtime file set is invalid")
         if paths != sorted(set(paths)):
             raise ValueError("controller runtime file set is invalid")
         tree_paths = [item.get("path") if isinstance(item, Mapping) else None for item in manifest["trees"]]
-        if (
-            any(not isinstance(path, str) for path in tree_paths)
-            or tree_paths != sorted(set(tree_paths))
-        ):
+        if any(not isinstance(path, str) for path in tree_paths) or tree_paths != sorted(set(tree_paths)):
             raise ValueError("controller runtime tree set is invalid")
         if (
             not isinstance(manifest["import_roots"], list)
@@ -642,10 +618,7 @@ def _hold_controller_runtime(
                         binding["nlink"],
                         binding["size"],
                     )
-                    if (
-                        identity != expected_identity
-                        or "sha256:" + sha256(raw).hexdigest() != binding["sha256"]
-                    ):
+                    if identity != expected_identity or "sha256:" + sha256(raw).hexdigest() != binding["sha256"]:
                         raise ValueError("controller inherited closure artifact differs")
                     artifact = (Path(binding["path"]), inherited_fd, raw, identity)
                 except Exception:
@@ -669,11 +642,7 @@ def _hold_controller_runtime(
                 }:
                     os.close(artifact[1])
                     raise ValueError("controller resolved ELF binding is invalid")
-                raw_elf = {
-                    name: expected_elf[name]
-                    for name in expected_elf
-                    if name not in {"resolved", "pt_interp_resolved"}
-                }
+                raw_elf = {name: expected_elf[name] for name in expected_elf if name not in {"resolved", "pt_interp_resolved"}}
             else:
                 raw_elf = None
             if _elf_closure(artifact[2]) != raw_elf:
@@ -684,9 +653,7 @@ def _hold_controller_runtime(
             inherited_path = None
             if require_launcher:
                 base = int(os.environ["TGW_W09_RUNTIME_FD_BASE"])
-                inherited_path = Path(
-                    f"/proc/self/fd/{base + len(manifest['files']) + index}"
-                )
+                inherited_path = Path(f"/proc/self/fd/{base + len(manifest['files']) + index}")
             trees.append(
                 _hold_runtime_tree(
                     binding,
@@ -714,8 +681,7 @@ def _hold_controller_runtime(
         materialization_hash = unsigned_materialization.pop("receipt_sha256")
         if (
             materialization["schema"] != "tgw-w09-controller-runtime-materialization/v1"
-            or materialization_hash
-            != "sha256:" + sha256(_canonical(unsigned_materialization)).hexdigest()
+            or materialization_hash != "sha256:" + sha256(_canonical(unsigned_materialization)).hexdigest()
             or materialization["launcher"] != value["launcher"]
             or materialization["python"] != value["python"]
             or materialization["bundle"] != value["bundle"]
@@ -745,41 +711,26 @@ def _hold_controller_runtime(
             not isinstance(receipt_manifest, Mapping)
             or not isinstance(receipt_closure, Mapping)
             or not isinstance(receipt_config, Mapping)
-            or output_binding(receipt_manifest, receipt_manifest["content_sha256"])
-            != value["manifest"]
-            or output_binding(receipt_closure, receipt_closure["sha256"])
-            != value["closure"]
-            or output_binding(receipt_config, receipt_config["sha256"])
-            != value["launcher_config"]
+            or output_binding(receipt_manifest, receipt_manifest["content_sha256"]) != value["manifest"]
+            or output_binding(receipt_closure, receipt_closure["sha256"]) != value["closure"]
+            or output_binding(receipt_config, receipt_config["sha256"]) != value["launcher_config"]
         ):
             raise ValueError("controller materialized outputs differ from receipt")
         manifest["_materialization_receipt"] = materialization
-        manifest_paths = {
-            str(artifact[0].resolve(strict=True))
-            for artifact in artifacts[closure_start:]
-        }
+        manifest_paths = {str(artifact[0].resolve(strict=True)) for artifact in artifacts[closure_start:]}
         if str(named["python"][0].resolve(strict=True)) not in manifest_paths:
             raise ValueError("controller interpreter is absent from the runtime manifest")
         for item in manifest["files"]:
             elf = item["elf"]
             if elf is None:
                 continue
-            if (
-                elf["pt_interp"] is not None
-                and elf["pt_interp_resolved"] not in manifest_paths
-            ):
+            if elf["pt_interp"] is not None and elf["pt_interp_resolved"] not in manifest_paths:
                 raise ValueError("controller ELF interpreter is outside the held closure")
             resolved = elf["resolved"]
             if (
                 not isinstance(resolved, list)
-                or resolved
-                != sorted(resolved, key=lambda value: (value.get("soname", ""), value.get("path", "")))
-                or any(
-                    not isinstance(edge, Mapping)
-                    or set(edge) != {"soname", "path"}
-                    or edge["path"] not in manifest_paths
-                    for edge in resolved
-                )
+                or resolved != sorted(resolved, key=lambda value: (value.get("soname", ""), value.get("path", "")))
+                or any(not isinstance(edge, Mapping) or set(edge) != {"soname", "path"} or edge["path"] not in manifest_paths for edge in resolved)
                 or [edge["soname"] for edge in resolved] != elf["needed"]
             ):
                 raise ValueError("controller exact ELF dependency edges are invalid")
@@ -791,10 +742,7 @@ def _hold_controller_runtime(
                     {
                         "manifest_sha256": claimed,
                         "identities": [list(artifact[3]) for artifact in artifacts],
-                        "trees": [
-                            {"path": str(tree[0]), "sha256": tree[2], "identity": list(tree[3])}
-                            for tree in trees
-                        ],
+                        "trees": [{"path": str(tree[0]), "sha256": tree[2], "identity": list(tree[3])} for tree in trees],
                     }
                 )
             ).hexdigest()
@@ -819,10 +767,7 @@ def _revalidate_controller_runtime(
         _revalidate_runtime_artifact(artifact)
     for tree in trees:
         _revalidate_runtime_tree(tree)
-    allowed_bindings = {
-        str(Path(item["path"]).resolve(strict=True)): item
-        for item in manifest["files"]
-    }
+    allowed_bindings = {str(Path(item["path"]).resolve(strict=True)): item for item in manifest["files"]}
     allowed = set(allowed_bindings)
     loaded = set()
     for module in tuple(sys.modules.values()):
@@ -832,9 +777,7 @@ def _revalidate_controller_runtime(
         if location.startswith(sys.argv[0] + "/"):
             continue
         cached = getattr(module, "__cached__", None)
-        if location.endswith((".pyc", ".pyo")) or (
-            isinstance(cached, str) and Path(cached).exists()
-        ):
+        if location.endswith((".pyc", ".pyo")) or (isinstance(cached, str) and Path(cached).exists()):
             raise OSError("controller imported bytecode")
         loaded.add(str(Path(location).resolve(strict=True)))
     roots = [Path(item["path"]).resolve(strict=True) for item in manifest["trees"]]
@@ -848,41 +791,31 @@ def _revalidate_controller_runtime(
         roots=roots,
         expected_identities=held_mapping_identities,
     )
-    unexpected = {
-        path
-        for path in (loaded | set(mapped)) - allowed
-        if not any(Path(path).is_relative_to(root) for root in roots)
-    }
-    unexpected |= {
-        path
-        for path in loaded
-        if path.endswith((".pyc", ".pyo")) and path not in allowed
-    }
-    mapped_tree_neighbors = {
-        path
-        for path in mapped
-        if path not in allowed
-        and any(Path(path).is_relative_to(root) for root in roots)
-    }
+    unexpected = {path for path in (loaded | set(mapped)) - allowed if not any(Path(path).is_relative_to(root) for root in roots)}
+    unexpected |= {path for path in loaded if path.endswith((".pyc", ".pyo")) and path not in allowed}
+    mapped_tree_neighbors = {path for path in mapped if path not in allowed and any(Path(path).is_relative_to(root) for root in roots)}
     unexpected |= mapped_tree_neighbors
     if unexpected:
         if os.environ.get("TGW_W09_RUNTIME_PROBE") == "1":
             sys.stderr.write("w09-runtime-probe-unexpected:" + json.dumps(sorted(unexpected)) + "\n")
         raise OSError("loaded controller modules are absent from the protected runtime manifest: " + "sha256:" + sha256(_canonical(sorted(unexpected))).hexdigest())
-    mapped_evidence = "sha256:" + sha256(
-        _canonical(
-            [
-                {
-                    "path": path,
-                    "dev": identity[0],
-                    "ino": identity[1],
-                    "sha256": allowed_bindings[path]["sha256"],
-                }
-                for path, identity in sorted(mapped.items())
-                if path in allowed_bindings
-            ]
-        )
-    ).hexdigest()
+    mapped_evidence = (
+        "sha256:"
+        + sha256(
+            _canonical(
+                [
+                    {
+                        "path": path,
+                        "dev": identity[0],
+                        "ino": identity[1],
+                        "sha256": allowed_bindings[path]["sha256"],
+                    }
+                    for path, identity in sorted(mapped.items())
+                    if path in allowed_bindings
+                ]
+            )
+        ).hexdigest()
+    )
     prior_evidence = manifest.get("_mapped_runtime_sha256")
     if prior_evidence is not None and prior_evidence != mapped_evidence:
         raise OSError("controller native mapping set changed after admission")
@@ -917,24 +850,10 @@ def _mapped_runtime_identity(
             if prior != identity:
                 raise OSError("controller native mapping path has multiple identities")
             binding = allowed_bindings.get(resolved)
-            expected = (
-                expected_identities.get(resolved)
-                if expected_identities is not None
-                else ((binding["dev"], binding["ino"]) if binding is not None else None)
-            )
+            expected = expected_identities.get(resolved) if expected_identities is not None else ((binding["dev"], binding["ino"]) if binding is not None else None)
             if binding is not None and identity != expected:
-                raise OSError(
-                    "controller native mapping differs from its held file mapping: "
-                    + resolved
-                    + ":sha256:"
-                    + sha256(_canonical([identity, expected])).hexdigest()
-                )
-    mapped_tree_neighbors = {
-        path
-        for path in mapped
-        if path not in allowed_bindings
-        and any(Path(path).is_relative_to(root) for root in roots)
-    }
+                raise OSError("controller native mapping differs from its held file mapping: " + resolved + ":sha256:" + sha256(_canonical([identity, expected])).hexdigest())
+    mapped_tree_neighbors = {path for path in mapped if path not in allowed_bindings and any(Path(path).is_relative_to(root) for root in roots)}
     if mapped_tree_neighbors:
         raise OSError("controller mapped an unbound native neighbor from an import root")
     return mapped
@@ -946,20 +865,12 @@ def _held_mapping_identities(
 ) -> dict[str, tuple[int, int]]:
     """Learn map-device identities by mapping the already-held exact FDs."""
 
-    bindings = {
-        str(Path(item["path"]).resolve(strict=True)): item
-        for item in manifest["files"]
-    }
+    bindings = {str(Path(item["path"]).resolve(strict=True)): item for item in manifest["files"]}
     descriptors = {}
     for path, fd, raw, identity in artifacts:
         resolved = str(path.resolve(strict=True))
         binding = bindings.get(resolved)
-        if (
-            binding is not None
-            and raw
-            and identity[0] == binding["dev"]
-            and identity[1] == binding["ino"]
-        ):
+        if binding is not None and raw and identity[0] == binding["dev"] and identity[1] == binding["ino"]:
             descriptors.setdefault(resolved, fd)
     if set(descriptors) != {path for path, item in bindings.items() if item["size"] > 0}:
         raise OSError("controller held mapping closure is incomplete")
@@ -1018,9 +929,7 @@ def _validate_early_python_home(
     proc_root = f"/proc/self/fd/{home_fd}"
     if sys.prefix != proc_root or sys.exec_prefix != proc_root:
         raise ValueError("controller Python initialized outside its held home")
-    stdlib_root = (
-        f"{proc_root}/lib/python{sys.version_info.major}.{sys.version_info.minor}"
-    )
+    stdlib_root = f"{proc_root}/lib/python{sys.version_info.major}.{sys.version_info.minor}"
     for module in tuple(sys.modules.values()):
         location = getattr(module, "__file__", None)
         if not isinstance(location, str):
@@ -1077,8 +986,7 @@ def _hold_controller_source(
             or not isinstance(launcher_source.get("size"), int)
             or not isinstance(launcher_source.get("identity"), list)
             or len(launcher_source["identity"]) != 7
-            or launcher_source.get("build_contract")
-            != "static-elf-no-interp-no-needed@1"
+            or launcher_source.get("build_contract") != "static-elf-no-interp-no-needed@1"
         ):
             raise ValueError("controller source/bundle binding differs")
         archive_identity = receipt["materialization"]["archive_identity"]
@@ -1216,10 +1124,8 @@ def execute_from_fixed_config(path: Path = CONFIG_PATH) -> Mapping[str, Any]:
         )
         runtime_materialization = runtime_manifest["_materialization_receipt"]
         if (
-            runtime_materialization["controller_source_receipt_sha256"]
-            != source_receipt["receipt_sha256"]
-            or runtime_materialization["application_candidate"]
-            != source_receipt["application_candidate"]
+            runtime_materialization["controller_source_receipt_sha256"] != source_receipt["receipt_sha256"]
+            or runtime_materialization["application_candidate"] != source_receipt["application_candidate"]
         ):
             raise ValueError("controller runtime is cross-bound to a different source/application")
 
@@ -1495,6 +1401,7 @@ def _runtime_probe_main() -> int:
         for import_root in reversed(_held_import_roots(manifest, trees)):
             sys.path.insert(0, import_root)
         for module in (
+            "promptcraft.handoff",
             "tgw.application_deployment_contract",
             "tgw.application_release_provider",
             "tgw.bootstrap_authority",

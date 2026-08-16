@@ -42,11 +42,7 @@ def _real_launcher_source_receipt(
     controller_bundle: Path | None = None,
 ) -> tuple[dict, dict]:
     source_path = tmp_path / "w09-controller-launcher.c"
-    source_path.write_bytes(
-        launcher_source
-        if launcher_source is not None
-        else Path("src/tgw/w09_controller_launcher.c").read_bytes()
-    )
+    source_path.write_bytes(launcher_source if launcher_source is not None else Path("src/tgw/w09_controller_launcher.c").read_bytes())
     source_path.chmod(0o400)
     source_binding = _file_binding(source_path)
     bundle = controller_bundle if controller_bundle is not None else source_path
@@ -63,10 +59,7 @@ def _real_launcher_source_receipt(
                 "materialized_path": str(source_path),
                 "sha256": source_binding["sha256"],
                 "size": source_binding["size"],
-                "identity": [
-                    source_binding[name]
-                    for name in ("dev", "ino", "uid", "gid", "mode", "nlink", "size")
-                ],
+                "identity": [source_binding[name] for name in ("dev", "ino", "uid", "gid", "mode", "nlink", "size")],
                 "build_contract": "static-elf-no-interp-no-needed@1",
             },
             "application_candidate": {
@@ -132,12 +125,7 @@ def _real_launcher_build(
         neighbor.chmod(0o400)
     build_root = _protected_dir(tmp_path / f"{stem}-build")
     if occupied_output:
-        output_name = (
-            "launcher-"
-            + source["controller_launcher_source"]["sha256"].removeprefix("sha256:")
-            + "-"
-            + runtime.hashlib.sha256(str(binding_path).encode()).hexdigest()
-        )
+        output_name = "launcher-" + source["controller_launcher_source"]["sha256"].removeprefix("sha256:") + "-" + runtime.hashlib.sha256(str(binding_path).encode()).hexdigest()
         neighbor = build_root / output_name
         neighbor.write_bytes(b"neighbor")
         neighbor.chmod(0o400)
@@ -207,17 +195,11 @@ def test_real_launcher_build_producer_pins_discovered_environment_and_static_out
         binding_path=Path("/etc/tgw/w09-controller-runtime.fds"),
     )
     assert build["source_sha256"] == source["controller_launcher_source"]["sha256"]
-    assert build["compiler"]["sha256"] == _file_binding(
-        Path(shutil.which("cc")).resolve()
-    )["sha256"]
-    assert build["executed_argv_sha256"] == runtime._digest(
-        _canonical(build["executed_argv"])
-    )
+    assert build["compiler"]["sha256"] == _file_binding(Path(shutil.which("cc")).resolve())["sha256"]
+    assert build["executed_argv_sha256"] == runtime._digest(_canonical(build["executed_argv"]))
     assert build["launcher"]["elf"]["pt_interp"] is None
     assert build["launcher"]["elf"]["needed"] == []
-    environment_receipt = json.loads(
-        Path(build["build_environment"]["path"]).read_text()
-    )
+    environment_receipt = json.loads(Path(build["build_environment"]["path"]).read_text())
     assert environment_receipt["scratch"]["path"] == environment_receipt["environment"]["TMPDIR"]
     assert environment_receipt["cwd"]["path"] != environment_receipt["scratch"]["path"]
     assert "$SCRATCH" in environment_receipt["accesses"]
@@ -351,12 +333,7 @@ def test_real_launcher_build_never_removes_preexisting_neighbor(tmp_path):
             stem="occupied-build",
             occupied_output=True,
         )
-    output_name = (
-        "launcher-"
-        + source["controller_launcher_source"]["sha256"].removeprefix("sha256:")
-        + "-"
-        + runtime.hashlib.sha256(str(binding_path).encode()).hexdigest()
-    )
+    output_name = "launcher-" + source["controller_launcher_source"]["sha256"].removeprefix("sha256:") + "-" + runtime.hashlib.sha256(str(binding_path).encode()).hexdigest()
     assert (tmp_path / "occupied-build-build" / output_name).read_bytes() == b"neighbor"
 
 
@@ -382,10 +359,7 @@ def test_build_trace_parser_rejects_relative_truncated_unknown_or_unfinished(
 
 
 def test_build_trace_parser_decodes_escapes_and_rejoins_resumed_records(tmp_path):
-    trace = (
-        b'[pid 7] openat(AT_FDCWD, "/etc/ld\\056so\\056cache", <unfinished ...>\n'
-        b'[pid 7] <... openat resumed>O_RDONLY|O_CLOEXEC) = 3\n'
-    )
+    trace = b'[pid 7] openat(AT_FDCWD, "/etc/ld\\056so\\056cache", <unfinished ...>\n[pid 7] <... openat resumed>O_RDONLY|O_CLOEXEC) = 3\n'
     inputs, accesses = runtime._parse_trace_accesses(
         trace,
         scratch=tmp_path,
@@ -535,11 +509,8 @@ def _native_python_closure(python: Path, extra_files=()):
 def _actual_controller_bundle(path: Path):
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:") as archive:
-        sources = [
-            item
-            for item in Path("src/tgw").iterdir()
-            if item.is_file() and item.suffix in {".py", ".c"}
-        ]
+        sources = [item for item in Path("src/tgw").iterdir() if item.is_file() and item.suffix in {".py", ".c"}]
+        sources.extend(item for item in Path("agent-services/providers/promptcraft/promptcraft").iterdir() if item.is_file() and item.suffix == ".py")
         sources.append(Path(PROJECTION_PATH))
         for source in sorted(sources, key=str):
             raw = source.read_bytes()
@@ -601,11 +572,7 @@ def test_actual_controller_bundle_imports_under_compiled_held_runtime(tmp_path):
     python_lib = python_home / f"lib/python{sys.version_info.major}.{sys.version_info.minor}"
 
     def omit_bytecode(_directory, names):
-        return [
-            name
-            for name in names
-            if name == "__pycache__" or Path(name).suffix in {".pyc", ".pyo"}
-        ]
+        return [name for name in names if name == "__pycache__" or Path(name).suffix in {".pyc", ".pyo"}]
 
     python_lib.parent.mkdir(parents=True)
     shutil.copytree(stdlib, python_lib, symlinks=False, ignore=omit_bytecode)
@@ -614,20 +581,11 @@ def test_actual_controller_bundle_imports_under_compiled_held_runtime(tmp_path):
             item.chmod(0o500 if item.is_dir() else 0o400)
     python_lib.parent.chmod(0o500)
     python_home.chmod(0o500)
-    runtime_files = [
-        path
-        for path in python_lib.rglob("*")
-        if path.is_file()
-        and not path.is_symlink()
-        and path.suffix == ".so"
-    ]
+    runtime_files = [path for path in python_lib.rglob("*") if path.is_file() and not path.is_symlink() and path.suffix == ".so"]
     runtime_files.extend(path for path in site.rglob("*") if path.is_file() and path.suffix == ".so")
     native_closure = _native_python_closure(python, runtime_files)
 
-    probe_source = (
-        f"#define TGW_TRUSTED_UID {os.getuid()}\n"
-        "#define TGW_RUNTIME_IMPORT_PROBE 1\n"
-    ).encode() + Path("src/tgw/w09_controller_launcher.c").read_bytes()
+    probe_source = (f"#define TGW_TRUSTED_UID {os.getuid()}\n#define TGW_RUNTIME_IMPORT_PROBE 1\n").encode() + Path("src/tgw/w09_controller_launcher.c").read_bytes()
     source_binding, source = _real_launcher_source_receipt(
         tmp_path,
         launcher_source=probe_source,

@@ -85,7 +85,13 @@ def _bundle_from_archive(archive: bytes) -> tuple[bytes, str, str, bytes]:
                     if extracted is None:
                         raise ControllerBundleError("controller launcher source is not a file")
                     launcher_source = extracted.read(1024 * 1024 + 1)
-                if not member.isfile() or not member.name.startswith("src/tgw/"):
+                if not member.isfile():
+                    continue
+                if member.name.startswith("src/tgw/"):
+                    bundle_name = member.name.removeprefix("src/")
+                elif member.name.startswith("agent-services/providers/promptcraft/promptcraft/"):
+                    bundle_name = member.name.removeprefix("agent-services/providers/promptcraft/")
+                else:
                     continue
                 extracted = source.extractfile(member)
                 if extracted is None:
@@ -93,7 +99,7 @@ def _bundle_from_archive(archive: bytes) -> tuple[bytes, str, str, bytes]:
                 raw = extracted.read(16 * 1024 * 1024 + 1)
                 if len(raw) > 16 * 1024 * 1024:
                     raise ControllerBundleError("controller module exceeds its bound")
-                files[member.name.removeprefix("src/")] = raw
+                files[bundle_name] = raw
     except (tarfile.TarError, OSError) as exc:
         raise ControllerBundleError("controller source archive is invalid") from exc
     if projection is None or len(projection) > 4 * 1024 * 1024:
@@ -109,6 +115,9 @@ def _bundle_from_archive(archive: bytes) -> tuple[bytes, str, str, bytes]:
         "tgw/deployment_runtime.py",
         "tgw/effect_completion_store.py",
         "tgw/effect_handlers.py",
+        "promptcraft/__init__.py",
+        "promptcraft/core.py",
+        "promptcraft/handoff.py",
     }
     if not required.issubset(files):
         raise ControllerBundleError("controller bundle source closure is incomplete")

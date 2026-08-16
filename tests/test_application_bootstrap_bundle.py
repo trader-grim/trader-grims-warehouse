@@ -26,6 +26,7 @@ REQUIRED = (
     "effect_completion_store.py",
     "effect_handlers.py",
 )
+PROMPTCRAFT_REQUIRED = ("__init__.py", "core.py", "handoff.py")
 
 
 def _archive(*, unsafe=False, bytecode=False):
@@ -35,6 +36,7 @@ def _archive(*, unsafe=False, bytecode=False):
             PROJECTION_PATH: b'{"projection":"exact"}',
             "src/tgw/w09_controller_launcher.c": b"int main(void) { return 0; }\n",
             **{f"src/tgw/{name}": f"# {name}\n".encode() for name in REQUIRED},
+            **{f"agent-services/providers/promptcraft/promptcraft/{name}": f"# {name}\n".encode() for name in PROMPTCRAFT_REQUIRED},
         }
         if unsafe:
             entries["../escape.py"] = b"neighbor"
@@ -61,6 +63,7 @@ def test_controller_bundle_is_deterministic_source_only_and_projection_bound():
         assert "__main__.py" in bundle.namelist()
         assert all(not name.endswith(".pyc") for name in bundle.namelist())
         assert bundle.read("__main__.py").startswith(b"from tgw.application_bootstrap_entrypoint import main")
+        assert set(PROMPTCRAFT_REQUIRED).issubset({Path(name).name for name in bundle.namelist() if name.startswith("promptcraft/")})
 
 
 def test_controller_bundle_rejects_archive_traversal_before_materialization():
