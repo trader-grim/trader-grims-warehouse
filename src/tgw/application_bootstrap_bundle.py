@@ -89,7 +89,11 @@ def _bundle_from_archive(archive: bytes) -> tuple[bytes, str, str, bytes]:
                     continue
                 if member.name.startswith("src/tgw/"):
                     bundle_name = member.name.removeprefix("src/")
-                elif member.name.startswith("agent-services/providers/promptcraft/promptcraft/"):
+                elif member.name in {
+                    "agent-services/providers/promptcraft/promptcraft/__init__.py",
+                    "agent-services/providers/promptcraft/promptcraft/core.py",
+                    "agent-services/providers/promptcraft/promptcraft/handoff.py",
+                }:
                     bundle_name = member.name.removeprefix("agent-services/providers/promptcraft/")
                 else:
                     continue
