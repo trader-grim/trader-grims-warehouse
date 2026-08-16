@@ -223,6 +223,8 @@ def qualified_execution_catalog(plan_commit, runner_descriptor):
                 ],
                 "attestation_key_id": TEST_EXECUTION_ATTESTATION_KEY_ID,
                 "attestation_public_key": execution_public_key(TEST_EXECUTION_ATTESTATION_PRIVATE_KEY),
+                "runner_attestation_key_id": runner_descriptor["attestation_key_id"],
+                "runner_attestation_public_key": runner_descriptor["attestation_public_key"],
             }
         ],
     }
@@ -1403,8 +1405,14 @@ def test_bootstrap_contract_is_derived_from_exact_w08_s_d_x_evidence_and_retaine
 @pytest.mark.parametrize(
     "corruption",
     [
-        "candidate", "sink", "legacy-static-only", "admission-gate",
-        "review-bundle", "symbolic-closure", "typed-effect", "rollback-contract",
+        "candidate",
+        "sink",
+        "legacy-static-only",
+        "admission-gate",
+        "review-bundle",
+        "symbolic-closure",
+        "typed-effect",
+        "rollback-contract",
     ],
 )
 def test_bootstrap_contract_rejects_widened_or_mismatched_w08_and_closure_bindings(tmp_path, corruption):

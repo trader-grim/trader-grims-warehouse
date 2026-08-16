@@ -372,6 +372,7 @@ def configured(
         "max_active_requests": 1,
         "max_retained_proofs_per_client": 2,
         "attestation_key_id": "signer-fixture-key",
+        "attestation_public_key": execution_public_key(signer_key),
         "attestation_private_key_env": "SIGNER_KEY",
     }
     parsed = QualifiedExecutionConfig.parse(config)
@@ -392,6 +393,8 @@ def configured(
                 "capabilities": ["candidate-test-execution"],
                 "attestation_key_id": "signer-fixture-key",
                 "attestation_public_key": execution_public_key(signer_key),
+                "runner_attestation_key_id": runner.descriptor["attestation_key_id"],
+                "runner_attestation_public_key": runner.descriptor["attestation_public_key"],
             }
         ],
     }
@@ -416,6 +419,18 @@ def test_signer_only_accepts_fresh_separately_signed_confined_runner_result(tmp_
     assert proof["status"] == "PASS"
     assert proof["policy_artifact_hash"] == config.policy.artifact_hash
     assert "subprocess.Popen" not in Path("src/tgw/qualified_execution_service.py").read_text()
+    for field, value in (
+        ("runner_attestation_key_id", catalog["services"][0]["attestation_key_id"]),
+        ("runner_attestation_public_key", catalog["services"][0]["attestation_public_key"]),
+    ):
+        forged = {**catalog, "services": [{**catalog["services"][0], field: value}]}
+        with pytest.raises(QualifiedExecutionError, match="catalog"):
+            validate_execution_proof(
+                response["results"][0]["proof"],
+                response["results"][0]["transcript"],
+                catalog=forged,
+                runner_descriptor=runner.descriptor,
+            )
 
 
 def test_runner_identity_namespace_and_deadline_attestation_fail_closed(tmp_path):
@@ -465,10 +480,59 @@ def test_runner_identity_namespace_and_deadline_attestation_fail_closed(tmp_path
         "max_active_requests": 1,
         "max_retained_proofs_per_client": 2,
         "attestation_key_id": "signer-key",
+        "attestation_public_key": execution_public_key(signer_key),
         "attestation_private_key_env": "SIGNER_KEY",
     }
     with pytest.raises(QualifiedExecutionConfigurationError, match="must not share"):
         QualifiedExecutionConfig.parse(bad)
+
+
+@pytest.mark.parametrize("shared", ["key-id", "public-key"])
+def test_config_rejects_shared_runner_signer_attestation_keys(tmp_path, shared):
+    config, runner, signer_key, _descriptor, _catalog, _candidate, _tree, _base, _base_tree = configured(tmp_path)
+    runner_value = dict(runner.descriptor)
+    if shared == "key-id":
+        runner_value["attestation_key_id"] = config.attestation_key_id
+    else:
+        runner_value["attestation_public_key"] = execution_public_key(signer_key)
+    value = {
+        "schema": SERVICE_CONFIG_SCHEMA,
+        "service_id": config.service_id,
+        "signer_identity": config.signer_identity,
+        "signer_namespace_id": config.signer_namespace_id,
+        "repository": str(config.repository),
+        "plan_repository": str(config.plan_repository),
+        "plan_commit": config.plan_commit,
+        "policy_path": config.policy.path,
+        "policy_artifact_hash": config.policy.artifact_hash,
+        "runner": runner_value,
+        "clients": [
+            {
+                "id": "fixture-client",
+                "credential_env": "SIGNER_TOKEN",
+                "descriptor_hash": config.clients["fixture-client"].descriptor_hash,
+                "profiles": ["focused"],
+            }
+        ],
+        "max_active_requests": 1,
+        "max_retained_proofs_per_client": 2,
+        "attestation_key_id": config.attestation_key_id,
+        "attestation_public_key": config.attestation_public_key,
+        "attestation_private_key_env": "SIGNER_KEY",
+    }
+    with pytest.raises(QualifiedExecutionConfigurationError, match="attestation keys must be distinct"):
+        QualifiedExecutionConfig.parse(value)
+
+
+def test_service_rejects_a_provisioned_signer_private_key_that_differs_from_config(tmp_path):
+    config, runner, _signer_key, _descriptor, _catalog, _candidate, _tree, _base, _base_tree = configured(tmp_path)
+    with pytest.raises(QualifiedExecutionConfigurationError, match="does not match configured public key"):
+        QualifiedExecutionService(
+            config,
+            {"fixture-client": "signer-secret"},
+            signing_private_key=runner.key,
+            environment={"RUNNER_TOKEN": runner.token},
+        )
 
 
 @pytest.mark.parametrize(
@@ -516,7 +580,7 @@ def test_signer_rejects_unconfined_or_replaced_runner_results(tmp_path, variant)
 
 
 def test_config_rejects_runner_policy_pin_drift(tmp_path):
-    config, runner, _signer_key, _descriptor, _catalog, _candidate, _tree, _base, _base_tree = configured(tmp_path)
+    config, runner, signer_key, _descriptor, _catalog, _candidate, _tree, _base, _base_tree = configured(tmp_path)
     bad = {
         "schema": SERVICE_CONFIG_SCHEMA,
         "service_id": config.service_id,
@@ -539,6 +603,7 @@ def test_config_rejects_runner_policy_pin_drift(tmp_path):
         "max_active_requests": 1,
         "max_retained_proofs_per_client": 2,
         "attestation_key_id": "signer-fixture-key",
+        "attestation_public_key": execution_public_key(signer_key),
         "attestation_private_key_env": "SIGNER_KEY",
     }
     with pytest.raises(QualifiedExecutionConfigurationError, match="Plan policy"):

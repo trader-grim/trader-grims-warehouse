@@ -35,9 +35,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 
 from tgw.candidate_manifest import load_candidate_test_plan, verify_migration_safety_receipt, verify_test_receipt
 
-SERVICE_CONFIG_SCHEMA = "tgw-qualified-execution-signer-config/v2"
+SERVICE_CONFIG_SCHEMA = "tgw-qualified-execution-signer-config/v3"
 SERVICE_DESCRIPTOR_SCHEMA = "tgw-qualified-execution-signer/v2"
-SERVICE_CATALOG_SCHEMA = "tgw-qualified-execution-service-catalog/v2"
+SERVICE_CATALOG_SCHEMA = "tgw-qualified-execution-service-catalog/v3"
 RUNNER_DESCRIPTOR_SCHEMA = "tgw-qualified-execution-runner/v1"
 POLICY_SCHEMA = "tgw-qualified-execution-policy/v1"
 RUNNER_IDENTITY_SCHEMA = "tgw-qualified-runner-identity/v1"
@@ -130,6 +130,13 @@ def _public_key(value: Any) -> Ed25519PublicKey:
         return Ed25519PublicKey.from_public_bytes(_b64(value, label="qualified execution public key", length=32))
     except ValueError as exc:
         raise QualifiedExecutionError("qualified execution public key is invalid") from exc
+
+
+def _key_bytes(value: Any) -> bytes:
+    """Return a validated canonical raw Ed25519 public key for comparison."""
+
+    _public_key(value)
+    return _b64(value, label="qualified execution public key", length=32)
 
 
 def _environment(value: Any) -> dict[str, str]:
@@ -269,6 +276,8 @@ def validate_execution_service_catalog(value: Mapping[str, Any]) -> dict[str, An
         "capabilities",
         "attestation_key_id",
         "attestation_public_key",
+        "runner_attestation_key_id",
+        "runner_attestation_public_key",
     }
     for entry in value["services"]:
         if not isinstance(entry, Mapping) or set(entry) != entry_fields:
@@ -293,9 +302,13 @@ def validate_execution_service_catalog(value: Mapping[str, Any]) -> dict[str, An
             or not all(isinstance(item, str) and item in _CAPABILITIES for item in capabilities)
             or not isinstance(entry.get("attestation_key_id"), str)
             or _ID.fullmatch(entry["attestation_key_id"]) is None
+            or not isinstance(entry.get("runner_attestation_key_id"), str)
+            or _ID.fullmatch(entry["runner_attestation_key_id"]) is None
+            or entry["attestation_key_id"] == entry["runner_attestation_key_id"]
         ):
             raise QualifiedExecutionError("qualified execution catalog entry is invalid")
-        _public_key(entry.get("attestation_public_key"))
+        if _key_bytes(entry.get("attestation_public_key")) == _key_bytes(entry.get("runner_attestation_public_key")):
+            raise QualifiedExecutionError("qualified execution catalog signer and runner keys must be distinct")
         seen.add(identity)
         normalized.append({**dict(entry), "capabilities": sorted(capabilities)})
     return {"schema": SERVICE_CATALOG_SCHEMA, "catalog_ref": value["catalog_ref"], "plan_commit": value["plan_commit"], "policy_artifact_hash": value["policy_artifact_hash"], "services": normalized}
@@ -694,6 +707,10 @@ def validate_execution_proof(
         or entry["catalog_policy_artifact_hash"] != payload["policy_artifact_hash"]
         or entry["runner_descriptor_hash"] != payload["runner_descriptor_hash"]
         or qualified_runner_descriptor_hash(runner) != payload["runner_descriptor_hash"]
+        or entry["runner_attestation_key_id"] != runner["attestation_key_id"]
+        or _key_bytes(entry["runner_attestation_public_key"]) != _key_bytes(runner["attestation_public_key"])
+        or entry["attestation_key_id"] == runner["attestation_key_id"]
+        or _key_bytes(entry["attestation_public_key"]) == _key_bytes(runner["attestation_public_key"])
         or runner["plan_commit"] != payload["plan_commit"]
         or runner["policy_path"] != payload["policy_path"]
         or runner["policy_artifact_hash"] != payload["policy_artifact_hash"]
@@ -783,6 +800,7 @@ class QualifiedExecutionConfig:
     max_active_requests: int
     max_retained_proofs_per_client: int
     attestation_key_id: str
+    attestation_public_key: str
     attestation_private_key_env: str
 
     @classmethod
@@ -802,6 +820,7 @@ class QualifiedExecutionConfig:
             "max_active_requests",
             "max_retained_proofs_per_client",
             "attestation_key_id",
+            "attestation_public_key",
             "attestation_private_key_env",
         }
         if not isinstance(value, Mapping) or set(value) != fields or value.get("schema") != SERVICE_CONFIG_SCHEMA:
@@ -818,6 +837,7 @@ class QualifiedExecutionConfig:
             or _GIT.fullmatch(value["plan_commit"]) is None
             or not _relative(value.get("policy_path"))
             or not _hash_ok(value.get("policy_artifact_hash"))
+            or not isinstance(value.get("attestation_public_key"), str)
             or not isinstance(value.get("attestation_private_key_env"), str)
             or _ENV.fullmatch(value["attestation_private_key_env"]) is None
             or not isinstance(value.get("max_active_requests"), int)
@@ -838,6 +858,10 @@ class QualifiedExecutionConfig:
             policy_blob = _git_bytes(plans, "show", f"{value['plan_commit']}:{value['policy_path']}")
         except (OSError, QualifiedExecutionError) as exc:
             raise QualifiedExecutionConfigurationError("qualified execution signer trust roots are unavailable") from exc
+        try:
+            signer_public_key = _key_bytes(value["attestation_public_key"])
+        except QualifiedExecutionError as exc:
+            raise QualifiedExecutionConfigurationError("qualified execution signer public key is invalid") from exc
         if _hash_bytes(policy_blob) != value["policy_artifact_hash"]:
             raise QualifiedExecutionConfigurationError("qualified execution Plan policy artifact hash is invalid")
         policy = _policy(policy_blob, path=value["policy_path"], artifact_hash=value["policy_artifact_hash"])
@@ -850,6 +874,8 @@ class QualifiedExecutionConfig:
             value["signer_namespace_id"],
         }:
             raise QualifiedExecutionConfigurationError("qualified runner must not share signer identity or namespace")
+        if runner["attestation_key_id"] == value["attestation_key_id"] or _key_bytes(runner["attestation_public_key"]) == signer_public_key:
+            raise QualifiedExecutionConfigurationError("qualified runner and signer attestation keys must be distinct")
         if runner["plan_commit"] != value["plan_commit"] or runner["policy_path"] != value["policy_path"] or runner["policy_artifact_hash"] != value["policy_artifact_hash"]:
             raise QualifiedExecutionConfigurationError("qualified runner does not pin the configured Plan policy")
         if any(profile not in policy.profiles for profile in runner["profiles"]):
@@ -891,6 +917,7 @@ class QualifiedExecutionConfig:
             value["max_active_requests"],
             value["max_retained_proofs_per_client"],
             value["attestation_key_id"],
+            value["attestation_public_key"],
             value["attestation_private_key_env"],
         )
 
@@ -1051,7 +1078,9 @@ class QualifiedExecutionService:
             if not isinstance(token, str) or not token or any(hmac.compare_digest(token, known) for known, _client in pairs):
                 raise QualifiedExecutionConfigurationError("qualified execution client credentials are invalid")
             pairs.append((token, client))
-        _private_key(signing_private_key)
+        signer_key = _private_key(signing_private_key)
+        if _key_bytes(config.attestation_public_key) != _key_bytes(execution_public_key(signer_key)):
+            raise QualifiedExecutionConfigurationError("qualified execution signer private key does not match configured public key")
         self.config, self._credentials, self._key = config, tuple(pairs), signing_private_key
         self._runner = _RunnerClient(config.runner, environment=environment)
         self._slots = threading.BoundedSemaphore(config.max_active_requests)
