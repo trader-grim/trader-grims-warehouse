@@ -434,6 +434,7 @@ def _verified_w08_evidence(
             candidate_sink, candidate_evidence_descriptor=candidate_evidence_descriptor,
             repository=repo, source_commit=source_commit, source_tree=source_tree,
             plan_commit=plan_authority["approved_commit"],
+            plan_repository=Path(plan_authority["repository"]),
         )
         admission = candidate_admission_gate(
             repo,
@@ -634,6 +635,7 @@ class PinnedBootstrapDeploymentContractResolver:
                 repository=self._repository,
                 source_commit=source_commit, source_tree=source_tree,
                 plan_commit=plan_authority["approved_commit"],
+                plan_repository=Path(plan_authority["repository"]),
             )
             admission = candidate_admission_gate(
                 self._repository,

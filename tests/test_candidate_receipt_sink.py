@@ -29,6 +29,8 @@ from tgw.candidate_receipt_sink import (
     GOVERNED_EXECUTION_BUNDLE_SCHEMA,
     INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA,
     PINNED_CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA,
+    PINNED_W06_CANONICAL_GRAPH_SCHEMA,
+    PINNED_W06_PLAN_MATERIALIZATION_SCHEMA,
     RECEIPT_SINK_MANIFEST_SCHEMA,
     RECEIPT_SINK_SCHEMA,
     ROLLBACK_MANIFEST_SCHEMA,
@@ -151,26 +153,9 @@ def approved_plan_repository(tmp_path):
     return repo, commit
 
 
-def w06_plan_materialization(tmp_path, *, plan_commit, corrupt=None):
-    """Retain a concrete W06 solve outside the mutable candidate and S/D/X."""
-
-    repo = tmp_path / "w06-plan-materialization"
-    _new_sink(repo, email="w06@example.invalid", name="W06 Plan evidence")
-    graph = {
-        "schema": "tgw-plan/v2",
-        "plan_commit": plan_commit,
-        "capabilities": ["candidate.admission@1"],
-        "providers": [{"id": "candidate-admission", "provides": ["candidate.admission@1"]}],
-        "observations": [],
-        "target": {
-            "id": "fixture-approved-plan",
-            "profile": "production",
-            "minimum_state": "operationally_verified",
-            "required_capabilities": ["candidate.admission@1"],
-        },
-    }
+def _dispatchable_w06_solution(graph, *, plan_commit):
     native = solve(graph, expected_plan_commit=plan_commit)
-    solution = solve(
+    return solve(
         graph,
         expected_plan_commit=plan_commit,
         conformance_result={
@@ -179,6 +164,47 @@ def w06_plan_materialization(tmp_path, *, plan_commit, corrupt=None):
             "closure_hash": native["closure_hash"],
         },
     )
+
+
+def w06_plan_materialization(plan_repository, *, plan_commit, corrupt=None):
+    """Retain the W06 graph and solve in the configured Plan/evidence repo."""
+
+    canonical_graph = {
+        "schema": "tgw-plan/v2",
+        "plan_commit": plan_commit,
+        "capabilities": ["plan.capability-resolution@2", "coding.governed-execution@1"],
+        "providers": [
+            {"id": "canonical-plan-resolver", "provides": ["plan.capability-resolution@2"]},
+            {
+                "id": "canonical-governed-execution",
+                "provides": ["coding.governed-execution@1"],
+                "requires": ["plan.capability-resolution@2"],
+            },
+        ],
+        "observations": [],
+        "target": {
+            "id": "GOVERNED-EXECUTION-PLATFORM",
+            "profile": "production",
+            "minimum_state": "operationally_verified",
+            "required_capabilities": ["coding.governed-execution@1"],
+        },
+    }
+    graph = canonical_graph
+    if corrupt == "synthetic-graph":
+        graph = {
+            "schema": "tgw-plan/v2",
+            "plan_commit": plan_commit,
+            "capabilities": ["candidate.admission@1"],
+            "providers": [{"id": "candidate-admission", "provides": ["candidate.admission@1"]}],
+            "observations": [],
+            "target": {
+                "id": "fixture-self-declared-plan",
+                "profile": "production",
+                "minimum_state": "operationally_verified",
+                "required_capabilities": ["candidate.admission@1"],
+            },
+        }
+    solution = _dispatchable_w06_solution(graph, plan_commit=plan_commit)
     materialization = {
         "schema": W06_PLAN_MATERIALIZATION_SCHEMA,
         "plan_commit": plan_commit,
@@ -194,20 +220,31 @@ def w06_plan_materialization(tmp_path, *, plan_commit, corrupt=None):
         materialization["solution"] = {**solution, "dispatchable": False}
     elif corrupt == "graph":
         materialization["graph"] = {**graph, "plan_commit": "0" * 40}
-    raw = write_json(repo / "materialization.json", materialization)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-qm", "retain W06 Plan materialization"], cwd=repo, check=True)
+    canonical_graph_raw = write_json(plan_repository / "evidence" / "w06-canonical-graph.json", canonical_graph)
+    raw = write_json(plan_repository / "evidence" / "w06-materialization.json", materialization)
+    subprocess.run(["git", "add", "."], cwd=plan_repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "retain W06 Plan graph and materialization evidence"], cwd=plan_repository, check=True)
+    evidence_commit = git(plan_repository, "rev-parse", "HEAD")
+    evidence_tree = git(plan_repository, "rev-parse", "HEAD^{tree}")
     pin = {
-        "schema": "tgw-pinned-git-w06-plan-materialization/v1",
-        "repository": str(repo.resolve()),
-        "commit": git(repo, "rev-parse", "HEAD"),
-        "tree": git(repo, "rev-parse", "HEAD^{tree}"),
-        "path": "materialization.json",
+        "schema": PINNED_W06_PLAN_MATERIALIZATION_SCHEMA,
+        "repository": str(plan_repository.resolve()),
+        "commit": evidence_commit,
+        "tree": evidence_tree,
+        "path": "evidence/w06-materialization.json",
         "content_sha256": digest(raw),
+        "canonical_graph": {
+            "schema": PINNED_W06_CANONICAL_GRAPH_SCHEMA,
+            "repository": str(plan_repository.resolve()),
+            "commit": evidence_commit,
+            "tree": evidence_tree,
+            "path": "evidence/w06-canonical-graph.json",
+            "content_sha256": digest(canonical_graph_raw),
+        },
     }
     if corrupt == "missing":
         pin["path"] = "absent-materialization.json"
-    return repo, pin, materialization
+    return pin, materialization
 
 
 def service_catalog(plan_commit):
@@ -1132,13 +1169,14 @@ def pinned_sinks(
     source_commit,
     source_tree,
     plan_commit,
+    plan_repository,
     corrupt_role=None,
     corrupt_sink_binding_role=None,
     corrupt_w08=None,
     corrupt_w06_materialization=None,
 ):
-    _w06_repository, w06_materialization_pin, materialization = w06_plan_materialization(
-        tmp_path,
+    w06_materialization_pin, materialization = w06_plan_materialization(
+        plan_repository,
         plan_commit=plan_commit,
         corrupt=corrupt_w06_materialization,
     )
@@ -1200,11 +1238,12 @@ def test_acyclic_two_store_gate_reads_exact_committed_artifacts_and_cli_admits(t
         source_commit=commit,
         source_tree=tree,
         plan_commit=plan_commit,
+        plan_repository=plan_repository,
     )
     (execution_sink / "governed-execution" / "implementation" / "role_receipt.json").write_text("{}")
     descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
     binding = descriptor.card_binding()
-    assert binding["ref"] == "candidate-evidence:candidate-evidence-sink:descriptor:v3"
+    assert binding["ref"] == "candidate-evidence:candidate-evidence-sink:descriptor:v4"
     assert binding["hash"].startswith("sha256:")
     assert descriptor.identity["repository"] == str(authority.resolve())
     assert descriptor.candidate_evidence_sink_descriptor["repository"] == str(candidate_sink.resolve())
@@ -1254,6 +1293,7 @@ def test_gate_holds_when_x_bundle_artifact_does_not_match(tmp_path):
         source_commit=commit,
         source_tree=tree,
         plan_commit=plan_commit,
+        plan_repository=plan_repository,
         corrupt_role="independent-review",
     )
     gate = _gate(candidate, plan_repository, descriptor_config, execution_config)
@@ -1273,6 +1313,7 @@ def test_gate_rejects_a_legacy_or_substituted_card_receipt_sink_binding(tmp_path
         source_commit=commit,
         source_tree=tree,
         plan_commit=plan_commit,
+        plan_repository=plan_repository,
         corrupt_sink_binding_role="controller-verification",
     )
     gate = _gate(candidate, plan_repository, descriptor_config, execution_config)
@@ -1311,6 +1352,7 @@ def test_gate_requires_every_retained_s_or_x_evidence_artifact(tmp_path, corrupt
         source_commit=commit,
         source_tree=tree,
         plan_commit=plan_commit,
+        plan_repository=plan_repository,
         corrupt_w08=corruption,
     )
     gate = _gate(candidate, plan_repository, descriptor_config, execution_config)
@@ -1326,7 +1368,7 @@ def test_gate_requires_every_retained_s_or_x_evidence_artifact(tmp_path, corrupt
     assert gate["reasons"] == expected
 
 
-@pytest.mark.parametrize("corruption", ["solution", "graph", "missing"])
+@pytest.mark.parametrize("corruption", ["solution", "graph", "missing", "synthetic-graph"])
 def test_gate_requires_a_valid_d_pinned_w06_plan_materialization(tmp_path, corruption):
     candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
@@ -1336,6 +1378,7 @@ def test_gate_requires_a_valid_d_pinned_w06_plan_materialization(tmp_path, corru
         source_commit=commit,
         source_tree=tree,
         plan_commit=plan_commit,
+        plan_repository=plan_repository,
         corrupt_w06_materialization=corruption,
     )
     gate = _gate(candidate, plan_repository, descriptor_config, execution_config)
@@ -1356,6 +1399,7 @@ def test_gate_rejects_a_one_store_cycle_even_when_both_pins_are_individually_val
         source_commit=commit,
         source_tree=tree,
         plan_commit=plan_commit,
+        plan_repository=plan_repository,
     )
     descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
     with pytest.raises(CandidateReceiptSinkError, match="must be disjoint"):
@@ -1374,13 +1418,14 @@ def test_gate_rejects_a_one_store_cycle_even_when_both_pins_are_individually_val
 
 def test_pinned_candidate_evidence_descriptor_rejects_a_tampered_dynamic_s_pin(tmp_path):
     candidate, commit, tree = candidate_repository(tmp_path)
-    _plans, plan_commit = approved_plan_repository(tmp_path)
+    plan_repository, plan_commit = approved_plan_repository(tmp_path)
     _s, _d, _x, descriptor_config, _execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
         source_commit=commit,
         source_tree=tree,
         plan_commit=plan_commit,
+        plan_repository=plan_repository,
     )
     pin = json.loads(descriptor_config.read_text())
     pin["content_sha256"] = "sha256:" + "0" * 64
@@ -1391,13 +1436,14 @@ def test_pinned_candidate_evidence_descriptor_rejects_a_tampered_dynamic_s_pin(t
 
 def test_candidate_local_descriptor_configuration_or_repository_is_refused(tmp_path):
     candidate, commit, tree = candidate_repository(tmp_path)
-    _plans, plan_commit = approved_plan_repository(tmp_path)
+    plan_repository, plan_commit = approved_plan_repository(tmp_path)
     _s, _d, _x, descriptor_config, execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
         source_commit=commit,
         source_tree=tree,
         plan_commit=plan_commit,
+        plan_repository=plan_repository,
     )
     local = candidate / "candidate-evidence-descriptor-config.json"
     local.write_bytes(descriptor_config.read_bytes())
@@ -1496,6 +1542,7 @@ def test_bootstrap_contract_is_derived_from_exact_w08_s_d_x_evidence_and_retaine
         source_commit=commit,
         source_tree=tree,
         plan_commit=plan_commit,
+        plan_repository=plan_repository,
     )
     descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
     contract = derive_bootstrap_deployment_contract(
@@ -1561,6 +1608,7 @@ def test_bootstrap_contract_rejects_widened_or_mismatched_w08_and_closure_bindin
         source_commit=commit,
         source_tree=tree,
         plan_commit=plan_commit,
+        plan_repository=plan_repository,
     )
     descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
     contract = derive_bootstrap_deployment_contract(
