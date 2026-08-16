@@ -83,7 +83,8 @@ def _contract():
             "immutable_generation_path": "/opt/TGW/releases/release-b", "current_selector": "/opt/TGW/current",
             "nix_system_path": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-tgw-prod-26.05",
             "predecessor_observation_ref": "observation:release-a", "predecessor_observation_hash": h("f"),
-            "prior_projection_sha256": h("1"), "prior_runtime_config_sha256": h("2"),
+            "provider_observation_ref": "observation:w09-provider", "provider_observation_hash": h("0"),
+            "prior_projection_sha256": None, "prior_runtime_config_sha256": h("2"),
         },
         "services": ["tgw-api.service", "tgw-worker.target"],
         "health_probes": ["api", "authority", "queue"], "stage_order": list(STAGES),
@@ -234,3 +235,22 @@ def test_consumed_w09_grant_never_returns_retry():
     result = controller.execute(request_id="w09", effect=effect)
     assert result.outcome is EffectOutcome.ROLLED_BACK
     assert result.outcome is not EffectOutcome.RETRY
+
+
+def test_authenticated_remote_restore_is_terminal_without_second_rollback_dispatch():
+    install = Mock(return_value={
+        "terminal_outcome": "rolled_back",
+        "rollback_receipt": "remote-rollback:release-a",
+        "evidence": ["database:restored", "health:predecessor"],
+    })
+    rollback = Mock()
+    recorder = Mock(side_effect=lambda receipt: {
+        "receipt": "terminal:rollback", "receipt_hash": receipt["receipt_hash"],
+    })
+    controller, _, effect = _application_controller(
+        install=install, rollback=rollback, recorder=recorder,
+    )
+    result = controller.execute(request_id="remote-restored", effect=effect)
+    assert result.outcome is EffectOutcome.ROLLED_BACK
+    assert result.rollback_receipt == "remote-rollback:release-a"
+    rollback.assert_not_called()

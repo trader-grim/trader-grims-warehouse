@@ -43,12 +43,13 @@ def _request():
         "services": ["tgw-api.service"], "health_probes": ["http://127.0.0.1:7373/health"],
         "nix_system_path": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-system",
         "predecessor_observation_ref": "observation:a", "predecessor_observation_hash": h("9"),
+        "provider_observation_ref": "observation:w09-provider", "provider_observation_hash": h("0"),
         "immutable_generation_path": "/opt/TGW/releases/release-b",
         "predecessor": {
             "generation": "release-a", "selector_target": "/opt/TGW/releases/release-a",
             "commit": "c" * 40, "tree": "d" * 40, "archive_sha256": h("a"),
             "release_manifest_hash": h("b"), "content_manifest_sha256": h("c"),
-            "projection_sha256": h("d"), "runtime_config_sha256": h("e"),
+            "projection_sha256": None, "runtime_config_sha256": h("e"),
         },
     }
     unsigned = {

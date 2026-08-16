@@ -816,6 +816,18 @@ class AuthorityEffectController:
         try:
             result = handler(parameters)
             evidence = tuple(sorted(str(item) for item in result.get("evidence", ())))
+            if (
+                effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT
+                and self.registry._application_bootstrap_contract_resolver is not None
+                and result.get("terminal_outcome") == "rolled_back"
+                and isinstance(result.get("rollback_receipt"), str)
+            ):
+                return self._finish(
+                    request_id, receipt_id, effect, handler_id, executor_principal,
+                    EffectOutcome.ROLLED_BACK, evidence,
+                    rollback_receipt=result["rollback_receipt"],
+                    detail="remote transaction restored predecessor before returning",
+                )
             return self._finish(
                 request_id, receipt_id, effect, handler_id, executor_principal,
                 EffectOutcome.SUCCEEDED, evidence,

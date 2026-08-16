@@ -13,6 +13,7 @@ import json
 import os
 import re
 import selectors
+import signal
 import stat
 import subprocess
 import sys
@@ -22,10 +23,6 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from tgw.a3_host_state_observation import (
-    _group_empty_or_kill,
-    _post_reap_group_state,
-)
 from tgw.release_installer import (
     current_generation,
     install_runtime_files,
@@ -36,10 +33,9 @@ from tgw.release_installer import (
 )
 
 SCHEMA = "tgw-w09-application-release-request/v1"
+FRAMED_SCHEMA = "tgw-w09-application-release-framed-request/v1"
 CONFIG_SCHEMA = "tgw-w09-application-release-helper-config/v1"
 RESPONSE_SCHEMA = "tgw-w09-application-release-response/v1"
-CONFIG_PATH = Path("/etc/tgw/application-release-helper.json")
-MAX_PACKET = 192 * 1024 * 1024
 _SHA = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _GENERATION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 MIGRATION_PATHS = (
@@ -51,6 +47,29 @@ PROJECTION_PATH = "agent-services/plan-runtime/GOVERNED-EXECUTION-PLATFORM-f0a8c
 
 class ApplicationReleaseRemoteError(RuntimeError):
     pass
+
+
+def _group_empty_or_kill(pgid: int) -> dict[str, bool]:
+    for sent in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sent)
+        except ProcessLookupError:
+            return {"had_survivor": sent != signal.SIGTERM, "removed": True, "reaped": True}
+        for _ in range(200):
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return {"had_survivor": True, "removed": True, "reaped": True}
+            time.sleep(0.01)
+    return {"had_survivor": True, "removed": False, "reaped": False}
+
+
+def _post_reap_group_state(pgid: int, prior: Mapping[str, bool]) -> dict[str, bool]:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return {"had_survivor": prior["had_survivor"], "removed": True, "reaped": True}
+    return {"had_survivor": prior["had_survivor"], "removed": False, "reaped": True}
 
 
 def _bounded_process(process: subprocess.Popen[bytes], stdin: bytes, *, limit: int, timeout: int) -> tuple[bytes, bytes]:
@@ -112,14 +131,7 @@ def _safe_root(path: Path, *, mode: int = 0o700) -> None:
         raise ApplicationReleaseRemoteError(f"protected root is unsafe: {path}")
 
 
-def _read_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
-    metadata = path.lstat()
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o400:
-        raise ApplicationReleaseRemoteError("helper config metadata is unsafe")
-    try:
-        value = json.loads(path.read_bytes())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ApplicationReleaseRemoteError("helper config is unreadable") from exc
+def _validate_config(value: Any, *, expected_helper_sha256: str) -> dict[str, Any]:
     config = _exact(value, {
         "schema", "target_host", "root_id", "release_root", "current_selector", "active_config_path",
         "services", "health_probes", "executables", "database", "receipt_root", "backup_root",
@@ -129,13 +141,7 @@ def _read_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     unsigned = dict(config); claimed = unsigned.pop("config_sha256")
     if claimed != _hash(unsigned) or config["schema"] != CONFIG_SCHEMA:
         raise ApplicationReleaseRemoteError("helper config self-hash/schema is invalid")
-    module_path = Path(__file__)
-    module_metadata = module_path.stat()
-    if (
-        not stat.S_ISREG(module_metadata.st_mode) or module_metadata.st_uid != 0
-        or module_metadata.st_nlink != 1 or stat.S_IMODE(module_metadata.st_mode) & 0o022
-        or _hash_bytes(module_path.read_bytes()) != config["helper_sha256"]
-    ):
+    if config["helper_sha256"] != expected_helper_sha256:
         raise ApplicationReleaseRemoteError("running helper module differs from reviewed source")
     if (
         config["target_host"] != "tgw-prod" or config["root_id"] != "production-releases"
@@ -161,17 +167,24 @@ def _read_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     return config
 
 
-def validate_request(value: Mapping[str, Any], config: Mapping[str, Any]) -> dict[str, Any]:
-    request = _exact(value, {"schema", "action", "parameters", "archive_b64", "config_b64", "request_hash"}, "release request")
+def validate_request(
+    value: Mapping[str, Any], config: Mapping[str, Any],
+    *, artifact_bytes: tuple[bytes, bytes] | None = None,
+) -> dict[str, Any]:
+    fields = {"schema", "action", "parameters", "request_hash"}
+    if artifact_bytes is None:
+        fields |= {"archive_b64", "config_b64"}
+    request = _exact(value, fields, "release request")
     unsigned = dict(request); claimed = unsigned.pop("request_hash")
-    if request["schema"] != SCHEMA or claimed != _hash(unsigned) or request["action"] not in {"install", "rollback"}:
+    expected_schema = SCHEMA if artifact_bytes is None else FRAMED_SCHEMA
+    if request["schema"] != expected_schema or claimed != _hash(unsigned) or request["action"] not in {"install", "rollback"}:
         raise ApplicationReleaseRemoteError("release request schema/hash/action is invalid")
     parameters = _exact(request["parameters"], {
         "generation", "candidate_commit", "candidate_tree", "archive_sha256", "artifact_ref", "root_id",
         "expected_current", "operation_id", "review_receipt", "controller_receipt", "migration_receipts",
         "projection", "runtime_config", "services", "health_probes", "nix_system_path",
         "predecessor_observation_ref", "predecessor_observation_hash", "immutable_generation_path",
-        "predecessor",
+        "provider_observation_ref", "provider_observation_hash", "predecessor",
     }, "release parameters")
     if (
         _GENERATION.fullmatch(str(parameters["generation"])) is None
@@ -192,9 +205,13 @@ def validate_request(value: Mapping[str, Any], config: Mapping[str, Any]) -> dic
         or predecessor["selector_target"] != f"/opt/TGW/releases/{parameters['expected_current']}"
         or not re.fullmatch(r"[0-9a-f]{40}", str(predecessor["commit"]))
         or not re.fullmatch(r"[0-9a-f]{40}", str(predecessor["tree"]))
+        or (
+            predecessor["projection_sha256"] is not None
+            and _SHA.fullmatch(str(predecessor["projection_sha256"])) is None
+        )
         or any(_SHA.fullmatch(str(predecessor[name])) is None for name in (
             "archive_sha256", "release_manifest_hash", "content_manifest_sha256",
-            "projection_sha256", "runtime_config_sha256",
+            "runtime_config_sha256",
         ))
     ):
         raise ApplicationReleaseRemoteError("release predecessor identity is invalid")
@@ -221,11 +238,14 @@ def validate_request(value: Mapping[str, Any], config: Mapping[str, Any]) -> dic
         ):
             raise ApplicationReleaseRemoteError("migration receipt order or identity differs")
     if request["action"] == "install":
-        try:
-            archive = base64.b64decode(request["archive_b64"], validate=True)
-            runtime_config = base64.b64decode(request["config_b64"], validate=True)
-        except (ValueError, TypeError) as exc:
-            raise ApplicationReleaseRemoteError("release artifacts are not canonical base64") from exc
+        if artifact_bytes is None:
+            try:
+                archive = base64.b64decode(request["archive_b64"], validate=True)
+                runtime_config = base64.b64decode(request["config_b64"], validate=True)
+            except (ValueError, TypeError) as exc:
+                raise ApplicationReleaseRemoteError("release artifacts are not canonical base64") from exc
+        else:
+            archive, runtime_config = artifact_bytes
         if (
             not archive or len(archive) > int(config["max_archive_bytes"])
             or not runtime_config or len(runtime_config) > int(config["max_config_bytes"])
@@ -234,7 +254,9 @@ def validate_request(value: Mapping[str, Any], config: Mapping[str, Any]) -> dic
         ):
             raise ApplicationReleaseRemoteError("release artifact bytes differ from exact contract")
         request["archive"] = archive; request["runtime_config_bytes"] = runtime_config
-    elif request["archive_b64"] != "" or request["config_b64"] != "":
+    elif artifact_bytes is not None and artifact_bytes != (b"", b""):
+        raise ApplicationReleaseRemoteError("rollback request carries unexpected framed artifact bytes")
+    elif artifact_bytes is None and (request["archive_b64"] != "" or request["config_b64"] != ""):
         raise ApplicationReleaseRemoteError("rollback request carries unexpected artifact bytes")
     request["parameters"] = parameters
     return request
@@ -461,8 +483,11 @@ def _reconcile(parameters: Mapping[str, Any], config: Mapping[str, Any], runtime
         return {"status": "AMBIGUOUS", "generation": current_generation(root), "predecessor_healthy": False, "evidence": evidence + ["reconcile-error:" + _hash_bytes(str(exc).encode())]}
 
 
-def execute(request_value: Mapping[str, Any], config: Mapping[str, Any], runtime: HostRuntime) -> dict[str, Any]:
-    request = validate_request(request_value, config); parameters = request["parameters"]
+def execute(
+    request_value: Mapping[str, Any], config: Mapping[str, Any], runtime: HostRuntime,
+    *, artifact_bytes: tuple[bytes, bytes] | None = None,
+) -> dict[str, Any]:
+    request = validate_request(request_value, config, artifact_bytes=artifact_bytes); parameters = request["parameters"]
     journal = _load_journal(config, parameters["operation_id"])
     if request["action"] == "rollback":
         result = _reconcile(parameters, config, runtime, journal)
@@ -477,6 +502,7 @@ def execute(request_value: Mapping[str, Any], config: Mapping[str, Any], runtime
         predecessor_manifest = json.loads(
             (predecessor_release / ".release-manifest.json").read_bytes()
         )
+        prior_projection = predecessor_release / PROJECTION_PATH
         actual_predecessor = {
             "generation": parameters["expected_current"],
             "selector_target": str(predecessor_release),
@@ -485,7 +511,7 @@ def execute(request_value: Mapping[str, Any], config: Mapping[str, Any], runtime
             "archive_sha256": "sha256:" + str(predecessor_manifest.get("archive_sha256")),
             "release_manifest_hash": _hash(predecessor_manifest),
             "content_manifest_sha256": "sha256:" + str(predecessor_manifest.get("content_manifest_sha256")),
-            "projection_sha256": _hash_bytes((predecessor_release / PROJECTION_PATH).read_bytes()),
+            "projection_sha256": _hash_bytes(prior_projection.read_bytes()) if prior_projection.is_file() else None,
             "runtime_config_sha256": _hash_bytes(Path(config["active_config_path"]).read_bytes()),
         }
         if predecessor_verification.get("status") != "PASS" or actual_predecessor != predecessor_binding:
@@ -562,17 +588,22 @@ def _bound_response(
     return {**unsigned, "receipt_sha256": _hash(unsigned)}
 
 
-def main() -> int:
-    if os.geteuid() != 0 or os.environ.get("SSH_ORIGINAL_COMMAND", "") not in {"", None}:
-        raise ApplicationReleaseRemoteError("helper requires root forced-command execution with no original argv")
-    packet = sys.stdin.buffer.read(MAX_PACKET + 1)
-    if len(packet) > MAX_PACKET: raise ApplicationReleaseRemoteError("request exceeds fixed packet bound")
-    request = json.loads(packet)
-    config = _read_config()
-    response = execute(request, config, HostRuntime(config))
-    sys.stdout.buffer.write(_canonical(response) + b"\n")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+def memory_main(
+    request: Mapping[str, Any], config_raw: bytes, archive: bytes,
+    runtime_config: bytes, helper_sha256: str,
+) -> int:
+    """Execute the one framed W09 transaction from reviewed in-memory modules."""
+    if os.geteuid() != 0 or len(sys.argv) != 1 or _SHA.fullmatch(helper_sha256) is None:
+        return 64
+    if len(config_raw) > 1024 * 1024:
+        return 65
+    try:
+        config_value = json.loads(config_raw)
+        config = _validate_config(config_value, expected_helper_sha256=helper_sha256)
+        artifacts = (archive, runtime_config) if request.get("action") == "install" else (b"", b"")
+        response = execute(request, config, HostRuntime(config), artifact_bytes=artifacts)
+        sys.stdout.buffer.write(_canonical(response) + b"\n")
+        return 0
+    except Exception as exc:
+        sys.stderr.write("application-release-error:" + _hash_bytes(str(exc).encode()) + "\n")
+        return 75

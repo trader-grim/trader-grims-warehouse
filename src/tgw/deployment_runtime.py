@@ -106,6 +106,8 @@ def compose_application_bootstrap_controller(
     """Mount W09 only from the sealed SSH/helper production composition."""
     if type(authority) is not BootstrapSessionAuthority:
         raise ValueError("W09 bootstrap session authority is not mounted")
+    if authority.production_authority is not True:
+        raise ValueError("W09 bootstrap grant is not a protected production authority")
     if type(authority.grant) is not ApplicationBootstrapGrant:
         raise ValueError("W09 requires the disjoint application bootstrap grant")
     if type(application_resolver) is not PinnedApplicationDeploymentContractResolver:

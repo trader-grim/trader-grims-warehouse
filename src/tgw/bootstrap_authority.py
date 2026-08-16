@@ -23,6 +23,8 @@ from typing import Any, Mapping
 from tgw.plan_authority import TypedEffect
 from tgw.platform_bootstrap import validate_platform_bootstrap_effect
 
+_PRODUCTION_AUTHORITY_SEAL = object()
+
 
 def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
@@ -115,6 +117,15 @@ class BootstrapAuthorityState(str, Enum):
 class BootstrapSessionAuthority:
     """Redeem one immutable grant; absence/mismatch/expiry all fail closed."""
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        immutable = {
+            "grant", "receipt_path", "_production_authority", "_grant_artifact",
+            "_root_identity", "_directory_fd", "_lock_name",
+        }
+        if getattr(self, "_bindings_frozen", False) and name in immutable:
+            raise AttributeError("bootstrap authority binding is immutable")
+        object.__setattr__(self, name, value)
+
     def __init__(
         self,
         grant: BootstrapGrant,
@@ -122,6 +133,8 @@ class BootstrapSessionAuthority:
         receipt_path: Path,
         current_plan_commit: str,
         trusted_uid: int = 0,
+        _production_token: object | None = None,
+        _grant_artifact: tuple[Path, int, bytes, tuple[int, int]] | None = None,
     ):
         self.grant = grant
         self.receipt_path = Path(receipt_path)
@@ -177,6 +190,82 @@ class BootstrapSessionAuthority:
         self._ambiguity_evidence: tuple[str, ...] = ()
         self._ambiguity_cause: Exception | None = None
         self._consume_lock = threading.Lock()
+        self._production_authority = _production_token is _PRODUCTION_AUTHORITY_SEAL
+        self._grant_artifact = _grant_artifact
+        if self._production_authority and (
+            type(grant) is not ApplicationBootstrapGrant or _grant_artifact is None
+        ):
+            self.close()
+            raise ValueError("production application bootstrap grant is not protected")
+        self._bindings_frozen = True
+
+    @property
+    def production_authority(self) -> bool:
+        return self._production_authority
+
+    @classmethod
+    def production_application(
+        cls, grant_path: Path, *, receipt_path: Path,
+        current_plan_commit: str, trusted_uid: int = 0,
+    ) -> "BootstrapSessionAuthority":
+        path = Path(grant_path)
+        for ancestor in (path.parent, *path.parents):
+            item = ancestor.lstat()
+            if not stat.S_ISDIR(item.st_mode) or item.st_uid != 0 or stat.S_IMODE(item.st_mode) & 0o022:
+                raise ValueError("production bootstrap grant ancestor is not protected")
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            metadata = os.fstat(fd)
+            raw = os.pread(fd, 1024 * 1024 + 1, 0)
+            named = os.stat(path, follow_symlinks=False)
+            identity = (metadata.st_dev, metadata.st_ino)
+            if (
+                len(raw) > 1024 * 1024 or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != 0 or metadata.st_nlink != 1
+                or stat.S_IMODE(metadata.st_mode) != 0o444
+                or (named.st_dev, named.st_ino) != identity
+            ):
+                raise ValueError("production bootstrap grant artifact is unsafe")
+            grant = ApplicationBootstrapGrant.parse(json.loads(raw))
+        except Exception:
+            os.close(fd)
+            raise
+        return cls(
+            grant, receipt_path=receipt_path, current_plan_commit=current_plan_commit,
+            trusted_uid=trusted_uid, _production_token=_PRODUCTION_AUTHORITY_SEAL,
+            _grant_artifact=(path, fd, raw, identity),
+        )
+
+    def close(self) -> None:
+        for name in ("_directory_fd",):
+            fd = getattr(self, name, -1)
+            if fd >= 0:
+                try: os.close(fd)
+                except OSError: pass
+                object.__setattr__(self, name, -1)
+        artifact = getattr(self, "_grant_artifact", None)
+        if artifact is not None:
+            try: os.close(artifact[1])
+            except OSError: pass
+            object.__setattr__(self, "_grant_artifact", None)
+
+    def _revalidate_grant_artifact(self) -> None:
+        if not self._production_authority:
+            return
+        path, fd, raw, identity = self._grant_artifact
+        held = os.fstat(fd); named = os.stat(path, follow_symlinks=False)
+        if (
+            (held.st_dev, held.st_ino) != identity
+            or (named.st_dev, named.st_ino) != identity
+            or os.pread(fd, len(raw) + 1, 0) != raw
+        ):
+            raise ValueError("production bootstrap grant artifact changed")
+        try:
+            retained = ApplicationBootstrapGrant.parse(json.loads(raw))
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("production bootstrap grant bytes are invalid") from exc
+        if retained != self.grant:
+            raise ValueError("production bootstrap grant object differs from held issuance")
 
     @property
     def state(self) -> BootstrapAuthorityState:
@@ -438,6 +527,9 @@ class BootstrapSessionAuthority:
 
     def consume(self, request_id: str, *, effect_hash: str, generation: str, now: datetime | None = None) -> Mapping[str, Any]:
         with self._consume_lock:
+            if self._production_authority and now is not None:
+                raise ValueError("production bootstrap consumption clock is internal")
+            self._revalidate_grant_artifact()
             self._check_terminal_state()
             return self._consume_unlocked(request_id, effect_hash=effect_hash, generation=generation, now=now)
 
