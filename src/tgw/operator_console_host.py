@@ -212,9 +212,13 @@ def configured_console_mount(
                     provider = bootstrap_provider_factory(config_provider())
                 except BootstrapHostIntegrationError as exc:
                     raise ValueError("bootstrap deployment provider cannot be mounted") from exc
-            return configured_execution_controller(
-                store, config_provider, bootstrap_provider=provider,
-            ).execute(*args, **kwargs)
+            try:
+                controller = configured_execution_controller(
+                    store, config_provider, bootstrap_provider=provider,
+                )
+            except RuntimeError as exc:
+                raise ValueError("bootstrap deployment provider cannot be mounted") from exc
+            return controller.execute(*args, **kwargs)
     return OperatorConsoleMount(
         store=store,
         current_plan_commit=lambda: current_plan_commit(config_provider),

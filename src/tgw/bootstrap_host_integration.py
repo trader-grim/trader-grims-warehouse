@@ -8,6 +8,8 @@ the observed closure transitions, health proof receipts, and rollback receipt.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
@@ -17,6 +19,9 @@ from typing import Any, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from tgw.bootstrap_deployment_contract import (
     BootstrapDeploymentContractError,
@@ -34,7 +39,32 @@ BOOTSTRAP_PROVIDER_BINDING_SCHEMA = "tgw-bootstrap-provider-binding/v1"
 BOOTSTRAP_PROVIDER_RESPONSE_SCHEMA = "tgw-bootstrap-provider-response/v1"
 _IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$")
 _CREDENTIAL_ENV = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
-_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _canonical(value: Any) -> bytes:
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise BootstrapHostIntegrationError("bootstrap provider value is not canonical") from exc
+
+
+def _hash(value: Any) -> str:
+    return "sha256:" + hashlib.sha256(_canonical(value)).hexdigest()
+
+
+def _public_key(value: Any) -> Ed25519PublicKey:
+    if not isinstance(value, str):
+        raise BootstrapHostIntegrationError("bootstrap provider public key is invalid")
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (TypeError, ValueError) as exc:
+        raise BootstrapHostIntegrationError("bootstrap provider public key is invalid") from exc
+    if len(raw) != 32 or base64.b64encode(raw).decode("ascii") != value:
+        raise BootstrapHostIntegrationError("bootstrap provider public key is invalid")
+    try:
+        return Ed25519PublicKey.from_public_bytes(raw)
+    except ValueError as exc:
+        raise BootstrapHostIntegrationError("bootstrap provider public key is invalid") from exc
 
 
 class BootstrapHostIntegrationError(ValueError):
@@ -69,7 +99,8 @@ class _ConfiguredBootstrapHttpProvider:
     credential_env: str
     provider_id: str
     provider_identity: str
-    trust_anchor_sha256: str
+    provider_key_id: str
+    provider_public_key: str
     timeout_seconds: int
 
     def _call(self, operation: str, binding: Mapping[str, str]) -> Mapping[str, Any]:
@@ -101,17 +132,29 @@ class _ConfiguredBootstrapHttpProvider:
         except (TypeError, ValueError) as exc:
             raise BootstrapHostIntegrationError("bootstrap provider response is invalid") from exc
         if not isinstance(payload, Mapping) or set(payload) != {
-            "schema", "provider_id", "provider_identity", "trust_anchor_sha256", "result",
+            "schema", "provider_id", "provider_identity", "provider_key_id", "operation", "binding",
+            "result", "response_hash", "signature",
         }:
             raise BootstrapHostIntegrationError("bootstrap provider response is invalid")
+        signed = {key: value for key, value in payload.items() if key not in {"response_hash", "signature"}}
         if (
-            payload.get("schema") != BOOTSTRAP_PROVIDER_RESPONSE_SCHEMA
-            or payload.get("provider_id") != self.provider_id
-            or payload.get("provider_identity") != self.provider_identity
-            or payload.get("trust_anchor_sha256") != self.trust_anchor_sha256
-            or not isinstance(payload.get("result"), Mapping)
+            signed.get("schema") != BOOTSTRAP_PROVIDER_RESPONSE_SCHEMA
+            or signed.get("provider_id") != self.provider_id
+            or signed.get("provider_identity") != self.provider_identity
+            or signed.get("provider_key_id") != self.provider_key_id
+            or signed.get("operation") != operation
+            or signed.get("binding") != normalized
+            or not isinstance(signed.get("result"), Mapping)
+            or payload.get("response_hash") != _hash(signed)
         ):
             raise BootstrapHostIntegrationError("bootstrap provider identity binding is invalid")
+        try:
+            signature = base64.b64decode(payload.get("signature"), validate=True)
+            if len(signature) != 64 or base64.b64encode(signature).decode("ascii") != payload.get("signature"):
+                raise ValueError("invalid signature")
+            _public_key(self.provider_public_key).verify(signature, _canonical({**signed, "response_hash": payload["response_hash"]}))
+        except (InvalidSignature, TypeError, ValueError) as exc:
+            raise BootstrapHostIntegrationError("bootstrap provider response signature is invalid") from exc
         return dict(payload["result"])
 
     def observe(self, binding: Mapping[str, str]) -> Mapping[str, Any]:
@@ -136,7 +179,7 @@ def configured_bootstrap_deployment_provider(config: Mapping[str, Any]) -> Typed
         return None
     required = {
         "schema", "provider_id", "endpoint", "credential_env", "timeout_seconds",
-        "provider_identity", "trust_anchor_sha256",
+        "provider_identity", "provider_key_id", "provider_public_key",
     }
     if not isinstance(value, Mapping) or set(value) != required:
         raise BootstrapHostIntegrationError("bootstrap provider binding is invalid")
@@ -148,24 +191,29 @@ def configured_bootstrap_deployment_provider(config: Mapping[str, Any]) -> Typed
         raise BootstrapHostIntegrationError("bootstrap provider identity is not allowlisted")
     endpoint = value.get("endpoint")
     parsed = urlsplit(endpoint) if isinstance(endpoint, str) else None
-    local_http = parsed and parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
-    if not parsed or (parsed.scheme != "https" and not local_http) or not parsed.netloc or parsed.query or parsed.fragment:
+    local_http = parsed and parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1"}
+    if (
+        not parsed or (parsed.scheme != "https" and not local_http) or not parsed.netloc
+        or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment
+    ):
         raise BootstrapHostIntegrationError("bootstrap provider endpoint is invalid")
     credential_env = value.get("credential_env")
     provider_identity = value.get("provider_identity")
-    trust_anchor = value.get("trust_anchor_sha256")
+    provider_key_id = value.get("provider_key_id")
+    provider_public_key = value.get("provider_public_key")
     timeout = value.get("timeout_seconds")
     if (
         not isinstance(credential_env, str) or _CREDENTIAL_ENV.fullmatch(credential_env) is None
         or not isinstance(provider_identity, str) or _IDENTITY.fullmatch(provider_identity) is None
-        or not isinstance(trust_anchor, str) or _SHA256.fullmatch(trust_anchor) is None
+        or not isinstance(provider_key_id, str) or _IDENTITY.fullmatch(provider_key_id) is None
         or isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 60
     ):
         raise BootstrapHostIntegrationError("bootstrap provider binding is invalid")
+    _public_key(provider_public_key)
     return _ConfiguredBootstrapHttpProvider(
         endpoint=endpoint.rstrip("/"), credential_env=credential_env,
         provider_id="tgw-bootstrap-deployment-provider@1", provider_identity=provider_identity,
-        trust_anchor_sha256=trust_anchor, timeout_seconds=timeout,
+        provider_key_id=provider_key_id, provider_public_key=provider_public_key, timeout_seconds=timeout,
     )
 
 

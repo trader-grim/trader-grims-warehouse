@@ -1,13 +1,17 @@
+import base64
+import hashlib
 import json
 import subprocess
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from tgw.bootstrap_host_integration import configured_bootstrap_deployment_provider
+from tgw.bootstrap_host_integration import BootstrapHostIntegrationError, configured_bootstrap_deployment_provider
 from tgw.operator_console_host import (
     DEFAULT_PLAN_ROOT,
     ConfiguredAuthorityStore,
@@ -175,18 +179,36 @@ def test_allowlisted_bootstrap_provider_sends_only_contract_binding(monkeypatch)
     import tgw.bootstrap_host_integration as host
 
     captured: dict[str, object] = {}
+    binding = {
+        "bootstrap_contract_ref": "candidate:" + "a" * 40 + ":bootstrap-deployment:v2",
+        "bootstrap_contract_hash": "sha256:" + "b" * 64,
+    }
+    private = Ed25519PrivateKey.generate()
+    signing_key = [private]
+    public = base64.b64encode(private.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw,
+    )).decode("ascii")
 
     class _Response:
         status = 200
 
         def read(self, _: int) -> bytes:
-            return json.dumps({
+            signed = {
                 "schema": "tgw-bootstrap-provider-response/v1",
                 "provider_id": "tgw-bootstrap-deployment-provider@1",
                 "provider_identity": "provider:tgw-prod-bootstrap",
-                "trust_anchor_sha256": "sha256:" + "c" * 64,
+                "provider_key_id": "bootstrap-provider-key-1",
+                "operation": "observe",
+                "binding": binding,
                 "result": {"generation": "before", "closure": "/nix/store/fixture"},
-            }).encode()
+            }
+            response_hash = "sha256:" + hashlib.sha256(json.dumps(
+                signed, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            ).encode()).hexdigest()
+            signature = base64.b64encode(signing_key[0].sign(json.dumps(
+                {**signed, "response_hash": response_hash}, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            ).encode())).decode("ascii")
+            return json.dumps({**signed, "response_hash": response_hash, "signature": signature}).encode()
 
         def __enter__(self):
             return self
@@ -212,14 +234,11 @@ def test_allowlisted_bootstrap_provider_sends_only_contract_binding(monkeypatch)
             "credential_env": "TGW_BOOTSTRAP_PROVIDER_TOKEN",
             "timeout_seconds": 9,
             "provider_identity": "provider:tgw-prod-bootstrap",
-            "trust_anchor_sha256": "sha256:" + "c" * 64,
+            "provider_key_id": "bootstrap-provider-key-1",
+            "provider_public_key": public,
         },
     })
     assert provider is not None
-    binding = {
-        "bootstrap_contract_ref": "candidate:" + "a" * 40 + ":bootstrap-deployment:v2",
-        "bootstrap_contract_hash": "sha256:" + "b" * 64,
-    }
     assert provider.observe(binding) == {"generation": "before", "closure": "/nix/store/fixture"}
     assert captured == {
         "url": "https://bootstrap-provider.example.invalid/v1/bootstrap/observe",
@@ -227,6 +246,11 @@ def test_allowlisted_bootstrap_provider_sends_only_contract_binding(monkeypatch)
         "authorization": "Bearer fixture-token",
         "timeout": 9,
     }
+    # An endpoint that can echo metadata but does not possess the pinned key
+    # cannot make a bootstrap provider result authoritative.
+    signing_key[0] = Ed25519PrivateKey.generate()
+    with pytest.raises(BootstrapHostIntegrationError, match="signature"):
+        provider.observe(binding)
 
 
 def test_configured_host_principals_are_named_role_bound_and_fail_closed():
