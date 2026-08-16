@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tgw.candidate_review import (
     CandidateReviewError,
@@ -11,11 +12,13 @@ from tgw.candidate_review import (
     validate_review_result,
 )
 from tgw.execute_candidate_review import REVIEW_LEASE_SECONDS, _card
+from tgw.execution_resources import issue_harness_retrieval_attestation
 from tgw.harness_registry import load_registry, observe_health
 from tgw.review_runner import snapshot_hash
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "agent-services/catalogs/harness-providers-v1.json"
+TEST_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
 
 
 def hash_object(value):
@@ -90,14 +93,45 @@ def packet(tmp_path, *, configured=True):
 
 
 def governed_receipt(packet_value, *, passed):
+    card_hash = "sha256:" + "d" * 64
+    resource_receipt_hash = "sha256:" + "e" * 64
+    resources = {
+        name: {"ref": f"test:{name}", "hash": "sha256:" + "c" * 64}
+        for name in (
+            "plan_input", "plan_commit", "plan_graph", "codegraph_snapshot", "source_tree",
+            "execution_environment", "authority_conditions", "receipt_sink",
+        )
+    }
+    handoff_hash = "sha256:" + "b" * 64
+    attestation_payload = {
+        "schema": "tgw-registered-resource-retrieval-attestation/v3",
+        "service_id": "review-service", "run_id": "review-run", "card_hash": card_hash,
+        "client_id": "candidate-review-client",
+        "role": "independent-review", "execution_identity": "review-context:1",
+        "handoff_hash": handoff_hash, "resource_receipt_hash": resource_receipt_hash,
+        "resources": resources,
+        "attestation_key_id": "candidate-review-test-key-1",
+    }
+    attestation = issue_harness_retrieval_attestation(
+        attestation_payload, signing_private_key=TEST_ATTESTATION_PRIVATE_KEY,
+    )
     unsigned = {
         "schema": "tgw-governed-coding-receipt/v1",
         "status": "PASS" if passed else "FAIL",
         "role": "independent-review",
         "selected_provider": packet_value["selected_provider"],
         "execution_identity": "review-context:1",
-        "card_hash": "sha256:card",
+        "card_hash": card_hash,
         "promptcraft_receipt_hash": "sha256:promptcraft",
+        "handoff_hash": handoff_hash,
+        "resource_receipt_hash": resource_receipt_hash,
+        "harness_resource_receipt_hash": resource_receipt_hash,
+        "harness_retrieval_attestation_hash": attestation["attestation_hash"],
+        "harness_retrieval_attestation": attestation,
+        "resource_service_descriptor_hash": "sha256:service",
+        "resource_service_client_id": "candidate-review-client",
+        "resource_service_catalog_ref": "catalog:review-service@1",
+        "resource_service_catalog_hash": "sha256:catalog",
         "outcome": "satisfied" if passed else "failed",
         "established_conditions": ["reviewed"] if passed else [],
         "artifacts": [],

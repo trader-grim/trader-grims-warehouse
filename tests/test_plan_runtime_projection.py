@@ -42,6 +42,7 @@ def test_projection_rejects_rehashed_or_unhashed_authority_mutation(lane):
 
 
 def test_held_projection_loader_and_console_host_use_one_exact_projection(tmp_path: Path):
+    value = _value()
     root = tmp_path / "protected"
     root.mkdir(mode=0o700)
     path = root / "projection.json"
@@ -52,11 +53,12 @@ def test_held_projection_loader_and_console_host_use_one_exact_projection(tmp_pa
         "plan_projection_trusted_uid": os.getuid(),
         "plan_projection_root": root,
         "plan_approved_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+        "plan_approved_solution_hash": value["solution"]["solution_hash"],
     }
-    value = load_projection(path, expected_plan_commit=config["plan_approved_commit"], trusted_uid=os.getuid(), trusted_root=root)
-    assert current_plan_commit(lambda: config) == value["plan_commit"]
-    assert load_solution(lambda: config, value["solution"]["solution_hash"]) == value["solution"]
-    with pytest.raises(ValueError, match="unavailable"):
+    loaded = load_projection(path, expected_plan_commit=config["plan_approved_commit"], trusted_uid=os.getuid(), trusted_root=root)
+    assert current_plan_commit(lambda: config) == loaded["plan_commit"]
+    assert load_solution(lambda: config, loaded["solution"]["solution_hash"]) == loaded["solution"]
+    with pytest.raises(ValueError, match="not the approved"):
         load_solution(lambda: config, "sha256:" + "0" * 64)
 
 

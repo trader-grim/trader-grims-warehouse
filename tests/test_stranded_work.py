@@ -3,9 +3,11 @@ from pathlib import Path
 
 from tgw.stranded_work import (
     discover_repositories,
+    discover_repositories_with_diagnostics,
     inspect_repository,
     inspect_worktree,
     inventory_environment,
+    inventory_preservation_artifacts,
     inventory_worktrees,
 )
 
@@ -105,4 +107,85 @@ def test_environment_inventory_discovers_nested_repository(tmp_path: Path):
         "stranded_work_count": 0,
         "inaccessible_worktree_count": 0,
         "evidence_residue_count": 0,
+        "preservation_artifact_count": 0,
+        "artifact_diagnostic_count": 0,
     }
+
+
+def test_inventory_preserves_missing_registered_worktree_and_reflog_evidence(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "fixture@example.invalid")
+    _git(repo, "config", "user.name", "Fixture")
+    (repo / "tracked").write_text("same\n")
+    _git(repo, "add", "tracked")
+    _git(repo, "commit", "-qm", "fixture")
+    linked = tmp_path / "missing-linked-worktree"
+    _git(repo, "worktree", "add", "--detach", str(linked))
+    for child in sorted(linked.iterdir(), reverse=True):
+        if child.is_dir():
+            for nested in sorted(child.rglob("*"), reverse=True):
+                if nested.is_file() or nested.is_symlink():
+                    nested.unlink()
+                elif nested.is_dir():
+                    nested.rmdir()
+            child.rmdir()
+        else:
+            child.unlink()
+    linked.rmdir()
+
+    observed = inspect_repository(repo)
+    inventory = inventory_worktrees([repo])
+
+    assert observed["reflog_commit_count"] >= 1
+    missing = next(item for item in inventory["worktrees"] if item["path"] == str(linked))
+    assert missing["classification"] == "MISSING-WORKTREE"
+    assert missing["cleanup_authorized"] is False
+
+
+def test_discovery_reports_missing_roots_and_semantic_surfaces(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "fixture@example.invalid")
+    _git(repo, "config", "user.name", "Fixture")
+    (repo / "src").mkdir()
+    (repo / "src" / "authority_request_handler.py").write_text("def execute_receipt(): pass\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_console_status.py").write_text("pass\n")
+    (repo / "results").mkdir()
+    (repo / "results" / "receipt.json").write_text("{}\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "fixture")
+
+    repositories, diagnostics = discover_repositories_with_diagnostics([repo, tmp_path / "missing"])
+    worktree = inspect_worktree(repo)
+
+    assert repositories == [repo.resolve()]
+    assert diagnostics == [{
+        "path": str((tmp_path / "missing").resolve()),
+        "classification": "MISSING-DISCOVERY-ROOT",
+        "error": "FileNotFoundError",
+    }]
+    assert all(worktree["semantic_inventory"][surface] for surface in (
+        "request", "display", "decision", "execute", "receipt", "status",
+    ))
+
+
+def test_preservation_artifact_inventory_keeps_bundle_archive_receipt_and_plan_todo(tmp_path: Path):
+    (tmp_path / "recovery.bundle").write_text("bundle\n")
+    (tmp_path / "releases").mkdir()
+    (tmp_path / "releases" / "release-a.tar.gz").write_text("release\n")
+    (tmp_path / "runtime-receipt.json").write_text("{}\n")
+    (tmp_path / "plan").mkdir()
+    (tmp_path / "plan" / "TODO-1721.md").write_text("reconcile\n")
+
+    inventory = inventory_preservation_artifacts([tmp_path])
+    by_path = {item["path"]: item["categories"] for item in inventory["records"]}
+
+    assert by_path["recovery.bundle"] == ["BUNDLE", "ARCHIVE_OR_RELEASE"]
+    assert "ARCHIVE_OR_RELEASE" in by_path["releases/release-a.tar.gz"]
+    assert by_path["runtime-receipt.json"] == ["RUNTIME_RECEIPT"]
+    assert by_path["plan/TODO-1721.md"] == ["PLAN_OR_TODO"]
+    assert inventory["inventory_sha256"]

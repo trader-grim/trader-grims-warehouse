@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from tgw.config import load_config
+from tgw.config import load_config, load_operational_config
 
 
 def _write_cfg(tmp_path: Path, data: dict) -> Path:
@@ -83,6 +83,37 @@ def test_plan_roots_keep_mutable_and_authority_bindings_separate(tmp_path):
         cfg["standalone_plan_root"] / "pp",
     )
     assert cfg["plan_update_master_path"] == cfg["plan_master_path"]
+    assert cfg["plan_render_root"] == Path("/opt/TGW/var/plan-render")
+    assert cfg["sync_conflict_roots"] == [cfg["itemdata_root"]]
+
+
+def test_legacy_plan_vault_is_filtered_from_operational_sync_scan(tmp_path):
+    vault = tmp_path / "legacy-vault"
+    catalog = tmp_path / "catalog"
+    cfg = load_config(_write_cfg(tmp_path, {
+        "plan_vault_path": str(vault),
+        "catalog_root": str(catalog),
+        "sync_conflict_roots": [str(vault), str(vault / "plan"), str(catalog)],
+    }))
+    assert cfg["sync_conflict_roots"] == [catalog]
+
+
+def test_plan_authority_credentials_and_sessions_require_named_principals(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path, {
+        "plan_authority_executor_credential_env": "TGW_TEST_AUTHORITY_EXECUTOR_TOKEN",
+        "plan_authority_executor_principal": "executor:authority-runner",
+        "plan_authority_operator_api_principal": "operator:alice",
+        "plan_authority_operator_session_principal": "operator:alice",
+    }))
+    assert cfg["plan_authority_executor_principal"] == "executor:authority-runner"
+    assert cfg["plan_authority_operator_api_principal"] == "operator:alice"
+
+    with pytest.raises(ValueError, match="named person or service"):
+        load_config(_write_cfg(tmp_path, {"plan_authority_operator_api_principal": "operator:api-key"}))
+    with pytest.raises(ValueError, match="configured together"):
+        load_config(_write_cfg(tmp_path, {
+            "plan_authority_executor_credential_env": "TGW_TEST_AUTHORITY_EXECUTOR_TOKEN",
+        }))
 
 
 def test_runtime_python_does_not_depend_on_legacy_production_source_checkout() -> None:
@@ -115,6 +146,7 @@ def test_approved_plan_content_must_be_exact_clean_commit(tmp_path):
         "standalone_plan_root": str(root),
         "plan_repository_root": str(tmp_path / "repository"),
         "plan_approved_commit": approved,
+        "plan_approved_solution_hash": "sha256:" + "a" * 64,
         "plan_git_path": "git",
     })
 
@@ -123,10 +155,19 @@ def test_approved_plan_content_must_be_exact_clean_commit(tmp_path):
     assert cfg["plan_update_master_path"] == (
         tmp_path / "repository" / "plan" / "TGW-Master-Plan.md"
     )
+    assert load_operational_config(config_path)["plan_approved_commit"] == approved
 
     (root / "unapproved").write_text("dirty\n")
     with pytest.raises(ValueError, match="not clean"):
         load_config(config_path)
+
+
+def test_operational_config_rejects_unbound_plan_authority(tmp_path):
+    """Only generic library loads may omit immutable Plan approval pins."""
+    path = _write_cfg(tmp_path, {})
+    assert load_config(path)["plan_approved_commit"] is None
+    with pytest.raises(ValueError, match="requires approved Plan commit and solution"):
+        load_operational_config(path)
 
 
 def test_approved_plan_requires_distinct_update_repository(tmp_path):
@@ -157,6 +198,7 @@ def test_production_plan_projection_replaces_a_local_plan_checkout(tmp_path):
         "standalone_plan_root": "/run/tgw/no-local-plan",
         "plan_repository_root": "/run/tgw/no-local-plan",
         "plan_approved_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+        "plan_approved_solution_hash": "sha256:31ad3fd9faa4da237cdcc1da9b5d4b8cf40a1c4c71962a343fd6c6e175485e1f",
         "plan_projection_path": str(projection),
         "plan_projection_root": str(protected),
         "plan_projection_trusted_uid": os.getuid(),
@@ -192,6 +234,14 @@ def test_ebay_sku_migrate_block_surfaced_without_raw(tmp_path):
     assert cfg["ebay_sku_migrate"] == migrate_block
     assert cfg["ebay_sku_migrate"]["enabled"] is True
     assert cfg["ebay_sku_migrate"]["batch_size"] == 10
+
+
+def test_pinned_bootstrap_host_integration_is_surfaced_to_the_canonical_host(tmp_path):
+    """The HTTP host receives deployment pins without reaching into ``raw``."""
+    integration = {"schema": "tgw-pinned-bootstrap-host-integration/v1"}
+    cfg = load_config(_write_cfg(tmp_path, {"pinned_bootstrap_host_integration": integration}))
+    assert cfg["pinned_bootstrap_host_integration"] == integration
+    assert load_config(_write_cfg(tmp_path, {}))["pinned_bootstrap_host_integration"] is None
 
 
 # ---------------------------------------------------------------------------

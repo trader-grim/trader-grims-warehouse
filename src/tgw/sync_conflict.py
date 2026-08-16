@@ -18,8 +18,9 @@ compared to its canonical counterpart:
 
 Zero-data-loss invariant: unique content is NEVER deleted under any code path.
 
-Scan roots default to ``[plan_vault_path, itemdata_root]`` and are extended
-via ``sync_conflict_roots`` in ``tgw-api-config.json``.
+Scan roots default to ``[itemdata_root]`` and are extended via
+``sync_conflict_roots`` in ``tgw-api-config.json``.  The legacy Plan Vault
+is intentionally excluded from this operational scanner.
 
 Decision tree for ItemData SKU JSON files (tgwXXXXXX.json):
 
@@ -421,6 +422,16 @@ def run_scan(
     t0 = time.time()
 
     roots: List[Path] = cfg.get("sync_conflict_roots") or []
+    # W11: the mutable source-tree vault is archive/inbox material, not an
+    # operational sync surface.  Filter it at the execution boundary as well
+    # as config loading so an old configuration cannot re-enable the scanner.
+    legacy_vault = cfg.get("plan_vault_path")
+    if legacy_vault:
+        legacy = Path(legacy_vault).resolve()
+        roots = [
+            root for root in roots
+            if not (Path(root).resolve() == legacy or legacy in Path(root).resolve().parents)
+        ]
     review_dir: Path = cfg["plan_inbox_path"] / "review"
 
     todo_fn = add_todo_fn

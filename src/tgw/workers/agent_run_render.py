@@ -2,8 +2,8 @@
 tgw.workers.agent_run_render — Agent-runs render worker (PP-AGENTTRACE-001
 Phase 2).
 
-Claims an agent_run_render job and regenerates plan/TGW-Agent-Runs.md from
-the agent_runs table.
+Claims an agent_run_render job and regenerates the operational TGW-Agent-Runs
+view from the agent_runs table and an approved Plan binding.
 
 Jobs are enqueued with a 30s not_before and dedupe_key='agent_run_render:pending'
 so rapid successive start_agent_run()/end_agent_run() calls coalesce into a
@@ -22,7 +22,7 @@ from typing import Any, Dict
 
 import tgw.logging as tgw_logging
 from tgw.agent_trace_render import render_agent_runs_doc
-from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.config import DEFAULT_CONFIG
 from tgw.queue.worker_base import QueueWorker
 
 log = logging.getLogger(__name__)
@@ -53,7 +53,8 @@ def main() -> int:
     parser.add_argument('--config', default=str(DEFAULT_CONFIG))
     args = parser.parse_args()
 
-    cfg = load_config(Path(args.config))
+    from tgw.config import load_operational_config
+    cfg = load_operational_config(Path(args.config))
     worker = AgentRunRenderWorker(queue_name=QUEUE_NAME, config=cfg)
     worker.run()
     return 0

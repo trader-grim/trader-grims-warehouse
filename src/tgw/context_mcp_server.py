@@ -1,9 +1,8 @@
-"""Authoritative read-only Plan, runbook, and CodeGraph MCP for tgw-lib.
+"""Read-only MCP context bound to an approved standalone Plan and source tree.
 
-This server deliberately does not expose inventory or production effects.  It
-binds every answer to the approved standalone Plan commit and a committed
-application source tree.  The advancing Plan repository and mutable source
-working tree are diagnostics, never retrieval authority.
+The server deliberately reads committed blobs, never mutable checkout bytes.
+It exposes navigation and evidence only: it has no approval, queue, deployment,
+or provider-effect operation.
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ SCOPE_SEMANTICS = {
 
 
 class ContextError(RuntimeError):
-    pass
+    """A binding, source, or bounded-query precondition failed."""
 
 
 def _canonical(value: Any) -> bytes:
@@ -51,25 +50,10 @@ def _sha(raw: bytes) -> str:
 
 
 def _path_env(name: str, default: str) -> Path:
-    raw = os.environ.get(name, default)
-    path = Path(raw)
-    if not path.is_absolute():
+    value = Path(os.environ.get(name, default))
+    if not value.is_absolute():
         raise ContextError(f"{name} must be an absolute path")
-    return path.resolve(strict=True)
-
-
-def _git(root: Path, *args: str, timeout: int = 30) -> str:
-    process = subprocess.run(
-        ["git", "-c", f"safe.directory={root}", "-C", str(root), *args],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=_git_env(),
-    )
-    if process.returncode:
-        raise ContextError(process.stderr.strip() or f"git {' '.join(args)} failed")
-    return process.stdout
+    return value.resolve(strict=True)
 
 
 def _git_env() -> dict[str, str]:
@@ -83,87 +67,104 @@ def _git_env() -> dict[str, str]:
     }
 
 
+def _git(root: Path, *args: str, bytes_output: bool = False) -> str | bytes:
+    result = subprocess.run(
+        ["git", "-c", f"safe.directory={root}", "-C", str(root), *args],
+        check=False,
+        capture_output=True,
+        timeout=30,
+        env=_git_env(),
+    )
+    if result.returncode:
+        message = result.stderr.decode(errors="replace").strip()
+        raise ContextError(message or f"git {' '.join(args)} failed")
+    return result.stdout if bytes_output else result.stdout.decode().strip()
+
+
 def _approved_commit() -> str:
-    value = os.environ.get("TGW_CONTEXT_PLAN_COMMIT", "")
-    if not FULL_COMMIT.fullmatch(value):
+    commit = os.environ.get("TGW_CONTEXT_PLAN_COMMIT", "")
+    if not FULL_COMMIT.fullmatch(commit):
         raise ContextError("TGW_CONTEXT_PLAN_COMMIT must be a full approved commit")
-    return value
+    return commit
+
+
+def _approved_solution() -> str:
+    solution = os.environ.get("TGW_CONTEXT_PLAN_SOLUTION", "")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", solution):
+        raise ContextError("TGW_CONTEXT_PLAN_SOLUTION must be an exact approved solution hash")
+    return solution
 
 
 def _bindings() -> dict[str, Any]:
     plan_root = _path_env("TGW_CONTEXT_PLAN_ROOT", "/opt/TGW/tgw-lib/runtime/approved-plan")
-    plan_repo = _path_env("TGW_CONTEXT_PLAN_REPOSITORY", "/opt/TGW/library/plans")
+    plan_repository = _path_env("TGW_CONTEXT_PLAN_REPOSITORY", "/opt/TGW/library/plans")
     source_root = _path_env(
         "TGW_CONTEXT_SOURCE_ROOT", "/opt/TGW/tgw-lib/src/trader-grims-warehouse"
     )
-    runtime_root = Path(
-        os.environ.get("TGW_CONTEXT_RUNTIME_ROOT", "/opt/TGW/tgw-lib/var/context")
-    )
+    runtime_root = Path(os.environ.get("TGW_CONTEXT_RUNTIME_ROOT", "/opt/TGW/tgw-lib/var/context"))
     if not runtime_root.is_absolute():
-        raise ContextError("TGW_CONTEXT_RUNTIME_ROOT must be absolute")
-
+        raise ContextError("TGW_CONTEXT_RUNTIME_ROOT must be an absolute path")
     approved = _approved_commit()
-    plan_head = _git(plan_root, "rev-parse", "HEAD^{commit}").strip()
-    if plan_head != approved:
+    solution = _approved_solution()
+    if _git(plan_root, "rev-parse", "HEAD^{commit}") != approved:
         raise ContextError("approved Plan materialization does not match configured commit")
     if _git(plan_root, "status", "--porcelain=v1", "--untracked-files=all"):
         raise ContextError("approved Plan materialization is not clean")
-    if _git(plan_repo, "cat-file", "-t", approved).strip() != "commit":
+    if _git(plan_repository, "cat-file", "-t", approved) != "commit":
         raise ContextError("approved Plan commit is absent from the canonical repository")
-
-    source_commit = _git(source_root, "rev-parse", "HEAD^{commit}").strip()
-    source_tree = _git(source_root, "rev-parse", f"{source_commit}^{{tree}}").strip()
-    source_status = _git(
-        source_root, "status", "--porcelain=v1", "--untracked-files=all"
-    )
+    source_commit = _git(source_root, "rev-parse", "HEAD^{commit}")
+    assert isinstance(source_commit, str)
+    source_status = _git(source_root, "status", "--porcelain=v1", "--untracked-files=all")
     return {
         "plan_root": plan_root,
-        "plan_repository": plan_repo,
+        "plan_repository": plan_repository,
         "plan_commit": approved,
-        "plan_tree": _git(plan_root, "rev-parse", "HEAD^{tree}").strip(),
-        "plan_repository_head": _git(plan_repo, "rev-parse", "HEAD^{commit}").strip(),
+        "plan_solution_hash": solution,
+        "plan_tree": _git(plan_root, "rev-parse", "HEAD^{tree}"),
+        "plan_repository_head": _git(plan_repository, "rev-parse", "HEAD^{commit}"),
         "source_root": source_root,
         "source_commit": source_commit,
-        "source_tree": source_tree,
+        "source_tree": _git(source_root, "rev-parse", f"{source_commit}^{{tree}}"),
         "source_worktree_clean": not bool(source_status),
-        "source_status_sha256": _sha(source_status.encode()),
+        "source_status_sha256": _sha(str(source_status).encode()),
         "runtime_root": runtime_root,
     }
 
 
-def _git_bytes(root: Path, commit: str, path: str) -> bytes:
-    process = subprocess.run(
-        ["git", "-c", f"safe.directory={root}", "-C", str(root), "show", f"{commit}:{path}"],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=30,
-        env=_git_env(),
-    )
-    if process.returncode:
-        raise ContextError(process.stderr.decode(errors="replace").strip() or f"missing source: {path}")
-    if len(process.stdout) > MAX_TEXT_BYTES:
+def _bytes_at(root: Path, commit: str, path: str) -> bytes:
+    raw = _git(root, "show", f"{commit}:{path}", bytes_output=True)
+    assert isinstance(raw, bytes)
+    if len(raw) > MAX_TEXT_BYTES:
         raise ContextError(f"source exceeds {MAX_TEXT_BYTES} byte retrieval bound")
-    return process.stdout
+    return raw
 
 
-def _safe_source_path(path: str, prefixes: tuple[str, ...]) -> str:
+def _safe_path(path: str, prefixes: tuple[str, ...]) -> str:
     if not isinstance(path, str) or not path or len(path) > 500:
         raise ContextError("path must be a non-empty bounded string")
     parsed = PurePosixPath(path)
-    if parsed.is_absolute() or ".." in parsed.parts or str(parsed) != path:
+    if parsed.is_absolute() or ".." in parsed.parts or parsed.as_posix() != path:
         raise ContextError("path must be canonical and repository-relative")
     if not path.startswith(prefixes):
         raise ContextError("path is outside the admitted context roots")
     return path
 
 
-def _tree_paths(root: Path, commit: str, prefix: str) -> list[str]:
-    return sorted(
-        line
-        for line in _git(root, "ls-tree", "-r", "--name-only", commit, "--", prefix).splitlines()
-        if line
-    )
+def _chunk(root: Path, commit: str, path: str, start_line: int, max_lines: int) -> dict[str, Any]:
+    if type(start_line) is not int or start_line < 1:
+        raise ContextError("start_line must be a positive integer")
+    if type(max_lines) is not int or not 1 <= max_lines <= MAX_LINES:
+        raise ContextError(f"max_lines must be between 1 and {MAX_LINES}")
+    raw = _bytes_at(root, commit, path)
+    lines = raw.decode("utf-8").splitlines()
+    selected = lines[start_line - 1:start_line - 1 + max_lines]
+    return {
+        "schema": "tgw-context-source-chunk/v1", "commit": commit, "path": path,
+        "sha256": _sha(raw), "bytes": len(raw), "total_lines": len(lines),
+        "start_line": start_line,
+        "end_line": start_line + len(selected) - 1 if selected else start_line - 1,
+        "content": "\n".join(selected),
+    }
 
 
 @lru_cache(maxsize=4)
@@ -173,10 +174,12 @@ def _code_snapshot(root_text: str, commit: str) -> dict[str, Any]:
 
 def context_status() -> dict[str, Any]:
     binding = _bindings()
-    plan_repo = binding["plan_repository"]
+    plan_root = binding["plan_repository"]
     plan_commit = binding["plan_commit"]
+    assert isinstance(plan_root, Path) and isinstance(plan_commit, str)
     source_root = binding["source_root"]
     source_commit = binding["source_commit"]
+    assert isinstance(source_root, Path) and isinstance(source_commit, str)
     graph = _code_snapshot(str(source_root), source_commit)
     identities = {}
     for path in (
@@ -184,33 +187,22 @@ def context_status() -> dict[str, Any]:
         "plan/TGW-Master-Plan.md",
         "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml",
     ):
-        raw = _git_bytes(plan_repo, plan_commit, path)
+        raw = _bytes_at(plan_root, plan_commit, path)
         identities[path] = {"sha256": _sha(raw), "bytes": len(raw)}
     result = {
-        "schema": SCHEMA,
-        "ok": True,
-        "host_role": "tgw-lib-authoritative-context",
+        "schema": SCHEMA, "ok": True, "host_role": "tgw-lib-authoritative-context",
         "plan": {
-            "repository": str(plan_repo),
-            "approved_materialization": str(binding["plan_root"]),
-            "approved_commit": plan_commit,
-            "approved_tree": binding["plan_tree"],
-            "evidence_head": binding["plan_repository_head"],
-            "sources": identities,
+            "repository": str(plan_root), "approved_materialization": str(binding["plan_root"]),
+            "approved_commit": plan_commit, "approved_tree": binding["plan_tree"],
+            "approved_solution_hash": binding["plan_solution_hash"],
+            "evidence_head": binding["plan_repository_head"], "sources": identities,
         },
         "source": {
-            "repository": str(source_root),
-            "commit": source_commit,
-            "tree": binding["source_tree"],
+            "repository": str(source_root), "commit": source_commit, "tree": binding["source_tree"],
             "working_tree_clean": binding["source_worktree_clean"],
             "status_sha256": binding["source_status_sha256"],
         },
-        "code_graph": {
-            "commit": graph["commit"],
-            "tree": graph["tree"],
-            "freshness_hash": graph["freshness_hash"],
-            "capabilities": graph["capabilities"],
-        },
+        "code_graph": {key: graph[key] for key in ("commit", "tree", "freshness_hash", "capabilities")},
         "scope_semantics": dict(SCOPE_SEMANTICS),
     }
     result["context_sha256"] = _sha(_canonical(result))
@@ -222,12 +214,10 @@ def plan_graph(task: str, receiver: str = "codex", operation: str = "brief", lim
         raise ContextError("task must be a non-empty bounded string")
     binding = _bindings()
     result = live_plan_graph(
-        binding["plan_root"],
-        task,
-        receiver=receiver,
-        operation=operation,
-        limit=limit,
+        binding["plan_root"], task, receiver=receiver, operation=operation, limit=limit,
         runtime_root=binding["runtime_root"],
+        approved_plan_commit=binding["plan_commit"],
+        approved_solution_hash=binding["plan_solution_hash"],
     )
     if result["plan_commit"] != binding["plan_commit"]:
         raise ContextError("Plan Graph did not bind the approved Plan commit")
@@ -236,114 +226,59 @@ def plan_graph(task: str, receiver: str = "codex", operation: str = "brief", lim
 
 
 def source_chunk(path: str, start_line: int = 1, max_lines: int = 200) -> dict[str, Any]:
-    path = _safe_source_path(path, PLAN_PREFIXES)
-    if type(start_line) is not int or start_line < 1:
-        raise ContextError("start_line must be a positive integer")
-    if type(max_lines) is not int or not 1 <= max_lines <= MAX_LINES:
-        raise ContextError(f"max_lines must be between 1 and {MAX_LINES}")
     binding = _bindings()
-    raw = _git_bytes(binding["plan_repository"], binding["plan_commit"], path)
-    lines = raw.decode("utf-8").splitlines()
-    selected = lines[start_line - 1 : start_line - 1 + max_lines]
-    return {
-        "schema": "tgw-context-source-chunk/v1",
-        "authority": "standalone-plan",
-        "commit": binding["plan_commit"],
-        "path": path,
-        "sha256": _sha(raw),
-        "bytes": len(raw),
-        "total_lines": len(lines),
-        "start_line": start_line,
-        "end_line": start_line + len(selected) - 1 if selected else start_line - 1,
-        "content": "\n".join(selected),
-    }
+    path = _safe_path(path, PLAN_PREFIXES)
+    result = _chunk(binding["plan_repository"], binding["plan_commit"], path, start_line, max_lines)
+    result["authority"] = "standalone-plan"
+    return result
 
 
 def runbooks(query: str = "", path: str = "", start_line: int = 1, max_lines: int = 200, limit: int = 20) -> dict[str, Any]:
     binding = _bindings()
     root, commit = binding["source_root"], binding["source_commit"]
+    assert isinstance(root, Path) and isinstance(commit, str)
     if path:
-        path = _safe_source_path(path, (RUNBOOK_PREFIX,))
-        result = source_chunk_from_repository(root, commit, path, start_line, max_lines)
+        result = _chunk(root, commit, _safe_path(path, (RUNBOOK_PREFIX,)), start_line, max_lines)
         result["authority"] = "committed-application-runbook"
         return result
     if not isinstance(query, str) or len(query) > MAX_QUERY:
         raise ContextError("query must be a bounded string")
     if type(limit) is not int or not 1 <= limit <= MAX_RESULTS:
         raise ContextError(f"limit must be between 1 and {MAX_RESULTS}")
-    needle = query.casefold().strip()
-    tokens = sorted(set(re.findall(r"[a-z0-9_-]{3,}", needle)))
+    tokens = sorted(set(re.findall(r"[a-z0-9_-]{3,}", query.casefold())))
+    paths = _git(root, "ls-tree", "-r", "--name-only", commit, "--", RUNBOOK_PREFIX)
+    assert isinstance(paths, str)
     matches = []
-    for candidate in _tree_paths(root, commit, RUNBOOK_PREFIX):
+    for candidate in paths.splitlines():
         if not candidate.endswith(".md"):
             continue
-        raw = _git_bytes(root, commit, candidate)
-        text = raw.decode("utf-8")
-        haystack = f"{candidate}\n{text}".casefold()
+        raw = _bytes_at(root, commit, candidate)
+        haystack = f"{candidate}\n{raw.decode('utf-8')}".casefold()
         score = sum(haystack.count(token) for token in tokens)
-        if needle and needle not in haystack and score == 0:
+        if query.casefold().strip() and score == 0:
             continue
-        matches.append({
-            "path": candidate, "sha256": _sha(raw), "bytes": len(raw),
-            "score": score,
-        })
+        matches.append({"path": candidate, "sha256": _sha(raw), "bytes": len(raw), "score": score})
     matches.sort(key=lambda item: (-item["score"], item["path"]))
-    return {
-        "schema": "tgw-context-runbook-index/v1",
-        "commit": commit,
-        "tree": binding["source_tree"],
-        "query": query,
-        "matches": matches[:limit],
-    }
-
-
-def source_chunk_from_repository(root: Path, commit: str, path: str, start_line: int, max_lines: int) -> dict[str, Any]:
-    if type(start_line) is not int or start_line < 1:
-        raise ContextError("start_line must be a positive integer")
-    if type(max_lines) is not int or not 1 <= max_lines <= MAX_LINES:
-        raise ContextError(f"max_lines must be between 1 and {MAX_LINES}")
-    raw = _git_bytes(root, commit, path)
-    lines = raw.decode("utf-8").splitlines()
-    selected = lines[start_line - 1 : start_line - 1 + max_lines]
-    return {
-        "schema": "tgw-context-source-chunk/v1",
-        "commit": commit,
-        "path": path,
-        "sha256": _sha(raw),
-        "bytes": len(raw),
-        "total_lines": len(lines),
-        "start_line": start_line,
-        "end_line": start_line + len(selected) - 1 if selected else start_line - 1,
-        "content": "\n".join(selected),
-    }
+    return {"schema": "tgw-context-runbook-index/v1", "commit": commit, "tree": binding["source_tree"], "query": query, "matches": matches[:limit]}
 
 
 def code_graph(operation: str = "status", query: str = "", limit: int = 20) -> dict[str, Any]:
     if not isinstance(query, str) or len(query) > MAX_QUERY:
         raise ContextError("query must be a bounded string")
     binding = _bindings()
-    snapshot = _code_snapshot(str(binding["source_root"]), binding["source_commit"])
+    snapshot = _code_snapshot(str(binding["source_root"]), str(binding["source_commit"]))
     result = CodeGraphService(snapshot).query(operation, query, limit)
-    result["binding"] = {
-        "commit": binding["source_commit"],
-        "tree": binding["source_tree"],
-        "freshness_hash": snapshot["freshness_hash"],
-    }
+    result["binding"] = {key: snapshot[key] for key in ("commit", "tree", "freshness_hash")}
     return result
 
 
 def context_bundle(task: str, receiver: str = "codex", limit: int = 12) -> dict[str, Any]:
     if not isinstance(task, str) or not task.strip() or len(task) > MAX_QUERY:
         raise ContextError("task must be a non-empty bounded string")
-    status = context_status()
-    bundle = {
-        "schema": "tgw-context-task-bundle/v1",
-        "task": task,
-        "receiver": receiver,
-        "status": status,
-        "plan_graph": plan_graph(task, receiver=receiver, limit=limit),
-        "runbooks": runbooks(query=task, limit=min(limit, 20)),
-        "code_graph": code_graph("status"),
+    result = {
+        "schema": "tgw-context-task-bundle/v1", "task": task, "receiver": receiver,
+        "status": context_status(), "plan_graph": plan_graph(task, receiver, limit=limit),
+        "runbooks": runbooks(query=task, limit=min(limit, 20)), "code_graph": code_graph(),
         "instructions": [
             "Retrieve cited Plan and runbook chunks before changing code.",
             "Use CodeGraph queries against the bound source commit; do not infer from a worktree.",
@@ -351,23 +286,17 @@ def context_bundle(task: str, receiver: str = "codex", limit: int = 12) -> dict[
             "Never describe platform W11 completion as completion of the TGW Master Plan.",
         ],
     }
-    bundle["bundle_sha256"] = _sha(_canonical(bundle))
-    return bundle
+    result["bundle_sha256"] = _sha(_canonical(result))
+    return result
 
 
-mcp = FastMCP(
-    name="tgw-context",
-    instructions=(
-        "Authoritative read-only TGW planning and coding context hosted on tgw-lib. "
-        "Call tgw_context_bundle before coding or reporting Plan completion."
-    ),
-)
+mcp = FastMCP(name="tgw-context", instructions="Authoritative read-only TGW planning and coding context hosted on tgw-lib.")
 
 
 def _json_call(function: Any, *args: Any, **kwargs: Any) -> str:
     try:
         return json.dumps(function(*args, **kwargs), ensure_ascii=False)
-    except Exception as exc:
+    except Exception as exc:  # MCP errors are a bounded, serializable response.
         return json.dumps({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
 
 
@@ -379,7 +308,7 @@ def tgw_context_status() -> str:
 
 @mcp.tool()
 def tgw_context_bundle(task: str, receiver: str = "codex", limit: int = 12) -> str:
-    """Return the bounded authoritative starting context for one task."""
+    """Return bounded authoritative starting context for one task."""
     return _json_call(context_bundle, task, receiver, limit)
 
 
@@ -391,19 +320,19 @@ def tgw_context_plan_graph(task: str, receiver: str = "codex", operation: str = 
 
 @mcp.tool()
 def tgw_context_plan_source(path: str, start_line: int = 1, max_lines: int = 200) -> str:
-    """Read a bounded line chunk from an exact approved Plan source."""
+    """Read a bounded chunk from exact approved standalone-Plan source."""
     return _json_call(source_chunk, path, start_line, max_lines)
 
 
 @mcp.tool()
 def tgw_context_runbooks(query: str = "", path: str = "", start_line: int = 1, max_lines: int = 200, limit: int = 20) -> str:
-    """Search or read committed runbooks from the bound application source."""
+    """Search or read committed application runbooks from the bound source tree."""
     return _json_call(runbooks, query, path, start_line, max_lines, limit)
 
 
 @mcp.tool()
 def tgw_context_code_graph(operation: str = "status", query: str = "", limit: int = 20) -> str:
-    """Query the CodeGraph snapshot built from the bound committed source tree."""
+    """Query the CodeGraph snapshot bound to committed application source."""
     return _json_call(code_graph, operation, query, limit)
 
 

@@ -8,9 +8,9 @@ token, waiting-on-another-queue — all conditions that clear themselves with
 time, not a code bug) can be verified-and-requeued with one shared tool
 instead of a bespoke script per queue (PP-DEADLETTER-001, todo #1402).
 
-**This tool does NOT decide what's transient vs a real bug — that
-classification lives in `/opt/TGW/library/plans/plan/pp/PP-DEADLETTER-001.md`
-and is the caller's responsibility.** Always dry-run first and read the
+**This tool does NOT decide what's transient vs a real bug — the exact
+approved standalone Plan packet supplied for an operation defines that
+classification, and it remains the caller's responsibility.** Always dry-run first and read the
 matched rows before passing --apply, and pick an --error-like pattern
 narrow enough to exclude any real-bug rows sharing the same queue (e.g.
 ebay_sync's transient "Lease expired"/"token is expired" rows share a queue

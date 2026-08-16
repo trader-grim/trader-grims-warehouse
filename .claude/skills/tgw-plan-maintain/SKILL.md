@@ -1,11 +1,16 @@
 ---
 name: tgw-plan-maintain
-description: Reconcile and tidy TGW-Master-Plan.md between planning sessions — trim it back toward its own ≤500-line target, resolve stale premise conflicts, fold loose lines into their PP section, flag stub PPs for a real decision. Use when the user says /tgw-plan-maintain, asks to "go over the master plan," "clean up the plan," or a session opens by noting the plan has grown large / hasn't had a reconciliation pass. Shared across actors (Claude, Tigwa) — this is the one procedure both follow so the plan doesn't drift into two maintenance styles.
+description: Reconcile and tidy the Plan index in its explicitly configured authoring repository between planning sessions — trim it toward its own ≤500-line target, resolve stale premise conflicts, fold loose lines into their PP section, and flag stub PPs for a real decision. Never use a source-tree vault or an approved Plan materialization as an authoring target.
 ---
 
 # TGW Plan Maintain
 
-`TGW-Master-Plan.md` states its own rule: "this file stays ≤500 lines; full
+This is an **authoring-only** procedure. Run it only in the separately
+configured Plan-update repository and only against its explicit
+`plan_update_master_path`. The resulting commit is not operational authority
+until a clean approved Plan binding pins both its commit and solution.
+
+The top-level Plan index states its own rule: "this file stays ≤500 lines; full
 designs live in `pp/`, history in `archive/`." It drifts past that between
 dedicated reconciliation passes because ordinary session work adds detail
 inline faster than anyone moves it back out. This skill is the maintenance
@@ -16,8 +21,8 @@ plan document itself.
 
 - Dave asks to "go over the plan," or a session's own `INPROGRESS-*` note
   says a reconciliation pass is overdue.
-- The file measurably exceeds its line budget (`wc -l
-  docs/TGW-Plan-Vault/plan/TGW-Master-Plan.md`).
+- The explicit authoring target measurably exceeds its line budget (`wc -l
+  <plan-update-root>/plan/TGW-Master-Plan.md`).
 - Right after a batch of new PPs/incidents landed in one sitting (a busy
   session is exactly when stray lines and stub PPs accumulate).
 
@@ -27,9 +32,9 @@ plan document itself.
 history of the archive. That is the whole point of the architecture."**
 
 Git already gives a byte-exact, permanent record of every prior version of
-`TGW-Master-Plan.md` — the commit immediately before a rewrite *is* the
-archive. `git log -p` / `git log --follow -p -- docs/TGW-Plan-Vault/plan/
-TGW-Master-Plan.md` / `git show <rev>:<path>` are the reconciliation tools:
+the top-level Plan index — the commit immediately before a rewrite *is* the
+archive. `git log -p` / `git log --follow -p -- plan/TGW-Master-Plan.md` /
+`git show <rev>:<path>` are the reconciliation tools:
 if anyone needs the old detail back, that's how it's recovered — not by
 hunting through a copied-out file. This is also an indexed data source in
 its own right (same Prime Directive 1 logic as everything else in the

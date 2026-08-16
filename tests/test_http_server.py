@@ -20,6 +20,7 @@ import ast
 import json
 import re
 import sqlite3
+import subprocess
 import time
 import zipfile
 from datetime import datetime, timezone
@@ -3233,7 +3234,7 @@ def test_home_has_pm_chat_widget(client):
 # ---------------------------------------------------------------------------
 
 def _seed_vault(vault_root: Path) -> None:
-    """Write a minimal vault structure for docs tests."""
+    """Write a minimal approved standalone Plan materialization for docs tests."""
     (vault_root / "reference" / "runbooks").mkdir(parents=True)
     (vault_root / "plan").mkdir(parents=True)
     (vault_root / "reference" / "runbooks" / "INDEX.md").write_text(
@@ -3250,11 +3251,31 @@ def _seed_vault(vault_root: Path) -> None:
     )
 
 
+def _seed_approved_docs(env) -> Path:
+    """Bind docs tests to a separate, exact Plan checkout, never source vault."""
+    root = env["cfg"].get("standalone_plan_root")
+    if root is None:
+        root = env["cfg"]["plan_vault_path"].parent / "approved-plan"
+        env["cfg"]["standalone_plan_root"] = root
+    root = Path(root)
+    _seed_vault(root)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "fixture@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "approved"], check=True)
+    commit = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    env["cfg"].update(
+        plan_approved_commit=commit,
+        plan_approved_solution_hash="sha256:" + "a" * 64,
+    )
+    return root
+
+
 def test_docs_redirect(env):
     """GET /docs redirects to the runbook index."""
     client = env["client"]
-    vault = Path(env["cfg"]["plan_vault_path"])
-    _seed_vault(vault)
+    _seed_approved_docs(env)
 
     r = client.get("/docs", follow_redirects=False)
     assert r.status_code == 302
@@ -3264,8 +3285,7 @@ def test_docs_redirect(env):
 def test_docs_renders_markdown(env):
     """GET /docs/{path} renders a markdown file as HTML."""
     client = env["client"]
-    vault = Path(env["cfg"]["plan_vault_path"])
-    _seed_vault(vault)
+    _seed_approved_docs(env)
 
     r = client.get("/docs/reference/runbooks/INDEX.md", follow_redirects=True)
     assert r.status_code == 200
@@ -3275,11 +3295,25 @@ def test_docs_renders_markdown(env):
     assert "docs-sidebar" in r.text
 
 
+def test_docs_ignore_same_named_legacy_vault_content(env):
+    """A mutable source-vault document cannot shadow the pinned Plan view."""
+    approved = _seed_approved_docs(env)
+    legacy = env["cfg"]["plan_vault_path"]
+    (legacy / "reference" / "runbooks").mkdir(parents=True)
+    (legacy / "reference" / "runbooks" / "INDEX.md").write_text("# Legacy poison\n")
+
+    r = env["client"].get("/docs/reference/runbooks/INDEX.md")
+    assert r.status_code == 200
+    assert "Runbooks Index" in r.text
+    assert "Legacy poison" not in r.text
+    assert env["cfg"]["plan_approved_commit"] in r.text
+    assert approved != legacy
+
+
 def test_docs_sidebar_lists_docs(env):
     """Sidebar contains links to other vault docs."""
     client = env["client"]
-    vault = Path(env["cfg"]["plan_vault_path"])
-    _seed_vault(vault)
+    _seed_approved_docs(env)
 
     r = client.get("/docs/reference/runbooks/INDEX.md", follow_redirects=True)
     assert r.status_code == 200
@@ -3291,8 +3325,7 @@ def test_docs_sidebar_lists_docs(env):
 def test_docs_active_link_marked(env):
     """The current doc's sidebar link has the active class."""
     client = env["client"]
-    vault = Path(env["cfg"]["plan_vault_path"])
-    _seed_vault(vault)
+    _seed_approved_docs(env)
 
     r = client.get("/docs/reference/runbooks/INDEX.md", follow_redirects=True)
     assert r.status_code == 200
@@ -3302,8 +3335,7 @@ def test_docs_active_link_marked(env):
 def test_docs_non_md_rejected(env):
     """Non-.md paths return 404."""
     client = env["client"]
-    vault = Path(env["cfg"]["plan_vault_path"])
-    _seed_vault(vault)
+    _seed_approved_docs(env)
 
     r = client.get("/docs/reference/runbooks/INDEX.txt")
     assert r.status_code == 404
@@ -3312,8 +3344,7 @@ def test_docs_non_md_rejected(env):
 def test_docs_path_traversal_rejected(env):
     """../  traversal outside the vault root returns 403."""
     client = env["client"]
-    vault = Path(env["cfg"]["plan_vault_path"])
-    _seed_vault(vault)
+    vault = _seed_approved_docs(env)
     # Write a file outside the vault to confirm it would exist if served.
     outside = vault.parent / "secret.md"
     outside.write_text("secret", encoding="utf-8")
@@ -3325,8 +3356,7 @@ def test_docs_path_traversal_rejected(env):
 def test_docs_missing_file_404(env):
     """Missing file returns 404."""
     client = env["client"]
-    vault = Path(env["cfg"]["plan_vault_path"])
-    _seed_vault(vault)
+    _seed_approved_docs(env)
 
     r = client.get("/docs/reference/does-not-exist.md")
     assert r.status_code == 404
@@ -3335,8 +3365,7 @@ def test_docs_missing_file_404(env):
 def test_docs_uses_static_css(env):
     """Rendered page links the shared tgw.css."""
     client = env["client"]
-    vault = Path(env["cfg"]["plan_vault_path"])
-    _seed_vault(vault)
+    _seed_approved_docs(env)
 
     r = client.get("/docs/reference/ISSUES.md", follow_redirects=True)
     assert r.status_code == 200
@@ -3346,8 +3375,7 @@ def test_docs_uses_static_css(env):
 def test_docs_plan_handoff(env):
     """plan/handoff.md can be fetched via /docs/plan/handoff.md."""
     client = env["client"]
-    vault = Path(env["cfg"]["plan_vault_path"])
-    _seed_vault(vault)
+    _seed_approved_docs(env)
 
     r = client.get("/docs/plan/handoff.md", follow_redirects=True)
     assert r.status_code == 200
@@ -5832,12 +5860,16 @@ def test_hint_trail_rejects_path_traversal_sku(client):
 
 
 def test_docs_page_escapes_raw_html_in_markdown(env):
-    """/docs renders vault markdown; raw HTML/script must not execute verbatim."""
-    vault = env["cfg"]["plan_vault_path"]
-    vault.mkdir(parents=True, exist_ok=True)
+    """/docs renders pinned Plan Markdown; raw HTML/script must not execute."""
+    vault = _seed_approved_docs(env)
     (vault / "evil.md").write_text(
         "# Title\n\n<script>alert(1)</script>\n", encoding="utf-8",
     )
+    subprocess.run(["git", "-C", str(vault), "add", "evil.md"], check=True)
+    subprocess.run(["git", "-C", str(vault), "commit", "-qm", "evil approved"], check=True)
+    env["cfg"]["plan_approved_commit"] = subprocess.check_output(
+        ["git", "-C", str(vault), "rev-parse", "HEAD"], text=True,
+    ).strip()
     r = env["client"].get("/docs/evil.md")
     assert r.status_code == 200
     assert "<script>alert(1)</script>" not in r.text

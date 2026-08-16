@@ -29,6 +29,7 @@ import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from subprocess import run as _pager_run
 from typing import Any, Dict, Generator, List, Optional
 
 import psycopg2
@@ -490,6 +491,31 @@ def todo_brief(item_id: int, plan_path: Path) -> Dict[str, Any]:
             'brief': '\n'.join(parts)}
 
 
+def _approved_todo_brief(cfg: Dict[str, Any], item_id: int) -> Dict[str, Any]:
+    """Build a todo brief from the immutable approved Plan materialization.
+
+    ``todo_brief`` remains a small pure formatter for focused unit tests. All
+    CLI-facing callers enter through this binding gate so a caller cannot pass
+    a mutable ``plan_master_path`` in configuration and influence an operator
+    brief.
+    """
+    from tgw.plan_render import PlanRenderBindingError, approved_render_plan_identity
+
+    try:
+        identity = approved_render_plan_identity(cfg)
+    except PlanRenderBindingError as exc:
+        return {'ok': False, 'error': str(exc), 'code': exc.code}
+
+    result = todo_brief(item_id, Path(identity['master_plan_path']))
+    result['plan_identity'] = identity
+    if result.get('ok'):
+        result['brief'] = (
+            f"Bound Plan: {identity['plan_commit']} {identity['solution_hash']}\n\n"
+            f"{result['brief']}"
+        )
+    return result
+
+
 def todo_seed() -> Dict[str, Any]:
     """Seed Work Tracks items; skip if body already exists for that agent."""
     added = 0
@@ -539,15 +565,13 @@ def _tty_prompt(prompt: str) -> str:
 
 def _next_interactive(cfg: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
     """Interactive --next loop: less pager + done/skip prompt (TTY only)."""
-    import subprocess
-
     while True:
         top = todo_top(agent_name)
         if top is None:
             print(f'No open tasks for agent: {agent_name}')
             return {'ok': False, 'error': f'no open tasks for {agent_name}'}
 
-        result = todo_brief(top['id'], cfg['plan_master_path'])
+        result = _approved_todo_brief(cfg, top['id'])
         if not result['ok']:
             print(f"Error: {result['error']}")
             return result
@@ -561,7 +585,7 @@ def _next_interactive(cfg: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
         # Pipe brief through less. -F quits if output fits on one screen;
         # -X skips the termcap init/deinit flash.
         try:
-            subprocess.run(['less', '-FX'], input=brief, text=True)
+            _pager_run(['less', '-FX'], input=brief, text=True)
         except FileNotFoundError:
             print(brief)
 
@@ -581,8 +605,6 @@ def _next_interactive(cfg: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
 
 def _nextloop_interactive(cfg: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
     """Loop --next until the user quits or tasks are exhausted."""
-    import subprocess
-
     done_count = 0
     skipped_count = 0
 
@@ -592,7 +614,7 @@ def _nextloop_interactive(cfg: Dict[str, Any], agent_name: str) -> Dict[str, Any
             print(f'No more open tasks for agent: {agent_name}')
             break
 
-        result = todo_brief(top['id'], cfg['plan_master_path'])
+        result = _approved_todo_brief(cfg, top['id'])
         if not result['ok']:
             print(f"Error: {result['error']}")
             return result
@@ -603,7 +625,7 @@ def _nextloop_interactive(cfg: Dict[str, Any], agent_name: str) -> Dict[str, Any
             print('[clipboard] copy failed — wl-copy and xclip not found')
 
         try:
-            subprocess.run(['less', '-FX'], input=brief, text=True)
+            _pager_run(['less', '-FX'], input=brief, text=True)
         except FileNotFoundError:
             print(brief)
 
@@ -647,7 +669,7 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         if top is None:
             print(f'No open tasks for agent: {agent_name}')
             return {'ok': False, 'error': f'no open tasks for {agent_name}'}
-        result = todo_brief(top['id'], cfg['plan_master_path'])
+        result = _approved_todo_brief(cfg, top['id'])
         if result['ok']:
             print(result['brief'])
             if not _push_clipboard(result['brief']):
@@ -673,7 +695,7 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
                       '       tgw todo brief --next --agent <agent> [--clip]')
                 return {'ok': False, 'error': 'missing id'}
             target_id = int(args.brief_id)
-        result = todo_brief(target_id, cfg['plan_master_path'])
+        result = _approved_todo_brief(cfg, target_id)
         if result['ok']:
             print(result['brief'])
             if getattr(args, 'clip', False):

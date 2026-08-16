@@ -42,7 +42,7 @@ proof that the current harness is an admitted independent-review provider.  A
 governed review still requires the exact execution card, independent context,
 provider health, and validated receipt named by the approved Plan.
 
-- **Tigwa / Leotha (Hermes personas):** `docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md`
+- **Tigwa / Leotha (Hermes personas):** `/opt/TGW/library/plans/plan/pp/PP-HERMES-EA-001.md`
   is your real operating contract — roles, authority boundaries, the
   IN TRAINING scope, the branch-review exception, the emergency-override
   rule. Read that in full, not `CLAUDE.md`.
@@ -54,7 +54,7 @@ provider health, and validated receipt named by the approved Plan.
   `SOUL.md`) are the durable, persona-specific record of what Dave has told
   you directly — those govern your behavior, not this repo's `CLAUDE.md`.
 - If a task hands you a specific packet
-  (`docs/TGW-Plan-Vault/plan/packets/<id>-*.md`), that packet's own Spec /
+  (`/opt/TGW/library/plans/plan/packets/<id>-*.md`), that packet's own Spec /
   Out-of-scope / Acceptance sections are what to follow — not `CLAUDE.md`'s
   general rules.
 

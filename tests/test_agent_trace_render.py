@@ -8,8 +8,11 @@ tests/test_plan_render.py's render_taskboard tests.
 """
 from __future__ import annotations
 
+import subprocess
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+
+import pytest
 
 from tgw.agent_trace_render import (
     AGENT_RUNS_DOC_NAME,
@@ -104,12 +107,35 @@ def test_build_escapes_pipes_in_summary():
 # ---------------------------------------------------------------------------
 
 def _cfg(tmp_path):
-    vault = tmp_path / 'vault'
-    (vault / 'plan').mkdir(parents=True)
-    (vault / 'plan' / 'TGW-Master-Plan.md').write_text(
-        '### PP-AGENTTRACE-001 — agent trace logging\n', encoding='utf-8')
-    return {'plan_vault_path': vault,
-            'plan_master_path': vault / 'plan' / 'TGW-Master-Plan.md'}
+    root = tmp_path / 'standalone-plan'
+    master = root / 'plan' / 'TGW-Master-Plan.md'
+    master.parent.mkdir(parents=True)
+    master.write_text(
+        '### PP-AGENTTRACE-001 — approved agent trace logging\n', encoding='utf-8',
+    )
+    subprocess.run(['git', 'init', '-q', str(root)], check=True)
+    subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+    subprocess.run([
+        'git', '-C', str(root), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+        'commit', '-qm', 'approved Plan',
+    ], check=True)
+    commit = subprocess.check_output(
+        ['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True,
+    ).strip()
+    vault = tmp_path / 'legacy-vault'
+    legacy_master = vault / 'plan' / 'TGW-Master-Plan.md'
+    legacy_master.parent.mkdir(parents=True)
+    legacy_master.write_text(
+        '### PP-AGENTTRACE-001 — legacy agent trace logging\n', encoding='utf-8',
+    )
+    return {
+        'plan_vault_path': vault,
+        'plan_render_root': tmp_path / 'rendered',
+        'plan_master_path': legacy_master,
+        'standalone_plan_root': root,
+        'plan_approved_commit': commit,
+        'plan_approved_solution_hash': 'sha256:' + 'b' * 64,
+    }
 
 
 def test_render_writes_file(tmp_path):
@@ -119,14 +145,20 @@ def test_render_writes_file(tmp_path):
         result = render_agent_runs_doc(cfg)
     assert result['ok'] is True
     assert result['count'] == 1
+    assert result['plan_identity']['plan_root'] == str(cfg['standalone_plan_root'])
+    assert result['plan_identity']['plan_commit'] == cfg['plan_approved_commit']
+    assert result['plan_identity']['solution_hash'] == cfg['plan_approved_solution_hash']
     out = agent_runs_doc_path(cfg)
     assert out.name == AGENT_RUNS_DOC_NAME
     assert out.exists()
     content = out.read_text(encoding='utf-8')
     assert 'tgw-coder' in content
-    assert '[[TGW-Master-Plan#PP-AGENTTRACE-001 — agent trace logging\\|PP-AGENTTRACE-001]]' in content
+    assert '[[TGW-Master-Plan#PP-AGENTTRACE-001 — approved agent trace logging\\|PP-AGENTTRACE-001]]' in content
+    assert cfg['plan_approved_commit'] in content
+    assert cfg['plan_approved_solution_hash'] in content
     # no temp file left behind
     assert not list(out.parent.glob('.agent-runs-*'))
+    assert 'plan' not in out.relative_to(tmp_path).parts
 
 
 def test_render_reports_tracker_failure(tmp_path):
@@ -135,6 +167,28 @@ def test_render_reports_tracker_failure(tmp_path):
         result = render_agent_runs_doc(cfg)
     assert result['ok'] is False
     assert 'db down' in result['error']
+    assert result['plan_identity']['plan_commit'] == cfg['plan_approved_commit']
+    assert not agent_runs_doc_path(cfg).exists()
+
+
+@pytest.mark.parametrize(
+    ('field', 'code'),
+    [
+        ('plan_approved_commit', 'approved_plan_commit_required'),
+        ('plan_approved_solution_hash', 'approved_solution_required'),
+    ],
+)
+def test_agent_trace_render_refuses_unbound_plan_before_reading_tracker(tmp_path, field, code):
+    cfg = _cfg(tmp_path)
+    cfg.pop(field)
+    with patch('tgw.queue.state_machine.list_agent_runs') as list_runs:
+        result = render_agent_runs_doc(cfg)
+    assert result == {
+        'ok': False,
+        'error': f'approved Plan binding unavailable: {code}',
+        'code': code,
+    }
+    list_runs.assert_not_called()
     assert not agent_runs_doc_path(cfg).exists()
 
 

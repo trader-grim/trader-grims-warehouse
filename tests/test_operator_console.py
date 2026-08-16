@@ -9,6 +9,10 @@ from tgw.operator_console_plugin import (
     OperatorConsoleMount,
     mount_operator_console,
 )
+from tgw.plan_authority import AuthorityPrincipal, PrincipalRole
+
+OPERATOR = AuthorityPrincipal("operator:fixture-alice", PrincipalRole.OPERATOR, "test-session")
+EXECUTOR = AuthorityPrincipal("executor:fixture-runner", PrincipalRole.EXECUTOR, "test-credential")
 
 
 class Store:
@@ -31,9 +35,6 @@ class Store:
         raise AssertionError
 
     def consume(self, request_id, *, effect_hash, generation):  # pragma: no cover
-        raise AssertionError
-
-    def record_execution(self, request_id, receipt):  # pragma: no cover
         raise AssertionError
 
 
@@ -59,13 +60,12 @@ def _row(**updates):
     return row
 
 
-def _client(row, execute_request=None):
+def _client(row):
     app = FastAPI()
     app.include_router(create_operator_console_router(
         Store(row), current_plan_commit=lambda: "f" * 40,
-        load_solution=lambda _: {}, require_operator=lambda: "operator",
-        require_executor=lambda: "executor",
-        execute_request=execute_request,
+        load_solution=lambda _: {}, require_operator=lambda: OPERATOR,
+        require_executor=lambda: EXECUTOR,
     ))
     return TestClient(app)
 
@@ -76,16 +76,66 @@ def test_projection_reports_status_evidence_and_only_legal_actions():
     assert pending["evidence"] == ["receipt:1"]
     assert pending["legal_actions"] == ["view-evidence", "approve", "hold", "reconcile"]
     assert project_request(_row(decision_kind="approve"))["legal_actions"] == [
-        "view-evidence", "execute-by-controller",
+        "view-evidence", "consume-by-executor",
     ]
-    assert project_request(_row(receipt_id="receipt:done"))["status"] == "consumed"
-    executed = project_request(_row(
-        receipt_id="receipt:done", execution_receipt_hash="sha256:done",
-        execution_outcome="succeeded", execution_handler_id="authority-canary-receipt-only@1",
-        execution_evidence=["authority-canary:sha256:one"], execution_detail="",
+    assert project_request(_row(
+        receipt_id="receipt:done", completed_at=datetime.now(timezone.utc), outcome="succeeded",
+    ))["status"] == "succeeded"
+    active = project_request(_row(receipt_id="receipt:active"))
+    assert active["status"] == "reconciliation_required"
+    assert active["reconciliation_required"] is True
+    assert active["legal_actions"] == ["view-evidence", "reconcile"]
+    ambiguous = project_request(_row(
+        receipt_id="receipt:ambiguous", completed_at=datetime.now(timezone.utc), outcome="ambiguous",
     ))
-    assert executed["status"] == "succeeded"
-    assert executed["execution"]["receipt_hash"] == "sha256:done"
+    assert ambiguous["status"] == "ambiguous"
+    assert ambiguous["reconciliation_required"] is True
+
+
+def test_shared_projection_contains_exact_scope_solution_decision_and_receipt_provenance():
+    projection = project_request(_row(
+        requested_by="operator:alice",
+        decision_kind="approve",
+        decided_by="operator:bob",
+        decision_reason="reviewed exact scope",
+        reconciliation_evidence=["reconcile:1"],
+        decided_at=datetime.now(timezone.utc),
+        receipt_id="receipt:exact",
+        handler_id="authority-canary-receipt-only@1",
+        executor_principal="executor:runner",
+        started_at=datetime.now(timezone.utc),
+        completed_at=datetime.now(timezone.utc),
+        outcome="succeeded",
+        execution_evidence=["provider:readback"],
+        rollback_receipt="rollback:unused",
+    ))
+    assert projection["effect"] == {
+        "kind": "coding-release", "generation": "generation-1",
+        "hash": "effect:sha256:ghi", "parameters": {},
+    }
+    assert projection["solution_hash"] == "solution:sha256:abc"
+    assert projection["graph_id"] == "graph:1"
+    assert projection["object_generation"] == "object:1"
+    assert projection["decision"]["by"] == "operator:bob"
+    assert projection["execution"]["executor_principal"] == "executor:runner"
+    assert projection["execution"]["receipt_id"] == "receipt:exact"
+
+
+def test_web_and_flutter_normal_navigation_name_every_authority_detail_and_control():
+    web = Path(__file__).parents[1].joinpath("src/tgw/static/plan_console.html").read_text(encoding="utf-8")
+    flutter = Path(__file__).parents[1].joinpath(
+        "apps/tgw_app/lib/features/review/plan_authority_screen.dart",
+    ).read_text(encoding="utf-8")
+    for label in (
+        "Exact effect scope", "Parameters", "Effect hash", "Bound Plan solution",
+        "Solution hash", "Closure hash", "Graph", "Object generation", "Evidence",
+        "Decision", "Execution / receipt provenance", "Executor principal",
+        "Authenticated operator decision", "reconciliation_evidence",
+    ):
+        assert label in web
+        assert label in flutter
+    assert "/api/plan-authority/requests/${encodeURIComponent(requestId)}/decisions" in web
+    assert "decidePlanAuthorityRequest" in flutter
 
 
 def test_mount_exposes_shared_api_site_and_canonical_authority_router():
@@ -96,28 +146,6 @@ def test_mount_exposes_shared_api_site_and_canonical_authority_router():
     site = client.get("/form/plan-authority")
     assert site.status_code == 200
     assert "Only records from PlanAuthority grant authority" in site.text
-    assert client.post(
-        "/api/plan-authority/requests/request:sha256:abc/consume", json={}
-    ).status_code == 409
-
-
-def test_typed_execute_route_invokes_only_the_mounted_controller():
-    observed = []
-    client = _client(
-        _row(decision_kind="approve"),
-        lambda request_id: observed.append(request_id) or {"outcome": "succeeded"},
-    )
-    response = client.post("/api/plan-authority/requests/request:sha256:abc/execute")
-    assert response.status_code == 200
-    assert response.json()["execution"] == {"outcome": "succeeded"}
-    assert observed == ["request:sha256:abc"]
-
-
-def test_console_html_exposes_real_decision_and_execute_controls():
-    site = _client(_row()).get("/form/plan-authority").text
-    assert "execute-by-controller" in site
-    assert "/decisions" in site
-    assert "/execute" in site
 
 
 def test_discovery_names_one_backend_and_non_authority_surfaces():
@@ -148,11 +176,17 @@ def test_plugin_mount_uses_host_auth_and_returns_flutter_json():
     def host_auth(authorization: str | None = Header(default=None)):
         if authorization != "Bearer shared-host-token":
             raise HTTPException(401, "host auth rejected")
+        return OPERATOR
+
+    def executor_auth(authorization: str | None = Header(default=None)):
+        if authorization != "Bearer executor-token":
+            raise HTTPException(401, "executor auth rejected")
+        return EXECUTOR
 
     config = OperatorConsoleMount(
         store=Store(_row()), current_plan_commit=lambda: "f" * 40,
         load_solution=lambda _: {}, require_operator=host_auth,
-        require_executor=host_auth,
+        require_executor=executor_auth,
     )
     mount_operator_console(app, config)
     client = TestClient(app)
@@ -170,8 +204,8 @@ def test_plugin_mount_uses_host_auth_and_returns_flutter_json():
 def test_plugin_rejects_duplicate_mount_or_route_shadowing():
     config = OperatorConsoleMount(
         store=Store(_row()), current_plan_commit=lambda: "f" * 40,
-        load_solution=lambda _: {}, require_operator=lambda: None,
-        require_executor=lambda: None,
+        load_solution=lambda _: {}, require_operator=lambda: OPERATOR,
+        require_executor=lambda: EXECUTOR,
     )
     app = FastAPI()
     mount_operator_console(app, config)

@@ -1,0 +1,32 @@
+{
+  "schema": "tgw-registered-resource-service-installation-template/v1",
+  "plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+  "installation_status": "NOT_INSTALLED",
+  "service_entry_point": "tgw.governed_resource_service:main",
+  "runtime_config_schema": "tgw-governed-resource-service-config/v5",
+  "descriptor_template": {
+    "schema": "tgw-registered-resource-service/v2",
+    "id": null,
+    "client_id": null,
+    "endpoint": null,
+    "credential_env": null,
+    "timeout_seconds": null
+  },
+  "qualification_requirements": {
+    "catalog_schema": "tgw-registered-resource-service-catalog/v3",
+    "attestation_schema": "tgw-registered-resource-retrieval-attestation/v3",
+    "attestation_key_requirement": "Each qualified service entry supplies one attestation_key_id and canonical base64 Ed25519 public key. The runtime config names a separate environment variable holding its matching raw base64 private key; no key material belongs in this template.",
+    "required_capabilities": [
+      "registered-resource-retrieval",
+      "plan-source",
+      "plan-graph",
+      "codegraph-snapshot",
+      "source-tree",
+      "execution-environment",
+      "authority-conditions",
+      "receipt-sink"
+    ],
+    "client_authentication_requirement": "Every runtime client binding maps one credential environment to one client_id, one unique execution_identity, and one exact role. The card, descriptor, and handoff bind that client_id; the service rejects any claimed role or execution identity outside the authenticated client grant. Resource bytes are available only through an opened run bound to that client, card, role, and identity. Deployment configuration bounds both open and completed runs per client.",
+    "launch_rule": "A deployment must provide an exact configured descriptor, Plan-bound qualified catalog, client credential bindings, and private signing key environment. This template is neither and must not be passed to a card or launcher."
+  }
+}

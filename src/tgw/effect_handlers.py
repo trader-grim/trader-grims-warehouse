@@ -12,9 +12,13 @@ import json
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from tgw.bootstrap_authority import BootstrapConsumptionAmbiguous
+from tgw.bootstrap_deployment_contract import (
+    BootstrapDeploymentContractResolver,
+    VerifiedBootstrapDeploymentContract,
+)
 from tgw.nix_observer_render_evaluation import validate_request as validate_render_request
 from tgw.nixos_a3_successor_evaluation import (
     EFFECT_KIND as A3_SUCCESSOR_EFFECT_KIND,
@@ -83,6 +87,30 @@ class EffectOutcome(str, Enum):
     FAILED = "failed"
 
 
+class AuthorityExecutionStore(Protocol):
+    """Durable authority seam for a fenced provider attempt."""
+
+    def begin_execution(
+        self,
+        request_id: str,
+        *,
+        effect_hash: str,
+        generation: str,
+        handler_id: str,
+        executor_principal: str,
+    ) -> Mapping[str, Any]: ...
+
+    def complete_execution(
+        self,
+        receipt_id: str,
+        *,
+        outcome: str,
+        evidence: Sequence[str] = (),
+        rollback_receipt: str | None = None,
+        detail: str = "",
+    ) -> Mapping[str, Any]: ...
+
+
 def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
 
@@ -130,9 +158,10 @@ class EffectExecutionReceipt:
     evidence: tuple[str, ...]
     rollback_receipt: str | None = None
     detail: str = ""
+    executor_principal: str | None = None
 
     def as_mapping(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema": self.schema,
             "request_id": self.request_id,
             "authority_receipt_id": self.authority_receipt_id,
@@ -145,6 +174,9 @@ class EffectExecutionReceipt:
             "rollback_receipt": self.rollback_receipt,
             "detail": self.detail,
         }
+        if self.executor_principal is not None:
+            result["executor_principal"] = self.executor_principal
+        return result
 
     @property
     def receipt_hash(self) -> str:
@@ -179,6 +211,7 @@ class TypedEffectHandlerRegistry:
         bootstrap_install: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         bootstrap_rollback: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         bootstrap_validate: Callable[[Mapping[str, Any]], None] | None = None,
+        bootstrap_contract_resolver: BootstrapDeploymentContractResolver | None = None,
         nixos_reviewed_evaluation: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         nixos_observer_render_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         nixos_a3_successor_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
@@ -211,6 +244,7 @@ class TypedEffectHandlerRegistry:
             ),
         }
         self._bootstrap_validate = bootstrap_validate
+        self._bootstrap_contract_resolver = bootstrap_contract_resolver
         self._a3_successor_binding = nixos_a3_successor_evaluation
         self._a3_successor_allow_fixture = bool(getattr(getattr(nixos_a3_successor_evaluation, "composition", None), "allow_fixture", False))
 
@@ -499,8 +533,35 @@ class TypedEffectHandlerRegistry:
             if parameters["purpose"] != "verify-plan-authority-roundtrip":
                 raise ValueError("authority canary purpose is outside the harmless registered bound")
         elif effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT:
-            validate_platform_bootstrap_effect(effect.parameters)
-            parameters = dict(effect.parameters)
+            if self._bootstrap_contract_resolver is not None:
+                parameters = _required(
+                    effect.parameters,
+                    {"bootstrap_contract_ref", "bootstrap_contract_hash"},
+                )
+                verified = self._bootstrap_contract_resolver.resolve(
+                    parameters["bootstrap_contract_ref"],
+                    parameters["bootstrap_contract_hash"],
+                )
+                if not isinstance(verified, VerifiedBootstrapDeploymentContract):
+                    raise ValueError(
+                        "bootstrap deployment contract resolver returned an invalid verification"
+                    )
+                if (
+                    verified.reference != parameters["bootstrap_contract_ref"]
+                    or verified.contract_hash != parameters["bootstrap_contract_hash"]
+                    or effect.generation != verified.intended_next_generation
+                ):
+                    raise ValueError(
+                        "bootstrap deployment effect does not match its verified immutable contract"
+                    )
+                parameters = verified.provider_binding()
+            elif self._bootstrap_validate is not None:
+                validate_platform_bootstrap_effect(effect.parameters)
+                parameters = dict(effect.parameters)
+            else:
+                raise ValueError(
+                    "verified bootstrap deployment contract resolver is not mounted"
+                )
         elif effect.kind is EffectKind.NIXOS_REVIEWED_EVALUATION:
             parameters = _required_strings(
                 effect.parameters,
@@ -628,8 +689,15 @@ class TypedEffectHandlerRegistry:
         else:  # pragma: no cover - EffectKind is closed above
             raise ValueError("effect kind has no registered parameter validator")
         handler_id, handler, rollback = self._providers[effect.kind]
-        parameters["generation"] = effect.generation
-        if effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT:
+        if not (
+            effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT
+            and self._bootstrap_contract_resolver is not None
+        ):
+            parameters["generation"] = effect.generation
+        if (
+            effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT
+            and self._bootstrap_contract_resolver is None
+        ):
             if self._bootstrap_validate is None:
                 raise ValueError("platform-bootstrap pre-authority validator is unavailable")
             self._bootstrap_validate(parameters)
@@ -637,39 +705,84 @@ class TypedEffectHandlerRegistry:
 
 
 class AuthorityEffectController:
-    """Atomically redeems authority before invoking one registered provider."""
+    """Execute one closed effect through durable or bounded legacy authority."""
 
-    def __init__(self, registry: TypedEffectHandlerRegistry, consume_authority: Callable[..., Mapping[str, Any]]):
+    def __init__(
+        self,
+        registry: TypedEffectHandlerRegistry,
+        authority: AuthorityExecutionStore | Callable[..., Mapping[str, Any]],
+    ):
         self.registry = registry
-        self.consume_authority = consume_authority
+        self.authority = authority
+        self._has_durable_methods = callable(
+            getattr(authority, "begin_execution", None)
+        ) and callable(getattr(authority, "complete_execution", None))
 
-    def execute(self, *, request_id: str, effect: TypedEffect) -> EffectExecutionReceipt:
+    def _uses_durable_authority(self, executor_principal: str | None) -> bool:
+        return self._has_durable_methods and (
+            not callable(self.authority) or executor_principal is not None
+        )
+
+    def execute(
+        self,
+        *,
+        request_id: str,
+        effect: TypedEffect,
+        executor_principal: str | None = None,
+    ) -> EffectExecutionReceipt:
         handler_id, parameters, handler, rollback = self.registry.prepare(effect)
-        try:
-            authority = self.consume_authority(request_id, effect_hash=effect.effect_hash, generation=effect.generation)
-        except BootstrapConsumptionAmbiguous as exc:
-            authority_observation = exc.evidence[0]
-            return self._receipt(
+        durable = self._uses_durable_authority(executor_principal)
+        if durable:
+            if not isinstance(executor_principal, str) or not executor_principal:
+                raise ValueError("executor principal is required for durable authority execution")
+            authority = self.authority.begin_execution(
                 request_id,
-                authority_observation,
-                effect,
-                handler_id,
-                EffectOutcome.AMBIGUOUS,
-                exc.evidence,
-                detail=str(exc),
+                effect_hash=effect.effect_hash,
+                generation=effect.generation,
+                handler_id=handler_id,
+                executor_principal=executor_principal,
             )
+        else:
+            if not callable(self.authority):
+                raise ValueError("authority execution seam is unavailable")
+            try:
+                authority = self.authority(
+                    request_id,
+                    effect_hash=effect.effect_hash,
+                    generation=effect.generation,
+                )
+            except BootstrapConsumptionAmbiguous as exc:
+                authority_observation = exc.evidence[0]
+                return self._receipt(
+                    request_id,
+                    authority_observation,
+                    effect,
+                    handler_id,
+                    EffectOutcome.AMBIGUOUS,
+                    exc.evidence,
+                    detail=str(exc),
+                )
         receipt_id = str(authority["receipt_id"])
         try:
             result = handler(parameters)
             evidence = tuple(sorted(str(item) for item in result.get("evidence", ())))
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.SUCCEEDED, evidence)
+            return self._finish(
+                request_id, receipt_id, effect, handler_id, executor_principal,
+                EffectOutcome.SUCCEEDED, evidence,
+            )
         except RetryableEffect as exc:
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.RETRY, exc.evidence, detail=str(exc))
+            return self._finish(
+                request_id, receipt_id, effect, handler_id, executor_principal,
+                EffectOutcome.RETRY, exc.evidence, detail=str(exc),
+            )
         except HeldEffect as exc:
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.HOLD, exc.evidence, detail=str(exc))
+            return self._finish(
+                request_id, receipt_id, effect, handler_id, executor_principal,
+                EffectOutcome.HOLD, exc.evidence, detail=str(exc),
+            )
         except AmbiguousEffect as exc:
             evidence = exc.evidence
-            if not evidence:
+            if not evidence and not durable:
                 observation = {
                     "schema": "tgw-effect-ambiguity-observation/v1",
                     "request_id": request_id,
@@ -679,72 +792,133 @@ class AuthorityEffectController:
                     "handler_id": handler_id,
                     "detail": str(exc),
                 }
-                evidence = ("effect-ambiguity-memory:sha256:" + hashlib.sha256(_canonical(observation)).hexdigest(),)
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, evidence, detail=str(exc))
+                evidence = (
+                    "effect-ambiguity-memory:sha256:"
+                    + hashlib.sha256(_canonical(observation)).hexdigest(),
+                )
+            return self._finish(
+                request_id, receipt_id, effect, handler_id, executor_principal,
+                EffectOutcome.AMBIGUOUS, evidence, detail=str(exc),
+            )
         except BootstrapStateAmbiguous as exc:
             if not exc.rollback_required:
-                return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc))
+                return self._finish(
+                    request_id, receipt_id, effect, handler_id, executor_principal,
+                    EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc),
+                )
             if rollback is not None:
                 try:
                     rolled_back = rollback(parameters)
                     rollback_receipt = str(rolled_back["receipt"])
-                    return self._receipt(
-                        request_id,
-                        receipt_id,
-                        effect,
-                        handler_id,
-                        EffectOutcome.ROLLED_BACK,
-                        exc.evidence,
-                        rollback_receipt=rollback_receipt,
-                        detail=str(exc),
+                    return self._finish(
+                        request_id, receipt_id, effect, handler_id, executor_principal,
+                        EffectOutcome.ROLLED_BACK, exc.evidence,
+                        rollback_receipt=rollback_receipt, detail=str(exc),
                     )
                 except BootstrapStateAmbiguous as rollback_exc:
                     evidence = tuple(sorted(set(exc.evidence + rollback_exc.evidence)))
-                    return self._receipt(
-                        request_id,
-                        receipt_id,
-                        effect,
-                        handler_id,
-                        EffectOutcome.AMBIGUOUS,
-                        evidence,
+                    return self._finish(
+                        request_id, receipt_id, effect, handler_id, executor_principal,
+                        EffectOutcome.AMBIGUOUS, evidence,
                         detail=f"effect={exc}; rollback={rollback_exc}",
                     )
                 except Exception as rollback_exc:
-                    return self._receipt(
-                        request_id,
-                        receipt_id,
-                        effect,
-                        handler_id,
-                        EffectOutcome.FAILED,
-                        exc.evidence,
+                    return self._finish(
+                        request_id, receipt_id, effect, handler_id, executor_principal,
+                        EffectOutcome.FAILED, exc.evidence,
                         detail=f"effect={exc}; rollback={rollback_exc}",
                     )
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc))
+            return self._finish(
+                request_id, receipt_id, effect, handler_id, executor_principal,
+                EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc),
+            )
         except Exception as exc:
             if rollback is not None:
                 try:
                     rolled_back = rollback(parameters)
                     rollback_receipt = str(rolled_back["receipt"])
-                    return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.ROLLED_BACK, (), rollback_receipt=rollback_receipt, detail=str(exc))
+                    return self._finish(
+                        request_id, receipt_id, effect, handler_id, executor_principal,
+                        EffectOutcome.ROLLED_BACK, (),
+                        rollback_receipt=rollback_receipt, detail=str(exc),
+                    )
                 except Exception as rollback_exc:
                     if isinstance(rollback_exc, BootstrapStateAmbiguous):
-                        return self._receipt(
-                            request_id,
-                            receipt_id,
-                            effect,
-                            handler_id,
-                            EffectOutcome.AMBIGUOUS,
-                            rollback_exc.evidence,
+                        return self._finish(
+                            request_id, receipt_id, effect, handler_id, executor_principal,
+                            EffectOutcome.AMBIGUOUS, rollback_exc.evidence,
                             detail=f"effect={exc}; rollback={rollback_exc}",
                         )
-                    return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.FAILED, (), detail=f"effect={exc}; rollback={rollback_exc}")
+                    return self._finish(
+                        request_id, receipt_id, effect, handler_id, executor_principal,
+                        EffectOutcome.FAILED, (),
+                        detail=f"effect={exc}; rollback={rollback_exc}",
+                    )
             evidence = exc.evidence if isinstance(exc, EffectHandlerError) else ()
-            return self._receipt(request_id, receipt_id, effect, handler_id, EffectOutcome.FAILED, evidence, detail=str(exc))
+            return self._finish(
+                request_id, receipt_id, effect, handler_id, executor_principal,
+                EffectOutcome.FAILED, evidence, detail=str(exc),
+            )
+
+    def _finish(
+        self,
+        request_id: str,
+        authority_receipt_id: str,
+        effect: TypedEffect,
+        handler_id: str,
+        executor_principal: str | None,
+        outcome: EffectOutcome,
+        evidence: tuple[str, ...],
+        *,
+        rollback_receipt: str | None = None,
+        detail: str = "",
+    ) -> EffectExecutionReceipt:
+        durable = self._uses_durable_authority(executor_principal)
+        if durable:
+            self.authority.complete_execution(
+                authority_receipt_id,
+                outcome=outcome.value,
+                evidence=evidence,
+                rollback_receipt=rollback_receipt,
+                detail=detail,
+            )
+        return self._receipt(
+            request_id,
+            authority_receipt_id,
+            effect,
+            handler_id,
+            outcome,
+            evidence,
+            rollback_receipt=rollback_receipt,
+            detail=detail,
+            executor_principal=executor_principal if durable else None,
+        )
 
     @staticmethod
     def _receipt(
-        request_id: str, authority_receipt_id: str, effect: TypedEffect, handler_id: str, outcome: EffectOutcome, evidence: tuple[str, ...], *, rollback_receipt: str | None = None, detail: str = ""
+        request_id: str,
+        authority_receipt_id: str,
+        effect: TypedEffect,
+        handler_id: str,
+        outcome: EffectOutcome,
+        evidence: tuple[str, ...],
+        *,
+        rollback_receipt: str | None = None,
+        detail: str = "",
+        executor_principal: str | None = None,
     ) -> EffectExecutionReceipt:
         return EffectExecutionReceipt(
-            "tgw-effect-execution-receipt/v1", request_id, authority_receipt_id, effect.effect_hash, effect.kind.value, effect.generation, handler_id, outcome, evidence, rollback_receipt, detail
+            "tgw-effect-execution-receipt/v2" if executor_principal is not None
+            else "tgw-effect-execution-receipt/v1",
+            request_id,
+            authority_receipt_id,
+            effect.effect_hash,
+            effect.kind.value,
+            effect.generation,
+            handler_id,
+            outcome,
+            evidence,
+            rollback_receipt,
+            detail,
+            executor_principal,
         )

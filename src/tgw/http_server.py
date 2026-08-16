@@ -35,7 +35,8 @@ from pydantic import BaseModel, Field
 
 from . import draft_sync, inventory_record
 from .assets import ordered_photos as _ordered_photos
-from .config import DEFAULT_CONFIG, load_config
+from .bootstrap_host_integration import configured_bootstrap_deployment_provider
+from .config import DEFAULT_CONFIG
 from .ebay.category_aspect_migration import (
     apply_category_aspect_migration,
     detect_category_orphaned_aspects,
@@ -46,8 +47,9 @@ from .ebay.draft_specifics import is_envelope as _is_ebay_draft_envelope
 from .ebay.inventory_diff import apply_inventory_diff, diff_ebay_draft_to_inventory
 from .item_mutation import item_generation
 from .items import _archive_before_overwrite, atomic_write_json, create_item, locationupdate
-from .operator_console_host import configured_console_mount
+from .operator_console_host import configured_authority_principal, configured_console_mount
 from .operator_console_plugin import mount_operator_console
+from .plan_authority import AuthorityPrincipal, PrincipalRole
 from .queue import state_machine
 from .readiness import check_ebay, readiness_html
 from .resolver import load_item_doc
@@ -88,7 +90,7 @@ def _local_ts(raw: Any, fmt: str = "%Y-%m-%d %H:%M") -> str:
 # Worker pipeline tooltip text — sourced from TGW-Pipeline-Flow.md
 _WORKER_TOOLTIPS: Dict[str, str] = {
     "token_refresh": "OAuth token refresh via eBay API; fires when token expires within 30 min",
-    "pm_intake": "Reads plan-vault inbox notes → Ollama classifies → patches Master Plan",
+    "pm_intake": "Reads Plan-vault inbox notes → classifies → patches the separate Plan update repository",
     "catalog_rebuild": "Rebuilds JSON catalog + SQLite + location tree from all ItemData",
     "thumbnail_gen": "Generates SKU thumbnail from primary photo (Pillow)",
     "bundle_intake": "Polls incoming/newitems/, creates item stubs, enqueues ai_identify",
@@ -204,7 +206,8 @@ PIPELINE_ACTIONS = {
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _cfg, _api_key, _web_password
-    _cfg = load_config(DEFAULT_CONFIG)
+    from tgw.config import load_operational_config
+    _cfg = load_operational_config(DEFAULT_CONFIG)
     state_machine.init(_cfg["postgres_dsn"])
 
     key_path: Path = _cfg["secrets_root"] / "tgw-api-key.json"
@@ -336,6 +339,66 @@ def _require_auth(
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
 
 
+def _configured_authority_principal(field: str, role: PrincipalRole, binding: str) -> AuthorityPrincipal:
+    """Construct an authority principal from server configuration only."""
+    try:
+        return configured_authority_principal(
+            _cfg, field=field, role=role, authentication_binding=binding,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"named Plan authority {role.value} principal is not configured",
+        ) from exc
+
+
+def _require_plan_operator(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(_security),
+    request: Request = None,
+) -> AuthorityPrincipal:
+    """Map an authenticated API key or web session to one named operator.
+
+    Authentication mechanism labels are not durable operator identities.  The
+    host must explicitly bind each accepted mechanism to a configured named
+    principal before any authority mutation or console read can occur.
+    """
+    mechanism = _require_auth(credentials, request)
+    if mechanism == "operator:api-key":
+        return _configured_authority_principal(
+            "plan_authority_operator_api_principal", PrincipalRole.OPERATOR, "api-key",
+        )
+    if mechanism == "operator:web-session":
+        return _configured_authority_principal(
+            "plan_authority_operator_session_principal", PrincipalRole.OPERATOR, "web-session",
+        )
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid Plan authority operator")
+
+
+def _require_plan_executor(request: Request) -> AuthorityPrincipal:
+    """Authenticate a dedicated effect executor, never an operator session.
+
+    Operator credentials may request/decide and inspect authority.  They cannot
+    redeem it: the executor needs its separately configured secret and a named
+    executor identity, which keeps the HTTP /consume capability out of the
+    normal browser/API-key role.
+    """
+    reference = _cfg.get("plan_authority_executor_credential_env")
+    supplied = request.headers.get("X-TGW-Executor-Authorization", "")
+    expected = os.environ.get(reference) if isinstance(reference, str) else None
+    if (
+        not expected
+        or not supplied.startswith("Bearer ")
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid Plan authority executor")
+    if not secrets.compare_digest(supplied.removeprefix("Bearer ").encode(), expected.encode()):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid Plan authority executor")
+    if request.headers.get("X-TGW-Executor-Identity"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="client-supplied executor identity is forbidden")
+    return _configured_authority_principal(
+        "plan_authority_executor_principal", PrincipalRole.EXECUTOR, f"credential-env:{reference}",
+    )
+
+
 AUTH = Depends(_require_auth)
 
 # Consolidated PlanAuthority console. The late-bound host adapter performs no
@@ -344,8 +407,9 @@ mount_operator_console(
     app,
     configured_console_mount(
         lambda: _cfg,
-        require_operator=_require_auth,
-        require_executor=_require_auth,
+        require_operator=_require_plan_operator,
+        require_executor=_require_plan_executor,
+        bootstrap_provider_factory=configured_bootstrap_deployment_provider,
     ),
 )
 
@@ -12196,12 +12260,21 @@ _DOCS_EXTRA_CSS = (
 )
 
 
+def _docs_plan_binding() -> dict[str, str]:
+    """Return the only public Plan-docs source: a pinned clean materialization."""
+    from tgw.plan_graph import approved_plan_binding
+
+    return approved_plan_binding(
+        Path(_cfg.get("standalone_plan_root") or "/opt/TGW/library/plans"),
+        approved_plan_commit=_cfg.get("plan_approved_commit"),
+        approved_solution_hash=_cfg.get("plan_approved_solution_hash"),
+        git_path=str(_cfg.get("plan_git_path") or "git"),
+    )
+
+
 def _vault_root() -> Path:
-    """Return the mutable documentation vault root used by the docs browser."""
-    p = _cfg.get("plan_vault_path")
-    if p:
-        return Path(p)
-    return Path("/opt/TGW/library/plans")
+    """Return the pinned standalone Plan docs root; never the legacy source vault."""
+    return Path(_docs_plan_binding()["plan_root"])
 
 
 def _list_docs_sections() -> list[tuple[str, list[tuple[str, str]]]]:
@@ -12238,7 +12311,7 @@ def _docs_sidebar_html(sections: list[tuple[str, list[tuple[str, str]]]], curren
     return "".join(parts)
 
 
-def _docs_page_html(title: str, body_html: str, sidebar_html: str) -> str:
+def _docs_page_html(title: str, body_html: str, sidebar_html: str, plan_commit: str) -> str:
     import html as _html
 
     return (
@@ -12249,6 +12322,8 @@ def _docs_page_html(title: str, body_html: str, sidebar_html: str) -> str:
         + _STATIC_HEAD
         + f"<style>{_DOCS_EXTRA_CSS}</style>"
         + "</head><body>"
+        + f'<div class="docs-plan-binding" data-plan-commit="{_html.escape(plan_commit)}">'
+        + f'Approved Plan: <code>{_html.escape(plan_commit)}</code></div>'
         + '<div class="docs-layout">'
         + sidebar_html
         + f'<main class="docs-content">{body_html}</main>'
@@ -12262,6 +12337,11 @@ def _docs_page_html(title: str, body_html: str, sidebar_html: str) -> str:
 def docs_index_redirect():
     """Redirect /docs to the runbook index."""
     from fastapi.responses import RedirectResponse
+
+    try:
+        _docs_plan_binding()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"approved Plan docs unavailable: {exc}")
 
     return RedirectResponse(url="/docs/reference/runbooks/INDEX.md", status_code=302)
 
@@ -12280,7 +12360,11 @@ def docs_page(path: str):
     if not path.lower().endswith(".md"):
         raise HTTPException(status_code=404, detail="only .md files are served here")
 
-    vault = _vault_root()
+    try:
+        binding = _docs_plan_binding()
+        vault = Path(binding["plan_root"])
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"approved Plan docs unavailable: {exc}")
     # Resolve to absolute path and check it stays within vault
     try:
         resolved = (vault / path).resolve()
@@ -12311,7 +12395,7 @@ def docs_page(path: str):
     sidebar_html = _docs_sidebar_html(sections, path)
     title = Path(path).stem.replace("-", " ").replace("_", " ")
 
-    return HTMLResponse(_docs_page_html(title, body_html, sidebar_html))
+    return HTMLResponse(_docs_page_html(title, body_html, sidebar_html, binding["plan_commit"]))
 
 
 # ---------------------------------------------------------------------------

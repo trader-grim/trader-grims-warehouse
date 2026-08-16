@@ -8,8 +8,11 @@ module; tests/test_mcp_server.py retains only FastMCP-boundary coverage.
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+
+import pytest
 
 from tgw.plan_render import (
     PLAN_BRIEF_MAX_SOURCE_BYTES,
@@ -139,12 +142,32 @@ def test_build_has_generated_warning():
 # ---------------------------------------------------------------------------
 
 def _cfg(tmp_path):
-    vault = tmp_path / 'vault'
-    (vault / 'plan').mkdir(parents=True)
-    (vault / 'plan' / 'TGW-Master-Plan.md').write_text(
-        '### PP-FOO-001 — The Foo Project\n', encoding='utf-8')
-    return {'plan_vault_path': vault,
-            'plan_master_path': vault / 'plan' / 'TGW-Master-Plan.md'}
+    root = tmp_path / 'standalone-plan'
+    master = root / 'plan' / 'TGW-Master-Plan.md'
+    master.parent.mkdir(parents=True)
+    master.write_text('### PP-FOO-001 — The Approved Project\n', encoding='utf-8')
+    subprocess.run(['git', 'init', '-q', str(root)], check=True)
+    subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+    subprocess.run([
+        'git', '-C', str(root), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+        'commit', '-qm', 'approved Plan',
+    ], check=True)
+    commit = subprocess.check_output(
+        ['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True,
+    ).strip()
+    vault = tmp_path / 'legacy-vault'
+    legacy_master = vault / 'plan' / 'TGW-Master-Plan.md'
+    legacy_master.parent.mkdir(parents=True)
+    legacy_master.write_text('### PP-FOO-001 — Legacy Vault Plan\n', encoding='utf-8')
+    return {
+        'plan_vault_path': vault,
+        'plan_render_root': tmp_path / 'rendered',
+        # Prove rendering ignores this stale compatibility field.
+        'plan_master_path': legacy_master,
+        'standalone_plan_root': root,
+        'plan_approved_commit': commit,
+        'plan_approved_solution_hash': 'sha256:' + 'a' * 64,
+    }
 
 
 def test_render_writes_file(tmp_path):
@@ -156,13 +179,22 @@ def test_render_writes_file(tmp_path):
     assert result['ok'] is True
     assert result['open'] == 1
     assert result['done_week'] == 1
+    assert result['plan_identity'] == {
+        'plan_root': str(cfg['standalone_plan_root']),
+        'plan_commit': cfg['plan_approved_commit'],
+        'solution_hash': cfg['plan_approved_solution_hash'],
+        'master_plan_path': str(cfg['standalone_plan_root'] / 'plan' / 'TGW-Master-Plan.md'),
+    }
     board = taskboard_path(cfg)
     assert board.exists()
     content = board.read_text(encoding='utf-8')
     assert 'open task' in content
-    assert '[[TGW-Master-Plan#PP-FOO-001 — The Foo Project\\|PP-FOO-001]]' in content
+    assert '[[TGW-Master-Plan#PP-FOO-001 — The Approved Project\\|PP-FOO-001]]' in content
+    assert cfg['plan_approved_commit'] in content
+    assert cfg['plan_approved_solution_hash'] in content
     # no temp file left behind
     assert not list(board.parent.glob('.taskboard-*'))
+    assert 'plan' not in board.relative_to(tmp_path).parts
 
 
 def test_render_reports_tracker_failure(tmp_path):
@@ -171,7 +203,39 @@ def test_render_reports_tracker_failure(tmp_path):
         result = render_taskboard(cfg)
     assert result['ok'] is False
     assert 'db down' in result['error']
+    assert result['plan_identity']['plan_commit'] == cfg['plan_approved_commit']
     assert not taskboard_path(cfg).exists()
+
+
+@pytest.mark.parametrize(
+    ('field', 'code'),
+    [
+        ('plan_approved_commit', 'approved_plan_commit_required'),
+        ('plan_approved_solution_hash', 'approved_solution_required'),
+    ],
+)
+def test_render_refuses_unbound_plan_before_reading_tracker(tmp_path, field, code):
+    cfg = _cfg(tmp_path)
+    cfg.pop(field)
+    with patch('tgw.todo.todo_list') as todo_list:
+        result = render_taskboard(cfg)
+    assert result == {
+        'ok': False,
+        'error': f'approved Plan binding unavailable: {code}',
+        'code': code,
+    }
+    todo_list.assert_not_called()
+    assert not taskboard_path(cfg).exists()
+
+
+def test_render_refuses_dirty_or_mismatched_approved_plan_before_reading_tracker(tmp_path):
+    cfg = _cfg(tmp_path)
+    (cfg['standalone_plan_root'] / 'plan' / 'TGW-Master-Plan.md').write_text('dirty\n', encoding='utf-8')
+    with patch('tgw.todo.todo_list') as todo_list:
+        result = render_taskboard(cfg)
+    assert result['ok'] is False
+    assert result['code'] == 'source_changed'
+    todo_list.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -235,15 +299,44 @@ PLAN_TEXT = """\
 """
 
 
-def _check_cfg(tmp_path):
-    vault = tmp_path / 'vault'
-    (vault / 'plan').mkdir(parents=True)
-    plan = vault / 'plan' / 'TGW-Master-Plan.md'
-    plan.write_text(PLAN_TEXT, encoding='utf-8')
+def _approved_plan_cfg(tmp_path, *, name='standalone-plan'):
+    root = tmp_path / name
+    root.mkdir()
+    subprocess.run(['git', 'init', '-q', str(root)], check=True)
+    subprocess.run([
+        'git', '-C', str(root), '-c', 'user.name=Test',
+        '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty',
+        '-qm', 'initial approved Plan',
+    ], check=True)
+    commit = subprocess.check_output(
+        ['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True,
+    ).strip()
     return {
-        'plan_vault_path': vault,
-        'plan_master_path': plan,
+        'standalone_plan_root': root,
+        'plan_approved_commit': commit,
+        'plan_approved_solution_hash': 'sha256:' + 'a' * 64,
     }
+
+
+def _commit_approved_plan(cfg, message='update approved Plan'):
+    root = cfg['standalone_plan_root']
+    subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+    subprocess.run([
+        'git', '-C', str(root), '-c', 'user.name=Test',
+        '-c', 'user.email=test@example.invalid', 'commit', '-qm', message,
+    ], check=True)
+    cfg['plan_approved_commit'] = subprocess.check_output(
+        ['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True,
+    ).strip()
+
+
+def _check_cfg(tmp_path):
+    cfg = _approved_plan_cfg(tmp_path)
+    plan = cfg['standalone_plan_root'] / 'plan' / 'TGW-Master-Plan.md'
+    plan.parent.mkdir(parents=True)
+    plan.write_text(PLAN_TEXT, encoding='utf-8')
+    _commit_approved_plan(cfg)
+    return cfg
 
 
 def _open_item(id, body='task', pp_ref=None, plan_anchor=None):
@@ -366,7 +459,7 @@ def test_plan_check_tracker_failure(tmp_path):
 
 
 def test_plan_check_missing_plan(tmp_path):
-    cfg = {'plan_master_path': tmp_path / 'nonexistent.md', 'plan_vault_path': tmp_path}
+    cfg = _approved_plan_cfg(tmp_path)
     result = plan_check(cfg)
     assert result['ok'] is False
 
@@ -543,17 +636,14 @@ def test_format_plan_status_truncates_long_body():
 # ---------------------------------------------------------------------------
 
 def _brief_cfg(tmp_path):
-    vault = tmp_path / 'plan-vault'
-    return {
-        'plan_vault_path': vault,
-        'plan_master_path': vault / 'plan' / 'TGW-Master-Plan.md',
-    }
+    return _approved_plan_cfg(tmp_path)
 
 
 def _write_plan(cfg, text):
-    path = cfg['plan_master_path']
+    path = cfg['standalone_plan_root'] / 'plan' / 'TGW-Master-Plan.md'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding='utf-8')
+    _commit_approved_plan(cfg)
     return path
 
 
@@ -566,7 +656,7 @@ def test_plan_brief_invalid_pp_identifier(tmp_path):
 
 def test_plan_brief_canonical_plan_unavailable(tmp_path):
     cfg = _brief_cfg(tmp_path)
-    # No plan file written — plan_master_path does not exist.
+    # No canonical Master Plan file is committed.
     out = plan_brief(cfg, 'PP-ALPHA-001')
     assert out['ok'] is False
     assert out['code'] == 'canonical_plan_unavailable'
@@ -578,7 +668,9 @@ def test_plan_brief_pp_not_found(tmp_path):
     out = plan_brief(cfg, 'PP-ALPHA-001')
     assert out['ok'] is False
     assert out['code'] == 'pp_not_found'
-    assert out['canonical_source']['path'] == str(cfg['plan_master_path'])
+    assert out['canonical_source']['path'] == str(
+        cfg['standalone_plan_root'] / 'plan' / 'TGW-Master-Plan.md'
+    )
 
 
 def test_plan_brief_ambiguous_pp(tmp_path):
@@ -670,10 +762,11 @@ def test_plan_brief_linked_detail_is_metadata_only_never_inlined(tmp_path):
     # content is never inlined even when well under the packet cap.
     cfg = _brief_cfg(tmp_path)
     _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
-    detail_path = cfg['plan_vault_path'] / 'plan' / 'pp' / 'PP-ALPHA-001.md'
+    detail_path = cfg['standalone_plan_root'] / 'plan' / 'pp' / 'PP-ALPHA-001.md'
     detail_path.parent.mkdir(parents=True)
     detail_bytes = b'# PP-ALPHA-001\nSmall detail doc, well under the cap.\n'
     detail_path.write_bytes(detail_bytes)
+    _commit_approved_plan(cfg)
 
     out = plan_brief(cfg, 'PP-ALPHA-001')
 
@@ -686,16 +779,16 @@ def test_plan_brief_linked_detail_is_metadata_only_never_inlined(tmp_path):
     assert 'content' not in detail
 
 
-def test_plan_brief_uses_explicit_standalone_detail_root(tmp_path):
+def test_plan_brief_ignores_configured_detail_root(tmp_path):
     cfg = _brief_cfg(tmp_path)
-    mutable_detail = cfg['plan_vault_path'] / 'plan' / 'pp' / 'PP-ALPHA-001.md'
+    mutable_detail = tmp_path / 'mutable-vault' / 'plan' / 'pp' / 'PP-ALPHA-001.md'
     mutable_detail.parent.mkdir(parents=True)
     mutable_detail.write_text('stale mutable detail', encoding='utf-8')
-    standalone_detail_root = tmp_path / 'standalone' / 'plan' / 'pp'
+    standalone_detail_root = cfg['standalone_plan_root'] / 'plan' / 'pp'
     standalone_detail_root.mkdir(parents=True)
     canonical_detail = standalone_detail_root / 'PP-ALPHA-001.md'
     canonical_detail.write_text('canonical detail', encoding='utf-8')
-    cfg['plan_detail_root'] = standalone_detail_root
+    cfg['plan_detail_root'] = mutable_detail.parent
     _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
 
     out = plan_brief(cfg, 'PP-ALPHA-001')
@@ -709,12 +802,10 @@ def test_plan_brief_uses_explicit_standalone_detail_root(tmp_path):
 
 def test_plan_brief_uses_secondary_canonical_detail_root(tmp_path):
     cfg = _brief_cfg(tmp_path)
-    first = tmp_path / 'standalone' / 'plan' / 'pp'
-    second = tmp_path / 'standalone' / 'pp'
+    second = cfg['standalone_plan_root'] / 'pp'
     second.mkdir(parents=True)
     canonical_detail = second / 'PP-ALPHA-001.md'
     canonical_detail.write_text('root detail', encoding='utf-8')
-    cfg['plan_detail_roots'] = (first, second)
     _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
 
     out = plan_brief(cfg, 'PP-ALPHA-001')
@@ -725,13 +816,12 @@ def test_plan_brief_uses_secondary_canonical_detail_root(tmp_path):
 
 def test_plan_brief_refuses_duplicate_canonical_details(tmp_path):
     cfg = _brief_cfg(tmp_path)
-    first = tmp_path / 'standalone' / 'plan' / 'pp'
-    second = tmp_path / 'standalone' / 'pp'
+    first = cfg['standalone_plan_root'] / 'plan' / 'pp'
+    second = cfg['standalone_plan_root'] / 'pp'
     first.mkdir(parents=True)
     second.mkdir(parents=True)
     for root in (first, second):
         (root / 'PP-ALPHA-001.md').write_text(str(root), encoding='utf-8')
-    cfg['plan_detail_roots'] = (first, second)
     _write_plan(cfg, '## PP-ALPHA-001 Alpha work\nalpha source\n')
 
     out = plan_brief(cfg, 'PP-ALPHA-001')
@@ -753,9 +843,11 @@ def test_plan_brief_never_writes_anything(tmp_path):
     plan_brief(cfg, 'PP-MISSING-999')  # not_found path
     plan_brief(cfg, 'not-a-pp')  # invalid path
 
-    # No new files anywhere under the plan vault (read-only guarantee).
-    vault = cfg['plan_vault_path']
-    all_files = sorted(p for p in vault.rglob('*') if p.is_file())
+    # No new files anywhere under the approved Plan (read-only guarantee).
+    vault = cfg['standalone_plan_root']
+    all_files = sorted(
+        p for p in vault.rglob('*') if p.is_file() and '.git' not in p.relative_to(vault).parts
+    )
     assert all_files == [plan_path]
     assert plan_path.read_bytes() == before
     assert plan_path.stat().st_mtime == before_mtime

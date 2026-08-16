@@ -52,7 +52,7 @@ import psycopg2.errors
 import tgw.logging as tgw_logging
 from tgw.apis.llm import call_model, get_task_model
 from tgw.apis.ollama import extract_json
-from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.config import DEFAULT_CONFIG
 from tgw.items import atomic_write_text
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -750,9 +750,13 @@ class PMIntakeWorker(QueueWorker):
         queued_dir = inbox_dir / 'queued'
         processed_dir = inbox_dir / 'archive'
         vault_path: Path = self.config['plan_vault_path']
-        master_plan_path: Path = self.config.get(
-            'plan_update_master_path', self.config['plan_master_path']
-        )
+        # This is an explicit *authoring* repository target, not Plan
+        # authority.  Operational readers bind the separate clean standalone
+        # materialization through approved_plan_binding(); never fall back to
+        # it here or to a mutable vault path.
+        master_plan_path = self.config.get('plan_update_master_path')
+        if not isinstance(master_plan_path, Path):
+            raise HardFailure('pm_intake requires an explicit Plan update target')
         processed_dir.mkdir(parents=True, exist_ok=True)
 
         note_path = queued_dir / filename
@@ -1006,7 +1010,8 @@ def main() -> int:
     parser.add_argument('--config', default=str(DEFAULT_CONFIG))
     args = parser.parse_args()
 
-    cfg = load_config(Path(args.config))
+    from tgw.config import load_operational_config
+    cfg = load_operational_config(Path(args.config))
     worker = PMIntakeWorker(queue_name=QUEUE_NAME, config=cfg)
     worker.run()
     return 0

@@ -251,7 +251,9 @@ BEGIN
        AND lease_owner = p_worker_id
        AND lease_token = p_lease_token
        AND lease_expires_at IS NOT NULL
-       AND lease_expires_at > NOW()
+       -- NOW() is fixed at transaction start.  A terminal operation that
+       -- waits behind a lock must re-check wall clock time at its statement.
+       AND lease_expires_at > clock_timestamp()
      RETURNING * INTO v_job;
 
     IF NOT FOUND THEN
@@ -471,7 +473,9 @@ BEGIN
        AND lease_owner = p_worker_id
        AND lease_token = p_lease_token
        AND lease_expires_at IS NOT NULL
-       AND lease_expires_at > NOW()
+       -- See fail_job: the terminal fence must not accept a lease that
+       -- expired while this transaction was waiting.
+       AND lease_expires_at > clock_timestamp()
      RETURNING * INTO v_job;
 
     IF NOT FOUND THEN

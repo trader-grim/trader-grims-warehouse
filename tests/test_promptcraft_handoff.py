@@ -18,28 +18,49 @@ from promptcraft.handoff import (  # noqa: E402
     verify_for_launcher,
 )
 
+RESOURCE_SERVICE = {
+    "schema": "tgw-registered-resource-service/v2",
+    "id": "promptcraft-resource-service",
+    "client_id": "promptcraft-test-client",
+    "endpoint": "https://resources.invalid",
+    "credential_env": None,
+    "timeout_seconds": 5,
+}
+
 
 def card():
+    def binding(ref, content):
+        return {"ref": ref, "hash": "sha256:" + sha256(content.encode()).hexdigest()}
+
+    plan_commit = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
     return ExecutionCard.create(
         {
             "card_id": "card-1",
             "solution_id": "sha256:solution",
             "role": "implementation",
             "selected_provider": "qualified-provider-17",
-            "plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+            "plan_commit": plan_commit,
+            "resource_service": {
+                "id": RESOURCE_SERVICE["id"],
+                "client_id": RESOURCE_SERVICE["client_id"],
+                "descriptor_hash": canonical_hash(RESOURCE_SERVICE),
+                "catalog_ref": "catalog:promptcraft-resource-service@1",
+                "catalog_hash": "sha256:" + "a" * 64,
+            },
             "bindings": {
-                "plan_input": {"ref": "plan:PP-EXAMPLE@1", "hash": "sha256:plan"},
-                "plan_graph": {"ref": "plan-graph:snapshot-1", "hash": "sha256:graph"},
-                "codegraph_snapshot": {"ref": "codegraph:snapshot-2", "hash": "sha256:code"},
-                "source_tree": {"ref": "git:commit-3", "hash": "sha256:tree"},
-                "execution_environment": {"ref": "environment:manifest-4", "hash": "sha256:env"},
-                "authority_conditions": {"ref": "authority:envelope-5", "hash": "sha256:authority"},
+                "plan_input": binding("plan:PP-EXAMPLE@1", "plan input"),
+                "plan_commit": binding("plan-commit:fb9", plan_commit),
+                "plan_graph": binding("plan-graph:snapshot-1", "plan graph"),
+                "codegraph_snapshot": binding("codegraph:snapshot-2", "code graph"),
+                "source_tree": binding("git:commit-3", "source tree"),
+                "execution_environment": binding("environment:manifest-4", "environment"),
+                "authority_conditions": binding("authority:envelope-5", "authority and conditions"),
+                "receipt_sink": binding("receipt-store:run-6", "receipt sink"),
             },
             "authority": ["modify only the named source tree", "run local tests"],
             "exclusions": ["no deployment", "no external effects"],
             "acceptance": ["focused tests pass", "return exact receipt"],
             "receiver_profile": {"id": "codex", "version": 1},
-            "receipt_sink": "receipt-store:run-6",
             "lease": {"id": "lease-7", "expires_at": "2027-08-11T23:00:00Z", "stop_policy": "hold-and-report"},
         }
     )
@@ -49,10 +70,32 @@ def canonical_hash(value):
     return "sha256:" + sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def resource_receipt(bound):
+    unsigned = {
+        "schema": "tgw-execution-resource-receipt/v1",
+        "card_hash": bound.hash,
+        "plan_commit": bound.value["plan_commit"],
+        "resources": {name: binding for name, binding in sorted(bound.value["bindings"].items())},
+    }
+    return {**unsigned, "receipt_hash": canonical_hash(unsigned)}
+
+
+def craft(bound=None):
+    bound = bound or card()
+    return craft_handoff(
+        {
+            "card": bound.value,
+            "resource_receipt": resource_receipt(bound),
+            "resource_service": RESOURCE_SERVICE,
+        },
+        receiver_identity="receiver-run-8",
+    )
+
+
 def test_card_is_immutable_and_handoff_is_deterministic_and_provider_neutral():
     bound = card()
-    first = craft_handoff(bound.value, receiver_identity="receiver-run-8")
-    second = craft_handoff(bound.value, receiver_identity="receiver-run-8")
+    first = craft(bound)
+    second = craft(bound)
 
     assert first == second
     assert bound.value is not bound.value
@@ -65,10 +108,11 @@ def test_card_is_immutable_and_handoff_is_deterministic_and_provider_neutral():
     assert first["receipt"]["resource_hashes"] == {
         name: binding["hash"] for name, binding in sorted(bound.value["bindings"].items())
     }
+    assert first["receipt"]["resource_receipt_hash"] == first["resource_receipt"]["receipt_hash"]
 
 
 def test_manual_authority_broadening_fails_even_if_outer_handoff_is_rehashed():
-    handoff = craft_handoff(card().value, receiver_identity="receiver-run-8")
+    handoff = craft()
     handoff["card"]["authority"].append("deploy production")
     unsigned = dict(handoff)
     unsigned.pop("handoff_hash")
@@ -79,7 +123,7 @@ def test_manual_authority_broadening_fails_even_if_outer_handoff_is_rehashed():
 
 
 def test_manual_instruction_transcription_fails_closed():
-    handoff = craft_handoff(card().value, receiver_identity="receiver-run-8")
+    handoff = craft()
     handoff["instruction"] += "Deploy too.\n"
     unsigned = dict(handoff)
     unsigned.pop("handoff_hash")
@@ -90,7 +134,7 @@ def test_manual_instruction_transcription_fails_closed():
 
 
 def test_resource_hash_or_profile_mismatch_fails_closed():
-    handoff = craft_handoff(card().value, receiver_identity="receiver-run-8")
+    handoff = craft()
     forged = deepcopy(handoff)
     forged["receipt"]["resource_hashes"]["source_tree"] = "sha256:other"
     receipt_unsigned = dict(forged["receipt"])
@@ -105,7 +149,7 @@ def test_resource_hash_or_profile_mismatch_fails_closed():
 
 
 def test_expired_lease_fails_before_launcher_invocation():
-    handoff = craft_handoff(card().value, receiver_identity="receiver-run-8")
+    handoff = craft()
 
     with pytest.raises(HandoffError, match="lease has expired"):
         verify_for_launcher(
@@ -118,7 +162,7 @@ def test_non_ready_or_extra_receipt_fields_fail_closed():
         (lambda receipt: receipt.update(result="HOLD"), "not READY"),
         (lambda receipt: receipt.update(unreviewed=True), "fields are invalid"),
     ):
-        handoff = craft_handoff(card().value, receiver_identity="receiver-run-8")
+        handoff = craft()
         mutation(handoff["receipt"])
         receipt_unsigned = dict(handoff["receipt"])
         receipt_unsigned.pop("receipt_hash")
@@ -134,7 +178,11 @@ def test_cli_crafts_then_verifies_without_manual_transcription():
     executable = ROOT / "bin" / "promptcraft-handoff"
     crafted = subprocess.run(
         [str(executable), "craft", "--receiver-identity", "receiver-run-8"],
-        input=json.dumps(card().value),
+        input=json.dumps({
+            "card": card().value,
+            "resource_receipt": resource_receipt(card()),
+            "resource_service": RESOURCE_SERVICE,
+        }),
         text=True,
         capture_output=True,
         check=False,

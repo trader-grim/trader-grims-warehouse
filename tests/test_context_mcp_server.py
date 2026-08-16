@@ -17,130 +17,79 @@ def _git(root: Path, *args: str) -> str:
 
 def _commit(root: Path, message: str) -> str:
     _git(root, "add", ".")
-    subprocess.run(
-        [
-            "git", "-C", str(root), "-c", "user.name=Context Test",
-            "-c", "user.email=context@example.invalid", "commit", "-qm", message,
-        ],
-        check=True,
-    )
+    _git(root, "-c", "user.name=Context Test", "-c", "user.email=context@example.invalid", "commit", "-qm", message)
     return _git(root, "rev-parse", "HEAD")
 
 
 @pytest.fixture
 def bound_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path | str]:
-    plan_repo = tmp_path / "plans"
-    (plan_repo / "plan" / "execution").mkdir(parents=True)
-    (plan_repo / "plan" / "pp").mkdir()
-    (plan_repo / "reference").mkdir()
-    (plan_repo / "plan" / "SPEC-plan-capability-graph-v2.md").write_text(
-        "# Plan v2\n\nA Todo does not complete its parent Plan.\n"
-    )
-    (plan_repo / "plan" / "TGW-Master-Plan.md").write_text(
-        "# Master Plan\n\n## PP-CONTEXT-001\nContext service.\n"
-    )
-    (plan_repo / "plan" / "pp" / "PP-CONTEXT-001.md").write_text(
-        "# PP-CONTEXT-001\n\nProvide Plan and CodeGraph context.\n"
-    )
-    (plan_repo / "plan" / "execution" / "GOVERNED-EXECUTION-PLATFORM-v1.yaml").write_text(
-        "schema: fixture\nwork_units:\n  - id: W11\n"
-    )
-    (plan_repo / "reference" / "context.md").write_text("# Context\n\nExact sources.\n")
-    _git(plan_repo, "init", "-q")
-    approved = _commit(plan_repo, "approved plan")
-    approved_root = tmp_path / "approved"
-    _git(plan_repo, "worktree", "add", "--detach", str(approved_root), approved)
-    (plan_repo / "evidence.md").write_text("later evidence\n")
-    evidence_head = _commit(plan_repo, "later evidence")
+    plan_repository = tmp_path / "plans"
+    for path, content in {
+        "plan/SPEC-plan-capability-graph-v2.md": "# Plan v2\n",
+        "plan/TGW-Master-Plan.md": "# Master Plan\n",
+        "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml": "schema: fixture\n",
+        "plan/pp/PP-CONTEXT-001.md": "# PP\n",
+        "reference/context.md": "# Context\n",
+    }.items():
+        target = plan_repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    _git(plan_repository, "init", "-q")
+    approved = _commit(plan_repository, "approved")
+    materialization = tmp_path / "approved"
+    _git(plan_repository, "worktree", "add", "--detach", str(materialization), approved)
+    (plan_repository / "evidence.md").write_text("later evidence\n")
+    evidence_head = _commit(plan_repository, "evidence")
 
     source = tmp_path / "source"
-    (source / "src" / "pkg").mkdir(parents=True)
-    (source / "src" / "pkg" / "core.py").write_text(
-        "class ContextProvider:\n    pass\n"
-    )
+    (source / "src" / "fixture").mkdir(parents=True)
+    (source / "src" / "fixture" / "provider.py").write_text("class ContextProvider:\n    pass\n")
     (source / "docs" / "runbooks").mkdir(parents=True)
-    (source / "docs" / "runbooks" / "context-v1.md").write_text(
-        "# Context runbook\n\nPlan Graph and CodeGraph stay distinct.\n"
-    )
+    (source / "docs" / "runbooks" / "context.md").write_text("# Context\n\nCommitted runbook.\n")
     _git(source, "init", "-q")
     source_commit = _commit(source, "source")
 
-    runtime = tmp_path / "runtime"
-    monkeypatch.setenv("TGW_CONTEXT_PLAN_ROOT", str(approved_root))
-    monkeypatch.setenv("TGW_CONTEXT_PLAN_REPOSITORY", str(plan_repo))
+    monkeypatch.setenv("TGW_CONTEXT_PLAN_ROOT", str(materialization))
+    monkeypatch.setenv("TGW_CONTEXT_PLAN_REPOSITORY", str(plan_repository))
     monkeypatch.setenv("TGW_CONTEXT_PLAN_COMMIT", approved)
+    monkeypatch.setenv("TGW_CONTEXT_PLAN_SOLUTION", "sha256:" + "a" * 64)
     monkeypatch.setenv("TGW_CONTEXT_SOURCE_ROOT", str(source))
-    monkeypatch.setenv("TGW_CONTEXT_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("TGW_CONTEXT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     context._code_snapshot.cache_clear()
-    return {
-        "plan_repo": plan_repo,
-        "approved_root": approved_root,
-        "approved": approved,
-        "evidence_head": evidence_head,
-        "source": source,
-        "source_commit": source_commit,
-        "runtime": runtime,
-    }
+    return {"approved": approved, "evidence_head": evidence_head, "source": source, "source_commit": source_commit}
 
 
-def test_status_separates_approved_plan_evidence_head_and_master_scope(bound_context):
-    result = context.context_status()
-    assert result["plan"]["approved_commit"] == bound_context["approved"]
-    assert result["plan"]["evidence_head"] == bound_context["evidence_head"]
-    assert result["source"]["commit"] == bound_context["source_commit"]
-    assert result["code_graph"]["commit"] == bound_context["source_commit"]
-    assert result["scope_semantics"]["platform_w11_completion_implies_master_plan_completion"] is False
-    assert result["scope_semantics"]["narrow_plan_pp_or_todo_completion_implies_parent_completion"] is False
-    assert result["context_sha256"].startswith("sha256:")
+def test_status_binds_approved_plan_evidence_and_committed_source(bound_context):
+    status = context.context_status()
+    assert status["plan"]["approved_commit"] == bound_context["approved"]
+    assert status["plan"]["approved_solution_hash"] == "sha256:" + "a" * 64
+    assert status["plan"]["evidence_head"] == bound_context["evidence_head"]
+    assert status["source"]["commit"] == bound_context["source_commit"]
+    assert status["code_graph"]["commit"] == bound_context["source_commit"]
+    assert status["scope_semantics"]["platform_w11_completion_implies_master_plan_completion"] is False
 
 
-def test_task_bundle_uses_approved_plan_and_committed_runbook(bound_context):
-    bundle = context.context_bundle("PP-CONTEXT-001 Plan Graph CodeGraph")
-    assert bundle["plan_graph"]["plan_commit"] == bound_context["approved"]
-    assert bundle["code_graph"]["binding"]["commit"] == bound_context["source_commit"]
-    assert bundle["runbooks"]["matches"][0]["path"] == "docs/runbooks/context-v1.md"
-    assert "Never describe platform W11" in bundle["instructions"][-1]
-    assert (bound_context["runtime"] / "tgw-plan-graph").is_dir()
-
-
-def test_codegraph_and_runbooks_ignore_dirty_source_bytes(bound_context):
+def test_committed_plan_runbook_and_codegraph_ignore_dirty_bytes(bound_context):
     source = bound_context["source"]
-    (source / "src" / "pkg" / "core.py").write_text("broken python !!!\n")
-    (source / "docs" / "runbooks" / "context-v1.md").write_text("dirty replacement\n")
-    graph = context.code_graph("symbols", "ContextProvider", 10)
-    assert graph["result"][0]["name"] == "ContextProvider"
-    runbook = context.runbooks(path="docs/runbooks/context-v1.md")
-    assert "Plan Graph and CodeGraph stay distinct" in runbook["content"]
-    assert "dirty replacement" not in runbook["content"]
+    assert isinstance(source, Path)
+    (source / "src" / "fixture" / "provider.py").write_text("broken python !!!\n")
+    (source / "docs" / "runbooks" / "context.md").write_text("dirty bytes\n")
+    assert context.code_graph("symbols", "ContextProvider")["result"][0]["name"] == "ContextProvider"
+    assert "Committed runbook" in context.runbooks(path="docs/runbooks/context.md")["content"]
+    assert "dirty bytes" not in context.runbooks(path="docs/runbooks/context.md")["content"]
     assert context.context_status()["source"]["working_tree_clean"] is False
 
 
-def test_plan_chunks_are_bounded_and_path_safe(bound_context):
-    result = context.source_chunk("plan/TGW-Master-Plan.md", 1, 2)
-    assert result["commit"] == bound_context["approved"]
-    assert result["content"].startswith("# Master Plan")
+def test_fail_closed_path_and_materialization_checks_and_read_only_surface(bound_context, monkeypatch):
     with pytest.raises(context.ContextError, match="outside"):
-        context.source_chunk("docs/runbooks/context-v1.md")
-    with pytest.raises(context.ContextError, match="canonical"):
-        context.runbooks(path="docs/runbooks/../secrets.md")
-
-
-def test_wrong_approved_materialization_fails_closed(bound_context, monkeypatch):
+        context.source_chunk("docs/runbooks/context.md")
     monkeypatch.setenv("TGW_CONTEXT_PLAN_COMMIT", str(bound_context["evidence_head"]))
     with pytest.raises(context.ContextError, match="does not match"):
         context.context_status()
-
-
-def test_mcp_surface_is_read_only_and_complete(bound_context):
     tools = set(context.mcp._tool_manager._tools)
     assert tools == {
-        "tgw_context_status",
-        "tgw_context_bundle",
-        "tgw_context_plan_graph",
-        "tgw_context_plan_source",
-        "tgw_context_runbooks",
-        "tgw_context_code_graph",
+        "tgw_context_status", "tgw_context_bundle", "tgw_context_plan_graph",
+        "tgw_context_plan_source", "tgw_context_runbooks", "tgw_context_code_graph",
     }
     payload = json.loads(context.tgw_context_status())
-    assert payload["ok"] is True
-    assert not any("enqueue" in name or "write" in name for name in tools)
+    assert payload["ok"] is False

@@ -216,6 +216,32 @@ def test_cmd_clip_unknown_action(tmp_path):
     assert "unknown clip action" in out["error"]
 
 
+def test_pp_clip_authority_projection_uses_http_client_not_history_db(tmp_path, monkeypatch, capsys):
+    calls = []
+
+    class Client:
+        def __init__(self, endpoint, token):
+            calls.append((endpoint, token))
+
+        def list_requests(self, *, limit):
+            return {"requests": [{"request_id": "request:1", "status": "pending"}], "limit": limit}
+
+    monkeypatch.setattr(clip, "PlanAuthorityHttpClient", Client)
+    result = clip.cmd_clip(
+        "authority-list", authority_url="https://authority.example", authority_token="token",
+        limit=7, db_path=_db(tmp_path),
+    )
+    assert result["ok"] is True
+    assert calls == [("https://authority.example", "token")]
+    assert clip.list_history(db_path=_db(tmp_path)) == []
+    assert "request:1" in capsys.readouterr().out
+
+
+def test_pp_clip_authority_decision_requires_explicit_operator_inputs(tmp_path):
+    result = clip.cmd_clip("authority-decide", authority_url="https://authority.example", authority_token="token", db_path=_db(tmp_path))
+    assert result == {"ok": False, "error": "authority-decide requires --request-id, --decision and --reason"}
+
+
 # ---------------------------------------------------------------------------
 # origin/label columns + deliver_clip (todo #1563/PP-CLIP-001
 # clipboard-agent-delivery Phase 0)

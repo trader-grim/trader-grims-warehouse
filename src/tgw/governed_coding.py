@@ -9,6 +9,18 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from tgw.execution_resources import (
+    HTTPRegisteredResourceResolver,
+    ResourceResolver,
+    ResourceVerificationError,
+    card_resource_receipt,
+    resource_service_attestation_key,
+    resource_service_catalog_hash,
+    resource_service_descriptor_hash,
+    validate_harness_retrieval_attestation,
+    verify_card_resource_service,
+    verify_resource_service_registration,
+)
 from tgw.harness_registry import (
     ProviderHealth,
     execution_card_provider_fields,
@@ -98,6 +110,9 @@ def dispatch_role(
     execution_identity: str,
     required_capabilities: Sequence[str] = (),
     independent_from: Sequence[str] = (),
+    resource_resolver: ResourceResolver | None = None,
+    resource_service: Mapping[str, Any] | None = None,
+    resource_service_catalog: Mapping[str, Any] | None = None,
     run: Run = subprocess.run,
 ) -> dict[str, Any]:
     """Select, adapt, execute, and bind one role result to an immutable receipt."""
@@ -122,6 +137,7 @@ def dispatch_role(
                 "execution_identity": execution_identity,
                 "card_hash": None,
                 "promptcraft_receipt_hash": None,
+                "resource_receipt_hash": None,
                 "outcome": "unavailable",
                 "established_conditions": [],
                 "artifacts": [{"kind": "provider_selection", "considered": selection["considered"]}],
@@ -129,8 +145,52 @@ def dispatch_role(
         )
     provider_fields = execution_card_provider_fields(selection)
     card = _card(card_template, provider_fields, role)
+    try:
+        if resource_resolver is None or resource_service is None or resource_service_catalog is None:
+            raise ResourceVerificationError("registered resource resolver is unavailable")
+        verified_service, verified_catalog = verify_card_resource_service(
+            card, resource_service, resource_service_catalog,
+        )
+        if not isinstance(resource_resolver, HTTPRegisteredResourceResolver):
+            raise ResourceVerificationError("registered resource resolver cannot check service health")
+        verify_resource_service_registration(
+            verified_catalog, verified_service, resolver=resource_resolver,
+        )
+        attestation_key = resource_service_attestation_key(
+            verified_catalog, verified_service["id"], verified_service["client_id"],
+        )
+        resource_receipt = card_resource_receipt(card)
+    except ResourceVerificationError as exc:
+        return _receipt(
+            {
+                "schema": RECEIPT_SCHEMA,
+                "status": "HOLD",
+                "role": role,
+                "selected_provider": selection["selected_provider"],
+                "execution_identity": execution_identity,
+                "card_hash": card["card_hash"],
+                "promptcraft_receipt_hash": None,
+                "resource_receipt_hash": None,
+                "outcome": "resource-verification",
+                "established_conditions": [],
+                "artifacts": [{"kind": "resource_verification", "detail": str(exc)}],
+            }
+        )
     promptcraft = _promptcraft_path(adapters)
-    handoff = _promptcraft(promptcraft, "craft", card, receiver_identity=execution_identity, run=run)
+    handoff = _promptcraft(
+        promptcraft,
+        "craft",
+        {
+            "card": card,
+            "resource_receipt": resource_receipt,
+            # This is a small service descriptor, not copied execution context.
+            # The selected harness receives it and must retrieve the card-bound
+            # sources itself before it may claim a passing role result.
+            "resource_service": verified_service,
+        },
+        receiver_identity=execution_identity,
+        run=run,
+    )
     invocation = _promptcraft(promptcraft, "verify", handoff, receiver_identity=execution_identity, run=run)
     if invocation.get("selected_provider") != selection["selected_provider"]:
         raise GovernedCodingError("Promptcraft invocation provider does not match selection")
@@ -144,11 +204,14 @@ def dispatch_role(
             **os.environ,
             "TGW_EXECUTION_HANDOFF_HASH": str(handoff["handoff_hash"]),
             "TGW_EXECUTION_CARD_HASH": str(card["card_hash"]),
+            "TGW_EXECUTION_RESOURCE_RECEIPT_HASH": str(resource_receipt["receipt_hash"]),
         },
     )
     artifacts: list[Any] = []
     outcome = "failed"
     established: list[str] = []
+    harness_resource_receipt_hash: str | None = None
+    harness_retrieval_attestation: Mapping[str, Any] | None = None
     if runner.returncode:
         artifacts.append({"kind": "runner_failure", "detail": runner.stderr[-500:]})
     else:
@@ -160,21 +223,53 @@ def dispatch_role(
             outcome = str(result.get("outcome", "failed"))
             raw_established = result.get("established_conditions", [])
             raw_artifacts = result.get("artifacts", [])
+            raw_resource_hash = result.get("resource_receipt_hash")
+            raw_attestation = result.get("resource_retrieval_attestation")
             if isinstance(raw_established, list) and all(isinstance(item, str) for item in raw_established):
                 established = raw_established
             if isinstance(raw_artifacts, list):
                 artifacts = raw_artifacts
+            if isinstance(raw_resource_hash, str):
+                harness_resource_receipt_hash = raw_resource_hash
+            if isinstance(raw_attestation, Mapping):
+                harness_retrieval_attestation = raw_attestation
     allowed = _ROLE_CONDITIONS[role]
+    attestation_hash: str | None = None
+    attestation_error: str | None = None
+    if not isinstance(resource_resolver, HTTPRegisteredResourceResolver):
+        attestation_error = "registered resource resolver cannot verify harness retrieval attestation"
+    elif harness_retrieval_attestation is None:
+        attestation_error = "runner did not return a service-issued retrieval attestation"
+    else:
+        try:
+            verified_attestation = resource_resolver.verify_harness_retrieval_attestation(
+                harness_retrieval_attestation,
+                card_hash=card["card_hash"], role=role,
+                execution_identity=execution_identity, handoff_hash=handoff["handoff_hash"],
+                resource_receipt_hash=resource_receipt["receipt_hash"], resources=card["bindings"],
+                **attestation_key,
+            )
+            attestation_hash = str(verified_attestation["attestation_hash"])
+            harness_retrieval_attestation = verified_attestation
+        except ResourceVerificationError as exc:
+            attestation_error = str(exc)
     valid_success = (
         outcome == "satisfied"
         and _ROLE_REQUIRED[role] <= set(established)
         and set(established) <= allowed
+        and harness_resource_receipt_hash == resource_receipt["receipt_hash"]
+        and attestation_hash is not None
     )
     if not valid_success:
         established = []
         if outcome == "satisfied":
             outcome = "failed"
-            artifacts.append({"kind": "contract_failure", "detail": "runner claimed conditions outside role authority"})
+            detail = "runner claimed conditions outside role authority"
+            if harness_resource_receipt_hash != resource_receipt["receipt_hash"]:
+                detail = "runner did not prove retrieval of the card-bound resource receipt"
+            elif attestation_error is not None:
+                detail = attestation_error
+            artifacts.append({"kind": "contract_failure", "detail": detail})
     return _receipt(
         {
             "schema": RECEIPT_SCHEMA,
@@ -184,6 +279,15 @@ def dispatch_role(
             "execution_identity": execution_identity,
             "card_hash": card["card_hash"],
             "promptcraft_receipt_hash": handoff["receipt"]["receipt_hash"],
+            "handoff_hash": handoff["handoff_hash"],
+            "resource_receipt_hash": resource_receipt["receipt_hash"],
+            "harness_resource_receipt_hash": harness_resource_receipt_hash,
+            "harness_retrieval_attestation_hash": attestation_hash,
+            "harness_retrieval_attestation": harness_retrieval_attestation,
+            "resource_service_descriptor_hash": resource_service_descriptor_hash(verified_service),
+            "resource_service_client_id": verified_service["client_id"],
+            "resource_service_catalog_ref": verified_catalog["catalog_ref"],
+            "resource_service_catalog_hash": resource_service_catalog_hash(verified_catalog),
             "outcome": outcome,
             "established_conditions": established,
             "artifacts": artifacts,
@@ -204,14 +308,39 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
         "HOLD",
     }:
         raise GovernedCodingError("governed coding receipt contract is invalid")
+    attestation = receipt.get("harness_retrieval_attestation")
     if receipt.get("status") == "PASS" and (
         not isinstance(receipt.get("selected_provider"), str)
         or not isinstance(receipt.get("card_hash"), str)
         or not isinstance(receipt.get("promptcraft_receipt_hash"), str)
+        or not isinstance(receipt.get("handoff_hash"), str)
+        or not isinstance(receipt.get("resource_receipt_hash"), str)
+        or receipt.get("harness_resource_receipt_hash") != receipt.get("resource_receipt_hash")
+        or not isinstance(receipt.get("resource_service_descriptor_hash"), str)
+        or not isinstance(receipt.get("resource_service_client_id"), str)
+        or not isinstance(receipt.get("resource_service_catalog_ref"), str)
+        or not isinstance(receipt.get("resource_service_catalog_hash"), str)
+        or not isinstance(receipt.get("harness_retrieval_attestation_hash"), str)
+        or not isinstance(attestation, Mapping)
+        or attestation.get("attestation_hash") != receipt.get("harness_retrieval_attestation_hash")
         or not _ROLE_REQUIRED[str(receipt["role"])]
         <= set(receipt.get("established_conditions", ()))
     ):
         raise GovernedCodingError("passing governed coding receipt lacks role evidence")
+    if receipt.get("status") == "PASS":
+        try:
+            validate_harness_retrieval_attestation(
+                attestation,
+                expected={
+                    "card_hash": receipt["card_hash"], "role": receipt["role"],
+                    "execution_identity": receipt["execution_identity"],
+                    "client_id": receipt["resource_service_client_id"],
+                    "handoff_hash": receipt["handoff_hash"],
+                    "resource_receipt_hash": receipt["resource_receipt_hash"],
+                },
+            )
+        except ResourceVerificationError as exc:
+            raise GovernedCodingError(f"passing governed coding receipt attestation is invalid: {exc}") from exc
 
 
 def admission_gate(receipts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

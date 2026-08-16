@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Mapping, Optional
 
 from mcp.server import FastMCP
 from pydantic import AliasChoices, Field
@@ -52,8 +52,8 @@ _cfg: Dict[str, Any] = {}
 def _get_cfg() -> Dict[str, Any]:
     global _cfg
     if not _cfg:
-        from tgw.config import load_config
-        _cfg = load_config(_CONFIG_PATH)
+        from tgw.config import load_operational_config
+        _cfg = load_operational_config(_CONFIG_PATH)
     return _cfg
 
 
@@ -613,10 +613,32 @@ if not _READONLY:
 # Deterministic parser/retrieval logic lives in tgw.plan_render.plan_brief()
 # (PP-KNOWLEDGE-001 / todo #1439, #1520 follow-up refactor, Tigwa's v1
 # reviewed submission) — this tool is a thin delegate, not a second parser.
-# Paths come from cfg['plan_master_path'] / cfg['plan_detail_root']; no Plan
-# root is hard-coded in this module.  Mutable inbox/docs state remains under
-# cfg['plan_vault_path'] and is deliberately not a canonical read source.
+# The delegated binding derives paths only from the approved standalone Plan;
+# mutable inbox/docs state is deliberately not a canonical read source.
 # ---------------------------------------------------------------------------
+
+def _external_plan_context_hold(cfg: Mapping[str, Any], operation: str) -> str | None:
+    """Refuse local Plan reads after production cuts over to a projection.
+
+    The complete Plan and Plan Graph live behind the registered ``tgw-context``
+    service on tgw-lib.  A production release projection is sufficient for
+    authority execution, but it is deliberately not a second copy of Plan
+    source.  Returning this typed hold prevents an absent local checkout from
+    degrading into ENOENT or being replaced by stale embedded material.
+    """
+    if cfg.get("plan_projection_path") is None:
+        return None
+    return json.dumps({
+        "ok": False,
+        "error": {
+            "code": "CANONICAL_PLAN_CONTEXT_REQUIRED",
+            "message": f"{operation} is served by the registered tgw-context service",
+        },
+        "plan_commit": cfg.get("plan_approved_commit"),
+        "solution_hash": cfg.get("plan_approved_solution_hash"),
+        "context_service": cfg.get("plan_context_service") or "tgw-context",
+        "canonical_authority": "Standalone Plan Markdown on tgw-lib remains canonical.",
+    }, ensure_ascii=False)
 
 @mcp.tool()
 def tgw_get_plan_brief(pp: Annotated[str, alias_field('pp', 'PP')]) -> str:
@@ -636,6 +658,9 @@ def tgw_get_plan_brief(pp: Annotated[str, alias_field('pp', 'PP')]) -> str:
     """
     from tgw.plan_render import plan_brief
     cfg = _get_cfg()
+    hold = _external_plan_context_hold(cfg, "Plan brief retrieval")
+    if hold is not None:
+        return hold
     return json.dumps(plan_brief(cfg, pp), ensure_ascii=False)
 
 
@@ -654,11 +679,16 @@ def tgw_get_plan_graph(
     from tgw.plan_graph import live_plan_graph
 
     cfg = _get_cfg()
+    hold = _external_plan_context_hold(cfg, "Plan Graph retrieval")
+    if hold is not None:
+        return hold
     root = Path(cfg.get('standalone_plan_root') or '/opt/TGW/library/plans')
     try:
         return json.dumps(live_plan_graph(
             root, task, receiver=receiver, operation=operation, limit=limit,
             git_path=str(cfg.get('plan_git_path') or 'git'),
+            approved_plan_commit=cfg.get('plan_approved_commit'),
+            approved_solution_hash=cfg.get('plan_approved_solution_hash'),
         ), ensure_ascii=False)
     except Exception as exc:
         code = getattr(exc, 'code', None)

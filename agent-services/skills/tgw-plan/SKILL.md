@@ -13,7 +13,7 @@ only when the operator explicitly narrows execution.
 
 1. Resolve the Plan root through the registered execution environment. Require it to
    identify `/opt/TGW/library/plans` or a declared successor.
-2. Run `scripts/verify_plan_root.py <root> <approved-ref>` and record the immutable
+2. Run `scripts/verify_plan_root.py <root> <approved-ref> <approved-solution-hash>` and record the immutable
    approved commit separately from the repository's evidence/history HEAD. Never
    silently move the approved ref when evidence is committed.
 3. Read these canonical files completely before changing or launching Plan work:

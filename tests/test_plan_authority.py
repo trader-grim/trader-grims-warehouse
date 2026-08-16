@@ -3,13 +3,24 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.testclient import TestClient
 
-from tgw.plan_authority import AuthorityDecision, AuthorityRequest, DecisionKind, EffectKind, TypedEffect, create_authority_router
+from tgw.plan_authority import (
+    AuthorityDecision,
+    AuthorityPrincipal,
+    AuthorityRequest,
+    DecisionKind,
+    EffectKind,
+    PrincipalRole,
+    TypedEffect,
+    create_authority_router,
+)
 from tgw.plan_solver import solve
 
 COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
+OPERATOR = AuthorityPrincipal("operator:fixture-alice", PrincipalRole.OPERATOR, "test-session")
+EXECUTOR = AuthorityPrincipal("executor:fixture-runner", PrincipalRole.EXECUTOR, "test-credential")
 
 
 def test_sql_effect_constraint_covers_every_registered_effect():
@@ -126,6 +137,7 @@ def test_http_api_is_one_projection_over_injected_canonical_store():
             return self.event_rows
 
         def decide(self, decision):
+            self.decision = decision
             self.event_rows.append({"event_type": "decided", "kind": decision.kind.value})
             return {"request_id": decision.request_id, "decision_kind": decision.kind.value}
 
@@ -140,21 +152,110 @@ def test_http_api_is_one_projection_over_injected_canonical_store():
             store,
             current_plan_commit=lambda: COMMIT,
             load_solution=lambda identity: solution if identity == solution["solution_hash"] else {},
-            require_operator=lambda: "operator",
-            require_executor=lambda: "executor",
+            require_operator=lambda: OPERATOR,
+            require_executor=lambda: EXECUTOR,
         )
     )
     client = TestClient(app)
-    body = {**_data(), "solution_hash": solution["solution_hash"]}
+    body = {**_data(requested_by="caller:spoofed"), "solution_hash": solution["solution_hash"]}
 
     created = client.post("/api/plan-authority/requests", json=body)
     assert created.status_code == 201
     request_id = created.json()["request"]["request_id"]
+    assert store.request.requested_by == OPERATOR.identity
     assert client.get("/api/plan-authority/requests").json()["requests"] == [{"request_id": request_id}]
     decision = client.post(
         f"/api/plan-authority/requests/{request_id}/decisions",
-        json={"kind": "hold", "decided_by": "Dave", "reason": "needs reconciliation"},
+        json={"kind": "hold", "decided_by": "caller:spoofed", "reason": "needs reconciliation"},
     )
     assert decision.json()["request"]["decision_kind"] == "hold"
+    assert store.decision.decided_by == OPERATOR.identity
     detail = client.get(f"/api/plan-authority/requests/{request_id}").json()
     assert [event["event_type"] for event in detail["events"]] == ["requested", "decided"]
+
+
+def test_consume_requires_a_distinct_executor_and_uses_only_the_stored_typed_effect():
+    effect = TypedEffect.parse({
+        "kind": "authority-canary", "generation": "canary-1",
+        "parameters": {"canary_id": "canary:1", "purpose": "verify-plan-authority-roundtrip"},
+    })
+
+    class Store:
+        row = {
+            "request_id": "request:1", "effect_kind": effect.kind.value,
+            "effect_generation": effect.generation, "effect_parameters": effect.parameters,
+            "effect_hash": effect.effect_hash,
+        }
+
+        def get(self, request_id):
+            return self.row if request_id == "request:1" else None
+
+        def list(self, limit=100):
+            return []
+
+        def events(self, request_id):
+            return []
+
+        def create_request(self, request):  # pragma: no cover - route contract
+            raise AssertionError
+
+        def decide(self, decision):  # pragma: no cover - route contract
+            raise AssertionError
+
+    invoked = []
+
+    def require_operator(role: str | None = Header(default=None)):
+        if role != "operator":
+            raise HTTPException(401, "operator required")
+        return OPERATOR
+
+    def require_executor(role: str | None = Header(default=None)):
+        if role != "executor":
+            raise HTTPException(401, "executor required")
+        return EXECUTOR
+
+    def registered_controller(*, request_id, effect, executor_principal):
+        invoked.append((request_id, effect, executor_principal))
+        return {"receipt_id": "attempt:1", "outcome": "succeeded"}
+
+    app = FastAPI()
+    app.include_router(create_authority_router(
+        Store(), current_plan_commit=lambda: COMMIT, load_solution=lambda _: _solution(),
+        require_operator=require_operator, require_executor=require_executor,
+        execute_effect=registered_controller,
+    ))
+    client = TestClient(app)
+
+    # A normal operator is not an executor, even if the request is already approved.
+    assert client.post("/api/plan-authority/requests/request:1/consume", json={}, headers={"role": "operator"}).status_code == 401
+    # An executor cannot smuggle a changed effect/generation around the controller.
+    assert client.post(
+        "/api/plan-authority/requests/request:1/consume",
+        json={"effect_hash": "effect:attacker", "generation": "other"}, headers={"role": "executor"},
+    ).status_code == 409
+    executed = client.post(
+        "/api/plan-authority/requests/request:1/consume", json={}, headers={"role": "executor"},
+    )
+    assert executed.status_code == 200
+    assert executed.json()["receipt"]["outcome"] == "succeeded"
+    assert invoked == [("request:1", effect, EXECUTOR.identity)]
+
+    unavailable = FastAPI()
+    unavailable.include_router(create_authority_router(
+        Store(), current_plan_commit=lambda: COMMIT, load_solution=lambda _: _solution(),
+        require_operator=require_operator, require_executor=require_executor,
+    ))
+    assert TestClient(unavailable).post(
+        "/api/plan-authority/requests/request:1/consume", json={}, headers={"role": "executor"},
+    ).status_code == 409
+
+
+def test_raw_or_wrong_role_dependency_values_fail_closed_before_mutation():
+    app = FastAPI()
+    app.include_router(create_authority_router(
+        object(), current_plan_commit=lambda: COMMIT, load_solution=lambda _: _solution(),
+        require_operator=lambda: "operator:caller-controlled",
+        require_executor=lambda: OPERATOR,
+    ))
+    body = {**_data(), "solution_hash": _solution()["solution_hash"]}
+    assert TestClient(app).post("/api/plan-authority/requests", json=body).status_code == 401

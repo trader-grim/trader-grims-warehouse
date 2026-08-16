@@ -9,7 +9,8 @@ tools: Bash, Read, Edit, Write, Grep, Glob
 You execute exactly ONE todo/work-packet, on an isolated branch, and stop at
 a result manifest. You do not merge to main, you do not review your own
 work against the plan for fidelity — that check happens in a separate step
-(Tigwa's bounded check/fix loop, see `docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md`
+(Tigwa's bounded check/fix loop, see the bound approved Plan materialization's
+`plan/pp/PP-HERMES-EA-001.md`
 §"Tigwa as branch-review enforcer"). Your job ends when the branch + result
 manifest exist and are pushed/committed; someone else stitches.
 
@@ -29,13 +30,14 @@ neither is given, stop and ask — do not guess which task to run.
 ### 1. Load — the packet, and ONLY the packet
 
 - `sudo -u tgw tgw todo brief <id>` for the task brief.
-- If `docs/TGW-Plan-Vault/plan/packets/<id>-*.md` exists, read it. Its
+- Resolve the approved Plan binding first. If its `plan/packets/<id>-*.md`
+  exists, read it. Its
   **Context budget** line is a hard ceiling on what you may load beyond
   this file. If it names specific reference docs or code paths, load
   exactly those — nothing more.
 - If the packet has no explicit Spec section (cadence/TTL/limits/defaults
   stated), STOP — an unspecced task is not delegatable to this profile
-  (Work-packet protocol, `TGW-Master-Plan.md`). Report back instead of
+  (the bound Plan's work-packet protocol). Report back instead of
   guessing.
 
 ### 2. Worktree + branch — isolated, never the shared checkout
@@ -192,8 +194,8 @@ reality. Report the mismatch in the result manifest as `blocked`.
 
 ### 6. Result manifest — then stop
 
-Write `docs/TGW-Plan-Vault/plan/packets/results/<id>-RESULT.md`, committed
-on the branch:
+Write the result to the task's separate candidate-evidence store, committed
+on the branch. Do not write into the approved Plan materialization:
 
 ```
 # Result: <todo-id> <slug>

@@ -1,7 +1,7 @@
 """
 tgw.plan_render — generated taskboard renderer + plan reconciler (PP-PLANDB-001).
 
-Renders ``plan/TGW-Taskboard.md`` in the plan vault from the ``todo_items``
+Renders ``TGW-Taskboard.md`` in the configured operational render root from the ``todo_items``
 table: per-agent sections (ID / pri / size / task), blocker badges from
 ``depends_on``, Obsidian links to master-plan sections via ``pp_ref`` /
 ``plan_anchor``, and a done-this-week section.
@@ -27,9 +27,10 @@ import re
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 TASKBOARD_NAME = 'TGW-Taskboard.md'
+DEFAULT_PLAN_ROOT = Path('/opt/TGW/library/plans')
 
 # ---------------------------------------------------------------------------
 # plan_brief — bounded, exact-source Master Plan retrieval (PP-KNOWLEDGE-001
@@ -67,7 +68,50 @@ _HEADER = """\
 
 
 def taskboard_path(cfg: Dict[str, Any]) -> Path:
-    return cfg['plan_vault_path'] / 'plan' / TASKBOARD_NAME
+    return Path(cfg.get('plan_render_root') or '/opt/TGW/var/plan-render') / TASKBOARD_NAME
+
+
+class PlanRenderBindingError(ValueError):
+    """A rendered Plan view cannot establish its approved source identity."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(f'approved Plan binding unavailable: {code}')
+
+
+def approved_render_plan_identity(cfg: Mapping[str, Any]) -> Dict[str, str]:
+    """Return the only Plan identity permitted to drive a rendered view.
+
+    Rendered taskboard and agent-trace views are operational artifacts, but
+    their links still shape operator decisions.  Never let a configured
+    legacy ``plan_master_path`` substitute for the exact clean standalone
+    Plan materialization approved with its solution.
+    """
+    from tgw.plan_graph import SourcePreconditionError, approved_plan_binding
+
+    try:
+        binding = approved_plan_binding(
+            Path(cfg.get('standalone_plan_root') or DEFAULT_PLAN_ROOT),
+            approved_plan_commit=cfg.get('plan_approved_commit'),
+            approved_solution_hash=cfg.get('plan_approved_solution_hash'),
+            git_path=str(cfg.get('plan_git_path') or 'git'),
+        )
+        root = Path(binding['plan_root'])
+        master = root / 'plan' / 'TGW-Master-Plan.md'
+        if not master.is_file():
+            raise PlanRenderBindingError('canonical_plan_unavailable')
+    except PlanRenderBindingError:
+        raise
+    except SourcePreconditionError as exc:
+        raise PlanRenderBindingError(exc.code) from exc
+    except (OSError, ValueError) as exc:
+        raise PlanRenderBindingError('canonical_plan_unavailable') from exc
+    return {
+        'plan_root': str(root),
+        'plan_commit': binding['plan_commit'],
+        'solution_hash': binding['solution_hash'],
+        'master_plan_path': str(master),
+    }
 
 
 def _parse_size(body: str) -> str:
@@ -118,6 +162,7 @@ def build_taskboard(
     items: List[Dict[str, Any]],
     headings: Dict[str, str],
     now: Optional[datetime] = None,
+    plan_identity: Optional[Mapping[str, str]] = None,
 ) -> str:
     """Pure renderer: todo rows (open + recently done) → taskboard markdown."""
     now = now or datetime.now(tz=timezone.utc)
@@ -131,6 +176,15 @@ def build_taskboard(
 
     lines = [
         _HEADER,
+        *(
+            [
+                '_Bound Plan: '
+                f'commit `{plan_identity["plan_commit"]}`, '
+                f'solution `{plan_identity["solution_hash"]}`._',
+                '',
+            ]
+            if plan_identity is not None else []
+        ),
         f'_Rendered {now.strftime("%Y-%m-%d %H:%M UTC")} — '
         f'{len(open_items)} open, {len(done_week)} done in the last {_DONE_WINDOW_DAYS} days._',
         '',
@@ -178,16 +232,25 @@ def build_taskboard(
 
 
 def render_taskboard(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Query the tracker and atomically (re)write plan/TGW-Taskboard.md."""
+    """Query the tracker and atomically write a non-authoritative runtime view."""
     from tgw.todo import todo_list
+
+    try:
+        plan_identity = approved_render_plan_identity(cfg)
+    except PlanRenderBindingError as exc:
+        return {'ok': False, 'error': str(exc), 'code': exc.code}
 
     try:
         items = todo_list(show_all=True)
     except Exception as exc:
-        return {'ok': False, 'error': f'todo tracker unavailable: {exc}'}
+        return {
+            'ok': False,
+            'error': f'todo tracker unavailable: {exc}',
+            'plan_identity': plan_identity,
+        }
 
-    headings = _plan_heading_map(cfg['plan_master_path'])
-    text = build_taskboard(items, headings)
+    headings = _plan_heading_map(Path(plan_identity['master_plan_path']))
+    text = build_taskboard(items, headings, plan_identity=plan_identity)
 
     out_path = taskboard_path(cfg)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,7 +270,13 @@ def render_taskboard(cfg: Dict[str, Any]) -> Dict[str, Any]:
     open_count = sum(1 for i in items if not i.get('done_at'))
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=_DONE_WINDOW_DAYS)
     done_week = sum(1 for i in items if i.get('done_at') and i['done_at'] >= cutoff)
-    return {'ok': True, 'path': str(out_path), 'open': open_count, 'done_week': done_week}
+    return {
+        'ok': True,
+        'path': str(out_path),
+        'open': open_count,
+        'done_week': done_week,
+        'plan_identity': plan_identity,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -257,16 +326,24 @@ def plan_check(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     from tgw.todo import todo_list
 
-    plan_path = cfg.get('plan_master_path')
-    if not plan_path or not Path(plan_path).exists():
-        return {'ok': False, 'error': f'Master plan not found: {plan_path}', 'issues': [], 'counts': {}}
+    try:
+        plan_identity = approved_render_plan_identity(cfg)
+    except PlanRenderBindingError as exc:
+        return {
+            'ok': False, 'error': str(exc), 'code': exc.code,
+            'issues': [], 'counts': {},
+        }
+    plan_path = Path(plan_identity['master_plan_path'])
 
     pp_in_headings, done_in_headings, all_headings = _parse_plan_sections(Path(plan_path))
 
     try:
         items = todo_list(show_all=True)
     except Exception as exc:
-        return {'ok': False, 'error': f'todo tracker unavailable: {exc}', 'issues': [], 'counts': {}}
+        return {
+            'ok': False, 'error': f'todo tracker unavailable: {exc}',
+            'issues': [], 'counts': {}, 'plan_identity': plan_identity,
+        }
 
     open_items = [i for i in items if not i.get('done_at')]
     issues: List[Dict[str, Any]] = []
@@ -380,6 +457,7 @@ def plan_check(cfg: Dict[str, Any]) -> Dict[str, Any]:
     infos = sum(1 for i in issues if i['severity'] == 'info')
     return {
         'ok': True,
+        'plan_identity': plan_identity,
         'issues': issues,
         'counts': {'warnings': warnings, 'infos': infos},
         'summary': (
@@ -404,6 +482,12 @@ def format_plan_check(result: Dict[str, Any]) -> str:
     issues = result.get('issues', [])
     counts = result.get('counts', {})
     lines = [f"tgw plan check — {result['summary']}"]
+    identity = result.get('plan_identity') or {}
+    if identity:
+        lines.append(
+            f"Bound Plan: {identity.get('plan_commit', 'unknown')} "
+            f"{identity.get('solution_hash', 'unknown')}"
+        )
 
     if not issues:
         return '\n'.join(lines)
@@ -581,10 +665,10 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
 
     Pure, read-only, deterministic retrieval — never writes anything, never
     produces a model-written summary, and refuses missing or ambiguous PP
-    matches. Paths are derived from ``cfg['plan_master_path']`` and
-    ``cfg['plan_vault_path']`` — no Plan Vault root is hard-coded here, and
-    this is the single implementation shared by the MCP tool (and any future
-    CLI surface, per Tigwa's item 7 — not built here).
+    matches. Paths are derived only from the approved standalone Plan binding
+    and its canonical siblings — no mutable Plan Vault/config-path fallback
+    exists, and this is the single implementation shared by the MCP tool (and
+    any future CLI surface, per Tigwa's item 7 — not built here).
 
     A linked ``plan/pp/<PP>.md`` detail document, if present, is reported
     metadata-only (path/status/sha256/bytes) — its content is never inlined,
@@ -603,7 +687,12 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
             'code': 'invalid_pp_identifier',
         }
 
-    plan_master_path = Path(cfg['plan_master_path'])
+    try:
+        plan_identity = approved_render_plan_identity(cfg)
+    except PlanRenderBindingError as exc:
+        return {'ok': False, 'error': str(exc), 'code': exc.code}
+
+    plan_master_path = Path(plan_identity['master_plan_path'])
     try:
         raw, source = _canonical_plan_source(plan_master_path)
     except OSError as exc:
@@ -611,6 +700,7 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
             'ok': False,
             'error': str(exc),
             'code': 'canonical_plan_unavailable',
+            'plan_identity': plan_identity,
         }
 
     text = raw.decode('utf-8')
@@ -620,6 +710,7 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
             'ok': False,
             'code': 'pp_not_found',
             'query': {'pp': query_pp},
+            'plan_identity': plan_identity,
             'canonical_source': source,
             'warning': 'Read the full canonical Master Plan or select another PP; no heading was guessed.',
         }
@@ -628,6 +719,7 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
             'ok': False,
             'code': 'ambiguous_pp',
             'query': {'pp': query_pp},
+            'plan_identity': plan_identity,
             'canonical_source': source,
             'matches': [{key: section[key] for key in ('heading', 'line_start', 'line_end')}
                         for section in sections],
@@ -640,21 +732,16 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
             'ok': False,
             'code': 'section_too_large',
             'query': {'pp': query_pp},
+            'plan_identity': plan_identity,
             'canonical_source': source,
             'section': {key: section[key] for key in section if key != 'content'},
             'warning': 'Exact section exceeds the packet limit; use the canonical source path and anchors.',
         }
 
-    # Linked PP details are canonical Plan material too.  Preserve the legacy
-    # fixture/config fallback, while production config supplies the standalone
-    # detail root explicitly.
-    configured_roots = cfg.get('plan_detail_roots')
-    if configured_roots is None:
-        configured_roots = (
-            cfg.get('plan_detail_root')
-            or (Path(cfg['plan_vault_path']) / 'plan' / 'pp'),
-        )
-    detail_roots = tuple(Path(root) for root in configured_roots)
+    # Linked PP details are canonical Plan material too.  The master Plan's
+    # own parent is the only fallback; a source-vault sibling is never valid.
+    plan_root = Path(plan_identity['plan_root'])
+    detail_roots = (plan_root / 'plan' / 'pp', plan_root / 'pp')
     detail_candidates = tuple(root / f'{query_pp}.md' for root in detail_roots)
     existing_details = tuple(path for path in detail_candidates if path.is_file())
     detail_path = existing_details[0] if len(existing_details) == 1 else detail_candidates[0]
@@ -686,6 +773,7 @@ def plan_brief(cfg: Dict[str, Any], pp_ref: str) -> Dict[str, Any]:
     return {
         'ok': True,
         'generator_version': PLAN_BRIEF_VERSION,
+        'plan_identity': plan_identity,
         'query': {'pp': query_pp},
         'canonical_source': source,
         'section': section,

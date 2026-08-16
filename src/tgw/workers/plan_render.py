@@ -1,8 +1,8 @@
 """
 tgw.workers.plan_render — Taskboard render worker (PP-PLANDB-001 Phase 2).
 
-Claims a plan_render job and regenerates plan/TGW-Taskboard.md from the
-todo_items table.
+Claims a plan_render job and regenerates the operational TGW-Taskboard.md
+view from the todo_items table and an approved Plan binding.
 
 Jobs are enqueued with a 30s not_before and dedupe_key='plan_render:pending'
 so rapid successive todo mutations coalesce into a single render
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import tgw.logging as tgw_logging
-from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.config import DEFAULT_CONFIG
 from tgw.plan_render import render_taskboard
 from tgw.queue.worker_base import QueueWorker
 
@@ -48,7 +48,8 @@ def main() -> int:
     parser.add_argument('--config', default=str(DEFAULT_CONFIG))
     args = parser.parse_args()
 
-    cfg = load_config(Path(args.config))
+    from tgw.config import load_operational_config
+    cfg = load_operational_config(Path(args.config))
     worker = PlanRenderWorker(queue_name=QUEUE_NAME, config=cfg)
     worker.run()
     return 0

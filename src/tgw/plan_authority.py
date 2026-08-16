@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from hashlib import sha256
@@ -17,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from tgw.plan_solver import validate_for_dispatch
 
 AUTHORITY_SCHEMA = "tgw-plan-authority/v1"
+_PRINCIPAL_IDENTITY = re.compile(r"^(operator|executor):[A-Za-z0-9][A-Za-z0-9._@/-]{0,191}$")
 
 
 def _canonical(value: Any) -> bytes:
@@ -31,6 +33,45 @@ class DecisionKind(str, Enum):
     APPROVE = "approve"
     HOLD = "hold"
     RECONCILE = "reconcile"
+
+
+class PrincipalRole(str, Enum):
+    """The two deliberately separate PlanAuthority mutation roles."""
+
+    OPERATOR = "operator"
+    EXECUTOR = "executor"
+
+
+@dataclass(frozen=True)
+class AuthorityPrincipal:
+    """A named principal derived by a configured host authentication seam.
+
+    This is intentionally not a string alias.  Authority routes refuse raw
+    strings, so a dependency must attest both the named configured principal
+    and the distinct role before a request, decision, or consumption occurs.
+    ``authentication_binding`` is non-secret provenance (for example
+    ``session`` or ``credential-env:TGW_AUTHORITY_EXECUTOR_TOKEN``), not a
+    user-controlled HTTP field.
+    """
+
+    identity: str
+    role: PrincipalRole
+    authentication_binding: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, str) or not _PRINCIPAL_IDENTITY.fullmatch(self.identity):
+            raise ValueError("authority principal identity is invalid")
+        if not self.identity.startswith(f"{self.role.value}:"):
+            raise ValueError("authority principal identity does not match its role")
+        if not isinstance(self.authentication_binding, str) or not self.authentication_binding:
+            raise ValueError("authority principal authentication binding is required")
+
+
+def require_authenticated_principal(value: Any, role: PrincipalRole) -> AuthorityPrincipal:
+    """Reject untyped or wrong-role dependency output at every authority route."""
+    if not isinstance(value, AuthorityPrincipal) or value.role is not role:
+        raise HTTPException(401, f"configured authenticated {role.value} principal is required")
+    return value
 
 
 class EffectKind(str, Enum):
@@ -142,6 +183,7 @@ class AuthorityDecision:
     kind: DecisionKind
     decided_by: str
     reason: str
+    reconciliation_evidence: tuple[str, ...]
     decided_at: datetime
 
     @classmethod
@@ -150,23 +192,61 @@ class AuthorityDecision:
         decided_by, reason = data.get("decided_by"), data.get("reason")
         if not isinstance(decided_by, str) or not decided_by or not isinstance(reason, str) or not reason:
             raise ValueError("decided_by and reason are required")
+        evidence = data.get("reconciliation_evidence", ())
+        if (
+            not isinstance(evidence, Sequence)
+            or isinstance(evidence, (str, bytes))
+            or not all(isinstance(item, str) and item for item in evidence)
+        ):
+            raise ValueError("reconciliation_evidence must be a sequence of identities")
+        if kind is not DecisionKind.RECONCILE and evidence:
+            raise ValueError("reconciliation_evidence is only valid for reconcile decisions")
         decided_at = now or datetime.now(timezone.utc)
-        payload = {"request_id": request_id, "kind": kind.value, "decided_by": decided_by, "reason": reason, "decided_at": decided_at.isoformat()}
-        return cls(_identity("decision", payload), request_id, kind, decided_by, reason, decided_at)
+        normalized_evidence = tuple(sorted(set(evidence)))
+        payload = {
+            "request_id": request_id, "kind": kind.value, "decided_by": decided_by,
+            "reason": reason, "reconciliation_evidence": normalized_evidence,
+            "decided_at": decided_at.isoformat(),
+        }
+        return cls(_identity("decision", payload), request_id, kind, decided_by, reason, normalized_evidence, decided_at)
 
 
 class AuthorityStore(Protocol):
     def create_request(self, request: AuthorityRequest) -> Mapping[str, Any]: ...
     def decide(self, decision: AuthorityDecision) -> Mapping[str, Any]: ...
-    def consume(self, request_id: str, *, effect_hash: str, generation: str) -> Mapping[str, Any]: ...
-    def record_execution(self, request_id: str, receipt: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    def begin_execution(
+        self,
+        request_id: str,
+        *,
+        effect_hash: str,
+        generation: str,
+        handler_id: str,
+        executor_principal: str,
+    ) -> Mapping[str, Any]: ...
+    def complete_execution(
+        self,
+        receipt_id: str,
+        *,
+        outcome: str,
+        evidence: Sequence[str] = (),
+        rollback_receipt: str | None = None,
+        detail: str = "",
+    ) -> Mapping[str, Any]: ...
     def get(self, request_id: str) -> Mapping[str, Any] | None: ...
     def list(self, limit: int = 100) -> Sequence[Mapping[str, Any]]: ...
     def events(self, request_id: str) -> Sequence[Mapping[str, Any]]: ...
 
 
 class PostgresAuthorityStore:
-    """Canonical durable store; conditional SQL owns one-shot transitions."""
+    """Canonical durable store for the authority and execution state machine.
+
+    An authority is *not* consumed before a provider runs.  ``begin_execution``
+    records an exclusive durable attempt, and ``complete_execution`` records the
+    provider outcome in the same transaction as the corresponding authority
+    transition.  A process that dies between the two leaves an explicit active
+    attempt, which is intentionally non-retryable until reconciliation instead
+    of silently spending an approval or risking a duplicate provider call.
+    """
 
     def __init__(self, dsn: str):
         self.dsn = dsn
@@ -197,125 +277,212 @@ class PostgresAuthorityStore:
     def decide(self, decision: AuthorityDecision) -> Mapping[str, Any]:
         with self._connection() as con, con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
+                "SELECT expires_at FROM plan_authority_requests WHERE request_id=%s FOR UPDATE",
+                (decision.request_id,),
+            )
+            request = cur.fetchone()
+            if request is None:
+                raise ValueError("request is absent")
+            cur.execute(
+                """SELECT * FROM plan_authority_effect_receipts
+                    WHERE request_id=%s AND completed_at IS NULL FOR UPDATE""",
+                (decision.request_id,),
+            )
+            active_attempt = cur.fetchone()
+            if request["expires_at"] <= decision.decided_at and active_attempt is None:
+                raise ValueError("request is expired")
+            if active_attempt is not None:
+                if decision.kind is not DecisionKind.RECONCILE:
+                    raise ValueError("request has an unresolved execution attempt; reconcile it explicitly")
+                if not decision.reconciliation_evidence:
+                    raise ValueError("active execution reconciliation requires evidence")
+            else:
+                cur.execute(
+                    """SELECT outcome FROM plan_authority_effect_receipts
+                        WHERE request_id=%s
+                        ORDER BY started_at DESC, receipt_id DESC LIMIT 1""",
+                    (decision.request_id,),
+                )
+                latest_effect = cur.fetchone()
+                if latest_effect is not None and latest_effect["outcome"] != "retry":
+                    raise ValueError("request has a terminal execution outcome")
+            cur.execute(
+                """SELECT decision_kind FROM plan_authority_decisions
+                    WHERE request_id=%s ORDER BY decided_at DESC, decision_id DESC LIMIT 1""",
+                (decision.request_id,),
+            )
+            prior = cur.fetchone()
+            prior_kind = prior["decision_kind"] if prior else None
+            allowed = {
+                None: {DecisionKind.APPROVE.value, DecisionKind.HOLD.value, DecisionKind.RECONCILE.value},
+                DecisionKind.HOLD.value: {DecisionKind.APPROVE.value, DecisionKind.RECONCILE.value},
+                DecisionKind.RECONCILE.value: {DecisionKind.APPROVE.value, DecisionKind.HOLD.value},
+                # A retry returns the request to its existing exact approval;
+                # a new decision may instead deliberately hold/reconcile it.
+                DecisionKind.APPROVE.value: {DecisionKind.HOLD.value, DecisionKind.RECONCILE.value},
+            }
+            if decision.kind.value not in allowed.get(prior_kind, set()):
+                raise ValueError(f"invalid authority transition {prior_kind or 'pending'} -> {decision.kind.value}")
+            settled_receipt_id = None
+            if active_attempt is not None:
+                settled_receipt_id = str(active_attempt["receipt_id"])
+                cur.execute(
+                    """UPDATE plan_authority_effect_receipts
+                          SET outcome='ambiguous', evidence=%s::jsonb,
+                              detail=%s, completed_at=%s
+                        WHERE receipt_id=%s AND completed_at IS NULL""",
+                    (
+                        json.dumps(list(decision.reconciliation_evidence)),
+                        f"reconciled active execution as ambiguous: {decision.reason}",
+                        decision.decided_at,
+                        settled_receipt_id,
+                    ),
+                )
+                if cur.rowcount != 1:  # pragma: no cover - lock above is the invariant
+                    raise ValueError("active execution changed before reconciliation")
+            cur.execute(
                 """INSERT INTO plan_authority_decisions
-                   (decision_id,request_id,decision_kind,decided_by,reason,decided_at)
-                   SELECT %s,%s,%s,%s,%s,%s FROM plan_authority_requests
-                    WHERE request_id=%s AND expires_at>%s
-                   ON CONFLICT (request_id) DO NOTHING RETURNING *""",
+                   (decision_id,request_id,decision_kind,decided_by,reason,reconciliation_evidence,decided_at)
+                   VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s) RETURNING *""",
                 (decision.decision_id, decision.request_id, decision.kind.value,
-                 decision.decided_by, decision.reason, decision.decided_at,
-                 decision.request_id, decision.decided_at),
+                 decision.decided_by, decision.reason,
+                 json.dumps(list(decision.reconciliation_evidence)), decision.decided_at),
             )
             row = cur.fetchone()
-            if row is None:
-                raise ValueError("request is absent, expired, or already decided")
+            if settled_receipt_id is not None:
+                self._event(cur, decision.request_id, "execution-reconciled", {
+                    "receipt_id": settled_receipt_id,
+                    "outcome": "ambiguous",
+                    "evidence": list(decision.reconciliation_evidence),
+                })
             self._event(cur, decision.request_id, "decided", asdict(decision))
-            return dict(row)
+            result = dict(row)
+            if settled_receipt_id is not None:
+                result["settled_receipt_id"] = settled_receipt_id
+                result["execution_outcome"] = "ambiguous"
+            return result
 
-    def consume(self, request_id: str, *, effect_hash: str, generation: str) -> Mapping[str, Any]:
+    def begin_execution(
+        self,
+        request_id: str,
+        *,
+        effect_hash: str,
+        generation: str,
+        handler_id: str,
+        executor_principal: str,
+    ) -> Mapping[str, Any]:
+        """Durably claim one approved effect without consuming its approval.
+
+        The row is an intentional ambiguity fence.  It is never deleted: a
+        stopped executor remains visible and cannot be replayed as if no call
+        had reached the registered provider.
+        """
+        if (
+            not isinstance(executor_principal, str)
+            or not _PRINCIPAL_IDENTITY.fullmatch(executor_principal)
+            or not executor_principal.startswith("executor:")
+        ):
+            raise ValueError("configured executor principal is required")
         receipt_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
         with self._connection() as con, con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Serialize attempts for a request before evaluating the active
+            # attempt fence.  The partial unique index in the schema remains
+            # the final cross-process invariant.
+            cur.execute(
+                "SELECT request_id FROM plan_authority_requests WHERE request_id=%s FOR UPDATE",
+                (request_id,),
+            )
+            if cur.fetchone() is None:
+                raise ValueError("request is absent")
             cur.execute(
                 """INSERT INTO plan_authority_effect_receipts
-                   (receipt_id,request_id,effect_hash,effect_generation,consumed_at)
-                   SELECT %s,r.request_id,r.effect_hash,r.effect_generation,%s
+                   (receipt_id,request_id,effect_hash,effect_generation,handler_id,executor_principal,started_at)
+                   SELECT %s,r.request_id,r.effect_hash,r.effect_generation,%s,%s,%s
                      FROM plan_authority_requests r
-                     JOIN plan_authority_decisions d ON d.request_id=r.request_id
-                    WHERE r.request_id=%s AND d.decision_kind='approve' AND r.expires_at>%s
+                    WHERE r.request_id=%s AND r.expires_at>%s
                       AND r.effect_hash=%s AND r.effect_generation=%s
-                   ON CONFLICT (request_id) DO NOTHING RETURNING *""",
-                (receipt_id, now, request_id, now, effect_hash, generation),
+                      AND (SELECT d.decision_kind
+                             FROM plan_authority_decisions d
+                            WHERE d.request_id=r.request_id
+                            ORDER BY d.decided_at DESC, d.decision_id DESC LIMIT 1)='approve'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM plan_authority_effect_receipts terminal
+                           WHERE terminal.request_id=r.request_id
+                             AND terminal.completed_at IS NOT NULL
+                             AND terminal.outcome <> 'retry'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM plan_authority_effect_receipts active
+                           WHERE active.request_id=r.request_id
+                             AND active.completed_at IS NULL
+                      )
+                   RETURNING *""",
+                (receipt_id, handler_id, executor_principal, now, request_id, now, effect_hash, generation),
             )
             row = cur.fetchone()
             if row is None:
-                raise ValueError("effect is not approved, expired, mismatched, or already consumed")
-            receipt = {"schema": "tgw-plan-effect-receipt/v1", "receipt_id": receipt_id, "request_id": request_id, "effect_hash": effect_hash, "generation": generation, "consumed_at": now.isoformat()}
-            self._event(cur, request_id, "consumed", receipt)
+                raise ValueError("effect is not approved, expired, mismatched, terminal, or already executing")
+            receipt = {
+                "schema": "tgw-plan-effect-receipt/v2",
+                "receipt_id": receipt_id,
+                "request_id": request_id,
+                "effect_hash": effect_hash,
+                "generation": generation,
+                "handler_id": handler_id,
+                "executor_principal": executor_principal,
+                "started_at": now.isoformat(),
+            }
+            self._event(cur, request_id, "execution-started", receipt)
             return receipt
 
-    def record_execution(self, request_id: str, receipt: Mapping[str, Any]) -> Mapping[str, Any]:
-        required = {
-            "schema", "request_id", "authority_receipt_id", "effect_hash", "effect_kind",
-            "generation", "handler_id", "outcome", "evidence", "rollback_receipt", "detail",
-            "receipt_hash",
-        }
-        if set(receipt) != required or receipt.get("schema") != "tgw-effect-execution-receipt/v1":
-            raise ValueError("effect execution receipt schema is not exact")
-        if receipt.get("request_id") != request_id:
-            raise ValueError("effect execution receipt request mismatch")
-        unsigned = dict(receipt)
-        claimed = unsigned.pop("receipt_hash")
-        if claimed != "sha256:" + sha256(_canonical(unsigned)).hexdigest():
-            raise ValueError("effect execution receipt self-hash mismatch")
-        evidence = receipt.get("evidence")
-        if (
-            not isinstance(evidence, Sequence)
-            or isinstance(evidence, (str, bytes))
-            or not all(isinstance(item, str) and item for item in evidence)
-            or not isinstance(receipt.get("detail"), str)
-            or (
-                receipt.get("rollback_receipt") is not None
-                and not isinstance(receipt.get("rollback_receipt"), str)
-            )
-        ):
-            raise ValueError("effect execution evidence is invalid")
+    def complete_execution(
+        self,
+        receipt_id: str,
+        *,
+        outcome: str,
+        evidence: Sequence[str] = (),
+        rollback_receipt: str | None = None,
+        detail: str = "",
+    ) -> Mapping[str, Any]:
+        """Persist a provider outcome and resulting authority state atomically."""
+        allowed_outcomes = {"succeeded", "retry", "ambiguous", "rolled_back", "failed"}
+        if outcome not in allowed_outcomes:
+            raise ValueError("execution outcome is not registered")
+        if not isinstance(detail, str) or not all(isinstance(item, str) and item for item in evidence):
+            raise ValueError("execution receipt content is invalid")
+        now = datetime.now(timezone.utc)
         with self._connection() as con, con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                """INSERT INTO plan_authority_execution_receipts
-                   (execution_receipt_hash,request_id,authority_receipt_id,effect_hash,
-                    effect_generation,handler_id,outcome,evidence,rollback_receipt,detail)
-                   SELECT %s,r.request_id,e.receipt_id,r.effect_hash,r.effect_generation,
-                          %s,%s,%s::jsonb,%s,%s
-                     FROM plan_authority_requests r
-                     JOIN plan_authority_effect_receipts e USING(request_id)
-                    WHERE r.request_id=%s AND e.receipt_id=%s AND r.effect_hash=%s
-                      AND r.effect_generation=%s AND r.effect_kind=%s
-                   ON CONFLICT (request_id) DO NOTHING RETURNING *""",
-                (
-                    claimed, receipt["handler_id"], receipt["outcome"],
-                    json.dumps(list(evidence)), receipt["rollback_receipt"], receipt["detail"],
-                    request_id, receipt["authority_receipt_id"], receipt["effect_hash"],
-                    receipt["generation"], receipt["effect_kind"],
-                ),
+                """UPDATE plan_authority_effect_receipts
+                      SET outcome=%s, evidence=%s::jsonb, rollback_receipt=%s,
+                          detail=%s, completed_at=%s
+                    WHERE receipt_id=%s AND completed_at IS NULL
+                RETURNING *""",
+                (outcome, json.dumps(sorted(set(evidence))), rollback_receipt, detail, now, receipt_id),
             )
             row = cur.fetchone()
             if row is None:
-                cur.execute(
-                    "SELECT * FROM plan_authority_execution_receipts WHERE request_id=%s",
-                    (request_id,),
-                )
-                existing_row = cur.fetchone()
-                existing = dict(existing_row) if existing_row is not None else None
-                if existing is not None and existing.get("execution_receipt_hash") == claimed:
-                    return existing
-                raise ValueError("execution receipt is mismatched or already recorded")
-            self._event(cur, request_id, "executed", receipt)
-            return dict(row)
+                raise ValueError("execution receipt is absent or already completed")
+            receipt = dict(row)
+            receipt["schema"] = "tgw-effect-execution-receipt/v2"
+            self._event(cur, str(row["request_id"]), "execution-completed", {
+                "receipt_id": str(row["receipt_id"]),
+                "outcome": outcome,
+                "rollback_receipt": rollback_receipt,
+            })
+            return receipt
 
     def get(self, request_id: str) -> Mapping[str, Any] | None:
         return self._query_one(
-            """SELECT r.*,d.decision_id,d.decision_kind,d.decided_by,d.reason AS decision_reason,d.decided_at,
-                      e.receipt_id,e.consumed_at,x.execution_receipt_hash,x.handler_id AS execution_handler_id,
-                      x.outcome AS execution_outcome,x.evidence AS execution_evidence,
-                      x.rollback_receipt,x.detail AS execution_detail,x.recorded_at AS executed_at
-                 FROM plan_authority_requests r LEFT JOIN plan_authority_decisions d USING(request_id)
-                 LEFT JOIN plan_authority_effect_receipts e USING(request_id)
-                 LEFT JOIN plan_authority_execution_receipts x USING(request_id) WHERE r.request_id=%s""",
+            self._request_projection_sql("WHERE r.request_id=%s"),
             (request_id,),
         )
 
     def list(self, limit: int = 100) -> Sequence[Mapping[str, Any]]:
         with self._connection() as con, con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                """SELECT r.*,d.decision_id,d.decision_kind,d.decided_by,d.reason AS decision_reason,d.decided_at,
-                          e.receipt_id,e.consumed_at,x.execution_receipt_hash,x.handler_id AS execution_handler_id,
-                          x.outcome AS execution_outcome,x.evidence AS execution_evidence,
-                          x.rollback_receipt,x.detail AS execution_detail,x.recorded_at AS executed_at
-                     FROM plan_authority_requests r LEFT JOIN plan_authority_decisions d USING(request_id)
-                     LEFT JOIN plan_authority_effect_receipts e USING(request_id)
-                     LEFT JOIN plan_authority_execution_receipts x USING(request_id)
-                    ORDER BY r.requested_at DESC LIMIT %s""",
+                self._request_projection_sql("ORDER BY r.requested_at DESC LIMIT %s"),
                 (limit,),
             )
             return [dict(row) for row in cur.fetchall()]
@@ -332,6 +499,28 @@ class PostgresAuthorityStore:
             return dict(row) if row else None
 
     @staticmethod
+    def _request_projection_sql(tail: str) -> str:
+        """Use latest decision/attempt, never a lossy multi-row join."""
+        return f"""SELECT r.*,d.decision_id,d.decision_kind,d.decided_by,
+                          d.reason AS decision_reason,d.reconciliation_evidence,d.decided_at,
+                          e.receipt_id,e.started_at,e.completed_at,e.outcome,
+                          e.handler_id,e.executor_principal,e.evidence AS execution_evidence,
+                          e.rollback_receipt,e.detail,
+                          e.completed_at AS consumed_at
+                     FROM plan_authority_requests r
+                LEFT JOIN LATERAL (
+                    SELECT * FROM plan_authority_decisions d
+                     WHERE d.request_id=r.request_id
+                     ORDER BY d.decided_at DESC, d.decision_id DESC LIMIT 1
+                ) d ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT * FROM plan_authority_effect_receipts e
+                     WHERE e.request_id=r.request_id
+                     ORDER BY e.started_at DESC, e.receipt_id DESC LIMIT 1
+                ) e ON TRUE
+                {tail}"""
+
+    @staticmethod
     def _event(cur: Any, request_id: str, event_type: str, details: Mapping[str, Any]) -> None:
         cur.execute("INSERT INTO plan_authority_events (request_id,event_type,details) VALUES (%s,%s,%s::jsonb)", (request_id, event_type, json.dumps(details, default=str)))
 
@@ -343,51 +532,84 @@ def create_authority_router(
     load_solution: Callable[[str], Mapping[str, Any]],
     require_operator: Callable[[], Any],
     require_executor: Callable[[], Any],
-    execute_request: Callable[[str], Mapping[str, Any]] | None = None,
+    execute_effect: Callable[..., Any] | None = None,
 ) -> APIRouter:
     """One HTTP projection over the canonical authority store."""
 
     router = APIRouter(prefix="/api/plan-authority", tags=["plan-authority"])
 
-    @router.get("/requests", dependencies=[Depends(require_operator)])
-    def list_requests(limit: int = 100):
+    @router.get("/requests")
+    def list_requests(limit: int = 100, operator_identity: Any = Depends(require_operator)):
+        require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR)
         return {"schema": AUTHORITY_SCHEMA, "requests": store.list(limit)}
 
-    @router.get("/requests/{request_id}", dependencies=[Depends(require_operator)])
-    def get_request(request_id: str):
+    @router.get("/requests/{request_id}")
+    def get_request(request_id: str, operator_identity: Any = Depends(require_operator)):
+        require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR)
         row = store.get(request_id)
         if row is None:
             raise HTTPException(404, "request not found")
         return {"schema": AUTHORITY_SCHEMA, "request": row, "events": store.events(request_id)}
 
-    @router.post("/requests", status_code=201, dependencies=[Depends(require_operator)])
-    def request_effect(body: dict[str, Any]):
+    @router.post("/requests", status_code=201)
+    def request_effect(body: dict[str, Any], operator_identity: Any = Depends(require_operator)):
         try:
-            solution = load_solution(str(body["solution_hash"]))
-            request = AuthorityRequest.create(body, solution=solution, current_plan_commit=current_plan_commit())
+            payload = dict(body)
+            payload["requested_by"] = require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR).identity
+            solution = load_solution(str(payload["solution_hash"]))
+            request = AuthorityRequest.create(payload, solution=solution, current_plan_commit=current_plan_commit())
             return {"schema": AUTHORITY_SCHEMA, "request": store.create_request(request)}
-        except (KeyError, ValueError, RuntimeError) as exc:
+        except (KeyError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    @router.post("/requests/{request_id}/decisions", dependencies=[Depends(require_operator)])
-    def decide(request_id: str, body: dict[str, Any]):
+    @router.post("/requests/{request_id}/decisions")
+    def decide(request_id: str, body: dict[str, Any], operator_identity: Any = Depends(require_operator)):
         try:
-            return {"schema": AUTHORITY_SCHEMA, "request": store.decide(AuthorityDecision.create(request_id, body))}
+            payload = dict(body)
+            payload["decided_by"] = require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR).identity
+            return {"schema": AUTHORITY_SCHEMA, "request": store.decide(AuthorityDecision.create(request_id, payload))}
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    @router.post("/requests/{request_id}/consume", dependencies=[Depends(require_executor)])
-    def consume(request_id: str, body: dict[str, Any]):
-        del request_id, body
-        raise HTTPException(409, "direct authority consumption is disabled; use the typed execute route")
+    @router.post("/requests/{request_id}/consume")
+    def consume(
+        request_id: str,
+        body: dict[str, Any] | None = None,
+        executor_identity: Any = Depends(require_executor),
+    ):
+        """Execute the already-recorded typed effect through a registered handler.
 
-    @router.post("/requests/{request_id}/execute", dependencies=[Depends(require_executor)])
-    def execute(request_id: str):
-        if execute_request is None:
-            raise HTTPException(409, "typed execution controller is not mounted")
+        This endpoint deliberately accepts no client-supplied effect hash or
+        generation.  An executor can only redeem the immutable effect stored in
+        the request, and only through the supplied controller.
+        """
         try:
-            return {"schema": AUTHORITY_SCHEMA, "execution": execute_request(request_id)}
-        except (KeyError, ValueError, RuntimeError) as exc:
+            if body:
+                raise ValueError("consume takes no effect payload; the approved request is authoritative")
+            if execute_effect is None:
+                raise ValueError("no registered effect executor is mounted")
+            executor = require_authenticated_principal(executor_identity, PrincipalRole.EXECUTOR)
+            row = store.get(request_id)
+            if row is None:
+                raise ValueError("request not found")
+            effect = TypedEffect.parse({
+                "kind": row["effect_kind"],
+                "generation": row["effect_generation"],
+                "parameters": row["effect_parameters"],
+            })
+            if effect.effect_hash != row["effect_hash"]:
+                raise ValueError("stored request effect binding is invalid")
+            receipt = execute_effect(
+                request_id=request_id,
+                effect=effect,
+                executor_principal=executor.identity,
+            )
+            if is_dataclass(receipt):
+                receipt = asdict(receipt)
+            if not isinstance(receipt, Mapping):
+                raise ValueError("registered effect executor returned an invalid receipt")
+            return {"schema": AUTHORITY_SCHEMA, "receipt": dict(receipt)}
+        except (KeyError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     return router

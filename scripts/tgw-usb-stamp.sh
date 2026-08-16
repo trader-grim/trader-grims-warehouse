@@ -25,6 +25,7 @@ REPO="/home/db/tgw-flake"
 DB_NAME="state_machine"
 DB_USER="tgw"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+BUNDLE_TMP=""
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -52,6 +53,9 @@ if ! mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
 fi
 
 cleanup() {
+  if [[ -n "$BUNDLE_TMP" && -e "$BUNDLE_TMP" ]]; then
+    rm -f -- "$BUNDLE_TMP"
+  fi
   if $MOUNTED_HERE && mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
     umount "$MOUNT_DIR" 2>/dev/null || true
   fi
@@ -83,7 +87,16 @@ fi
 
 log "bundling flake repo → flake/tgw.bundle"
 run mkdir -p "$MOUNT_DIR/flake"
-run git -C "$REPO" bundle create "$MOUNT_DIR/flake/tgw.bundle" --all
+if $DRY_RUN; then
+  info "[dry-run] create a unique temporary bundle in $MOUNT_DIR/flake/"
+  info "[dry-run] verify the temporary bundle, then atomically replace tgw.bundle"
+else
+  BUNDLE_TMP="$(mktemp "$MOUNT_DIR/flake/.tgw.bundle.tmp.XXXXXX")"
+  git -C "$REPO" bundle create - --all > "$BUNDLE_TMP"
+  git -C "$REPO" bundle verify "$BUNDLE_TMP"
+  mv -f -- "$BUNDLE_TMP" "$MOUNT_DIR/flake/tgw.bundle"
+  BUNDLE_TMP=""
+fi
 
 # ── sync and report ──────────────────────────────────────────────────────────
 

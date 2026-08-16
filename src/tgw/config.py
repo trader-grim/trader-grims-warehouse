@@ -89,8 +89,16 @@ def load_config(path: Path) -> Dict[str, Any]:
     incoming_path = p("incoming_path", "/opt/TGW/incoming")
     plan_vault_path = p("plan_vault_path", "/opt/TGW/library/plans")
     standalone_plan_root = p("standalone_plan_root", "/opt/TGW/library/plans")
+    # Generated operational views are runtime artifacts, never files inside
+    # either the mutable legacy vault or the immutable approved Plan checkout.
+    plan_render_root = p("plan_render_root", "/opt/TGW/var/plan-render")
     plan_repository_root = p("plan_repository_root", str(standalone_plan_root))
     plan_approved_commit = raw.get("plan_approved_commit")
+    plan_approved_solution_hash = raw.get("plan_approved_solution_hash")
+    plan_authority_executor_credential_env = raw.get("plan_authority_executor_credential_env")
+    plan_authority_executor_principal = raw.get("plan_authority_executor_principal")
+    plan_authority_operator_api_principal = raw.get("plan_authority_operator_api_principal")
+    plan_authority_operator_session_principal = raw.get("plan_authority_operator_session_principal")
     plan_git_path = p("plan_git_path", "git")
     plan_projection_path = (
         p("plan_projection_path", str(raw["plan_projection_path"]))
@@ -113,12 +121,17 @@ def load_config(path: Path) -> Dict[str, Any]:
         if plan_projection_path is not None:
             from tgw.plan_runtime_projection import load_projection
 
-            load_projection(
+            projection = load_projection(
                 plan_projection_path,
                 expected_plan_commit=plan_approved_commit,
                 trusted_uid=plan_projection_trusted_uid,
                 trusted_root=plan_projection_root,
             )
+            if (
+                plan_approved_solution_hash is not None
+                and projection["solution"]["solution_hash"] != plan_approved_solution_hash
+            ):
+                raise ValueError("Plan runtime projection differs from the approved solution")
         elif "plan_repository_root" not in raw:
             raise ValueError(
                 "plan_repository_root is required when plan_approved_commit is configured"
@@ -147,6 +160,42 @@ def load_config(path: Path) -> Dict[str, Any]:
                 raise ValueError("standalone Plan materialization does not match approved commit")
             if status.returncode or status.stdout:
                 raise ValueError("standalone Plan materialization is not clean")
+    if plan_approved_solution_hash is not None:
+        if not isinstance(plan_approved_solution_hash, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", plan_approved_solution_hash
+        ):
+            raise ValueError("plan_approved_solution_hash must be an exact solution hash")
+    if (plan_approved_commit is None) != (plan_approved_solution_hash is None):
+        raise ValueError("approved Plan commit and solution must be configured together")
+    if plan_authority_executor_credential_env is not None and (
+        not isinstance(plan_authority_executor_credential_env, str)
+        or not re.fullmatch(r"[A-Z][A-Z0-9_]*", plan_authority_executor_credential_env)
+    ):
+        raise ValueError("plan_authority_executor_credential_env must name an environment variable")
+
+    def authority_principal(value: Any, role: str, field: str) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not re.fullmatch(
+            rf"{role}:[A-Za-z0-9][A-Za-z0-9._@/-]{{0,191}}", value,
+        ):
+            raise ValueError(f"{field} must name a configured {role} principal")
+        # Authentication mechanism labels are deliberately not principals.
+        if value in {f"{role}:api-key", f"{role}:web-session", f"{role}:default", f"{role}:unknown"}:
+            raise ValueError(f"{field} must be a named person or service, not an authentication mechanism")
+        return value
+
+    plan_authority_executor_principal = authority_principal(
+        plan_authority_executor_principal, "executor", "plan_authority_executor_principal",
+    )
+    plan_authority_operator_api_principal = authority_principal(
+        plan_authority_operator_api_principal, "operator", "plan_authority_operator_api_principal",
+    )
+    plan_authority_operator_session_principal = authority_principal(
+        plan_authority_operator_session_principal, "operator", "plan_authority_operator_session_principal",
+    )
+    if (plan_authority_executor_credential_env is None) != (plan_authority_executor_principal is None):
+        raise ValueError("Plan authority executor credential and named principal must be configured together")
 
     full_catalog_path = p("full_catalog_path", str(catalog_root / "master-catalog.json"))
     search_catalog_path = p("search_catalog_path", str(catalog_root / "search-catalog.json"))
@@ -167,13 +216,19 @@ def load_config(path: Path) -> Dict[str, Any]:
     # PP-CAPTURE-001 P2 — KDE Connect device ID for quiet-check push notification
     kdeconnect_device_id: str = raw.get("kdeconnect_device_id", "")
 
-    # PP-PORTABLE-CATALOG-001 P3 — sync-conflict scan roots (default: vault + itemdata)
+    # The source-tree vault is an archived/inbox surface after W11.  It must
+    # never be an operational sync-conflict scan root.
     _raw_sync_roots = raw.get("sync_conflict_roots")
     sync_conflict_roots: list = (
         [Path(os.path.expanduser(r)) for r in _raw_sync_roots]
         if _raw_sync_roots is not None
-        else [plan_vault_path, itemdata_root]
+        else [itemdata_root]
     )
+    legacy_vault = plan_vault_path.resolve()
+    sync_conflict_roots = [
+        root for root in sync_conflict_roots
+        if not (root.resolve() == legacy_vault or legacy_vault in root.resolve().parents)
+    ]
 
     ebay_token_path = secrets_root / "ebay-token.json"
     ebay_credentials_path = secrets_root / "ebay-credentials.json"
@@ -278,13 +333,30 @@ def load_config(path: Path) -> Dict[str, Any]:
         "incoming_path": incoming_path,
         "newitems_path": incoming_path / "newitems",
         "plan_vault_path": plan_vault_path,
+        "plan_render_root": plan_render_root,
         "standalone_plan_root": standalone_plan_root,
         "plan_repository_root": plan_repository_root,
         "plan_approved_commit": plan_approved_commit,
-        "plan_git_path": plan_git_path,
+        "plan_approved_solution_hash": plan_approved_solution_hash,
         "plan_projection_path": plan_projection_path,
         "plan_projection_trusted_uid": plan_projection_trusted_uid,
         "plan_projection_root": plan_projection_root,
+        "plan_context_service": raw.get("plan_context_service", "tgw-context"),
+        "plan_authority_executor_credential_env": plan_authority_executor_credential_env,
+        "plan_authority_executor_principal": plan_authority_executor_principal,
+        "plan_authority_operator_api_principal": plan_authority_operator_api_principal,
+        "plan_authority_operator_session_principal": plan_authority_operator_session_principal,
+        "plan_git_path": plan_git_path,
+        # The host adapter validates this complete, externally supplied pin
+        # set at mount time.  It is deliberately surfaced as a first-class
+        # normalized setting so the canonical HTTP host can never silently
+        # lose the deployment boundary configuration in ``raw``.
+        "pinned_bootstrap_host_integration": raw.get("pinned_bootstrap_host_integration"),
+        # The independently configured, closed provider binding is intentionally
+        # distinct from the immutable S/D/X/Y evidence pins above.  Its strict
+        # allowlist/schema validation occurs at the authority execution boundary
+        # after the HTTP host has loaded this configuration.
+        "bootstrap_provider_binding": raw.get("bootstrap_provider_binding"),
         "plan_inbox_path": plan_vault_path / "inbox",
         # Canonical Plan intent lives only in the standalone repository.  The
         # mutable/synced Plan Vault remains the inbox and general docs surface,
@@ -330,6 +402,23 @@ def load_config(path: Path) -> Dict[str, Any]:
         "coding": raw.get("coding", {}),
         "raw": raw,
     }
+
+
+def load_operational_config(path: Path) -> Dict[str, Any]:
+    """Load configuration for a process that can consume Plan authority.
+
+    Generic library callers may load path configuration without a Plan checkout,
+    but a running CLI, host, MCP server, or Plan-facing worker must never do
+    so. Requiring both immutable approval pins here keeps that distinction
+    explicit and prevents an operational entrypoint from treating a mutable
+    path as a Plan source.
+    """
+    cfg = load_config(path)
+    if not cfg.get("plan_approved_commit") or not cfg.get("plan_approved_solution_hash"):
+        raise ValueError(
+            "operational configuration requires approved Plan commit and solution"
+        )
+    return cfg
 
 
 def load_coding_worker_config(path: Path) -> Dict[str, Any]:

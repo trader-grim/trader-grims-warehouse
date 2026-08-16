@@ -497,7 +497,9 @@ def _make_cfg(tmp_path: Path) -> dict:
     return {
         'plan_vault_path': vault,
         'plan_inbox_path': vault / 'inbox',
-        'plan_master_path': plan,
+        # PM intake writes only this explicit authoring target. It is not the
+        # clean approved Plan materialization consumed by operational readers.
+        'plan_update_master_path': plan,
         'pm_intake_delay_hours': 4.0,
         'models': {'pm_intake': {'provider': 'openrouter', 'model': 'google/gemini-2.5-flash'}},
         'postgres_dsn': 'dbname=state_machine user=tgw',
@@ -550,7 +552,7 @@ def test_handle_append_to_section(tmp_path):
     with patch('tgw.workers.pm_intake.call_model', return_value=llm_response):
         worker.handle(job)
 
-    plan_text = cfg['plan_master_path'].read_text()
+    plan_text = cfg['plan_update_master_path'].read_text()
     assert 'New bullet point.' in plan_text
     # Bullet should be in the Work Tracks section, before Other Section
     assert plan_text.index('New bullet point.') < plan_text.index('## Other Section')
@@ -609,7 +611,7 @@ def test_handle_file_document_with_plan_pointer(tmp_path):
     with patch('tgw.workers.pm_intake.call_model', return_value=llm_response):
         worker.handle(job)
 
-    plan_text = cfg['plan_master_path'].read_text()
+    plan_text = cfg['plan_update_master_path'].read_text()
     assert 'PERPLEXITY-008-test.md' in plan_text
 
 
@@ -693,7 +695,7 @@ def test_handle_new_section_demoted_to_flag(tmp_path):
     mock_todo.assert_called_once()
 
     # Plan must NOT have the new section (append-only enforcement)
-    plan_text = cfg['plan_master_path'].read_text()
+    plan_text = cfg['plan_update_master_path'].read_text()
     assert 'Brand New Section' not in plan_text
 
 

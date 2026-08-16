@@ -52,6 +52,8 @@ tgw                = "tgw.api:main"
 tgw-coding         = "tgw.coding_cli:main"
 tgw-mcp-server     = "tgw.mcp_server:main"
 tgw-context-mcp-server = "tgw.context_mcp_server:main"
+tgw-governed-resource-service = "tgw.governed_resource_service:main"
+tgw-qualified-execution-service = "tgw.qualified_execution_service:main"
 tgw-aider-mcp-server = "tgw.aider_mcp_server:main"
 tgw-browser        = "tgw.browser:main"
 tgw-queue-launcher = "tgw.queue.launcher:main"
@@ -123,6 +125,9 @@ norecursedirs = ["nix", ".git", "__pycache__", "*.egg-info", "systemd"]
 # os.path.expandvars()), so tgw and db each get their own cache under
 # their own home and never write into the worktree tree at all.
 cache_dir = "$HOME/.cache/tgw-pytest"
+markers = [
+    "real_luet: opt-in pinned Luet binary integration coverage (requires TGW_LUET_BINARY)",
+]
 
 [tool.ruff]
 line-length = 200

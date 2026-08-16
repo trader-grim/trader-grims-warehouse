@@ -1,6 +1,7 @@
 """Tests for tgw.todo CRUD operations and dead_letter state_machine helpers."""
 from __future__ import annotations
 
+import subprocess
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -375,11 +376,31 @@ _ROW_9 = {
 }
 
 
+def _approved_cfg(tmp_path):
+    """Return a clean, pinned standalone Plan for CLI-facing todo tests."""
+    root = tmp_path / 'standalone-plan'
+    master = root / 'plan' / 'TGW-Master-Plan.md'
+    master.parent.mkdir(parents=True)
+    master.write_text('# TGW Master Plan\n', encoding='utf-8')
+    subprocess.run(['git', 'init', '-q', str(root)], check=True)
+    subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+    subprocess.run([
+        'git', '-C', str(root), '-c', 'user.name=Test',
+        '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'approved Plan',
+    ], check=True)
+    commit = subprocess.check_output(
+        ['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True,
+    ).strip()
+    return {
+        'standalone_plan_root': root,
+        'plan_approved_commit': commit,
+        'plan_approved_solution_hash': 'sha256:' + 'a' * 64,
+    }
+
+
 def test_brief_clip_calls_push_clipboard(tmp_path):
     from tgw import todo as todo_mod
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_brief_args(brief_id='9', clip=True)
 
     with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
@@ -394,9 +415,7 @@ def test_brief_clip_calls_push_clipboard(tmp_path):
 
 def test_brief_clip_failure_prints_warning(tmp_path, capsys):
     from tgw import todo as todo_mod
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_brief_args(brief_id='9', clip=True)
 
     with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
@@ -409,9 +428,7 @@ def test_brief_clip_failure_prints_warning(tmp_path, capsys):
 
 def test_brief_no_clip_does_not_call_push_clipboard(tmp_path):
     from tgw import todo as todo_mod
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_brief_args(brief_id='9', clip=False)
 
     with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
@@ -423,9 +440,7 @@ def test_brief_no_clip_does_not_call_push_clipboard(tmp_path):
 
 def test_brief_next_agent_gets_top_task(tmp_path):
     from tgw import todo as todo_mod
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_brief_args(next_task=True, next_agent='gemini')
 
     gemini_row = dict(_ROW_9, id=7, agent='gemini', body='gemini top task')
@@ -441,9 +456,7 @@ def test_brief_next_agent_gets_top_task(tmp_path):
 
 def test_brief_next_default_agent_is_claude(tmp_path):
     from tgw import todo as todo_mod
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_brief_args(next_task=True, next_agent=None)  # no --agent given
 
     with patch.object(todo_mod, 'todo_top', return_value=_ROW_9) as mock_top:
@@ -455,9 +468,7 @@ def test_brief_next_default_agent_is_claude(tmp_path):
 
 def test_brief_next_no_tasks_returns_error(tmp_path):
     from tgw import todo as todo_mod
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_brief_args(next_task=True, next_agent='gemini')
 
     with patch.object(todo_mod, 'todo_top', return_value=None):
@@ -554,9 +565,7 @@ def _make_shorthand_args(**overrides):
 def test_shorthand_next_prints_and_clips_top_task(tmp_path):
     """tgw todo --next claude: prints brief and always copies to clipboard."""
     from tgw import todo as todo_mod
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_shorthand_args(agent='claude')
 
     with patch.object(todo_mod, 'todo_top', return_value=_ROW_9) as mock_top:
@@ -574,9 +583,7 @@ def test_shorthand_next_prints_and_clips_top_task(tmp_path):
 def test_shorthand_next_default_agent_is_claude(tmp_path):
     """tgw todo --next (no positional) defaults agent to claude."""
     from tgw import todo as todo_mod
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_shorthand_args(agent=None)  # no positional, no --agent
 
     with patch.object(todo_mod, 'todo_top', return_value=_ROW_9) as mock_top:
@@ -590,9 +597,7 @@ def test_shorthand_next_default_agent_is_claude(tmp_path):
 def test_shorthand_next_agent_flag_overrides_positional(tmp_path):
     """tgw todo --next --agent gemini: --agent flag wins over absent positional."""
     from tgw import todo as todo_mod
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     # --agent flag fills next_agent; no positional agent
     args = _make_shorthand_args(agent=None, next_agent='gemini')
 
@@ -610,9 +615,7 @@ def test_shorthand_next_agent_flag_overrides_positional(tmp_path):
 def test_shorthand_next_no_tasks_returns_error(tmp_path, capsys):
     """tgw todo --next admin when admin queue is empty: prints message, returns error."""
     from tgw import todo as todo_mod
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_shorthand_args(agent='admin')
 
     with patch.object(todo_mod, 'todo_top', return_value=None):
@@ -627,9 +630,7 @@ def test_shorthand_next_no_tasks_returns_error(tmp_path, capsys):
 def test_shorthand_next_clipboard_fail_prints_warning(tmp_path, capsys):
     """tgw todo --next: clipboard failure prints warning but still returns ok."""
     from tgw import todo as todo_mod
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_shorthand_args(agent='claude')
 
     with patch.object(todo_mod, 'todo_top', return_value=_ROW_9):
@@ -705,7 +706,7 @@ def test_listing_shows_high_badge(tmp_path, capsys):
               'done_at': None, 'pp_ref': None, 'depends_on': [], 'reasoning': 'high'}]
     with patch.object(todo_mod, 'todo_list', return_value=items):
         with patch.object(todo_mod, 'open_ids', return_value=set()):
-            todo_mod.cmd_todo({'plan_master_path': tmp_path / 'plan.md'}, args)
+            todo_mod.cmd_todo({}, args)
     out = capsys.readouterr().out
     assert '[high]' in out
 
@@ -727,7 +728,7 @@ def test_listing_no_badge_for_normal(tmp_path, capsys):
               'done_at': None, 'pp_ref': None, 'depends_on': [], 'reasoning': 'normal'}]
     with patch.object(todo_mod, 'todo_list', return_value=items):
         with patch.object(todo_mod, 'open_ids', return_value=set()):
-            todo_mod.cmd_todo({'plan_master_path': tmp_path / 'plan.md'}, args)
+            todo_mod.cmd_todo({}, args)
     out = capsys.readouterr().out
     assert '[normal]' not in out
     assert '[high]' not in out
@@ -771,9 +772,7 @@ def test_brief_omits_reasoning_when_normal(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _interactive_cfg(tmp_path):
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    return {'plan_master_path': plan}
+    return _approved_cfg(tmp_path)
 
 
 def test_next_interactive_y_marks_done(tmp_path):
@@ -785,7 +784,7 @@ def test_next_interactive_y_marks_done(tmp_path):
         with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
             with patch.object(todo_mod, '_push_clipboard', return_value=True):
                 with patch.object(todo_mod, '_tty_prompt', return_value='y') as mock_prompt:
-                    with patch('subprocess.run'):
+                    with patch.object(todo_mod, '_pager_run'):
                         with patch.object(todo_mod, 'todo_done', return_value={'ok': True, 'id': 9}) as mock_done:
                             result = todo_mod._next_interactive(cfg, 'claude')
 
@@ -805,7 +804,7 @@ def test_next_interactive_empty_answer_marks_done(tmp_path):
         with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
             with patch.object(todo_mod, '_push_clipboard', return_value=True):
                 with patch.object(todo_mod, '_tty_prompt', return_value=''):
-                    with patch('subprocess.run'):
+                    with patch.object(todo_mod, '_pager_run'):
                         with patch.object(todo_mod, 'todo_done', return_value={'ok': True, 'id': 9}):
                             result = todo_mod._next_interactive(cfg, 'claude')
 
@@ -821,7 +820,7 @@ def test_next_interactive_n_leaves_open(tmp_path):
         with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
             with patch.object(todo_mod, '_push_clipboard', return_value=True):
                 with patch.object(todo_mod, '_tty_prompt', return_value='n'):
-                    with patch('subprocess.run'):
+                    with patch.object(todo_mod, '_pager_run'):
                         with patch.object(todo_mod, 'todo_done') as mock_done:
                             result = todo_mod._next_interactive(cfg, 'claude')
 
@@ -844,7 +843,7 @@ def test_next_interactive_s_skips_to_next(tmp_path):
             with patch.object(todo_mod, '_push_clipboard', return_value=True):
                 # First call: 's'; second call: 'n' to stop
                 with patch.object(todo_mod, '_tty_prompt', side_effect=['s', 'n']):
-                    with patch('subprocess.run'):
+                    with patch.object(todo_mod, '_pager_run'):
                         with patch.object(todo_mod, 'todo_done') as mock_done:
                             result = todo_mod._next_interactive(cfg, 'claude')
 
@@ -862,7 +861,7 @@ def test_next_interactive_less_not_found_falls_back(tmp_path, capsys):
         with patch.object(todo_mod, 'todo_get', return_value=_ROW_9):
             with patch.object(todo_mod, '_push_clipboard', return_value=True):
                 with patch.object(todo_mod, '_tty_prompt', return_value='n'):
-                    with patch('subprocess.run', side_effect=FileNotFoundError):
+                    with patch.object(todo_mod, '_pager_run', side_effect=FileNotFoundError):
                         with patch.object(todo_mod, 'todo_done'):
                             todo_mod._next_interactive(cfg, 'claude')
 
@@ -929,9 +928,7 @@ def test_nextloop_marks_done_and_continues(tmp_path):
     """y answer marks task done and fetches the next one."""
     from tgw import todo as todo_mod
 
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_nextloop_args(agent='claude')
 
     top_seq = [_ROW_A, _ROW_B, None]
@@ -946,7 +943,7 @@ def test_nextloop_marks_done_and_continues(tmp_path):
                     with patch.object(todo_mod, '_push_clipboard', return_value=True):
                         with patch.object(todo_mod, '_tty_prompt', return_value='y'):
                             with patch.object(todo_mod, 'todo_done') as mock_done:
-                                with patch('subprocess.run'):
+                                with patch.object(todo_mod, '_pager_run'):
                                     result = todo_mod.cmd_todo(cfg, args)
 
     assert result['ok'] is True
@@ -959,9 +956,7 @@ def test_nextloop_skip_continues_without_marking_done(tmp_path):
     """s answer skips the task and fetches the next one without marking done."""
     from tgw import todo as todo_mod
 
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_nextloop_args(agent='claude')
 
     top_seq = [_ROW_A, None]
@@ -976,7 +971,7 @@ def test_nextloop_skip_continues_without_marking_done(tmp_path):
                     with patch.object(todo_mod, '_push_clipboard', return_value=True):
                         with patch.object(todo_mod, '_tty_prompt', return_value='s'):
                             with patch.object(todo_mod, 'todo_done') as mock_done:
-                                with patch('subprocess.run'):
+                                with patch.object(todo_mod, '_pager_run'):
                                     result = todo_mod.cmd_todo(cfg, args)
 
     assert result['ok'] is True
@@ -989,9 +984,7 @@ def test_nextloop_quit_exits_immediately(tmp_path):
     """q answer leaves task open and exits the loop."""
     from tgw import todo as todo_mod
 
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_nextloop_args(agent='claude')
 
     with patch('sys.stdout') as mock_stdout:
@@ -1003,7 +996,7 @@ def test_nextloop_quit_exits_immediately(tmp_path):
                     with patch.object(todo_mod, '_push_clipboard', return_value=True):
                         with patch.object(todo_mod, '_tty_prompt', return_value='q'):
                             with patch.object(todo_mod, 'todo_done') as mock_done:
-                                with patch('subprocess.run'):
+                                with patch.object(todo_mod, '_pager_run'):
                                     result = todo_mod.cmd_todo(cfg, args)
 
     assert result['ok'] is True
@@ -1016,9 +1009,7 @@ def test_nextloop_empty_queue_returns_ok(tmp_path):
     """--nextloop with no tasks returns ok immediately."""
     from tgw import todo as todo_mod
 
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_nextloop_args(agent='claude')
 
     with patch('sys.stdout') as mock_stdout:
@@ -1026,7 +1017,7 @@ def test_nextloop_empty_queue_returns_ok(tmp_path):
         with patch('sys.stdin') as mock_stdin:
             mock_stdin.isatty.return_value = True
             with patch.object(todo_mod, 'todo_top', return_value=None):
-                with patch('subprocess.run'):
+                with patch.object(todo_mod, '_pager_run'):
                     result = todo_mod.cmd_todo(cfg, args)
 
     assert result['ok'] is True
@@ -1037,9 +1028,7 @@ def test_nextloop_requires_tty(tmp_path, capsys):
     """--nextloop in non-interactive context returns error."""
     from tgw import todo as todo_mod
 
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_nextloop_args(agent='claude')
 
     with patch('sys.stdout') as mock_stdout:
@@ -1056,9 +1045,7 @@ def test_nextloop_default_agent_is_claude(tmp_path):
     """--nextloop with no agent arg defaults to claude."""
     from tgw import todo as todo_mod
 
-    plan = tmp_path / 'plan.md'
-    plan.write_text('', encoding='utf-8')
-    cfg = {'plan_master_path': plan}
+    cfg = _approved_cfg(tmp_path)
     args = _make_nextloop_args(agent=None, next_agent=None)
 
     with patch('sys.stdout') as mock_stdout:

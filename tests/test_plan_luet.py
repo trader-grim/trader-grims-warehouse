@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import yaml
+
 from tgw.plan_luet import LUET_REVISION, LUET_VERSION, conform
 from tgw.plan_solver import solve
 
@@ -17,11 +19,70 @@ def graph(*, providers, required):
 
 
 def fake_luet(_binary: Path, tree: Path):
-    packages = []
-    for definition in sorted((tree / "tgw-provider").glob("*/1.0/definition.yaml")):
-        name = definition.parts[-3]
-        packages.append({"category": "tgw-provider", "name": name, "version": "1.0"})
-    return {"packages": packages}
+    """Small SAT-shaped fixture runner for generated Luet package trees.
+
+    It resolves exact and ``provides`` references, dependencies, and symmetric
+    conflicts.  Production conformance invokes pinned Luet; this lets unit
+    tests verify that the generated virtual-package encoding preserves TGW's
+    nested alternatives without putting a binary in the test environment.
+    """
+    definitions = {}
+    for path in tree.rglob("definition.yaml"):
+        data = yaml.safe_load(path.read_text())
+        data["_reference"] = {
+            "category": data["category"], "name": data["name"],
+            "version": str(data["version"]),
+        }
+        definitions[_key(data["_reference"])] = data
+
+    def matches(reference, package):
+        return _key(reference) == _key(package["_reference"]) or any(
+            _key(reference) == _key(provided)
+            for provided in package.get("provides", [])
+        )
+
+    def conflicts(left, right):
+        return any(matches(reference, right) for reference in left.get("conflicts", [])) or any(
+            matches(reference, left) for reference in right.get("conflicts", [])
+        )
+
+    def candidates(reference):
+        return sorted(
+            (package for package in definitions.values() if matches(reference, package)),
+            key=lambda package: (
+                -int(package.get("annotations", {}).get("tgw.preference", 0)),
+                _key(package["_reference"]),
+            ),
+        )
+
+    def satisfy(requirements, selected):
+        if not requirements:
+            return selected
+        reference, *remaining = requirements
+        if any(matches(reference, package) for package in selected.values()):
+            return satisfy(remaining, selected)
+        for package in candidates(reference):
+            key = _key(package["_reference"])
+            if any(conflicts(package, chosen) for chosen in selected.values()):
+                continue
+            nested = satisfy(package.get("requires", []), {**selected, key: package})
+            if nested is not None:
+                resolved = satisfy(remaining, nested)
+                if resolved is not None:
+                    return resolved
+        return None
+
+    target = definitions[("tgw-target", "closure", "1.0")]
+    selected = satisfy(target.get("requires", []), {})
+    if selected is None:
+        raise RuntimeError("fixture Luet solver found no solution")
+    return {
+        "packages": [package["_reference"] for package in selected.values()],
+    }
+
+
+def _key(reference):
+    return reference["category"], reference["name"], str(reference["version"])
 
 
 def test_pin_is_exact_and_nix_source_records_same_revision():
@@ -48,30 +109,85 @@ def test_representable_unique_closure_agrees_with_native(tmp_path):
     assert result["closure_hash"] == native["closure_hash"]
 
 
-def test_multiple_provider_choice_is_truthfully_unrepresentable(tmp_path):
+def test_multiple_provider_choice_is_a_luet_virtual_package_alternative(tmp_path):
     document = graph(
         providers=[
             {"id": "a", "provides": ["app@1"]},
             {"id": "b", "provides": ["app@1"]},
         ], required=["app@1"],
     )
-    result = conform(document, luet_binary=tmp_path / "absent")
-    assert result["available"] is False
-    assert result["status"] == "UNREPRESENTABLE"
-    assert "2 available providers" in result["reason"]
+    binary = tmp_path / "luet"
+    binary.write_text("pinned fixture")
+    result = conform(document, luet_binary=binary, runner=fake_luet)
+    assert result["status"] == "AGREEMENT"
+    assert result["selected_providers"] == ["a"]
 
 
-def test_any_and_preference_are_not_reported_as_agreement(tmp_path):
-    any_graph = graph(
-        providers=[{"id": "a", "provides": ["a@1"]}, {"id": "b", "provides": ["b@1"]}],
-        required={"any": ["a@1", "b@1"]},
+def test_nested_any_agrees_through_selector_packages(tmp_path):
+    document = graph(
+        providers=[
+            {"id": "a", "provides": ["a@1"]},
+            {"id": "b", "provides": ["b@1"]},
+            {"id": "c", "provides": ["c@1"]},
+        ],
+        required={"any": [{"all": ["a@1", {"any": ["b@1", "c@1"]}]}, "c@1"]},
     )
-    preferred = graph(
-        providers=[{"id": "a", "provides": ["a@1"], "preference": 10}],
-        required=["a@1"],
+    binary = tmp_path / "luet"
+    binary.write_text("pinned fixture")
+    result = conform(document, luet_binary=binary, runner=fake_luet)
+    native = solve(document)
+    assert result["status"] == "AGREEMENT"
+    assert result["selected_providers"] == native["selected_providers"] == ["a", "b"]
+    assert result["closure_hash"] == native["closure_hash"]
+
+
+def test_preference_is_translated_and_mismatch_remains_fail_closed(tmp_path):
+    document = graph(
+        providers=[
+            {"id": "preferred", "provides": ["app@1"], "preference": 10},
+            {"id": "fallback", "provides": ["app@1"]},
+        ],
+        required=["app@1"],
     )
-    assert conform(any_graph, luet_binary=tmp_path / "absent")["status"] == "UNREPRESENTABLE"
-    assert conform(preferred, luet_binary=tmp_path / "absent")["status"] == "UNREPRESENTABLE"
+    binary = tmp_path / "luet"
+    binary.write_text("pinned fixture")
+    agreed = conform(document, luet_binary=binary, runner=fake_luet)
+    assert agreed["status"] == "AGREEMENT"
+    assert agreed["selected_providers"] == ["preferred"]
+
+    def lower_ranked_runner(_binary, tree):
+        for path in tree.glob("tgw-provider/*/1.0/definition.yaml"):
+            definition = yaml.safe_load(path.read_text())
+            if definition["annotations"]["tgw.preference"] == "0":
+                return {"packages": [{
+                    "category": definition["category"], "name": definition["name"],
+                    "version": str(definition["version"]),
+                }]}
+        raise AssertionError("fixture did not contain a lower-ranked provider")
+
+    disagreement = conform(document, luet_binary=binary, runner=lower_ranked_runner)
+    assert disagreement["available"] is True
+    assert disagreement["status"] == "DISAGREEMENT"
+    assert disagreement["selected_providers"] == ["fallback"]
+
+
+def test_global_non_greedy_alternative_agrees_with_native(tmp_path):
+    document = graph(
+        providers=[
+            {"id": "app-high", "provides": ["app@1"], "requires": ["db@1"], "preference": 100},
+            {"id": "app-low", "provides": ["app@1"], "preference": 10},
+            {"id": "db", "provides": ["db@1"], "conflicts": ["exclusive@1"]},
+            {"id": "exclusive", "provides": ["exclusive@1"]},
+        ],
+        required=["app@1", "exclusive@1"],
+    )
+    binary = tmp_path / "luet"
+    binary.write_text("pinned fixture")
+    result = conform(document, luet_binary=binary, runner=fake_luet)
+    native = solve(document)
+    assert result["status"] == "AGREEMENT"
+    assert result["selected_providers"] == native["selected_providers"] == ["app-low", "exclusive"]
+    assert result["closure_hash"] == native["closure_hash"]
 
 
 def test_missing_pinned_binary_is_unavailable(tmp_path):

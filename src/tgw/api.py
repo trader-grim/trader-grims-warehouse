@@ -495,7 +495,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
         "claude-help", "clip", "suggest-edit", "promo", "nix-bundle-usb",
         "mailbox", "trace", "flake",
-        "coding",
+        "coding", "plan-authority",
     ]),
 ]
 
@@ -645,8 +645,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--worker", default="", help="focus on a specific worker")
     p.add_argument("--launch", action="store_true", help="exec claude now (default: print the command)")
 
-    p = sub.add_parser("clip", help="TGW clipboard history store/query (PP-CLIP-001)")
-    p.add_argument("clip_action", choices=["list", "last-sku", "search", "wipe", "get", "deliver"])
+    p = sub.add_parser("clip", help="TGW clipboard history and PlanAuthority projection (PP-CLIP-001)")
+    p.add_argument("clip_action", choices=["list", "last-sku", "search", "wipe", "get", "deliver", "authority-list", "authority-show", "authority-decide"])
     p.add_argument("pattern", nargs="?", default="",
                    help="search pattern (for search) / content to deliver (for deliver)")
     p.add_argument("--limit", type=int, default=20, help="max rows (list/search)")
@@ -654,6 +654,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--id", type=int, default=None, metavar="ID",
                    help="get: clip entry ID to retrieve (prints full content)")
     p.add_argument("--copy", action="store_true", help="get: also copy content back to clipboard")
+    p.add_argument("--authority-url", help="PlanAuthority HTTP endpoint (otherwise TGW_AUTHORITY_URL)")
+    p.add_argument("--authority-token", help="PlanAuthority bearer token (otherwise TGW_AUTHORITY_BEARER_TOKEN)")
+    p.add_argument("--request-id", help="authority-show/authority-decide: authority request ID")
+    p.add_argument("--decision", choices=["approve", "hold", "reconcile"], help="authority-decide: explicit operator decision")
+    p.add_argument("--reason", help="authority-decide: durable operator reason")
+    p.add_argument("--reconciliation-evidence", action="append", default=[], help="authority-decide reconcile: evidence identity (repeatable)")
     p.add_argument("--label", default=None, help="deliver: optional short human-readable description")
     p.add_argument("--requested-by", default="claude", dest="requested_by",
                    help="deliver: who requested the delivery (claude|tigwa); not yet persisted to schema")
@@ -1072,6 +1078,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source-commit", help="exact lowercase 40-hex commit in the registered repository")
     p.add_argument("--endpoint", help="explicit endpoint override")
     p.add_argument("--api-key", help="explicit credential override")
+
+    p = sub.add_parser("plan-authority", help="recovery CLI projection over shared PlanAuthority HTTP records")
+    p.add_argument("authority_action", choices=["list", "show", "decide", "notify"])
+    p.add_argument("--request-id", help="show/decide/notify: authority request ID")
+    p.add_argument("--kind", choices=["approve", "hold", "reconcile"], help="decide: explicit operator decision")
+    p.add_argument("--reason", help="decide: durable operator reason")
+    p.add_argument("--reconciliation-evidence", action="append", default=[], help="decide reconcile: evidence identity (repeatable)")
+    p.add_argument("--limit", type=int, default=100, help="list: maximum records")
+    p.add_argument("--endpoint", help="PlanAuthority HTTP endpoint (otherwise TGW_AUTHORITY_URL)")
+    p.add_argument("--api-key", dest="authority_api_key", help="PlanAuthority bearer token (otherwise TGW_AUTHORITY_BEARER_TOKEN)")
 
     p = sub.add_parser("plan", help="plan/taskboard operations (PP-PLANDB-001)")
     p.add_argument(
@@ -3671,14 +3687,19 @@ def cmd_classify_suggestions(
              new-work entries. plan_append and review_flag are listed in report only.
     """
     from tgw import suggestions as sug_mod
+    from tgw.plan_render import PlanRenderBindingError, approved_render_plan_identity
 
     suggestions_path = cfg['plan_vault_path'] / 'suggestions' / 'SUGGESTIONS.md'
-    master_plan_path: Path = cfg['plan_master_path']
+    try:
+        plan_identity = approved_render_plan_identity(cfg)
+    except PlanRenderBindingError as exc:
+        return {'ok': False, 'error': str(exc), 'code': exc.code}
+    master_plan_path = Path(plan_identity['master_plan_path'])
 
     entries = sug_mod.parse_pending(suggestions_path)
     if not entries:
         print('No unprocessed suggestions found.')
-        return {'ok': True, 'total': 0}
+        return {'ok': True, 'total': 0, 'plan_identity': plan_identity}
 
     if limit and limit > 0:
         entries = entries[:limit]
@@ -3691,10 +3712,14 @@ def cmd_classify_suggestions(
     classified = sug_mod.classify_batch(entries, plan_headings, cfg)
     if not classified:
         print('LLM returned no classifications.')
-        return {'ok': False, 'error': 'empty_response', 'total': len(entries)}
+        return {
+            'ok': False, 'error': 'empty_response', 'total': len(entries),
+            'plan_identity': plan_identity,
+        }
 
     result = sug_mod.apply_classifications(suggestions_path, entries, classified, write=apply)
     print(sug_mod.format_report(result, applied=apply))
+    result['plan_identity'] = plan_identity
     return result
 
 
@@ -4467,6 +4492,21 @@ def main() -> int:
                 sku_only=args.sku_only, clip_id=getattr(args, "id", None),
                 copy=getattr(args, "copy", False), label=getattr(args, "label", None),
                 requested_by=getattr(args, "requested_by", "claude"),
+                authority_url=getattr(args, "authority_url", None),
+                authority_token=getattr(args, "authority_token", None),
+                request_id=getattr(args, "request_id", None),
+                decision=getattr(args, "decision", None), reason=getattr(args, "reason", None),
+                reconciliation_evidence=getattr(args, "reconciliation_evidence", ()),
+            )
+
+        elif args.op == "plan-authority":
+            from .plan_authority_client import cmd_plan_authority
+
+            result = cmd_plan_authority(
+                args.authority_action, request_id=args.request_id, kind=args.kind,
+                reason=args.reason, limit=args.limit, endpoint=args.endpoint,
+                bearer_token=args.authority_api_key,
+                reconciliation_evidence=args.reconciliation_evidence,
             )
 
         elif args.op == "catlocmvall":
@@ -5726,8 +5766,11 @@ def main() -> int:
 
                 result = render_taskboard(cfg)
                 if result["ok"]:
+                    plan_identity = result["plan_identity"]
                     print(f"Taskboard rendered: {result['path']} "
-                          f"({result['open']} open, {result['done_week']} done this week)")
+                          f"({result['open']} open, {result['done_week']} done this week)\n"
+                          f"Bound Plan: {plan_identity['plan_commit']} "
+                          f"{plan_identity['solution_hash']}")
                 else:
                     print(f"Error: {result.get('error')}")
                 return 0 if result["ok"] else 1

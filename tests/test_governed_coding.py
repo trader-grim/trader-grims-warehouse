@@ -1,10 +1,115 @@
+import hashlib
+import json
 from pathlib import Path
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from tgw.execution_resources import (
+    RESOURCE_SERVICE_CAPABILITIES,
+    HTTPRegisteredResourceResolver,
+    RegisteredResourceResolver,
+    ResourceVerificationError,
+    ed25519_public_key,
+    issue_harness_retrieval_attestation,
+    resource_service_catalog_hash,
+)
 from tgw.governed_coding import admission_gate, dispatch_role
 from tgw.harness_registry import load_registry, observe_health
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "agent-services/catalogs/harness-providers-v1.json"
+PLAN_COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
+RESOURCE_CONTENT = {
+    "plan:p": "plan input",
+    "plan-commit:fb9": PLAN_COMMIT,
+    "graph:g": "plan graph",
+    "code:c": "code graph",
+    "git:s": "source tree",
+    "env:e": "execution environment",
+    "auth:a": "authority and conditions",
+    "receipt:r": "receipt sink",
+}
+RESOURCE_SERVICE = {
+    "schema": "tgw-registered-resource-service/v2",
+    "id": "unit-resource-service",
+    "client_id": "unit-test-client",
+    "endpoint": "https://resources.invalid",
+    "credential_env": None,
+    "timeout_seconds": 5,
+}
+TEST_ATTESTATION_HASH = "sha256:" + "a" * 64
+TEST_ATTESTATION_KEY_ID = "unit-attestation-key-1"
+TEST_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
+
+
+def service_hash():
+    return "sha256:" + hashlib.sha256(
+        json.dumps(RESOURCE_SERVICE, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+RESOURCE_SERVICE_CATALOG = {
+    "schema": "tgw-registered-resource-service-catalog/v3",
+    "catalog_ref": "catalog:unit-resource-service@1",
+    "plan_commit": PLAN_COMMIT,
+    "services": [{
+        "id": RESOURCE_SERVICE["id"],
+        "client_id": RESOURCE_SERVICE["client_id"],
+        "descriptor_hash": service_hash(),
+        "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
+        "attestation_key_id": TEST_ATTESTATION_KEY_ID,
+        "attestation_public_key": ed25519_public_key(TEST_ATTESTATION_PRIVATE_KEY),
+    }],
+}
+
+
+class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
+    """Inject a narrow in-process verifier for role-selection unit tests.
+
+    Real service attestation and its echo-only rejection are exercised against
+    HTTP in ``test_governed_resource_service``.  These tests isolate provider
+    selection and gate behavior while retaining the mandatory dispatcher seam.
+    """
+
+    def __init__(self) -> None:
+        self._delegate = RegisteredResourceResolver(RESOURCE_CONTENT)
+
+    def fetch(self, ref):
+        return self._delegate.fetch(ref)
+
+    def check_health(self, *, attestation_key_id):
+        if attestation_key_id != TEST_ATTESTATION_KEY_ID:
+            raise ResourceVerificationError("test resource service health identity is invalid")
+
+    def verify_harness_retrieval_attestation(self, attestation, **kwargs):
+        if attestation != {"attestation_hash": TEST_ATTESTATION_HASH}:
+            raise ResourceVerificationError("test retrieval attestation is invalid")
+        if (
+            kwargs.get("attestation_key_id") != TEST_ATTESTATION_KEY_ID
+            or kwargs.get("attestation_public_key")
+            != RESOURCE_SERVICE_CATALOG["services"][0]["attestation_public_key"]
+        ):
+            raise ResourceVerificationError("test retrieval attestation key is invalid")
+        for name, binding in kwargs["resources"].items():
+            if self._delegate.fetch(binding["ref"]).content_hash() != binding["hash"]:
+                raise ResourceVerificationError(f"registered resource {name} content hash mismatch")
+        payload = {
+            "schema": "tgw-registered-resource-retrieval-attestation/v3",
+            "service_id": RESOURCE_SERVICE["id"], "run_id": "unit-run",
+            "client_id": RESOURCE_SERVICE["client_id"],
+            "card_hash": kwargs["card_hash"], "role": kwargs["role"],
+            "execution_identity": kwargs["execution_identity"], "handoff_hash": kwargs["handoff_hash"],
+            "resource_receipt_hash": kwargs["resource_receipt_hash"], "resources": kwargs["resources"],
+            "attestation_key_id": TEST_ATTESTATION_KEY_ID,
+        }
+        return issue_harness_retrieval_attestation(
+            payload, signing_private_key=TEST_ATTESTATION_PRIVATE_KEY,
+        )
+
+
+class UnhealthyUnitAttestedResourceResolver(UnitAttestedResourceResolver):
+    def check_health(self, *, attestation_key_id):
+        raise ResourceVerificationError("qualified resource service health check failed")
 
 
 def runner(path: Path, *, fail_review=False, overclaim=False):
@@ -16,9 +121,15 @@ def runner(path: Path, *, fail_review=False, overclaim=False):
         f"fail_review={fail_review!r}\n"
         f"overclaim={overclaim!r}\n"
         "conditions={'implementation':['implemented'],'independent-review':['reviewed'],'controller-verification':['tested','linted','controller_verified']}[role]\n"
+        "resource_receipt_hash=handoff['resource_receipt']['receipt_hash']\n"
+        "attestation={'attestation_hash':'sha256:" + "a" * 64 + "'}\n"
         "if overclaim and role=='implementation': conditions=['reviewed']\n"
-        "if fail_review and role=='independent-review': result={'outcome':'failed','established_conditions':[],'artifacts':[{'kind':'review','verdict':'FAIL'}]}\n"
-        "else: result={'outcome':'satisfied','established_conditions':conditions,'artifacts':[{'kind':'runner','role':role}]}\n"
+        "if fail_review and role=='independent-review':\n"
+        " result={'outcome':'failed','established_conditions':[],'artifacts':[{'kind':'review','verdict':'FAIL'}],\n"
+        " 'resource_receipt_hash':resource_receipt_hash,'resource_retrieval_attestation':attestation}\n"
+        "else:\n"
+        " result={'outcome':'satisfied','established_conditions':conditions,'artifacts':[{'kind':'runner','role':role}],\n"
+        " 'resource_receipt_hash':resource_receipt_hash,'resource_retrieval_attestation':attestation}\n"
         "print(json.dumps(result))\n"
     )
     path.chmod(0o755)
@@ -34,24 +145,40 @@ def adapters():
 
 
 def card_template(card_id):
+    def binding(ref):
+        return {
+            "ref": ref,
+            "hash": "sha256:" + hashlib.sha256(RESOURCE_CONTENT[ref].encode()).hexdigest(),
+        }
+
     return {
         "card_id": card_id,
         "solution_id": "sha256:solution",
-        "plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+        "plan_commit": PLAN_COMMIT,
+        "resource_service": {
+            "id": RESOURCE_SERVICE["id"], "client_id": RESOURCE_SERVICE["client_id"], "descriptor_hash": service_hash(),
+            "catalog_ref": RESOURCE_SERVICE_CATALOG["catalog_ref"],
+            "catalog_hash": resource_service_catalog_hash(RESOURCE_SERVICE_CATALOG),
+        },
         "bindings": {
-            "plan_input": {"ref": "plan:p", "hash": "sha256:p"},
-            "plan_graph": {"ref": "graph:g", "hash": "sha256:g"},
-            "codegraph_snapshot": {"ref": "code:c", "hash": "sha256:c"},
-            "source_tree": {"ref": "git:s", "hash": "sha256:s"},
-            "execution_environment": {"ref": "env:e", "hash": "sha256:e"},
-            "authority_conditions": {"ref": "auth:a", "hash": "sha256:a"},
+            "plan_input": binding("plan:p"),
+            "plan_commit": binding("plan-commit:fb9"),
+            "plan_graph": binding("graph:g"),
+            "codegraph_snapshot": binding("code:c"),
+            "source_tree": binding("git:s"),
+            "execution_environment": binding("env:e"),
+            "authority_conditions": binding("auth:a"),
+            "receipt_sink": binding("receipt:r"),
         },
         "authority": ["local source and tests only"],
         "exclusions": ["no deployment"],
         "acceptance": ["role receipt passes"],
-        "receipt_sink": "receipt:r",
         "lease": {"id": "lease:l", "expires_at": "2027-08-11T23:00:00Z", "stop_policy": "hold"},
     }
+
+
+def resource_resolver():
+    return UnitAttestedResourceResolver()
 
 
 def setup(tmp_path, *, fail_review=False, overclaim=False):
@@ -64,14 +191,19 @@ def setup(tmp_path, *, fail_review=False, overclaim=False):
 
 
 def dispatch(registry, health, bound_adapters, role, identity, **kwargs):
+    template = kwargs.pop("card_template", card_template("card-" + role))
+    resolver = kwargs.pop("resource_resolver", resource_resolver())
     return dispatch_role(
         registry,
         health,
         role=role,
         adapters=bound_adapters,
-        card_template=card_template("card-" + role),
+        card_template=template,
         execution_identity=identity,
         required_capabilities=["source-mutation"] if role == "implementation" else ["tests"],
+        resource_resolver=resolver,
+        resource_service=RESOURCE_SERVICE,
+        resource_service_catalog=RESOURCE_SERVICE_CATALOG,
         **kwargs,
     )
 
@@ -99,6 +231,28 @@ def test_provider_selected_dispatch_returns_hash_bound_role_receipts(tmp_path):
         "reasons": [],
         "receipt_hashes": sorted([implementation["receipt_hash"], review["receipt_hash"], controller["receipt_hash"]]),
     }
+
+
+def test_direct_dispatch_requires_catalog_selected_service_health_before_launch(tmp_path):
+    registry, health, bound_adapters = setup(tmp_path)
+    launched = []
+
+    def should_not_launch(*args, **kwargs):
+        launched.append((args, kwargs))
+        raise AssertionError("dispatch launched after a failed resource service health check")
+
+    receipt = dispatch(
+        registry, health, bound_adapters, "implementation", "run:unhealthy-resource-service",
+        resource_resolver=UnhealthyUnitAttestedResourceResolver(), run=should_not_launch,
+    )
+
+    assert receipt["status"] == "HOLD"
+    assert receipt["outcome"] == "resource-verification"
+    assert receipt["artifacts"] == [{
+        "kind": "resource_verification",
+        "detail": "qualified resource service health check failed",
+    }]
+    assert launched == []
 
 
 def test_failed_review_receipt_blocks_admission(tmp_path):
@@ -148,6 +302,52 @@ def test_runner_cannot_establish_conditions_outside_selected_role(tmp_path):
     assert receipt["outcome"] == "failed"
     assert receipt["established_conditions"] == []
     assert any(item["kind"] == "contract_failure" for item in receipt["artifacts"])
+
+
+def test_fake_nonempty_resource_hash_cannot_produce_a_passing_attested_role(tmp_path):
+    registry, health, bound_adapters = setup(tmp_path)
+    fake = card_template("fake-resource-card")
+    fake["bindings"]["source_tree"]["hash"] = "sha256:" + "0" * 64
+
+    receipt = dispatch(
+        registry,
+        health,
+        bound_adapters,
+        "implementation",
+        "run:fake-resource",
+        card_template=fake,
+    )
+
+    assert receipt["status"] == "FAIL"
+    assert receipt["outcome"] == "failed"
+    assert receipt["promptcraft_receipt_hash"] is not None
+    assert receipt["artifacts"][-1] == {
+        "kind": "contract_failure",
+        "detail": "registered resource source_tree content hash mismatch",
+    }
+
+
+def test_core_dispatch_rejects_an_in_process_resolver_without_service_health(tmp_path):
+    registry, health, bound_adapters = setup(tmp_path)
+    receipt = dispatch_role(
+        registry,
+        health,
+        role="implementation",
+        adapters=bound_adapters,
+        card_template=card_template("unattested-core-dispatch"),
+        execution_identity="run:unattested-core",
+        required_capabilities=["source-mutation"],
+        resource_resolver=RegisteredResourceResolver(RESOURCE_CONTENT),
+        resource_service=RESOURCE_SERVICE,
+        resource_service_catalog=RESOURCE_SERVICE_CATALOG,
+    )
+
+    assert receipt["status"] == "HOLD"
+    assert receipt["outcome"] == "resource-verification"
+    assert receipt["artifacts"] == [{
+        "kind": "resource_verification",
+        "detail": "registered resource resolver cannot check service health",
+    }]
 
 
 def test_same_execution_context_cannot_self_review_for_admission(tmp_path):
