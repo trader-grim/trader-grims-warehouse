@@ -146,6 +146,7 @@ def validate_resource_service_descriptor(descriptor: Mapping[str, Any]) -> dict[
     if not isinstance(endpoint, str):
         raise ResourceVerificationError("registered resource service endpoint is invalid")
     parsed = urlsplit(endpoint)
+    loopback = parsed.hostname in {"127.0.0.1", "::1", "localhost"}
     if (
         parsed.scheme not in {"http", "https"}
         or not parsed.netloc
@@ -153,8 +154,9 @@ def validate_resource_service_descriptor(descriptor: Mapping[str, Any]) -> dict[
         or parsed.fragment
         or parsed.username is not None
         or parsed.password is not None
+        or (parsed.scheme == "http" and not loopback)
     ):
-        raise ResourceVerificationError("registered resource service endpoint is invalid")
+        raise ResourceVerificationError("registered resource service endpoint must use HTTPS or loopback HTTP")
     if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= 60:
         raise ResourceVerificationError("registered resource service timeout is invalid")
     if credential_env is not None and (

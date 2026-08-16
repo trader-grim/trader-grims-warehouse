@@ -288,6 +288,19 @@ def test_qualified_catalog_rejects_an_unbound_service_descriptor(monkeypatch):
             verify_resource_service_registration(catalog(service), substituted)
 
 
+def test_registered_resource_service_rejects_plaintext_non_loopback_endpoint():
+    with pytest.raises(ResourceVerificationError, match="HTTPS or loopback HTTP"):
+        HTTPRegisteredResourceResolver.from_descriptor(
+            {
+                "schema": "tgw-registered-resource-service/v1",
+                "id": "untrusted-remote-service",
+                "endpoint": "http://resources.example.invalid",
+                "credential_env": None,
+                "timeout_seconds": 5,
+            }
+        )
+
+
 def test_absent_codegraph_holds_before_a_harness_can_receive_the_card(monkeypatch):
     content = resources()
     missing = {name: value for name, value in content.items() if name != "codegraph:snapshot"}
