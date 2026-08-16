@@ -2,12 +2,16 @@ from unittest.mock import Mock
 
 import pytest
 
+from tgw.bootstrap_deployment_contract import VerifiedBootstrapDeploymentContract
 from tgw.effect_handlers import AmbiguousEffect, AuthorityEffectController, EffectOutcome, RetryableEffect, TypedEffectHandlerRegistry
 from tgw.plan_authority import TypedEffect
 
 SHA = "a" * 40
 TREE = "b" * 40
 DIGEST = "c" * 64
+BOOTSTRAP_REF = f"candidate:{SHA}:bootstrap-deployment:v1"
+BOOTSTRAP_HASH = "sha256:" + "d" * 64
+BOOTSTRAP_GENERATION = "candidate-release"
 
 
 class _AuthorityStore:
@@ -20,7 +24,19 @@ class _AuthorityStore:
         self.complete_execution = Mock(return_value={}, side_effect=complete_error)
 
 
+class _BootstrapContractResolver:
+    """Inert test seam standing in for the separately configured X resolver."""
+
+    def __init__(self):
+        self.resolve = Mock(return_value=VerifiedBootstrapDeploymentContract(
+            reference=BOOTSTRAP_REF,
+            contract_hash=BOOTSTRAP_HASH,
+            intended_next_generation=BOOTSTRAP_GENERATION,
+        ))
+
+
 def _registry(**changes):
+    resolver = changes.pop("bootstrap_contract_resolver", _BootstrapContractResolver())
     providers = {
         "release_install": Mock(return_value={"evidence": ["release:selected"]}),
         "release_rollback": Mock(return_value={"receipt": "rollback:1"}),
@@ -31,7 +47,7 @@ def _registry(**changes):
         "bootstrap_rollback": Mock(return_value={"receipt": "nixos:rollback"}),
     }
     providers.update(changes)
-    return TypedEffectHandlerRegistry(**providers), providers
+    return TypedEffectHandlerRegistry(bootstrap_contract_resolver=resolver, **providers), providers
 
 
 @pytest.mark.parametrize(
@@ -56,28 +72,21 @@ def _registry(**changes):
         ("dependency-resubmit", {"dependency_id": "W03", "queue_id": "coding", "failed_generation": "generation-1"}),
         ("authority-canary", {"canary_id": "canary:w10-1", "purpose": "verify-plan-authority-roundtrip"}),
         ("approval-platform-bootstrap-deployment", {
-            "target_host": "tgw-prod", "flake_repository_id": "tgw-flake",
-            "flake_commit": SHA, "flake_tree": TREE,
-            "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old",
-            "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
-            "credential_ref": "credential:tgw-review:codex", "credential_sha256": DIGEST,
-            "broker_source_sha256": DIGEST, "namespace_source_sha256": DIGEST,
-            "nix_module_sha256": DIGEST, "egress_contract_sha256": DIGEST,
-            "install_contract_sha256": DIGEST, "review_receipt": "review:passed",
-            "controller_receipt": "controller:passed", "network_attestation_receipt": "network:passed",
-            "probe_receipt": "probes:passed", "operation_id": "bootstrap:review-transport-1",
+            "bootstrap_contract_ref": BOOTSTRAP_REF,
+            "bootstrap_contract_hash": BOOTSTRAP_HASH,
         }),
     ],
 )
 def test_registered_effects_consume_exact_authority_then_invoke_only_their_handler(kind, parameters):
     registry, providers = _registry()
     authority = _AuthorityStore()
-    effect = TypedEffect.parse({"kind": kind, "generation": "generation-2", "parameters": parameters})
+    generation = BOOTSTRAP_GENERATION if kind == "approval-platform-bootstrap-deployment" else "generation-2"
+    effect = TypedEffect.parse({"kind": kind, "generation": generation, "parameters": parameters})
 
     receipt = AuthorityEffectController(registry, authority).execute(request_id="request:1", effect=effect)
 
     authority.begin_execution.assert_called_once_with(
-        "request:1", effect_hash=effect.effect_hash, generation="generation-2",
+        "request:1", effect_hash=effect.effect_hash, generation=generation,
         handler_id=receipt.handler_id,
     )
     authority.complete_execution.assert_called_once_with(
@@ -211,25 +220,23 @@ def test_authority_canary_is_internal_receipt_only_and_cannot_broaden_purpose():
 def test_bootstrap_effect_rejects_host_path_command_digest_and_cas_broadening_before_consumption():
     registry, _ = _registry()
     authority = _AuthorityStore()
-    base = next(parameters for kind, parameters in [
-        ("approval-platform-bootstrap-deployment", {
-            "target_host": "tgw-prod", "flake_repository_id": "tgw-flake", "flake_commit": SHA, "flake_tree": TREE,
-            "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old", "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
-            "credential_ref": "credential:tgw-review:codex", "credential_sha256": DIGEST, "broker_source_sha256": DIGEST,
-            "namespace_source_sha256": DIGEST, "nix_module_sha256": DIGEST, "egress_contract_sha256": DIGEST, "install_contract_sha256": DIGEST,
-            "review_receipt": "review:passed", "controller_receipt": "controller:passed", "network_attestation_receipt": "network:passed",
-            "probe_receipt": "probes:passed", "operation_id": "bootstrap:review-transport-1",
-        })
-    ] if kind)
+    base = {"bootstrap_contract_ref": BOOTSTRAP_REF, "bootstrap_contract_hash": BOOTSTRAP_HASH}
     changes = (
-        {"target_host": "other"}, {"credential_ref": "/home/codex/.codex/auth.json"},
-        {"credential_sha256": "unbound"}, {"successor_system": base["expected_current_system"]},
+        {"target_host": "other"}, {"candidate_commit": SHA},
+        {"bootstrap_contract_ref": "symbolic:latest"}, {"bootstrap_contract_hash": "sha256:" + "0" * 64},
         {"command": "nixos-rebuild switch"},
     )
     for change in changes:
-        effect = {"kind": "approval-platform-bootstrap-deployment", "generation": "nixos-review-transport-1", "parameters": {**base, **change}}
+        effect = {"kind": "approval-platform-bootstrap-deployment", "generation": BOOTSTRAP_GENERATION, "parameters": {**base, **change}}
         with pytest.raises(ValueError):
             AuthorityEffectController(registry, authority).execute(request_id="bootstrap", effect=TypedEffect.parse(effect))
+    with pytest.raises(ValueError, match="does not match"):
+        AuthorityEffectController(registry, authority).execute(
+            request_id="bootstrap",
+            effect=TypedEffect.parse({
+                "kind": "approval-platform-bootstrap-deployment", "generation": "wrong-generation", "parameters": base,
+            }),
+        )
     authority.begin_execution.assert_not_called()
 
 
@@ -237,17 +244,41 @@ def test_bootstrap_provider_failure_rolls_back_only_registered_prior_closure():
     install = Mock(side_effect=RuntimeError("health probe failed"))
     rollback = Mock(return_value={"receipt": "nixos:prior-closure-restored"})
     registry, _ = _registry(bootstrap_install=install, bootstrap_rollback=rollback)
-    parameters = {
-        "target_host": "tgw-prod", "flake_repository_id": "tgw-flake", "flake_commit": SHA, "flake_tree": TREE,
-        "expected_current_system": "/nix/store/aaaaaaaa-nixos-system-tgw-prod-old", "successor_system": "/nix/store/bbbbbbbb-nixos-system-tgw-prod-new",
-        "credential_ref": "credential:tgw-review:codex", "credential_sha256": DIGEST, "broker_source_sha256": DIGEST,
-        "namespace_source_sha256": DIGEST, "nix_module_sha256": DIGEST, "egress_contract_sha256": DIGEST, "install_contract_sha256": DIGEST,
-        "review_receipt": "review:passed", "controller_receipt": "controller:passed", "network_attestation_receipt": "network:passed",
-        "probe_receipt": "probes:passed", "operation_id": "bootstrap:review-transport-1",
-    }
-    effect = TypedEffect.parse({"kind": "approval-platform-bootstrap-deployment", "generation": "nixos-review-transport-1", "parameters": parameters})
+    parameters = {"bootstrap_contract_ref": BOOTSTRAP_REF, "bootstrap_contract_hash": BOOTSTRAP_HASH}
+    effect = TypedEffect.parse({
+        "kind": "approval-platform-bootstrap-deployment", "generation": BOOTSTRAP_GENERATION, "parameters": parameters,
+    })
     authority = _AuthorityStore(receipt_id="bootstrap:attempt")
     receipt = AuthorityEffectController(registry, authority).execute(request_id="bootstrap", effect=effect)
     assert receipt.outcome is EffectOutcome.ROLLED_BACK
     assert receipt.rollback_receipt == "nixos:prior-closure-restored"
-    rollback.assert_called_once()
+    rollback.assert_called_once_with(parameters)
+
+
+def test_bootstrap_dry_run_provider_receives_only_a_verified_immutable_contract_binding():
+    registry, providers = _registry()
+    authority = _AuthorityStore(receipt_id="bootstrap:dry-run")
+    parameters = {"bootstrap_contract_ref": BOOTSTRAP_REF, "bootstrap_contract_hash": BOOTSTRAP_HASH}
+    receipt = AuthorityEffectController(registry, authority).execute(
+        request_id="bootstrap:dry-run",
+        effect=TypedEffect.parse({
+            "kind": "approval-platform-bootstrap-deployment", "generation": BOOTSTRAP_GENERATION,
+            "parameters": parameters,
+        }),
+    )
+
+    assert receipt.outcome is EffectOutcome.SUCCEEDED
+    providers["bootstrap_install"].assert_called_once_with(parameters)
+
+
+def test_bootstrap_effect_without_an_exact_contract_resolver_holds_before_authority_consumption():
+    registry, _ = _registry(bootstrap_contract_resolver=None)
+    authority = _AuthorityStore()
+    effect = TypedEffect.parse({
+        "kind": "approval-platform-bootstrap-deployment", "generation": BOOTSTRAP_GENERATION,
+        "parameters": {"bootstrap_contract_ref": BOOTSTRAP_REF, "bootstrap_contract_hash": BOOTSTRAP_HASH},
+    })
+
+    with pytest.raises(ValueError, match="resolver is not mounted"):
+        AuthorityEffectController(registry, authority).execute(request_id="bootstrap:unmounted", effect=effect)
+    authority.begin_execution.assert_not_called()

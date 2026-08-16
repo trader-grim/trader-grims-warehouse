@@ -14,6 +14,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+from tgw.bootstrap_deployment_contract import (
+    BootstrapDeploymentContractResolver,
+    VerifiedBootstrapDeploymentContract,
+)
 from tgw.plan_authority import EffectKind, TypedEffect
 
 _SHA1 = re.compile(r"^[0-9a-f]{40}$")
@@ -77,15 +81,6 @@ def _required(parameters: Mapping[str, Any], keys: set[str]) -> dict[str, str]:
     return result
 
 
-def _required_strings(parameters: Mapping[str, Any], keys: set[str]) -> dict[str, str]:
-    if set(parameters) != keys:
-        raise ValueError(f"effect parameters must be exactly {sorted(keys)}")
-    result = dict(parameters)
-    if any(not isinstance(value, str) or not value for value in result.values()):
-        raise ValueError("effect parameters must be non-empty strings")
-    return result
-
-
 @dataclass(frozen=True)
 class EffectExecutionReceipt:
     schema: str
@@ -129,6 +124,7 @@ class TypedEffectHandlerRegistry:
         dependency_resubmit: Callable[[Mapping[str, str]], Mapping[str, Any]],
         bootstrap_install: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         bootstrap_rollback: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
+        bootstrap_contract_resolver: BootstrapDeploymentContractResolver | None = None,
     ) -> None:
         self._providers = {
             EffectKind.CODING_RELEASE: ("immutable-release-installer@1", release_install, release_rollback),
@@ -137,11 +133,12 @@ class TypedEffectHandlerRegistry:
             EffectKind.DEPENDENCY_RESUBMIT: ("dependency-resubmit@1", dependency_resubmit, None),
             EffectKind.AUTHORITY_CANARY: ("authority-canary-receipt-only@1", _authority_canary, None),
             EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT: (
-                "nixos-reviewed-generation-switch@1",
+                "nixos-reviewed-generation-switch@2",
                 bootstrap_install or self._unavailable_bootstrap,
                 bootstrap_rollback or self._unavailable_bootstrap,
             ),
         }
+        self._bootstrap_contract_resolver = bootstrap_contract_resolver
 
     @staticmethod
     def _unavailable_bootstrap(parameters: Mapping[str, str]) -> Mapping[str, Any]:
@@ -186,36 +183,33 @@ class TypedEffectHandlerRegistry:
             parameters = _required(effect.parameters, {"canary_id", "purpose"})
             if parameters["purpose"] != "verify-plan-authority-roundtrip":
                 raise ValueError("authority canary purpose is outside the harmless registered bound")
-        else:
-            parameters = _required_strings(effect.parameters, {
-                "target_host", "flake_repository_id", "flake_commit", "flake_tree",
-                "expected_current_system", "successor_system", "credential_ref", "credential_sha256",
-                "broker_source_sha256", "namespace_source_sha256", "nix_module_sha256",
-                "egress_contract_sha256", "install_contract_sha256", "review_receipt",
-                "controller_receipt", "network_attestation_receipt", "probe_receipt", "operation_id",
-            })
-            if parameters["target_host"] != "tgw-prod" or parameters["flake_repository_id"] != "tgw-flake":
-                raise ValueError("bootstrap deployment target is outside the registered production bound")
-            if not _SHA1.fullmatch(parameters["flake_commit"]) or not _SHA1.fullmatch(parameters["flake_tree"]):
-                raise ValueError("bootstrap reviewed flake identity is invalid")
-            digest_fields = {key for key in parameters if key.endswith("_sha256")}
-            if any(not _SHA256.fullmatch(parameters[key]) for key in digest_fields):
-                raise ValueError("bootstrap artifact or credential digest is invalid")
-            for key in ("expected_current_system", "successor_system"):
-                if not parameters[key].startswith("/nix/store/") or "nixos-system-tgw-prod-" not in parameters[key]:
-                    raise ValueError("bootstrap system closure is not an exact tgw-prod Nix store identity")
-            if parameters["expected_current_system"] == parameters["successor_system"]:
-                raise ValueError("bootstrap successor must differ from expected current generation")
-            if not parameters["credential_ref"].startswith("credential:tgw-review:"):
-                raise ValueError("bootstrap credential must use the dedicated symbolic review identity")
-            identity_fields = {
-                "target_host", "flake_repository_id", "credential_ref", "review_receipt",
-                "controller_receipt", "network_attestation_receipt", "probe_receipt", "operation_id",
-            }
-            if any(not _IDENTITY.fullmatch(parameters[key]) for key in identity_fields):
-                raise ValueError("bootstrap symbolic identity is invalid")
+        elif effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT:
+            parameters = _required(
+                effect.parameters, {"bootstrap_contract_ref", "bootstrap_contract_hash"},
+            )
+            resolver = self._bootstrap_contract_resolver
+            if resolver is None:
+                raise ValueError("verified bootstrap deployment contract resolver is not mounted")
+            verified = resolver.resolve(
+                parameters["bootstrap_contract_ref"], parameters["bootstrap_contract_hash"],
+            )
+            if not isinstance(verified, VerifiedBootstrapDeploymentContract):
+                raise ValueError("bootstrap deployment contract resolver returned an invalid verification")
+            if (
+                verified.reference != parameters["bootstrap_contract_ref"]
+                or verified.contract_hash != parameters["bootstrap_contract_hash"]
+                or effect.generation != verified.intended_next_generation
+            ):
+                raise ValueError("bootstrap deployment effect does not match its verified immutable contract")
+            # Providers do not receive a target, closure, credential, path, or
+            # mutable deployment document.  They may act only on this exact
+            # independently verified reference/hash pair.
+            parameters = verified.provider_binding()
+        else:  # pragma: no cover - every EffectKind is handled above.
+            raise ValueError("effect kind is not registered")
         handler_id, handler, rollback = self._providers[effect.kind]
-        parameters["generation"] = effect.generation
+        if effect.kind is not EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT:
+            parameters["generation"] = effect.generation
         return handler_id, parameters, handler, rollback
 
 

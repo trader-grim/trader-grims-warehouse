@@ -9,6 +9,12 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from tgw.bootstrap_deployment_contract import (
+    BootstrapDeploymentContractError,
+    PinnedBootstrapDeploymentContractResolver,
+    bootstrap_deployment_contract_ref,
+    derive_bootstrap_deployment_contract,
+)
 from tgw.candidate_manifest import (
     build_candidate_manifest,
     create_migration_safety_receipt,
@@ -1203,3 +1209,128 @@ def test_cli_requires_both_operator_configured_evidence_roots(tmp_path):
     )
     assert completed.returncode == 2
     assert "--candidate-evidence-descriptor-config" in completed.stderr
+
+
+def _bootstrap_deployment_declaration():
+    return {
+        "schema": "tgw-bootstrap-deployment-declaration/v1",
+        "target": {"host": "tgw-prod", "flake_repository_id": "tgw-flake"},
+        "expected_prior_closure": "/nix/store/" + "a" * 32 + "-nixos-system-tgw-prod-previous",
+        "intended_next_closure": "/nix/store/" + "b" * 32 + "-nixos-system-tgw-prod-candidate",
+        "health_probes": ["broker", "egress", "namespace"],
+    }
+
+
+def _append_bootstrap_deployment_contract(execution_sink, *, source_commit, contract, tmp_path):
+    manifest = json.loads((execution_sink / "manifest.json").read_text())
+    ref = bootstrap_deployment_contract_ref(source_commit)
+    raw = write_json(execution_sink / "bootstrap-deployment" / "contract.json", contract)
+    descriptor = _commit_sink(
+        execution_sink,
+        sink_id="execution-evidence-sink",
+        artifacts=[
+            *manifest["artifacts"],
+            {
+                "ref": ref,
+                "path": "bootstrap-deployment/contract.json",
+                "content_sha256": digest(raw),
+            },
+        ],
+        message="retain immutable W09 bootstrap deployment contract",
+    )
+    config = tmp_path / "w09-execution-evidence-sink-config.json"
+    write_json(config, descriptor)
+    return ref, config
+
+
+def _bootstrap_contract_resolver(candidate, plan_repository, descriptor_config, execution_config):
+    descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
+    execution_sink = PinnedGitReceiptSink(
+        load_receipt_sink_descriptor(execution_config, candidate_repository=candidate),
+        candidate_repository=candidate,
+    )
+    return PinnedBootstrapDeploymentContractResolver(
+        candidate,
+        plan_repository=plan_repository,
+        plan_approved_ref=PLAN_APPROVED_REF,
+        candidate_evidence_descriptor=descriptor,
+        execution_evidence_sink=execution_sink,
+    )
+
+
+def test_bootstrap_contract_is_derived_from_exact_w08_s_d_evidence_and_retained_in_x(tmp_path):
+    candidate, commit, tree = candidate_repository(tmp_path)
+    plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    _s, _d, execution_sink, descriptor_config, _execution_config = pinned_sinks(
+        tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree, plan_commit=plan_commit,
+    )
+    descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
+    contract = derive_bootstrap_deployment_contract(
+        candidate,
+        candidate="HEAD",
+        plan_repository=plan_repository,
+        plan_approved_ref=PLAN_APPROVED_REF,
+        candidate_evidence_descriptor=descriptor,
+        deployment_declaration=_bootstrap_deployment_declaration(),
+    )
+    ref, execution_config = _append_bootstrap_deployment_contract(
+        execution_sink, source_commit=commit, contract=contract, tmp_path=tmp_path,
+    )
+
+    verified = _bootstrap_contract_resolver(
+        candidate, plan_repository, descriptor_config, execution_config,
+    ).resolve(ref, contract["contract_hash"])
+
+    assert ref == bootstrap_deployment_contract_ref(commit)
+    assert contract["candidate"]["commit"] == commit
+    assert contract["candidate"]["tree"] == tree
+    assert contract["plan"]["commit"] == plan_commit
+    assert contract["release"]["manifest_hash"].startswith("sha256:")
+    assert contract["rollback"]["manifest_hash"].startswith("sha256:")
+    assert contract["deployment"]["expected_prior"]["generation"] == "previous"
+    assert contract["deployment"]["intended_next"]["generation"] == "candidate"
+    assert verified.provider_binding() == {
+        "bootstrap_contract_ref": ref,
+        "bootstrap_contract_hash": contract["contract_hash"],
+    }
+
+
+@pytest.mark.parametrize(
+    "corruption", ["candidate", "sink", "symbolic-closure", "typed-effect", "rollback-contract"],
+)
+def test_bootstrap_contract_rejects_widened_or_mismatched_w08_and_closure_bindings(tmp_path, corruption):
+    candidate, commit, tree = candidate_repository(tmp_path)
+    plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    _s, _d, execution_sink, descriptor_config, _execution_config = pinned_sinks(
+        tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree, plan_commit=plan_commit,
+    )
+    descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
+    contract = derive_bootstrap_deployment_contract(
+        candidate,
+        candidate="HEAD",
+        plan_repository=plan_repository,
+        plan_approved_ref=PLAN_APPROVED_REF,
+        candidate_evidence_descriptor=descriptor,
+        deployment_declaration=_bootstrap_deployment_declaration(),
+    )
+    contract = json.loads(json.dumps(contract))
+    if corruption == "candidate":
+        contract["candidate"]["commit"] = "0" * 40
+    elif corruption == "sink":
+        contract["candidate"]["candidate_evidence"]["sink"]["commit"] = "0" * 40
+    elif corruption == "symbolic-closure":
+        contract["deployment"]["intended_next"]["closure"] = "current-system"
+    elif corruption == "typed-effect":
+        contract["typed_effects"]["install"]["target_host"] = "other-host"
+    else:
+        contract["rollback_contract"]["generation"] = "unbound-rollback"
+    unsigned = {key: value for key, value in contract.items() if key != "contract_hash"}
+    contract["contract_hash"] = object_hash(unsigned)
+    ref, execution_config = _append_bootstrap_deployment_contract(
+        execution_sink, source_commit=commit, contract=contract, tmp_path=tmp_path,
+    )
+
+    with pytest.raises(BootstrapDeploymentContractError):
+        _bootstrap_contract_resolver(
+            candidate, plan_repository, descriptor_config, execution_config,
+        ).resolve(ref, contract["contract_hash"])

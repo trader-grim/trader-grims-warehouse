@@ -1174,7 +1174,9 @@ def verify_candidate_evidence_bundle(
         "full_suite_test_output_artifact_hash": candidate["full_suite_output_artifact_hash"],
         "migration_receipt_hashes": sorted(receipt.receipt_hash for receipt in candidate["migration_receipts"]),
         "qualified_execution_proof_hashes": candidate["qualified_execution_proof_hashes"],
+        "release_generation": release_manifest["generation"],
         "release_manifest_hash": _hash(release_manifest),
+        "rollback_generation": rollback_manifest["rollback_release_manifest"]["generation"],
         "rollback_manifest_hash": rollback_manifest["manifest_hash"],
         "bundle_hash": bundle["bundle_hash"],
     }
