@@ -67,7 +67,8 @@ class ProtectedGitReader(Protocol):
 
 
 _PROTECTED_GIT_READERS: ContextVar[Mapping[Path, ProtectedGitReader] | None] = ContextVar(
-    "tgw_protected_git_readers", default=None,
+    "tgw_protected_git_readers",
+    default=None,
 )
 
 RECEIPT_SINK_SCHEMA = "tgw-pinned-git-candidate-receipt-sink/v1"
@@ -141,13 +142,7 @@ def protected_git_object_reads(
     """Route every admission Git read through caller-held repository FDs."""
 
     normalized = {Path(root).resolve(strict=True): reader for root, reader in readers.items()}
-    if len(normalized) != len(readers) or any(
-        not all(
-            callable(getattr(reader, name, None))
-            for name in ("run_git", "run_git_status", "postcheck")
-        )
-        for reader in normalized.values()
-    ):
+    if len(normalized) != len(readers) or any(not all(callable(getattr(reader, name, None)) for name in ("run_git", "run_git_status", "postcheck")) for reader in normalized.values()):
         raise CandidateReceiptSinkError("protected Git reader mapping is invalid")
     token = _PROTECTED_GIT_READERS.set(normalized)
     try:
@@ -200,9 +195,7 @@ def _git(repository: Path, *args: str) -> bytes:
         try:
             reader = readers[Path(repository).resolve(strict=True)]
         except (KeyError, OSError) as exc:
-            raise CandidateReceiptSinkError(
-                "production admission attempted an unheld Git repository"
-            ) from exc
+            raise CandidateReceiptSinkError("production admission attempted an unheld Git repository") from exc
         return reader.run_git(*args)
     try:
         return subprocess.run(
@@ -221,9 +214,7 @@ def _git_status(repository: Path, *args: str) -> tuple[int, bytes]:
         try:
             reader = readers[Path(repository).resolve(strict=True)]
         except (KeyError, OSError) as exc:
-            raise CandidateReceiptSinkError(
-                "production admission attempted an unheld Git repository"
-            ) from exc
+            raise CandidateReceiptSinkError("production admission attempted an unheld Git repository") from exc
         return reader.run_git_status(*args)
     try:
         result = subprocess.run(["git", *args], cwd=repository, check=False, capture_output=True)
@@ -403,11 +394,7 @@ def validate_pinned_w06_plan_materialization(value: Mapping[str, Any]) -> dict[s
     """
 
     required = {"schema", "plan_source", "solution"}
-    if (
-        not isinstance(value, Mapping)
-        or set(value) != required
-        or value.get("schema") != PINNED_W06_PLAN_MATERIALIZATION_SCHEMA
-    ):
+    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != PINNED_W06_PLAN_MATERIALIZATION_SCHEMA:
         raise CandidateReceiptSinkError("pinned W06 Plan materialization descriptor is invalid")
     plan_source = value.get("plan_source")
     solution = value.get("solution")
@@ -489,10 +476,7 @@ class PinnedCandidateEvidenceDescriptor:
             raise CandidateReceiptSinkError("W06 Plan source must be disjoint from the candidate repository")
         if _paths_overlap(candidate_root, solution_repository):
             raise CandidateReceiptSinkError("W06 Plan solution must be disjoint from the candidate repository")
-        if any(
-            _paths_overlap(solution_repository, root)
-            for root in (self._repository, sink_repository)
-        ):
+        if any(_paths_overlap(solution_repository, root) for root in (self._repository, sink_repository)):
             raise CandidateReceiptSinkError("W06 Plan solution must be disjoint from candidate evidence and descriptor roots")
         self._value = {
             "schema": CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA,
@@ -590,11 +574,7 @@ def _load_w06_plan_materialization(
     if source_repository != expected_plan_repository or solution_repository != expected_plan_repository:
         raise CandidateReceiptSinkError("W06 Plan source and solution must be retained in the configured Plan/evidence repository")
     source_commit, source_tree = _candidate_identity(source_repository, source_pin["commit"])
-    if (
-        source_commit != plan_commit
-        or source_commit != source_pin["commit"]
-        or source_tree != source_pin["tree"]
-    ):
+    if source_commit != plan_commit or source_commit != source_pin["commit"] or source_tree != source_pin["tree"]:
         raise CandidateReceiptSinkError("pinned W06 Plan source must be the exact approved Plan commit")
     source_raw = _git(source_repository, "show", f"{source_commit}:{source_pin['path']}")
     if _hash_bytes(source_raw) != source_pin["content_sha256"]:
@@ -1057,7 +1037,11 @@ def _verify_candidate_manifest_evidence(
     if _GIT_OBJECT.fullmatch(base_tree) is None:
         raise CandidateReceiptSinkError("candidate manifest predecessor binding is invalid")
     ancestry_status, _ = _git_status(
-        repository, "merge-base", "--is-ancestor", base_commit, source_commit,
+        repository,
+        "merge-base",
+        "--is-ancestor",
+        base_commit,
+        source_commit,
     )
     if ancestry_status:
         raise CandidateReceiptSinkError("candidate manifest predecessor is not an ancestor")
@@ -1085,16 +1069,9 @@ def _verify_candidate_manifest_evidence(
         raise CandidateReceiptSinkError("candidate manifest Plan binding mismatch")
     if not all(isinstance(plan.get(field), str) and _SHA256.fullmatch(plan[field]) for field in ("solution_hash", "closure_hash")):
         raise CandidateReceiptSinkError("candidate manifest Plan solution binding is invalid")
-    if (
-        plan["solution_hash"] != w06_plan_materialization["solution_hash"]
-        or plan["closure_hash"] != w06_plan_materialization["closure_hash"]
-    ):
+    if plan["solution_hash"] != w06_plan_materialization["solution_hash"] or plan["closure_hash"] != w06_plan_materialization["closure_hash"]:
         raise CandidateReceiptSinkError("candidate manifest does not bind the approved W06 Plan solution")
-    if (
-        conformance.get("status") != "VERIFIED"
-        or conformance.get("receipt_hash") != luet_conformance_receipt.get("receipt_hash")
-        or manifest.get("dispatchable") is not True
-    ):
+    if conformance.get("status") != "VERIFIED" or conformance.get("receipt_hash") != luet_conformance_receipt.get("receipt_hash") or manifest.get("dispatchable") is not True:
         raise CandidateReceiptSinkError("candidate manifest is not Luet-conformance verified and dispatchable")
     try:
         verified_luet = verify_luet_conformance_receipt(
@@ -1107,10 +1084,7 @@ def _verify_candidate_manifest_evidence(
         )
     except CandidateManifestError as exc:
         raise CandidateReceiptSinkError("retained Luet conformance receipt is invalid") from exc
-    if (
-        verified_luet["provider_id"] != w06_plan_materialization["provider_id"]
-        or verified_luet["binary_sha256"] != w06_plan_materialization["binary_sha256"]
-    ):
+    if verified_luet["provider_id"] != w06_plan_materialization["provider_id"] or verified_luet["binary_sha256"] != w06_plan_materialization["binary_sha256"]:
         raise CandidateReceiptSinkError("retained Luet conformance receipt provider binding is invalid")
     if manifest.get("candidate_closed") is not True or manifest.get("installed") is not False:
         raise CandidateReceiptSinkError("candidate manifest must be closed and uninstalled")
@@ -1125,7 +1099,8 @@ def _verify_candidate_manifest_evidence(
         if not isinstance(test_plan_value, Mapping) or not isinstance(test_plan_value.get("runner"), Mapping):
             raise CandidateManifestError("candidate canonical test plan is invalid")
         runner_path = _safe_path(
-            test_plan_value["runner"].get("path"), label="candidate test plan runner path",
+            test_plan_value["runner"].get("path"),
+            label="candidate test plan runner path",
         )
         test_plan = validate_candidate_test_plan(
             test_plan_value,
@@ -1554,9 +1529,7 @@ def verify_independent_review_evidence_bundle(
     artifacts = {name: _bundle_artifact(sink, bundle[name]) for name in _INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS}
     try:
         report = validate_review_report(artifacts["review_packet"], artifacts["review_report"])
-        review = validate_review_result(
-            artifacts["review_packet"], artifacts["review_report"], artifacts["review_result"]
-        )
+        review = validate_review_result(artifacts["review_packet"], artifacts["review_report"], artifacts["review_result"])
     except CandidateReviewError as exc:
         raise CandidateReceiptSinkError("candidate semantic/security review is invalid") from exc
     if review["status"] != "PASS" or review["candidate_manifest_hash"] != candidate_manifest_hash:
@@ -1703,12 +1676,8 @@ def candidate_admission_gate(
         candidate_repository=repo,
     )
     try:
-        w06_plan_source_repository = Path(
-            candidate_evidence_descriptor.w06_plan_materialization_pin["plan_source"]["repository"]
-        ).resolve(strict=True)
-        w06_solution_repository = Path(
-            candidate_evidence_descriptor.w06_plan_materialization_pin["solution"]["repository"]
-        ).resolve(strict=True)
+        w06_plan_source_repository = Path(candidate_evidence_descriptor.w06_plan_materialization_pin["plan_source"]["repository"]).resolve(strict=True)
+        w06_solution_repository = Path(candidate_evidence_descriptor.w06_plan_materialization_pin["solution"]["repository"]).resolve(strict=True)
         approved_plan_repository = Path(plan_authority["repository"]).resolve(strict=True)
     except OSError as exc:
         raise CandidateReceiptSinkError("W06 Plan source, solution, or approved Plan repository is unavailable") from exc
@@ -1719,11 +1688,7 @@ def candidate_admission_gate(
         candidate_evidence_descriptor.authority_repository,
         execution_sink.repository,
     )
-    if any(
-        _paths_overlap(left, right)
-        for index, left in enumerate(receipt_roots)
-        for right in receipt_roots[index + 1 :]
-    ):
+    if any(_paths_overlap(left, right) for index, left in enumerate(receipt_roots) for right in receipt_roots[index + 1 :]):
         raise CandidateReceiptSinkError("candidate evidence, descriptor, and execution evidence roots must be disjoint")
     if any(_paths_overlap(approved_plan_repository, root) for root in receipt_roots):
         raise CandidateReceiptSinkError("approved Plan repository must be disjoint from candidate evidence, descriptor, and execution evidence roots")
@@ -1802,12 +1767,8 @@ def candidate_admission_gate(
         "reasons": sorted(set(reasons)),
         "governed_execution_receipt_hashes": sorted(receipt["receipt_hash"] for receipt in governed_receipts),
         "bundle_hashes": sorted(bundle_hashes),
-        "luet_conformance_receipt_hash": (
-            candidate_evidence["luet_conformance_receipt_hash"] if candidate_evidence else None
-        ),
-        "w06_plan_materialization_hash": (
-            candidate_evidence["w06_plan_materialization_hash"] if candidate_evidence else None
-        ),
+        "luet_conformance_receipt_hash": (candidate_evidence["luet_conformance_receipt_hash"] if candidate_evidence else None),
+        "w06_plan_materialization_hash": (candidate_evidence["w06_plan_materialization_hash"] if candidate_evidence else None),
         "plan_graph_hash": candidate_evidence["plan_graph_hash"] if candidate_evidence else None,
         "plan_solution_hash": candidate_evidence["plan_solution_hash"] if candidate_evidence else None,
         "candidate_evidence": candidate_evidence,

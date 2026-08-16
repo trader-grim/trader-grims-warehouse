@@ -10,8 +10,8 @@ import pytest
 
 import tgw.bootstrap_authority as authority_module
 from tgw.bootstrap_authority import (
-    BootstrapAuthorityState,
     ApplicationBootstrapGrant,
+    BootstrapAuthorityState,
     BootstrapConsumptionAmbiguous,
     BootstrapGrant,
     BootstrapSessionAuthority,
@@ -105,9 +105,7 @@ def _grant(**changes):
 def test_exact_grant_is_consumed_once_to_immutable_bound_receipt(tmp_path):
     grant = _grant()
     path = tmp_path / "bootstrap-consumed.json"
-    authority = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    authority = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     now = datetime(2029, 1, 1, tzinfo=timezone.utc)
 
     receipt = authority.consume(grant.grant_id, effect_hash=grant.effect.effect_hash, generation=grant.effect.generation, now=now)
@@ -137,9 +135,7 @@ def test_exact_grant_is_consumed_once_to_immutable_bound_receipt(tmp_path):
 def test_mismatch_does_not_spend_grant(tmp_path, field, value, message):
     grant = _grant()
     path = tmp_path / "receipt.json"
-    authority = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    authority = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     arguments = {"request_id": grant.grant_id, "effect_hash": grant.effect.effect_hash, "generation": grant.effect.generation}
     arguments[field] = value
     with pytest.raises(ValueError, match=message):
@@ -170,7 +166,8 @@ def test_stale_plan_and_expired_or_broadened_grants_fail_closed(tmp_path):
 
 def test_bootstrap_grant_rejects_legacy_coding_release_even_if_target_looks_related():
     legacy = {
-        "kind": "coding-release", "generation": "g",
+        "kind": "coding-release",
+        "generation": "g",
         "parameters": {"root_id": "production-releases", "candidate_commit": "b" * 40},
     }
     with pytest.raises(ValueError, match="exact platform bootstrap"):
@@ -180,7 +177,8 @@ def test_bootstrap_grant_rejects_legacy_coding_release_even_if_target_looks_rela
 def test_bootstrap_grant_accepts_only_exact_w09_application_contract_binding():
     commit = "b" * 40
     effect = {
-        "kind": "approval-platform-bootstrap-deployment", "generation": "release-b",
+        "kind": "approval-platform-bootstrap-deployment",
+        "generation": "release-b",
         "parameters": {
             "schema": "tgw-approval-application-bootstrap/v1",
             "application_contract_ref": f"candidate:{commit}:application-bootstrap:v1",
@@ -190,28 +188,35 @@ def test_bootstrap_grant_accepts_only_exact_w09_application_contract_binding():
     application_plan = "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99"
     application_solution = "sha256:1c3684135769e5dcabcaf130c55df160a4cecc0d3ebcee6ccd129ab97cdd709b"
     value = {
-        "plan_commit": application_plan, "solution_hash": application_solution,
-        "target_host": "tgw-prod", "root_id": "production-releases",
-        "candidate_commit": commit, "effect": effect,
-        "expires_at": "2030-01-01T00:00:00Z", "deployment_uses": 1,
+        "plan_commit": application_plan,
+        "solution_hash": application_solution,
+        "target_host": "tgw-prod",
+        "root_id": "production-releases",
+        "candidate_commit": commit,
+        "effect": effect,
+        "expires_at": "2030-01-01T00:00:00Z",
+        "deployment_uses": 1,
         "retirement_condition": "W10:canonical-gate-operational",
     }
     grant = ApplicationBootstrapGrant.parse(value)
     assert grant.effect.generation == "release-b"
     with pytest.raises(ValueError):
-        ApplicationBootstrapGrant.parse({
-            **value,
-            "effect": {
-                "kind": "approval-platform-bootstrap-deployment",
-                "generation": "platform-bb5c67d",
-                "parameters": _parameters(),
-            },
-        })
+        ApplicationBootstrapGrant.parse(
+            {
+                **value,
+                "effect": {
+                    "kind": "approval-platform-bootstrap-deployment",
+                    "generation": "platform-bb5c67d",
+                    "parameters": _parameters(),
+                },
+            }
+        )
     for field, value in (
         ("application_contract_ref", "candidate:" + "c" * 40 + ":application-bootstrap:v1"),
         ("application_contract_hash", "sha256:not-a-digest"),
     ):
-        bad = json.loads(json.dumps(effect)); bad["parameters"][field] = value
+        bad = json.loads(json.dumps(effect))
+        bad["parameters"][field] = value
         with pytest.raises(ValueError, match="does not match"):
             _grant(effect=bad, plan_commit=application_plan, solution_hash=application_solution)
 
@@ -219,9 +224,7 @@ def test_bootstrap_grant_accepts_only_exact_w09_application_contract_binding():
 def test_consumption_store_loops_short_writes_and_held_rereads(tmp_path, monkeypatch):
     grant = _grant()
     path = tmp_path / "short-consumption.json"
-    authority = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    authority = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     real_write = os.write
     calls = 0
 
@@ -241,14 +244,10 @@ def test_consumption_store_loops_short_writes_and_held_rereads(tmp_path, monkeyp
     assert json.loads(path.read_text()) == receipt
 
 
-def test_partial_consumption_write_is_terminal_ambiguity_without_replay_or_valid_receipt(
-    tmp_path, monkeypatch
-):
+def test_partial_consumption_write_is_terminal_ambiguity_without_replay_or_valid_receipt(tmp_path, monkeypatch):
     grant = _grant()
     path = tmp_path / "partial-consumption.json"
-    authority = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    authority = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     real_write = os.write
     calls = 0
 
@@ -372,9 +371,7 @@ def test_production_authority_rejects_grant_replacement_and_method_shadowing():
 def test_successful_consume_stays_spent_after_receipt_is_unlinked(tmp_path):
     grant = _grant()
     path = tmp_path / "unlinked-after-success.json"
-    authority = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    authority = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     arguments = {
         "request_id": grant.grant_id,
         "effect_hash": grant.effect.effect_hash,
@@ -393,9 +390,7 @@ def test_successful_consume_stays_spent_after_receipt_is_unlinked(tmp_path):
 def test_concurrent_consume_serializes_to_one_success_and_one_spent_refusal(tmp_path):
     grant = _grant()
     path = tmp_path / "concurrent.json"
-    authority = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    authority = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     barrier = threading.Barrier(3)
     outcomes: list[tuple[str, object]] = []
     outcomes_lock = threading.Lock()
@@ -435,12 +430,8 @@ def test_concurrent_consume_serializes_to_one_success_and_one_spent_refusal(tmp_
 def test_two_instances_wait_for_stalled_writer_then_validate_durable_spent_receipt(tmp_path):
     grant = _grant()
     path = tmp_path / "two-instance-stalled.json"
-    writer = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
-    loser = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    writer = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
+    loser = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     writer_entered = threading.Event()
     release_writer = threading.Event()
     loser_observed_receipt = threading.Event()
@@ -550,9 +541,7 @@ def test_unsafe_lock_artifact_is_terminal_ambiguity_before_receipt_creation(tmp_
     else:
         lock_path.write_bytes(b"unexpected" if attack == "content" else b"")
         lock_path.chmod(0o600 if attack == "mode" else 0o400)
-    authority = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    authority = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     arguments = {
         "request_id": grant.grant_id,
         "effect_hash": grant.effect.effect_hash,
@@ -571,9 +560,7 @@ def test_unsafe_lock_artifact_is_terminal_ambiguity_before_receipt_creation(tmp_
 def test_lock_owner_mismatch_is_terminal_ambiguity_before_receipt_creation(tmp_path, monkeypatch):
     grant = _grant()
     path = tmp_path / "lock-owner.json"
-    authority = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    authority = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     real_validate = authority._validate_lock_artifact
 
     def reject_owner(lock_fd):
@@ -595,9 +582,7 @@ def test_lock_owner_mismatch_is_terminal_ambiguity_before_receipt_creation(tmp_p
 def test_lock_reference_replacement_after_flock_is_terminal_ambiguity(tmp_path, monkeypatch):
     grant = _grant()
     path = tmp_path / "lock-replaced.json"
-    authority = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    authority = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     lock_path = tmp_path / authority._lock_name
     replacement = tmp_path / "replacement-lock"
     replacement.touch(mode=0o400)
@@ -627,17 +612,11 @@ def test_lock_reference_replacement_after_flock_is_terminal_ambiguity(tmp_path, 
 
 
 @pytest.mark.parametrize("repeat", range(5))
-def test_replacement_during_receipt_write_never_yields_mixed_success_and_ambiguity(
-    tmp_path, repeat
-):
+def test_replacement_during_receipt_write_never_yields_mixed_success_and_ambiguity(tmp_path, repeat):
     grant = _grant()
     path = tmp_path / f"write-lock-replaced-{repeat}.json"
-    writer = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
-    replacement_instance = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    writer = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
+    replacement_instance = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     lock_path = tmp_path / writer._lock_name
     replacement_lock = tmp_path / f"replacement-during-write-{repeat}.lock"
     replacement_lock.touch(mode=0o400)
@@ -670,9 +649,7 @@ def test_replacement_during_receipt_write_never_yields_mixed_success_and_ambigui
     assert writer_stalled.wait(timeout=5)
     lock_path.unlink()
     replacement_lock.replace(lock_path)
-    replacement_thread = threading.Thread(
-        target=consume, args=(replacement_instance, "replacement-instance")
-    )
+    replacement_thread = threading.Thread(target=consume, args=(replacement_instance, "replacement-instance"))
     replacement_thread.start()
     replacement_thread.join(timeout=5)
     assert not replacement_thread.is_alive()
@@ -686,9 +663,7 @@ def test_replacement_during_receipt_write_never_yields_mixed_success_and_ambigui
     assert replacement_instance.state is BootstrapAuthorityState.AMBIGUOUS
     durable_receipt_id = json.loads(path.read_text())["receipt_id"]
     assert durable_receipt_id.startswith("bootstrap-consumption:sha256:")
-    reconciler = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    reconciler = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     with pytest.raises(ValueError, match="already consumed"):
         reconciler.consume(
             grant.grant_id,
@@ -705,9 +680,7 @@ def test_precreated_invalid_receipt_makes_authority_terminally_ambiguous(tmp_pat
     path = tmp_path / "precreated.json"
     path.write_bytes(b"not-a-valid-consumption-receipt\n")
     path.chmod(0o400)
-    authority = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    authority = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     arguments = {
         "request_id": grant.grant_id,
         "effect_hash": grant.effect.effect_hash,
@@ -727,9 +700,7 @@ def test_precreated_invalid_receipt_makes_authority_terminally_ambiguous(tmp_pat
 def test_unlink_during_directory_fsync_cannot_return_consumption_success(tmp_path, monkeypatch):
     grant = _grant()
     path = tmp_path / "unlink-during-fsync.json"
-    authority = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    authority = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     real_fsync = os.fsync
     removed = False
 
@@ -761,9 +732,7 @@ def test_replace_or_symlink_during_directory_fsync_cannot_return_success(tmp_pat
     replacement = tmp_path / f"{attack}-replacement.json"
     replacement.write_bytes(b"replacement\n")
     replacement.chmod(0o400)
-    authority = BootstrapSessionAuthority(
-        grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid()
-    )
+    authority = BootstrapSessionAuthority(grant, receipt_path=path, current_plan_commit=grant.plan_commit, trusted_uid=os.geteuid())
     real_fsync = os.fsync
     attacked = False
 
@@ -791,9 +760,7 @@ def test_replace_or_symlink_during_directory_fsync_cannot_return_success(tmp_pat
     assert authority.state is BootstrapAuthorityState.AMBIGUOUS
 
 
-def test_authority_controller_classifies_consumption_persistence_loss_without_invoking_handler(
-    tmp_path, monkeypatch
-):
+def test_authority_controller_classifies_consumption_persistence_loss_without_invoking_handler(tmp_path, monkeypatch):
     grant = _grant()
     authority = BootstrapSessionAuthority(
         grant,
@@ -814,9 +781,7 @@ def test_authority_controller_classifies_consumption_persistence_loss_without_in
     )
     monkeypatch.setattr(authority_module.os, "write", Mock(side_effect=OSError("injected authority loss")))
 
-    receipt = AuthorityEffectController(registry, authority.consume).execute(
-        request_id=grant.grant_id, effect=grant.effect
-    )
+    receipt = AuthorityEffectController(registry, authority.consume).execute(request_id=grant.grant_id, effect=grant.effect)
 
     assert receipt.outcome is EffectOutcome.AMBIGUOUS
     assert receipt.evidence

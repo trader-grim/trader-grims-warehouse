@@ -50,8 +50,14 @@ class BootstrapGrant:
     @classmethod
     def parse(cls, value: Mapping[str, Any]) -> "BootstrapGrant":
         required = {
-            "plan_commit", "solution_hash", "target_host", "root_id",
-            "candidate_commit", "effect", "expires_at", "deployment_uses",
+            "plan_commit",
+            "solution_hash",
+            "target_host",
+            "root_id",
+            "candidate_commit",
+            "effect",
+            "expires_at",
+            "deployment_uses",
             "retirement_condition",
         }
         if set(value) != required:
@@ -119,9 +125,19 @@ class BootstrapSessionAuthority:
 
     __slots__ = (
         "__dict__",
-        "grant", "receipt_path", "_lock_name", "_directory_fd", "_root_identity",
-        "_state", "_spent_receipt_id", "_ambiguity_evidence", "_ambiguity_cause",
-        "_consume_lock", "_production_authority", "_grant_artifact", "_bindings_frozen",
+        "grant",
+        "receipt_path",
+        "_lock_name",
+        "_directory_fd",
+        "_root_identity",
+        "_state",
+        "_spent_receipt_id",
+        "_ambiguity_evidence",
+        "_ambiguity_cause",
+        "_consume_lock",
+        "_production_authority",
+        "_grant_artifact",
+        "_bindings_frozen",
     )
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -143,16 +159,17 @@ class BootstrapSessionAuthority:
 
     def __setattr__(self, name: str, value: Any) -> None:
         immutable = {
-            "grant", "receipt_path", "_production_authority", "_grant_artifact",
-            "_root_identity", "_directory_fd", "_lock_name",
+            "grant",
+            "receipt_path",
+            "_production_authority",
+            "_grant_artifact",
+            "_root_identity",
+            "_directory_fd",
+            "_lock_name",
         }
         if getattr(self, "_bindings_frozen", False) and name in immutable:
             raise AttributeError("bootstrap authority binding is immutable")
-        if (
-            getattr(self, "_bindings_frozen", False)
-            and getattr(self, "_production_authority", False)
-            and callable(getattr(type(self), name, None))
-        ):
+        if getattr(self, "_bindings_frozen", False) and getattr(self, "_production_authority", False) and callable(getattr(type(self), name, None)):
             raise AttributeError("production bootstrap authority methods cannot be shadowed")
         object.__setattr__(self, name, value)
 
@@ -179,11 +196,7 @@ class BootstrapSessionAuthority:
             named = self.receipt_path.parent.lstat()
         except OSError as exc:
             raise ValueError("bootstrap receipt directory is not provisioned") from exc
-        if (
-            not stat.S_ISDIR(named.st_mode)
-            or named.st_uid != trusted_uid
-            or stat.S_IMODE(named.st_mode) != 0o700
-        ):
+        if not stat.S_ISDIR(named.st_mode) or named.st_uid != trusted_uid or stat.S_IMODE(named.st_mode) != 0o700:
             raise ValueError("bootstrap receipt directory is not provisioned")
         try:
             self._directory_fd = os.open(
@@ -205,13 +218,7 @@ class BootstrapSessionAuthority:
             named_after_open.st_uid,
             stat.S_IMODE(named_after_open.st_mode),
         )
-        if (
-            not stat.S_ISDIR(opened.st_mode)
-            or not stat.S_ISDIR(named_after_open.st_mode)
-            or opened_identity != named_identity
-            or opened.st_uid != trusted_uid
-            or stat.S_IMODE(opened.st_mode) != 0o700
-        ):
+        if not stat.S_ISDIR(opened.st_mode) or not stat.S_ISDIR(named_after_open.st_mode) or opened_identity != named_identity or opened.st_uid != trusted_uid or stat.S_IMODE(opened.st_mode) != 0o700:
             os.close(self._directory_fd)
             raise ValueError("bootstrap receipt directory changed while opening")
         self._root_identity = opened_identity
@@ -222,9 +229,7 @@ class BootstrapSessionAuthority:
         self._consume_lock = threading.Lock()
         self._production_authority = _production_token is _PRODUCTION_AUTHORITY_SEAL
         self._grant_artifact = _grant_artifact
-        if self._production_authority and (
-            type(grant) is not ApplicationBootstrapGrant or _grant_artifact is None
-        ):
+        if self._production_authority and (type(grant) is not ApplicationBootstrapGrant or _grant_artifact is None):
             self.close()
             raise ValueError("production application bootstrap grant is not protected")
         self._bindings_frozen = True
@@ -235,8 +240,12 @@ class BootstrapSessionAuthority:
 
     @classmethod
     def production_application(
-        cls, grant_path: Path, *, receipt_path: Path,
-        current_plan_commit: str, trusted_uid: int = 0,
+        cls,
+        grant_path: Path,
+        *,
+        receipt_path: Path,
+        current_plan_commit: str,
+        trusted_uid: int = 0,
     ) -> "BootstrapSessionAuthority":
         path = Path(grant_path)
         for ancestor in (path.parent, *path.parents):
@@ -250,8 +259,10 @@ class BootstrapSessionAuthority:
             named = os.stat(path, follow_symlinks=False)
             identity = (metadata.st_dev, metadata.st_ino)
             if (
-                len(raw) > 1024 * 1024 or not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_uid != 0 or metadata.st_nlink != 1
+                len(raw) > 1024 * 1024
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != 0
+                or metadata.st_nlink != 1
                 or stat.S_IMODE(metadata.st_mode) != 0o444
                 or (named.st_dev, named.st_ino) != identity
             ):
@@ -261,8 +272,11 @@ class BootstrapSessionAuthority:
             os.close(fd)
             raise
         return cls(
-            grant, receipt_path=receipt_path, current_plan_commit=current_plan_commit,
-            trusted_uid=trusted_uid, _production_token=_PRODUCTION_AUTHORITY_SEAL,
+            grant,
+            receipt_path=receipt_path,
+            current_plan_commit=current_plan_commit,
+            trusted_uid=trusted_uid,
+            _production_token=_PRODUCTION_AUTHORITY_SEAL,
             _grant_artifact=(path, fd, raw, identity),
         )
 
@@ -270,25 +284,26 @@ class BootstrapSessionAuthority:
         for name in ("_directory_fd",):
             fd = getattr(self, name, -1)
             if fd >= 0:
-                try: os.close(fd)
-                except OSError: pass
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
                 object.__setattr__(self, name, -1)
         artifact = getattr(self, "_grant_artifact", None)
         if artifact is not None:
-            try: os.close(artifact[1])
-            except OSError: pass
+            try:
+                os.close(artifact[1])
+            except OSError:
+                pass
             object.__setattr__(self, "_grant_artifact", None)
 
     def _revalidate_grant_artifact(self) -> None:
         if not self._production_authority:
             return
         path, fd, raw, identity = self._grant_artifact
-        held = os.fstat(fd); named = os.stat(path, follow_symlinks=False)
-        if (
-            (held.st_dev, held.st_ino) != identity
-            or (named.st_dev, named.st_ino) != identity
-            or os.pread(fd, len(raw) + 1, 0) != raw
-        ):
+        held = os.fstat(fd)
+        named = os.stat(path, follow_symlinks=False)
+        if (held.st_dev, held.st_ino) != identity or (named.st_dev, named.st_ino) != identity or os.pread(fd, len(raw) + 1, 0) != raw:
             raise ValueError("production bootstrap grant artifact changed")
         try:
             retained = ApplicationBootstrapGrant.parse(json.loads(raw))
@@ -309,11 +324,7 @@ class BootstrapSessionAuthority:
             raise OSError("bootstrap receipt directory identity is unavailable") from exc
         opened_identity = (opened.st_dev, opened.st_ino, opened.st_uid, stat.S_IMODE(opened.st_mode))
         named_identity = (named.st_dev, named.st_ino, named.st_uid, stat.S_IMODE(named.st_mode))
-        if (
-            opened_identity != self._root_identity
-            or named_identity != self._root_identity
-            or not stat.S_ISDIR(opened.st_mode)
-        ):
+        if opened_identity != self._root_identity or named_identity != self._root_identity or not stat.S_ISDIR(opened.st_mode):
             raise OSError("bootstrap receipt directory identity changed")
 
     @staticmethod
@@ -325,9 +336,7 @@ class BootstrapSessionAuthority:
                 raise OSError("bootstrap consumption receipt short write")
             offset += written
 
-    def _mark_ambiguous(
-        self, receipt: Mapping[str, Any], persistence_state: str, cause: Exception
-    ) -> BootstrapConsumptionAmbiguous:
+    def _mark_ambiguous(self, receipt: Mapping[str, Any], persistence_state: str, cause: Exception) -> BootstrapConsumptionAmbiguous:
         observation = {
             "schema": "tgw-bootstrap-consumption-persistence-observation/v1",
             "grant_id": self.grant.grant_id,
@@ -599,9 +608,7 @@ class BootstrapSessionAuthority:
         finally:
             self._release_filesystem_lock(lock_fd, receipt)
 
-    def _consume_with_filesystem_lock(
-        self, receipt: Mapping[str, Any], data: bytes, lock_fd: int
-    ) -> Mapping[str, Any]:
+    def _consume_with_filesystem_lock(self, receipt: Mapping[str, Any], data: bytes, lock_fd: int) -> Mapping[str, Any]:
         try:
             existing_status = self._existing_receipt_status()
         except Exception as exc:
@@ -657,9 +664,7 @@ class BootstrapSessionAuthority:
             if persistence_error is None:
                 persistence_error = exc
         if persistence_error is not None:
-            raise self._mark_ambiguous(
-                receipt, "created-not-durably-verified", persistence_error
-            ) from persistence_error
+            raise self._mark_ambiguous(receipt, "created-not-durably-verified", persistence_error) from persistence_error
         self._spent_receipt_id = receipt["receipt_id"]
         self._state = BootstrapAuthorityState.SPENT
         return receipt

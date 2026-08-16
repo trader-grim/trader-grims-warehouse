@@ -9,10 +9,10 @@ import re
 import shlex
 import stat
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
-from datetime import datetime, timezone
 
 from tgw.a3_host_state_observation import (
     _bounded_stream,
@@ -35,10 +35,17 @@ _SHA = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 def _memory_bootstrap(
-    *, installer_sha256: str, transaction_sha256: str,
-    helper_config_sha256: str, python_sha256: str, sudo_sha256: str,
-    python_path: str, sudo_path: str, python_stat: Mapping[str, int],
-    sudo_stat: Mapping[str, int], nix_system_path: str,
+    *,
+    installer_sha256: str,
+    transaction_sha256: str,
+    helper_config_sha256: str,
+    python_sha256: str,
+    sudo_sha256: str,
+    python_path: str,
+    sudo_path: str,
+    python_stat: Mapping[str, int],
+    sudo_stat: Mapping[str, int],
+    nix_system_path: str,
 ) -> str:
     """Return the reviewed isolated root bootstrap with controller-fixed digests."""
     expected = {
@@ -46,7 +53,7 @@ def _memory_bootstrap(
         "application_transaction": transaction_sha256,
         "helper_config": helper_config_sha256,
     }
-    return f'''import hashlib,json,os,pathlib,sys,types
+    return f"""import hashlib,json,os,pathlib,sys,types
 def read_exact(size):
     out=bytearray()
     while len(out)<size:
@@ -91,7 +98,7 @@ exec(compile(blobs["release_installer"],installer.__file__,"exec"),installer.__d
 transaction=types.ModuleType("tgw.application_release_remote"); transaction.__file__="memory:application_transaction"; sys.modules[transaction.__name__]=transaction
 exec(compile(blobs["application_transaction"],transaction.__file__,"exec"),transaction.__dict__)
 raise SystemExit(transaction.memory_main(header["request"],blobs["helper_config"],blobs["candidate_archive"],blobs["runtime_config"],{transaction_sha256!r}))
-'''
+"""
 
 
 class ApplicationReleaseProviderError(RuntimeError):
@@ -131,10 +138,7 @@ def _protected_held(path: Path, digest: str, *, executable: bool) -> tuple[int, 
     absolute = path.absolute()
     for ancestor in (absolute.parent, *absolute.parents):
         metadata = os.lstat(ancestor)
-        if (
-            not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
-            or metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022
-        ):
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022:
             raise ApplicationReleaseProviderError("provider artifact ancestor is not root-protected")
         if ancestor == Path("/"):
             break
@@ -143,8 +147,13 @@ def _protected_held(path: Path, digest: str, *, executable: bool) -> tuple[int, 
 
 def _validate_response_shape(response: Mapping[str, Any]) -> None:
     common = {
-        "schema", "operation_id", "helper_sha256", "helper_config_sha256",
-        "nix_system_path", "status", "receipt_sha256",
+        "schema",
+        "operation_id",
+        "helper_sha256",
+        "helper_config_sha256",
+        "nix_system_path",
+        "status",
+        "receipt_sha256",
     }
     status = response.get("status")
     if status == "SUCCEEDED":
@@ -158,41 +167,70 @@ def _validate_response_shape(response: Mapping[str, Any]) -> None:
     else:
         raise ApplicationReleaseProviderError("remote application release status is invalid")
     evidence = response.get("evidence")
-    if (
-        set(response) != expected or not isinstance(evidence, list) or not evidence
-        or any(not isinstance(item, str) or not item or len(item) > 512 for item in evidence)
-    ):
+    if set(response) != expected or not isinstance(evidence, list) or not evidence or any(not isinstance(item, str) or not item or len(item) > 512 for item in evidence):
         raise ApplicationReleaseProviderError("remote application release evidence schema is invalid")
     if "detail_hash" in response and _SHA.fullmatch(str(response["detail_hash"])) is None:
         raise ApplicationReleaseProviderError("remote application release failure hash is invalid")
 
 
 def validate_provider_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
-    descriptor = _exact(value, {
-        "schema", "target", "transport", "candidate", "runtime_config", "remote_boundary",
-        "bounds", "prerequisite_receipt", "descriptor_hash",
-    }, "application release provider descriptor")
-    unsigned = dict(descriptor); claimed = unsigned.pop("descriptor_hash")
+    descriptor = _exact(
+        value,
+        {
+            "schema",
+            "target",
+            "transport",
+            "candidate",
+            "runtime_config",
+            "remote_boundary",
+            "bounds",
+            "prerequisite_receipt",
+            "descriptor_hash",
+        },
+        "application release provider descriptor",
+    )
+    unsigned = dict(descriptor)
+    claimed = unsigned.pop("descriptor_hash")
     if descriptor["schema"] != DESCRIPTOR_SCHEMA or claimed != _hash(unsigned):
         raise ApplicationReleaseProviderError("provider descriptor schema/hash is invalid")
     target = _exact(descriptor["target"], {"host", "address", "port", "user"}, "provider target")
     if target != {"host": "tgw-prod", "address": "100.107.99.66", "port": 22, "user": "db"}:
         raise ApplicationReleaseProviderError("provider target is not exact tgw-prod")
-    transport = _exact(descriptor["transport"], {
-        "ssh_path", "ssh_sha256", "ssh_keygen_path", "ssh_keygen_sha256",
-        "known_hosts_path", "known_hosts_sha256",
-        "identity_path", "identity_sha256", "transaction_source_path", "transaction_source_sha256",
-        "installer_source_path", "installer_source_sha256",
-    }, "provider transport")
+    transport = _exact(
+        descriptor["transport"],
+        {
+            "ssh_path",
+            "ssh_sha256",
+            "ssh_keygen_path",
+            "ssh_keygen_sha256",
+            "known_hosts_path",
+            "known_hosts_sha256",
+            "identity_path",
+            "identity_sha256",
+            "transaction_source_path",
+            "transaction_source_sha256",
+            "installer_source_path",
+            "installer_source_sha256",
+        },
+        "provider transport",
+    )
     for name in ("ssh_path", "ssh_keygen_path", "known_hosts_path", "identity_path", "transaction_source_path", "installer_source_path"):
         if not isinstance(transport[name], str) or not transport[name].startswith("/"):
             raise ApplicationReleaseProviderError("provider transport path is invalid")
     for name in ("ssh_sha256", "ssh_keygen_sha256", "known_hosts_sha256", "identity_sha256", "transaction_source_sha256", "installer_source_sha256"):
         if _SHA.fullmatch(str(transport[name])) is None:
             raise ApplicationReleaseProviderError("provider transport hash is invalid")
-    candidate = _exact(descriptor["candidate"], {
-        "archive_path", "archive_sha256", "commit", "tree", "effect_parameters_sha256",
-    }, "provider candidate")
+    candidate = _exact(
+        descriptor["candidate"],
+        {
+            "archive_path",
+            "archive_sha256",
+            "commit",
+            "tree",
+            "effect_parameters_sha256",
+        },
+        "provider candidate",
+    )
     runtime = _exact(descriptor["runtime_config"], {"path", "content_sha256"}, "provider runtime config")
     for binding, path_name in ((candidate, "archive_path"), (runtime, "path")):
         if not isinstance(binding[path_name], str) or not binding[path_name].startswith("/"):
@@ -202,11 +240,25 @@ def validate_provider_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
             raise ApplicationReleaseProviderError("provider artifact hash is invalid")
     if not re.fullmatch(r"[0-9a-f]{40}", str(candidate["commit"])) or not re.fullmatch(r"[0-9a-f]{40}", str(candidate["tree"])):
         raise ApplicationReleaseProviderError("provider candidate identity is invalid")
-    boundary = _exact(descriptor["remote_boundary"], {
-        "python_path", "python_sha256", "sudo_path", "sudo_sha256", "bootstrap_sha256", "config_path", "config_sha256",
-        "authorized_public_key", "nix_system_path", "credential_scope", "remote_command_sha256",
-        "python_stat", "sudo_stat",
-    }, "provider remote boundary")
+    boundary = _exact(
+        descriptor["remote_boundary"],
+        {
+            "python_path",
+            "python_sha256",
+            "sudo_path",
+            "sudo_sha256",
+            "bootstrap_sha256",
+            "config_path",
+            "config_sha256",
+            "authorized_public_key",
+            "nix_system_path",
+            "credential_scope",
+            "remote_command_sha256",
+            "python_stat",
+            "sudo_stat",
+        },
+        "provider remote boundary",
+    )
     if (
         not re.fullmatch(r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/]+/bin/python3(?:\.[0-9]+)?", str(boundary["python_path"]))
         or not re.fullmatch(r"/run/wrappers/wrappers\.[A-Za-z0-9]+/sudo", str(boundary["sudo_path"]))
@@ -219,21 +271,19 @@ def validate_provider_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ApplicationReleaseProviderError("provider observed Nix prerequisite is invalid")
     for name in ("python_stat", "sudo_stat"):
         observed = _exact(boundary[name], {"uid", "gid", "mode", "size"}, f"provider {name}")
-        if (
-            observed["uid"] != 0 or observed["gid"] != 0
-            or not isinstance(observed["mode"], int) or not isinstance(observed["size"], int)
-            or observed["size"] <= 0
-        ):
+        if observed["uid"] != 0 or observed["gid"] != 0 or not isinstance(observed["mode"], int) or not isinstance(observed["size"], int) or observed["size"] <= 0:
             raise ApplicationReleaseProviderError("provider remote executable stat is invalid")
     if re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]+={0,2}", str(boundary["authorized_public_key"])) is None:
         raise ApplicationReleaseProviderError("provider authorized public key is invalid")
-    if (
-        boundary["credential_scope"] != "pre-existing-db-operator-bootstrap"
-        or _SHA.fullmatch(str(boundary["remote_command_sha256"])) is None
-    ):
+    if boundary["credential_scope"] != "pre-existing-db-operator-bootstrap" or _SHA.fullmatch(str(boundary["remote_command_sha256"])) is None:
         raise ApplicationReleaseProviderError("provider credential/command authority is misstated")
     bounds = _exact(descriptor["bounds"], {"timeout_seconds", "max_output_bytes", "max_diagnostic_bytes", "max_packet_bytes"}, "provider bounds")
-    if not 1 <= int(bounds["timeout_seconds"]) <= 1800 or not 1024 <= int(bounds["max_output_bytes"]) <= 4 * 1024 * 1024 or not 1024 <= int(bounds["max_diagnostic_bytes"]) <= 1024 * 1024 or not 1024 <= int(bounds["max_packet_bytes"]) <= 192 * 1024 * 1024:
+    if (
+        not 1 <= int(bounds["timeout_seconds"]) <= 1800
+        or not 1024 <= int(bounds["max_output_bytes"]) <= 4 * 1024 * 1024
+        or not 1024 <= int(bounds["max_diagnostic_bytes"]) <= 1024 * 1024
+        or not 1024 <= int(bounds["max_packet_bytes"]) <= 192 * 1024 * 1024
+    ):
         raise ApplicationReleaseProviderError("provider bounds are invalid")
     prerequisite = _exact(descriptor["prerequisite_receipt"], {"ref", "path", "sha256"}, "provider prerequisite")
     if not isinstance(prerequisite["path"], str) or not prerequisite["path"].startswith("/") or _SHA.fullmatch(str(prerequisite["sha256"])) is None:
@@ -275,7 +325,10 @@ class SshApplicationReleaseProvider:
         return True
 
     def __init__(
-        self, descriptor: Mapping[str, Any], *, _token: object,
+        self,
+        descriptor: Mapping[str, Any],
+        *,
+        _token: object,
         _descriptor_artifact: tuple[Path, int, bytes, tuple[int, ...]],
     ) -> None:
         if _token is not _SEAL:
@@ -306,43 +359,60 @@ class SshApplicationReleaseProvider:
                 metadata = os.fstat(fd)
                 if metadata.st_uid != uid or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) not in modes:
                     raise ApplicationReleaseProviderError("provider artifact metadata differs")
-                fds.append(fd); raw_values.append(raw); identities.append((path, _inode_identity(metadata)))
+                fds.append(fd)
+                raw_values.append(raw)
+                identities.append((path, _inode_identity(metadata)))
             fds.append(descriptor_fd)
             raw_values.append(descriptor_raw)
             identities.append((descriptor_path, descriptor_identity))
         except Exception:
-            for fd in reversed(fds): os.close(fd)
+            for fd in reversed(fds):
+                os.close(fd)
             if descriptor_fd not in fds:
                 os.close(descriptor_fd)
             raise
-        if (
-            _hash_bytes(raw_values[3]) != transport["transaction_source_sha256"]
-            or _hash_bytes(raw_values[4]) != transport["installer_source_sha256"]
-        ):
-            for fd in reversed(fds): os.close(fd)
+        if _hash_bytes(raw_values[3]) != transport["transaction_source_sha256"] or _hash_bytes(raw_values[4]) != transport["installer_source_sha256"]:
+            for fd in reversed(fds):
+                os.close(fd)
             raise ApplicationReleaseProviderError("local reviewed helper differs from installed remote helper binding")
         known_hosts = raw_values[1].decode("ascii", errors="strict").strip().splitlines()
-        if (
-            len(known_hosts) != 1
-            or re.fullmatch(r"tgw-prod ssh-ed25519 [A-Za-z0-9+/]+={0,2}", known_hosts[0]) is None
-            or not raw_values[2].startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----\n")
-        ):
-            for fd in reversed(fds): os.close(fd)
+        if len(known_hosts) != 1 or re.fullmatch(r"tgw-prod ssh-ed25519 [A-Za-z0-9+/]+={0,2}", known_hosts[0]) is None or not raw_values[2].startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----\n"):
+            for fd in reversed(fds):
+                os.close(fd)
             raise ApplicationReleaseProviderError("provider SSH identity/known-host grammar is invalid")
         try:
             prerequisite = json.loads(raw_values[8])
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            for fd in reversed(fds): os.close(fd)
+            for fd in reversed(fds):
+                os.close(fd)
             raise ApplicationReleaseProviderError("provider prerequisite receipt is invalid") from exc
-        prerequisite = _exact(prerequisite, {
-            "schema", "receipt_id", "target_host", "observed_at", "expires_at",
-            "python_sha256", "sudo_sha256", "nix_system_path", "predecessor_observation_hash",
-            "python_path", "sudo_path",
-            "python_stat", "sudo_stat",
-            "helper_config_sha256", "remote_command_sha256",
-            "sudo_db_root_nopasswd", "authorized_public_key_sha256", "credential_scope",
-            "server_forced_command_restriction", "verified", "receipt_hash",
-        }, "provider prerequisite receipt")
+        prerequisite = _exact(
+            prerequisite,
+            {
+                "schema",
+                "receipt_id",
+                "target_host",
+                "observed_at",
+                "expires_at",
+                "python_sha256",
+                "sudo_sha256",
+                "nix_system_path",
+                "predecessor_observation_hash",
+                "python_path",
+                "sudo_path",
+                "python_stat",
+                "sudo_stat",
+                "helper_config_sha256",
+                "remote_command_sha256",
+                "sudo_db_root_nopasswd",
+                "authorized_public_key_sha256",
+                "credential_scope",
+                "server_forced_command_restriction",
+                "verified",
+                "receipt_hash",
+            },
+            "provider prerequisite receipt",
+        )
         prerequisite_unsigned = dict(prerequisite)
         prerequisite_claimed = prerequisite_unsigned.pop("receipt_hash")
         if (
@@ -361,23 +431,24 @@ class SshApplicationReleaseProvider:
             or prerequisite["sudo_db_root_nopasswd"] is not True
             or prerequisite["credential_scope"] != "pre-existing-db-operator-bootstrap"
             or prerequisite["server_forced_command_restriction"] != "not-claimed"
-            or prerequisite["authorized_public_key_sha256"] != _hash_bytes(
-                (self.descriptor["remote_boundary"]["authorized_public_key"] + "\n").encode()
-            )
+            or prerequisite["authorized_public_key_sha256"] != _hash_bytes((self.descriptor["remote_boundary"]["authorized_public_key"] + "\n").encode())
             or prerequisite["verified"] is not True
             or prerequisite_claimed != _hash(prerequisite_unsigned)
         ):
-            for fd in reversed(fds): os.close(fd)
+            for fd in reversed(fds):
+                os.close(fd)
             raise ApplicationReleaseProviderError("provider prerequisite receipt binding differs")
         try:
             observed_at = datetime.fromisoformat(str(prerequisite["observed_at"]).replace("Z", "+00:00"))
             expires_at = datetime.fromisoformat(str(prerequisite["expires_at"]).replace("Z", "+00:00"))
         except ValueError as exc:
-            for fd in reversed(fds): os.close(fd)
+            for fd in reversed(fds):
+                os.close(fd)
             raise ApplicationReleaseProviderError("provider prerequisite freshness is invalid") from exc
         current = datetime.now(timezone.utc)
         if observed_at.tzinfo is None or expires_at.tzinfo is None or not observed_at <= current <= expires_at:
-            for fd in reversed(fds): os.close(fd)
+            for fd in reversed(fds):
+                os.close(fd)
             raise ApplicationReleaseProviderError("provider prerequisite observation is stale")
         bootstrap = _memory_bootstrap(
             installer_sha256=transport["installer_source_sha256"],
@@ -392,13 +463,24 @@ class SshApplicationReleaseProvider:
             nix_system_path=self.descriptor["remote_boundary"]["nix_system_path"],
         )
         if _hash_bytes(bootstrap.encode()) != self.descriptor["remote_boundary"]["bootstrap_sha256"]:
-            for fd in reversed(fds): os.close(fd)
+            for fd in reversed(fds):
+                os.close(fd)
             raise ApplicationReleaseProviderError("reviewed in-memory bootstrap binding differs")
-        remote_command = shlex.join([
-            REMOTE_SUDO, "-n", "--", REMOTE_PYTHON, "-I", "-S", "-c", bootstrap,
-        ])
+        remote_command = shlex.join(
+            [
+                REMOTE_SUDO,
+                "-n",
+                "--",
+                REMOTE_PYTHON,
+                "-I",
+                "-S",
+                "-c",
+                bootstrap,
+            ]
+        )
         if _hash_bytes(remote_command.encode()) != self.descriptor["remote_boundary"]["remote_command_sha256"]:
-            for fd in reversed(fds): os.close(fd)
+            for fd in reversed(fds):
+                os.close(fd)
             raise ApplicationReleaseProviderError("reviewed remote command differs from its descriptor")
         try:
             sealed_private = _sealed("w09-key-crossmatch", raw_values[2])
@@ -410,10 +492,14 @@ class SshApplicationReleaseProvider:
             try:
                 returncode, public_key, _diagnostic = _run_held_bounded(
                     [
-                        f"/proc/{os.getpid()}/fd/{fds[9]}", "-y", "-f",
+                        f"/proc/{os.getpid()}/fd/{fds[9]}",
+                        "-y",
+                        "-f",
                         f"/proc/{os.getpid()}/fd/{sealed_private}",
                     ],
-                    pass_fds=(fds[9], sealed_private), timeout=10, limit=16 * 1024,
+                    pass_fds=(fds[9], sealed_private),
+                    timeout=10,
+                    limit=16 * 1024,
                     env={"PATH": "", "LANG": "C", "LC_ALL": "C"},
                 )
             except Exception:
@@ -422,12 +508,9 @@ class SshApplicationReleaseProvider:
                 raise
         finally:
             os.close(sealed_private)
-        if (
-            returncode != 0
-            or public_key.strip().decode("ascii", errors="strict")
-            != self.descriptor["remote_boundary"]["authorized_public_key"]
-        ):
-            for fd in reversed(fds): os.close(fd)
+        if returncode != 0 or public_key.strip().decode("ascii", errors="strict") != self.descriptor["remote_boundary"]["authorized_public_key"]:
+            for fd in reversed(fds):
+                os.close(fd)
             raise ApplicationReleaseProviderError("db operator private/public SSH authority differs")
         self._fds, self._raw, self._identities = tuple(fds), tuple(raw_values), tuple(identities)
         self._prerequisite = _freeze(prerequisite)
@@ -435,15 +518,18 @@ class SshApplicationReleaseProvider:
 
     def close(self) -> None:
         for fd in reversed(getattr(self, "_fds", ())):
-            try: os.close(fd)
-            except OSError: pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         object.__setattr__(self, "_fds", ())
 
     def __del__(self) -> None:
         self.close()
 
     def _check_parameters(self, parameters: Mapping[str, Any]) -> None:
-        candidate = self.descriptor["candidate"]; runtime = self.descriptor["runtime_config"]
+        candidate = self.descriptor["candidate"]
+        runtime = self.descriptor["runtime_config"]
         if (
             parameters.get("candidate_commit") != candidate["commit"]
             or parameters.get("candidate_tree") != candidate["tree"]
@@ -470,17 +556,15 @@ class SshApplicationReleaseProvider:
         if not observed_at <= current <= expires_at:
             raise ApplicationReleaseProviderError("mounted provider observation expired before authority consumption")
         for (path, identity), fd, raw in zip(self._identities, self._fds, self._raw, strict=True):
-            if (
-                _inode_identity(os.fstat(fd)) != identity
-                or _hash_bytes(os.pread(fd, len(raw) + 1, 0)) != _hash_bytes(raw)
-                or _inode_identity(os.stat(path, follow_symlinks=False)) != identity
-            ):
+            if _inode_identity(os.fstat(fd)) != identity or _hash_bytes(os.pread(fd, len(raw) + 1, 0)) != _hash_bytes(raw) or _inode_identity(os.stat(path, follow_symlinks=False)) != identity:
                 raise ApplicationReleaseProviderError("mounted provider artifact changed before authority consumption")
 
     def _packet(self, action: str, parameters: Mapping[str, Any]) -> bytes:
         self._check_parameters(parameters)
         request_unsigned = {
-            "schema": FRAMED_SCHEMA, "action": action, "parameters": dict(parameters),
+            "schema": FRAMED_SCHEMA,
+            "action": action,
+            "parameters": dict(parameters),
         }
         request = {**request_unsigned, "request_hash": _hash(request_unsigned)}
         bodies = (
@@ -493,10 +577,7 @@ class SshApplicationReleaseProvider:
         frame_unsigned = {
             "schema": FRAME_SCHEMA,
             "request": request,
-            "blobs": [
-                {"name": name, "size": len(raw), "sha256": _hash_bytes(raw)}
-                for name, raw in bodies
-            ],
+            "blobs": [{"name": name, "size": len(raw), "sha256": _hash_bytes(raw)} for name, raw in bodies],
         }
         header = _canonical({**frame_unsigned, "frame_hash": _hash(frame_unsigned)})
         return len(header).to_bytes(8, "big") + header + b"".join(raw for _name, raw in bodies)
@@ -516,13 +597,24 @@ class SshApplicationReleaseProvider:
             helper_config_sha256=boundary["config_sha256"],
             python_sha256=boundary["python_sha256"],
             sudo_sha256=boundary["sudo_sha256"],
-            python_path=boundary["python_path"], sudo_path=boundary["sudo_path"],
-            python_stat=boundary["python_stat"], sudo_stat=boundary["sudo_stat"],
+            python_path=boundary["python_path"],
+            sudo_path=boundary["sudo_path"],
+            python_stat=boundary["python_stat"],
+            sudo_stat=boundary["sudo_stat"],
             nix_system_path=boundary["nix_system_path"],
         )
-        remote_command = shlex.join([
-            REMOTE_SUDO, "-n", "--", REMOTE_PYTHON, "-I", "-S", "-c", bootstrap,
-        ])
+        remote_command = shlex.join(
+            [
+                REMOTE_SUDO,
+                "-n",
+                "--",
+                REMOTE_PYTHON,
+                "-I",
+                "-S",
+                "-c",
+                bootstrap,
+            ]
+        )
         if _hash_bytes(remote_command.encode()) != boundary["remote_command_sha256"]:
             raise ApplicationReleaseProviderError("remote command changed after pre-authority readiness")
         sealed_hosts = _sealed("w09-app-hosts", self._raw[1])
@@ -530,21 +622,48 @@ class SshApplicationReleaseProvider:
         try:
             sealed_identity = _sealed("w09-app-identity", self._raw[2])
             argv = [
-                f"/proc/{os.getpid()}/fd/{ssh_fd}", "-F", "/dev/null", "-p", "22",
-                "-oBatchMode=yes", "-oIdentitiesOnly=yes", "-oIdentityAgent=none", "-oClearAllForwardings=yes",
-                "-oStrictHostKeyChecking=yes", "-oGlobalKnownHostsFile=/dev/null", "-oCanonicalizeHostname=no",
-                "-oProxyCommand=none", "-oProxyJump=none", "-oPreferredAuthentications=publickey",
-                "-oKbdInteractiveAuthentication=no", "-oGSSAPIAuthentication=no", "-oHostbasedAuthentication=no",
-                "-oPubkeyAuthentication=yes", "-oPermitLocalCommand=no", "-oControlMaster=no", "-oControlPath=none",
-                "-oUpdateHostKeys=no", "-oVerifyHostKeyDNS=no", "-oForwardAgent=no", "-oForwardX11=no",
-                "-oHostKeyAlias=tgw-prod", f"-oUserKnownHostsFile=/proc/{os.getpid()}/fd/{sealed_hosts}",
-                f"-oIdentityFile=/proc/{os.getpid()}/fd/{sealed_identity}", "-oPasswordAuthentication=no", "-T",
-                "db@100.107.99.66", remote_command,
+                f"/proc/{os.getpid()}/fd/{ssh_fd}",
+                "-F",
+                "/dev/null",
+                "-p",
+                "22",
+                "-oBatchMode=yes",
+                "-oIdentitiesOnly=yes",
+                "-oIdentityAgent=none",
+                "-oClearAllForwardings=yes",
+                "-oStrictHostKeyChecking=yes",
+                "-oGlobalKnownHostsFile=/dev/null",
+                "-oCanonicalizeHostname=no",
+                "-oProxyCommand=none",
+                "-oProxyJump=none",
+                "-oPreferredAuthentications=publickey",
+                "-oKbdInteractiveAuthentication=no",
+                "-oGSSAPIAuthentication=no",
+                "-oHostbasedAuthentication=no",
+                "-oPubkeyAuthentication=yes",
+                "-oPermitLocalCommand=no",
+                "-oControlMaster=no",
+                "-oControlPath=none",
+                "-oUpdateHostKeys=no",
+                "-oVerifyHostKeyDNS=no",
+                "-oForwardAgent=no",
+                "-oForwardX11=no",
+                "-oHostKeyAlias=tgw-prod",
+                f"-oUserKnownHostsFile=/proc/{os.getpid()}/fd/{sealed_hosts}",
+                f"-oIdentityFile=/proc/{os.getpid()}/fd/{sealed_identity}",
+                "-oPasswordAuthentication=no",
+                "-T",
+                "db@100.107.99.66",
+                remote_command,
             ]
             try:
                 process = subprocess.Popen(
-                    argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    start_new_session=True, pass_fds=(ssh_fd, sealed_hosts, sealed_identity),
+                    argv,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                    pass_fds=(ssh_fd, sealed_hosts, sealed_identity),
                     env={"PATH": "", "LANG": "C", "LC_ALL": "C"},
                 )
             except OSError as exc:
@@ -556,14 +675,22 @@ class SshApplicationReleaseProvider:
             stream_error: Exception | None = None
             try:
                 stdout, stderr = _bounded_stream(
-                    process, packet, stdout_limit=int(bounds["max_output_bytes"]),
-                    stderr_limit=int(bounds["max_diagnostic_bytes"]), timeout=int(bounds["timeout_seconds"]),
+                    process,
+                    packet,
+                    stdout_limit=int(bounds["max_output_bytes"]),
+                    stderr_limit=int(bounds["max_diagnostic_bytes"]),
+                    timeout=int(bounds["timeout_seconds"]),
                 )
             except Exception as exc:
-                stream_error = exc; stdout = b""; stderr = str(exc).encode()
+                stream_error = exc
+                stdout = b""
+                stderr = str(exc).encode()
             state = _group_empty_or_kill(process.pid)
-            try: process.wait(timeout=1); state["reaped"] = True
-            except subprocess.TimeoutExpired: state["reaped"] = False
+            try:
+                process.wait(timeout=1)
+                state["reaped"] = True
+            except subprocess.TimeoutExpired:
+                state["reaped"] = False
             state = _post_reap_group_state(process.pid, state)
         finally:
             if sealed_identity >= 0:
@@ -587,10 +714,12 @@ class SshApplicationReleaseProvider:
             raise BootstrapStateAmbiguous("application release response is invalid", evidence=("application-release-response:" + _hash_bytes(stdout),), rollback_required=action == "install") from exc
         if not isinstance(response, dict):
             raise BootstrapStateAmbiguous("application release response is not an object", evidence=("application-release-response:" + _hash_bytes(stdout),), rollback_required=action == "install")
-        unsigned = dict(response); claimed = unsigned.pop("receipt_sha256", None)
+        unsigned = dict(response)
+        claimed = unsigned.pop("receipt_sha256", None)
         boundary = self.descriptor["remote_boundary"]
         if (
-            response.get("schema") != RESPONSE_SCHEMA or claimed != _hash(unsigned)
+            response.get("schema") != RESPONSE_SCHEMA
+            or claimed != _hash(unsigned)
             or response.get("operation_id") != parameters["operation_id"]
             or response.get("helper_sha256") != transport["transaction_source_sha256"]
             or response.get("helper_config_sha256") != boundary["config_sha256"]
@@ -614,13 +743,10 @@ class SshApplicationReleaseProvider:
         if result.get("status") == "AMBIGUOUS":
             raise BootstrapStateAmbiguous(
                 "remote application deployment is ambiguous",
-                evidence=tuple(result.get("evidence", ())), rollback_required=True,
+                evidence=tuple(result.get("evidence", ())),
+                rollback_required=True,
             )
-        if (
-            result.get("status") == "RESTORED"
-            and result.get("predecessor_healthy") is True
-            and isinstance(result.get("receipt"), str)
-        ):
+        if result.get("status") == "RESTORED" and result.get("predecessor_healthy") is True and isinstance(result.get("receipt"), str):
             return {
                 "terminal_outcome": "rolled_back",
                 "rollback_receipt": result["receipt"],
@@ -632,7 +758,7 @@ class SshApplicationReleaseProvider:
         result = self._dispatch("rollback", parameters)
         if result.get("status") != "RESTORED" or result.get("predecessor_healthy") is not True or not isinstance(result.get("receipt"), str):
             raise BootstrapStateAmbiguous("remote predecessor reconciliation is ambiguous", evidence=tuple(result.get("evidence", ())), rollback_required=False)
-        return {"receipt": result["receipt"], "evidence": list(result.get("evidence", ())) }
+        return {"receipt": result["receipt"], "evidence": list(result.get("evidence", ()))}
 
 
 def build_production_application_release_provider(descriptor_path: Path) -> SshApplicationReleaseProvider:
@@ -647,8 +773,10 @@ def build_production_application_release_provider(descriptor_path: Path) -> SshA
         named = os.stat(path, follow_symlinks=False)
         identity = _inode_identity(metadata)
         if (
-            len(raw) > 1024 * 1024 or not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != 0 or metadata.st_nlink != 1
+            len(raw) > 1024 * 1024
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_nlink != 1
             or stat.S_IMODE(metadata.st_mode) != 0o444
             or _inode_identity(named) != identity
         ):
@@ -658,6 +786,7 @@ def build_production_application_release_provider(descriptor_path: Path) -> SshA
         os.close(fd)
         raise
     return SshApplicationReleaseProvider(
-        descriptor, _token=_SEAL,
+        descriptor,
+        _token=_SEAL,
         _descriptor_artifact=(path, fd, raw, identity),
     )

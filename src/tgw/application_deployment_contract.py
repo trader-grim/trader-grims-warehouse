@@ -16,10 +16,15 @@ import re
 import stat
 import tarfile
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, Mapping, Protocol
 
+from tgw.a3_preintegration_observation import (
+    _held_regular,
+    _inode_identity,
+    _run_held_bounded,
+)
 from tgw.candidate_receipt_sink import (
     CandidateReceiptSinkError,
     PinnedCandidateEvidenceDescriptor,
@@ -32,11 +37,6 @@ from tgw.candidate_receipt_sink import (
 )
 from tgw.plan_runtime_projection import validate_projection
 from tgw.release_installer import ReleaseError, runtime_manifest_identity
-from tgw.a3_preintegration_observation import (
-    _held_regular,
-    _inode_identity,
-    _run_held_bounded,
-)
 
 SCHEMA = "tgw-governed-application-bootstrap-contract/v2"
 EFFECT_SCHEMA = "tgw-approval-application-bootstrap/v1"
@@ -114,10 +114,7 @@ def _contained_path(value: Any, expected: str, label: str) -> str:
 
 
 def _identities(value: Any, label: str) -> list[str]:
-    if (
-        not isinstance(value, list) or not value or value != sorted(set(value))
-        or any(not isinstance(item, str) or _IDENTITY.fullmatch(item) is None for item in value)
-    ):
+    if not isinstance(value, list) or not value or value != sorted(set(value)) or any(not isinstance(item, str) or _IDENTITY.fullmatch(item) is None for item in value):
         raise ApplicationDeploymentContractError(f"{label} are invalid")
     return list(value)
 
@@ -125,23 +122,51 @@ def _identities(value: Any, label: str) -> list[str]:
 def validate_application_deployment_contract(value: Mapping[str, Any]) -> dict[str, Any]:
     """Reject mutable, Nix-only, reordered, or underbound W09 contracts."""
 
-    contract = _exact(value, {
-        "schema", "authorization", "candidate", "archive", "plan", "runtime_config", "migrations",
-        "deployment", "services", "health_probes", "stage_order", "rollback", "operation_sink",
-        "contract_hash",
-    }, "application deployment contract")
+    contract = _exact(
+        value,
+        {
+            "schema",
+            "authorization",
+            "candidate",
+            "archive",
+            "plan",
+            "runtime_config",
+            "migrations",
+            "deployment",
+            "services",
+            "health_probes",
+            "stage_order",
+            "rollback",
+            "operation_sink",
+            "contract_hash",
+        },
+        "application deployment contract",
+    )
     if contract["schema"] != SCHEMA:
         raise ApplicationDeploymentContractError("application deployment contract schema is invalid")
 
-    authorization = _exact(contract["authorization"], {
-        "operator_instruction", "observed_at", "capabilities", "phases", "repositories",
-        "effect_set", "exclusions", "expires_at", "retirement_condition", "deployment_uses",
-    }, "application authorization")
+    authorization = _exact(
+        contract["authorization"],
+        {
+            "operator_instruction",
+            "observed_at",
+            "capabilities",
+            "phases",
+            "repositories",
+            "effect_set",
+            "exclusions",
+            "expires_at",
+            "retirement_condition",
+            "deployment_uses",
+        },
+        "application authorization",
+    )
     instruction = _exact(authorization["operator_instruction"], {"ref", "content_sha256"}, "operator instruction")
     _identity(instruction["ref"], "operator instruction reference")
     _sha(instruction["content_sha256"], "operator instruction hash")
     try:
         from datetime import datetime
+
         observed = datetime.fromisoformat(str(authorization["observed_at"]).replace("Z", "+00:00"))
         expires = datetime.fromisoformat(str(authorization["expires_at"]).replace("Z", "+00:00"))
     except ValueError as exc:
@@ -161,12 +186,25 @@ def validate_application_deployment_contract(value: Mapping[str, Any]) -> dict[s
     for name, repository in repositories.items():
         _identity(repository, f"application {name} repository")
 
-    candidate = _exact(contract["candidate"], {
-        "commit", "tree", "archive_sha256", "candidate_evidence_bundle_hash", "manifest_hash",
-        "release_manifest_hash", "rollback_manifest_hash", "admission_gate_hash",
-        "predecessor_commit", "predecessor_tree", "predecessor_archive_sha256",
-        "predecessor_release_manifest_hash", "predecessor_content_manifest_sha256",
-    }, "application candidate")
+    candidate = _exact(
+        contract["candidate"],
+        {
+            "commit",
+            "tree",
+            "archive_sha256",
+            "candidate_evidence_bundle_hash",
+            "manifest_hash",
+            "release_manifest_hash",
+            "rollback_manifest_hash",
+            "admission_gate_hash",
+            "predecessor_commit",
+            "predecessor_tree",
+            "predecessor_archive_sha256",
+            "predecessor_release_manifest_hash",
+            "predecessor_content_manifest_sha256",
+        },
+        "application candidate",
+    )
     if any(not isinstance(candidate[name], str) or _GIT.fullmatch(candidate[name]) is None for name in ("commit", "tree")):
         raise ApplicationDeploymentContractError("application candidate Git identity is invalid")
     for name in ("predecessor_commit", "predecessor_tree"):
@@ -176,26 +214,47 @@ def validate_application_deployment_contract(value: Mapping[str, Any]) -> dict[s
         _sha(candidate[name], f"application candidate {name}")
 
     raw_deployment = contract["deployment"] if isinstance(contract["deployment"], Mapping) else {}
-    archive = _exact(contract["archive"], {
-        "artifact_ref", "content_sha256", "size_bytes", "embedded_commit",
-        "release_manifest_hash", "content_manifest_sha256", "file_count",
-    }, "application archive")
+    archive = _exact(
+        contract["archive"],
+        {
+            "artifact_ref",
+            "content_sha256",
+            "size_bytes",
+            "embedded_commit",
+            "release_manifest_hash",
+            "content_manifest_sha256",
+            "file_count",
+        },
+        "application archive",
+    )
     if (
         archive["artifact_ref"] != raw_deployment.get("artifact_ref")
         or archive["content_sha256"] != candidate["archive_sha256"]
         or archive["embedded_commit"] != candidate["commit"]
         or archive["release_manifest_hash"] != candidate["release_manifest_hash"]
-        or not isinstance(archive["size_bytes"], int) or archive["size_bytes"] <= 0
-        or not isinstance(archive["file_count"], int) or archive["file_count"] <= 0
+        or not isinstance(archive["size_bytes"], int)
+        or archive["size_bytes"] <= 0
+        or not isinstance(archive["file_count"], int)
+        or archive["file_count"] <= 0
     ):
         raise ApplicationDeploymentContractError("application archive is underbound")
     _sha(archive["content_sha256"], "application archive hash")
     _sha(archive["content_manifest_sha256"], "application archive manifest hash")
 
-    plan = _exact(contract["plan"], {
-        "commit", "tree", "solution_hash", "closure_hash", "graph_hash", "work_unit",
-        "authorization_ref", "projection",
-    }, "application Plan")
+    plan = _exact(
+        contract["plan"],
+        {
+            "commit",
+            "tree",
+            "solution_hash",
+            "closure_hash",
+            "graph_hash",
+            "work_unit",
+            "authorization_ref",
+            "projection",
+        },
+        "application Plan",
+    )
     if (plan["commit"], plan["solution_hash"], plan["closure_hash"]) != (PLAN_COMMIT, SOLUTION_HASH, CLOSURE_HASH):
         raise ApplicationDeploymentContractError("application Plan does not match approved f0 solution")
     if _GIT.fullmatch(str(plan["tree"])) is None or plan["work_unit"] != "W09":
@@ -208,12 +267,24 @@ def validate_application_deployment_contract(value: Mapping[str, Any]) -> dict[s
     _contained_path(projection["release_path"], PROJECTION_PATH, "runtime projection")
     _sha(projection["content_sha256"], "runtime projection hash")
 
-    runtime = _exact(contract["runtime_config"], {
-        "artifact_ref", "generation_path", "content_sha256", "overlay_manifest_sha256",
-        "config_schema", "executor_principal",
-        "operator_principals", "executor_credential_env", "credential_reference",
-        "trusted_root", "trusted_uid", "forbidden_paths",
-    }, "operational config")
+    runtime = _exact(
+        contract["runtime_config"],
+        {
+            "artifact_ref",
+            "generation_path",
+            "content_sha256",
+            "overlay_manifest_sha256",
+            "config_schema",
+            "executor_principal",
+            "operator_principals",
+            "executor_credential_env",
+            "credential_reference",
+            "trusted_root",
+            "trusted_uid",
+            "forbidden_paths",
+        },
+        "operational config",
+    )
     _contained_path(runtime["generation_path"], CONFIG_PATH, "operational config")
     if runtime["config_schema"] != OPERATIONAL_CONFIG_SCHEMA:
         raise ApplicationDeploymentContractError("operational config schema is invalid")
@@ -237,9 +308,11 @@ def validate_application_deployment_contract(value: Mapping[str, Any]) -> dict[s
     _identities(runtime["operator_principals"], "operator principals")
     if runtime["trusted_root"] != raw_deployment.get("immutable_generation_path") or runtime["trusted_uid"] != 0:
         raise ApplicationDeploymentContractError("operational config trusted release root/uid is invalid")
-    if runtime["forbidden_paths"] != sorted(set(runtime["forbidden_paths"])) or any(
-        not isinstance(path, str) or not path.startswith("/") for path in runtime["forbidden_paths"]
-    ) or not {"/run/tgw/no-local-plan", "/opt/TGW/src"}.issubset(runtime["forbidden_paths"]):
+    if (
+        runtime["forbidden_paths"] != sorted(set(runtime["forbidden_paths"]))
+        or any(not isinstance(path, str) or not path.startswith("/") for path in runtime["forbidden_paths"])
+        or not {"/run/tgw/no-local-plan", "/opt/TGW/src"}.issubset(runtime["forbidden_paths"])
+    ):
         raise ApplicationDeploymentContractError("operational config does not retire legacy Plan/source paths")
 
     migrations = contract["migrations"]
@@ -250,16 +323,32 @@ def validate_application_deployment_contract(value: Mapping[str, Any]) -> dict[s
         _sha(normalized["source_sha256"], "migration source hash")
         _sha(normalized["receipt_hash"], "migration receipt hash")
 
-    deployment = _exact(contract["deployment"], {
-        "target_host", "root_id", "release_root", "artifact_ref", "prior_generation",
-        "next_generation", "immutable_generation_path", "current_selector", "nix_system_path",
-        "predecessor_observation_ref", "predecessor_observation_hash",
-        "provider_observation_ref", "provider_observation_hash",
-        "prior_projection_sha256", "prior_runtime_config_sha256",
-        "prior_database_identity_sha256",
-        "prior_runtime_config_uid", "prior_runtime_config_gid",
-        "prior_runtime_config_mode", "prior_runtime_config_size",
-    }, "application deployment")
+    deployment = _exact(
+        contract["deployment"],
+        {
+            "target_host",
+            "root_id",
+            "release_root",
+            "artifact_ref",
+            "prior_generation",
+            "next_generation",
+            "immutable_generation_path",
+            "current_selector",
+            "nix_system_path",
+            "predecessor_observation_ref",
+            "predecessor_observation_hash",
+            "provider_observation_ref",
+            "provider_observation_hash",
+            "prior_projection_sha256",
+            "prior_runtime_config_sha256",
+            "prior_database_identity_sha256",
+            "prior_runtime_config_uid",
+            "prior_runtime_config_gid",
+            "prior_runtime_config_mode",
+            "prior_runtime_config_size",
+        },
+        "application deployment",
+    )
     expected_generation_path = f"/opt/TGW/releases/{deployment['next_generation']}"
     if (
         deployment["target_host"] != "tgw-prod"
@@ -294,10 +383,19 @@ def validate_application_deployment_contract(value: Mapping[str, Any]) -> dict[s
     if tuple(contract["stage_order"]) != STAGES:
         raise ApplicationDeploymentContractError("application deployment stage order is invalid")
 
-    rollback = _exact(contract["rollback"], {
-        "generation", "manifest_hash", "database_backup_required", "selector_cas_required",
-        "config_reconciliation_required", "service_reconciliation_required", "predecessor_health_required",
-    }, "application rollback")
+    rollback = _exact(
+        contract["rollback"],
+        {
+            "generation",
+            "manifest_hash",
+            "database_backup_required",
+            "selector_cas_required",
+            "config_reconciliation_required",
+            "service_reconciliation_required",
+            "predecessor_health_required",
+        },
+        "application rollback",
+    )
     if (
         rollback["generation"] != deployment["prior_generation"]
         or rollback["manifest_hash"] != candidate["rollback_manifest_hash"]
@@ -326,8 +424,15 @@ class ProtectedGitObjectReader:
     """Held Git executable and protected immutable object repository."""
 
     __slots__ = (
-        "repository", "_repo_fd", "_git_fd", "_git_raw", "_git_path",
-        "_git_identity", "_repo_identity", "_closure_identity", "_frozen",
+        "repository",
+        "_repo_fd",
+        "_git_fd",
+        "_git_raw",
+        "_git_path",
+        "_git_identity",
+        "_repo_identity",
+        "_closure_identity",
+        "_frozen",
     )
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -344,16 +449,15 @@ class ProtectedGitObjectReader:
                 metadata = os.lstat(ancestor)
                 if ancestor == absolute and path == self._git_path:
                     continue
-                if stat.S_ISDIR(metadata.st_mode) and (
-                    metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022
-                ):
+                if stat.S_ISDIR(metadata.st_mode) and (metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022):
                     raise ApplicationDeploymentContractError("production Git authority is not protected")
         repo = self.repository.lstat()
         if not stat.S_ISDIR(repo.st_mode) or repo.st_uid != 0 or stat.S_IMODE(repo.st_mode) & 0o022:
             raise ApplicationDeploymentContractError("production Git object repository is mutable")
         self._repo_identity = _inode_identity(repo)
         self._repo_fd = os.open(
-            self.repository, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            self.repository,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
         )
         if _inode_identity(os.fstat(self._repo_fd)) != self._repo_identity:
             os.close(self._repo_fd)
@@ -365,10 +469,7 @@ class ProtectedGitObjectReader:
             os.close(self._repo_fd)
             raise
         git_metadata = os.fstat(self._git_fd)
-        if (
-            git_metadata.st_uid != 0 or git_metadata.st_nlink != 1
-            or stat.S_IMODE(git_metadata.st_mode) not in {0o555, 0o755}
-        ):
+        if git_metadata.st_uid != 0 or git_metadata.st_nlink != 1 or stat.S_IMODE(git_metadata.st_mode) not in {0o555, 0o755}:
             os.close(self._git_fd)
             os.close(self._repo_fd)
             raise ApplicationDeploymentContractError("production Git executable is not protected")
@@ -391,11 +492,7 @@ class ProtectedGitObjectReader:
                 relative = str(relative_root / name)
                 metadata = item.lstat()
                 mode = stat.S_IMODE(metadata.st_mode)
-                if (
-                    stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != 0
-                    or mode & 0o022
-                    or not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode))
-                ):
+                if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != 0 or mode & 0o022 or not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
                     raise ApplicationDeploymentContractError("production Git object closure is mutable")
                 digest: str | None = None
                 if stat.S_ISREG(metadata.st_mode):
@@ -403,29 +500,30 @@ class ProtectedGitObjectReader:
                     try:
                         opened = os.fstat(fd)
                         if _inode_identity(opened) != _inode_identity(metadata) or opened.st_nlink != 1:
-                            raise ApplicationDeploymentContractError(
-                                "production Git object closure changed while opening"
-                            )
+                            raise ApplicationDeploymentContractError("production Git object closure changed while opening")
                         hasher = hashlib.sha256()
                         total = 0
                         while block := os.read(fd, 1024 * 1024):
                             total += len(block)
                             if total > 2 * 1024 * 1024 * 1024:
-                                raise ApplicationDeploymentContractError(
-                                    "production Git object exceeds its verification bound"
-                                )
+                                raise ApplicationDeploymentContractError("production Git object exceeds its verification bound")
                             hasher.update(block)
                         if total != opened.st_size:
-                            raise ApplicationDeploymentContractError(
-                                "production Git object changed while reading"
-                            )
+                            raise ApplicationDeploymentContractError("production Git object changed while reading")
                         digest = hasher.hexdigest()
                     finally:
                         os.close(fd)
-                entries.append((
-                    relative, metadata.st_dev, metadata.st_ino, metadata.st_uid,
-                    metadata.st_mode, metadata.st_size, digest,
-                ))
+                entries.append(
+                    (
+                        relative,
+                        metadata.st_dev,
+                        metadata.st_ino,
+                        metadata.st_uid,
+                        metadata.st_mode,
+                        metadata.st_size,
+                        digest,
+                    )
+                )
         return tuple(entries)
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -444,12 +542,17 @@ class ProtectedGitObjectReader:
             raise ApplicationDeploymentContractError("production Git reader is closed")
         argv = [
             f"/proc/{os.getpid()}/fd/{self._git_fd}",
-            "-c", f"safe.directory=/proc/{os.getpid()}/fd/{self._repo_fd}",
-            "-C", f"/proc/{os.getpid()}/fd/{self._repo_fd}",
+            "-c",
+            f"safe.directory=/proc/{os.getpid()}/fd/{self._repo_fd}",
+            "-C",
+            f"/proc/{os.getpid()}/fd/{self._repo_fd}",
             *arguments,
         ]
         rc, stdout, _stderr = _run_held_bounded(
-            argv, pass_fds=(self._git_fd, self._repo_fd), timeout=20, limit=limit,
+            argv,
+            pass_fds=(self._git_fd, self._repo_fd),
+            timeout=20,
+            limit=limit,
             env={"PATH": "", "LANG": "C", "LC_ALL": "C"},
         )
         if rc:
@@ -476,12 +579,18 @@ class ProtectedGitObjectReader:
             raise ApplicationDeploymentContractError("production Git reader is closed")
         argv = [
             f"/proc/{os.getpid()}/fd/{self._git_fd}",
-            "-c", f"safe.directory=/proc/{os.getpid()}/fd/{self._repo_fd}",
-            "-C", f"/proc/{os.getpid()}/fd/{self._repo_fd}", *arguments,
+            "-c",
+            f"safe.directory=/proc/{os.getpid()}/fd/{self._repo_fd}",
+            "-C",
+            f"/proc/{os.getpid()}/fd/{self._repo_fd}",
+            *arguments,
         ]
         rc, stdout, _stderr = _run_held_bounded(
-            argv, pass_fds=(self._git_fd, self._repo_fd), timeout=20,
-            limit=4 * 1024 * 1024, env={"PATH": "", "LANG": "C", "LC_ALL": "C"},
+            argv,
+            pass_fds=(self._git_fd, self._repo_fd),
+            timeout=20,
+            limit=4 * 1024 * 1024,
+            env={"PATH": "", "LANG": "C", "LC_ALL": "C"},
         )
         self.postcheck()
         return rc, stdout
@@ -530,14 +639,9 @@ def _validate_projection(raw: bytes) -> None:
     try:
         projection = validate_projection(projection, expected_plan_commit=PLAN_COMMIT)
     except ValueError as exc:
-        raise ApplicationDeploymentContractError(
-            "runtime projection canonical binding is invalid"
-        ) from exc
+        raise ApplicationDeploymentContractError("runtime projection canonical binding is invalid") from exc
     solution = projection["solution"]
-    if (
-        solution.get("solution_hash") != SOLUTION_HASH
-        or solution.get("closure_hash") != CLOSURE_HASH
-    ):
+    if solution.get("solution_hash") != SOLUTION_HASH or solution.get("closure_hash") != CLOSURE_HASH:
         raise ApplicationDeploymentContractError("runtime projection differs from retained Plan solution")
 
 
@@ -570,8 +674,14 @@ def _validate_runtime_config(raw: bytes, contract: Mapping[str, Any]) -> None:
     if None in actual_operators or sorted(actual_operators) != runtime["operator_principals"]:
         raise ApplicationDeploymentContractError("operational config operator principals differ")
     forbidden_key_tokens = {
-        "access_token", "refresh_token", "client_secret", "api_key", "password",
-        "private_key", "secret_bytes", "credential_value",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "api_key",
+        "password",
+        "private_key",
+        "secret_bytes",
+        "credential_value",
     }
     forbidden: set[str] = set()
     configured_paths: set[str] = set()
@@ -591,12 +701,7 @@ def _validate_runtime_config(raw: bytes, contract: Mapping[str, Any]) -> None:
 
     inspect(value)
     forbidden_roots = tuple(PurePosixPath(path) for path in runtime["forbidden_paths"])
-    path_violation = any(
-        path == root or root in path.parents
-        for configured in configured_paths
-        for path in (PurePosixPath(configured),)
-        for root in forbidden_roots
-    )
+    path_violation = any(path == root or root in path.parents for configured in configured_paths for path in (PurePosixPath(configured),) for root in forbidden_roots)
     if forbidden or path_violation:
         raise ApplicationDeploymentContractError("operational config contains secret material instead of a credential reference")
 
@@ -636,23 +741,27 @@ class VerifiedApplicationDeploymentContract:
         if value["contract_hash"] != self.contract_hash:
             raise ApplicationDeploymentContractError("resolved application contract hash mismatch")
         if len(self.migration_receipts) != len(MIGRATION_PATHS) or any(
-            receipt.get("migration_path") != binding["path"]
-            or receipt.get("receipt_hash") != binding["receipt_hash"]
-            or receipt.get("migration_sha256") != binding["source_sha256"]
+            receipt.get("migration_path") != binding["path"] or receipt.get("receipt_hash") != binding["receipt_hash"] or receipt.get("migration_sha256") != binding["source_sha256"]
             for receipt, binding in zip(self.migration_receipts, value["migrations"], strict=True)
         ):
             raise ApplicationDeploymentContractError("resolved migration receipts do not match W09 contract")
         candidate, deployment = value["candidate"], value["deployment"]
         return {
             "generation": deployment["next_generation"],
-            "candidate_commit": candidate["commit"], "candidate_tree": candidate["tree"],
-            "archive_sha256": candidate["archive_sha256"], "artifact_ref": deployment["artifact_ref"],
-            "root_id": deployment["root_id"], "expected_current": deployment["prior_generation"],
+            "candidate_commit": candidate["commit"],
+            "candidate_tree": candidate["tree"],
+            "archive_sha256": candidate["archive_sha256"],
+            "artifact_ref": deployment["artifact_ref"],
+            "root_id": deployment["root_id"],
+            "expected_current": deployment["prior_generation"],
             "operation_id": "w09-" + self.contract_hash.removeprefix("sha256:")[:24],
-            "review_receipt": candidate["admission_gate_hash"], "controller_receipt": self.contract_hash,
+            "review_receipt": candidate["admission_gate_hash"],
+            "controller_receipt": self.contract_hash,
             "migration_receipts": [dict(item) for item in self.migration_receipts],
-            "projection": dict(value["plan"]["projection"]), "runtime_config": dict(value["runtime_config"]),
-            "services": list(value["services"]), "health_probes": list(value["health_probes"]),
+            "projection": dict(value["plan"]["projection"]),
+            "runtime_config": dict(value["runtime_config"]),
+            "services": list(value["services"]),
+            "health_probes": list(value["health_probes"]),
             "nix_system_path": deployment["nix_system_path"],
             "predecessor_observation_ref": deployment["predecessor_observation_ref"],
             "predecessor_observation_hash": deployment["predecessor_observation_hash"],
@@ -713,8 +822,12 @@ class PinnedApplicationDeploymentContractResolver:
         if not isinstance(candidate_evidence_descriptor, PinnedCandidateEvidenceDescriptor):
             raise ApplicationDeploymentContractError("candidate evidence descriptor is not externally pinned")
         sinks = (
-            execution_evidence_sink, contract_sink, runtime_config_sink, archive_sink,
-            instruction_sink, predecessor_observation_sink,
+            execution_evidence_sink,
+            contract_sink,
+            runtime_config_sink,
+            archive_sink,
+            instruction_sink,
+            predecessor_observation_sink,
         )
         if any(not isinstance(item, PinnedGitReceiptSink) for item in sinks):
             raise ApplicationDeploymentContractError("application deployment stores are not externally pinned")
@@ -731,24 +844,21 @@ class PinnedApplicationDeploymentContractResolver:
                 raise ApplicationDeploymentContractError("protected repository mapping is unavailable") from exc
         if _production_token is _PRODUCTION_RESOLVER_SEAL:
             expected_roots = {
-                repository, plan_repository, candidate_evidence_descriptor.authority_repository,
+                repository,
+                plan_repository,
+                candidate_evidence_descriptor.authority_repository,
                 Path(candidate_evidence_descriptor.candidate_evidence_sink_descriptor["repository"]).resolve(strict=True),
                 *(item.repository for item in sinks),
             }
-            if set(protected) != expected_roots or any(
-                type(reader) is not ProtectedGitObjectReader or reader.repository != root
-                for root, reader in protected.items()
-            ):
+            if set(protected) != expected_roots or any(type(reader) is not ProtectedGitObjectReader or reader.repository != root for root, reader in protected.items()):
                 raise ApplicationDeploymentContractError("production W09 Git/sink authority is incomplete")
             try:
                 with protected_git_object_reads(protected):
                     candidate_evidence_descriptor = PinnedCandidateEvidenceDescriptor(
-                        candidate_evidence_descriptor.pin, candidate_repository=repository,
+                        candidate_evidence_descriptor.pin,
+                        candidate_repository=repository,
                     )
-                    sinks = tuple(
-                        PinnedGitReceiptSink(item.descriptor, candidate_repository=repository)
-                        for item in sinks
-                    )
+                    sinks = tuple(PinnedGitReceiptSink(item.descriptor, candidate_repository=repository) for item in sinks)
                     candidate_sink = PinnedGitReceiptSink(
                         candidate_evidence_descriptor.candidate_evidence_sink_descriptor,
                         candidate_repository=repository,
@@ -764,7 +874,7 @@ class PinnedApplicationDeploymentContractResolver:
             except CandidateReceiptSinkError as exc:
                 raise ApplicationDeploymentContractError("candidate evidence store is unavailable") from exc
         roots = (repository, candidate_sink.repository, candidate_evidence_descriptor.authority_repository, *(item.repository for item in sinks))
-        if any(left == right or left in right.parents or right in left.parents for index, left in enumerate(roots) for right in roots[index + 1:]):
+        if any(left == right or left in right.parents or right in left.parents for index, left in enumerate(roots) for right in roots[index + 1 :]):
             raise ApplicationDeploymentContractError("candidate and W09 evidence/config/operation roots must be disjoint")
         production.validate()
         if not all(callable(getattr(reader, name, None)) for reader in (candidate_objects, plan_objects) for name in ("identity", "show")):
@@ -782,12 +892,7 @@ class PinnedApplicationDeploymentContractResolver:
             if (
                 candidate_objects.repository != repository
                 or plan_objects.repository != plan_repository
-                or any(
-                    not stat.S_ISDIR(root.lstat().st_mode)
-                    or root.lstat().st_uid != 0
-                    or stat.S_IMODE(root.lstat().st_mode) & 0o022
-                    for root in protected_roots
-                )
+                or any(not stat.S_ISDIR(root.lstat().st_mode) or root.lstat().st_uid != 0 or stat.S_IMODE(root.lstat().st_mode) & 0o022 for root in protected_roots)
             ):
                 raise ApplicationDeploymentContractError("production W09 repositories/sinks are not protected")
         self._repository = repository
@@ -796,8 +901,12 @@ class PinnedApplicationDeploymentContractResolver:
         self._descriptor = candidate_evidence_descriptor
         self._candidate_sink = candidate_sink
         (
-            self._execution_sink, self._contract_sink, self._config_sink, self._archive_sink,
-            self._instruction_sink, self._predecessor_sink,
+            self._execution_sink,
+            self._contract_sink,
+            self._config_sink,
+            self._archive_sink,
+            self._instruction_sink,
+            self._predecessor_sink,
         ) = sinks
         self._candidate_objects, self._plan_objects = candidate_objects, plan_objects
         self._protected_readers = protected
@@ -837,12 +946,24 @@ class PinnedApplicationDeploymentContractResolver:
             contract = validate_application_deployment_contract(self._contract_sink.fetch_object(str(reference)))
             if not re.fullmatch(r"refs/[A-Za-z0-9][A-Za-z0-9._/-]{0,239}", self._plan_approved_ref):
                 raise CandidateReceiptSinkError("approved Plan reference is invalid")
-            object_type = self._plan_objects.run_git(
-                "cat-file", "-t", self._plan_approved_ref,
-            ).decode().strip()
-            approved_commit = self._plan_objects.run_git(
-                "rev-parse", "--verify", f"{self._plan_approved_ref}^{{commit}}",
-            ).decode().strip()
+            object_type = (
+                self._plan_objects.run_git(
+                    "cat-file",
+                    "-t",
+                    self._plan_approved_ref,
+                )
+                .decode()
+                .strip()
+            )
+            approved_commit = (
+                self._plan_objects.run_git(
+                    "rev-parse",
+                    "--verify",
+                    f"{self._plan_approved_ref}^{{commit}}",
+                )
+                .decode()
+                .strip()
+            )
             if object_type != "commit" or _GIT.fullmatch(approved_commit) is None:
                 raise CandidateReceiptSinkError("approved Plan reference is not a direct commit")
             authority = {
@@ -852,18 +973,23 @@ class PinnedApplicationDeploymentContractResolver:
                 "approved_commit": approved_commit,
             }
             evidence = verify_candidate_evidence_bundle(
-                self._candidate_sink, candidate_evidence_descriptor=self._descriptor,
-                repository=self._repository, source_commit=commit, source_tree=tree,
-                plan_commit=authority["approved_commit"], plan_repository=Path(authority["repository"]),
+                self._candidate_sink,
+                candidate_evidence_descriptor=self._descriptor,
+                repository=self._repository,
+                source_commit=commit,
+                source_tree=tree,
+                plan_commit=authority["approved_commit"],
+                plan_repository=Path(authority["repository"]),
             )
             admission = candidate_admission_gate(
-                self._repository, candidate=commit, plan_repository=self._plan_repository,
-                plan_approved_ref=self._plan_approved_ref, candidate_evidence_descriptor=self._descriptor,
+                self._repository,
+                candidate=commit,
+                plan_repository=self._plan_repository,
+                plan_approved_ref=self._plan_approved_ref,
+                candidate_evidence_descriptor=self._descriptor,
                 execution_sink=self._execution_sink,
             )
-            bundle = validate_candidate_evidence_bundle(
-                self._candidate_sink.fetch_object(candidate_evidence_bundle_ref(commit))
-            )
+            bundle = validate_candidate_evidence_bundle(self._candidate_sink.fetch_object(candidate_evidence_bundle_ref(commit)))
             migrations = tuple(_artifact(self._candidate_sink, pointer) for pointer in bundle["migration_receipts"])
             release_manifest = _artifact(self._candidate_sink, bundle["release_manifest"])
             rollback_manifest = _artifact(self._candidate_sink, bundle["rollback_manifest"])
@@ -925,11 +1051,13 @@ class PinnedApplicationDeploymentContractResolver:
             raise ApplicationDeploymentContractError("W09 operator authorization is not current at dispatch")
         if (
             contract["contract_hash"] != contract_hash
-            or authority["approved_commit"] != PLAN_COMMIT or plan_commit != PLAN_COMMIT
+            or authority["approved_commit"] != PLAN_COMMIT
+            or plan_commit != PLAN_COMMIT
             or contract["plan"]["tree"] != plan_tree
             or contract["plan"]["graph_hash"] != evidence["plan_graph_hash"]
             or admission.get("allowed") is not True
-            or candidate["commit"] != commit or candidate["tree"] != tree
+            or candidate["commit"] != commit
+            or candidate["tree"] != tree
             or candidate["archive_sha256"] != _hash_bytes(archive_bytes)
             or contract["archive"]["size_bytes"] != len(archive_bytes)
             or contract["archive"]["embedded_commit"] != embedded_commit
@@ -953,11 +1081,11 @@ class PinnedApplicationDeploymentContractResolver:
             or predecessor_unsigned != expected_predecessor
             or predecessor_receipt_hash != _hash(predecessor_unsigned)
             or deployment["predecessor_observation_hash"] != predecessor_receipt_hash
-            or (deployment["target_host"], deployment["root_id"], Path(deployment["release_root"]))
-               != (self._production.target_host, self._production.root_id, self._production.release_root)
+            or (deployment["target_host"], deployment["root_id"], Path(deployment["release_root"])) != (self._production.target_host, self._production.root_id, self._production.release_root)
             or tuple(contract["services"]) != self._production.services
             or tuple(contract["health_probes"]) != self._production.health_probes
-            or contract["operation_sink"] != {
+            or contract["operation_sink"]
+            != {
                 "sink_id": self._production.operation_sink_id,
                 "descriptor_hash": self._production.operation_sink_descriptor_hash,
             }

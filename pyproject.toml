@@ -66,7 +66,6 @@ tgw-nixos-observer-render-evaluation = "tgw.nixos_observer_render_evaluation:mai
 tgw-nixos-a3-successor-evaluation = "tgw.nixos_a3_successor_evaluation:main"
 tgw-prod-a3-preintegration-observation = "tgw.a3_preintegration_observation:main"
 tgw-prod-a3-preintegration-helper = "tgw.a3_preintegration_observation:helper_main"
-tgw-w09-application-bootstrap = "tgw.application_bootstrap_entrypoint:main"
 tgw-echo-worker           = "tgw.workers.echo:main"
 tgw-token-worker          = "tgw.workers.token_refresh:main"
 tgw-pm-intake-worker      = "tgw.workers.pm_intake:main"
@@ -107,6 +106,7 @@ tgw-hermes-stitch-worker      = "tgw.workers.coding:hermes_stitch_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+script-files = ["scripts/tgw-w09-application-bootstrap"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

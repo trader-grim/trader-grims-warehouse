@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""Stdlib-only exact launcher for the isolated W09 application controller."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import stat
+from pathlib import Path
+from typing import Any, Mapping
+
+CONFIG_PATH = Path("/etc/tgw/w09/application-bootstrap-controller.json")
+CONFIG_SCHEMA = "tgw-w09-application-bootstrap-controller/v2"
+
+
+def _canonical(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
+
+
+def _protected(path: Path) -> None:
+    for ancestor in (path.parent, *path.parents):
+        metadata = ancestor.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise SystemExit("W09 launcher artifact ancestor is not root-protected")
+
+
+def _held(
+    binding: Mapping[str, Any],
+    *,
+    expected_path: Path | None = None,
+    max_bytes: int = 64 * 1024 * 1024,
+) -> tuple[Path, int, bytes, tuple[int, ...]]:
+    if not isinstance(binding, Mapping) or set(binding) != {
+        "path",
+        "sha256",
+        "uid",
+        "gid",
+        "mode",
+        "size",
+    }:
+        raise SystemExit("W09 launcher artifact binding is invalid")
+    path = Path(str(binding["path"]))
+    if not path.is_absolute() or (expected_path is not None and path.resolve(strict=True) != expected_path.resolve(strict=True)):
+        raise SystemExit("W09 launcher artifact path is invalid")
+    _protected(path)
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        held = os.fstat(fd)
+        named = os.stat(path, follow_symlinks=False)
+        raw = os.pread(fd, max_bytes + 1, 0)
+        identity = (
+            held.st_dev,
+            held.st_ino,
+            held.st_uid,
+            held.st_gid,
+            held.st_mode,
+            held.st_size,
+        )
+        if (
+            len(raw) > max_bytes
+            or not stat.S_ISREG(held.st_mode)
+            or held.st_uid != binding["uid"]
+            or held.st_gid != binding["gid"]
+            or stat.S_IMODE(held.st_mode) != binding["mode"]
+            or held.st_size != binding["size"]
+            or "sha256:" + hashlib.sha256(raw).hexdigest() != binding["sha256"]
+            or identity
+            != (
+                named.st_dev,
+                named.st_ino,
+                named.st_uid,
+                named.st_gid,
+                named.st_mode,
+                named.st_size,
+            )
+        ):
+            raise SystemExit("W09 launcher artifact differs from its binding")
+        return path, fd, raw, identity
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _revalidate(artifact: tuple[Path, int, bytes, tuple[int, ...]]) -> None:
+    path, fd, raw, identity = artifact
+    held = os.fstat(fd)
+    named = os.stat(path, follow_symlinks=False)
+    current = (
+        held.st_dev,
+        held.st_ino,
+        held.st_uid,
+        held.st_gid,
+        held.st_mode,
+        held.st_size,
+    )
+    if (
+        current != identity
+        or current
+        != (
+            named.st_dev,
+            named.st_ino,
+            named.st_uid,
+            named.st_gid,
+            named.st_mode,
+            named.st_size,
+        )
+        or os.pread(fd, len(raw) + 1, 0) != raw
+    ):
+        raise SystemExit("W09 launcher artifact changed before isolated exec")
+
+
+def _held_config() -> tuple[dict[str, Any], tuple[Path, int, bytes, tuple[int, ...]]]:
+    _protected(CONFIG_PATH)
+    fd = os.open(CONFIG_PATH, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        held = os.fstat(fd)
+        named = os.stat(CONFIG_PATH, follow_symlinks=False)
+        raw = os.pread(fd, 4 * 1024 * 1024 + 1, 0)
+        identity = (
+            held.st_dev,
+            held.st_ino,
+            held.st_uid,
+            held.st_gid,
+            held.st_mode,
+            held.st_size,
+        )
+        if (
+            len(raw) > 4 * 1024 * 1024
+            or not stat.S_ISREG(held.st_mode)
+            or held.st_uid != 0
+            or held.st_nlink != 1
+            or stat.S_IMODE(held.st_mode) != 0o400
+            or identity
+            != (
+                named.st_dev,
+                named.st_ino,
+                named.st_uid,
+                named.st_gid,
+                named.st_mode,
+                named.st_size,
+            )
+        ):
+            raise SystemExit("W09 launcher config is not one protected artifact")
+        config = json.loads(raw)
+        if not isinstance(config, dict) or config.get("schema") != CONFIG_SCHEMA:
+            raise SystemExit("W09 launcher config schema is invalid")
+        unsigned = dict(config)
+        claimed = unsigned.pop("config_sha256", None)
+        if claimed != "sha256:" + hashlib.sha256(_canonical(unsigned)).hexdigest():
+            raise SystemExit("W09 launcher config hash is invalid")
+        return config, (CONFIG_PATH, fd, raw, identity)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def main() -> None:
+    if len(os.sys.argv) != 1:
+        raise SystemExit("tgw-w09-application-bootstrap accepts no arguments")
+    config, config_artifact = _held_config()
+    artifacts = [config_artifact]
+    try:
+        runtime = config.get("controller_runtime")
+        if not isinstance(runtime, Mapping) or set(runtime) != {
+            "launcher",
+            "python",
+            "entrypoint",
+            "manifest",
+        }:
+            raise SystemExit("W09 launcher runtime binding is invalid")
+        expected = {
+            "launcher": Path(__file__),
+            "python": Path("/proc/self/exe"),
+        }
+        held = {}
+        for name in ("launcher", "python", "entrypoint", "manifest"):
+            artifact = _held(
+                runtime[name],
+                expected_path=expected.get(name),
+            )
+            artifacts.append(artifact)
+            held[name] = artifact
+        for artifact in artifacts:
+            _revalidate(artifact)
+        python = held["python"][0]
+        entrypoint = held["entrypoint"][0]
+        os.execve(
+            python,
+            [str(python), "-I", str(entrypoint)],
+            {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": ""},
+        )
+    finally:
+        for _path, fd, _raw, _identity in reversed(artifacts):
+            os.close(fd)
+
+
+if __name__ == "__main__":
+    main()

@@ -102,13 +102,20 @@ def test_protected_git_context_routes_transitive_reads_and_rejects_unheld_roots(
 
     reader = Reader()
     with protected_git_object_reads({repository: reader}):
-        assert receipt_sink_module._git(
-            repository, "show", "a" * 40 + ":path",
-        ) == b"held\n"
+        assert (
+            receipt_sink_module._git(
+                repository,
+                "show",
+                "a" * 40 + ":path",
+            )
+            == b"held\n"
+        )
         with pytest.raises(CandidateReceiptSinkError, match="unheld"):
             receipt_sink_module._git(tmp_path, "status")
     assert reader.calls == [("show", "a" * 40 + ":path")]
     assert reader.checks == 2
+
+
 TEST_RUNNER_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
 
 

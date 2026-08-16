@@ -80,28 +80,40 @@ def _bounded_process(process: subprocess.Popen[bytes], stdin: bytes, *, limit: i
     selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
     selector.register(process.stdout, selectors.EVENT_READ, "stdout")
     selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-    outputs = {"stdout": bytearray(), "stderr": bytearray()}; offset = 0; deadline = time.monotonic() + timeout
+    outputs = {"stdout": bytearray(), "stderr": bytearray()}
+    offset = 0
+    deadline = time.monotonic() + timeout
     try:
         while selector.get_map():
             remaining = deadline - time.monotonic()
-            if remaining <= 0: raise subprocess.TimeoutExpired(process.args, timeout)
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, timeout)
             for key, _ in selector.select(min(remaining, 0.25)):
                 if key.data == "stdin":
                     if offset == len(stdin):
-                        selector.unregister(key.fileobj); key.fileobj.close(); continue
-                    try: offset += os.write(key.fd, stdin[offset:offset + 65536])
-                    except BrokenPipeError: selector.unregister(key.fileobj); key.fileobj.close()
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    try:
+                        offset += os.write(key.fd, stdin[offset : offset + 65536])
+                    except BrokenPipeError:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
                 else:
                     chunk = os.read(key.fd, 65536)
-                    if not chunk: selector.unregister(key.fileobj); continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
                     outputs[key.data].extend(chunk)
-                    if len(outputs[key.data]) > limit: raise ApplicationReleaseRemoteError(f"{key.data} exceeded fixed bound")
+                    if len(outputs[key.data]) > limit:
+                        raise ApplicationReleaseRemoteError(f"{key.data} exceeded fixed bound")
         process.wait(timeout=max(0.1, deadline - time.monotonic()))
         return bytes(outputs["stdout"]), bytes(outputs["stderr"])
     finally:
         selector.close()
         for stream in (process.stdin, process.stdout, process.stderr):
-            if stream is not None and not stream.closed: stream.close()
+            if stream is not None and not stream.closed:
+                stream.close()
 
 
 def _canonical(value: Any) -> bytes:
@@ -132,30 +144,54 @@ def _safe_root(path: Path, *, mode: int = 0o700) -> None:
 
 
 def _validate_config(value: Any, *, expected_helper_sha256: str) -> dict[str, Any]:
-    config = _exact(value, {
-        "schema", "target_host", "root_id", "release_root", "current_selector", "active_config_path",
-        "active_config_metadata",
-        "services", "health_probes", "executables", "database", "receipt_root", "backup_root",
-        "unrelated_paths", "max_archive_bytes", "max_config_bytes", "command_timeout_seconds",
-        "helper_sha256", "config_sha256",
-    }, "helper config")
-    unsigned = dict(config); claimed = unsigned.pop("config_sha256")
+    config = _exact(
+        value,
+        {
+            "schema",
+            "target_host",
+            "root_id",
+            "release_root",
+            "current_selector",
+            "active_config_path",
+            "active_config_metadata",
+            "services",
+            "health_probes",
+            "executables",
+            "database",
+            "receipt_root",
+            "backup_root",
+            "unrelated_paths",
+            "max_archive_bytes",
+            "max_config_bytes",
+            "command_timeout_seconds",
+            "helper_sha256",
+            "config_sha256",
+        },
+        "helper config",
+    )
+    unsigned = dict(config)
+    claimed = unsigned.pop("config_sha256")
     if claimed != _hash(unsigned) or config["schema"] != CONFIG_SCHEMA:
         raise ApplicationReleaseRemoteError("helper config self-hash/schema is invalid")
     if config["helper_sha256"] != expected_helper_sha256:
         raise ApplicationReleaseRemoteError("running helper module differs from reviewed source")
     if (
-        config["target_host"] != "tgw-prod" or config["root_id"] != "production-releases"
-        or config["release_root"] != "/opt/TGW" or config["current_selector"] != "/opt/TGW/current"
+        config["target_host"] != "tgw-prod"
+        or config["root_id"] != "production-releases"
+        or config["release_root"] != "/opt/TGW"
+        or config["current_selector"] != "/opt/TGW/current"
         or config["active_config_path"] != "/opt/TGW/config/tgw-api-config.json"
     ):
         raise ApplicationReleaseRemoteError("helper target paths are invalid")
     active_config_metadata = _exact(
-        config["active_config_metadata"], {"uid", "gid", "mode"}, "active config metadata",
+        config["active_config_metadata"],
+        {"uid", "gid", "mode"},
+        "active config metadata",
     )
     if (
         active_config_metadata["uid"] != 0
-        or not isinstance(active_config_metadata["gid"], int) or active_config_metadata["gid"] < 0
+        or not isinstance(active_config_metadata["gid"], int)
+        or active_config_metadata["gid"] < 0
         or active_config_metadata["mode"] not in {0o400, 0o440, 0o600, 0o640}
     ):
         raise ApplicationReleaseRemoteError("active config metadata is invalid")
@@ -169,14 +205,24 @@ def _validate_config(value: Any, *, expected_helper_sha256: str) -> dict[str, An
             re.fullmatch(
                 r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/]+/(?:s?bin)/[A-Za-z0-9._+-]+",
                 str(item["path"]),
-            ) is None
+            )
+            is None
             or _SHA.fullmatch(str(item["sha256"])) is None
-            or item["uid"] != 0 or item["gid"] != 0
+            or item["uid"] != 0
+            or item["gid"] != 0
             or item["mode"] not in {0o555, 0o755}
-            or not isinstance(item["size"], int) or item["size"] <= 0
+            or not isinstance(item["size"], int)
+            or item["size"] <= 0
         ):
             raise ApplicationReleaseRemoteError("helper executable binding is invalid")
-    _exact(config["database"], {"name", "user", "host"}, "helper database")
+    database = _exact(config["database"], {"name", "user", "host", "port"}, "helper database")
+    if (
+        not all(isinstance(database[name], str) and database[name] for name in ("name", "user", "host"))
+        or not isinstance(database["port"], int)
+        or isinstance(database["port"], bool)
+        or not 1 <= database["port"] <= 65535
+    ):
+        raise ApplicationReleaseRemoteError("helper database binding is invalid")
     for name in ("receipt_root", "backup_root"):
         if not isinstance(config[name], str) or not config[name].startswith("/opt/TGW/var/"):
             raise ApplicationReleaseRemoteError("helper state root is invalid")
@@ -187,24 +233,48 @@ def _validate_config(value: Any, *, expected_helper_sha256: str) -> dict[str, An
 
 
 def validate_request(
-    value: Mapping[str, Any], config: Mapping[str, Any],
-    *, artifact_bytes: tuple[bytes, bytes] | None = None,
+    value: Mapping[str, Any],
+    config: Mapping[str, Any],
+    *,
+    artifact_bytes: tuple[bytes, bytes] | None = None,
 ) -> dict[str, Any]:
     fields = {"schema", "action", "parameters", "request_hash"}
     if artifact_bytes is None:
         fields |= {"archive_b64", "config_b64"}
     request = _exact(value, fields, "release request")
-    unsigned = dict(request); claimed = unsigned.pop("request_hash")
+    unsigned = dict(request)
+    claimed = unsigned.pop("request_hash")
     expected_schema = SCHEMA if artifact_bytes is None else FRAMED_SCHEMA
     if request["schema"] != expected_schema or claimed != _hash(unsigned) or request["action"] not in {"install", "rollback"}:
         raise ApplicationReleaseRemoteError("release request schema/hash/action is invalid")
-    parameters = _exact(request["parameters"], {
-        "generation", "candidate_commit", "candidate_tree", "archive_sha256", "artifact_ref", "root_id",
-        "expected_current", "operation_id", "review_receipt", "controller_receipt", "migration_receipts",
-        "projection", "runtime_config", "services", "health_probes", "nix_system_path",
-        "predecessor_observation_ref", "predecessor_observation_hash", "immutable_generation_path",
-        "provider_observation_ref", "provider_observation_hash", "predecessor",
-    }, "release parameters")
+    parameters = _exact(
+        request["parameters"],
+        {
+            "generation",
+            "candidate_commit",
+            "candidate_tree",
+            "archive_sha256",
+            "artifact_ref",
+            "root_id",
+            "expected_current",
+            "operation_id",
+            "review_receipt",
+            "controller_receipt",
+            "migration_receipts",
+            "projection",
+            "runtime_config",
+            "services",
+            "health_probes",
+            "nix_system_path",
+            "predecessor_observation_ref",
+            "predecessor_observation_hash",
+            "immutable_generation_path",
+            "provider_observation_ref",
+            "provider_observation_hash",
+            "predecessor",
+        },
+        "release parameters",
+    )
     if (
         _GENERATION.fullmatch(str(parameters["generation"])) is None
         or _GENERATION.fullmatch(str(parameters["expected_current"])) is None
@@ -214,26 +284,42 @@ def validate_request(
         or parameters["immutable_generation_path"] != f"/opt/TGW/releases/{parameters['generation']}"
     ):
         raise ApplicationReleaseRemoteError("release parameters differ from root-owned composition")
-    predecessor = _exact(parameters["predecessor"], {
-        "generation", "selector_target", "commit", "tree", "archive_sha256",
-        "release_manifest_hash", "content_manifest_sha256", "projection_sha256",
-        "runtime_config_sha256", "database_identity_sha256",
-        "runtime_config_uid", "runtime_config_gid", "runtime_config_mode", "runtime_config_size",
-    }, "release predecessor")
+    predecessor = _exact(
+        parameters["predecessor"],
+        {
+            "generation",
+            "selector_target",
+            "commit",
+            "tree",
+            "archive_sha256",
+            "release_manifest_hash",
+            "content_manifest_sha256",
+            "projection_sha256",
+            "runtime_config_sha256",
+            "database_identity_sha256",
+            "runtime_config_uid",
+            "runtime_config_gid",
+            "runtime_config_mode",
+            "runtime_config_size",
+        },
+        "release predecessor",
+    )
     if (
         predecessor["generation"] != parameters["expected_current"]
         or predecessor["selector_target"] != f"/opt/TGW/releases/{parameters['expected_current']}"
         or not re.fullmatch(r"[0-9a-f]{40}", str(predecessor["commit"]))
         or not re.fullmatch(r"[0-9a-f]{40}", str(predecessor["tree"]))
-        or (
-            predecessor["projection_sha256"] is not None
-            and _SHA.fullmatch(str(predecessor["projection_sha256"])) is None
+        or (predecessor["projection_sha256"] is not None and _SHA.fullmatch(str(predecessor["projection_sha256"])) is None)
+        or any(
+            _SHA.fullmatch(str(predecessor[name])) is None
+            for name in (
+                "archive_sha256",
+                "release_manifest_hash",
+                "content_manifest_sha256",
+                "runtime_config_sha256",
+                "database_identity_sha256",
+            )
         )
-        or any(_SHA.fullmatch(str(predecessor[name])) is None for name in (
-            "archive_sha256", "release_manifest_hash", "content_manifest_sha256",
-            "runtime_config_sha256",
-            "database_identity_sha256",
-        ))
     ):
         raise ApplicationReleaseRemoteError("release predecessor identity is invalid")
     if (
@@ -246,12 +332,24 @@ def validate_request(
     ):
         raise ApplicationReleaseRemoteError("release predecessor config metadata is invalid")
     projection = _exact(parameters["projection"], {"release_path", "content_sha256"}, "release projection")
-    runtime_binding = _exact(parameters["runtime_config"], {
-        "artifact_ref", "generation_path", "content_sha256", "overlay_manifest_sha256",
-        "config_schema", "executor_principal", "operator_principals",
-        "executor_credential_env", "credential_reference", "trusted_root", "trusted_uid",
-        "forbidden_paths",
-    }, "release runtime config")
+    runtime_binding = _exact(
+        parameters["runtime_config"],
+        {
+            "artifact_ref",
+            "generation_path",
+            "content_sha256",
+            "overlay_manifest_sha256",
+            "config_schema",
+            "executor_principal",
+            "operator_principals",
+            "executor_credential_env",
+            "credential_reference",
+            "trusted_root",
+            "trusted_uid",
+            "forbidden_paths",
+        },
+        "release runtime config",
+    )
     if projection["release_path"].startswith("/") or ".." in Path(projection["release_path"]).parts:
         raise ApplicationReleaseRemoteError("release projection path escapes the generation")
     if runtime_binding["generation_path"] != "config/tgw-api-config.json":
@@ -277,13 +375,16 @@ def validate_request(
         else:
             archive, runtime_config = artifact_bytes
         if (
-            not archive or len(archive) > int(config["max_archive_bytes"])
-            or not runtime_config or len(runtime_config) > int(config["max_config_bytes"])
+            not archive
+            or len(archive) > int(config["max_archive_bytes"])
+            or not runtime_config
+            or len(runtime_config) > int(config["max_config_bytes"])
             or _hash_bytes(archive) != parameters["archive_sha256"]
             or _hash_bytes(runtime_config) != parameters["runtime_config"]["content_sha256"]
         ):
             raise ApplicationReleaseRemoteError("release artifact bytes differ from exact contract")
-        request["archive"] = archive; request["runtime_config_bytes"] = runtime_config
+        request["archive"] = archive
+        request["runtime_config_bytes"] = runtime_config
     elif artifact_bytes is not None and artifact_bytes != (b"", b""):
         raise ApplicationReleaseRemoteError("rollback request carries unexpected framed artifact bytes")
     elif artifact_bytes is None and (request["archive_b64"] != "" or request["config_b64"] != ""):
@@ -304,51 +405,68 @@ class HostRuntime:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         try:
             held = os.fstat(fd)
-            raw = bytearray(); offset = 0
+            raw = bytearray()
+            offset = 0
             while block := os.pread(fd, 1024 * 1024, offset):
-                raw.extend(block); offset += len(block)
+                raw.extend(block)
+                offset += len(block)
             named = os.stat(path, follow_symlinks=False)
             identity = (held.st_dev, held.st_ino, held.st_uid, held.st_gid, held.st_mode, held.st_size)
             if (
-                _hash_bytes(bytes(raw)) != binding["sha256"] or not stat.S_ISREG(held.st_mode)
+                _hash_bytes(bytes(raw)) != binding["sha256"]
+                or not stat.S_ISREG(held.st_mode)
                 or stat.S_IMODE(held.st_mode) != binding["mode"]
-                or held.st_uid != binding["uid"] or held.st_gid != binding["gid"]
-                or held.st_size != binding["size"] or held.st_nlink < 1
+                or held.st_uid != binding["uid"]
+                or held.st_gid != binding["gid"]
+                or held.st_size != binding["size"]
+                or held.st_nlink < 1
                 or identity != (named.st_dev, named.st_ino, named.st_uid, named.st_gid, named.st_mode, named.st_size)
             ):
                 raise ApplicationReleaseRemoteError(f"held {executable} executable differs")
             process = subprocess.Popen(
-                [f"/proc/{os.getpid()}/fd/{fd}", *arguments], stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
-                pass_fds=(fd,), env={"PATH": "", "LANG": "C", "LC_ALL": "C"},
+                [f"/proc/{os.getpid()}/fd/{fd}", *arguments],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                pass_fds=(fd,),
+                env={"PATH": "", "LANG": "C", "LC_ALL": "C"},
             )
             try:
                 stdout, stderr = _bounded_process(
-                    process, stdin, limit=limit, timeout=int(self.config["command_timeout_seconds"]),
+                    process,
+                    stdin,
+                    limit=limit,
+                    timeout=int(self.config["command_timeout_seconds"]),
                 )
             except Exception as exc:
                 state = _group_empty_or_kill(process.pid)
                 try:
                     process.wait(timeout=1)
                 except subprocess.TimeoutExpired as reap_exc:
-                    raise ApplicationReleaseRemoteError(
-                        f"{executable} leader could not be reaped"
-                    ) from reap_exc
+                    raise ApplicationReleaseRemoteError(f"{executable} leader could not be reaped") from reap_exc
                 state = _post_reap_group_state(process.pid, state)
                 if not state.get("removed"):
-                    raise ApplicationReleaseRemoteError(
-                        f"{executable} process-group cleanup is ambiguous"
-                    ) from exc
+                    raise ApplicationReleaseRemoteError(f"{executable} process-group cleanup is ambiguous") from exc
                 raise ApplicationReleaseRemoteError(f"{executable} bounded lifecycle failed") from exc
             state = _post_reap_group_state(
-                process.pid, _group_empty_or_kill(process.pid),
+                process.pid,
+                _group_empty_or_kill(process.pid),
             )
             if state.get("had_survivor") or not state.get("removed"):
                 raise ApplicationReleaseRemoteError(f"{executable} left a surviving process group")
             if process.returncode:
                 raise ApplicationReleaseRemoteError(f"{executable} failed: {_hash_bytes(stderr)}")
-            after = os.fstat(fd); named_after = os.stat(path, follow_symlinks=False)
-            if identity != (after.st_dev, after.st_ino, after.st_uid, after.st_gid, after.st_mode, after.st_size) or identity != (named_after.st_dev, named_after.st_ino, named_after.st_uid, named_after.st_gid, named_after.st_mode, named_after.st_size):
+            after = os.fstat(fd)
+            named_after = os.stat(path, follow_symlinks=False)
+            if identity != (after.st_dev, after.st_ino, after.st_uid, after.st_gid, after.st_mode, after.st_size) or identity != (
+                named_after.st_dev,
+                named_after.st_ino,
+                named_after.st_uid,
+                named_after.st_gid,
+                named_after.st_mode,
+                named_after.st_size,
+            ):
                 raise ApplicationReleaseRemoteError(f"named {executable} executable changed")
             return stdout
         finally:
@@ -361,30 +479,103 @@ class HostRuntime:
 
     def quiesce(self) -> None:
         self.systemctl("stop", self.config["services"])
-        states = self._run(
-            "systemctl",
-            ["show", "--property=ActiveState", "--value", "--", *self.config["services"]],
-        ).decode("ascii", errors="strict").splitlines()
+        states = (
+            self._run(
+                "systemctl",
+                ["show", "--property=ActiveState", "--value", "--", *self.config["services"]],
+            )
+            .decode("ascii", errors="strict")
+            .splitlines()
+        )
         if states != ["inactive"] * len(self.config["services"]):
             raise ApplicationReleaseRemoteError("service quiescence was not proven")
 
     def backup(self, destination: Path) -> None:
         db = self.config["database"]
-        data = self._run("pg_dump", ["-Fc", "-h", db["host"], "-U", db["user"], db["name"]], limit=512 * 1024 * 1024)
+        data = self._run(
+            "pg_dump",
+            [
+                "-Fc",
+                "-h",
+                db["host"],
+                "-p",
+                str(db["port"]),
+                "-U",
+                db["user"],
+                db["name"],
+            ],
+            limit=512 * 1024 * 1024,
+        )
         _write_once(destination, data, 0o400)
 
     def migrate(self, sources: Sequence[bytes]) -> None:
         db = self.config["database"]
         body = b"BEGIN;\n" + b"\n".join(sources) + b"\nCOMMIT;\n"
-        self._run("psql", ["-X", "--no-psqlrc", "-v", "ON_ERROR_STOP=1", "-h", db["host"], "-U", db["user"], "-d", db["name"]], stdin=body)
+        self._run(
+            "psql",
+            [
+                "-X",
+                "--no-psqlrc",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-h",
+                db["host"],
+                "-p",
+                str(db["port"]),
+                "-U",
+                db["user"],
+                "-d",
+                db["name"],
+            ],
+            stdin=body,
+        )
 
     def restore(self, source: Path) -> None:
         db = self.config["database"]
+        principal = (
+            self._run(
+                "psql",
+                [
+                    "-X",
+                    "--no-psqlrc",
+                    "-A",
+                    "-t",
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                    "-h",
+                    db["host"],
+                    "-p",
+                    str(db["port"]),
+                    "-U",
+                    db["user"],
+                    "-d",
+                    "postgres",
+                    "-c",
+                    "SELECT current_user || '|' || (rolsuper OR rolcreatedb)::text FROM pg_roles WHERE rolname = current_user",
+                ],
+            )
+            .decode("utf-8", errors="strict")
+            .strip()
+        )
+        if principal != f"{db['user']}|true":
+            raise ApplicationReleaseRemoteError("configured database principal cannot recreate the predecessor database")
         self._run(
             "pg_restore",
             [
-                "--clean", "--if-exists", "--create", "--exit-on-error", "--no-owner",
-                "-h", db["host"], "-U", db["user"], "-d", "postgres", str(source),
+                "--clean",
+                "--if-exists",
+                "--create",
+                "--exit-on-error",
+                "--no-owner",
+                "-h",
+                db["host"],
+                "-p",
+                str(db["port"]),
+                "-U",
+                db["user"],
+                "-d",
+                "postgres",
+                str(source),
             ],
         )
 
@@ -395,9 +586,18 @@ class HostRuntime:
         schema = self._run(
             "pg_dump",
             [
-                "--format=plain", "--no-owner", "--no-privileges", "--no-comments",
+                "--format=plain",
+                "--no-owner",
+                "--no-privileges",
+                "--no-comments",
                 "--restrict-key=TGWW09DATABASEIDENTITY",
-                "-h", db["host"], "-U", db["user"], db["name"],
+                "-h",
+                db["host"],
+                "-p",
+                str(db["port"]),
+                "-U",
+                db["user"],
+                db["name"],
             ],
             limit=64 * 1024 * 1024,
         )
@@ -420,11 +620,13 @@ def _write_once(path: Path, raw: bytes, mode: int, *, uid: int | None = None, gi
         offset = 0
         while offset < len(raw):
             written = os.write(descriptor, raw[offset:])
-            if written <= 0: raise OSError("short protected write")
+            if written <= 0:
+                raise OSError("short protected write")
             offset += written
         if uid is not None or gid is not None:
             os.fchown(descriptor, -1 if uid is None else uid, -1 if gid is None else gid)
-        os.fchmod(descriptor, mode); os.fsync(descriptor)
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
     finally:
         os.close(descriptor)
     parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -435,21 +637,30 @@ def _write_once(path: Path, raw: bytes, mode: int, *, uid: int | None = None, gi
 
 
 def _atomic(
-    path: Path, raw: bytes, mode: int, *, uid: int | None = None, gid: int | None = None,
+    path: Path,
+    raw: bytes,
+    mode: int,
+    *,
+    uid: int | None = None,
+    gid: int | None = None,
 ) -> None:
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     _write_once(temporary, raw, mode, uid=uid, gid=gid)
     os.replace(temporary, path)
     descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try: os.fsync(descriptor)
-    finally: os.close(descriptor)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _persist(root: Path, prefix: str, value: Mapping[str, Any]) -> str:
-    raw = _canonical(value) + b"\n"; digest = _hash_bytes(raw)
+    raw = _canonical(value) + b"\n"
+    digest = _hash_bytes(raw)
     path = root / f"{prefix}-{digest.removeprefix('sha256:')}.json"
     if path.exists():
-        if path.read_bytes() != raw: raise ApplicationReleaseRemoteError("receipt hash collision")
+        if path.read_bytes() != raw:
+            raise ApplicationReleaseRemoteError("receipt hash collision")
     else:
         _write_once(path, raw, 0o400)
     return f"application-release:{prefix}:{digest}"
@@ -460,13 +671,8 @@ def _snapshot(paths: Sequence[str]) -> str:
     for named in paths:
         path = Path(named)
         metadata = path.lstat()
-        if (
-            not path.is_absolute() or not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_nlink != 1 or metadata.st_size > 64 * 1024 * 1024
-        ):
-            raise ApplicationReleaseRemoteError(
-                "unrelated-state bindings must name exact bounded regular artifacts"
-            )
+        if not path.is_absolute() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > 64 * 1024 * 1024:
+            raise ApplicationReleaseRemoteError("unrelated-state bindings must name exact bounded regular artifacts")
         fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
         try:
             held = os.fstat(fd)
@@ -475,8 +681,10 @@ def _snapshot(paths: Sequence[str]) -> str:
             identity = (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size)
             held_identity = (held.st_dev, held.st_ino, held.st_mode, held.st_size)
             after_identity = (
-                named_after.st_dev, named_after.st_ino,
-                named_after.st_mode, named_after.st_size,
+                named_after.st_dev,
+                named_after.st_ino,
+                named_after.st_mode,
+                named_after.st_size,
             )
             if len(raw) != metadata.st_size or identity != held_identity or identity != after_identity:
                 raise ApplicationReleaseRemoteError("unrelated-state artifact changed during observation")
@@ -505,7 +713,8 @@ def _load_journal(config: Mapping[str, Any], operation: str) -> dict[str, Any]:
 def _stage(config: Mapping[str, Any], journal: dict[str, Any], stage: str, evidence: Sequence[str]) -> str:
     if stage in journal["stages"]:
         return _hash({"operation": journal["operation_id"], "stage": stage})
-    journal["stages"].append(stage); journal["evidence"].extend(evidence)
+    journal["stages"].append(stage)
+    journal["evidence"].extend(evidence)
     path = _journal_path(config, journal["operation_id"])
     _atomic(path, _canonical(journal) + b"\n", 0o600)
     return _hash({"operation": journal["operation_id"], "stage": stage})
@@ -520,16 +729,25 @@ def _active_config_identity(config: Mapping[str, Any]) -> tuple[bytes, dict[str,
         named = os.stat(path, follow_symlinks=False)
         identity = (held.st_dev, held.st_ino, held.st_uid, held.st_gid, held.st_mode, held.st_size)
         if (
-            not stat.S_ISREG(held.st_mode) or held.st_nlink != 1 or len(raw) != held.st_size
-            or identity != (
-                named.st_dev, named.st_ino, named.st_uid, named.st_gid,
-                named.st_mode, named.st_size,
+            not stat.S_ISREG(held.st_mode)
+            or held.st_nlink != 1
+            or len(raw) != held.st_size
+            or identity
+            != (
+                named.st_dev,
+                named.st_ino,
+                named.st_uid,
+                named.st_gid,
+                named.st_mode,
+                named.st_size,
             )
         ):
             raise ApplicationReleaseRemoteError("active config identity changed during observation")
         return raw, {
-            "runtime_config_sha256": _hash_bytes(raw), "runtime_config_uid": held.st_uid,
-            "runtime_config_gid": held.st_gid, "runtime_config_mode": stat.S_IMODE(held.st_mode),
+            "runtime_config_sha256": _hash_bytes(raw),
+            "runtime_config_uid": held.st_uid,
+            "runtime_config_gid": held.st_gid,
+            "runtime_config_mode": stat.S_IMODE(held.st_mode),
             "runtime_config_size": held.st_size,
         }
     finally:
@@ -537,7 +755,9 @@ def _active_config_identity(config: Mapping[str, Any]) -> tuple[bytes, dict[str,
 
 
 def _predecessor_identity(
-    parameters: Mapping[str, Any], config: Mapping[str, Any], runtime: HostRuntime,
+    parameters: Mapping[str, Any],
+    config: Mapping[str, Any],
+    runtime: HostRuntime,
 ) -> dict[str, Any]:
     """Re-observe every bound predecessor fact from live immutable state."""
 
@@ -571,7 +791,8 @@ def _predecessor_identity(
 
 
 def _reconcile(parameters: Mapping[str, Any], config: Mapping[str, Any], runtime: HostRuntime, journal: dict[str, Any]) -> dict[str, Any]:
-    root = Path(config["release_root"]); operation = parameters["operation_id"]
+    root = Path(config["release_root"])
+    operation = parameters["operation_id"]
     evidence: list[str] = []
     try:
         selection = root / "receipts" / f"{operation}.json"
@@ -593,84 +814,115 @@ def _reconcile(parameters: Mapping[str, Any], config: Mapping[str, Any], runtime
             if _hash_bytes(backup_raw) != predecessor_config["runtime_config_sha256"]:
                 raise ApplicationReleaseRemoteError("predecessor config backup differs from its binding")
             _atomic(
-                active_config, backup_raw, predecessor_config["runtime_config_mode"],
+                active_config,
+                backup_raw,
+                predecessor_config["runtime_config_mode"],
                 uid=predecessor_config["runtime_config_uid"],
                 gid=predecessor_config["runtime_config_gid"],
             )
             evidence.append("config:restored")
         database_backup = Path(config["backup_root"]) / f"{operation}.dump"
-        restore_required = any(
-            stage in journal["stages"] for stage in ("migration-restore-required", "migrations-applied")
-        )
+        restore_required = any(stage in journal["stages"] for stage in ("migration-restore-required", "migrations-applied"))
         if restore_required and not database_backup.exists():
             raise ApplicationReleaseRemoteError("required predecessor database backup is absent")
         if database_backup.exists() and restore_required:
-            runtime.restore(database_backup); evidence.append("database:restored")
-        predecessor = _predecessor_identity(parameters, config, runtime)
+            runtime.restore(database_backup)
+            evidence.append("database:restored")
+        _predecessor_identity(parameters, config, runtime)
         unrelated_evidence = next(
             (item for item in journal.get("evidence", []) if isinstance(item, str) and item.startswith("unrelated:")),
             None,
         )
         if unrelated_evidence is not None and _snapshot(config["unrelated_paths"]) != unrelated_evidence.removeprefix("unrelated:"):
             raise ApplicationReleaseRemoteError("unrelated host state differs during reconciliation")
-        runtime.systemctl("restart", config["services"]); runtime.health()
+        runtime.systemctl("restart", config["services"])
+        runtime.health()
+        predecessor = _predecessor_identity(parameters, config, runtime)
         evidence.extend(["services:predecessor", "health:predecessor"])
-        receipt = _persist(Path(config["receipt_root"]), "rollback", {
-            "schema": "tgw-w09-application-rollback/v1", "operation_id": operation,
-            "generation": parameters["expected_current"], "predecessor": predecessor,
-            "evidence": evidence,
-        })
+        receipt = _persist(
+            Path(config["receipt_root"]),
+            "rollback",
+            {
+                "schema": "tgw-w09-application-rollback/v1",
+                "operation_id": operation,
+                "generation": parameters["expected_current"],
+                "predecessor": predecessor,
+                "evidence": evidence,
+            },
+        )
         return {"status": "RESTORED", "receipt": receipt, "generation": parameters["expected_current"], "predecessor_healthy": True, "evidence": evidence}
     except Exception as exc:
         return {"status": "AMBIGUOUS", "generation": current_generation(root), "predecessor_healthy": False, "evidence": evidence + ["reconcile-error:" + _hash_bytes(str(exc).encode())]}
 
 
 def execute(
-    request_value: Mapping[str, Any], config: Mapping[str, Any], runtime: HostRuntime,
-    *, artifact_bytes: tuple[bytes, bytes] | None = None,
+    request_value: Mapping[str, Any],
+    config: Mapping[str, Any],
+    runtime: HostRuntime,
+    *,
+    artifact_bytes: tuple[bytes, bytes] | None = None,
 ) -> dict[str, Any]:
-    request = validate_request(request_value, config, artifact_bytes=artifact_bytes); parameters = request["parameters"]
+    request = validate_request(request_value, config, artifact_bytes=artifact_bytes)
+    parameters = request["parameters"]
     journal = _load_journal(config, parameters["operation_id"])
     if request["action"] == "rollback":
         result = _reconcile(parameters, config, runtime, journal)
         return _bound_response(parameters, result, config)
-    root = Path(config["release_root"]); evidence: list[str] = []
+    root = Path(config["release_root"])
+    evidence: list[str] = []
     try:
         if current_generation(root) != parameters["expected_current"] or os.readlink("/run/current-system") != parameters["nix_system_path"]:
             raise ApplicationReleaseRemoteError("fresh predecessor selector/Nix observation differs")
         actual_predecessor = _predecessor_identity(parameters, config, runtime)
         runtime.systemctl("is-active", config["services"])
         unrelated = _snapshot(config["unrelated_paths"])
-        predecessor = _persist(Path(config["receipt_root"]), "preflight", {
-            "schema": "tgw-w09-live-predecessor/v1", "bound_observation": parameters["predecessor_observation_hash"],
-            "generation": parameters["expected_current"], "nix_system_path": parameters["nix_system_path"],
-            "services": config["services"], "health_probes": config["health_probes"],
-            "release": actual_predecessor,
-            "unrelated_snapshot": unrelated,
-        })
-        evidence += [predecessor, _stage(
-            config, journal, "predecessor-verified", [predecessor, "unrelated:" + unrelated],
-        )]
-        runtime.quiesce(); evidence.append(_stage(config, journal, "services-quiesced", ["services:inactive"]))
+        predecessor = _persist(
+            Path(config["receipt_root"]),
+            "preflight",
+            {
+                "schema": "tgw-w09-live-predecessor/v1",
+                "bound_observation": parameters["predecessor_observation_hash"],
+                "generation": parameters["expected_current"],
+                "nix_system_path": parameters["nix_system_path"],
+                "services": config["services"],
+                "health_probes": config["health_probes"],
+                "release": actual_predecessor,
+                "unrelated_snapshot": unrelated,
+            },
+        )
+        evidence += [
+            predecessor,
+            _stage(
+                config,
+                journal,
+                "predecessor-verified",
+                [predecessor, "unrelated:" + unrelated],
+            ),
+        ]
+        runtime.quiesce()
+        evidence.append(_stage(config, journal, "services-quiesced", ["services:inactive"]))
         operation = parameters["operation_id"]
         config_backup = Path(config["receipt_root"]) / f"{operation}.config.backup"
         if not config_backup.exists():
             config_raw, config_identity = _active_config_identity(config)
-            if any(
-                parameters["predecessor"].get(name) != value
-                for name, value in config_identity.items()
-            ):
+            if any(parameters["predecessor"].get(name) != value for name, value in config_identity.items()):
                 raise ApplicationReleaseRemoteError("active config changed before backup")
             _write_once(config_backup, config_raw, 0o400)
         database_backup = Path(config["backup_root"]) / f"{operation}.dump"
-        if not database_backup.exists(): runtime.backup(database_backup)
+        if not database_backup.exists():
+            runtime.backup(database_backup)
         backup_receipt = "backup:" + _hash_bytes(database_backup.read_bytes())
         evidence += [backup_receipt, _stage(config, journal, "database-backed-up", [backup_receipt])]
         archive_path = Path(config["receipt_root"]) / f"{parameters['archive_sha256'].removeprefix('sha256:')}.tar"
-        if not archive_path.exists(): _write_once(archive_path, request["archive"], 0o400)
+        if not archive_path.exists():
+            _write_once(archive_path, request["archive"], 0o400)
         manifest = materialize(
-            root, archive_path, generation=parameters["generation"], commit=parameters["candidate_commit"],
-            tree=parameters["candidate_tree"], archive_sha256=parameters["archive_sha256"].removeprefix("sha256:"),
+            root,
+            archive_path,
+            generation=parameters["generation"],
+            commit=parameters["candidate_commit"],
+            tree=parameters["candidate_tree"],
+            archive_sha256=parameters["archive_sha256"].removeprefix("sha256:"),
         )
         verify(root, parameters["generation"])
         evidence.append(_stage(config, journal, "release-materialized", ["manifest:" + manifest["content_manifest_sha256"]]))
@@ -678,32 +930,39 @@ def execute(
         sources = []
         for receipt in parameters["migration_receipts"]:
             source = (release / receipt["migration_path"]).read_bytes()
-            if _hash_bytes(source) != receipt["migration_sha256"]: raise ApplicationReleaseRemoteError("migration source differs")
+            if _hash_bytes(source) != receipt["migration_sha256"]:
+                raise ApplicationReleaseRemoteError("migration source differs")
             sources.append(source)
-        evidence.append(_stage(
-            config, journal, "migration-restore-required",
-            ["database-restore:required-before-migration-dispatch"],
-        ))
+        evidence.append(
+            _stage(
+                config,
+                journal,
+                "migration-restore-required",
+                ["database-restore:required-before-migration-dispatch"],
+            )
+        )
         runtime.migrate(sources)
         evidence.append(_stage(config, journal, "migrations-applied", ["migrations:ordered"]))
         installed = install_runtime_files(root, parameters["generation"], {parameters["runtime_config"]["generation_path"]: request["runtime_config_bytes"]})
-        if (
-            "sha256:" + str(installed.get("runtime_manifest_sha256"))
-            != parameters["runtime_config"]["overlay_manifest_sha256"]
-        ):
+        if "sha256:" + str(installed.get("runtime_manifest_sha256")) != parameters["runtime_config"]["overlay_manifest_sha256"]:
             raise ApplicationReleaseRemoteError("runtime overlay manifest differs from W09 contract")
         verify(root, parameters["generation"])
         evidence.append(_stage(config, journal, "runtime-staged", ["runtime:" + str(installed["runtime_manifest_sha256"])]))
         selected = select(root, parameters["generation"], expected_current=parameters["expected_current"], operation_id=operation)
         successor_config = config["active_config_metadata"]
         _atomic(
-            Path(config["active_config_path"]), request["runtime_config_bytes"],
-            successor_config["mode"], uid=successor_config["uid"], gid=successor_config["gid"],
+            Path(config["active_config_path"]),
+            request["runtime_config_bytes"],
+            successor_config["mode"],
+            uid=successor_config["uid"],
+            gid=successor_config["gid"],
         )
         evidence.append(_stage(config, journal, "generation-activated", ["selection:" + selected["operation_id"]]))
-        runtime.systemctl("restart", config["services"]); evidence.append(_stage(config, journal, "successor-restarted", ["services:successor"]))
+        runtime.systemctl("restart", config["services"])
+        evidence.append(_stage(config, journal, "successor-restarted", ["services:successor"]))
         runtime.health()
-        if _snapshot(config["unrelated_paths"]) != unrelated: raise ApplicationReleaseRemoteError("unrelated host state changed")
+        if _snapshot(config["unrelated_paths"]) != unrelated:
+            raise ApplicationReleaseRemoteError("unrelated host state changed")
         evidence.append(_stage(config, journal, "successor-verified", ["health:successor", "unrelated:unchanged"]))
         result = {"status": "SUCCEEDED", "evidence": evidence}
     except Exception as exc:
@@ -713,7 +972,9 @@ def execute(
 
 
 def _bound_response(
-    parameters: Mapping[str, Any], result: Mapping[str, Any], config: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+    result: Mapping[str, Any],
+    config: Mapping[str, Any],
 ) -> dict[str, Any]:
     unsigned = {
         "schema": RESPONSE_SCHEMA,
@@ -727,8 +988,11 @@ def _bound_response(
 
 
 def memory_main(
-    request: Mapping[str, Any], config_raw: bytes, archive: bytes,
-    runtime_config: bytes, helper_sha256: str,
+    request: Mapping[str, Any],
+    config_raw: bytes,
+    archive: bytes,
+    runtime_config: bytes,
+    helper_sha256: str,
 ) -> int:
     """Execute the one framed W09 transaction from reviewed in-memory modules."""
     if os.geteuid() != 0 or len(sys.argv) != 1 or _SHA.fullmatch(helper_sha256) is None:

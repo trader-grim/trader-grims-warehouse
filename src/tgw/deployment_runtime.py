@@ -12,8 +12,8 @@ from tgw.application_deployment_contract import (
 )
 from tgw.application_release_provider import SshApplicationReleaseProvider
 from tgw.bootstrap_authority import ApplicationBootstrapGrant, BootstrapSessionAuthority
-from tgw.effect_handlers import AuthorityEffectController, TypedEffectHandlerRegistry
 from tgw.effect_completion_store import ImmutableEffectCompletionStore
+from tgw.effect_handlers import AuthorityEffectController, TypedEffectHandlerRegistry
 from tgw.nixos_a3_successor_evaluation import A3SuccessorEvaluationProvider
 from tgw.platform_bootstrap import A3PlatformBootstrapProvider
 from tgw.release_controller import MountedReleaseController
@@ -61,7 +61,8 @@ def _mounted_release(mounts: DeploymentMounts, providers: ReleaseProviders, *, e
         raise ValueError("mounted candidate artifact is unavailable")
     providers.validate()
     return MountedReleaseController(
-        roots={mounts.root_id: root}, artifacts={mounts.artifact_ref: artifact},
+        roots={mounts.root_id: root},
+        artifacts={mounts.artifact_ref: artifact},
         **{name: getattr(providers, name) for name in providers.__dataclass_fields__},
     )
 
@@ -79,8 +80,10 @@ def _registry(
     a3_successor_evaluation: A3SuccessorEvaluationProvider | None = None,
 ) -> TypedEffectHandlerRegistry:
     return TypedEffectHandlerRegistry(
-        release_install=release.install, release_rollback=release.rollback,
-        flake_push=flake_push, flake_switch_record=flake_switch_record,
+        release_install=release.install,
+        release_rollback=release.rollback,
+        flake_push=flake_push,
+        flake_switch_record=flake_switch_record,
         dependency_resubmit=dependency_resubmit,
         application_bootstrap_contract_resolver=application_resolver,
         application_bootstrap_install=release.install if application_resolver is not None else None,
@@ -122,9 +125,7 @@ def compose_application_bootstrap_controller(
         raise ValueError("immutable W09 terminal receipt sink is unavailable")
     if type(provider) is not SshApplicationReleaseProvider or provider.production_authority is not True:
         raise ValueError("sealed tgw-prod application release provider is unavailable")
-    if not isinstance(controller_evidence, str) or not controller_evidence.startswith(
-        "w09-controller-config:sha256:"
-    ) or not callable(terminal_precheck):
+    if not isinstance(controller_evidence, str) or not controller_evidence.startswith("w09-controller-config:sha256:") or not callable(terminal_precheck):
         raise ValueError("W09 controller config provenance is unavailable")
     if expected_host != "tgw-prod" or provider.descriptor["target"]["host"] != expected_host:
         raise ValueError("W09 provider target differs from exact production host")
@@ -135,11 +136,9 @@ def compose_application_bootstrap_controller(
         terminal_store.sink_id,
         terminal_store.descriptor_hash,
     )
-    if (
-        terminal_store.sink_id != production.operation_sink_id
-        or terminal_store.descriptor_hash != production.operation_sink_descriptor_hash
-    ):
+    if terminal_store.sink_id != production.operation_sink_id or terminal_store.descriptor_hash != production.operation_sink_descriptor_hash:
         raise ValueError("W09 terminal store differs from the pinned production operation sink")
+
     def unavailable_steady_state(_parameters: Mapping[str, Any]) -> Mapping[str, Any]:
         raise ValueError("steady-state coding release is not mounted in the one-use W09 controller")
 
@@ -154,6 +153,7 @@ def compose_application_bootstrap_controller(
         application_bootstrap_rollback=provider.rollback,
         application_bootstrap_validate=provider.preflight,
     )
+
     def consume_exact(request_id: str, **binding: Any) -> Mapping[str, Any]:
         if authority.grant is not mounted_grant:
             raise ValueError("mounted W09 grant identity changed")
@@ -170,7 +170,9 @@ def compose_application_bootstrap_controller(
         return ImmutableEffectCompletionStore.persist(terminal_store, receipt)
 
     return AuthorityEffectController(
-        registry, consume_exact, terminal_recorder=persist_exact,
+        registry,
+        consume_exact,
+        terminal_recorder=persist_exact,
         bound_evidence=(controller_evidence,),
     )
 
@@ -211,7 +213,9 @@ def compose_deployment_controller(
     release = _mounted_release(mounts, providers, expected_host=expected_host)
     require_authority_schema()
     registry = _registry(
-        release, flake_push=flake_push, flake_switch_record=flake_switch_record,
+        release,
+        flake_push=flake_push,
+        flake_switch_record=flake_switch_record,
         dependency_resubmit=dependency_resubmit,
         platform_bootstrap=platform_bootstrap if enable_platform_bootstrap else None,
         bootstrap_contract_resolver=bootstrap_contract_resolver if enable_platform_bootstrap else None,

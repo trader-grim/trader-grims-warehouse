@@ -15,8 +15,10 @@ from enum import Enum
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from tgw.application_deployment_contract import (
-    ApplicationDeploymentContractResolver,
     EFFECT_SCHEMA as APPLICATION_BOOTSTRAP_EFFECT_SCHEMA,
+)
+from tgw.application_deployment_contract import (
+    ApplicationDeploymentContractResolver,
     VerifiedApplicationDeploymentContract,
 )
 from tgw.bootstrap_authority import BootstrapConsumptionAmbiguous
@@ -225,13 +227,13 @@ class TypedEffectHandlerRegistry:
         nixos_observer_render_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         nixos_a3_successor_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> None:
-        if application_bootstrap_contract_resolver is not None and any(
-            value is not None for value in (bootstrap_contract_resolver, bootstrap_validate)
-        ):
+        if application_bootstrap_contract_resolver is not None and any(value is not None for value in (bootstrap_contract_resolver, bootstrap_validate)):
             raise ValueError("application and legacy Nix bootstrap providers cannot share one controller")
         if application_bootstrap_contract_resolver is not None and not all(
-            callable(value) for value in (
-                application_bootstrap_install, application_bootstrap_rollback,
+            callable(value)
+            for value in (
+                application_bootstrap_install,
+                application_bootstrap_rollback,
                 application_bootstrap_validate,
             )
         ):
@@ -594,25 +596,19 @@ class TypedEffectHandlerRegistry:
                     parameters["bootstrap_contract_hash"],
                 )
                 if not isinstance(verified, VerifiedBootstrapDeploymentContract):
-                    raise ValueError(
-                        "bootstrap deployment contract resolver returned an invalid verification"
-                    )
+                    raise ValueError("bootstrap deployment contract resolver returned an invalid verification")
                 if (
                     verified.reference != parameters["bootstrap_contract_ref"]
                     or verified.contract_hash != parameters["bootstrap_contract_hash"]
                     or effect.generation != verified.intended_next_generation
                 ):
-                    raise ValueError(
-                        "bootstrap deployment effect does not match its verified immutable contract"
-                    )
+                    raise ValueError("bootstrap deployment effect does not match its verified immutable contract")
                 parameters = verified.provider_binding()
             elif self._bootstrap_validate is not None:
                 validate_platform_bootstrap_effect(effect.parameters)
                 parameters = dict(effect.parameters)
             else:
-                raise ValueError(
-                    "verified bootstrap deployment contract resolver is not mounted"
-                )
+                raise ValueError("verified bootstrap deployment contract resolver is not mounted")
         elif effect.kind is EffectKind.NIXOS_REVIEWED_EVALUATION:
             parameters = _required_strings(
                 effect.parameters,
@@ -740,19 +736,9 @@ class TypedEffectHandlerRegistry:
         else:  # pragma: no cover - EffectKind is closed above
             raise ValueError("effect kind has no registered parameter validator")
         handler_id, handler, rollback = self._providers[effect.kind]
-        if not (
-            effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT
-            and (
-                self._bootstrap_contract_resolver is not None
-                or self._application_bootstrap_contract_resolver is not None
-            )
-        ):
+        if not (effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT and (self._bootstrap_contract_resolver is not None or self._application_bootstrap_contract_resolver is not None)):
             parameters["generation"] = effect.generation
-        if (
-            effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT
-            and self._bootstrap_contract_resolver is None
-            and self._application_bootstrap_contract_resolver is None
-        ):
+        if effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT and self._bootstrap_contract_resolver is None and self._application_bootstrap_contract_resolver is None:
             if self._bootstrap_validate is None:
                 raise ValueError("platform-bootstrap pre-authority validator is unavailable")
             self._bootstrap_validate(parameters)
@@ -776,14 +762,10 @@ class AuthorityEffectController:
         if any(not isinstance(item, str) or not item for item in bound_evidence):
             raise ValueError("controller-bound evidence is invalid")
         self._bound_evidence = tuple(sorted(set(bound_evidence)))
-        self._has_durable_methods = callable(
-            getattr(authority, "begin_execution", None)
-        ) and callable(getattr(authority, "complete_execution", None))
+        self._has_durable_methods = callable(getattr(authority, "begin_execution", None)) and callable(getattr(authority, "complete_execution", None))
 
     def _uses_durable_authority(self, executor_principal: str | None) -> bool:
-        return self._has_durable_methods and (
-            not callable(self.authority) or executor_principal is not None
-        )
+        return self._has_durable_methods and (not callable(self.authority) or executor_principal is not None)
 
     def execute(
         self,
@@ -815,11 +797,12 @@ class AuthorityEffectController:
                 )
             except BootstrapConsumptionAmbiguous as exc:
                 authority_observation = exc.evidence[0]
-                return self._receipt(
+                return self._finish(
                     request_id,
                     authority_observation,
                     effect,
                     handler_id,
+                    None,
                     EffectOutcome.AMBIGUOUS,
                     exc.evidence,
                     detail=str(exc),
@@ -835,20 +818,27 @@ class AuthorityEffectController:
                 and isinstance(result.get("rollback_receipt"), str)
             ):
                 return self._finish(
-                    request_id, receipt_id, effect, handler_id, executor_principal,
-                    EffectOutcome.ROLLED_BACK, evidence,
+                    request_id,
+                    receipt_id,
+                    effect,
+                    handler_id,
+                    executor_principal,
+                    EffectOutcome.ROLLED_BACK,
+                    evidence,
                     rollback_receipt=result["rollback_receipt"],
                     detail="remote transaction restored predecessor before returning",
                 )
             return self._finish(
-                request_id, receipt_id, effect, handler_id, executor_principal,
-                EffectOutcome.SUCCEEDED, evidence,
+                request_id,
+                receipt_id,
+                effect,
+                handler_id,
+                executor_principal,
+                EffectOutcome.SUCCEEDED,
+                evidence,
             )
         except RetryableEffect as exc:
-            if (
-                effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT
-                and self.registry._application_bootstrap_contract_resolver is not None
-            ):
+            if effect.kind is EffectKind.APPROVAL_PLATFORM_BOOTSTRAP_DEPLOYMENT and self.registry._application_bootstrap_contract_resolver is not None:
                 # The one-use W09 grant is already consumed.  RETRY would
                 # falsely imply that this effect can be replayed, so reconcile
                 # the predecessor and record only a terminal outcome.
@@ -857,30 +847,58 @@ class AuthorityEffectController:
                         raise RuntimeError("W09 reconciliation provider is absent")
                     rolled_back = rollback(parameters)
                     return self._finish(
-                        request_id, receipt_id, effect, handler_id, executor_principal,
-                        EffectOutcome.ROLLED_BACK, exc.evidence,
-                        rollback_receipt=str(rolled_back["receipt"]), detail=str(exc),
+                        request_id,
+                        receipt_id,
+                        effect,
+                        handler_id,
+                        executor_principal,
+                        EffectOutcome.ROLLED_BACK,
+                        exc.evidence,
+                        rollback_receipt=str(rolled_back["receipt"]),
+                        detail=str(exc),
                     )
                 except BootstrapStateAmbiguous as rollback_exc:
                     return self._finish(
-                        request_id, receipt_id, effect, handler_id, executor_principal,
-                        EffectOutcome.AMBIGUOUS, tuple(sorted(set(exc.evidence + rollback_exc.evidence))),
+                        request_id,
+                        receipt_id,
+                        effect,
+                        handler_id,
+                        executor_principal,
+                        EffectOutcome.AMBIGUOUS,
+                        tuple(sorted(set(exc.evidence + rollback_exc.evidence))),
                         detail=f"effect={exc}; rollback={rollback_exc}",
                     )
                 except Exception as rollback_exc:
                     return self._finish(
-                        request_id, receipt_id, effect, handler_id, executor_principal,
-                        EffectOutcome.FAILED, exc.evidence,
+                        request_id,
+                        receipt_id,
+                        effect,
+                        handler_id,
+                        executor_principal,
+                        EffectOutcome.FAILED,
+                        exc.evidence,
                         detail=f"effect={exc}; rollback={rollback_exc}",
                     )
             return self._finish(
-                request_id, receipt_id, effect, handler_id, executor_principal,
-                EffectOutcome.RETRY, exc.evidence, detail=str(exc),
+                request_id,
+                receipt_id,
+                effect,
+                handler_id,
+                executor_principal,
+                EffectOutcome.RETRY,
+                exc.evidence,
+                detail=str(exc),
             )
         except HeldEffect as exc:
             return self._finish(
-                request_id, receipt_id, effect, handler_id, executor_principal,
-                EffectOutcome.HOLD, exc.evidence, detail=str(exc),
+                request_id,
+                receipt_id,
+                effect,
+                handler_id,
+                executor_principal,
+                EffectOutcome.HOLD,
+                exc.evidence,
+                detail=str(exc),
             )
         except AmbiguousEffect as exc:
             evidence = exc.evidence
@@ -894,45 +912,76 @@ class AuthorityEffectController:
                     "handler_id": handler_id,
                     "detail": str(exc),
                 }
-                evidence = (
-                    "effect-ambiguity-memory:sha256:"
-                    + hashlib.sha256(_canonical(observation)).hexdigest(),
-                )
+                evidence = ("effect-ambiguity-memory:sha256:" + hashlib.sha256(_canonical(observation)).hexdigest(),)
             return self._finish(
-                request_id, receipt_id, effect, handler_id, executor_principal,
-                EffectOutcome.AMBIGUOUS, evidence, detail=str(exc),
+                request_id,
+                receipt_id,
+                effect,
+                handler_id,
+                executor_principal,
+                EffectOutcome.AMBIGUOUS,
+                evidence,
+                detail=str(exc),
             )
         except BootstrapStateAmbiguous as exc:
             if not exc.rollback_required:
                 return self._finish(
-                    request_id, receipt_id, effect, handler_id, executor_principal,
-                    EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc),
+                    request_id,
+                    receipt_id,
+                    effect,
+                    handler_id,
+                    executor_principal,
+                    EffectOutcome.AMBIGUOUS,
+                    exc.evidence,
+                    detail=str(exc),
                 )
             if rollback is not None:
                 try:
                     rolled_back = rollback(parameters)
                     rollback_receipt = str(rolled_back["receipt"])
                     return self._finish(
-                        request_id, receipt_id, effect, handler_id, executor_principal,
-                        EffectOutcome.ROLLED_BACK, exc.evidence,
-                        rollback_receipt=rollback_receipt, detail=str(exc),
+                        request_id,
+                        receipt_id,
+                        effect,
+                        handler_id,
+                        executor_principal,
+                        EffectOutcome.ROLLED_BACK,
+                        exc.evidence,
+                        rollback_receipt=rollback_receipt,
+                        detail=str(exc),
                     )
                 except BootstrapStateAmbiguous as rollback_exc:
                     evidence = tuple(sorted(set(exc.evidence + rollback_exc.evidence)))
                     return self._finish(
-                        request_id, receipt_id, effect, handler_id, executor_principal,
-                        EffectOutcome.AMBIGUOUS, evidence,
+                        request_id,
+                        receipt_id,
+                        effect,
+                        handler_id,
+                        executor_principal,
+                        EffectOutcome.AMBIGUOUS,
+                        evidence,
                         detail=f"effect={exc}; rollback={rollback_exc}",
                     )
                 except Exception as rollback_exc:
                     return self._finish(
-                        request_id, receipt_id, effect, handler_id, executor_principal,
-                        EffectOutcome.FAILED, exc.evidence,
+                        request_id,
+                        receipt_id,
+                        effect,
+                        handler_id,
+                        executor_principal,
+                        EffectOutcome.FAILED,
+                        exc.evidence,
                         detail=f"effect={exc}; rollback={rollback_exc}",
                     )
             return self._finish(
-                request_id, receipt_id, effect, handler_id, executor_principal,
-                EffectOutcome.AMBIGUOUS, exc.evidence, detail=str(exc),
+                request_id,
+                receipt_id,
+                effect,
+                handler_id,
+                executor_principal,
+                EffectOutcome.AMBIGUOUS,
+                exc.evidence,
+                detail=str(exc),
             )
         except Exception as exc:
             if rollback is not None:
@@ -940,26 +989,48 @@ class AuthorityEffectController:
                     rolled_back = rollback(parameters)
                     rollback_receipt = str(rolled_back["receipt"])
                     return self._finish(
-                        request_id, receipt_id, effect, handler_id, executor_principal,
-                        EffectOutcome.ROLLED_BACK, (),
-                        rollback_receipt=rollback_receipt, detail=str(exc),
+                        request_id,
+                        receipt_id,
+                        effect,
+                        handler_id,
+                        executor_principal,
+                        EffectOutcome.ROLLED_BACK,
+                        (),
+                        rollback_receipt=rollback_receipt,
+                        detail=str(exc),
                     )
                 except Exception as rollback_exc:
                     if isinstance(rollback_exc, BootstrapStateAmbiguous):
                         return self._finish(
-                            request_id, receipt_id, effect, handler_id, executor_principal,
-                            EffectOutcome.AMBIGUOUS, rollback_exc.evidence,
+                            request_id,
+                            receipt_id,
+                            effect,
+                            handler_id,
+                            executor_principal,
+                            EffectOutcome.AMBIGUOUS,
+                            rollback_exc.evidence,
                             detail=f"effect={exc}; rollback={rollback_exc}",
                         )
                     return self._finish(
-                        request_id, receipt_id, effect, handler_id, executor_principal,
-                        EffectOutcome.FAILED, (),
+                        request_id,
+                        receipt_id,
+                        effect,
+                        handler_id,
+                        executor_principal,
+                        EffectOutcome.FAILED,
+                        (),
                         detail=f"effect={exc}; rollback={rollback_exc}",
                     )
             evidence = exc.evidence if isinstance(exc, EffectHandlerError) else ()
             return self._finish(
-                request_id, receipt_id, effect, handler_id, executor_principal,
-                EffectOutcome.FAILED, evidence, detail=str(exc),
+                request_id,
+                receipt_id,
+                effect,
+                handler_id,
+                executor_principal,
+                EffectOutcome.FAILED,
+                evidence,
+                detail=str(exc),
             )
 
     def _finish(
@@ -999,12 +1070,7 @@ class AuthorityEffectController:
         if not durable and self.terminal_recorder is not None:
             try:
                 stored = self.terminal_recorder(receipt.sealed_mapping())
-                if (
-                    not isinstance(stored, Mapping)
-                    or stored.get("receipt_hash") != receipt.receipt_hash
-                    or not isinstance(stored.get("receipt"), str)
-                    or not stored["receipt"]
-                ):
+                if not isinstance(stored, Mapping) or stored.get("receipt_hash") != receipt.receipt_hash or not isinstance(stored.get("receipt"), str) or not stored["receipt"]:
                     raise OSError("terminal recorder returned a mismatched receipt")
             except Exception as exc:
                 evidence = ("effect-terminal-persistence:" + receipt.receipt_hash,)
@@ -1022,8 +1088,12 @@ class AuthorityEffectController:
                 # ROLLED_BACK: return a typed terminal ambiguity and retain a
                 # deterministic observation for external reconciliation.
                 return self._receipt(
-                    request_id, authority_receipt_id, effect, handler_id,
-                    EffectOutcome.AMBIGUOUS, evidence,
+                    request_id,
+                    authority_receipt_id,
+                    effect,
+                    handler_id,
+                    EffectOutcome.AMBIGUOUS,
+                    evidence,
                     rollback_receipt=rollback_receipt,
                     detail="terminal execution receipt persistence is ambiguous",
                     executor_principal=None,
@@ -1044,8 +1114,7 @@ class AuthorityEffectController:
         executor_principal: str | None = None,
     ) -> EffectExecutionReceipt:
         return EffectExecutionReceipt(
-            "tgw-effect-execution-receipt/v2" if executor_principal is not None
-            else "tgw-effect-execution-receipt/v1",
+            "tgw-effect-execution-receipt/v2" if executor_principal is not None else "tgw-effect-execution-receipt/v1",
             request_id,
             authority_receipt_id,
             effect.effect_hash,
