@@ -187,6 +187,14 @@ def test_ebay_sku_migrate_block_surfaced_without_raw(tmp_path):
     assert cfg["ebay_sku_migrate"]["batch_size"] == 10
 
 
+def test_pinned_bootstrap_host_integration_is_surfaced_to_the_canonical_host(tmp_path):
+    """The HTTP host receives deployment pins without reaching into ``raw``."""
+    integration = {"schema": "tgw-pinned-bootstrap-host-integration/v1"}
+    cfg = load_config(_write_cfg(tmp_path, {"pinned_bootstrap_host_integration": integration}))
+    assert cfg["pinned_bootstrap_host_integration"] == integration
+    assert load_config(_write_cfg(tmp_path, {}))["pinned_bootstrap_host_integration"] is None
+
+
 # ---------------------------------------------------------------------------
 # todo #1400 — 'api_key' must always be a key in the normalised config,
 # regardless of whether secrets_root/tgw-api-key.json exists (regression for

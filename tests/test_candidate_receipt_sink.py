@@ -1305,47 +1305,53 @@ def _bootstrap_deployment_declaration():
     }
 
 
-def _append_bootstrap_deployment_contract(execution_sink, *, source_commit, contract, tmp_path):
-    manifest = json.loads((execution_sink / "manifest.json").read_text())
+def _append_bootstrap_deployment_contract(_execution_sink, *, source_commit, contract, tmp_path):
+    contract_sink = tmp_path / "bootstrap-contract-sink"
+    _new_sink(contract_sink, email="bootstrap-contract@example.invalid", name="Bootstrap contract Y")
     ref = bootstrap_deployment_contract_ref(source_commit)
-    raw = write_json(execution_sink / "bootstrap-deployment" / "contract.json", contract)
+    raw = write_json(contract_sink / "bootstrap-deployment" / "contract.json", contract)
     descriptor = _commit_sink(
-        execution_sink,
-        sink_id="execution-evidence-sink",
+        contract_sink,
+        sink_id="bootstrap-contract-sink",
         artifacts=[
-            *manifest["artifacts"],
             {
                 "ref": ref,
                 "path": "bootstrap-deployment/contract.json",
                 "content_sha256": digest(raw),
             },
         ],
-        message="retain immutable W09 bootstrap deployment contract",
+        message="retain immutable W09 bootstrap deployment contract Y",
     )
-    config = tmp_path / "w09-execution-evidence-sink-config.json"
+    config = tmp_path / "w09-bootstrap-contract-sink-config.json"
     write_json(config, descriptor)
     return ref, config
 
 
-def _bootstrap_contract_resolver(candidate, plan_repository, descriptor_config, execution_config):
-    descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
-    execution_sink = PinnedGitReceiptSink(
+def _pinned_execution_evidence_sink(candidate, execution_config):
+    return PinnedGitReceiptSink(
         load_receipt_sink_descriptor(execution_config, candidate_repository=candidate),
         candidate_repository=candidate,
     )
+
+
+def _bootstrap_contract_resolver(candidate, plan_repository, descriptor_config, execution_config, contract_config):
+    descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
+    execution_sink = _pinned_execution_evidence_sink(candidate, execution_config)
+    contract_sink = _pinned_execution_evidence_sink(candidate, contract_config)
     return PinnedBootstrapDeploymentContractResolver(
         candidate,
         plan_repository=plan_repository,
         plan_approved_ref=PLAN_APPROVED_REF,
         candidate_evidence_descriptor=descriptor,
         execution_evidence_sink=execution_sink,
+        bootstrap_contract_sink=contract_sink,
     )
 
 
-def test_bootstrap_contract_is_derived_from_exact_w08_s_d_evidence_and_retained_in_x(tmp_path):
+def test_bootstrap_contract_is_derived_from_exact_w08_s_d_x_evidence_and_retained_in_disjoint_y(tmp_path):
     candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
-    _s, _d, execution_sink, descriptor_config, _execution_config = pinned_sinks(
+    _s, _d, execution_sink, descriptor_config, execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
         source_commit=commit,
@@ -1359,9 +1365,10 @@ def test_bootstrap_contract_is_derived_from_exact_w08_s_d_evidence_and_retained_
         plan_repository=plan_repository,
         plan_approved_ref=PLAN_APPROVED_REF,
         candidate_evidence_descriptor=descriptor,
+        execution_evidence_sink=_pinned_execution_evidence_sink(candidate, execution_config),
         deployment_declaration=_bootstrap_deployment_declaration(),
     )
-    ref, execution_config = _append_bootstrap_deployment_contract(
+    ref, contract_config = _append_bootstrap_deployment_contract(
         execution_sink,
         source_commit=commit,
         contract=contract,
@@ -1373,6 +1380,7 @@ def test_bootstrap_contract_is_derived_from_exact_w08_s_d_evidence_and_retained_
         plan_repository,
         descriptor_config,
         execution_config,
+        contract_config,
     ).resolve(ref, contract["contract_hash"])
 
     assert ref == bootstrap_deployment_contract_ref(commit)
@@ -1381,6 +1389,9 @@ def test_bootstrap_contract_is_derived_from_exact_w08_s_d_evidence_and_retained_
     assert contract["plan"]["commit"] == plan_commit
     assert contract["release"]["manifest_hash"].startswith("sha256:")
     assert contract["rollback"]["manifest_hash"].startswith("sha256:")
+    admission = contract["candidate"]["governed_admission"]
+    assert admission["gate_hash"].startswith("sha256:")
+    assert admission["independent_review"]["qualified_execution_proof_hash"].startswith("sha256:")
     assert contract["deployment"]["expected_prior"]["generation"] == "previous"
     assert contract["deployment"]["intended_next"]["generation"] == "candidate"
     assert verified.provider_binding() == {
@@ -1391,12 +1402,15 @@ def test_bootstrap_contract_is_derived_from_exact_w08_s_d_evidence_and_retained_
 
 @pytest.mark.parametrize(
     "corruption",
-    ["candidate", "sink", "symbolic-closure", "typed-effect", "rollback-contract"],
+    [
+        "candidate", "sink", "legacy-static-only", "admission-gate",
+        "review-bundle", "symbolic-closure", "typed-effect", "rollback-contract",
+    ],
 )
 def test_bootstrap_contract_rejects_widened_or_mismatched_w08_and_closure_bindings(tmp_path, corruption):
     candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
-    _s, _d, execution_sink, descriptor_config, _execution_config = pinned_sinks(
+    _s, _d, execution_sink, descriptor_config, execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
         source_commit=commit,
@@ -1410,6 +1424,7 @@ def test_bootstrap_contract_rejects_widened_or_mismatched_w08_and_closure_bindin
         plan_repository=plan_repository,
         plan_approved_ref=PLAN_APPROVED_REF,
         candidate_evidence_descriptor=descriptor,
+        execution_evidence_sink=_pinned_execution_evidence_sink(candidate, execution_config),
         deployment_declaration=_bootstrap_deployment_declaration(),
     )
     contract = json.loads(json.dumps(contract))
@@ -1417,6 +1432,12 @@ def test_bootstrap_contract_rejects_widened_or_mismatched_w08_and_closure_bindin
         contract["candidate"]["commit"] = "0" * 40
     elif corruption == "sink":
         contract["candidate"]["candidate_evidence"]["sink"]["commit"] = "0" * 40
+    elif corruption == "legacy-static-only":
+        contract["candidate"].pop("governed_admission")
+    elif corruption == "admission-gate":
+        contract["candidate"]["governed_admission"]["gate_hash"] = "sha256:" + "0" * 64
+    elif corruption == "review-bundle":
+        contract["candidate"]["governed_admission"]["independent_review"]["bundle_hash"] = "sha256:" + "0" * 64
     elif corruption == "symbolic-closure":
         contract["deployment"]["intended_next"]["closure"] = "current-system"
     elif corruption == "typed-effect":
@@ -1425,7 +1446,7 @@ def test_bootstrap_contract_rejects_widened_or_mismatched_w08_and_closure_bindin
         contract["rollback_contract"]["generation"] = "unbound-rollback"
     unsigned = {key: value for key, value in contract.items() if key != "contract_hash"}
     contract["contract_hash"] = object_hash(unsigned)
-    ref, execution_config = _append_bootstrap_deployment_contract(
+    ref, contract_config = _append_bootstrap_deployment_contract(
         execution_sink,
         source_commit=commit,
         contract=contract,
@@ -1438,4 +1459,5 @@ def test_bootstrap_contract_rejects_widened_or_mismatched_w08_and_closure_bindin
             plan_repository,
             descriptor_config,
             execution_config,
+            contract_config,
         ).resolve(ref, contract["contract_hash"])

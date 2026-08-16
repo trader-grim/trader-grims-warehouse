@@ -1,6 +1,7 @@
 import json
 import subprocess
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,11 +11,12 @@ from tgw.operator_console_host import (
     ConfiguredAuthorityStore,
     configured_authority_principal,
     configured_console_mount,
+    configured_execution_controller,
     current_plan_commit,
     load_solution,
     plan_root,
 )
-from tgw.plan_authority import AuthorityPrincipal, PrincipalRole
+from tgw.plan_authority import AuthorityPrincipal, PrincipalRole, TypedEffect
 
 
 def _plan(tmp_path: Path) -> tuple[Path, str]:
@@ -139,6 +141,30 @@ def test_configured_host_principals_are_named_role_bound_and_fail_closed():
             {}, field="plan_authority_executor_principal",
             role=PrincipalRole.EXECUTOR, authentication_binding="credential-env:TEST",
         )
+
+
+def test_bootstrap_host_is_unmounted_or_pin_mismatched_before_authority_execution():
+    store = Mock()
+    effect = TypedEffect.parse({
+        "kind": "approval-platform-bootstrap-deployment",
+        "generation": "candidate-release",
+        "parameters": {
+            "bootstrap_contract_ref": "candidate:" + "a" * 40 + ":bootstrap-deployment:v2",
+            "bootstrap_contract_hash": "sha256:" + "b" * 64,
+        },
+    })
+    controller = configured_execution_controller(store, lambda: {})
+    with pytest.raises(ValueError, match="resolver is not mounted"):
+        controller.execute(request_id="request:bootstrap", effect=effect, executor_principal="executor:fixture")
+    store.begin_execution.assert_not_called()
+
+    with pytest.raises(RuntimeError, match="cannot be mounted"):
+        configured_execution_controller(
+            store,
+            lambda: {"pinned_bootstrap_host_integration": {"schema": "wrong"}},
+            bootstrap_provider=object(),
+        )
+    store.begin_execution.assert_not_called()
 
 
 def test_canonical_http_app_mounts_console_and_refuses_unpinned_docs():

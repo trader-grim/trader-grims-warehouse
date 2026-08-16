@@ -319,6 +319,11 @@ def load_config(path: Path) -> Dict[str, Any]:
         "plan_authority_operator_api_principal": plan_authority_operator_api_principal,
         "plan_authority_operator_session_principal": plan_authority_operator_session_principal,
         "plan_git_path": plan_git_path,
+        # The host adapter validates this complete, externally supplied pin
+        # set at mount time.  It is deliberately surfaced as a first-class
+        # normalized setting so the canonical HTTP host can never silently
+        # lose the deployment boundary configuration in ``raw``.
+        "pinned_bootstrap_host_integration": raw.get("pinned_bootstrap_host_integration"),
         "plan_inbox_path": plan_vault_path / "inbox",
         # Canonical Plan intent lives only in the standalone repository.  The
         # mutable/synced Plan Vault remains the inbox and general docs surface,

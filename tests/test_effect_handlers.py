@@ -9,7 +9,7 @@ from tgw.plan_authority import TypedEffect
 SHA = "a" * 40
 TREE = "b" * 40
 DIGEST = "c" * 64
-BOOTSTRAP_REF = f"candidate:{SHA}:bootstrap-deployment:v1"
+BOOTSTRAP_REF = f"candidate:{SHA}:bootstrap-deployment:v2"
 BOOTSTRAP_HASH = "sha256:" + "d" * 64
 BOOTSTRAP_GENERATION = "candidate-release"
 EXECUTOR = "executor:fixture-runner"
@@ -32,7 +32,11 @@ class _BootstrapContractResolver:
         self.resolve = Mock(return_value=VerifiedBootstrapDeploymentContract(
             reference=BOOTSTRAP_REF,
             contract_hash=BOOTSTRAP_HASH,
+            expected_prior_generation="previous-release",
+            expected_prior_closure="/nix/store/previous-nixos-system-tgw-prod-fixture",
             intended_next_generation=BOOTSTRAP_GENERATION,
+            intended_next_closure="/nix/store/next-nixos-system-tgw-prod-fixture",
+            required_health_probes=("broker",),
         ))
 
 

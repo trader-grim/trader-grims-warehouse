@@ -8,6 +8,11 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from tgw.bootstrap_host_integration import (
+    BootstrapHostIntegrationError,
+    TypedBootstrapDeploymentProvider,
+    mount_pinned_bootstrap_host_integration,
+)
 from tgw.effect_handlers import AuthorityEffectController, EffectHandlerError, TypedEffectHandlerRegistry
 from tgw.operator_console_plugin import OperatorConsoleMount
 from tgw.plan_authority import AuthorityPrincipal, PostgresAuthorityStore, PrincipalRole
@@ -146,7 +151,12 @@ def _unmounted_provider(name: str) -> Callable[[Mapping[str, str]], Mapping[str,
     return unavailable
 
 
-def configured_execution_controller(store: ConfiguredAuthorityStore) -> AuthorityEffectController:
+def configured_execution_controller(
+    store: ConfiguredAuthorityStore,
+    config_provider: Callable[[], Mapping[str, Any]],
+    *,
+    bootstrap_provider: TypedBootstrapDeploymentProvider | None = None,
+) -> AuthorityEffectController:
     """Build the one host execution boundary over the canonical store.
 
     Concrete provider mounting is deliberately explicit.  Until a host mounts
@@ -154,14 +164,26 @@ def configured_execution_controller(store: ConfiguredAuthorityStore) -> Authorit
     and receives a durable outcome; it can never fall back to /consume's old
     direct-redemption path.
     """
+    raw_bootstrap = config_provider().get("pinned_bootstrap_host_integration")
+    integration = None
+    if raw_bootstrap is not None or bootstrap_provider is not None:
+        if not isinstance(raw_bootstrap, Mapping):
+            raise RuntimeError("pinned bootstrap host integration configuration is required")
+        try:
+            integration = mount_pinned_bootstrap_host_integration(
+                raw_bootstrap, provider=bootstrap_provider,
+            )
+        except BootstrapHostIntegrationError as exc:
+            raise RuntimeError("pinned bootstrap host integration cannot be mounted") from exc
     registry = TypedEffectHandlerRegistry(
         release_install=_unmounted_provider("coding-release"),
         release_rollback=_unmounted_provider("coding-release rollback"),
         flake_push=_unmounted_provider("bounded-flake-push"),
         flake_switch_record=_unmounted_provider("flake-switch-record-only"),
         dependency_resubmit=_unmounted_provider("dependency-resubmit"),
-        bootstrap_install=_unmounted_provider("approval-platform-bootstrap-deployment"),
-        bootstrap_rollback=_unmounted_provider("approval-platform-bootstrap-deployment rollback"),
+        bootstrap_install=(integration.install if integration else _unmounted_provider("approval-platform-bootstrap-deployment")),
+        bootstrap_rollback=(integration.rollback if integration else _unmounted_provider("approval-platform-bootstrap-deployment rollback")),
+        bootstrap_contract_resolver=(integration.resolver if integration else None),
     )
     return AuthorityEffectController(registry, store)
 
@@ -172,6 +194,7 @@ def configured_console_mount(
     require_operator: Callable[[], Any],
     require_executor: Callable[[], Any],
     execute_effect: Callable[..., Any] | None = None,
+    bootstrap_provider: TypedBootstrapDeploymentProvider | None = None,
 ) -> OperatorConsoleMount:
     store = ConfiguredAuthorityStore(config_provider)
     return OperatorConsoleMount(
@@ -180,5 +203,7 @@ def configured_console_mount(
         load_solution=lambda identity: load_solution(config_provider, identity),
         require_operator=require_operator,
         require_executor=require_executor,
-        execute_effect=execute_effect or configured_execution_controller(store).execute,
+        execute_effect=execute_effect or configured_execution_controller(
+            store, config_provider, bootstrap_provider=bootstrap_provider,
+        ).execute,
     )

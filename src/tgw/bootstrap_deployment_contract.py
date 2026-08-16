@@ -1,7 +1,7 @@
 """Exact W09 bootstrap-deployment preflight contracts.
 
 The authority effect carries only a reference and hash for a contract retained
-in X.  Before an effect can cross the authority execution boundary, this
+in a dedicated W09 Y store.  Before an effect can cross the authority execution boundary, this
 module re-derives the W08 candidate identity from S through the externally
 pinned D descriptor.  It intentionally has no writer, deployment provider,
 or default resolver: retaining a contract and mounting a deployment provider
@@ -22,11 +22,12 @@ from tgw.candidate_receipt_sink import (
     CandidateReceiptSinkError,
     PinnedCandidateEvidenceDescriptor,
     PinnedGitReceiptSink,
+    candidate_admission_gate,
     resolve_approved_plan_authority,
     verify_candidate_evidence_bundle,
 )
 
-BOOTSTRAP_DEPLOYMENT_CONTRACT_SCHEMA = "tgw-bootstrap-deployment-contract/v1"
+BOOTSTRAP_DEPLOYMENT_CONTRACT_SCHEMA = "tgw-bootstrap-deployment-contract/v2"
 BOOTSTRAP_DEPLOYMENT_DECLARATION_SCHEMA = "tgw-bootstrap-deployment-declaration/v1"
 BOOTSTRAP_HEALTH_CONTRACT_SCHEMA = "tgw-bootstrap-health-contract/v1"
 BOOTSTRAP_ROLLBACK_CONTRACT_SCHEMA = "tgw-bootstrap-rollback-contract/v1"
@@ -38,7 +39,7 @@ _PROBE_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _NIX_SYSTEM = re.compile(
     r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-nixos-system-tgw-prod-[A-Za-z0-9._+-]+\Z"
 )
-_CONTRACT_REF = re.compile(r"candidate:([0-9a-f]{40}):bootstrap-deployment:v1\Z")
+_CONTRACT_REF = re.compile(r"candidate:([0-9a-f]{40}):bootstrap-deployment:v2\Z")
 
 
 class BootstrapDeploymentContractError(ValueError):
@@ -111,9 +112,9 @@ def _candidate_identity(repository: Path, candidate: str) -> tuple[str, str]:
 
 
 def bootstrap_deployment_contract_ref(candidate_commit: str) -> str:
-    """Return the one X-store reference allowed for a candidate's W09 contract."""
+    """Return the one Y-store reference allowed for a candidate's W09 contract."""
 
-    return f"candidate:{_git_value(candidate_commit, label='candidate commit')}:bootstrap-deployment:v1"
+    return f"candidate:{_git_value(candidate_commit, label='candidate commit')}:bootstrap-deployment:v2"
 
 
 def _validate_target(value: Any) -> dict[str, str]:
@@ -169,6 +170,80 @@ def _validate_sink_descriptor(value: Any) -> dict[str, str]:
     }
 
 
+def _validate_sink_identity(value: Any, *, label: str) -> dict[str, str]:
+    identity = _mapping(value, fields={"sink_id", "commit", "tree", "manifest_hash"}, label=label)
+    sink_id = identity.get("sink_id")
+    if not isinstance(sink_id, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", sink_id):
+        raise BootstrapDeploymentContractError(f"{label} identity is invalid")
+    return {
+        "sink_id": sink_id,
+        "commit": _git_value(identity.get("commit"), label=f"{label} commit"),
+        "tree": _git_value(identity.get("tree"), label=f"{label} tree"),
+        "manifest_hash": _hash_value(identity.get("manifest_hash"), label=f"{label} manifest hash"),
+    }
+
+
+def _governed_admission_binding(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Retain the exact independent X admission result needed by deployment.
+
+    ``gate_hash`` commits to the whole admission result.  The review packet,
+    result, qualified execution proof, and X review bundle are repeated here
+    deliberately so an operator can inspect the production-facing contract
+    without silently treating S-only candidate evidence as reviewed.
+    """
+    review = value.get("independent_review_evidence")
+    if value.get("allowed") is not True or not isinstance(review, Mapping):
+        raise BootstrapDeploymentContractError("candidate is not admitted by governed independent review")
+    required_review = {
+        "candidate_manifest_hash",
+        "review_packet_hash",
+        "review_result_hash",
+        "qualified_execution_proof_hash",
+        "bundle_hash",
+    }
+    if set(review) != required_review:
+        raise BootstrapDeploymentContractError("governed independent review binding is invalid")
+    return {
+        "gate_hash": _hash_value(value.get("gate_hash"), label="governed admission gate hash"),
+        "execution_evidence_sink": _validate_sink_identity(
+            value.get("execution_evidence_sink"), label="execution evidence sink",
+        ),
+        "independent_review": {
+            name: _hash_value(review.get(name), label=f"independent review {name}")
+            for name in sorted(required_review)
+        },
+    }
+
+
+def _validate_governed_admission_binding(value: Any) -> dict[str, Any]:
+    binding = _mapping(
+        value,
+        fields={"gate_hash", "execution_evidence_sink", "independent_review"},
+        label="governed admission binding",
+    )
+    review = _mapping(
+        binding.get("independent_review"),
+        fields={
+            "candidate_manifest_hash",
+            "review_packet_hash",
+            "review_result_hash",
+            "qualified_execution_proof_hash",
+            "bundle_hash",
+        },
+        label="governed independent review binding",
+    )
+    return {
+        "gate_hash": _hash_value(binding.get("gate_hash"), label="governed admission gate hash"),
+        "execution_evidence_sink": _validate_sink_identity(
+            binding.get("execution_evidence_sink"), label="execution evidence sink",
+        ),
+        "independent_review": {
+            name: _hash_value(review.get(name), label=f"independent review {name}")
+            for name in sorted(review)
+        },
+    }
+
+
 def _validate_declaration(value: Mapping[str, Any]) -> dict[str, Any]:
     declaration = _mapping(
         value,
@@ -210,7 +285,7 @@ def _validate_contract(value: Mapping[str, Any]) -> dict[str, Any]:
         raise BootstrapDeploymentContractError("bootstrap deployment contract schema is invalid")
     candidate = _mapping(
         contract.get("candidate"),
-        fields={"commit", "tree", "manifest_hash", "candidate_evidence"},
+        fields={"commit", "tree", "manifest_hash", "candidate_evidence", "governed_admission"},
         label="bootstrap candidate binding",
     )
     candidate_evidence = _mapping(
@@ -226,6 +301,7 @@ def _validate_contract(value: Mapping[str, Any]) -> dict[str, Any]:
             "sink": _validate_sink_descriptor(candidate_evidence.get("sink")),
             "bundle_hash": _hash_value(candidate_evidence.get("bundle_hash"), label="candidate evidence bundle hash"),
         },
+        "governed_admission": _validate_governed_admission_binding(candidate.get("governed_admission")),
     }
     plan = _mapping(contract.get("plan"), fields={"commit"}, label="bootstrap Plan binding")
     release = _mapping(contract.get("release"), fields={"manifest_hash"}, label="bootstrap release binding")
@@ -335,9 +411,12 @@ def _verified_w08_evidence(
     plan_repository: Path,
     plan_approved_ref: str,
     candidate_evidence_descriptor: PinnedCandidateEvidenceDescriptor,
-) -> tuple[Path, str, str, str, PinnedGitReceiptSink, dict[str, Any]]:
+    execution_evidence_sink: PinnedGitReceiptSink,
+) -> tuple[Path, str, str, str, PinnedGitReceiptSink, dict[str, Any], dict[str, Any]]:
     if not isinstance(candidate_evidence_descriptor, PinnedCandidateEvidenceDescriptor):
         raise BootstrapDeploymentContractError("candidate evidence descriptor must be externally pinned")
+    if not isinstance(execution_evidence_sink, PinnedGitReceiptSink):
+        raise BootstrapDeploymentContractError("execution evidence sink must be externally pinned")
     try:
         repo = repository.resolve(strict=True)
     except OSError as exc:
@@ -355,9 +434,19 @@ def _verified_w08_evidence(
             candidate_sink, repository=repo, source_commit=source_commit, source_tree=source_tree,
             plan_commit=plan_authority["approved_commit"],
         )
+        admission = candidate_admission_gate(
+            repo,
+            candidate=source_commit,
+            plan_repository=plan_repository,
+            plan_approved_ref=plan_approved_ref,
+            candidate_evidence_descriptor=candidate_evidence_descriptor,
+            execution_sink=execution_evidence_sink,
+        )
     except CandidateReceiptSinkError as exc:
         raise BootstrapDeploymentContractError("exact W08 candidate evidence is unavailable") from exc
-    return repo, source_commit, source_tree, plan_authority["approved_commit"], candidate_sink, evidence
+    if admission.get("allowed") is not True:
+        raise BootstrapDeploymentContractError("candidate is not admitted by exact W08 governed review evidence")
+    return repo, source_commit, source_tree, plan_authority["approved_commit"], candidate_sink, evidence, admission
 
 
 def derive_bootstrap_deployment_contract(
@@ -367,19 +456,24 @@ def derive_bootstrap_deployment_contract(
     plan_repository: Path,
     plan_approved_ref: str,
     candidate_evidence_descriptor: PinnedCandidateEvidenceDescriptor,
+    execution_evidence_sink: PinnedGitReceiptSink,
     deployment_declaration: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Derive the canonical W09 contract from immutable W08 S/D evidence.
+    """Derive the canonical W09 contract from immutable W08 S/D/X evidence.
 
-    The caller must retain this returned object in the separate X evidence
-    store before its pin is configured.  The returned object has no ambient
-    target path, credentials, commands, or service selector.
+    The caller must retain this returned object in a separate W09 contract
+    sink, not in W08's execution/review X store.  That separation prevents a
+    contract from changing the admission gate it claims to bind.  The returned
+    object has no ambient target path, credentials, commands, or service
+    selector.
     """
 
     declaration = _validate_declaration(deployment_declaration)
-    _repo, source_commit, source_tree, plan_commit, candidate_sink, evidence = _verified_w08_evidence(
+    _repo, source_commit, source_tree, plan_commit, candidate_sink, evidence, admission = _verified_w08_evidence(
         repository, candidate=candidate, plan_repository=plan_repository,
-        plan_approved_ref=plan_approved_ref, candidate_evidence_descriptor=candidate_evidence_descriptor,
+        plan_approved_ref=plan_approved_ref,
+        candidate_evidence_descriptor=candidate_evidence_descriptor,
+        execution_evidence_sink=execution_evidence_sink,
     )
     unsigned = {
         "schema": BOOTSTRAP_DEPLOYMENT_CONTRACT_SCHEMA,
@@ -392,6 +486,7 @@ def derive_bootstrap_deployment_contract(
                 "sink": candidate_sink.descriptor,
                 "bundle_hash": evidence["bundle_hash"],
             },
+            "governed_admission": _governed_admission_binding(admission),
         },
         "plan": {"commit": plan_commit},
         "release": {"manifest_hash": evidence["release_manifest_hash"]},
@@ -446,7 +541,11 @@ class VerifiedBootstrapDeploymentContract:
 
     reference: str
     contract_hash: str
+    expected_prior_generation: str
+    expected_prior_closure: str
     intended_next_generation: str
+    intended_next_closure: str
+    required_health_probes: tuple[str, ...]
 
     def provider_binding(self) -> dict[str, str]:
         """Return precisely the immutable reference/hash accepted by a provider."""
@@ -466,7 +565,7 @@ class BootstrapDeploymentContractResolver(Protocol):
 
 
 class PinnedBootstrapDeploymentContractResolver:
-    """Resolve X-retained W09 contracts against exact candidate S/D evidence."""
+    """Resolve Y-retained W09 contracts against exact candidate S/D/X evidence."""
 
     def __init__(
         self,
@@ -476,11 +575,14 @@ class PinnedBootstrapDeploymentContractResolver:
         plan_approved_ref: str,
         candidate_evidence_descriptor: PinnedCandidateEvidenceDescriptor,
         execution_evidence_sink: PinnedGitReceiptSink,
+        bootstrap_contract_sink: PinnedGitReceiptSink,
     ) -> None:
         if not isinstance(candidate_evidence_descriptor, PinnedCandidateEvidenceDescriptor):
             raise BootstrapDeploymentContractError("candidate evidence descriptor must be externally pinned")
         if not isinstance(execution_evidence_sink, PinnedGitReceiptSink):
             raise BootstrapDeploymentContractError("execution evidence sink must be externally pinned")
+        if not isinstance(bootstrap_contract_sink, PinnedGitReceiptSink):
+            raise BootstrapDeploymentContractError("bootstrap contract sink must be externally pinned")
         try:
             repo = repository.resolve(strict=True)
             candidate_sink = PinnedGitReceiptSink(
@@ -493,18 +595,20 @@ class PinnedBootstrapDeploymentContractResolver:
             candidate_sink.repository,
             candidate_evidence_descriptor.authority_repository,
             execution_evidence_sink.repository,
+            bootstrap_contract_sink.repository,
         )
         if any(
             left == right or left in right.parents or right in left.parents
             for index, left in enumerate(roots) for right in roots[index + 1:]
         ):
-            raise BootstrapDeploymentContractError("candidate evidence, descriptor, and execution roots must be disjoint")
+            raise BootstrapDeploymentContractError("candidate evidence, descriptor, execution, and contract roots must be disjoint")
         self._repository = repo
         self._plan_repository = plan_repository
         self._plan_approved_ref = plan_approved_ref
         self._candidate_evidence_descriptor = candidate_evidence_descriptor
         self._candidate_sink = candidate_sink
         self._execution_sink = execution_evidence_sink
+        self._bootstrap_contract_sink = bootstrap_contract_sink
 
     def resolve(
         self, bootstrap_contract_ref: str, bootstrap_contract_hash: str,
@@ -517,7 +621,7 @@ class PinnedBootstrapDeploymentContractResolver:
         expected_commit = match.group(1)
         expected_hash = _hash_value(bootstrap_contract_hash, label="bootstrap deployment contract hash")
         try:
-            contract = _validate_contract(self._execution_sink.fetch_object(bootstrap_contract_ref))
+            contract = _validate_contract(self._bootstrap_contract_sink.fetch_object(bootstrap_contract_ref))
             plan_authority = resolve_approved_plan_authority(
                 self._plan_repository, approved_ref=self._plan_approved_ref,
                 candidate_repository=self._repository,
@@ -528,8 +632,18 @@ class PinnedBootstrapDeploymentContractResolver:
                 source_commit=source_commit, source_tree=source_tree,
                 plan_commit=plan_authority["approved_commit"],
             )
+            admission = candidate_admission_gate(
+                self._repository,
+                candidate=source_commit,
+                plan_repository=self._plan_repository,
+                plan_approved_ref=self._plan_approved_ref,
+                candidate_evidence_descriptor=self._candidate_evidence_descriptor,
+                execution_sink=self._execution_sink,
+            )
         except CandidateReceiptSinkError as exc:
             raise BootstrapDeploymentContractError("exact W08 candidate evidence is unavailable") from exc
+        if admission.get("allowed") is not True:
+            raise BootstrapDeploymentContractError("candidate is not admitted by exact W08 governed review evidence")
         candidate = contract["candidate"]
         candidate_evidence = candidate["candidate_evidence"]
         if (
@@ -540,6 +654,7 @@ class PinnedBootstrapDeploymentContractResolver:
             or candidate_evidence["descriptor"] != self._candidate_evidence_descriptor.identity
             or candidate_evidence["sink"] != self._candidate_sink.descriptor
             or candidate_evidence["bundle_hash"] != evidence["bundle_hash"]
+            or candidate["governed_admission"] != _governed_admission_binding(admission)
             or contract["plan"]["commit"] != plan_authority["approved_commit"]
             or contract["release"]["manifest_hash"] != evidence["release_manifest_hash"]
             or contract["rollback"]["manifest_hash"] != evidence["rollback_manifest_hash"]
@@ -550,5 +665,9 @@ class PinnedBootstrapDeploymentContractResolver:
         return VerifiedBootstrapDeploymentContract(
             reference=bootstrap_contract_ref,
             contract_hash=expected_hash,
+            expected_prior_generation=contract["deployment"]["expected_prior"]["generation"],
+            expected_prior_closure=contract["deployment"]["expected_prior"]["closure"],
             intended_next_generation=contract["deployment"]["intended_next"]["generation"],
+            intended_next_closure=contract["deployment"]["intended_next"]["closure"],
+            required_health_probes=tuple(contract["health_contract"]["required_probes"]),
         )
