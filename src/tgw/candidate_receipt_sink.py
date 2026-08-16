@@ -20,6 +20,8 @@ import subprocess
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
+import yaml
+
 from tgw.candidate_manifest import (
     CandidateManifestError,
     graph_hash,
@@ -39,10 +41,10 @@ from tgw.governed_execution_receipt import (
     GovernedExecutionReceiptError,
     verify_candidate_governed_execution_receipt,
 )
+from tgw.plan_catalog import compose_catalog
 from tgw.plan_luet import (
     PINNED_LUET_BINARY_SHA256,
     PROVIDER_ID,
-    normalize_conformance_graph,
 )
 from tgw.plan_solver import PlanResolutionError, solve, validate_for_dispatch
 from tgw.qualified_execution_service import (
@@ -54,11 +56,14 @@ from tgw.qualified_execution_service import (
 RECEIPT_SINK_SCHEMA = "tgw-pinned-git-candidate-receipt-sink/v1"
 RECEIPT_SINK_MANIFEST_SCHEMA = "tgw-pinned-git-candidate-receipt-sink-manifest/v1"
 PINNED_CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA = "tgw-pinned-git-candidate-evidence-descriptor/v1"
-CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA = "tgw-candidate-evidence-descriptor/v3"
-CANDIDATE_EVIDENCE_CARD_BINDING_SCHEMA = "tgw-candidate-evidence-descriptor-card-binding/v4"
-PINNED_W06_PLAN_MATERIALIZATION_SCHEMA = "tgw-pinned-git-w06-plan-materialization/v2"
-PINNED_W06_CANONICAL_GRAPH_SCHEMA = "tgw-pinned-git-w06-canonical-graph/v1"
-W06_PLAN_MATERIALIZATION_SCHEMA = "tgw-w06-approved-plan-materialization/v1"
+CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA = "tgw-candidate-evidence-descriptor/v4"
+CANDIDATE_EVIDENCE_CARD_BINDING_SCHEMA = "tgw-candidate-evidence-descriptor-card-binding/v5"
+PINNED_W06_PLAN_MATERIALIZATION_SCHEMA = "tgw-pinned-git-w06-plan-materialization/v3"
+PINNED_W06_PLAN_SOURCE_SCHEMA = "tgw-pinned-git-w06-plan-source/v1"
+PINNED_W06_PLAN_SOLUTION_SCHEMA = "tgw-pinned-git-w06-plan-solution/v1"
+W06_PLAN_SOURCE_PATH = "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml"
+W06_PLAN_SOLUTION_PATH_PREFIX = "plan/execution/solutions/GOVERNED-EXECUTION-PLATFORM-"
+W06_CANDIDATE_CATALOG_PATH = "agent-services/catalogs/governed-execution-platform-v1.json"
 GOVERNED_EXECUTION_BUNDLE_SCHEMA = "tgw-candidate-governed-execution-bundle/v2"
 INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-independent-review-evidence-bundle/v3"
 GOVERNED_CANDIDATE_ADMISSION_SCHEMA = "tgw-governed-candidate-admission-gate/v2"
@@ -320,46 +325,43 @@ def _validate_pinned_w06_git_artifact(
 
 
 def validate_pinned_w06_plan_materialization(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate D's immutable pins to W06 materialization and canonical graph.
+    """Validate D's pins to the approved source YAML and retained solution.
 
-    This object deliberately names a retained evidence commit rather than the
-    approved Plan commit itself.  A concrete solution cannot be committed into
-    the same Git object it names without a self-reference; admission compares
-    the materialization's declared Plan commit to the separately approved ref.
-    The separately pinned graph is loaded from that Plan/evidence repository
-    and becomes the only graph eligible for re-solving.
+    The source pin must name the one execution document the approved ref
+    authorizes.  A later solution artifact is evidence, never a replacement
+    for that source intent.
     """
 
-    required = {
-        "schema",
-        "repository",
-        "commit",
-        "tree",
-        "path",
-        "content_sha256",
-        "canonical_graph",
-    }
+    required = {"schema", "plan_source", "solution"}
     if (
         not isinstance(value, Mapping)
         or set(value) != required
         or value.get("schema") != PINNED_W06_PLAN_MATERIALIZATION_SCHEMA
     ):
         raise CandidateReceiptSinkError("pinned W06 Plan materialization descriptor is invalid")
-    materialization = _validate_pinned_w06_git_artifact(
-        {key: value[key] for key in required - {"canonical_graph"}},
-        schema=PINNED_W06_PLAN_MATERIALIZATION_SCHEMA,
-        label="W06 Plan materialization",
+    plan_source = value.get("plan_source")
+    solution = value.get("solution")
+    if not isinstance(plan_source, Mapping) or not isinstance(solution, Mapping):
+        raise CandidateReceiptSinkError("pinned W06 Plan source or solution descriptor is invalid")
+    source_pin = _validate_pinned_w06_git_artifact(
+        plan_source,
+        schema=PINNED_W06_PLAN_SOURCE_SCHEMA,
+        label="W06 Plan source",
     )
-    graph = value.get("canonical_graph")
-    if not isinstance(graph, Mapping):
-        raise CandidateReceiptSinkError("pinned W06 canonical graph descriptor is invalid")
+    if source_pin["path"] != W06_PLAN_SOURCE_PATH:
+        raise CandidateReceiptSinkError("pinned W06 Plan source path is not allowed")
+    solution_pin = _validate_pinned_w06_git_artifact(
+        solution,
+        schema=PINNED_W06_PLAN_SOLUTION_SCHEMA,
+        label="W06 Plan solution",
+    )
+    expected_solution_path = f"{W06_PLAN_SOLUTION_PATH_PREFIX}{source_pin['commit'][:7]}.json"
+    if solution_pin["path"] != expected_solution_path:
+        raise CandidateReceiptSinkError("pinned W06 Plan solution path is not allowed")
     return {
-        **materialization,
-        "canonical_graph": _validate_pinned_w06_git_artifact(
-            graph,
-            schema=PINNED_W06_CANONICAL_GRAPH_SCHEMA,
-            label="W06 canonical graph",
-        ),
+        "schema": PINNED_W06_PLAN_MATERIALIZATION_SCHEMA,
+        "plan_source": source_pin,
+        "solution": solution_pin,
     }
 
 
@@ -399,25 +401,29 @@ class PinnedCandidateEvidenceDescriptor:
         materialization = validate_pinned_w06_plan_materialization(value["w06_plan_materialization"])
         try:
             sink_repository = Path(sink["repository"]).resolve(strict=True)
-            materialization_repository = Path(materialization["repository"]).resolve(strict=True)
-            graph_repository = Path(materialization["canonical_graph"]["repository"]).resolve(strict=True)
+            plan_source_repository = Path(materialization["plan_source"]["repository"]).resolve(strict=True)
+            solution_repository = Path(materialization["solution"]["repository"]).resolve(strict=True)
         except OSError as exc:
-            raise CandidateReceiptSinkError("candidate evidence, W06 materialization, or canonical graph repository is unavailable") from exc
+            raise CandidateReceiptSinkError("candidate evidence, W06 Plan source, or solution repository is unavailable") from exc
         if _paths_overlap(self._repository, sink_repository):
             raise CandidateReceiptSinkError("candidate evidence descriptor authority and evidence sink must be disjoint")
-        if _paths_overlap(self._repository, materialization_repository):
-            raise CandidateReceiptSinkError("candidate evidence descriptor authority and W06 materialization must be disjoint")
-        if _paths_overlap(sink_repository, materialization_repository):
-            raise CandidateReceiptSinkError("candidate evidence sink and W06 materialization must be disjoint")
-        if _paths_overlap(candidate_root, materialization_repository):
-            raise CandidateReceiptSinkError("W06 Plan materialization must be disjoint from the candidate repository")
-        if _paths_overlap(candidate_root, graph_repository):
-            raise CandidateReceiptSinkError("W06 canonical graph must be disjoint from the candidate repository")
+        if _paths_overlap(self._repository, plan_source_repository):
+            raise CandidateReceiptSinkError("candidate evidence descriptor authority and W06 Plan source must be disjoint")
+        if _paths_overlap(self._repository, solution_repository):
+            raise CandidateReceiptSinkError("candidate evidence descriptor authority and W06 Plan solution must be disjoint")
+        if _paths_overlap(sink_repository, plan_source_repository):
+            raise CandidateReceiptSinkError("candidate evidence sink and W06 Plan source must be disjoint")
+        if _paths_overlap(sink_repository, solution_repository):
+            raise CandidateReceiptSinkError("candidate evidence sink and W06 Plan solution must be disjoint")
+        if _paths_overlap(candidate_root, plan_source_repository):
+            raise CandidateReceiptSinkError("W06 Plan source must be disjoint from the candidate repository")
+        if _paths_overlap(candidate_root, solution_repository):
+            raise CandidateReceiptSinkError("W06 Plan solution must be disjoint from the candidate repository")
         if any(
-            _paths_overlap(graph_repository, root)
+            _paths_overlap(solution_repository, root)
             for root in (self._repository, sink_repository)
         ):
-            raise CandidateReceiptSinkError("W06 canonical graph must be disjoint from candidate evidence and descriptor roots")
+            raise CandidateReceiptSinkError("W06 Plan solution must be disjoint from candidate evidence and descriptor roots")
         self._value = {
             "schema": CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA,
             "pin": self._pin,
@@ -449,12 +455,12 @@ class PinnedCandidateEvidenceDescriptor:
         }
 
     def card_binding(self) -> dict[str, str]:
-        """Return the v4 card binding over D, S, and canonical W06 evidence."""
+        """Return the v5 card binding over D, S, and source-bound W06 evidence."""
 
         sink = self._value["candidate_evidence_sink"]
         content = {"schema": CANDIDATE_EVIDENCE_CARD_BINDING_SCHEMA, "descriptor": self._value}
         return {
-            "ref": f"candidate-evidence:{sink['sink_id']}:descriptor:v4",
+            "ref": f"candidate-evidence:{sink['sink_id']}:descriptor:v5",
             "hash": _hash(content),
         }
 
@@ -485,106 +491,78 @@ def _load_w06_plan_materialization(
     *,
     plan_commit: str,
     plan_repository: Path,
+    candidate_repository: Path,
+    candidate_commit: str,
 ) -> dict[str, Any]:
-    """Load and rederive D-pinned W06 graph/solution evidence.
+    """Derive W06 from approved YAML and compare it with retained evidence.
 
-    The materialization is a retained record of the approved Plan solve.  Its
-    own source commit may be newer than the approved Plan commit; that is why
-    both identities are verified independently instead of treating a receipt
-    hash as proof of an approved closure.
+    D may retain a later solution because a solution cannot be committed into
+    the source commit it describes.  It cannot, however, introduce a later
+    graph: the only graph eligible for Luet receipt verification is composed
+    from the exact approved YAML and the closed candidate's catalog.
     """
 
     pin = descriptor.w06_plan_materialization_pin
+    source_pin = pin["plan_source"]
+    solution_pin = pin["solution"]
     try:
-        repository = Path(pin["repository"]).resolve(strict=True)
         expected_plan_repository = plan_repository.resolve(strict=True)
+        source_repository = Path(source_pin["repository"]).resolve(strict=True)
+        solution_repository = Path(solution_pin["repository"]).resolve(strict=True)
     except OSError as exc:
-        raise CandidateReceiptSinkError("pinned W06 Plan materialization repository is unavailable") from exc
-    if repository != expected_plan_repository:
-        raise CandidateReceiptSinkError("W06 Plan materialization must be retained in the configured Plan/evidence repository")
-    commit, tree = _candidate_identity(repository, pin["commit"])
-    if commit != pin["commit"] or tree != pin["tree"]:
-        raise CandidateReceiptSinkError("pinned W06 Plan materialization Git identity mismatch")
-    raw = _git(repository, "show", f"{commit}:{pin['path']}")
-    if _hash_bytes(raw) != pin["content_sha256"]:
-        raise CandidateReceiptSinkError("pinned W06 Plan materialization content hash mismatch")
-    value = _object(raw, label="pinned W06 Plan materialization")
-    graph_pin = pin["canonical_graph"]
-    try:
-        graph_repository = Path(graph_pin["repository"]).resolve(strict=True)
-    except OSError as exc:
-        raise CandidateReceiptSinkError("pinned W06 canonical graph repository is unavailable") from exc
-    if graph_repository != expected_plan_repository:
-        raise CandidateReceiptSinkError("W06 canonical graph must be retained in the configured Plan/evidence repository")
-    graph_commit, graph_tree = _candidate_identity(graph_repository, graph_pin["commit"])
-    if graph_commit != graph_pin["commit"] or graph_tree != graph_pin["tree"]:
-        raise CandidateReceiptSinkError("pinned W06 canonical graph Git identity mismatch")
-    graph_raw = _git(graph_repository, "show", f"{graph_commit}:{graph_pin['path']}")
-    if _hash_bytes(graph_raw) != graph_pin["content_sha256"]:
-        raise CandidateReceiptSinkError("pinned W06 canonical graph content hash mismatch")
-    canonical_graph = _object(graph_raw, label="pinned W06 canonical graph")
-    required = {
-        "schema",
-        "plan_commit",
-        "graph",
-        "graph_hash",
-        "solution",
-        "solution_hash",
-        "closure_hash",
-        "provider_id",
-        "binary_sha256",
-    }
-    if set(value) != required or value.get("schema") != W06_PLAN_MATERIALIZATION_SCHEMA:
-        raise CandidateReceiptSinkError("W06 Plan materialization schema is invalid")
-    graph = value.get("graph")
-    solution = value.get("solution")
-    if not isinstance(graph, Mapping) or not isinstance(solution, Mapping):
-        raise CandidateReceiptSinkError("W06 Plan materialization graph or solution is invalid")
+        raise CandidateReceiptSinkError("pinned W06 Plan source or solution repository is unavailable") from exc
+    if source_repository != expected_plan_repository or solution_repository != expected_plan_repository:
+        raise CandidateReceiptSinkError("W06 Plan source and solution must be retained in the configured Plan/evidence repository")
+    source_commit, source_tree = _candidate_identity(source_repository, source_pin["commit"])
     if (
-        value.get("plan_commit") != plan_commit
-        or dict(graph) != canonical_graph
-        or value.get("graph_hash") != graph_hash(canonical_graph)
-        or value.get("provider_id") != PROVIDER_ID
-        or value.get("binary_sha256") != PINNED_LUET_BINARY_SHA256
-        or value.get("solution_hash") != solution.get("solution_hash")
-        or value.get("closure_hash") != solution.get("closure_hash")
+        source_commit != plan_commit
+        or source_commit != source_pin["commit"]
+        or source_tree != source_pin["tree"]
     ):
-        raise CandidateReceiptSinkError("W06 Plan materialization binding mismatch")
-    if (
-        not isinstance(value.get("solution_hash"), str)
-        or _SHA256.fullmatch(value["solution_hash"]) is None
-        or not isinstance(value.get("closure_hash"), str)
-        or _SHA256.fullmatch(value["closure_hash"]) is None
-    ):
-        raise CandidateReceiptSinkError("W06 Plan materialization solution identity is invalid")
+        raise CandidateReceiptSinkError("pinned W06 Plan source must be the exact approved Plan commit")
+    source_raw = _git(source_repository, "show", f"{source_commit}:{source_pin['path']}")
+    if _hash_bytes(source_raw) != source_pin["content_sha256"]:
+        raise CandidateReceiptSinkError("pinned W06 Plan source content hash mismatch")
+    solution_commit, solution_tree = _candidate_identity(solution_repository, solution_pin["commit"])
+    if solution_commit != solution_pin["commit"] or solution_tree != solution_pin["tree"]:
+        raise CandidateReceiptSinkError("pinned W06 Plan solution Git identity mismatch")
+    solution_raw = _git(solution_repository, "show", f"{solution_commit}:{solution_pin['path']}")
+    if _hash_bytes(solution_raw) != solution_pin["content_sha256"]:
+        raise CandidateReceiptSinkError("pinned W06 Plan solution content hash mismatch")
+    solution = _object(solution_raw, label="pinned W06 Plan solution")
     try:
-        normalized_graph = normalize_conformance_graph(canonical_graph)
-        # Re-solve the exact retained graph.  The expected Luet closure comes
-        # from the signed/pinned materialization only after native derivation
-        # establishes that it is the sole dispatchable solution.
+        execution = yaml.safe_load(source_raw)
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise CandidateReceiptSinkError("pinned W06 Plan source YAML is invalid") from exc
+    if not isinstance(execution, Mapping):
+        raise CandidateReceiptSinkError("pinned W06 Plan source YAML must be an object")
+    catalog_raw = _git(candidate_repository, "show", f"{candidate_commit}:{W06_CANDIDATE_CATALOG_PATH}")
+    catalog = _object(catalog_raw, label="candidate W06 provider catalog")
+    try:
+        canonical_graph = compose_catalog(execution, catalog, plan_commit=plan_commit)
         expected_solution = solve(
-            normalized_graph,
+            canonical_graph,
             expected_plan_commit=plan_commit,
             conformance_result={
                 "provider_id": PROVIDER_ID,
                 "available": True,
-                "closure_hash": value["closure_hash"],
+                "closure_hash": solution["closure_hash"],
             },
         )
         validate_for_dispatch(solution, current_plan_commit=plan_commit)
-    except (PlanResolutionError, ValueError) as exc:
-        raise CandidateReceiptSinkError("W06 Plan materialization is not dispatchable") from exc
+    except (KeyError, PlanResolutionError, ValueError) as exc:
+        raise CandidateReceiptSinkError("W06 source-derived Plan solution is not dispatchable") from exc
     if dict(solution) != expected_solution:
-        raise CandidateReceiptSinkError("W06 Plan materialization solution does not match its exact graph")
+        raise CandidateReceiptSinkError("W06 Plan solution does not match the source-derived canonical graph")
     return {
         "pin": pin,
-        "materialization_hash": _hash(value),
+        "materialization_hash": _hash({"plan_source": source_pin, "solution": solution_pin}),
         "graph": canonical_graph,
-        "graph_hash": value["graph_hash"],
-        "solution_hash": value["solution_hash"],
-        "closure_hash": value["closure_hash"],
-        "provider_id": value["provider_id"],
-        "binary_sha256": value["binary_sha256"],
+        "graph_hash": graph_hash(canonical_graph),
+        "solution_hash": solution["solution_hash"],
+        "closure_hash": solution["closure_hash"],
+        "provider_id": PROVIDER_ID,
+        "binary_sha256": PINNED_LUET_BINARY_SHA256,
     }
 
 
@@ -1406,6 +1384,8 @@ def verify_candidate_evidence_bundle(
         candidate_evidence_descriptor,
         plan_commit=plan_commit,
         plan_repository=plan_repository,
+        candidate_repository=repository,
+        candidate_commit=source_commit,
     )
     bundle = validate_candidate_evidence_bundle(sink.fetch_object(candidate_evidence_bundle_ref(source_commit)))
     if bundle["source_commit"] != source_commit or bundle["source_tree"] != source_tree or bundle["plan_commit"] != plan_commit:
@@ -1631,25 +1611,29 @@ def candidate_admission_gate(
         candidate_repository=repo,
     )
     try:
-        w06_materialization_repository = Path(
-            candidate_evidence_descriptor.w06_plan_materialization_pin["repository"]
+        w06_plan_source_repository = Path(
+            candidate_evidence_descriptor.w06_plan_materialization_pin["plan_source"]["repository"]
+        ).resolve(strict=True)
+        w06_solution_repository = Path(
+            candidate_evidence_descriptor.w06_plan_materialization_pin["solution"]["repository"]
         ).resolve(strict=True)
         approved_plan_repository = Path(plan_authority["repository"]).resolve(strict=True)
     except OSError as exc:
-        raise CandidateReceiptSinkError("W06 materialization or approved Plan repository is unavailable") from exc
+        raise CandidateReceiptSinkError("W06 Plan source, solution, or approved Plan repository is unavailable") from exc
+    if w06_plan_source_repository != approved_plan_repository or w06_solution_repository != approved_plan_repository:
+        raise CandidateReceiptSinkError("W06 Plan source and solution must use the approved Plan/evidence repository")
     receipt_roots = (
         candidate_sink.repository,
         candidate_evidence_descriptor.authority_repository,
         execution_sink.repository,
-        w06_materialization_repository,
     )
     if any(
         _paths_overlap(left, right)
         for index, left in enumerate(receipt_roots)
         for right in receipt_roots[index + 1 :]
     ):
-        raise CandidateReceiptSinkError("candidate evidence, descriptor, W06 materialization, and execution evidence roots must be disjoint")
-    if any(_paths_overlap(approved_plan_repository, root) for root in receipt_roots[:3]):
+        raise CandidateReceiptSinkError("candidate evidence, descriptor, and execution evidence roots must be disjoint")
+    if any(_paths_overlap(approved_plan_repository, root) for root in receipt_roots):
         raise CandidateReceiptSinkError("approved Plan repository must be disjoint from candidate evidence, descriptor, and execution evidence roots")
     plan_commit = plan_authority["approved_commit"]
     source_commit, source_tree = _candidate_identity(repo, candidate)

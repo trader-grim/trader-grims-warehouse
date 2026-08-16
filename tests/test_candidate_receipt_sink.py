@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tgw.bootstrap_deployment_contract import (
@@ -29,12 +30,13 @@ from tgw.candidate_receipt_sink import (
     GOVERNED_EXECUTION_BUNDLE_SCHEMA,
     INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA,
     PINNED_CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA,
-    PINNED_W06_CANONICAL_GRAPH_SCHEMA,
     PINNED_W06_PLAN_MATERIALIZATION_SCHEMA,
+    PINNED_W06_PLAN_SOLUTION_SCHEMA,
+    PINNED_W06_PLAN_SOURCE_SCHEMA,
     RECEIPT_SINK_MANIFEST_SCHEMA,
     RECEIPT_SINK_SCHEMA,
     ROLLBACK_MANIFEST_SCHEMA,
-    W06_PLAN_MATERIALIZATION_SCHEMA,
+    W06_PLAN_SOURCE_PATH,
     CandidateReceiptSinkError,
     PinnedGitReceiptSink,
     candidate_admission_gate,
@@ -53,6 +55,7 @@ from tgw.execution_resources import (
     resource_service_descriptor_hash,
 )
 from tgw.governed_execution_receipt import create_candidate_governed_execution_receipt
+from tgw.plan_catalog import compose_catalog
 from tgw.plan_luet import PINNED_LUET_BINARY_SHA256, PROVIDER_ID
 from tgw.plan_solver import solve
 from tgw.qualified_execution_service import (
@@ -93,14 +96,14 @@ def git(repo, *args):
     return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
 
 
-def candidate_repository(tmp_path):
+def candidate_repository(tmp_path, *, plan_commit):
     repo = tmp_path / "candidate"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
     (repo / "app.py").write_text("answer = 0\n")
-    _install_test_contract(repo)
+    _install_test_contract(repo, plan_commit=plan_commit)
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "baseline"], cwd=repo, check=True)
     (repo / "app.py").write_text("answer = 42\n")
@@ -112,7 +115,48 @@ def candidate_repository(tmp_path):
     return repo, git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD^{tree}")
 
 
-def _install_test_contract(repo: Path):
+def _governed_execution_source():
+    return {
+        "schema": "tgw-plan-execution/v2",
+        "plan_id": "PLAN-GOVERNED-EXECUTION-PLATFORM",
+        "version": 1,
+        "target": {
+            "profile": "production",
+            "required_capabilities": ["coding.governed-execution@1"],
+        },
+        "work_units": [
+            {"id": "W06", "establishes": ["plan.capability-resolution@2"]},
+            {
+                "id": "W07",
+                "requires_capabilities": ["plan.capability-resolution@2"],
+                "establishes": ["coding.governed-execution@1"],
+            },
+        ],
+    }
+
+
+def _governed_provider_catalog(plan_commit, *, synthetic=False):
+    provider_prefix = "synthetic" if synthetic else "canonical"
+    return {
+        "schema": "tgw-plan-provider-catalog/v1",
+        "id": f"{provider_prefix}-governed-execution-platform-providers@1",
+        "plan_id": "PLAN-GOVERNED-EXECUTION-PLATFORM",
+        "plan_commit": plan_commit,
+        "profiles": {"production": {"minimum_state": "operationally_verified"}},
+        "capabilities": ["plan.capability-resolution@2", "coding.governed-execution@1"],
+        "providers": [
+            {"id": f"{provider_prefix}-plan-resolver", "provides": ["plan.capability-resolution@2"]},
+            {
+                "id": f"{provider_prefix}-governed-execution",
+                "provides": ["coding.governed-execution@1"],
+                "requires": ["plan.capability-resolution@2"],
+            },
+        ],
+        "observations": [],
+    }
+
+
+def _install_test_contract(repo: Path, *, plan_commit):
     runner = repo / "scripts" / "candidate-test-runner.py"
     runner.parent.mkdir(parents=True, exist_ok=True)
     runner.write_text("# fixture runner\n")
@@ -137,6 +181,8 @@ def _install_test_contract(repo: Path):
             sort_keys=True,
         )
     )
+    governed_catalog = repo / "agent-services" / "catalogs" / "governed-execution-platform-v1.json"
+    governed_catalog.write_bytes(canonical(_governed_provider_catalog(plan_commit)))
 
 
 def approved_plan_repository(tmp_path):
@@ -145,7 +191,9 @@ def approved_plan_repository(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "plan@example.invalid"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Plan authority"], cwd=repo, check=True)
-    (repo / "plan.txt").write_text("approved governed execution Plan\n")
+    source = repo / W06_PLAN_SOURCE_PATH
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(yaml.safe_dump(_governed_execution_source(), sort_keys=True))
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "approved Plan"], cwd=repo, check=True)
     commit = git(repo, "rev-parse", "HEAD")
@@ -167,84 +215,57 @@ def _dispatchable_w06_solution(graph, *, plan_commit):
 
 
 def w06_plan_materialization(plan_repository, *, plan_commit, corrupt=None):
-    """Retain the W06 graph and solve in the configured Plan/evidence repo."""
+    """Pin fb9 source YAML and retain only a source-derived later solution."""
 
-    canonical_graph = {
-        "schema": "tgw-plan/v2",
-        "plan_commit": plan_commit,
-        "capabilities": ["plan.capability-resolution@2", "coding.governed-execution@1"],
-        "providers": [
-            {"id": "canonical-plan-resolver", "provides": ["plan.capability-resolution@2"]},
-            {
-                "id": "canonical-governed-execution",
-                "provides": ["coding.governed-execution@1"],
-                "requires": ["plan.capability-resolution@2"],
-            },
-        ],
-        "observations": [],
-        "target": {
-            "id": "GOVERNED-EXECUTION-PLATFORM",
-            "profile": "production",
-            "minimum_state": "operationally_verified",
-            "required_capabilities": ["coding.governed-execution@1"],
-        },
-    }
-    graph = canonical_graph
-    if corrupt == "synthetic-graph":
-        graph = {
-            "schema": "tgw-plan/v2",
-            "plan_commit": plan_commit,
-            "capabilities": ["candidate.admission@1"],
-            "providers": [{"id": "candidate-admission", "provides": ["candidate.admission@1"]}],
-            "observations": [],
-            "target": {
-                "id": "fixture-self-declared-plan",
-                "profile": "production",
-                "minimum_state": "operationally_verified",
-                "required_capabilities": ["candidate.admission@1"],
-            },
-        }
+    source_raw = subprocess.check_output(
+        ["git", "show", f"{plan_commit}:{W06_PLAN_SOURCE_PATH}"],
+        cwd=plan_repository,
+    )
+    execution = yaml.safe_load(source_raw)
+    assert isinstance(execution, dict)
+    graph = compose_catalog(
+        execution,
+        _governed_provider_catalog(plan_commit, synthetic=corrupt == "synthetic-graph"),
+        plan_commit=plan_commit,
+    )
     solution = _dispatchable_w06_solution(graph, plan_commit=plan_commit)
-    materialization = {
-        "schema": W06_PLAN_MATERIALIZATION_SCHEMA,
-        "plan_commit": plan_commit,
-        "graph": graph,
-        "graph_hash": object_hash(graph),
-        "solution": solution,
-        "solution_hash": solution["solution_hash"],
-        "closure_hash": solution["closure_hash"],
-        "provider_id": PROVIDER_ID,
-        "binary_sha256": PINNED_LUET_BINARY_SHA256,
-    }
     if corrupt == "solution":
-        materialization["solution"] = {**solution, "dispatchable": False}
+        solution = {**solution, "dispatchable": False}
     elif corrupt == "graph":
-        materialization["graph"] = {**graph, "plan_commit": "0" * 40}
-    canonical_graph_raw = write_json(plan_repository / "evidence" / "w06-canonical-graph.json", canonical_graph)
-    raw = write_json(plan_repository / "evidence" / "w06-materialization.json", materialization)
+        solution = {**solution, "solution_hash": "sha256:" + "0" * 64}
+    solution_path = f"plan/execution/solutions/GOVERNED-EXECUTION-PLATFORM-{plan_commit[:7]}.json"
+    raw = write_json(plan_repository / solution_path, solution)
     subprocess.run(["git", "add", "."], cwd=plan_repository, check=True)
-    subprocess.run(["git", "commit", "-qm", "retain W06 Plan graph and materialization evidence"], cwd=plan_repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "retain W06 Plan solution evidence"], cwd=plan_repository, check=True)
     evidence_commit = git(plan_repository, "rev-parse", "HEAD")
     evidence_tree = git(plan_repository, "rev-parse", "HEAD^{tree}")
     pin = {
         "schema": PINNED_W06_PLAN_MATERIALIZATION_SCHEMA,
-        "repository": str(plan_repository.resolve()),
-        "commit": evidence_commit,
-        "tree": evidence_tree,
-        "path": "evidence/w06-materialization.json",
-        "content_sha256": digest(raw),
-        "canonical_graph": {
-            "schema": PINNED_W06_CANONICAL_GRAPH_SCHEMA,
+        "plan_source": {
+            "schema": PINNED_W06_PLAN_SOURCE_SCHEMA,
+            "repository": str(plan_repository.resolve()),
+            "commit": plan_commit,
+            "tree": git(plan_repository, "rev-parse", f"{plan_commit}^{{tree}}"),
+            "path": W06_PLAN_SOURCE_PATH,
+            "content_sha256": digest(source_raw),
+        },
+        "solution": {
+            "schema": PINNED_W06_PLAN_SOLUTION_SCHEMA,
             "repository": str(plan_repository.resolve()),
             "commit": evidence_commit,
             "tree": evidence_tree,
-            "path": "evidence/w06-canonical-graph.json",
-            "content_sha256": digest(canonical_graph_raw),
+            "path": solution_path,
+            "content_sha256": digest(raw),
         },
     }
     if corrupt == "missing":
-        pin["path"] = "absent-materialization.json"
-    return pin, materialization
+        pin["solution"] = {**pin["solution"], "commit": "0" * 40}
+    return pin, {
+        "graph": graph,
+        "solution": solution,
+        "solution_hash": solution["solution_hash"],
+        "closure_hash": solution["closure_hash"],
+    }
 
 
 def service_catalog(plan_commit):
@@ -1230,8 +1251,8 @@ def _gate(candidate, plan_repository, descriptor_config, execution_config):
 
 
 def test_acyclic_two_store_gate_reads_exact_committed_artifacts_and_cli_admits(tmp_path):
-    candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    candidate, commit, tree = candidate_repository(tmp_path, plan_commit=plan_commit)
     candidate_sink, authority, execution_sink, descriptor_config, execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
@@ -1243,7 +1264,7 @@ def test_acyclic_two_store_gate_reads_exact_committed_artifacts_and_cli_admits(t
     (execution_sink / "governed-execution" / "implementation" / "role_receipt.json").write_text("{}")
     descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
     binding = descriptor.card_binding()
-    assert binding["ref"] == "candidate-evidence:candidate-evidence-sink:descriptor:v4"
+    assert binding["ref"] == "candidate-evidence:candidate-evidence-sink:descriptor:v5"
     assert binding["hash"].startswith("sha256:")
     assert descriptor.identity["repository"] == str(authority.resolve())
     assert descriptor.candidate_evidence_sink_descriptor["repository"] == str(candidate_sink.resolve())
@@ -1285,8 +1306,8 @@ def test_acyclic_two_store_gate_reads_exact_committed_artifacts_and_cli_admits(t
 
 
 def test_gate_holds_when_x_bundle_artifact_does_not_match(tmp_path):
-    candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    candidate, commit, tree = candidate_repository(tmp_path, plan_commit=plan_commit)
     _s, _d, _x, descriptor_config, execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
@@ -1305,8 +1326,8 @@ def test_gate_holds_when_x_bundle_artifact_does_not_match(tmp_path):
 
 
 def test_gate_rejects_a_legacy_or_substituted_card_receipt_sink_binding(tmp_path):
-    candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    candidate, commit, tree = candidate_repository(tmp_path, plan_commit=plan_commit)
     _s, _d, _x, descriptor_config, execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
@@ -1344,8 +1365,8 @@ def test_gate_rejects_a_legacy_or_substituted_card_receipt_sink_binding(tmp_path
     ],
 )
 def test_gate_requires_every_retained_s_or_x_evidence_artifact(tmp_path, corruption):
-    candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    candidate, commit, tree = candidate_repository(tmp_path, plan_commit=plan_commit)
     _s, _d, _x, descriptor_config, execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
@@ -1368,10 +1389,10 @@ def test_gate_requires_every_retained_s_or_x_evidence_artifact(tmp_path, corrupt
     assert gate["reasons"] == expected
 
 
-@pytest.mark.parametrize("corruption", ["solution", "graph", "missing", "synthetic-graph"])
+@pytest.mark.parametrize("corruption", ["solution", "graph", "missing"])
 def test_gate_requires_a_valid_d_pinned_w06_plan_materialization(tmp_path, corruption):
-    candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    candidate, commit, tree = candidate_repository(tmp_path, plan_commit=plan_commit)
     _s, _d, _x, descriptor_config, execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
@@ -1390,9 +1411,35 @@ def test_gate_requires_a_valid_d_pinned_w06_plan_materialization(tmp_path, corru
     ]
 
 
-def test_gate_rejects_a_one_store_cycle_even_when_both_pins_are_individually_valid(tmp_path):
-    candidate, commit, tree = candidate_repository(tmp_path)
+def test_gate_rejects_a_coherent_later_synthetic_graph_despite_the_pinned_fb9_yaml(tmp_path):
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    candidate, commit, tree = candidate_repository(tmp_path, plan_commit=plan_commit)
+    _s, _d, _x, descriptor_config, execution_config = pinned_sinks(
+        tmp_path,
+        candidate_repo=candidate,
+        source_commit=commit,
+        source_tree=tree,
+        plan_commit=plan_commit,
+        plan_repository=plan_repository,
+        corrupt_w06_materialization="synthetic-graph",
+    )
+    descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
+    source_pin = descriptor.w06_plan_materialization_pin["plan_source"]
+    assert source_pin["commit"] == plan_commit
+    assert source_pin["path"] == W06_PLAN_SOURCE_PATH
+
+    gate = _gate(candidate, plan_repository, descriptor_config, execution_config)
+
+    assert gate["allowed"] is False
+    assert gate["reasons"] == [
+        "missing-or-invalid-candidate-evidence",
+        "missing-or-invalid-independent-review-evidence",
+    ]
+
+
+def test_gate_rejects_a_one_store_cycle_even_when_both_pins_are_individually_valid(tmp_path):
+    plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    candidate, commit, tree = candidate_repository(tmp_path, plan_commit=plan_commit)
     _s, _d, _x, descriptor_config, _execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
@@ -1417,8 +1464,8 @@ def test_gate_rejects_a_one_store_cycle_even_when_both_pins_are_individually_val
 
 
 def test_pinned_candidate_evidence_descriptor_rejects_a_tampered_dynamic_s_pin(tmp_path):
-    candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    candidate, commit, tree = candidate_repository(tmp_path, plan_commit=plan_commit)
     _s, _d, _x, descriptor_config, _execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
@@ -1435,8 +1482,8 @@ def test_pinned_candidate_evidence_descriptor_rejects_a_tampered_dynamic_s_pin(t
 
 
 def test_candidate_local_descriptor_configuration_or_repository_is_refused(tmp_path):
-    candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    candidate, commit, tree = candidate_repository(tmp_path, plan_commit=plan_commit)
     _s, _d, _x, descriptor_config, execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
@@ -1456,8 +1503,8 @@ def test_candidate_local_descriptor_configuration_or_repository_is_refused(tmp_p
 
 
 def test_cli_requires_both_operator_configured_evidence_roots(tmp_path):
-    candidate, _commit, _tree = candidate_repository(tmp_path)
     plan_repository, _plan_commit = approved_plan_repository(tmp_path)
+    candidate, _commit, _tree = candidate_repository(tmp_path, plan_commit=_plan_commit)
     completed = subprocess.run(
         [
             sys.executable,
@@ -1534,8 +1581,8 @@ def _bootstrap_contract_resolver(candidate, plan_repository, descriptor_config, 
 
 
 def test_bootstrap_contract_is_derived_from_exact_w08_s_d_x_evidence_and_retained_in_disjoint_y(tmp_path):
-    candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    candidate, commit, tree = candidate_repository(tmp_path, plan_commit=plan_commit)
     _s, _d, execution_sink, descriptor_config, execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
@@ -1600,8 +1647,8 @@ def test_bootstrap_contract_is_derived_from_exact_w08_s_d_x_evidence_and_retaine
     ],
 )
 def test_bootstrap_contract_rejects_widened_or_mismatched_w08_and_closure_bindings(tmp_path, corruption):
-    candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    candidate, commit, tree = candidate_repository(tmp_path, plan_commit=plan_commit)
     _s, _d, execution_sink, descriptor_config, execution_config = pinned_sinks(
         tmp_path,
         candidate_repo=candidate,
