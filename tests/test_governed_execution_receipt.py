@@ -23,8 +23,9 @@ from tgw.governed_execution_receipt import (
 ROOT = Path(__file__).resolve().parents[1]
 PLAN_COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
 RESOURCE_SERVICE = {
-    "schema": "tgw-registered-resource-service/v1",
+    "schema": "tgw-registered-resource-service/v2",
     "id": "candidate-resource-service",
+    "client_id": "candidate-test-client",
     "endpoint": "https://resources.invalid",
     "credential_env": None,
     "timeout_seconds": 5,
@@ -40,11 +41,12 @@ def canonical_hash(value):
 
 
 RESOURCE_SERVICE_CATALOG = {
-    "schema": "tgw-registered-resource-service-catalog/v2",
+    "schema": "tgw-registered-resource-service-catalog/v3",
     "catalog_ref": "catalog:candidate-resource-service@1",
     "plan_commit": PLAN_COMMIT,
     "services": [{
         "id": RESOURCE_SERVICE["id"],
+        "client_id": RESOURCE_SERVICE["client_id"],
         "descriptor_hash": canonical_hash(RESOURCE_SERVICE),
         "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
         "attestation_key_id": TEST_ATTESTATION_KEY_ID,
@@ -80,6 +82,7 @@ def card(tree):
         "plan_commit": PLAN_COMMIT,
         "resource_service": {
             "id": RESOURCE_SERVICE["id"],
+            "client_id": RESOURCE_SERVICE["client_id"],
             "descriptor_hash": canonical_hash(RESOURCE_SERVICE),
             "catalog_ref": RESOURCE_SERVICE_CATALOG["catalog_ref"],
             "catalog_hash": resource_service_catalog_hash(RESOURCE_SERVICE_CATALOG),
@@ -116,8 +119,9 @@ def resource_receipt(card_value):
 def role_receipt(card_value, resource_value):
     handoff_hash = "sha256:" + "b" * 64
     attestation_payload = {
-        "schema": "tgw-registered-resource-retrieval-attestation/v2",
+        "schema": "tgw-registered-resource-retrieval-attestation/v3",
         "service_id": RESOURCE_SERVICE["id"],
+        "client_id": RESOURCE_SERVICE["client_id"],
         "run_id": "candidate-run",
         "card_hash": card_value["card_hash"],
         "role": "implementation",
@@ -144,6 +148,7 @@ def role_receipt(card_value, resource_value):
         "harness_retrieval_attestation_hash": attestation["attestation_hash"],
         "harness_retrieval_attestation": attestation,
         "resource_service_descriptor_hash": canonical_hash(RESOURCE_SERVICE),
+        "resource_service_client_id": RESOURCE_SERVICE["client_id"],
         "resource_service_catalog_ref": RESOURCE_SERVICE_CATALOG["catalog_ref"],
         "resource_service_catalog_hash": resource_service_catalog_hash(RESOURCE_SERVICE_CATALOG),
         "outcome": "satisfied",

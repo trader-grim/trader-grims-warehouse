@@ -118,18 +118,20 @@ def approved_plan_repository(tmp_path):
 
 def service_catalog(plan_commit):
     service = {
-        "schema": "tgw-registered-resource-service/v1",
+        "schema": "tgw-registered-resource-service/v2",
         "id": "candidate-receipt-service",
+        "client_id": "candidate-receipt-client",
         "endpoint": "https://receipts.invalid",
         "credential_env": None,
         "timeout_seconds": 5,
     }
     catalog = {
-        "schema": "tgw-registered-resource-service-catalog/v2",
+        "schema": "tgw-registered-resource-service-catalog/v3",
         "catalog_ref": "catalog:candidate-receipt-service@1",
         "plan_commit": plan_commit,
         "services": [{
             "id": service["id"],
+            "client_id": service["client_id"],
             "descriptor_hash": resource_service_descriptor_hash(service),
             "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
             "attestation_key_id": TEST_ATTESTATION_KEY_ID,
@@ -164,6 +166,7 @@ def role_evidence(*, role, source_commit, source_tree, plan_commit, receipt_sink
         "plan_commit": plan_commit,
         "resource_service": {
             "id": service["id"],
+            "client_id": service["client_id"],
             "descriptor_hash": resource_service_descriptor_hash(service),
             "catalog_ref": catalog["catalog_ref"],
             "catalog_hash": resource_service_catalog_hash(catalog),
@@ -186,8 +189,9 @@ def role_evidence(*, role, source_commit, source_tree, plan_commit, receipt_sink
     execution_identity = f"isolated-context:{role}"
     handoff_hash = "sha256:" + hashlib.sha256(f"handoff:{role}".encode()).hexdigest()
     attestation_payload = {
-        "schema": "tgw-registered-resource-retrieval-attestation/v2",
+        "schema": "tgw-registered-resource-retrieval-attestation/v3",
         "service_id": service["id"],
+        "client_id": service["client_id"],
         "run_id": f"run-{role}",
         "card_hash": card["card_hash"],
         "role": role,
@@ -219,6 +223,7 @@ def role_evidence(*, role, source_commit, source_tree, plan_commit, receipt_sink
         "harness_retrieval_attestation_hash": attestation["attestation_hash"],
         "harness_retrieval_attestation": attestation,
         "resource_service_descriptor_hash": card["resource_service"]["descriptor_hash"],
+        "resource_service_client_id": service["client_id"],
         "resource_service_catalog_ref": catalog["catalog_ref"],
         "resource_service_catalog_hash": card["resource_service"]["catalog_hash"],
         "outcome": "satisfied",

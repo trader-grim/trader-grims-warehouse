@@ -145,8 +145,9 @@ def test_selection_fields_flow_mechanically_into_promptcraft_card(tmp_path):
     provider_fields = execution_card_provider_fields(selection)
     plan_commit = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
     resource_service = {
-        "schema": "tgw-registered-resource-service/v1",
+        "schema": "tgw-registered-resource-service/v2",
         "id": "registry-resource-service",
+        "client_id": "registry-test-client",
         "endpoint": "https://resources.invalid",
         "credential_env": None,
         "timeout_seconds": 5,
@@ -164,6 +165,7 @@ def test_selection_fields_flow_mechanically_into_promptcraft_card(tmp_path):
             "plan_commit": plan_commit,
             "resource_service": {
                 "id": resource_service["id"],
+                "client_id": resource_service["client_id"],
                 "descriptor_hash": "sha256:" + hashlib.sha256(
                     json.dumps(resource_service, sort_keys=True, separators=(",", ":")).encode()
                 ).hexdigest(),

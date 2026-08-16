@@ -150,7 +150,9 @@ def dispatch_role(
         verified_service, verified_catalog = verify_card_resource_service(
             card, resource_service, resource_service_catalog,
         )
-        attestation_key = resource_service_attestation_key(verified_catalog, verified_service["id"])
+        attestation_key = resource_service_attestation_key(
+            verified_catalog, verified_service["id"], verified_service["client_id"],
+        )
         resource_receipt = verify_card_resources(card, resource_resolver)
     except ResourceVerificationError as exc:
         return _receipt(
@@ -277,6 +279,7 @@ def dispatch_role(
             "harness_retrieval_attestation_hash": attestation_hash,
             "harness_retrieval_attestation": harness_retrieval_attestation,
             "resource_service_descriptor_hash": resource_service_descriptor_hash(verified_service),
+            "resource_service_client_id": verified_service["client_id"],
             "resource_service_catalog_ref": verified_catalog["catalog_ref"],
             "resource_service_catalog_hash": resource_service_catalog_hash(verified_catalog),
             "outcome": outcome,
@@ -308,6 +311,7 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
         or not isinstance(receipt.get("resource_receipt_hash"), str)
         or receipt.get("harness_resource_receipt_hash") != receipt.get("resource_receipt_hash")
         or not isinstance(receipt.get("resource_service_descriptor_hash"), str)
+        or not isinstance(receipt.get("resource_service_client_id"), str)
         or not isinstance(receipt.get("resource_service_catalog_ref"), str)
         or not isinstance(receipt.get("resource_service_catalog_hash"), str)
         or not isinstance(receipt.get("harness_retrieval_attestation_hash"), str)
@@ -324,6 +328,7 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
                 expected={
                     "card_hash": receipt["card_hash"], "role": receipt["role"],
                     "execution_identity": receipt["execution_identity"],
+                    "client_id": receipt["resource_service_client_id"],
                     "handoff_hash": receipt["handoff_hash"],
                     "resource_receipt_hash": receipt["resource_receipt_hash"],
                 },

@@ -30,8 +30,9 @@ RESOURCE_CONTENT = {
     "receipt:r": "receipt sink",
 }
 RESOURCE_SERVICE = {
-    "schema": "tgw-registered-resource-service/v1",
+    "schema": "tgw-registered-resource-service/v2",
     "id": "unit-resource-service",
+    "client_id": "unit-test-client",
     "endpoint": "https://resources.invalid",
     "credential_env": None,
     "timeout_seconds": 5,
@@ -48,11 +49,12 @@ def service_hash():
 
 
 RESOURCE_SERVICE_CATALOG = {
-    "schema": "tgw-registered-resource-service-catalog/v2",
+    "schema": "tgw-registered-resource-service-catalog/v3",
     "catalog_ref": "catalog:unit-resource-service@1",
     "plan_commit": PLAN_COMMIT,
     "services": [{
         "id": RESOURCE_SERVICE["id"],
+        "client_id": RESOURCE_SERVICE["client_id"],
         "descriptor_hash": service_hash(),
         "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
         "attestation_key_id": TEST_ATTESTATION_KEY_ID,
@@ -85,8 +87,9 @@ class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
         ):
             raise ResourceVerificationError("test retrieval attestation key is invalid")
         payload = {
-            "schema": "tgw-registered-resource-retrieval-attestation/v2",
+            "schema": "tgw-registered-resource-retrieval-attestation/v3",
             "service_id": RESOURCE_SERVICE["id"], "run_id": "unit-run",
+            "client_id": RESOURCE_SERVICE["client_id"],
             "card_hash": kwargs["card_hash"], "role": kwargs["role"],
             "execution_identity": kwargs["execution_identity"], "handoff_hash": kwargs["handoff_hash"],
             "resource_receipt_hash": kwargs["resource_receipt_hash"], "resources": kwargs["resources"],
@@ -141,7 +144,7 @@ def card_template(card_id):
         "solution_id": "sha256:solution",
         "plan_commit": PLAN_COMMIT,
         "resource_service": {
-            "id": RESOURCE_SERVICE["id"], "descriptor_hash": service_hash(),
+            "id": RESOURCE_SERVICE["id"], "client_id": RESOURCE_SERVICE["client_id"], "descriptor_hash": service_hash(),
             "catalog_ref": RESOURCE_SERVICE_CATALOG["catalog_ref"],
             "catalog_hash": resource_service_catalog_hash(RESOURCE_SERVICE_CATALOG),
         },

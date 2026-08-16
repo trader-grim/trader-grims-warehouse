@@ -19,8 +19,9 @@ from promptcraft.handoff import (  # noqa: E402
 )
 
 RESOURCE_SERVICE = {
-    "schema": "tgw-registered-resource-service/v1",
+    "schema": "tgw-registered-resource-service/v2",
     "id": "promptcraft-resource-service",
+    "client_id": "promptcraft-test-client",
     "endpoint": "https://resources.invalid",
     "credential_env": None,
     "timeout_seconds": 5,
@@ -41,6 +42,7 @@ def card():
             "plan_commit": plan_commit,
             "resource_service": {
                 "id": RESOURCE_SERVICE["id"],
+                "client_id": RESOURCE_SERVICE["client_id"],
                 "descriptor_hash": canonical_hash(RESOURCE_SERVICE),
                 "catalog_ref": "catalog:promptcraft-resource-service@1",
                 "catalog_hash": "sha256:" + "a" * 64,

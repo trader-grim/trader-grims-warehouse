@@ -82,9 +82,11 @@ def _bound_card(
     resource_service = card.get("resource_service")
     if (
         not isinstance(resource_service, Mapping)
-        or set(resource_service) != {"id", "descriptor_hash", "catalog_ref", "catalog_hash"}
+        or set(resource_service) != {"id", "client_id", "descriptor_hash", "catalog_ref", "catalog_hash"}
         or not isinstance(resource_service["id"], str)
         or not resource_service["id"]
+        or not isinstance(resource_service["client_id"], str)
+        or not resource_service["client_id"]
         or not isinstance(resource_service["descriptor_hash"], str)
         or _SHA256.fullmatch(resource_service["descriptor_hash"]) is None
         or not isinstance(resource_service["catalog_ref"], str)
@@ -134,7 +136,7 @@ def create_candidate_governed_execution_receipt(
     try:
         verify_card_resource_service_catalog(card, resource_service_catalog)
         attestation_key = resource_service_attestation_key(
-            resource_service_catalog, card["resource_service"]["id"],
+            resource_service_catalog, card["resource_service"]["id"], card["resource_service"]["client_id"],
         )
     except ResourceVerificationError as exc:
         raise GovernedExecutionReceiptError(f"execution card resource service catalog is invalid: {exc}") from exc
@@ -159,6 +161,7 @@ def create_candidate_governed_execution_receipt(
         or role_receipt.get("selected_provider") != card["selected_provider"]
         or role_receipt.get("role") != card["role"]
         or role_receipt.get("resource_service_descriptor_hash") != card["resource_service"]["descriptor_hash"]
+        or role_receipt.get("resource_service_client_id") != card["resource_service"]["client_id"]
         or role_receipt.get("resource_service_catalog_ref") != card["resource_service"]["catalog_ref"]
         or role_receipt.get("resource_service_catalog_hash") != card["resource_service"]["catalog_hash"]
     ):
@@ -171,6 +174,7 @@ def create_candidate_governed_execution_receipt(
                 "execution_identity": role_receipt["execution_identity"],
                 "resource_receipt_hash": resource_hash, "resources": {name: bindings[name] for name in sorted(bindings)},
                 "service_id": card["resource_service"]["id"],
+                "client_id": card["resource_service"]["client_id"],
             },
             **attestation_key,
         )
@@ -192,6 +196,7 @@ def create_candidate_governed_execution_receipt(
         "harness_retrieval_attestation_hash": role_receipt["harness_retrieval_attestation_hash"],
         "harness_retrieval_attestation": dict(role_receipt["harness_retrieval_attestation"]),
         "service_id": card["resource_service"]["id"],
+        "service_client_id": card["resource_service"]["client_id"],
         "execution_identity": role_receipt["execution_identity"],
         "handoff_hash": role_receipt["handoff_hash"],
         "resource_service_descriptor_hash": card["resource_service"]["descriptor_hash"],
@@ -217,7 +222,7 @@ def verify_candidate_governed_execution_receipt(
     required = {
         "schema", "status", "source_commit", "source_tree", "plan_commit", "role",
         "selected_provider", "card_hash", "resource_receipt_hash", "harness_retrieval_attestation_hash",
-        "harness_retrieval_attestation", "service_id", "execution_identity", "handoff_hash",
+        "harness_retrieval_attestation", "service_id", "service_client_id", "execution_identity", "handoff_hash",
         "resource_service_descriptor_hash",
         "resource_service_catalog_ref", "resource_service_catalog_hash", "role_receipt_hash", "receipt_hash",
     }
@@ -243,12 +248,13 @@ def verify_candidate_governed_execution_receipt(
         raise GovernedExecutionReceiptError("candidate governed execution receipt attestation is invalid")
     try:
         attestation_key = resource_service_attestation_key(
-            resource_service_catalog, str(receipt["service_id"]),
+            resource_service_catalog, str(receipt["service_id"]), str(receipt["service_client_id"]),
         )
         validate_harness_retrieval_attestation(
             attestation,
             expected={
                 "service_id": receipt["service_id"], "card_hash": receipt["card_hash"],
+                "client_id": receipt["service_client_id"],
                 "role": receipt["role"], "execution_identity": receipt["execution_identity"],
                 "handoff_hash": receipt["handoff_hash"],
                 "resource_receipt_hash": receipt["resource_receipt_hash"],

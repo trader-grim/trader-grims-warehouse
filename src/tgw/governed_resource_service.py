@@ -34,16 +34,18 @@ from tgw.execution_resources import (
     issue_harness_retrieval_attestation,
 )
 
-SERVICE_CONFIG_SCHEMA = "tgw-governed-resource-service-config/v2"
+SERVICE_CONFIG_SCHEMA = "tgw-governed-resource-service-config/v3"
 # The resolver bounds the complete JSON response at 4 MiB.  Keep enough room
 # for base64 expansion and the response envelope, not merely the raw export.
 MAX_RESOURCE_BYTES = 3 * 1024 * 1024 - 1024
 MAX_REQUEST_BYTES = 128 * 1024
 
 _CONFIG_FIELDS = {
-    "schema", "service_id", "credential_env", "attestation_key_id",
-    "attestation_private_key_env", "harness_run_ttl_seconds", "resources",
+    "schema", "service_id", "clients", "attestation_key_id",
+    "attestation_private_key_env", "harness_run_ttl_seconds", "completed_run_ttl_seconds",
+    "max_completed_runs", "resources",
 }
+_CLIENT_FIELDS = {"id", "credential_env", "execution_identity", "allowed_roles"}
 _RESOURCE_FIELDS = {"ref", "path", "content_hash"}
 
 
@@ -108,6 +110,16 @@ def _valid_key_id(value: Any) -> bool:
     )
 
 
+def _valid_client_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and 1 <= len(value) <= 128
+        and value[0].isalnum()
+        and value[0].isascii()
+        and all(character.isascii() and (character.isalnum() or character in ".-_") for character in value)
+    )
+
+
 def _valid_identity(value: Any) -> bool:
     return isinstance(value, str) and 0 < len(value) <= 1024
 
@@ -143,14 +155,31 @@ class FrozenResource:
 
 
 @dataclass(frozen=True)
+class ResourceServiceClient:
+    """One configured credential principal for the resource service.
+
+    The bearer itself is runtime-only.  This durable configuration binds that
+    bearer source to the one client identity, execution identity, and role set
+    it is allowed to assert when it opens a retrieval run.
+    """
+
+    client_id: str
+    credential_env: str
+    execution_identity: str
+    allowed_roles: frozenset[str]
+
+
+@dataclass(frozen=True)
 class ResourceServiceConfig:
     """Validated configuration with resource bytes snapshotted at startup."""
 
     service_id: str
-    credential_env: str
+    clients: Mapping[str, ResourceServiceClient]
     attestation_key_id: str
     attestation_private_key_env: str
     harness_run_ttl_seconds: int
+    completed_run_ttl_seconds: int
+    max_completed_runs: int
     resources: Mapping[str, FrozenResource]
 
     @classmethod
@@ -160,14 +189,44 @@ class ResourceServiceConfig:
         if value.get("schema") != SERVICE_CONFIG_SCHEMA:
             raise ResourceServiceConfigurationError("governed resource service configuration schema is invalid")
         service_id = value.get("service_id")
-        credential_env = value.get("credential_env")
+        clients = value.get("clients")
         attestation_key_id = value.get("attestation_key_id")
         attestation_private_key_env = value.get("attestation_private_key_env")
         harness_run_ttl_seconds = value.get("harness_run_ttl_seconds")
+        completed_run_ttl_seconds = value.get("completed_run_ttl_seconds")
+        max_completed_runs = value.get("max_completed_runs")
         if not _valid_service_id(service_id):
             raise ResourceServiceConfigurationError("governed resource service identity is invalid")
-        if not _valid_credential_env(credential_env):
-            raise ResourceServiceConfigurationError("governed resource service credential environment is invalid")
+        if not isinstance(clients, list) or not clients:
+            raise ResourceServiceConfigurationError("governed resource service clients are invalid")
+        normalized_clients: dict[str, ResourceServiceClient] = {}
+        credential_envs: set[str] = set()
+        for client in clients:
+            if not isinstance(client, Mapping) or set(client) != _CLIENT_FIELDS:
+                raise ResourceServiceConfigurationError("governed resource service client binding is invalid")
+            client_id = client.get("id")
+            credential_env = client.get("credential_env")
+            execution_identity = client.get("execution_identity")
+            allowed_roles = client.get("allowed_roles")
+            if (
+                not _valid_client_id(client_id)
+                or client_id in normalized_clients
+                or not _valid_credential_env(credential_env)
+                or credential_env in credential_envs
+                or not _valid_identity(execution_identity)
+                or not isinstance(allowed_roles, list)
+                or not allowed_roles
+                or not all(_valid_identity(role) for role in allowed_roles)
+                or len(set(allowed_roles)) != len(allowed_roles)
+            ):
+                raise ResourceServiceConfigurationError("governed resource service client binding is invalid")
+            normalized_clients[client_id] = ResourceServiceClient(
+                client_id=client_id,
+                credential_env=credential_env,
+                execution_identity=execution_identity,
+                allowed_roles=frozenset(allowed_roles),
+            )
+            credential_envs.add(credential_env)
         if not _valid_key_id(attestation_key_id):
             raise ResourceServiceConfigurationError("governed resource service attestation key identity is invalid")
         if not _valid_credential_env(attestation_private_key_env):
@@ -178,6 +237,18 @@ class ResourceServiceConfig:
             or not 1 <= harness_run_ttl_seconds <= 3600
         ):
             raise ResourceServiceConfigurationError("governed resource service harness run TTL is invalid")
+        if (
+            not isinstance(completed_run_ttl_seconds, int)
+            or isinstance(completed_run_ttl_seconds, bool)
+            or not 1 <= completed_run_ttl_seconds <= 86_400
+        ):
+            raise ResourceServiceConfigurationError("governed resource service completed run TTL is invalid")
+        if (
+            not isinstance(max_completed_runs, int)
+            or isinstance(max_completed_runs, bool)
+            or not 1 <= max_completed_runs <= 10_000
+        ):
+            raise ResourceServiceConfigurationError("governed resource service completed run capacity is invalid")
         resources = value.get("resources")
         if not isinstance(resources, list) or not resources:
             raise ResourceServiceConfigurationError("governed resource service resources are invalid")
@@ -210,10 +281,12 @@ class ResourceServiceConfig:
             frozen[ref] = FrozenResource(ref=str(ref), content=resource_content, content_hash=actual_hash)
         return cls(
             service_id=str(service_id),
-            credential_env=credential_env,
+            clients=normalized_clients,
             attestation_key_id=str(attestation_key_id),
             attestation_private_key_env=str(attestation_private_key_env),
             harness_run_ttl_seconds=harness_run_ttl_seconds,
+            completed_run_ttl_seconds=completed_run_ttl_seconds,
+            max_completed_runs=max_completed_runs,
             resources=frozen,
         )
 
@@ -231,39 +304,111 @@ def load_resource_service_config(path: str | os.PathLike[str]) -> ResourceServic
 @dataclass
 class _HarnessRun:
     value: dict[str, Any]
+    client_id: str
     created_monotonic: float
     seen: set[str] = field(default_factory=set)
     attestation: dict[str, Any] | None = None
+    completed_monotonic: float | None = None
+    completed_response_returned: bool = False
 
 
 class _ResourceServiceState:
     def __init__(
-        self, config: ResourceServiceConfig, credential: str, signing_private_key: str | bytes,
+        self, config: ResourceServiceConfig, credentials: Mapping[str, str], signing_private_key: str | bytes,
         *, clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if not isinstance(credential, str) or not credential:
-            raise ResourceServiceConfigurationError("governed resource service credential is unavailable")
+        if not isinstance(credentials, Mapping) or set(credentials) != set(config.clients):
+            raise ResourceServiceConfigurationError("governed resource service client credentials are unavailable")
+        normalized_credentials: list[tuple[str, ResourceServiceClient]] = []
+        for client_id, client in config.clients.items():
+            credential = credentials.get(client_id)
+            if not isinstance(credential, str) or not credential:
+                raise ResourceServiceConfigurationError("governed resource service client credential is unavailable")
+            if any(hmac.compare_digest(credential, known) for known, _client in normalized_credentials):
+                raise ResourceServiceConfigurationError("governed resource service client credentials are not distinct")
+            normalized_credentials.append((credential, client))
         self.config = config
-        self._credential = credential
+        self._credentials = tuple(normalized_credentials)
         self._signing_private_key = signing_private_key
         self._clock = clock
         self._runs: dict[str, _HarnessRun] = {}
         self._lock = threading.Lock()
 
-    def authorized(self, authorization: str | None) -> bool:
-        return authorization is not None and hmac.compare_digest(authorization, f"Bearer {self._credential}")
+    def client_for_authorization(self, authorization: str | None) -> ResourceServiceClient | None:
+        """Resolve one bearer to its configured principal without trusting claims.
+
+        A successful request is never just "authenticated": all state-changing
+        operations receive the exact principal derived from its credential.
+        """
+
+        if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
+            return None
+        credential = authorization.removeprefix("Bearer ")
+        for configured_credential, client in self._credentials:
+            if hmac.compare_digest(credential, configured_credential):
+                return client
+        return None
 
     def _reclaim_expired_runs(self) -> None:
-        deadline = self._clock() - self.config.harness_run_ttl_seconds
+        now = self._clock()
+        open_deadline = now - self.config.harness_run_ttl_seconds
+        completed_deadline = now - self.config.completed_run_ttl_seconds
         expired = [
             run_id
             for run_id, run in self._runs.items()
-            if run.attestation is None and run.created_monotonic <= deadline
+            if (
+                (run.attestation is None and run.created_monotonic <= open_deadline)
+                or (
+                    run.attestation is not None
+                    and run.completed_response_returned
+                    and run.completed_monotonic is not None
+                    and run.completed_monotonic <= completed_deadline
+                )
+            )
         ]
         for run_id in expired:
             del self._runs[run_id]
 
-    def resource(self, ref: str, run_id: str | None) -> FrozenResource:
+    def completed_response_returned(self, run_id: str, client: ResourceServiceClient) -> None:
+        """Permit bounded retention only after the completed attestation was sent.
+
+        A service never evicts a completed run before returning the signed
+        attestation that names it.  Capacity reclamation then removes the
+        oldest *already returned* records, so an evicted run cannot strand a
+        caller without the receipt it needs to retain as evidence.
+        """
+
+        with self._lock:
+            self._reclaim_expired_runs()
+            run = self._runs.get(run_id)
+            if run is None or run.attestation is None or run.client_id != client.client_id:
+                return
+            run.completed_response_returned = True
+            completed = sorted(
+                (
+                    (record.completed_monotonic or record.created_monotonic, candidate)
+                    for candidate, record in self._runs.items()
+                    if record.attestation is not None and record.completed_response_returned
+                ),
+            )
+            overflow = len(completed) - self.config.max_completed_runs
+            for _completed_at, candidate in completed[:max(overflow, 0)]:
+                del self._runs[candidate]
+
+    def discard_unreturned_completed_run(self, run_id: str, client: ResourceServiceClient) -> None:
+        """Drop an attestation that failed before it could leave the service.
+
+        A broken response cannot be used for later verification, so retaining it
+        would only create an unbounded completed-run sink.  Successfully sent
+        receipts use :meth:`completed_response_returned` instead.
+        """
+
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is not None and run.attestation is not None and run.client_id == client.client_id:
+                del self._runs[run_id]
+
+    def resource(self, ref: str, run_id: str | None, client: ResourceServiceClient) -> FrozenResource:
         if not _valid_ref(ref):
             raise _ProtocolError(404, "resource is unavailable")
         with self._lock:
@@ -275,24 +420,35 @@ class _ResourceServiceState:
                 run = self._runs.get(run_id)
                 if run is None:
                     raise _ProtocolError(404, "harness run is unavailable")
+                if run.client_id != client.client_id:
+                    raise _ProtocolError(403, "harness run client is invalid")
                 bindings = run.value["resources"]
                 if ref not in {binding["ref"] for binding in bindings.values()}:
                     raise _ProtocolError(403, "resource is not bound to harness run")
                 run.seen.add(ref)
             return resource
 
-    def begin_run(self, value: Mapping[str, Any]) -> dict[str, Any]:
+    def begin_run(self, value: Mapping[str, Any], client: ResourceServiceClient) -> dict[str, Any]:
         required = {
-            "schema", "service_id", "card_hash", "role", "execution_identity",
+            "schema", "service_id", "client_id", "card_hash", "role", "execution_identity",
             "handoff_hash", "resource_receipt_hash", "resources",
         }
         if not isinstance(value, Mapping) or set(value) != required:
             raise _ProtocolError(400, "harness retrieval run is invalid")
-        if value.get("schema") != HARNESS_RUN_SCHEMA or value.get("service_id") != self.config.service_id:
+        if (
+            value.get("schema") != HARNESS_RUN_SCHEMA
+            or value.get("service_id") != self.config.service_id
+            or value.get("client_id") != client.client_id
+        ):
             raise _ProtocolError(400, "harness retrieval run identity is invalid")
         if not all(_valid_hash(value.get(field)) for field in ("card_hash", "handoff_hash", "resource_receipt_hash")):
             raise _ProtocolError(400, "harness retrieval run hash binding is invalid")
-        if not _valid_identity(value.get("role")) or not _valid_identity(value.get("execution_identity")):
+        if (
+            not _valid_identity(value.get("role"))
+            or not _valid_identity(value.get("execution_identity"))
+            or value["role"] not in client.allowed_roles
+            or value["execution_identity"] != client.execution_identity
+        ):
             raise _ProtocolError(400, "harness retrieval run identity is invalid")
         bindings = _resource_bindings(value.get("resources"))
         for binding in bindings.values():
@@ -302,6 +458,7 @@ class _ResourceServiceState:
         payload = {
             "schema": HARNESS_RUN_SCHEMA,
             "service_id": self.config.service_id,
+            "client_id": client.client_id,
             "card_hash": value["card_hash"],
             "role": value["role"],
             "execution_identity": value["execution_identity"],
@@ -314,10 +471,12 @@ class _ResourceServiceState:
             run_id = secrets.token_urlsafe(24)
             while run_id in self._runs:
                 run_id = secrets.token_urlsafe(24)
-            self._runs[run_id] = _HarnessRun(value=payload, created_monotonic=self._clock())
+            self._runs[run_id] = _HarnessRun(
+                value=payload, client_id=client.client_id, created_monotonic=self._clock(),
+            )
         return {**payload, "run_id": run_id}
 
-    def complete_run(self, run_id: str, value: Mapping[str, Any]) -> dict[str, Any]:
+    def complete_run(self, run_id: str, value: Mapping[str, Any], client: ResourceServiceClient) -> dict[str, Any]:
         if not _valid_run_id(run_id) or value != {"schema": HARNESS_RUN_SCHEMA, "run_id": run_id}:
             raise _ProtocolError(400, "harness retrieval completion is invalid")
         with self._lock:
@@ -325,6 +484,8 @@ class _ResourceServiceState:
             run = self._runs.get(run_id)
             if run is None:
                 raise _ProtocolError(404, "harness run is unavailable")
+            if run.client_id != client.client_id:
+                raise _ProtocolError(403, "harness run client is invalid")
             expected = {binding["ref"] for binding in run.value["resources"].values()}
             if run.seen != expected:
                 raise _ProtocolError(409, "harness run has not retrieved every bound resource")
@@ -332,6 +493,7 @@ class _ResourceServiceState:
                 payload = {
                     "schema": HARNESS_RETRIEVAL_ATTESTATION_SCHEMA,
                     "service_id": self.config.service_id,
+                    "client_id": run.client_id,
                     "run_id": run_id,
                     "card_hash": run.value["card_hash"],
                     "role": run.value["role"],
@@ -349,9 +511,10 @@ class _ResourceServiceState:
                     raise ResourceServiceConfigurationError(
                         "governed resource service private signing key is invalid"
                     ) from exc
+                run.completed_monotonic = self._clock()
             return dict(run.attestation)
 
-    def attestation(self, run_id: str) -> dict[str, Any]:
+    def attestation(self, run_id: str, client: ResourceServiceClient) -> dict[str, Any]:
         if not _valid_run_id(run_id):
             raise _ProtocolError(404, "harness run is unavailable")
         with self._lock:
@@ -359,6 +522,8 @@ class _ResourceServiceState:
             run = self._runs.get(run_id)
             if run is None or run.attestation is None:
                 raise _ProtocolError(404, "harness run attestation is unavailable")
+            if run.client_id != client.client_id:
+                raise _ProtocolError(403, "harness run client is invalid")
             return dict(run.attestation)
 
 
@@ -368,7 +533,7 @@ class _ConfiguredResourceServer(ThreadingHTTPServer):
 
 
 def create_resource_service_server(
-    config: ResourceServiceConfig, credential: str, *, signing_private_key: str | bytes,
+    config: ResourceServiceConfig, client_credentials: Mapping[str, str], *, signing_private_key: str | bytes,
     host: str = "127.0.0.1", port: int = 0, clock: Callable[[], float] = time.monotonic,
 ) -> ThreadingHTTPServer:
     """Create the HTTP service without selecting a deployment endpoint or catalog."""
@@ -376,7 +541,7 @@ def create_resource_service_server(
     if not isinstance(host, str) or not host or not isinstance(port, int) or not 0 <= port <= 65535:
         raise ResourceServiceConfigurationError("governed resource service bind address is invalid")
     try:
-        state = _ResourceServiceState(config, credential, signing_private_key, clock=clock)
+        state = _ResourceServiceState(config, client_credentials, signing_private_key, clock=clock)
         # Parse at construction, rather than deferring the deployment-key fault
         # until the first harness tries to complete a run.
         ed25519_public_key(signing_private_key)
@@ -401,12 +566,13 @@ def create_resource_service_server(
         def _reject(self, error: _ProtocolError) -> None:
             self.send_error(error.status, str(error))
 
-        def _authorized(self) -> bool:
-            if state.authorized(self.headers.get("Authorization")):
-                return True
+        def _authorized(self) -> ResourceServiceClient | None:
+            client = state.client_for_authorization(self.headers.get("Authorization"))
+            if client is not None:
+                return client
             # Do not identify a privileged resource service to an unauthenticated caller.
             self.send_error(404)
-            return False
+            return None
 
         def _path(self) -> tuple[str, str] | None:
             parsed = urlsplit(self.path)
@@ -437,7 +603,8 @@ def create_resource_service_server(
             return value
 
         def do_GET(self) -> None:  # noqa: N802
-            if not self._authorized():
+            client = self._authorized()
+            if client is None:
                 return
             parsed = self._path()
             if parsed is None:
@@ -459,7 +626,7 @@ def create_resource_service_server(
                 if path.startswith(resource_prefix):
                     ref = unquote(path.removeprefix(resource_prefix))
                     run_id = self.headers.get("X-TGW-Harness-Run")
-                    resource = state.resource(ref, run_id)
+                    resource = state.resource(ref, run_id, client)
                     self._send_json(
                         200,
                         {
@@ -473,14 +640,15 @@ def create_resource_service_server(
                 attestation_prefix = "/v1/harness-runs/"
                 if path.startswith(attestation_prefix) and path.endswith("/attestation"):
                     raw_run_id = path[len(attestation_prefix):-len("/attestation")].strip("/")
-                    self._send_json(200, state.attestation(unquote(raw_run_id)))
+                    self._send_json(200, state.attestation(unquote(raw_run_id), client))
                     return
                 self.send_error(404)
             except _ProtocolError as exc:
                 self._reject(exc)
 
         def do_POST(self) -> None:  # noqa: N802
-            if not self._authorized():
+            client = self._authorized()
+            if client is None:
                 return
             parsed = self._path()
             if parsed is None:
@@ -489,13 +657,20 @@ def create_resource_service_server(
             try:
                 value = self._json_body()
                 if path == "/v1/harness-runs":
-                    self._send_json(200, state.begin_run(value))
+                    self._send_json(200, state.begin_run(value, client))
                     return
                 prefix = "/v1/harness-runs/"
                 suffix = "/complete"
                 if path.startswith(prefix) and path.endswith(suffix):
                     raw_run_id = path[len(prefix):-len(suffix)].strip("/")
-                    self._send_json(200, state.complete_run(unquote(raw_run_id), value))
+                    run_id = unquote(raw_run_id)
+                    result = state.complete_run(run_id, value, client)
+                    try:
+                        self._send_json(200, result)
+                    except OSError:
+                        state.discard_unreturned_completed_run(run_id, client)
+                        return
+                    state.completed_response_returned(run_id, client)
                     return
                 self.send_error(404)
             except _ProtocolError as exc:
@@ -517,14 +692,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--port must be between 1 and 65535")
     try:
         config = load_resource_service_config(args.config)
-        credential = os.environ.get(config.credential_env)
-        if not credential:
-            raise ResourceServiceConfigurationError("governed resource service credential is unavailable")
+        client_credentials = {
+            client_id: os.environ.get(client.credential_env, "")
+            for client_id, client in config.clients.items()
+        }
+        if not all(client_credentials.values()):
+            raise ResourceServiceConfigurationError("governed resource service client credential is unavailable")
         signing_private_key = os.environ.get(config.attestation_private_key_env)
         if not signing_private_key:
             raise ResourceServiceConfigurationError("governed resource service private signing key is unavailable")
         server = create_resource_service_server(
-            config, credential, signing_private_key=signing_private_key, host=args.host, port=args.port,
+            config, client_credentials, signing_private_key=signing_private_key, host=args.host, port=args.port,
         )
     except (OSError, ResourceServiceConfigurationError) as exc:
         print(json.dumps({"error": str(exc), "error_type": type(exc).__name__}), file=os.sys.stderr)

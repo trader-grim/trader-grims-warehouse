@@ -23,12 +23,12 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 RESOURCE_RECEIPT_SCHEMA = "tgw-execution-resource-receipt/v1"
-RESOURCE_SERVICE_SCHEMA = "tgw-registered-resource-service/v1"
-RESOURCE_SERVICE_CATALOG_SCHEMA = "tgw-registered-resource-service-catalog/v2"
+RESOURCE_SERVICE_SCHEMA = "tgw-registered-resource-service/v2"
+RESOURCE_SERVICE_CATALOG_SCHEMA = "tgw-registered-resource-service-catalog/v3"
 RESOURCE_SERVICE_HEALTH_SCHEMA = "tgw-registered-resource-health/v1"
 RESOURCE_RESPONSE_SCHEMA = "tgw-registered-resource/v1"
-HARNESS_RUN_SCHEMA = "tgw-registered-resource-harness-run/v1"
-HARNESS_RETRIEVAL_ATTESTATION_SCHEMA = "tgw-registered-resource-retrieval-attestation/v2"
+HARNESS_RUN_SCHEMA = "tgw-registered-resource-harness-run/v2"
+HARNESS_RETRIEVAL_ATTESTATION_SCHEMA = "tgw-registered-resource-retrieval-attestation/v3"
 CARD_RESOURCE_NAMES = frozenset(
     {
         "plan_input",
@@ -46,10 +46,11 @@ _SERVICE_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _KEY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_CLIENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _GIT_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _MAX_RESOURCE_RESPONSE_BYTES = 4 * 1024 * 1024
 _RESOURCE_SERVICE_DESCRIPTOR_FIELDS = {
-    "schema", "id", "endpoint", "credential_env", "timeout_seconds",
+    "schema", "id", "client_id", "endpoint", "credential_env", "timeout_seconds",
 }
 # A role is not qualified merely because it was given an URL.  The service
 # catalog declares the capability that the role launcher needs: content-addressed
@@ -140,7 +141,7 @@ def ed25519_public_key(value: Ed25519PrivateKey | Ed25519PublicKey | str | bytes
 
 def _attestation_payload(value: Mapping[str, Any]) -> dict[str, Any]:
     required = {
-        "schema", "service_id", "run_id", "card_hash", "role", "execution_identity",
+        "schema", "service_id", "client_id", "run_id", "card_hash", "role", "execution_identity",
         "handoff_hash", "resource_receipt_hash", "resources", "attestation_key_id",
     }
     if not isinstance(value, Mapping) or set(value) != required:
@@ -149,6 +150,8 @@ def _attestation_payload(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ResourceVerificationError("harness retrieval attestation schema is invalid")
     if not isinstance(value.get("service_id"), str) or _SERVICE_ID.fullmatch(value["service_id"]) is None:
         raise ResourceVerificationError("harness retrieval attestation service identity is invalid")
+    if not isinstance(value.get("client_id"), str) or _CLIENT_ID.fullmatch(value["client_id"]) is None:
+        raise ResourceVerificationError("harness retrieval attestation client identity is invalid")
     if not isinstance(value.get("run_id"), str) or _RUN_ID.fullmatch(value["run_id"]) is None:
         raise ResourceVerificationError("harness retrieval attestation run identity is invalid")
     if not isinstance(value.get("role"), str) or not value["role"]:
@@ -169,6 +172,7 @@ def _attestation_payload(value: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema": HARNESS_RETRIEVAL_ATTESTATION_SCHEMA,
         "service_id": value["service_id"],
+        "client_id": value["client_id"],
         "run_id": value["run_id"],
         "card_hash": value["card_hash"],
         "role": value["role"],
@@ -214,7 +218,7 @@ def validate_harness_retrieval_attestation(
     an artifact may omit both, but must not treat that as trusted evidence.
     """
     required = {
-        "schema", "service_id", "run_id", "card_hash", "role", "execution_identity",
+        "schema", "service_id", "client_id", "run_id", "card_hash", "role", "execution_identity",
         "handoff_hash", "resource_receipt_hash", "resources", "attestation_key_id",
         "attestation_hash", "signature",
     }
@@ -255,11 +259,14 @@ def validate_resource_service_descriptor(descriptor: Mapping[str, Any]) -> dict[
     if descriptor["schema"] != RESOURCE_SERVICE_SCHEMA:
         raise ResourceVerificationError("registered resource service descriptor schema is invalid")
     service_id = descriptor["id"]
+    client_id = descriptor["client_id"]
     endpoint = descriptor["endpoint"]
     timeout_seconds = descriptor["timeout_seconds"]
     credential_env = descriptor["credential_env"]
     if not isinstance(service_id, str) or _SERVICE_ID.fullmatch(service_id) is None:
         raise ResourceVerificationError("registered resource service id is invalid")
+    if not isinstance(client_id, str) or _CLIENT_ID.fullmatch(client_id) is None:
+        raise ResourceVerificationError("registered resource service client identity is invalid")
     if not isinstance(endpoint, str):
         raise ResourceVerificationError("registered resource service endpoint is invalid")
     parsed = urlsplit(endpoint)
@@ -283,6 +290,7 @@ def validate_resource_service_descriptor(descriptor: Mapping[str, Any]) -> dict[
     return {
         "schema": RESOURCE_SERVICE_SCHEMA,
         "id": service_id,
+        "client_id": client_id,
         "endpoint": endpoint.rstrip("/"),
         "credential_env": credential_env,
         "timeout_seconds": timeout_seconds,
@@ -315,18 +323,26 @@ def validate_resource_service_catalog(catalog: Mapping[str, Any]) -> dict[str, A
     if not isinstance(services, list) or not services:
         raise ResourceVerificationError("registered resource service catalog is empty")
     normalized: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for item in services:
         if not isinstance(item, Mapping) or set(item) != {
-            "id", "descriptor_hash", "capabilities", "attestation_key_id", "attestation_public_key",
+            "id", "client_id", "descriptor_hash", "capabilities", "attestation_key_id", "attestation_public_key",
         }:
             raise ResourceVerificationError("registered resource service catalog entry is invalid")
         service_id = item["id"]
+        client_id = item["client_id"]
         descriptor_hash = item["descriptor_hash"]
         capabilities = item["capabilities"]
         attestation_key_id = item["attestation_key_id"]
         attestation_public_key = item["attestation_public_key"]
-        if not isinstance(service_id, str) or _SERVICE_ID.fullmatch(service_id) is None or service_id in seen:
+        service_identity = (service_id, client_id)
+        if (
+            not isinstance(service_id, str)
+            or _SERVICE_ID.fullmatch(service_id) is None
+            or not isinstance(client_id, str)
+            or _CLIENT_ID.fullmatch(client_id) is None
+            or service_identity in seen
+        ):
             raise ResourceVerificationError("registered resource service catalog identity is invalid")
         if not _is_hash(descriptor_hash):
             raise ResourceVerificationError("registered resource service catalog descriptor hash is invalid")
@@ -339,10 +355,11 @@ def validate_resource_service_catalog(catalog: Mapping[str, Any]) -> dict[str, A
             or len(set(capabilities)) != len(capabilities)
         ):
             raise ResourceVerificationError("registered resource service catalog capabilities are invalid")
-        seen.add(service_id)
+        seen.add(service_identity)
         normalized.append(
             {
                 "id": service_id,
+                "client_id": client_id,
                 "descriptor_hash": descriptor_hash,
                 "capabilities": sorted(capabilities),
                 "attestation_key_id": attestation_key_id,
@@ -372,12 +389,14 @@ def load_resource_service_catalog(path: str | os.PathLike[str]) -> dict[str, Any
 
 
 def resource_service_attestation_key(
-    catalog: Mapping[str, Any], service_id: str,
+    catalog: Mapping[str, Any], service_id: str, client_id: str,
 ) -> dict[str, str]:
     """Return the immutable catalog-pinned trust key for one service identity."""
 
     normalized = validate_resource_service_catalog(catalog)
-    entry = next((item for item in normalized["services"] if item["id"] == service_id), None)
+    entry = next(
+        (item for item in normalized["services"] if item["id"] == service_id and item["client_id"] == client_id), None,
+    )
     if entry is None:
         raise ResourceVerificationError("registered resource service is absent from qualified catalog")
     return {
@@ -394,7 +413,11 @@ def verify_resource_service_registration(
     normalized_catalog = validate_resource_service_catalog(catalog)
     normalized_descriptor = validate_resource_service_descriptor(descriptor)
     entry = next(
-        (item for item in normalized_catalog["services"] if item["id"] == normalized_descriptor["id"]), None
+        (
+            item for item in normalized_catalog["services"]
+            if item["id"] == normalized_descriptor["id"] and item["client_id"] == normalized_descriptor["client_id"]
+        ),
+        None,
     )
     if entry is None:
         raise ResourceVerificationError("registered resource service is absent from qualified catalog")
@@ -418,7 +441,11 @@ def verify_card_resource_service(
     normalized_catalog = verify_card_resource_service_catalog(card, catalog)
     binding = card["resource_service"]
     normalized = validate_resource_service_descriptor(descriptor)
-    if binding["id"] != normalized["id"] or binding["descriptor_hash"] != resource_service_descriptor_hash(normalized):
+    if (
+        binding["id"] != normalized["id"]
+        or binding["client_id"] != normalized["client_id"]
+        or binding["descriptor_hash"] != resource_service_descriptor_hash(normalized)
+    ):
         raise ResourceVerificationError("card resource service binding mismatch")
     return normalized, normalized_catalog
 
@@ -430,7 +457,7 @@ def verify_card_resource_service_catalog(
 
     binding = card.get("resource_service") if isinstance(card, Mapping) else None
     if not isinstance(binding, Mapping) or set(binding) != {
-        "id", "descriptor_hash", "catalog_ref", "catalog_hash",
+        "id", "client_id", "descriptor_hash", "catalog_ref", "catalog_hash",
     }:
         raise ResourceVerificationError("card resource service binding is invalid")
     normalized_catalog = validate_resource_service_catalog(catalog)
@@ -438,9 +465,17 @@ def verify_card_resource_service_catalog(
         binding["catalog_ref"] != normalized_catalog["catalog_ref"]
         or binding["catalog_hash"] != resource_service_catalog_hash(normalized_catalog)
         or normalized_catalog["plan_commit"] != card.get("plan_commit")
+        or not isinstance(binding["client_id"], str)
+        or _CLIENT_ID.fullmatch(binding["client_id"]) is None
     ):
         raise ResourceVerificationError("card resource service catalog binding mismatch")
-    entry = next((item for item in normalized_catalog["services"] if item["id"] == binding["id"]), None)
+    entry = next(
+        (
+            item for item in normalized_catalog["services"]
+            if item["id"] == binding["id"] and item["client_id"] == binding["client_id"]
+        ),
+        None,
+    )
     if entry is None or entry["descriptor_hash"] != binding["descriptor_hash"]:
         raise ResourceVerificationError("card resource service is not qualified by its catalog")
     return normalized_catalog
@@ -528,13 +563,14 @@ class HTTPRegisteredResourceResolver:
     """
 
     def __init__(
-        self, *, service_id: str, endpoint: str, credential: str | None = None,
+        self, *, service_id: str, client_id: str, endpoint: str, credential: str | None = None,
         timeout_seconds: int = 15,
     ) -> None:
         normalized = validate_resource_service_descriptor(
             {
                 "schema": RESOURCE_SERVICE_SCHEMA,
                 "id": service_id,
+                "client_id": client_id,
                 "endpoint": endpoint,
                 "credential_env": None,
                 "timeout_seconds": timeout_seconds,
@@ -543,6 +579,7 @@ class HTTPRegisteredResourceResolver:
         if credential is not None and (not isinstance(credential, str) or not credential):
             raise ResourceVerificationError("registered resource service credential is invalid")
         self._service_id = normalized["id"]
+        self._client_id = normalized["client_id"]
         self._endpoint = normalized["endpoint"]
         self._credential = credential
         self._timeout_seconds = timeout_seconds
@@ -563,6 +600,7 @@ class HTTPRegisteredResourceResolver:
                 raise ResourceVerificationError("registered resource service credential is unavailable")
         return cls(
             service_id=normalized["id"],
+            client_id=normalized["client_id"],
             endpoint=normalized["endpoint"],
             credential=credential,
             timeout_seconds=normalized["timeout_seconds"],
@@ -641,6 +679,7 @@ class HTTPRegisteredResourceResolver:
             raise ResourceVerificationError("harness retrieval run resources are invalid")
         payload = {
             "schema": HARNESS_RUN_SCHEMA, "service_id": self._service_id,
+            "client_id": self._client_id,
             "card_hash": card_hash, "role": role, "execution_identity": execution_identity,
             "handoff_hash": handoff_hash, "resource_receipt_hash": resource_receipt_hash,
             "resources": expected_resources,
@@ -656,6 +695,8 @@ class HTTPRegisteredResourceResolver:
     def for_harness_run(self, run: Mapping[str, Any]) -> HarnessRunResolver:
         if not isinstance(run, Mapping) or run.get("schema") != HARNESS_RUN_SCHEMA:
             raise ResourceVerificationError("harness retrieval run is invalid")
+        if run.get("service_id") != self._service_id or run.get("client_id") != self._client_id:
+            raise ResourceVerificationError("harness retrieval run client binding is invalid")
         run_id = run.get("run_id")
         if not isinstance(run_id, str) or _RUN_ID.fullmatch(run_id) is None:
             raise ResourceVerificationError("harness retrieval run id is invalid")
@@ -665,6 +706,8 @@ class HTTPRegisteredResourceResolver:
         """Close a run after the harness fetched every bound source itself."""
         if not isinstance(run, Mapping) or run.get("schema") != HARNESS_RUN_SCHEMA:
             raise ResourceVerificationError("harness retrieval run is invalid")
+        if run.get("service_id") != self._service_id or run.get("client_id") != self._client_id:
+            raise ResourceVerificationError("harness retrieval run client binding is invalid")
         run_id = run.get("run_id")
         if not isinstance(run_id, str) or _RUN_ID.fullmatch(run_id) is None:
             raise ResourceVerificationError("harness retrieval run id is invalid")
@@ -700,6 +743,7 @@ class HTTPRegisteredResourceResolver:
             raise ResourceVerificationError("harness retrieval attestation was not issued by the service")
         expected = {
             "schema": HARNESS_RETRIEVAL_ATTESTATION_SCHEMA, "service_id": self._service_id,
+            "client_id": self._client_id,
             "card_hash": card_hash, "role": role, "execution_identity": execution_identity,
             "handoff_hash": handoff_hash, "resource_receipt_hash": resource_receipt_hash,
             "resources": {name: resources[name] for name in sorted(CARD_RESOURCE_NAMES)},

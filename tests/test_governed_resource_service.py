@@ -84,6 +84,7 @@ def card_template(content, service=None, resource_catalog=None):
         resource_catalog = catalog(service) if resource_catalog is None else resource_catalog
         value["resource_service"] = {
             "id": service["id"],
+            "client_id": service["client_id"],
             "descriptor_hash": resource_service_descriptor_hash(service),
             "catalog_ref": resource_catalog["catalog_ref"],
             "catalog_hash": resource_service_catalog_hash(resource_catalog),
@@ -187,10 +188,15 @@ def resource_service(content, *, token="test-token"):
                 return
             if self.path == "/v1/harness-runs":
                 required = {
-                    "schema", "service_id", "card_hash", "role", "execution_identity",
+                    "schema", "service_id", "client_id", "card_hash", "role", "execution_identity",
                     "handoff_hash", "resource_receipt_hash", "resources",
                 }
-                if set(value) != required or value["schema"] != "tgw-registered-resource-harness-run/v1" or value["service_id"] != "test-resource-service":
+                if (
+                    set(value) != required
+                    or value["schema"] != "tgw-registered-resource-harness-run/v2"
+                    or value["service_id"] != "test-resource-service"
+                    or value["client_id"] != "test-implementation-client"
+                ):
                     self.send_error(400)
                     return
                 run_id = f"run-{len(runs) + 1}"
@@ -209,15 +215,16 @@ def resource_service(content, *, token="test-token"):
                 return
             run_id = unquote(self.path[len(prefix):-len(suffix)]).strip("/")
             run = runs.get(run_id)
-            if run is None or value != {"schema": "tgw-registered-resource-harness-run/v1", "run_id": run_id}:
+            if run is None or value != {"schema": "tgw-registered-resource-harness-run/v2", "run_id": run_id}:
                 self.send_error(400)
                 return
             if run["seen"] != {binding["ref"] for binding in run["resources"].values()}:
                 self.send_error(409)
                 return
             payload = {
-                "schema": "tgw-registered-resource-retrieval-attestation/v2",
+                "schema": "tgw-registered-resource-retrieval-attestation/v3",
                 "service_id": "test-resource-service", "run_id": run_id,
+                "client_id": run["client_id"],
                 "card_hash": run["card_hash"], "role": run["role"],
                 "execution_identity": run["execution_identity"], "handoff_hash": run["handoff_hash"],
                 "resource_receipt_hash": run["resource_receipt_hash"], "resources": run["resources"],
@@ -247,8 +254,9 @@ def resource_service(content, *, token="test-token"):
 
 def descriptor(endpoint):
     return {
-        "schema": "tgw-registered-resource-service/v1",
+        "schema": "tgw-registered-resource-service/v2",
         "id": "test-resource-service",
+        "client_id": "test-implementation-client",
         "endpoint": endpoint,
         "credential_env": "TGW_TEST_RESOURCE_TOKEN",
         "timeout_seconds": 5,
@@ -257,12 +265,13 @@ def descriptor(endpoint):
 
 def catalog(service):
     return {
-        "schema": "tgw-registered-resource-service-catalog/v2",
+        "schema": "tgw-registered-resource-service-catalog/v3",
         "catalog_ref": "catalog:qualified-test-resource-service@1",
         "plan_commit": PLAN_COMMIT,
         "services": [
             {
                 "id": service["id"],
+                "client_id": service["client_id"],
                 "descriptor_hash": resource_service_descriptor_hash(service),
                 "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
                 "attestation_key_id": TEST_ATTESTATION_KEY_ID,
@@ -321,8 +330,9 @@ def test_registered_resource_service_rejects_plaintext_non_loopback_endpoint():
     with pytest.raises(ResourceVerificationError, match="HTTPS or loopback HTTP"):
         HTTPRegisteredResourceResolver.from_descriptor(
             {
-                "schema": "tgw-registered-resource-service/v1",
+                "schema": "tgw-registered-resource-service/v2",
                 "id": "untrusted-remote-service",
+                "client_id": "untrusted-test-client",
                 "endpoint": "http://resources.example.invalid",
                 "credential_env": None,
                 "timeout_seconds": 5,

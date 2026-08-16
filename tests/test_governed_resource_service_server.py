@@ -3,6 +3,8 @@ import json
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -57,7 +59,7 @@ def _contents():
     }
 
 
-def _config_path(tmp_path, contents=None, *, signing_private_key=None, ttl=60):
+def _config_path(tmp_path, contents=None, *, signing_private_key=None, ttl=60, completed_ttl=60, max_completed=8):
     contents = _contents() if contents is None else contents
     signing_private_key = signing_private_key or Ed25519PrivateKey.generate()
     exports = tmp_path / "exports"
@@ -71,12 +73,27 @@ def _config_path(tmp_path, contents=None, *, signing_private_key=None, ttl=60):
     config_path.write_text(
         json.dumps(
             {
-                "schema": "tgw-governed-resource-service-config/v2",
+                "schema": "tgw-governed-resource-service-config/v3",
                 "service_id": "portable-resource-service",
-                "credential_env": "TGW_PORTABLE_RESOURCE_TOKEN",
+                "clients": [
+                    {
+                        "id": "portable-implementation-client",
+                        "credential_env": "TGW_PORTABLE_RESOURCE_TOKEN",
+                        "execution_identity": "portable-service-test",
+                        "allowed_roles": ["implementation"],
+                    },
+                    {
+                        "id": "portable-review-client",
+                        "credential_env": "TGW_PORTABLE_REVIEW_TOKEN",
+                        "execution_identity": "portable-review-test",
+                        "allowed_roles": ["independent-review"],
+                    },
+                ],
                 "attestation_key_id": "portable-test-key-1",
                 "attestation_private_key_env": "TGW_PORTABLE_RESOURCE_SIGNING_KEY",
                 "harness_run_ttl_seconds": ttl,
+                "completed_run_ttl_seconds": completed_ttl,
+                "max_completed_runs": max_completed,
                 "resources": resources,
             }
         )
@@ -93,10 +110,21 @@ def _card(contents):
     return {**unsigned, "card_hash": _canonical_hash(unsigned)}
 
 
+def _post(endpoint, token, value):
+    request = Request(
+        endpoint,
+        data=json.dumps(value).encode(),
+        method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    return urlopen(request)
+
+
 def _descriptor(endpoint):
     return {
-        "schema": "tgw-registered-resource-service/v1",
+        "schema": "tgw-registered-resource-service/v2",
         "id": "portable-resource-service",
+        "client_id": "portable-implementation-client",
         "endpoint": endpoint,
         "credential_env": "TGW_PORTABLE_RESOURCE_TOKEN",
         "timeout_seconds": 5,
@@ -105,12 +133,13 @@ def _descriptor(endpoint):
 
 def _catalog(descriptor, signing_private_key):
     return {
-        "schema": "tgw-registered-resource-service-catalog/v2",
+        "schema": "tgw-registered-resource-service-catalog/v3",
         "catalog_ref": "catalog:portable-resource-service-test@1",
         "plan_commit": PLAN_COMMIT,
         "services": [
             {
                 "id": descriptor["id"],
+                "client_id": descriptor["client_id"],
                 "descriptor_hash": resource_service_descriptor_hash(descriptor),
                 "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
                 "attestation_key_id": "portable-test-key-1",
@@ -121,9 +150,9 @@ def _catalog(descriptor, signing_private_key):
 
 
 @contextmanager
-def _server(config, credential, signing_private_key, **kwargs):
+def _server(config, client_credentials, signing_private_key, **kwargs):
     server = create_resource_service_server(
-        config, credential, signing_private_key=signing_private_key, **kwargs,
+        config, client_credentials, signing_private_key=signing_private_key, **kwargs,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -139,7 +168,11 @@ def test_portable_resource_service_implements_registered_protocol(tmp_path, monk
     config_path, contents, signing_private_key = _config_path(tmp_path)
     config = load_resource_service_config(config_path)
     monkeypatch.setenv("TGW_PORTABLE_RESOURCE_TOKEN", "test-token")
-    with _server(config, "test-token", signing_private_key) as endpoint:
+    with _server(
+        config,
+        {"portable-implementation-client": "test-token", "portable-review-client": "review-token"},
+        signing_private_key,
+    ) as endpoint:
         descriptor = _descriptor(endpoint)
         resolver = HTTPRegisteredResourceResolver.from_descriptor(descriptor)
         catalog = _catalog(descriptor, signing_private_key)
@@ -171,6 +204,112 @@ def test_portable_resource_service_implements_registered_protocol(tmp_path, monk
         assert resource_service_catalog_hash(catalog).startswith("sha256:")
 
 
+@pytest.mark.parametrize(
+    ("forged_role", "forged_identity"),
+    [
+        ("independent-review", "portable-service-test"),
+        ("implementation", "portable-review-test"),
+    ],
+)
+def test_authenticated_client_cannot_mint_a_different_role_or_execution_identity(
+    tmp_path, monkeypatch, forged_role, forged_identity,
+):
+    config_path, contents, signing_private_key = _config_path(tmp_path)
+    config = load_resource_service_config(config_path)
+    monkeypatch.setenv("TGW_PORTABLE_RESOURCE_TOKEN", "test-token")
+    with _server(
+        config,
+        {"portable-implementation-client": "test-token", "portable-review-client": "review-token"},
+        signing_private_key,
+    ) as endpoint:
+        resolver = HTTPRegisteredResourceResolver.from_descriptor(_descriptor(endpoint))
+        card = _card(contents)
+        receipt = verify_card_resources(card, resolver)
+        payload = {
+            "schema": "tgw-registered-resource-harness-run/v2",
+            "service_id": "portable-resource-service",
+            "client_id": "portable-implementation-client",
+            "card_hash": card["card_hash"],
+            "role": forged_role,
+            "execution_identity": forged_identity,
+            "handoff_hash": "sha256:" + "1" * 64,
+            "resource_receipt_hash": receipt["receipt_hash"],
+            "resources": card["bindings"],
+        }
+        with pytest.raises(HTTPError) as error:
+            _post(endpoint + "/v1/harness-runs", "test-token", payload)
+        assert error.value.code == 400
+
+
+def test_authenticated_client_cannot_claim_another_client_identity(tmp_path, monkeypatch):
+    config_path, contents, signing_private_key = _config_path(tmp_path)
+    config = load_resource_service_config(config_path)
+    monkeypatch.setenv("TGW_PORTABLE_RESOURCE_TOKEN", "test-token")
+    with _server(
+        config,
+        {"portable-implementation-client": "test-token", "portable-review-client": "review-token"},
+        signing_private_key,
+    ) as endpoint:
+        resolver = HTTPRegisteredResourceResolver.from_descriptor(_descriptor(endpoint))
+        card = _card(contents)
+        receipt = verify_card_resources(card, resolver)
+        payload = {
+            "schema": "tgw-registered-resource-harness-run/v2",
+            "service_id": "portable-resource-service",
+            "client_id": "portable-review-client",
+            "card_hash": card["card_hash"],
+            "role": "implementation",
+            "execution_identity": "portable-service-test",
+            "handoff_hash": "sha256:" + "1" * 64,
+            "resource_receipt_hash": receipt["receipt_hash"],
+            "resources": card["bindings"],
+        }
+        with pytest.raises(HTTPError) as error:
+            _post(endpoint + "/v1/harness-runs", "test-token", payload)
+        assert error.value.code == 400
+
+
+def test_completed_attestations_are_retained_only_after_return_and_bounded(tmp_path, monkeypatch):
+    config_path, contents, signing_private_key = _config_path(tmp_path, max_completed=1)
+    config = load_resource_service_config(config_path)
+    monkeypatch.setenv("TGW_PORTABLE_RESOURCE_TOKEN", "test-token")
+    with _server(
+        config,
+        {"portable-implementation-client": "test-token", "portable-review-client": "review-token"},
+        signing_private_key,
+    ) as endpoint:
+        resolver = HTTPRegisteredResourceResolver.from_descriptor(_descriptor(endpoint))
+        card = _card(contents)
+        receipt = verify_card_resources(card, resolver)
+
+        def complete(handoff_digit):
+            run = resolver.begin_harness_run(
+                card_hash=card["card_hash"], role="implementation", execution_identity="portable-service-test",
+                handoff_hash="sha256:" + handoff_digit * 64, resource_receipt_hash=receipt["receipt_hash"],
+                resources=card["bindings"],
+            )
+            assert verify_card_resources(card, resolver.for_harness_run(run)) == receipt
+            return run, resolver.complete_harness_run(run)
+
+        first_run, first_attestation = complete("1")
+        assert resolver.verify_harness_retrieval_attestation(
+            first_attestation,
+            card_hash=card["card_hash"], role="implementation", execution_identity="portable-service-test",
+            handoff_hash="sha256:" + "1" * 64, resource_receipt_hash=receipt["receipt_hash"],
+            resources=card["bindings"], attestation_key_id="portable-test-key-1",
+            attestation_public_key=ed25519_public_key(signing_private_key),
+        ) == first_attestation
+        _second_run, _second_attestation = complete("2")
+        with pytest.raises(ResourceVerificationError, match="attestation request failed"):
+            resolver.verify_harness_retrieval_attestation(
+                first_attestation,
+                card_hash=card["card_hash"], role="implementation", execution_identity="portable-service-test",
+                handoff_hash="sha256:" + "1" * 64, resource_receipt_hash=receipt["receipt_hash"],
+                resources=card["bindings"], attestation_key_id="portable-test-key-1",
+                attestation_public_key=ed25519_public_key(signing_private_key),
+            )
+
+
 def test_service_configuration_rejects_changed_or_unhashed_exports(tmp_path):
     config_path, _, _ = _config_path(tmp_path)
     config = json.loads(config_path.read_text())
@@ -198,6 +337,7 @@ def test_cli_fails_closed_when_runtime_credential_is_not_provisioned(tmp_path, m
 def test_cli_fails_closed_when_runtime_signing_key_is_not_provisioned(tmp_path, monkeypatch, capsys):
     config_path, _, _ = _config_path(tmp_path)
     monkeypatch.setenv("TGW_PORTABLE_RESOURCE_TOKEN", "test-token")
+    monkeypatch.setenv("TGW_PORTABLE_REVIEW_TOKEN", "review-token")
     monkeypatch.delenv("TGW_PORTABLE_RESOURCE_SIGNING_KEY", raising=False)
 
     assert main(["--config", str(config_path), "--port", "18444"]) == 2
@@ -207,6 +347,7 @@ def test_cli_fails_closed_when_runtime_signing_key_is_not_provisioned(tmp_path, 
 def test_cli_fails_closed_when_runtime_signing_key_is_malformed(tmp_path, monkeypatch, capsys):
     config_path, _, _ = _config_path(tmp_path)
     monkeypatch.setenv("TGW_PORTABLE_RESOURCE_TOKEN", "test-token")
+    monkeypatch.setenv("TGW_PORTABLE_REVIEW_TOKEN", "review-token")
     monkeypatch.setenv("TGW_PORTABLE_RESOURCE_SIGNING_KEY", "not-a-raw-ed25519-key")
 
     assert main(["--config", str(config_path), "--port", "18444"]) == 2
@@ -217,7 +358,11 @@ def test_signed_attestation_rejects_a_wrong_catalog_key_or_key_identity(tmp_path
     config_path, contents, signing_private_key = _config_path(tmp_path)
     config = load_resource_service_config(config_path)
     monkeypatch.setenv("TGW_PORTABLE_RESOURCE_TOKEN", "test-token")
-    with _server(config, "test-token", signing_private_key) as endpoint:
+    with _server(
+        config,
+        {"portable-implementation-client": "test-token", "portable-review-client": "review-token"},
+        signing_private_key,
+    ) as endpoint:
         descriptor = _descriptor(endpoint)
         resolver = HTTPRegisteredResourceResolver.from_descriptor(descriptor)
         card = _card(contents)
@@ -264,7 +409,12 @@ def test_unfinished_harness_runs_expire_and_are_reclaimed(tmp_path):
     config_path, contents, signing_private_key = _config_path(tmp_path, ttl=1)
     config = load_resource_service_config(config_path)
     now = [100.0]
-    with _server(config, "test-token", signing_private_key, clock=lambda: now[0]) as endpoint:
+    with _server(
+        config,
+        {"portable-implementation-client": "test-token", "portable-review-client": "review-token"},
+        signing_private_key,
+        clock=lambda: now[0],
+    ) as endpoint:
         descriptor = _descriptor(endpoint)
         resolver = HTTPRegisteredResourceResolver.from_descriptor(
             descriptor, environment={"TGW_PORTABLE_RESOURCE_TOKEN": "test-token"},

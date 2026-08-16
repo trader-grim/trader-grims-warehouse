@@ -102,8 +102,9 @@ def governed_receipt(packet_value, *, passed):
     }
     handoff_hash = "sha256:" + "b" * 64
     attestation_payload = {
-        "schema": "tgw-registered-resource-retrieval-attestation/v2",
+        "schema": "tgw-registered-resource-retrieval-attestation/v3",
         "service_id": "review-service", "run_id": "review-run", "card_hash": card_hash,
+        "client_id": "candidate-review-client",
         "role": "independent-review", "execution_identity": "review-context:1",
         "handoff_hash": handoff_hash, "resource_receipt_hash": resource_receipt_hash,
         "resources": resources,
@@ -126,6 +127,7 @@ def governed_receipt(packet_value, *, passed):
         "harness_retrieval_attestation_hash": attestation["attestation_hash"],
         "harness_retrieval_attestation": attestation,
         "resource_service_descriptor_hash": "sha256:service",
+        "resource_service_client_id": "candidate-review-client",
         "resource_service_catalog_ref": "catalog:review-service@1",
         "resource_service_catalog_hash": "sha256:catalog",
         "outcome": "satisfied" if passed else "failed",

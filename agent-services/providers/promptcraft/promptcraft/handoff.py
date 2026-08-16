@@ -26,7 +26,7 @@ CARD_RESOURCE_NAMES = {
     "receipt_sink",
 }
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
-RESOURCE_SERVICE_SCHEMA = "tgw-registered-resource-service/v1"
+RESOURCE_SERVICE_SCHEMA = "tgw-registered-resource-service/v2"
 
 
 class HandoffError(ValueError):
@@ -110,9 +110,11 @@ class ExecutionCard:
         service = value["resource_service"]
         if (
             not isinstance(service, Mapping)
-            or set(service) != {"id", "descriptor_hash", "catalog_ref", "catalog_hash"}
+            or set(service) != {"id", "client_id", "descriptor_hash", "catalog_ref", "catalog_hash"}
             or not isinstance(service["id"], str)
             or not service["id"]
+            or not isinstance(service["client_id"], str)
+            or not service["client_id"]
             or not isinstance(service["descriptor_hash"], str)
             or _SHA256.fullmatch(service["descriptor_hash"]) is None
             or not isinstance(service["catalog_ref"], str)
@@ -168,12 +170,12 @@ def _verified_resource_service(card: ExecutionCard, value: Any) -> Mapping[str, 
     """
 
     if not isinstance(value, Mapping) or set(value) != {
-        "schema", "id", "endpoint", "credential_env", "timeout_seconds",
+        "schema", "id", "client_id", "endpoint", "credential_env", "timeout_seconds",
     }:
         raise HandoffError("registered resource service descriptor is invalid")
     if value["schema"] != RESOURCE_SERVICE_SCHEMA:
         raise HandoffError("registered resource service descriptor schema is invalid")
-    if not all(isinstance(value[field], str) and value[field] for field in ("id", "endpoint")):
+    if not all(isinstance(value[field], str) and value[field] for field in ("id", "client_id", "endpoint")):
         raise HandoffError("registered resource service descriptor identity is invalid")
     if value["credential_env"] is not None and not isinstance(value["credential_env"], str):
         raise HandoffError("registered resource service descriptor credential is invalid")
@@ -181,7 +183,11 @@ def _verified_resource_service(card: ExecutionCard, value: Any) -> Mapping[str, 
         raise HandoffError("registered resource service descriptor timeout is invalid")
     descriptor_hash = _hash(value)
     binding = card.value["resource_service"]
-    if binding["id"] != value["id"] or binding["descriptor_hash"] != descriptor_hash:
+    if (
+        binding["id"] != value["id"]
+        or binding["client_id"] != value["client_id"]
+        or binding["descriptor_hash"] != descriptor_hash
+    ):
         raise HandoffError("registered resource service descriptor is not card-bound")
     return value
 
@@ -205,7 +211,7 @@ def craft_handoff(value: Mapping[str, Any], *, receiver_identity: str) -> dict[s
             f"Role: {card.value['role']}",
             f"Selected provider: {card.value['selected_provider']}",
             f"Plan commit: {card.value['plan_commit']}",
-            f"Registered resource service: {resource_service['id']} ({card.value['resource_service']['descriptor_hash']})",
+            f"Registered resource service: {resource_service['id']} / {resource_service['client_id']} ({card.value['resource_service']['descriptor_hash']})",
             "Retrieve and verify these authoritative resources:",
             *[
                 f"- {name}: {binding['ref']} ({binding['hash']})"

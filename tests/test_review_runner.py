@@ -28,8 +28,9 @@ sys.path.insert(0, str(PROMPTCRAFT))
 from promptcraft.handoff import ExecutionCard, craft_handoff  # noqa: E402
 
 RESOURCE_SERVICE = {
-    "schema": "tgw-registered-resource-service/v1",
+    "schema": "tgw-registered-resource-service/v2",
     "id": "review-resource-service",
+    "client_id": "review-test-client",
     "endpoint": "https://resources.invalid",
     "credential_env": None,
     "timeout_seconds": 5,
@@ -46,11 +47,12 @@ def resource_service_hash():
 
 
 RESOURCE_SERVICE_CATALOG = {
-    "schema": "tgw-registered-resource-service-catalog/v2",
+    "schema": "tgw-registered-resource-service-catalog/v3",
     "catalog_ref": "catalog:review-resource-service@1",
     "plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
     "services": [{
         "id": RESOURCE_SERVICE["id"],
+        "client_id": RESOURCE_SERVICE["client_id"],
         "descriptor_hash": resource_service_hash(),
         "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
         "attestation_key_id": TEST_ATTESTATION_KEY_ID,
@@ -80,6 +82,7 @@ def handoff(source):
             "plan_commit": plan_commit,
             "resource_service": {
                 "id": RESOURCE_SERVICE["id"],
+                "client_id": RESOURCE_SERVICE["client_id"],
                 "descriptor_hash": resource_service_hash(),
                 "catalog_ref": RESOURCE_SERVICE_CATALOG["catalog_ref"],
                 "catalog_hash": resource_service_catalog_hash(RESOURCE_SERVICE_CATALOG),
@@ -151,8 +154,9 @@ class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
         ):
             raise ResourceVerificationError("test retrieval attestation key is invalid")
         payload = {
-            "schema": "tgw-registered-resource-retrieval-attestation/v2",
+            "schema": "tgw-registered-resource-retrieval-attestation/v3",
             "service_id": RESOURCE_SERVICE["id"], "run_id": "unit-run",
+            "client_id": RESOURCE_SERVICE["client_id"],
             "card_hash": kwargs["card_hash"], "role": kwargs["role"],
             "execution_identity": kwargs["execution_identity"], "handoff_hash": kwargs["handoff_hash"],
             "resource_receipt_hash": kwargs["resource_receipt_hash"], "resources": kwargs["resources"],
