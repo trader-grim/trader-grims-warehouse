@@ -495,7 +495,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
         "claude-help", "clip", "suggest-edit", "promo", "nix-bundle-usb",
         "mailbox", "trace", "flake",
-        "coding",
+        "coding", "plan-authority",
     ]),
 ]
 

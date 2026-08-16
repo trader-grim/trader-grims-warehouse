@@ -89,22 +89,22 @@ _ALLOWLIST = {
     # Refreshed 2026-08-14: the governed eBay publish branch, bounded job
     # status route, committed-generation response, and visible exact photo-sync
     # fingerprint shifted existing access sites only; behavior is unchanged.
-    (_SRC / "tgw" / "http_server.py", 1146),              # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 1155),              # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 1632),              # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 1653),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
-    (_SRC / "tgw" / "http_server.py", 1671),              # (a) accessor output (full envelope) moving onward
-    (_SRC / "tgw" / "http_server.py", 1658),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
-    (_SRC / "tgw" / "http_server.py", 2328),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 2330),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 2336),              # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 4025),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
-    (_SRC / "tgw" / "http_server.py", 4084),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
+    (_SRC / "tgw" / "http_server.py", 1170),              # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
+    (_SRC / "tgw" / "http_server.py", 1179),              # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
+    (_SRC / "tgw" / "http_server.py", 1656),              # (a) accessor patch write
+    (_SRC / "tgw" / "http_server.py", 1677),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
+    (_SRC / "tgw" / "http_server.py", 1682),              # (a) accessor output (full envelope) moving onward
+    (_SRC / "tgw" / "http_server.py", 1695),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
+    (_SRC / "tgw" / "http_server.py", 2352),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 2354),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 2360),              # (a) accessor patch write (todo #1416)
+    (_SRC / "tgw" / "http_server.py", 4049),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
+    (_SRC / "tgw" / "http_server.py", 4108),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
     # Refreshed 2026-07-20 (todo #1582, PP-AGENTTRACE-001 Phase 3): the new
     # /form/runs route + _render_runs_html() inserted ~186 lines before this
     # entry, shifting it from 5855 to 6041 — re-verified against current
     # HEAD, no accessor-routing behavior changed, only position.
-    (_SRC / "tgw" / "http_server.py", 7343),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 7367),              # (b) revision_draft.delta
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)

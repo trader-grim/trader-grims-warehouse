@@ -34,6 +34,7 @@ from tgw.candidate_manifest import (
     create_plan_authority_migration_receipt,
     verify_plan_authority_migration_receipt,
 )
+from tgw.logging import announce_script_run
 
 MIGRATION_PATH = "src/tgw/plan_authority.sql"
 
@@ -374,6 +375,12 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
+    announce_script_run(
+        "prove_plan_authority_migration.py",
+        "prove the candidate PlanAuthority migration on an isolated PostgreSQL 17 cluster",
+        candidate=args.commit,
+        base_commit=args.base_commit,
+    )
     try:
         prove_migration(
             repo=args.repo, candidate=args.commit, base=args.base_commit,
