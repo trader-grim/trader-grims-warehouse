@@ -25,9 +25,15 @@ class CandidateManifestError(ValueError):
 
 TEST_RECEIPT_SCHEMA = "tgw-candidate-test-receipt/v1"
 RELEASE_MANIFEST_SCHEMA = "tgw-release-manifest-v1"
-MIGRATION_SAFETY_RECEIPT_SCHEMA = "tgw-plan-authority-migration-receipt/v1"
+MIGRATION_SAFETY_RECEIPT_SCHEMA = "tgw-database-migration-receipt/v2"
 _GIT_OBJECT = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _is_schema_snapshot_path(path: str) -> bool:
+    """Recognize checked-in schema exports that cannot be safely replayed."""
+    name = Path(path).name
+    return name in {"schema.sql", "live_schema.sql"}
 
 
 def _git(repo: Path, *args: str, text: bool = True) -> str | bytes:
@@ -44,6 +50,8 @@ class MigrationSafetyReceipt:
     base_tree: str
     migration_path: str
     migration_sha256: str
+    schema_snapshot_path: str | None
+    schema_snapshot_sha256: str | None
     postgres_version: str
     backup_sha256: str
     source_schema_sha256: str
@@ -249,7 +257,7 @@ def verify_luet_conformance_receipt(receipt: Mapping[str, Any], *, graph: Mappin
     return dict(receipt)
 
 
-def create_plan_authority_migration_receipt(
+def create_migration_safety_receipt(
     *,
     candidate_commit: str,
     candidate_tree: str,
@@ -257,6 +265,8 @@ def create_plan_authority_migration_receipt(
     base_tree: str,
     migration_path: str,
     migration_source: bytes,
+    schema_snapshot_path: str | None = None,
+    schema_snapshot_source: bytes | None = None,
     postgres_version: str,
     backup: bytes,
     source_schema: bytes,
@@ -267,11 +277,21 @@ def create_plan_authority_migration_receipt(
     migrated_data: bytes,
     verified: bool,
 ) -> MigrationSafetyReceipt:
-    """Build a candidate-bound receipt from a real isolated-cluster proof."""
+    """Build one exact-source receipt from a real isolated-cluster migration proof.
+
+    A schema snapshot is evidence of the intended post-migration shape, not an
+    executable migration.  When a proof relies on one, it is bound here so a
+    candidate cannot silently update a ``*_schema.sql`` dump without proving
+    the separately executable migration that actually reaches that state.
+    """
 
     def digest(blob: bytes) -> str:
         return "sha256:" + hashlib.sha256(blob).hexdigest()
 
+    if (schema_snapshot_path is None) != (schema_snapshot_source is None):
+        raise CandidateManifestError(
+            "schema snapshot path and source must either both be present or both be absent"
+        )
     value: dict[str, Any] = {
         "schema": MIGRATION_SAFETY_RECEIPT_SCHEMA,
         "candidate_commit": candidate_commit,
@@ -280,6 +300,10 @@ def create_plan_authority_migration_receipt(
         "base_tree": base_tree,
         "migration_path": migration_path,
         "migration_sha256": digest(migration_source),
+        "schema_snapshot_path": schema_snapshot_path,
+        "schema_snapshot_sha256": (
+            digest(schema_snapshot_source) if schema_snapshot_source is not None else None
+        ),
         "postgres_version": postgres_version,
         "backup_sha256": digest(backup),
         "source_schema_sha256": digest(source_schema),
@@ -294,7 +318,7 @@ def create_plan_authority_migration_receipt(
     return MigrationSafetyReceipt(**value)
 
 
-def verify_plan_authority_migration_receipt(
+def verify_migration_safety_receipt(
     receipt: MigrationSafetyReceipt | Mapping[str, Any],
     *,
     candidate_commit: str,
@@ -303,17 +327,19 @@ def verify_plan_authority_migration_receipt(
     base_tree: str,
     migration_paths: Sequence[str],
     migration_source: bytes,
+    schema_snapshot_source: bytes | None = None,
 ) -> MigrationSafetyReceipt:
-    """Accept only a real, exact-candidate PlanAuthority migration proof.
+    """Accept only a real, exact-candidate database migration proof.
 
     A self-consistent byte transform is not enough: the receipt must identify
-    PostgreSQL 17, the one changed SQL file, both source identities, and equal
-    logical schema/data snapshots before backup and after restore.
+    PostgreSQL 17, one explicit executable migration, both source identities,
+    and equal logical schema/data snapshots before backup and after restore.
     """
     value = asdict(receipt) if isinstance(receipt, MigrationSafetyReceipt) else dict(receipt)
     required = {
         "schema", "candidate_commit", "candidate_tree", "base_commit", "base_tree",
         "migration_path", "migration_sha256", "postgres_version", "backup_sha256",
+        "schema_snapshot_path", "schema_snapshot_sha256",
         "source_schema_sha256", "restored_schema_sha256", "source_data_sha256",
         "restored_data_sha256", "migrated_schema_sha256", "migrated_data_sha256",
         "verified", "receipt_hash",
@@ -322,8 +348,25 @@ def verify_plan_authority_migration_receipt(
         raise CandidateManifestError("migration receipt schema is invalid")
     if tuple(migration_paths) != (value.get("migration_path"),):
         raise CandidateManifestError("migration receipt does not cover exactly the candidate SQL changes")
-    if value.get("migration_path") != "src/tgw/plan_authority.sql":
-        raise CandidateManifestError("migration receipt is not for the PlanAuthority schema")
+    migration_path = value.get("migration_path")
+    if not isinstance(migration_path, str) or not migration_path.endswith(".sql"):
+        raise CandidateManifestError("migration receipt executable path is invalid")
+    if _is_schema_snapshot_path(migration_path):
+        raise CandidateManifestError("schema snapshots cannot be used as executable migrations")
+    snapshot_path = value.get("schema_snapshot_path")
+    snapshot_sha256 = value.get("schema_snapshot_sha256")
+    if schema_snapshot_source is None:
+        if snapshot_path is not None or snapshot_sha256 is not None:
+            raise CandidateManifestError("migration receipt unexpectedly binds a schema snapshot")
+    else:
+        if (
+            not isinstance(snapshot_path, str)
+            or not snapshot_path.endswith(".sql")
+            or snapshot_path == migration_path
+            or not _is_schema_snapshot_path(snapshot_path)
+            or snapshot_sha256 != "sha256:" + hashlib.sha256(schema_snapshot_source).hexdigest()
+        ):
+            raise CandidateManifestError("migration receipt schema snapshot binding mismatch")
     expected = {
         "candidate_commit": candidate_commit,
         "candidate_tree": candidate_tree,
@@ -355,6 +398,13 @@ def verify_plan_authority_migration_receipt(
     return MigrationSafetyReceipt(**value)
 
 
+# Compatibility aliases keep existing callers readable while the receipt
+# schema deliberately becomes generic.  They do not restore the old
+# PlanAuthority-only verification semantics.
+create_plan_authority_migration_receipt = create_migration_safety_receipt
+verify_plan_authority_migration_receipt = verify_migration_safety_receipt
+
+
 def build_candidate_manifest(
     repo: Path,
     *,
@@ -368,6 +418,7 @@ def build_candidate_manifest(
     full_suite_receipt: Mapping[str, Any],
     graph: Mapping[str, Any] | None = None,
     conformance_receipt: Mapping[str, Any] | None = None,
+    migration_receipts: Sequence[MigrationSafetyReceipt | Mapping[str, Any]] = (),
     migration_receipt: MigrationSafetyReceipt | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe only committed Git objects; mutable worktree state is ignored."""
@@ -388,24 +439,63 @@ def build_candidate_manifest(
     )
     archive = _git(repo, "archive", "--format=tar", exact_commit, text=False)
     changed = tuple(sorted(line for line in str(_git(repo, "diff", "--name-only", base, exact_commit)).splitlines() if line))
-    migrations = tuple(path for path in changed if path.endswith(".sql") or "/migrations/" in path)
-    if migrations:
-        if migration_receipt is None:
+    changed_sql = tuple(path for path in changed if path.endswith(".sql") or "/migrations/" in path)
+    if migration_receipt is not None:
+        if migration_receipts:
+            raise CandidateManifestError("use migration_receipts instead of combining singular and plural receipts")
+        migration_receipts = (migration_receipt,)
+    if changed_sql:
+        if not migration_receipts:
             raise CandidateManifestError("candidate changes database schema without a verified backup/restore receipt")
-        if len(migrations) != 1 or migrations[0] != "src/tgw/plan_authority.sql":
-            raise CandidateManifestError("candidate SQL changes require separately scoped migration proofs")
-        migration_source = _git(repo, "show", f"{exact_commit}:{migrations[0]}", text=False)
-        verified_migration = verify_plan_authority_migration_receipt(
-            migration_receipt,
-            candidate_commit=exact_commit,
-            candidate_tree=tree,
-            base_commit=base,
-            base_tree=base_tree,
-            migration_paths=migrations,
-            migration_source=migration_source,
-        )
+        verified_migrations: list[MigrationSafetyReceipt] = []
+        migration_paths: set[str] = set()
+        snapshot_paths: set[str] = set()
+        for supplied in migration_receipts:
+            value = asdict(supplied) if isinstance(supplied, MigrationSafetyReceipt) else dict(supplied)
+            path = value.get("migration_path")
+            if not isinstance(path, str) or path in migration_paths or path not in changed_sql:
+                raise CandidateManifestError("migration receipts must cover distinct changed executable SQL paths")
+            if _is_schema_snapshot_path(path):
+                raise CandidateManifestError("schema snapshots cannot be used as executable migrations")
+            source = _git(repo, "show", f"{exact_commit}:{path}", text=False)
+            snapshot_path = value.get("schema_snapshot_path")
+            snapshot_source = (
+                _git(repo, "show", f"{exact_commit}:{snapshot_path}", text=False)
+                if isinstance(snapshot_path, str) and snapshot_path in changed_sql
+                else None
+            )
+            if snapshot_path is not None and snapshot_source is None:
+                raise CandidateManifestError("migration receipt snapshot is not an exact changed candidate SQL path")
+            if snapshot_path is not None and not _is_schema_snapshot_path(snapshot_path):
+                raise CandidateManifestError("migration receipt snapshot path is not a recognized schema export")
+            verified = verify_migration_safety_receipt(
+                supplied,
+                candidate_commit=exact_commit,
+                candidate_tree=tree,
+                base_commit=base,
+                base_tree=base_tree,
+                migration_paths=(path,),
+                migration_source=source,
+                schema_snapshot_source=snapshot_source,
+            )
+            verified_migrations.append(verified)
+            migration_paths.add(path)
+            if snapshot_path is not None:
+                snapshot_paths.add(snapshot_path)
+        accounted = migration_paths | snapshot_paths
+        if accounted != set(changed_sql):
+            missing = sorted(set(changed_sql) - accounted)
+            unexpected = sorted(accounted - set(changed_sql))
+            detail = ", ".join(missing + unexpected)
+            raise CandidateManifestError(
+                f"candidate SQL changes require separately scoped executable migration proofs or snapshot bindings: {detail}"
+            )
+        if len(snapshot_paths) != sum(receipt.schema_snapshot_path is not None for receipt in verified_migrations):
+            raise CandidateManifestError("each changed schema snapshot must be bound by exactly one migration proof")
     else:
-        verified_migration = None
+        if migration_receipts:
+            raise CandidateManifestError("candidate has no database SQL changes for supplied migration receipts")
+        verified_migrations = []
     focused = verify_test_receipt(
         focused_receipt, scope="focused", source_commit=exact_commit, source_tree=tree,
     )
@@ -436,8 +526,17 @@ def build_candidate_manifest(
             "full_suite": full_suite,
         },
         "database": {
-            "migration_paths": list(migrations),
-            "backup_restore": asdict(verified_migration) if verified_migration else None,
+            "changed_sql_paths": list(changed_sql),
+            "migration_paths": sorted(receipt.migration_path for receipt in verified_migrations),
+            "schema_snapshot_paths": sorted(
+                receipt.schema_snapshot_path
+                for receipt in verified_migrations
+                if receipt.schema_snapshot_path is not None
+            ),
+            "backup_restore": [
+                asdict(receipt)
+                for receipt in sorted(verified_migrations, key=lambda receipt: receipt.migration_path)
+            ],
         },
         "candidate_closed": True,
         "dispatchable": conformance["status"] == "VERIFIED",

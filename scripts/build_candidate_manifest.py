@@ -20,7 +20,10 @@ def main() -> int:
     parser.add_argument("--closure-hash", required=True)
     parser.add_argument("--focused-receipt", type=Path, required=True)
     parser.add_argument("--full-suite-receipt", type=Path, required=True)
-    parser.add_argument("--migration-receipt", type=Path)
+    parser.add_argument(
+        "--migration-receipt", type=Path, action="append", default=[],
+        help="one independently verified executable database-migration receipt; repeat per migration",
+    )
     parser.add_argument("--graph", type=Path)
     parser.add_argument("--luet-conformance-receipt", type=Path)
     args = parser.parse_args()
@@ -33,7 +36,10 @@ def main() -> int:
     focused = json.loads(args.focused_receipt.read_text())
     full_suite = json.loads(args.full_suite_receipt.read_text())
     predecessor = json.loads(args.predecessor_release_manifest.read_text())
-    migration = MigrationSafetyReceipt(**json.loads(args.migration_receipt.read_text())) if args.migration_receipt else None
+    migrations = [
+        MigrationSafetyReceipt(**json.loads(path.read_text()))
+        for path in args.migration_receipt
+    ]
     graph = json.loads(args.graph.read_text()) if args.graph else None
     conformance = json.loads(args.luet_conformance_receipt.read_text()) if args.luet_conformance_receipt else None
     manifest = build_candidate_manifest(
@@ -48,7 +54,7 @@ def main() -> int:
         full_suite_receipt=full_suite,
         graph=graph,
         conformance_receipt=conformance,
-        migration_receipt=migration,
+        migration_receipts=migrations,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0

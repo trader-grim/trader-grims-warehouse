@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Prove a PlanAuthority migration against an isolated PostgreSQL 17 cluster.
+"""Prove the executable PlanAuthority migration against PostgreSQL 17.
 
 The proof deliberately reads the SQL from an immutable Git candidate, never
 from the working tree.  It builds a representative v1 database, makes a
 custom-format ``pg_dump`` backup, restores that backup into a fresh database,
 then applies the candidate migration to the original.  The resulting receipt
-is suitable for ``scripts/build_candidate_manifest.py --migration-receipt``.
+is one separately scoped proof for
+``scripts/build_candidate_manifest.py --migration-receipt``.  A candidate may
+also contain other database migrations; those require their own proof.
 
 Example:
 
@@ -31,8 +33,8 @@ from typing import Sequence
 
 from tgw.candidate_manifest import (
     CandidateManifestError,
-    create_plan_authority_migration_receipt,
-    verify_plan_authority_migration_receipt,
+    create_migration_safety_receipt,
+    verify_migration_safety_receipt,
 )
 from tgw.logging import announce_script_run
 
@@ -264,8 +266,8 @@ def prove_migration(*, repo: Path, candidate: str, base: str, output: Path, pg_b
         raise AssertionError("unexpected merge-base output")
     changed = tuple(sorted(line for line in _git(repo, "diff", "--name-only", exact_base, exact_candidate).splitlines() if line))
     migrations = tuple(path for path in changed if path.endswith(".sql") or "/migrations/" in path)
-    if migrations != (MIGRATION_PATH,):
-        raise MigrationProofError("candidate must change exactly src/tgw/plan_authority.sql for this proof")
+    if MIGRATION_PATH not in migrations:
+        raise MigrationProofError("candidate does not change src/tgw/plan_authority.sql")
     migration_source = _git_bytes(repo, "show", f"{exact_candidate}:{MIGRATION_PATH}")
     postgres_bin = _postgres_bin(pg_bin)
     version_output = _run((str(postgres_bin / "initdb"), "--version")).decode().strip()
@@ -329,7 +331,7 @@ def prove_migration(*, repo: Path, candidate: str, base: str, output: Path, pg_b
             if started:
                 _run((str(postgres_bin / "pg_ctl"), "-D", str(data_dir), "-m", "immediate", "-w", "stop"))
 
-    receipt = create_plan_authority_migration_receipt(
+    receipt = create_migration_safety_receipt(
         candidate_commit=exact_candidate,
         candidate_tree=candidate_tree,
         base_commit=exact_base,
@@ -347,13 +349,13 @@ def prove_migration(*, repo: Path, candidate: str, base: str, output: Path, pg_b
         verified=True,
     )
     try:
-        verified = verify_plan_authority_migration_receipt(
+        verified = verify_migration_safety_receipt(
             receipt,
             candidate_commit=exact_candidate,
             candidate_tree=candidate_tree,
             base_commit=exact_base,
             base_tree=base_tree,
-            migration_paths=migrations,
+            migration_paths=(MIGRATION_PATH,),
             migration_source=migration_source,
         )
     except CandidateManifestError as error:
