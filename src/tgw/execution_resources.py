@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 
 RESOURCE_RECEIPT_SCHEMA = "tgw-execution-resource-receipt/v1"
 RESOURCE_SERVICE_SCHEMA = "tgw-registered-resource-service/v1"
-RESOURCE_SERVICE_CATALOG_SCHEMA = "tgw-registered-resource-service-catalog/v1"
+RESOURCE_SERVICE_CATALOG_SCHEMA = "tgw-registered-resource-service-catalog/v2"
 RESOURCE_SERVICE_HEALTH_SCHEMA = "tgw-registered-resource-health/v1"
 RESOURCE_RESPONSE_SCHEMA = "tgw-registered-resource/v1"
 HARNESS_RUN_SCHEMA = "tgw-registered-resource-harness-run/v1"
@@ -41,6 +41,7 @@ _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _SERVICE_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+_GIT_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _MAX_RESOURCE_RESPONSE_BYTES = 4 * 1024 * 1024
 _RESOURCE_SERVICE_DESCRIPTOR_FIELDS = {
     "schema", "id", "endpoint", "credential_env", "timeout_seconds",
@@ -179,12 +180,21 @@ def resource_service_descriptor_hash(descriptor: Mapping[str, Any]) -> str:
 
 
 def validate_resource_service_catalog(catalog: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate the checked-in qualified service catalog, not just an URL file."""
+    """Validate an immutable Plan-bound qualified resource-service catalog.
 
-    if not isinstance(catalog, Mapping) or set(catalog) != {"schema", "services"}:
+    The catalog is a separate, content-addressed execution input.  A descriptor
+    alone only tells a runner where to connect; it cannot qualify that endpoint
+    or substitute for the Plan binding carried by a governed execution card.
+    """
+
+    if not isinstance(catalog, Mapping) or set(catalog) != {"schema", "catalog_ref", "plan_commit", "services"}:
         raise ResourceVerificationError("registered resource service catalog is invalid")
     if catalog["schema"] != RESOURCE_SERVICE_CATALOG_SCHEMA:
         raise ResourceVerificationError("registered resource service catalog schema is invalid")
+    if not isinstance(catalog["catalog_ref"], str) or not catalog["catalog_ref"]:
+        raise ResourceVerificationError("registered resource service catalog reference is invalid")
+    if not isinstance(catalog["plan_commit"], str) or _GIT_COMMIT.fullmatch(catalog["plan_commit"]) is None:
+        raise ResourceVerificationError("registered resource service catalog Plan commit is invalid")
     services = catalog["services"]
     if not isinstance(services, list) or not services:
         raise ResourceVerificationError("registered resource service catalog is empty")
@@ -214,7 +224,18 @@ def validate_resource_service_catalog(catalog: Mapping[str, Any]) -> dict[str, A
                 "capabilities": sorted(capabilities),
             }
         )
-    return {"schema": RESOURCE_SERVICE_CATALOG_SCHEMA, "services": normalized}
+    return {
+        "schema": RESOURCE_SERVICE_CATALOG_SCHEMA,
+        "catalog_ref": catalog["catalog_ref"],
+        "plan_commit": catalog["plan_commit"],
+        "services": normalized,
+    }
+
+
+def resource_service_catalog_hash(catalog: Mapping[str, Any]) -> str:
+    """Return the immutable identity that a card must carry for its catalog."""
+
+    return _hash(validate_resource_service_catalog(catalog))
 
 
 def load_resource_service_catalog(path: str | os.PathLike[str]) -> dict[str, Any]:
@@ -249,16 +270,27 @@ def verify_resource_service_registration(
     return normalized_descriptor
 
 
-def verify_card_resource_service(card: Mapping[str, Any], descriptor: Mapping[str, Any]) -> dict[str, Any]:
-    """Check that the portable descriptor passed to a harness is card-bound."""
+def verify_card_resource_service(
+    card: Mapping[str, Any], descriptor: Mapping[str, Any], catalog: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Check that descriptor and qualified catalog are both card-bound."""
 
     binding = card.get("resource_service")
-    if not isinstance(binding, Mapping) or set(binding) != {"id", "descriptor_hash"}:
+    if not isinstance(binding, Mapping) or set(binding) != {
+        "id", "descriptor_hash", "catalog_ref", "catalog_hash",
+    }:
         raise ResourceVerificationError("card resource service binding is invalid")
+    normalized_catalog = validate_resource_service_catalog(catalog)
     normalized = validate_resource_service_descriptor(descriptor)
     if binding["id"] != normalized["id"] or binding["descriptor_hash"] != resource_service_descriptor_hash(normalized):
         raise ResourceVerificationError("card resource service binding mismatch")
-    return normalized
+    if (
+        binding["catalog_ref"] != normalized_catalog["catalog_ref"]
+        or binding["catalog_hash"] != resource_service_catalog_hash(normalized_catalog)
+        or normalized_catalog["plan_commit"] != card.get("plan_commit")
+    ):
+        raise ResourceVerificationError("card resource service catalog binding mismatch")
+    return normalized, normalized_catalog
 
 
 @dataclass(frozen=True)

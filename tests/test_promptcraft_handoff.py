@@ -42,6 +42,8 @@ def card():
             "resource_service": {
                 "id": RESOURCE_SERVICE["id"],
                 "descriptor_hash": canonical_hash(RESOURCE_SERVICE),
+                "catalog_ref": "catalog:promptcraft-resource-service@1",
+                "catalog_hash": "sha256:" + "a" * 64,
             },
             "bindings": {
                 "plan_input": binding("plan:PP-EXAMPLE@1", "plan input"),

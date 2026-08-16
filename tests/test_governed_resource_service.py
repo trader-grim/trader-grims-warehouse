@@ -16,7 +16,9 @@ from tgw.execution_resources import (
     RESOURCE_SERVICE_CAPABILITIES,
     HTTPRegisteredResourceResolver,
     ResourceVerificationError,
+    resource_service_catalog_hash,
     resource_service_descriptor_hash,
+    verify_card_resource_service,
     verify_card_resources,
     verify_resource_service_registration,
 )
@@ -46,7 +48,7 @@ def resources():
     }
 
 
-def card_template(content, service=None):
+def card_template(content, service=None, resource_catalog=None):
     def binding(ref):
         return {"ref": ref, "hash": "sha256:" + hashlib.sha256(content[ref]).hexdigest()}
 
@@ -74,16 +76,19 @@ def card_template(content, service=None):
         },
     }
     if service is not None:
+        resource_catalog = catalog(service) if resource_catalog is None else resource_catalog
         value["resource_service"] = {
             "id": service["id"],
             "descriptor_hash": resource_service_descriptor_hash(service),
+            "catalog_ref": resource_catalog["catalog_ref"],
+            "catalog_hash": resource_service_catalog_hash(resource_catalog),
         }
     return value
 
 
-def card(content, service=None):
+def card(content, service=None, resource_catalog=None):
     unsigned = {
-        **card_template(content, service),
+        **card_template(content, service, resource_catalog),
         "schema": "tgw-execution-card/v1",
         "role": "implementation",
         "selected_provider": "resource-service-runner",
@@ -243,7 +248,9 @@ def descriptor(endpoint):
 
 def catalog(service):
     return {
-        "schema": "tgw-registered-resource-service-catalog/v1",
+        "schema": "tgw-registered-resource-service-catalog/v2",
+        "catalog_ref": "catalog:qualified-test-resource-service@1",
+        "plan_commit": PLAN_COMMIT,
         "services": [
             {
                 "id": service["id"],
@@ -286,6 +293,17 @@ def test_qualified_catalog_rejects_an_unbound_service_descriptor(monkeypatch):
         substituted = {**service, "endpoint": endpoint + "/substituted"}
         with pytest.raises(ResourceVerificationError, match="not catalog-bound"):
             verify_resource_service_registration(catalog(service), substituted)
+
+
+def test_card_refuses_a_caller_substituted_qualified_service_catalog(monkeypatch):
+    content = resources()
+    monkeypatch.setenv("TGW_TEST_RESOURCE_TOKEN", "test-token")
+    with resource_service(content) as endpoint:
+        service = descriptor(endpoint)
+        bound_catalog = catalog(service)
+        substituted_catalog = {**bound_catalog, "catalog_ref": "catalog:substituted-resource-service@1"}
+        with pytest.raises(ResourceVerificationError, match="catalog binding mismatch"):
+            verify_card_resource_service(card(content, service, bound_catalog), service, substituted_catalog)
 
 
 def test_registered_resource_service_rejects_plaintext_non_loopback_endpoint():
@@ -371,6 +389,7 @@ def test_every_role_retrieves_card_bound_sources_from_the_qualified_service(tmp_
                 required_capabilities=capabilities,
                 resource_resolver=resolver,
                 resource_service=service,
+                resource_service_catalog=catalog(service),
             )
             for role, capabilities in (
                 ("implementation", ["source-mutation"]),
@@ -397,6 +416,7 @@ def test_every_role_retrieves_card_bound_sources_from_the_qualified_service(tmp_
             required_capabilities=["source-mutation"],
             resource_resolver=resolver,
             resource_service=service,
+            resource_service_catalog=catalog(service),
         )
 
     assert [receipt["status"] for receipt in receipts] == ["PASS", "PASS", "PASS"]

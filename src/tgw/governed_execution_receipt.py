@@ -80,11 +80,15 @@ def _bound_card(
     resource_service = card.get("resource_service")
     if (
         not isinstance(resource_service, Mapping)
-        or set(resource_service) != {"id", "descriptor_hash"}
+        or set(resource_service) != {"id", "descriptor_hash", "catalog_ref", "catalog_hash"}
         or not isinstance(resource_service["id"], str)
         or not resource_service["id"]
         or not isinstance(resource_service["descriptor_hash"], str)
         or _SHA256.fullmatch(resource_service["descriptor_hash"]) is None
+        or not isinstance(resource_service["catalog_ref"], str)
+        or not resource_service["catalog_ref"]
+        or not isinstance(resource_service["catalog_hash"], str)
+        or _SHA256.fullmatch(resource_service["catalog_hash"]) is None
     ):
         raise GovernedExecutionReceiptError("execution card resource service binding is invalid")
     if bindings["source_tree"]["ref"] != f"git:tree:{source_tree}":
@@ -145,6 +149,8 @@ def create_candidate_governed_execution_receipt(
         != role_receipt.get("harness_retrieval_attestation_hash")
         or role_receipt.get("selected_provider") != card["selected_provider"]
         or role_receipt.get("role") != card["role"]
+        or role_receipt.get("resource_service_catalog_ref") != card["resource_service"]["catalog_ref"]
+        or role_receipt.get("resource_service_catalog_hash") != card["resource_service"]["catalog_hash"]
     ):
         raise GovernedExecutionReceiptError("governed role receipt binding mismatch")
     try:
@@ -174,6 +180,11 @@ def create_candidate_governed_execution_receipt(
         "resource_receipt_hash": resource_hash,
         "harness_retrieval_attestation_hash": role_receipt["harness_retrieval_attestation_hash"],
         "harness_retrieval_attestation": dict(role_receipt["harness_retrieval_attestation"]),
+        "service_id": card["resource_service"]["id"],
+        "execution_identity": role_receipt["execution_identity"],
+        "handoff_hash": role_receipt["handoff_hash"],
+        "resource_service_catalog_ref": card["resource_service"]["catalog_ref"],
+        "resource_service_catalog_hash": card["resource_service"]["catalog_hash"],
         "role_receipt_hash": role_hash,
     }
     return {**unsigned, "receipt_hash": _hash(unsigned)}
@@ -187,7 +198,8 @@ def verify_candidate_governed_execution_receipt(
     required = {
         "schema", "status", "source_commit", "source_tree", "plan_commit", "role",
         "selected_provider", "card_hash", "resource_receipt_hash", "harness_retrieval_attestation_hash",
-        "harness_retrieval_attestation", "role_receipt_hash", "receipt_hash",
+        "harness_retrieval_attestation", "service_id", "execution_identity", "handoff_hash",
+        "resource_service_catalog_ref", "resource_service_catalog_hash", "role_receipt_hash", "receipt_hash",
     }
     if not isinstance(receipt, Mapping) or set(receipt) != required or receipt.get("schema") != SCHEMA:
         raise GovernedExecutionReceiptError("candidate governed execution receipt schema is invalid")
@@ -213,12 +225,23 @@ def verify_candidate_governed_execution_receipt(
         validate_harness_retrieval_attestation(
             attestation,
             expected={
-                "card_hash": receipt["card_hash"], "role": receipt["role"],
+                "service_id": receipt["service_id"], "card_hash": receipt["card_hash"],
+                "role": receipt["role"], "execution_identity": receipt["execution_identity"],
+                "handoff_hash": receipt["handoff_hash"],
                 "resource_receipt_hash": receipt["resource_receipt_hash"],
             },
         )
     except ResourceVerificationError as exc:
         raise GovernedExecutionReceiptError(f"candidate governed execution receipt attestation is invalid: {exc}") from exc
-    if not isinstance(receipt.get("role"), str) or not isinstance(receipt.get("selected_provider"), str):
+    if (
+        not isinstance(receipt.get("role"), str)
+        or not isinstance(receipt.get("selected_provider"), str)
+        or not isinstance(receipt.get("service_id"), str)
+        or not isinstance(receipt.get("execution_identity"), str)
+        or not isinstance(receipt.get("handoff_hash"), str)
+        or not isinstance(receipt.get("resource_service_catalog_ref"), str)
+        or not isinstance(receipt.get("resource_service_catalog_hash"), str)
+        or _SHA256.fullmatch(receipt["resource_service_catalog_hash"]) is None
+    ):
         raise GovernedExecutionReceiptError("candidate governed execution receipt role binding is invalid")
     return dict(receipt)

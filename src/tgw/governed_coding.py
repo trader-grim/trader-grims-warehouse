@@ -13,6 +13,7 @@ from tgw.execution_resources import (
     HTTPRegisteredResourceResolver,
     ResourceResolver,
     ResourceVerificationError,
+    resource_service_catalog_hash,
     resource_service_descriptor_hash,
     validate_harness_retrieval_attestation,
     verify_card_resource_service,
@@ -109,6 +110,7 @@ def dispatch_role(
     independent_from: Sequence[str] = (),
     resource_resolver: ResourceResolver | None = None,
     resource_service: Mapping[str, Any] | None = None,
+    resource_service_catalog: Mapping[str, Any] | None = None,
     run: Run = subprocess.run,
 ) -> dict[str, Any]:
     """Select, adapt, execute, and bind one role result to an immutable receipt."""
@@ -142,9 +144,11 @@ def dispatch_role(
     provider_fields = execution_card_provider_fields(selection)
     card = _card(card_template, provider_fields, role)
     try:
-        if resource_resolver is None or resource_service is None:
+        if resource_resolver is None or resource_service is None or resource_service_catalog is None:
             raise ResourceVerificationError("registered resource resolver is unavailable")
-        verified_service = verify_card_resource_service(card, resource_service)
+        verified_service, verified_catalog = verify_card_resource_service(
+            card, resource_service, resource_service_catalog,
+        )
         resource_receipt = verify_card_resources(card, resource_resolver)
     except ResourceVerificationError as exc:
         return _receipt(
@@ -270,6 +274,8 @@ def dispatch_role(
             "harness_retrieval_attestation_hash": attestation_hash,
             "harness_retrieval_attestation": harness_retrieval_attestation,
             "resource_service_descriptor_hash": resource_service_descriptor_hash(verified_service),
+            "resource_service_catalog_ref": verified_catalog["catalog_ref"],
+            "resource_service_catalog_hash": resource_service_catalog_hash(verified_catalog),
             "outcome": outcome,
             "established_conditions": established,
             "artifacts": artifacts,
@@ -299,6 +305,8 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
         or not isinstance(receipt.get("resource_receipt_hash"), str)
         or receipt.get("harness_resource_receipt_hash") != receipt.get("resource_receipt_hash")
         or not isinstance(receipt.get("resource_service_descriptor_hash"), str)
+        or not isinstance(receipt.get("resource_service_catalog_ref"), str)
+        or not isinstance(receipt.get("resource_service_catalog_hash"), str)
         or not isinstance(receipt.get("harness_retrieval_attestation_hash"), str)
         or not isinstance(attestation, Mapping)
         or attestation.get("attestation_hash") != receipt.get("harness_retrieval_attestation_hash")

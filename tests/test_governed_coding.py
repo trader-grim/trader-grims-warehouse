@@ -2,7 +2,13 @@ import hashlib
 import json
 from pathlib import Path
 
-from tgw.execution_resources import HTTPRegisteredResourceResolver, RegisteredResourceResolver, ResourceVerificationError
+from tgw.execution_resources import (
+    RESOURCE_SERVICE_CAPABILITIES,
+    HTTPRegisteredResourceResolver,
+    RegisteredResourceResolver,
+    ResourceVerificationError,
+    resource_service_catalog_hash,
+)
 from tgw.governed_coding import admission_gate, dispatch_role
 from tgw.harness_registry import load_registry, observe_health
 
@@ -27,6 +33,24 @@ RESOURCE_SERVICE = {
     "timeout_seconds": 5,
 }
 TEST_ATTESTATION_HASH = "sha256:" + "a" * 64
+
+
+def service_hash():
+    return "sha256:" + hashlib.sha256(
+        json.dumps(RESOURCE_SERVICE, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+RESOURCE_SERVICE_CATALOG = {
+    "schema": "tgw-registered-resource-service-catalog/v2",
+    "catalog_ref": "catalog:unit-resource-service@1",
+    "plan_commit": PLAN_COMMIT,
+    "services": [{
+        "id": RESOURCE_SERVICE["id"],
+        "descriptor_hash": service_hash(),
+        "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
+    }],
+}
 
 
 class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
@@ -57,13 +81,6 @@ class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
                 json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest(),
         }
-
-
-def service_hash():
-    import json
-    return "sha256:" + hashlib.sha256(
-        json.dumps(RESOURCE_SERVICE, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
 
 
 def runner(path: Path, *, fail_review=False, overclaim=False):
@@ -109,7 +126,11 @@ def card_template(card_id):
         "card_id": card_id,
         "solution_id": "sha256:solution",
         "plan_commit": PLAN_COMMIT,
-        "resource_service": {"id": RESOURCE_SERVICE["id"], "descriptor_hash": service_hash()},
+        "resource_service": {
+            "id": RESOURCE_SERVICE["id"], "descriptor_hash": service_hash(),
+            "catalog_ref": RESOURCE_SERVICE_CATALOG["catalog_ref"],
+            "catalog_hash": resource_service_catalog_hash(RESOURCE_SERVICE_CATALOG),
+        },
         "bindings": {
             "plan_input": binding("plan:p"),
             "plan_commit": binding("plan-commit:fb9"),
@@ -152,6 +173,7 @@ def dispatch(registry, health, bound_adapters, role, identity, **kwargs):
         required_capabilities=["source-mutation"] if role == "implementation" else ["tests"],
         resource_resolver=resource_resolver(),
         resource_service=RESOURCE_SERVICE,
+        resource_service_catalog=RESOURCE_SERVICE_CATALOG,
         **kwargs,
     )
 
@@ -264,6 +286,7 @@ def test_core_dispatch_rejects_a_runner_without_a_registered_attestation_verifie
         required_capabilities=["source-mutation"],
         resource_resolver=RegisteredResourceResolver(RESOURCE_CONTENT),
         resource_service=RESOURCE_SERVICE,
+        resource_service_catalog=RESOURCE_SERVICE_CATALOG,
     )
 
     assert receipt["status"] == "FAIL"

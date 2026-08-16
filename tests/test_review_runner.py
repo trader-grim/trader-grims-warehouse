@@ -7,10 +7,12 @@ from pathlib import Path
 import pytest
 
 from tgw.execution_resources import (
+    RESOURCE_SERVICE_CAPABILITIES,
     HTTPRegisteredResourceResolver,
     RegisteredResource,
     RegisteredResourceResolver,
     ResourceVerificationError,
+    resource_service_catalog_hash,
 )
 from tgw.governed_coding import admission_gate, dispatch_role
 from tgw.harness_registry import load_registry, observe_health
@@ -30,6 +32,24 @@ RESOURCE_SERVICE = {
     "timeout_seconds": 5,
 }
 TEST_ATTESTATION_HASH = "sha256:" + "a" * 64
+
+
+def resource_service_hash():
+    return "sha256:" + hashlib.sha256(
+        json.dumps(RESOURCE_SERVICE, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+RESOURCE_SERVICE_CATALOG = {
+    "schema": "tgw-registered-resource-service-catalog/v2",
+    "catalog_ref": "catalog:review-resource-service@1",
+    "plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+    "services": [{
+        "id": RESOURCE_SERVICE["id"],
+        "descriptor_hash": resource_service_hash(),
+        "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
+    }],
+}
 
 
 def snapshot(tmp_path):
@@ -53,9 +73,9 @@ def handoff(source):
             "plan_commit": plan_commit,
             "resource_service": {
                 "id": RESOURCE_SERVICE["id"],
-                "descriptor_hash": "sha256:" + hashlib.sha256(
-                    json.dumps(RESOURCE_SERVICE, sort_keys=True, separators=(",", ":")).encode()
-                ).hexdigest(),
+                "descriptor_hash": resource_service_hash(),
+                "catalog_ref": RESOURCE_SERVICE_CATALOG["catalog_ref"],
+                "catalog_hash": resource_service_catalog_hash(RESOURCE_SERVICE_CATALOG),
             },
             "bindings": {
                 "plan_input": binding("plan:p", "plan input"),
@@ -358,7 +378,11 @@ def test_unattested_isolated_review_cannot_admit_even_with_distinct_context(tmp_
     config = {"commands": {"codex-implement": [local], "controller-verify": [local], "harness-review": wrapper}}
     bound = adapters()
     health = observe_health(registry, coding_config=config, adapters=bound)
-    common = {"registry": registry, "health": health, "adapters": bound, "resource_resolver": resource_resolver(source), "resource_service": RESOURCE_SERVICE}
+    common = {
+        "registry": registry, "health": health, "adapters": bound,
+        "resource_resolver": resource_resolver(source), "resource_service": RESOURCE_SERVICE,
+        "resource_service_catalog": RESOURCE_SERVICE_CATALOG,
+    }
     implementation = dispatch_role(
         **common,
         role="implementation",
@@ -399,7 +423,11 @@ def test_failed_isolated_review_blocks_governed_admission(tmp_path):
     config = {"commands": {"codex-implement": [local], "controller-verify": [local], "harness-review": wrapper}}
     bound = adapters()
     health = observe_health(registry, coding_config=config, adapters=bound)
-    common = {"registry": registry, "health": health, "adapters": bound, "resource_resolver": resource_resolver(source), "resource_service": RESOURCE_SERVICE}
+    common = {
+        "registry": registry, "health": health, "adapters": bound,
+        "resource_resolver": resource_resolver(source), "resource_service": RESOURCE_SERVICE,
+        "resource_service_catalog": RESOURCE_SERVICE_CATALOG,
+    }
     implementation = dispatch_role(**common, role="implementation", card_template=card_template(source, "i"), execution_identity="ctx:i", required_capabilities=["source-mutation"])
     review = dispatch_role(**common, role="independent-review", card_template=card_template(source, "r"), execution_identity="ctx:r", required_capabilities=["isolated-snapshot-review"])
     controller = dispatch_role(**common, role="controller-verification", card_template=card_template(source, "c"), execution_identity="ctx:c", required_capabilities=["tests"])

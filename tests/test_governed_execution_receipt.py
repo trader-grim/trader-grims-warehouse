@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tgw.execution_resources import RESOURCE_SERVICE_CAPABILITIES, resource_service_catalog_hash
 from tgw.governed_execution_receipt import (
     GovernedExecutionReceiptError,
     create_candidate_governed_execution_receipt,
@@ -28,6 +29,18 @@ def canonical_hash(value):
     return "sha256:" + hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+RESOURCE_SERVICE_CATALOG = {
+    "schema": "tgw-registered-resource-service-catalog/v2",
+    "catalog_ref": "catalog:candidate-resource-service@1",
+    "plan_commit": PLAN_COMMIT,
+    "services": [{
+        "id": RESOURCE_SERVICE["id"],
+        "descriptor_hash": canonical_hash(RESOURCE_SERVICE),
+        "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
+    }],
+}
 
 
 def candidate_repo(tmp_path):
@@ -58,6 +71,8 @@ def card(tree):
         "resource_service": {
             "id": RESOURCE_SERVICE["id"],
             "descriptor_hash": canonical_hash(RESOURCE_SERVICE),
+            "catalog_ref": RESOURCE_SERVICE_CATALOG["catalog_ref"],
+            "catalog_hash": resource_service_catalog_hash(RESOURCE_SERVICE_CATALOG),
         },
         "bindings": {
             "plan_input": binding("plan:input", "Plan input"),
@@ -116,6 +131,8 @@ def role_receipt(card_value, resource_value):
         "harness_retrieval_attestation_hash": attestation["attestation_hash"],
         "harness_retrieval_attestation": attestation,
         "resource_service_descriptor_hash": canonical_hash(RESOURCE_SERVICE),
+        "resource_service_catalog_ref": RESOURCE_SERVICE_CATALOG["catalog_ref"],
+        "resource_service_catalog_hash": resource_service_catalog_hash(RESOURCE_SERVICE_CATALOG),
         "outcome": "satisfied",
         "established_conditions": ["implemented"],
         "artifacts": [],
@@ -180,6 +197,30 @@ def test_candidate_receipt_verifier_rejects_a_compact_forged_attestation(tmp_pat
     )
     receipt["harness_retrieval_attestation"] = {"attestation_hash": "sha256:" + "e" * 64}
     receipt["harness_retrieval_attestation_hash"] = "sha256:" + "e" * 64
+    unsigned = dict(receipt)
+    unsigned.pop("receipt_hash")
+    receipt["receipt_hash"] = canonical_hash(unsigned)
+
+    with pytest.raises(GovernedExecutionReceiptError, match="attestation is invalid"):
+        verify_candidate_governed_execution_receipt(
+            receipt, source_commit=commit, source_tree=tree, plan_commit=PLAN_COMMIT,
+        )
+
+
+def test_candidate_receipt_verifier_binds_service_execution_and_handoff_identities(tmp_path):
+    _repo, commit, tree = candidate_repo(tmp_path)
+    card_value = card(tree)
+    resources = resource_receipt(card_value)
+    role = role_receipt(card_value, resources)
+    receipt = create_candidate_governed_execution_receipt(
+        card=card_value,
+        resource_receipt=resources,
+        role_receipt=role,
+        source_commit=commit,
+        source_tree=tree,
+        plan_commit=PLAN_COMMIT,
+    )
+    receipt["execution_identity"] = "substituted-context:1"
     unsigned = dict(receipt)
     unsigned.pop("receipt_hash")
     receipt["receipt_hash"] = canonical_hash(unsigned)

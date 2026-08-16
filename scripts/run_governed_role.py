@@ -61,8 +61,9 @@ def main() -> int:
         card_template = _object(args.card_template, "card template")
         resource_service = _object(args.resource_service, "registered resource service")
         resolver = HTTPRegisteredResourceResolver.from_descriptor(resource_service)
+        resource_service_catalog = load_resource_service_catalog(args.resource_service_catalog)
         resource_service = verify_resource_service_registration(
-            load_resource_service_catalog(args.resource_service_catalog),
+            resource_service_catalog,
             resource_service,
             resolver=resolver,
         )
@@ -85,6 +86,7 @@ def main() -> int:
             independent_from=args.independent_from,
             resource_resolver=resolver,
             resource_service=resource_service,
+            resource_service_catalog=resource_service_catalog,
         )
         print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
         return 0 if receipt["status"] == "PASS" else 2

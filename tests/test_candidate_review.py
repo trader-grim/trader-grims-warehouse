@@ -120,6 +120,8 @@ def governed_receipt(packet_value, *, passed):
         "harness_retrieval_attestation_hash": attestation["attestation_hash"],
         "harness_retrieval_attestation": attestation,
         "resource_service_descriptor_hash": "sha256:service",
+        "resource_service_catalog_ref": "catalog:review-service@1",
+        "resource_service_catalog_hash": "sha256:catalog",
         "outcome": "satisfied" if passed else "failed",
         "established_conditions": ["reviewed"] if passed else [],
         "artifacts": [],

@@ -167,6 +167,8 @@ def test_selection_fields_flow_mechanically_into_promptcraft_card(tmp_path):
                 "descriptor_hash": "sha256:" + hashlib.sha256(
                     json.dumps(resource_service, sort_keys=True, separators=(",", ":")).encode()
                 ).hexdigest(),
+                "catalog_ref": "catalog:registry-resource-service@1",
+                "catalog_hash": "sha256:" + "a" * 64,
             },
             "bindings": {
                 "plan_input": binding("plan:p", "plan"),

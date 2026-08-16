@@ -110,13 +110,17 @@ class ExecutionCard:
         service = value["resource_service"]
         if (
             not isinstance(service, Mapping)
-            or set(service) != {"id", "descriptor_hash"}
+            or set(service) != {"id", "descriptor_hash", "catalog_ref", "catalog_hash"}
             or not isinstance(service["id"], str)
             or not service["id"]
             or not isinstance(service["descriptor_hash"], str)
             or _SHA256.fullmatch(service["descriptor_hash"]) is None
+            or not isinstance(service["catalog_ref"], str)
+            or not service["catalog_ref"]
+            or not isinstance(service["catalog_hash"], str)
+            or _SHA256.fullmatch(service["catalog_hash"]) is None
         ):
-            raise HandoffError("resource_service must bind an id and descriptor hash")
+            raise HandoffError("resource_service must bind descriptor and catalog identities")
         for field in ("authority", "exclusions", "acceptance"):
             if not isinstance(value[field], list) or not all(isinstance(item, str) for item in value[field]):
                 raise HandoffError(f"{field} must be a string list")
