@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -7,13 +8,15 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tgw import context_mcp_server as context
 from tgw.execution_resources import (
     CARD_RESOURCE_NAMES,
-    RegisteredResourceResolver,
     card_resource_receipt,
     content_hash,
+    issue_harness_retrieval_attestation,
 )
 
 
@@ -123,29 +126,31 @@ def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):
     receipt = card_resource_receipt(card)
     observed = {}
 
-    class FakeResolver:
-        def __init__(self, **kwargs):
-            observed["configuration"] = kwargs
-            self.resources = RegisteredResourceResolver({
-                f"resource:{name}": value for name, value in contents.items()
-            })
+    signing_key = Ed25519PrivateKey.generate()
+    public_key = base64.b64encode(signing_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw,
+    )).decode()
 
-        def begin_harness_run(self, **kwargs):
-            observed["begin"] = kwargs
-            return {
-                "schema": "tgw-registered-resource-harness-run/v2",
-                "service_id": "review-resources", "client_id": "review-client",
-                "run_id": "run-bound-context", **kwargs,
-            }
+    class FakeBroker:
+        def __init__(self, endpoint):
+            observed["endpoint"] = endpoint
 
-        def for_harness_run(self, run):
-            observed["run"] = run
-            return self.resources
+        def execute(self, request):
+            observed["request"] = request
+            return issue_harness_retrieval_attestation(
+                {
+                    "schema": "tgw-registered-resource-retrieval-attestation/v3",
+                    "service_id": "review-resources", "client_id": "review-client",
+                    "run_id": "run-bound-context", "card_hash": request["card_hash"],
+                    "role": request["role"],
+                    "execution_identity": request["execution_identity"],
+                    "handoff_hash": request["handoff_hash"],
+                    "resource_receipt_hash": request["resource_receipt_hash"],
+                    "resources": request["resources"], "attestation_key_id": "test-key",
+                }, signing_private_key=signing_key,
+            )
 
-        def complete_harness_run(self, run):
-            return {"run_id": run["run_id"], "attestation_hash": "sha256:" + "b" * 64}
-
-    monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_ENDPOINT", "https://context.invalid")
+    monkeypatch.setenv("TGW_CONTEXT_REVIEW_BROKER_ENDPOINT", "https://broker.invalid")
     monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_ID", "review-resources")
     monkeypatch.setenv("TGW_CONTEXT_RESOURCE_SERVICE_CLIENT_ID", "review-client")
     monkeypatch.setenv(
@@ -153,12 +158,14 @@ def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):
     )
     monkeypatch.setenv("TGW_CONTEXT_REVIEW_UID", str(os.geteuid()))
     monkeypatch.setenv("TGW_CONTEXT_REVIEW_GID", str(os.getegid()))
+    monkeypatch.setenv("TGW_CONTEXT_ATTESTATION_KEY_ID", "test-key")
+    monkeypatch.setenv("TGW_CONTEXT_ATTESTATION_PUBLIC_KEY", public_key)
     result = context._review_context_run(
         challenge="c" * 64, card_json=json.dumps(card),
         handoff_hash="sha256:" + "d" * 64,
         resource_receipt_hash=receipt["receipt_hash"],
         skill_contract_hash="sha256:" + "e" * 64,
-        resolver_factory=FakeResolver, credential_reader=lambda: "secret",
+        broker_factory=FakeBroker,
     )
     assert result == {
         "schema": "tgw-context-review-run/v1", "status": "PASS",
@@ -167,10 +174,7 @@ def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):
         "resource_receipt_hash": receipt["receipt_hash"],
         "skill_contract_hash": "sha256:" + "e" * 64,
         "runtime_uid": os.geteuid(), "runtime_gid": os.getegid(),
-        "retrieval_attestation_hash": "sha256:" + "b" * 64,
+        "retrieval_attestation": result["retrieval_attestation"],
     }
-    assert observed["configuration"] == {
-        "service_id": "review-resources", "client_id": "review-client",
-        "endpoint": "https://context.invalid", "credential": "secret",
-    }
-    assert observed["begin"]["resources"] == bindings
+    assert observed["endpoint"] == "https://broker.invalid"
+    assert observed["request"]["resources"] == bindings

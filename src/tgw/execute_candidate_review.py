@@ -22,6 +22,7 @@ from tgw.candidate_review import (
 )
 from tgw.execution_resources import HTTPRegisteredResourceResolver
 from tgw.governed_coding import dispatch_role, validate_receipt
+from tgw.governed_execution_receipt import create_candidate_governed_execution_receipt
 from tgw.governed_review_adapter import validate_execution as validate_governed_review_execution
 from tgw.harness_registry import load_registry, observe_health
 from tgw.qualified_execution_service import QualifiedExecutionClient
@@ -100,8 +101,8 @@ def create_governed_review_role_receipt(
         "card_hash": normalized["card_hash"],
         "promptcraft_receipt_hash": normalized["promptcraft_receipt_hash"],
         "handoff_hash": normalized["handoff_hash"],
-        "resource_receipt_hash": normalized["promptcraft_receipt_hash"],
-        "harness_resource_receipt_hash": normalized["promptcraft_receipt_hash"],
+        "resource_receipt_hash": normalized["resource_receipt_hash"],
+        "harness_resource_receipt_hash": normalized["resource_receipt_hash"],
         "harness_retrieval_attestation_hash": attestation["attestation_hash"],
         "harness_retrieval_attestation": dict(attestation),
         "resource_service_descriptor_hash": card["resource_service"]["descriptor_hash"],
@@ -122,14 +123,62 @@ def create_governed_review_role_receipt(
 
 def finalize_and_publish_governed_review(
     packet: Mapping[str, Any], execution: Mapping[str, Any],
-    handoff: Mapping[str, Any], sink: Any,
+    handoff: Mapping[str, Any], resource_service_catalog: Mapping[str, Any], sink: Any,
 ) -> dict[str, Any]:
-    """Create and pin the complete seven-artifact governed review bundle."""
+    """Create and pin the governed role join and complete review evidence."""
 
     role_receipt = create_governed_review_role_receipt(execution, handoff)
     finalized = finalize_governed_review(packet, execution, role_receipt)
     source = finalized["execution"]["source"]
     plan_commit = finalized["execution"]["plan_commit"]
+    governed_bundle = None
+    governed_bundle_pointer = None
+    if role_receipt["status"] == "PASS":
+        candidate_receipt = create_candidate_governed_execution_receipt(
+            card=handoff["card"], resource_receipt=handoff["resource_receipt"],
+            role_receipt=role_receipt,
+            resource_service_catalog=resource_service_catalog,
+            source_commit=source["commit"], source_tree=source["tree"],
+            plan_commit=plan_commit,
+        )
+        governed_prefix = (
+            f"candidate:{source['commit']}:governed-execution:"
+            "independent-review"
+        )
+        governed_artifacts = {
+            "candidate_receipt": candidate_receipt,
+            "card": dict(handoff["card"]),
+            "resource_receipt": dict(handoff["resource_receipt"]),
+            "role_receipt": role_receipt,
+            "resource_service_catalog": dict(resource_service_catalog),
+        }
+        governed_pointers = {}
+        for name, value in governed_artifacts.items():
+            pointer = sink.publish_artifact(
+                f"{governed_prefix}:{name}", value,
+            )
+            if sink.read_artifact(pointer) != value:
+                raise ValueError(
+                    f"governed execution {name} artifact X readback differs"
+                )
+            governed_pointers[name] = pointer
+        unsigned_governed_bundle = {
+            "schema": "tgw-candidate-governed-execution-bundle/v2",
+            "source_commit": source["commit"],
+            "source_tree": source["tree"],
+            "plan_commit": plan_commit,
+            "role": "independent-review",
+            **governed_pointers,
+        }
+        governed_bundle = {
+            **unsigned_governed_bundle,
+            "bundle_hash": _hash(unsigned_governed_bundle),
+        }
+        governed_bundle_pointer = sink.publish_artifact(
+            governed_prefix, governed_bundle,
+        )
+        if sink.read_artifact(governed_bundle_pointer) != governed_bundle:
+            raise ValueError("governed execution bundle X readback differs")
     prefix = f"candidate:{source['commit']}:independent-review"
     artifacts = {
         "review_packet": finalized["packet"],
@@ -158,6 +207,8 @@ def finalize_and_publish_governed_review(
         raise ValueError("governed review bundle X readback differs")
     return {
         **finalized, "governed_review_receipt": role_receipt,
+        "governed_execution_bundle": governed_bundle,
+        "governed_execution_bundle_pointer": governed_bundle_pointer,
         "evidence_bundle": bundle, "evidence_bundle_pointer": bundle_pointer,
     }
 
@@ -385,7 +436,7 @@ def main() -> int:
             "schema": "tgw-governed-review-result-summary/v1",
             "provider": finalized["execution"]["provider"],
             "execution_hash": finalized["execution"]["execution_hash"],
-            "verdict": finalized["review"]["overall"],
+            "verdict": finalized["result"]["status"],
             "result_hash": finalized["result"]["result_hash"],
             "evidence_bundle_hash": finalized["evidence_bundle"]["bundle_hash"],
         }, sort_keys=True, separators=(",", ":")))

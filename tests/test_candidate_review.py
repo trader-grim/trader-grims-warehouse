@@ -1,11 +1,14 @@
 import hashlib
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import tgw.governed_review_adapter as governed_adapter
+from tgw import execute_candidate_review
 from tgw.candidate_review import (
     CandidateReviewError,
     create_review_report,
@@ -375,3 +378,24 @@ def test_governed_review_card_rejects_source_and_argv_substitution(tmp_path):
             codegraph_binding={"ref": "codegraph:1", "hash": "sha256:" + "6" * 64},
             **{**common, "execution_environment_binding": {"ref": "env:argv", "hash": hash_object(packet_value["runner_argv"])}},
         )
+
+
+def test_governed_request_cli_reports_finalized_result(
+    tmp_path, monkeypatch, capsys,
+):
+    request = tmp_path / "request.json"
+    request.write_text("{}")
+    finalized = {
+        "execution": {"provider": "claude", "execution_hash": "sha256:" + "1" * 64},
+        "result": {"status": "PASS", "result_hash": "sha256:" + "2" * 64},
+        "evidence_bundle": {"bundle_hash": "sha256:" + "3" * 64},
+    }
+    monkeypatch.setattr(governed_adapter, "execute_request", lambda _path: finalized)
+    monkeypatch.setattr(sys, "argv", ["tgw-execute-candidate-review", "--governed-request", str(request)])
+    assert execute_candidate_review.main() == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "schema": "tgw-governed-review-result-summary/v1", "provider": "claude",
+        "execution_hash": "sha256:" + "1" * 64, "verdict": "PASS",
+        "result_hash": "sha256:" + "2" * 64,
+        "evidence_bundle_hash": "sha256:" + "3" * 64,
+    }

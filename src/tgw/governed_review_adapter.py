@@ -32,6 +32,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from tgw.execution_resources import (
     ResourceVerificationError,
+    resource_service_descriptor_hash,
     validate_harness_retrieval_attestation,
 )
 from tgw.review_runner import ReviewRunnerError, _validate_report
@@ -137,7 +138,7 @@ def _validate_report_evidence(report: Any, expected_snapshot: str) -> dict[str, 
 
 def _validate_context_consumption(
     value: Any, *, provider_identity: Mapping[str, Any], card: Mapping[str, Any],
-    handoff_hash: str, promptcraft_receipt_hash: str, challenge: str | None = None,
+    handoff_hash: str, resource_receipt_hash: str, challenge: str | None = None,
 ) -> dict[str, Any]:
     required = {
         "schema", "status", "run_id", "challenge", "skill_contract_hash",
@@ -176,7 +177,7 @@ def _validate_context_consumption(
     service = provider_identity["context_bundle_service"]
     attestation = value.get("retrieval_attestation")
     try:
-        validate_harness_retrieval_attestation(
+        verified_attestation = validate_harness_retrieval_attestation(
             attestation,
             expected={
                 "service_id": service["service_id"],
@@ -187,7 +188,7 @@ def _validate_context_consumption(
                     value["challenge"], sandbox_identity["uid"], sandbox_identity["gid"],
                 ),
                 "handoff_hash": handoff_hash,
-                "resource_receipt_hash": promptcraft_receipt_hash,
+                "resource_receipt_hash": resource_receipt_hash,
                 "resources": {name: card["bindings"][name] for name in sorted(card["bindings"])},
             },
             attestation_key_id=service["attestation_key_id"],
@@ -195,13 +196,15 @@ def _validate_context_consumption(
         )
     except ResourceVerificationError as exc:
         raise ReviewRunnerError("governed review context attestation is invalid") from exc
+    if verified_attestation["run_id"] != value["run_id"]:
+        raise ReviewRunnerError("governed review context attestation run differs")
     return dict(value)
 
 
 def _compose_context_consumption(
     attestation: Mapping[str, Any], *, run_id: str, challenge: str,
     provider_identity: Mapping[str, Any], card: Mapping[str, Any],
-    handoff_hash: str, promptcraft_receipt_hash: str,
+    handoff_hash: str, resource_receipt_hash: str,
     runtime_identity: Mapping[str, int], consumed_skill_contract_hash: str,
 ) -> dict[str, Any]:
     policy = provider_identity["command_policy"]
@@ -218,14 +221,15 @@ def _compose_context_consumption(
     return _validate_context_consumption(
         value, provider_identity=provider_identity, card=card,
         handoff_hash=handoff_hash,
-        promptcraft_receipt_hash=promptcraft_receipt_hash, challenge=challenge,
+        resource_receipt_hash=resource_receipt_hash, challenge=challenge,
     )
 
 
 def _read_context_receipt(
     descriptor: int, *, challenge: str, card_hash: str,
     resource_receipt_hash: str, skill_contract_hash: str,
-    runtime_uid: int, runtime_gid: int,
+    runtime_uid: int, runtime_gid: int, provider_identity: Mapping[str, Any],
+    card: Mapping[str, Any], handoff_hash: str,
 ) -> dict[str, Any]:
     raw = os.pread(descriptor, 16 * 1024 + 1, 0)
     if not raw or len(raw) > 16 * 1024:
@@ -239,7 +243,7 @@ def _read_context_receipt(
         or set(value) != {
             "schema", "status", "context_run_id", "challenge", "card_hash",
             "resource_receipt_hash", "skill_contract_hash",
-            "retrieval_attestation_hash", "runtime_uid", "runtime_gid",
+            "retrieval_attestation", "runtime_uid", "runtime_gid",
         }
         or value.get("schema") != "tgw-context-review-run/v1"
         or value.get("status") != "PASS"
@@ -251,10 +255,32 @@ def _read_context_receipt(
         or value.get("skill_contract_hash") != skill_contract_hash
         or value.get("runtime_uid") != runtime_uid
         or value.get("runtime_gid") != runtime_gid
-        or not isinstance(value.get("retrieval_attestation_hash"), str)
-        or not value["retrieval_attestation_hash"].startswith(_SHA256_PREFIX)
     ):
         raise ReviewRunnerError("governed review context receipt binding is invalid")
+    service = provider_identity["context_bundle_service"]
+    try:
+        attestation = validate_harness_retrieval_attestation(
+            value["retrieval_attestation"],
+            expected={
+                "service_id": service["service_id"],
+                "client_id": service["client_id"],
+                "card_hash": card_hash, "role": "independent-review",
+                "execution_identity": _review_execution_identity(
+                    challenge, runtime_uid, runtime_gid,
+                ),
+                "handoff_hash": handoff_hash,
+                "resource_receipt_hash": resource_receipt_hash,
+                "resources": {
+                    name: card["bindings"][name] for name in sorted(card["bindings"])
+                },
+            },
+            attestation_key_id=service["attestation_key_id"],
+            attestation_public_key=service["attestation_public_key"],
+        )
+    except (KeyError, ResourceVerificationError) as exc:
+        raise ReviewRunnerError("governed review context receipt is unauthenticated") from exc
+    if attestation["run_id"] != value["context_run_id"]:
+        raise ReviewRunnerError("governed review context receipt run identity is invalid")
     return dict(value)
 
 
@@ -429,7 +455,8 @@ def snapshot_hash(root: Path) -> str:
 def validate_execution(value: Mapping[str, Any]) -> dict[str, Any]:
     required = {
         "schema", "provider", "receiver_identity", "card_hash", "handoff_hash",
-        "promptcraft_receipt_hash", "source", "source_protection", "plan_commit", "bindings",
+        "promptcraft_receipt_hash", "resource_receipt_hash", "source",
+        "source_protection", "plan_commit", "bindings",
         "provider_identity", "invocation", "lifecycle", "output", "context_consumption", "review",
         "execution_hash",
     }
@@ -461,7 +488,7 @@ def validate_execution(value: Mapping[str, Any]) -> dict[str, Any]:
     artifacts = provider_identity.get("artifacts")
     if not isinstance(artifacts, Mapping) or set(artifacts) != {
         "sandbox", "runtime", "context_provider", "executable", "skill_contract",
-        "mcp_config", "credential", "context_service_credential",
+        "mcp_config", "credential", "execution_environment",
     }:
         raise ReviewRunnerError("governed review provider artifacts are invalid")
     _validate_skill_provenance(
@@ -523,7 +550,7 @@ def validate_execution(value: Mapping[str, Any]) -> dict[str, Any]:
     context_service = _validate_context_service(
         provider_identity.get("context_bundle_service"),
     )
-    if context_service["endpoint"] not in network_policy["endpoints"]:
+    if context_service["broker_endpoint"] not in network_policy["endpoints"]:
         raise ReviewRunnerError("governed review context service egress is not admitted")
     invocation = value.get("invocation")
     if (
@@ -563,7 +590,7 @@ def validate_execution(value: Mapping[str, Any]) -> dict[str, Any]:
         value.get("context_consumption"), provider_identity=provider_identity,
         card={"card_hash": value["card_hash"], "bindings": bindings},
         handoff_hash=value["handoff_hash"],
-        promptcraft_receipt_hash=value["promptcraft_receipt_hash"],
+        resource_receipt_hash=value["resource_receipt_hash"],
     )
     if context_consumption["skill_contract_hash"] != invocation["skill_contract_hash"]:
         raise ReviewRunnerError("governed review consumed skill contract is invalid")
@@ -584,6 +611,8 @@ def validate_execution_handoff_binding(
         or normalized["handoff_hash"] != handoff.get("handoff_hash")
         or normalized["promptcraft_receipt_hash"]
         != handoff.get("receipt", {}).get("receipt_hash")
+        or normalized["resource_receipt_hash"]
+        != handoff.get("resource_receipt", {}).get("receipt_hash")
         or normalized["provider"] != card.get("selected_provider")
         or normalized["plan_commit"] != card.get("plan_commit")
     ):
@@ -691,6 +720,7 @@ def run_governed_review(
     read_execution: Callable[[Mapping[str, Any]], Mapping[str, Any]],
     read_context_bundle: Callable[[str, str], Mapping[str, Any]],
     timeout_seconds: float = 900, output_limit: int = 8 * 1024 * 1024,
+    challenge_source: Callable[[], str] | None = None,
 ) -> dict[str, Any]:
     """Execute and capture one exact provider-neutral tgw-review invocation.
 
@@ -714,6 +744,9 @@ def run_governed_review(
         raise ReviewRunnerError("governed review Plan binding is stale")
     _validate_evidence_sink_descriptor(
         evidence_sink_descriptor, card_binding=card["bindings"]["receipt_sink"],
+    )
+    _validate_card_context_service(
+        card, _validate_context_service(provider_identity.get("context_bundle_service")),
     )
     if (
         list(provider_argv).count("{prompt}") != 1
@@ -742,7 +775,9 @@ def run_governed_review(
     except Exception:
         os.close(snapshot_fd)
         raise
-    challenge = secrets.token_hex(32)
+    challenge = secrets.token_hex(32) if challenge_source is None else challenge_source()
+    if not isinstance(challenge, str) or len(challenge) != 64:
+        raise ReviewRunnerError("governed review challenge source is invalid")
     card_json = _canonical(card).decode("utf-8")
     receipt_directory: Path | None = None
     receipt_path: Path | None = None
@@ -763,7 +798,7 @@ def run_governed_review(
         for descriptor in (
             snapshot_fd, held["sandbox_fd"], held["executable_fd"],
             held["runtime_fd"], held["context_fd"], held["skill_fd"],
-            held["mcp_fd"], held["credential_fd"], held["context_credential_fd"],
+            held["mcp_fd"], held["credential_fd"], held["execution_environment_fd"],
         ):
             os.close(descriptor)
         if receipt_path is not None:
@@ -781,7 +816,7 @@ def run_governed_review(
         "You must use Skill and the admitted read-only MCP tools. Call "
         f"{_CONTEXT_BUNDLE_TOOL} with challenge={challenge}, "
         f"card_json={card_json}, handoff_hash={handoff['handoff_hash']}, and "
-        f"resource_receipt_hash={handoff['receipt']['receipt_hash']}, and "
+        f"resource_receipt_hash={handoff['resource_receipt']['receipt_hash']}, and "
         f"skill_contract_hash={held['skill_contract_hash']}. Compare its exact "
         "Plan, source, CodeGraph, and environment bindings to the review card, and "
         "confirm that it reports governed_review status PASS.",
@@ -791,7 +826,7 @@ def run_governed_review(
         for descriptor in (
             snapshot_fd, held["sandbox_fd"], held["executable_fd"],
             held["runtime_fd"], held["context_fd"], held["skill_fd"],
-            held["mcp_fd"], held["credential_fd"], held["context_credential_fd"],
+            held["mcp_fd"], held["credential_fd"], held["execution_environment_fd"],
             context_receipt_fd,
         ):
             os.close(descriptor)
@@ -805,13 +840,13 @@ def run_governed_review(
     skill_fd = held["skill_fd"]
     mcp_fd = held["mcp_fd"]
     credential_fd = held["credential_fd"]
-    context_credential_fd = held["context_credential_fd"]
+    execution_environment_fd = held["execution_environment_fd"]
     held_before = {
         descriptor: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
         for descriptor in (
             snapshot_fd, sandbox_fd, runtime_fd, context_fd, executable_fd, skill_fd, mcp_fd,
             credential_fd,
-            context_credential_fd,
+            execution_environment_fd,
         )
         for value in (os.fstat(descriptor),)
     }
@@ -832,7 +867,7 @@ def run_governed_review(
         parent
         for configured in (
             layout["skill_mount"], layout["credential_mount"],
-            layout["context_credential_mount"], layout["context_receipt_mount"],
+            layout["context_receipt_mount"],
         )
         for parent in PurePosixPath(configured).parents
         if parent != home and home in parent.parents
@@ -860,8 +895,6 @@ def run_governed_review(
         "--dir", layout["workspace"],
         "--ro-bind", f"/proc/self/fd/{skill_fd}", layout["skill_mount"],
         "--ro-bind", f"/proc/self/fd/{credential_fd}", layout["credential_mount"],
-        "--ro-bind", f"/proc/self/fd/{context_credential_fd}",
-        layout["context_credential_mount"],
         "--bind-fd", str(context_receipt_fd), layout["context_receipt_mount"],
         "--ro-bind", f"/proc/self/fd/{snapshot_fd}", layout["workspace"],
         "--setenv", "HOME", layout["home"], "--chdir", layout["workspace"],
@@ -876,7 +909,6 @@ def run_governed_review(
                 snapshot_fd, sandbox_fd, runtime_fd, context_fd, executable_fd, skill_fd,
                 mcp_fd,
                 credential_fd,
-                context_credential_fd,
                 context_receipt_fd,
             ),
         )
@@ -904,7 +936,8 @@ def run_governed_review(
                 revalidated["sandbox_fd"], revalidated["runtime_fd"],
                 revalidated["context_fd"], revalidated["executable_fd"],
                 revalidated["skill_fd"], revalidated["mcp_fd"],
-                revalidated["credential_fd"], revalidated["context_credential_fd"],
+                revalidated["credential_fd"],
+                revalidated["execution_environment_fd"],
             ):
                 os.close(descriptor)
         if timed_out:
@@ -933,17 +966,24 @@ def run_governed_review(
         )
         context_receipt = _read_context_receipt(
             context_receipt_fd, challenge=challenge, card_hash=card["card_hash"],
-            resource_receipt_hash=handoff["receipt"]["receipt_hash"],
+            resource_receipt_hash=handoff["resource_receipt"]["receipt_hash"],
             skill_contract_hash=held["skill_contract_hash"],
             runtime_uid=held["sandbox_identity"]["uid"],
             runtime_gid=held["sandbox_identity"]["gid"],
+            provider_identity=provider_identity, card=card,
+            handoff_hash=handoff["handoff_hash"],
         )
+        context_readback = read_context_bundle(
+            context_receipt["context_run_id"], challenge,
+        )
+        if context_readback != context_receipt["retrieval_attestation"]:
+            raise ReviewRunnerError("governed review context attestation readback differs")
         context_consumption = _compose_context_consumption(
-            read_context_bundle(context_receipt["context_run_id"], challenge),
+            context_readback,
             run_id=context_receipt["context_run_id"], challenge=challenge,
             provider_identity=provider_identity, card=card,
             handoff_hash=handoff["handoff_hash"],
-            promptcraft_receipt_hash=handoff["receipt"]["receipt_hash"],
+            resource_receipt_hash=handoff["resource_receipt"]["receipt_hash"],
             runtime_identity={
                 "uid": context_receipt["runtime_uid"],
                 "gid": context_receipt["runtime_gid"],
@@ -954,7 +994,7 @@ def run_governed_review(
         for descriptor in (
             snapshot_fd, sandbox_fd, runtime_fd, context_fd, executable_fd, skill_fd, mcp_fd,
             credential_fd,
-            context_credential_fd,
+            execution_environment_fd,
             context_receipt_fd,
         ):
             os.close(descriptor)
@@ -970,6 +1010,7 @@ def run_governed_review(
         "card_hash": card["card_hash"],
         "handoff_hash": handoff["handoff_hash"],
         "promptcraft_receipt_hash": handoff["receipt"]["receipt_hash"],
+        "resource_receipt_hash": handoff["resource_receipt"]["receipt_hash"],
         "source": {"commit": source_commit, "tree": source_tree, "snapshot_hash": expected_snapshot},
         "source_protection": {
             "trusted_uid": trusted_uid, "trusted_gid": trusted_gid,
@@ -1142,7 +1183,9 @@ def _render_skill_contract(contents: Mapping[str, bytes]) -> tuple[str, str]:
 
 def _validate_context_service(value: Any) -> dict[str, Any]:
     required = {
-        "schema", "endpoint", "credential_env", "service_id", "client_id",
+        "schema", "endpoint", "credential_env", "timeout_seconds", "service_id",
+        "client_id", "broker_endpoint", "resource_service_descriptor_hash",
+        "resource_service_catalog_ref", "resource_service_catalog_hash",
         "attestation_key_id", "attestation_public_key", "descriptor_hash",
     }
     if not isinstance(value, Mapping) or set(value) != required:
@@ -1150,6 +1193,7 @@ def _validate_context_service(value: Any) -> dict[str, Any]:
     unsigned = dict(value)
     claimed = unsigned.pop("descriptor_hash")
     parsed = urllib_parse.urlsplit(str(value.get("endpoint", "")))
+    broker = urllib_parse.urlsplit(str(value.get("broker_endpoint", "")))
     try:
         public_key = base64.b64decode(str(value.get("attestation_public_key", "")), validate=True)
     except ValueError as exc:
@@ -1162,15 +1206,35 @@ def _validate_context_service(value: Any) -> dict[str, Any]:
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
+        or broker.scheme != "https"
+        or not broker.hostname
+        or broker.username is not None
+        or broker.password is not None
+        or broker.query
+        or broker.fragment
         or not isinstance(value.get("credential_env"), str)
         or not value["credential_env"]
         or not isinstance(value.get("service_id"), str)
         or not value["service_id"]
         or not isinstance(value.get("client_id"), str)
         or not value["client_id"]
+        or not isinstance(value.get("timeout_seconds"), int)
+        or not 1 <= value["timeout_seconds"] <= 60
+        or not isinstance(value.get("resource_service_catalog_ref"), str)
+        or not value["resource_service_catalog_ref"]
+        or not isinstance(value.get("resource_service_catalog_hash"), str)
+        or not value["resource_service_catalog_hash"].startswith(_SHA256_PREFIX)
         or not isinstance(value.get("attestation_key_id"), str)
         or not value["attestation_key_id"]
         or len(public_key) != 32
+        or value.get("resource_service_descriptor_hash")
+        != resource_service_descriptor_hash({
+            "schema": "tgw-registered-resource-service/v2",
+            "id": value.get("service_id"), "client_id": value.get("client_id"),
+            "endpoint": value.get("endpoint"),
+            "credential_env": value.get("credential_env"),
+            "timeout_seconds": value.get("timeout_seconds"),
+        })
         or claimed != _hash(unsigned)
     ):
         raise ReviewRunnerError("governed review context service descriptor is invalid")
@@ -1213,7 +1277,23 @@ def _validate_evidence_sink_descriptor(
     return dict(value)
 
 
-def _validate_network_policy(value: Any, *, observed_at: datetime) -> dict[str, Any]:
+def _validate_card_context_service(
+    card: Mapping[str, Any], service: Mapping[str, Any],
+) -> None:
+    expected = {
+        "id": service["service_id"], "client_id": service["client_id"],
+        "descriptor_hash": service["resource_service_descriptor_hash"],
+        "catalog_ref": service["resource_service_catalog_ref"],
+        "catalog_hash": service["resource_service_catalog_hash"],
+    }
+    if card.get("resource_service") != expected:
+        raise ReviewRunnerError("governed review card resource service differs from provider context")
+
+
+def _validate_network_policy(
+    value: Any, *, observed_at: datetime, expected_key_id: str | None = None,
+    expected_public_key: str | None = None,
+) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != {
         "schema", "mode", "endpoints", "enforcement_key_id",
         "enforcement_public_key", "policy_hash", "enforcement_receipt",
@@ -1247,6 +1327,9 @@ def _validate_network_policy(value: Any, *, observed_at: datetime) -> dict[str, 
         or not isinstance(value.get("enforcement_public_key"), str)
         or not value["enforcement_public_key"]
         or value.get("policy_hash") != _hash(policy_unsigned)
+        or expected_key_id is not None and value.get("enforcement_key_id") != expected_key_id
+        or expected_public_key is not None
+        and value.get("enforcement_public_key") != expected_public_key
     ):
         raise ReviewRunnerError("governed review network policy is invalid")
     receipt = value.get("enforcement_receipt")
@@ -1310,15 +1393,14 @@ def validate_execution_identity(
         raise ReviewRunnerError("governed review provider executable is unavailable")
     layout = identity.get("sandbox_layout")
     if not isinstance(layout, Mapping) or set(layout) != {
-        "home", "skill_mount", "credential_mount", "context_credential_mount",
-        "context_receipt_mount", "workspace", "context_root",
+        "home", "skill_mount", "credential_mount", "context_receipt_mount",
+        "workspace", "context_root",
     }:
         raise ReviewRunnerError("governed review provider sandbox layout is invalid")
     try:
         home = PurePosixPath(layout["home"])
         skill_mount = PurePosixPath(layout["skill_mount"])
         credential_mount = PurePosixPath(layout["credential_mount"])
-        context_credential_mount = PurePosixPath(layout["context_credential_mount"])
         context_receipt_mount = PurePosixPath(layout["context_receipt_mount"])
     except TypeError as exc:
         raise ReviewRunnerError("governed review provider sandbox layout is invalid") from exc
@@ -1328,18 +1410,15 @@ def validate_execution_identity(
         or layout.get("context_root") != "/opt/tgw-context"
         or home not in skill_mount.parents
         or home not in credential_mount.parents
-        or home not in context_credential_mount.parents
         or home not in context_receipt_mount.parents
         or skill_mount.name != "tgw-review"
         or len({
-            skill_mount, credential_mount, context_credential_mount,
-            context_receipt_mount,
-        }) != 4
+            skill_mount, credential_mount, context_receipt_mount,
+        }) != 3
         or any(
             part in {"", ".", ".."}
             for part in (
-                *skill_mount.parts, *credential_mount.parts,
-                *context_credential_mount.parts, *context_receipt_mount.parts,
+                *skill_mount.parts, *credential_mount.parts, *context_receipt_mount.parts,
             )
         )
         or environment.get("HOME") != str(home)
@@ -1420,7 +1499,7 @@ def validate_execution_identity(
         identity.get("network_policy"), observed_at=observed_at,
     )
     context_service = _validate_context_service(identity.get("context_bundle_service"))
-    if context_service["endpoint"] not in network_policy["endpoints"]:
+    if context_service["broker_endpoint"] not in network_policy["endpoints"]:
         raise ReviewRunnerError("governed review context service egress is not admitted")
     if identity.get("environment_sha256") != _hash(dict(environment)):
         raise ReviewRunnerError("governed review environment identity mismatch")
@@ -1432,7 +1511,7 @@ def validate_execution_identity(
     artifacts = identity.get("artifacts")
     if not isinstance(artifacts, Mapping) or set(artifacts) != {
         "sandbox", "runtime", "context_provider", "executable", "skill_contract",
-        "mcp_config", "credential", "context_service_credential",
+        "mcp_config", "credential", "execution_environment",
     }:
         raise ReviewRunnerError("governed review provider artifacts are invalid")
     health = identity.get("health")
@@ -1508,11 +1587,12 @@ def validate_execution_identity(
         except (AttributeError, KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ReviewRunnerError("governed review MCP config is invalid") from exc
         expected_context_environment = {
-            "TGW_CONTEXT_RESOURCE_SERVICE_ENDPOINT": context_service["endpoint"],
             "TGW_CONTEXT_RESOURCE_SERVICE_ID": context_service["service_id"],
             "TGW_CONTEXT_RESOURCE_SERVICE_CLIENT_ID": context_service["client_id"],
-            "TGW_CONTEXT_RESOURCE_SERVICE_CREDENTIAL_FILE": layout[
-                "context_credential_mount"
+            "TGW_CONTEXT_REVIEW_BROKER_ENDPOINT": context_service["broker_endpoint"],
+            "TGW_CONTEXT_ATTESTATION_KEY_ID": context_service["attestation_key_id"],
+            "TGW_CONTEXT_ATTESTATION_PUBLIC_KEY": context_service[
+                "attestation_public_key"
             ],
             "TGW_CONTEXT_REVIEW_RECEIPT_FILE": layout["context_receipt_mount"],
             "TGW_CONTEXT_REVIEW_SKILL_CONTRACT_HASH": skill_contract_hash,
@@ -1534,16 +1614,44 @@ def validate_execution_identity(
             raise ReviewRunnerError("governed review MCP config is not closure-bound")
         credential_fd = _open_secret_artifact("credential", artifacts["credential"])
         descriptors.append(credential_fd)
-        context_credential_fd = _open_secret_artifact(
-            "context service credential", artifacts["context_service_credential"],
+        execution_environment_fd = _open_file_artifact(
+            "execution environment authority", artifacts["execution_environment"],
         )
-        descriptors.append(context_credential_fd)
+        descriptors.append(execution_environment_fd)
+        try:
+            environment_authority = json.loads(os.pread(
+                execution_environment_fd, 64 * 1024 + 1, 0,
+            ))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReviewRunnerError("governed review environment authority is invalid") from exc
+        if (
+            not isinstance(environment_authority, Mapping)
+            or set(environment_authority) != {
+                "schema", "provider", "runtime_uid", "runtime_gid",
+                "egress_key_id", "egress_public_key", "network_policy_hash",
+            }
+            or environment_authority.get("schema")
+            != "tgw-governed-review-environment-authority/v1"
+            or environment_authority.get("provider") != provider
+            or environment_authority.get("runtime_uid") != sandbox_identity["uid"]
+            or environment_authority.get("runtime_gid") != sandbox_identity["gid"]
+            or artifacts["execution_environment"]["content_sha256"]
+            != policy["context_bindings"]["execution_environment"]["hash"]
+            or environment_authority.get("network_policy_hash")
+            != network_policy["policy_hash"]
+        ):
+            raise ReviewRunnerError("governed review environment authority is invalid")
+        _validate_network_policy(
+            network_policy, observed_at=observed_at,
+            expected_key_id=environment_authority["egress_key_id"],
+            expected_public_key=environment_authority["egress_public_key"],
+        )
         return {
             "sandbox_fd": sandbox_fd, "runtime_fd": runtime_fd,
             "context_fd": context_fd,
+            "execution_environment_fd": execution_environment_fd,
             "executable_fd": executable_fd,
             "skill_fd": skill_fd, "mcp_fd": mcp_fd, "credential_fd": credential_fd,
-            "context_credential_fd": context_credential_fd,
             "skill_contract": skill_contract,
             "skill_contract_hash": skill_contract_hash,
             "skill_manifest_hash": artifacts["skill_contract"]["manifest_hash"],
@@ -1681,7 +1789,16 @@ def execute_request(request_path: Path) -> dict[str, Any]:
         request_stat = os.fstat(descriptor)
         request_identity = _stat_identity(request_stat)
         if (
-            not stat.S_ISREG(request_stat.st_mode)
+            named_before.get("is_symlink") is not False
+            or any(
+                named_before.get(field) != request_identity[field]
+                for field in (
+                    "device", "inode", "uid", "gid", "mode", "size",
+                    "mtime_ns",
+                )
+            )
+            or named_before.get("nlink") != request_stat.st_nlink
+            or not stat.S_ISREG(request_stat.st_mode)
             or request_stat.st_uid != 0
             or stat.S_IMODE(request_stat.st_mode) & 0o022
             or request_stat.st_nlink != 1
@@ -1703,6 +1820,7 @@ def execute_request(request_path: Path) -> dict[str, Any]:
             "plan_commit", "provider", "provider_identity", "provider_argv",
             "environment", "trusted_uid", "trusted_gid", "timeout_seconds",
             "output_limit", "evidence_sink", "review_packet",
+            "resource_service_catalog",
         }
         if (
             not isinstance(value, Mapping)
@@ -1736,7 +1854,8 @@ def execute_request(request_path: Path) -> dict[str, Any]:
         from tgw.execute_candidate_review import finalize_and_publish_governed_review
 
         result = finalize_and_publish_governed_review(
-            value["review_packet"], execution, value["handoff"], sink,
+            value["review_packet"], execution, value["handoff"],
+            value["resource_service_catalog"], sink,
         )
         if (
             _stat_identity(os.fstat(descriptor)) != request_identity

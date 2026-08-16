@@ -16,16 +16,17 @@ import subprocess
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from mcp.server import FastMCP
 
 from tgw.code_graph import CodeGraphService, build_snapshot
 from tgw.execution_resources import (
     CARD_RESOURCE_NAMES,
-    HTTPRegisteredResourceResolver,
     ResourceVerificationError,
     card_resource_receipt,
-    verify_card_resources,
+    validate_harness_retrieval_attestation,
 )
 from tgw.plan_graph import live_plan_graph
 
@@ -35,7 +36,6 @@ MAX_TEXT_BYTES = 2_000_000
 MAX_QUERY = 1_000
 MAX_LINES = 250
 MAX_RESULTS = 100
-MAX_CREDENTIAL_BYTES = 4096
 MAX_REVIEW_RECEIPT_BYTES = 16 * 1024
 PLAN_PREFIXES = ("plan/", "pp/", "reference/")
 RUNBOOK_PREFIX = "docs/runbooks/"
@@ -300,53 +300,40 @@ def context_bundle(task: str, receiver: str = "codex", limit: int = 12) -> dict[
     return result
 
 
-def _context_service_credential() -> str:
-    path_text = os.environ.get("TGW_CONTEXT_RESOURCE_SERVICE_CREDENTIAL_FILE", "")
-    path = Path(path_text)
-    if not path.is_absolute():
-        raise ContextError("context resource service credential path must be absolute")
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError as exc:
-        raise ContextError("context resource service credential is unavailable") from exc
-    try:
-        expected_uid = int(os.environ.get("TGW_CONTEXT_REVIEW_UID", ""))
-        value = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(value.st_mode)
-            or value.st_uid != expected_uid
-            or value.st_nlink != 1
-            or stat.S_IMODE(value.st_mode) & 0o077
-            or value.st_size < 1
-            or value.st_size > MAX_CREDENTIAL_BYTES
-        ):
-            raise ContextError("context resource service credential protection is invalid")
-        raw = os.pread(descriptor, MAX_CREDENTIAL_BYTES + 1, 0)
-        after = os.fstat(descriptor)
-        named = os.stat(path, follow_symlinks=False)
-        if (
-            len(raw) != value.st_size
-            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-            != (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
-            or (named.st_dev, named.st_ino) != (value.st_dev, value.st_ino)
-        ):
-            raise ContextError("context resource service credential changed during read")
-    finally:
-        os.close(descriptor)
-    try:
-        credential = raw.decode("utf-8").strip()
-    except UnicodeDecodeError as exc:
-        raise ContextError("context resource service credential is not text") from exc
-    if not credential or any(character.isspace() for character in credential):
-        raise ContextError("context resource service credential is invalid")
-    return credential
+class HTTPReviewContextBrokerClient:
+    """Call the separately privileged broker; no service credential enters the harness."""
+
+    def __init__(self, endpoint: str) -> None:
+        if not isinstance(endpoint, str) or not endpoint.startswith("https://"):
+            raise ContextError("governed review context broker endpoint is invalid")
+        self.endpoint = endpoint.rstrip("/")
+
+    def execute(self, request_value: Mapping[str, Any]) -> dict[str, Any]:
+        raw = _canonical(request_value)
+        request = Request(
+            self.endpoint + "/v1/review-context", data=raw, method="POST",
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+        )
+        try:
+            with urlopen(request, timeout=30) as response:  # nosec: protected configured endpoint
+                body = response.read(MAX_REVIEW_RECEIPT_BYTES + 1)
+        except (HTTPError, URLError, OSError) as exc:
+            raise ContextError("governed review context broker failed") from exc
+        if len(body) > MAX_REVIEW_RECEIPT_BYTES:
+            raise ContextError("governed review context broker response exceeds its bound")
+        try:
+            value = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ContextError("governed review context broker response is invalid") from exc
+        if not isinstance(value, dict):
+            raise ContextError("governed review context broker response is invalid")
+        return value
 
 
 def _review_context_run(
     *, challenge: str, card_json: str, handoff_hash: str,
     resource_receipt_hash: str, skill_contract_hash: str,
-    resolver_factory: Any = HTTPRegisteredResourceResolver,
-    credential_reader: Any = _context_service_credential,
+    broker_factory: Any = HTTPReviewContextBrokerClient,
 ) -> dict[str, Any]:
     """Fetch every review-card resource inside one authenticated service run."""
 
@@ -374,35 +361,48 @@ def _review_context_run(
         raise ContextError("governed review runtime identity is invalid") from exc
     if (os.geteuid(), os.getegid()) != (expected_uid, expected_gid):
         raise ContextError("governed review runtime identity is invalid")
-    endpoint = os.environ.get("TGW_CONTEXT_RESOURCE_SERVICE_ENDPOINT", "")
     service_id = os.environ.get("TGW_CONTEXT_RESOURCE_SERVICE_ID", "")
     client_id = os.environ.get("TGW_CONTEXT_RESOURCE_SERVICE_CLIENT_ID", "")
     try:
-        resolver = resolver_factory(
-            service_id=service_id, client_id=client_id, endpoint=endpoint,
-            credential=credential_reader(),
-        )
-        run = resolver.begin_harness_run(
-            card_hash=card["card_hash"], role="independent-review",
-            execution_identity=(
+        broker = broker_factory(os.environ.get("TGW_CONTEXT_REVIEW_BROKER_ENDPOINT", ""))
+        attestation = broker.execute({
+            "schema": "tgw-context-review-broker-request/v1",
+            "card_hash": card["card_hash"], "role": "independent-review",
+            "execution_identity": (
                 f"governed-review:{challenge}:uid={expected_uid}:gid={expected_gid}"
             ),
-            handoff_hash=handoff_hash, resource_receipt_hash=resource_receipt_hash,
-            resources={name: card["bindings"][name] for name in sorted(CARD_RESOURCE_NAMES)},
+            "handoff_hash": handoff_hash,
+            "resource_receipt_hash": resource_receipt_hash,
+            "resources": {
+                name: card["bindings"][name] for name in sorted(CARD_RESOURCE_NAMES)
+            },
+        })
+        attestation = validate_harness_retrieval_attestation(
+            attestation,
+            expected={
+                "service_id": service_id, "client_id": client_id,
+                "card_hash": card["card_hash"], "role": "independent-review",
+                "execution_identity": (
+                    f"governed-review:{challenge}:uid={expected_uid}:gid={expected_gid}"
+                ),
+                "handoff_hash": handoff_hash,
+                "resource_receipt_hash": resource_receipt_hash,
+                "resources": {
+                    name: card["bindings"][name] for name in sorted(CARD_RESOURCE_NAMES)
+                },
+            },
+            attestation_key_id=os.environ.get("TGW_CONTEXT_ATTESTATION_KEY_ID"),
+            attestation_public_key=os.environ.get("TGW_CONTEXT_ATTESTATION_PUBLIC_KEY"),
         )
-        verified_receipt = verify_card_resources(card, resolver.for_harness_run(run))
-        attestation = resolver.complete_harness_run(run)
-    except (KeyError, ResourceVerificationError) as exc:
+    except (KeyError, ResourceVerificationError, ValueError) as exc:
         raise ContextError("governed review registered context retrieval failed") from exc
-    if verified_receipt != receipt or attestation.get("run_id") != run.get("run_id"):
-        raise ContextError("governed review registered context completion is invalid")
     return {
         "schema": "tgw-context-review-run/v1", "status": "PASS",
-        "context_run_id": run["run_id"], "challenge": challenge,
+        "context_run_id": attestation["run_id"], "challenge": challenge,
         "card_hash": card["card_hash"], "resource_receipt_hash": resource_receipt_hash,
         "skill_contract_hash": skill_contract_hash,
         "runtime_uid": os.geteuid(), "runtime_gid": os.getegid(),
-        "retrieval_attestation_hash": attestation.get("attestation_hash"),
+        "retrieval_attestation": attestation,
     }
 
 

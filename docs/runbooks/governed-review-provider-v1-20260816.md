@@ -77,8 +77,10 @@ Before launch, the controller must create and freeze:
    held executable context-provider closure, minimal runtime closure, closed
    environment, fresh authentication-health evidence, and per-artifact owner
    policy;
-5. a registered context-bundle service and public key capable of issuing a
-   signed card/handoff/resource-retrieval attestation; and
+5. a registered, separately privileged context-broker service and public key
+   capable of issuing a signed card/handoff/resource-retrieval attestation;
+   the broker alone holds the backend resource-service credential and both
+   signing authorities remain unavailable to the provider; and
 6. a protected X-store descriptor whose exact reference and descriptor hash
    equal the card's `receipt_sink` binding, plus a fresh signed receipt from
    the host egress controller proving the admitted endpoint policy is active.
@@ -99,9 +101,11 @@ which is writable only by the selected sandbox uid. The challenge is disclosed i
 governed prompt. A passing provider must use Skill and the nonempty exact MCP
 tool policy and call `tgw_context_bundle` with that challenge and exact skill
 contract hash. The MCP writes its completed run identity, observed uid/gid,
-card, skill, and attestation hashes to the held receipt file; no provider-output
-field is trusted for this evidence. The adapter independently reads the run
-back from the registered context service. The signed retrieval attestation must
+card and skill identities plus the complete signed service attestation to the
+held receipt file; no provider-output field is trusted for this evidence. The
+adapter independently reads the same run back from the registered context
+broker with a controller-only credential and requires exact object equality.
+The signed retrieval attestation must
 bind that challenge and exact uid/gid, the exact card/handoff/resource receipt,
 and every card resource. The returned Plan,
 source, CodeGraph, and environment values are then compared byte-for-byte with
@@ -139,7 +143,8 @@ controller for that exact policy. A self-hash or caller assertion is a HOLD.
 ## Evidence and admission
 
 The provider emits `tgw-governed-review-execution/v1`. It binds the exact
-card/handoff/Promptcraft receipt, Plan, source commit/tree/snapshot,
+card/handoff, distinct execution-resource and Promptcraft receipts, Plan,
+source commit/tree/snapshot,
 CodeGraph/environment/resource bindings, provider identity, command policy,
 bounded lifecycle, output hashes, fully validated semantic result, and signed
 context consumption. The execution record is published by the card-bound sink
@@ -157,17 +162,22 @@ rehashes all objects, verifies the Promptcraft lease at the recorded start
 time, cross-binds provider/source/Plan/snapshot, requires a PASS result, and
 requires the independent governed receipt to name the retained execution.
 The fixed producer does not stop at an execution summary: it derives the
-governed role receipt, packet/report/result, publishes all seven artifacts,
-publishes the v4 pointer bundle, and reads every object back from X before
-returning its final result.
+governed role receipt and candidate governed-execution receipt, publishes the
+five mandatory governed-execution artifacts and exact
+`candidate:<commit>:governed-execution:independent-review` v2 bundle, then
+publishes the packet/report/result and all seven semantic-review artifacts in
+the v4 pointer bundle. It reads every object back from X before returning its
+final result.
 
 ## Installation status
 
 This source change is a candidate only. It is not installed or deployed. The
 current selected provider is HOLD, not disabled: its executable and existing
 credential are present, but the protected generic skill, context-provider,
-MCP-config, minimal runtime projections, registered signed context readback,
-X publisher, and host egress enforcement have not been issued. Before first
+MCP-config, minimal runtime projections, separately privileged context broker
+and its protected backend credential/signing authority, registered signed
+context readback, X publisher, protected execution-environment authority, and
+host egress enforcement have not been issued. Before first
 production use, the release operator must install a reviewed successor,
 provision those root-owned projections plus snapshot staging and the X-store,
 capture a fresh provider identity/health receipt, prove the matching egress
@@ -190,6 +200,7 @@ operator interface.
 ```bash
 PYTHONPATH=src pytest -q \
   tests/test_governed_review_adapter.py \
+  tests/test_governed_review_context_broker.py \
   tests/test_candidate_review.py \
   tests/test_candidate_receipt_sink.py
 ```
