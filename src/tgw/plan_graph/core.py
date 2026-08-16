@@ -833,7 +833,7 @@ def _paths_from(graph: dict[str, Any], starts: Iterable[str], depth: int = 1) ->
     adjacency: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
     nodes = {node["id"]: node for node in graph["nodes"]}
     for edge in graph["edges"]:
-        if edge["relation"] not in {"DEFINES", "MENTIONS", "GOVERNED_BY", "PARENT_OF"}:
+        if edge["relation"] not in {"DEFINES", "MENTIONS", "GOVERNED_BY", "PARENT_OF", "REQUIRES"}:
             continue
         if nodes.get(edge["source"], {}).get("structural_container"):
             continue

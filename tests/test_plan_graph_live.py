@@ -74,6 +74,15 @@ def test_live_graph_indexes_execution_work_unit_ids(tmp_path):
     assert result['status'] == 'matched'
     assert result['candidates'][0]['node_id'] == 'work-unit:W11'
     assert result['candidates'][0]['citation']['path'] == 'plan/execution/platform.yaml'
+    assert {
+        'nodes': ['work-unit:W11', 'work-unit:W10'],
+        'edges': [{
+            'source': 'work-unit:W11',
+            'relation': 'REQUIRES',
+            'target': 'work-unit:W10',
+            'anchor': 'plan/execution/platform.yaml:4',
+        }],
+    } in result['relationship_paths']
 
 
 def test_live_graph_rejects_undeclared_execution_dependency(tmp_path):
