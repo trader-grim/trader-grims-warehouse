@@ -637,13 +637,24 @@ def tgw_get_plan_brief(pp: Annotated[str, alias_field('pp', 'PP')]) -> str:
     from tgw.plan_graph import approved_plan_binding
     from tgw.plan_render import plan_brief
     cfg = _get_cfg()
-    approved_plan_binding(
+    binding = approved_plan_binding(
         Path(cfg.get('standalone_plan_root') or '/opt/TGW/library/plans'),
         approved_plan_commit=cfg.get('plan_approved_commit'),
         approved_solution_hash=cfg.get('plan_approved_solution_hash'),
         git_path=str(cfg.get('plan_git_path') or 'git'),
     )
-    return json.dumps(plan_brief(cfg, pp), ensure_ascii=False)
+    # The brief must consume the very materialization that was validated
+    # above.  Configured master/detail paths can describe a mutable legacy
+    # vault, so do not carry them across this authority boundary.
+    root = Path(binding['plan_root'])
+    brief_cfg = dict(cfg)
+    brief_cfg.update({
+        'standalone_plan_root': root,
+        'plan_master_path': root / 'plan' / 'TGW-Master-Plan.md',
+        'plan_detail_root': root / 'plan' / 'pp',
+        'plan_detail_roots': (root / 'plan' / 'pp', root / 'pp'),
+    })
+    return json.dumps(plan_brief(brief_cfg, pp), ensure_ascii=False)
 
 
 @mcp.tool()

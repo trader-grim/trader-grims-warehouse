@@ -17,6 +17,7 @@ import asyncio
 import builtins
 import hashlib
 import json
+import subprocess
 import sys
 
 import pytest
@@ -749,23 +750,48 @@ def test_catalog_verify_accepts_capitalized_arguments(cfg, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _plan_cfg(tmp_path):
-    vault = tmp_path / "plan-vault"
+    vault = tmp_path / "mutable-plan-vault"
+    standalone = tmp_path / "approved-plan"
     return {
         "plan_vault_path": vault,
+        # Deliberately point these stale keys at the mutable vault.  The MCP
+        # wrapper must replace them with paths under standalone_plan_root.
         "plan_master_path": vault / "plan" / "TGW-Master-Plan.md",
+        "plan_detail_roots": (vault / "plan" / "pp",),
+        "standalone_plan_root": standalone,
+        "plan_git_path": "git",
     }
+
+
+def _approved_plan_paths(c):
+    root = c["standalone_plan_root"]
+    return root / "plan" / "TGW-Master-Plan.md", root / "plan" / "pp"
+
+
+def _approve_plan(c):
+    root = c["standalone_plan_root"]
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "fixture@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "approved"], check=True)
+    c["plan_approved_commit"] = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], text=True,
+    ).strip()
+    c["plan_approved_solution_hash"] = "sha256:" + "a" * 64
 
 
 def test_get_plan_brief_returns_exact_pp_section_with_provenance(tmp_path, monkeypatch):
     c = _plan_cfg(tmp_path)
-    plan_path = c["plan_master_path"]
+    plan_path, detail_root = _approved_plan_paths(c)
     plan_path.parent.mkdir(parents=True)
     plan = "# TGW Master Plan\n\n## PP-ALPHA-001 Alpha work\nalpha source\n\n## PP-BETA-002 Beta work\nbeta source\n"
     plan_path.write_text(plan, encoding="utf-8")
-    detail = c["plan_vault_path"] / "plan" / "pp" / "PP-ALPHA-001.md"
+    detail = detail_root / "PP-ALPHA-001.md"
     detail.parent.mkdir(parents=True)
     detail_bytes = "# PP-ALPHA-001\nDetailed canonical source.\n".encode("utf-8")
     detail.write_bytes(detail_bytes)
+    _approve_plan(c)
     monkeypatch.setattr(mcp_server, "_cfg", c)
 
     out = json.loads(mcp_server.tgw_get_plan_brief("pp-alpha-001"))
@@ -786,13 +812,14 @@ def test_get_plan_brief_returns_exact_pp_section_with_provenance(tmp_path, monke
 
 def test_get_plan_brief_does_not_treat_a_cross_reference_heading_as_a_second_match(tmp_path, monkeypatch):
     c = _plan_cfg(tmp_path)
-    plan_path = c["plan_master_path"]
+    plan_path, _ = _approved_plan_paths(c)
     plan_path.parent.mkdir(parents=True)
     plan_path.write_text(
         "## PP-ALPHA-001 Canonical work\nalpha source\n\n"
         "## PP-OLD-001 Folded into PP-ALPHA-001\nold source\n",
         encoding="utf-8",
     )
+    _approve_plan(c)
     monkeypatch.setattr(mcp_server, "_cfg", c)
 
     out = json.loads(mcp_server.tgw_get_plan_brief("PP-ALPHA-001"))
@@ -805,9 +832,10 @@ def test_get_plan_brief_via_tool_run_boundary(tmp_path, monkeypatch):
     # FastMCP-boundary coverage (item 6): invoke through the actual MCP tool
     # dispatch path, not just a direct Python function call.
     c = _plan_cfg(tmp_path)
-    plan_path = c["plan_master_path"]
+    plan_path, _ = _approved_plan_paths(c)
     plan_path.parent.mkdir(parents=True)
     plan_path.write_text("## PP-GAMMA-003 Gamma work\ngamma source\n", encoding="utf-8")
+    _approve_plan(c)
     monkeypatch.setattr(mcp_server, "_cfg", c)
 
     tool = mcp_server.mcp._tool_manager._tools["tgw_get_plan_brief"]
@@ -824,9 +852,10 @@ def test_get_plan_brief_accepts_all_caps_pp_alias(tmp_path, monkeypatch):
     # are written everywhere in this codebase) as the mechanical
     # str.capitalize() form "Pp" — alias_field('pp', 'PP') covers both.
     c = _plan_cfg(tmp_path)
-    plan_path = c["plan_master_path"]
+    plan_path, _ = _approved_plan_paths(c)
     plan_path.parent.mkdir(parents=True)
     plan_path.write_text("## PP-DELTA-004 Delta work\ndelta source\n", encoding="utf-8")
+    _approve_plan(c)
     monkeypatch.setattr(mcp_server, "_cfg", c)
 
     tool = mcp_server.mcp._tool_manager._tools["tgw_get_plan_brief"]
@@ -835,6 +864,32 @@ def test_get_plan_brief_accepts_all_caps_pp_alias(tmp_path, monkeypatch):
     assert out["ok"] is True
     assert out["query"]["pp"] == "PP-DELTA-004"
     assert out["section"]["heading"] == "PP-DELTA-004 Delta work"
+
+
+def test_get_plan_brief_ignores_divergent_mutable_vault_paths(tmp_path, monkeypatch):
+    c = _plan_cfg(tmp_path)
+    approved_master, approved_details = _approved_plan_paths(c)
+    approved_master.parent.mkdir(parents=True)
+    approved_master.write_text("## PP-ALPHA-001 Approved\ntrusted source\n", encoding="utf-8")
+    approved_details.mkdir(parents=True)
+    (approved_details / "PP-ALPHA-001.md").write_text("approved detail\n", encoding="utf-8")
+    _approve_plan(c)
+
+    mutable_master = c["plan_master_path"]
+    mutable_master.parent.mkdir(parents=True)
+    mutable_master.write_text("## PP-ALPHA-001 Mutable poison\nuntrusted\n", encoding="utf-8")
+    mutable_detail = c["plan_vault_path"] / "plan" / "pp" / "PP-ALPHA-001.md"
+    mutable_detail.parent.mkdir(parents=True)
+    mutable_detail.write_text("mutable poison\n", encoding="utf-8")
+    monkeypatch.setattr(mcp_server, "_cfg", c)
+
+    out = json.loads(mcp_server.tgw_get_plan_brief("PP-ALPHA-001"))
+
+    assert out["ok"] is True
+    assert out["section"]["heading"] == "PP-ALPHA-001 Approved"
+    assert "Mutable poison" not in out["section"]["content"]
+    assert out["canonical_source"]["path"] == str(approved_master)
+    assert out["linked_pp_detail"]["path"] == str(approved_details / "PP-ALPHA-001.md")
 
 
 # ---------------------------------------------------------------------------
