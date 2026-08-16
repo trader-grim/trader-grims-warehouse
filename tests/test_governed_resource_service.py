@@ -50,6 +50,7 @@ def resources():
         "git:source": b"source tree content",
         "environment:manifest": b"execution environment manifest",
         "authority:conditions": b"authority and solved conditions",
+        "candidate:evidence": b"candidate evidence descriptor",
         "receipt:sink": b"registered receipt sink descriptor",
     }
 
@@ -70,6 +71,7 @@ def card_template(content, service=None, resource_catalog=None):
             "source_tree": binding("git:source"),
             "execution_environment": binding("environment:manifest"),
             "authority_conditions": binding("authority:conditions"),
+            "candidate_evidence": binding("candidate:evidence"),
             "receipt_sink": binding("receipt:sink"),
         },
         "authority": ["local source and tests only"],

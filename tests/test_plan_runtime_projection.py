@@ -10,6 +10,7 @@ from scripts.build_plan_runtime_projection import git_show
 from scripts.solve_governed_platform import plan_commit
 from tgw.operator_console_host import current_plan_commit, load_solution
 from tgw.plan_runtime_projection import load_projection, validate_projection
+from tgw.plan_render import PlanRenderBindingError, approved_render_plan_identity
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECTION = ROOT / "agent-services/plan-runtime/GOVERNED-EXECUTION-PLATFORM-f0a8cf22.json"
@@ -24,6 +25,24 @@ def test_projection_binds_current_approved_plan_and_complete_solution():
     assert value["solution"]["complete"] is True
     assert value["solution"]["dispatchable"] is True
     assert value["solution"]["conformance_verified"] is True
+    assert value["solution"]["solution_hash"] == "sha256:1c3684135769e5dcabcaf130c55df160a4cecc0d3ebcee6ccd129ab97cdd709b"
+    assert value["solution"]["closure_hash"] == "sha256:5d3e52999223f7df9a5421bd0a5f6549c9f0b2965b8cca55adb5c002492ae4a5"
+
+
+def test_projection_runtime_render_consumers_never_fall_back_to_direct_plan_root(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("direct Plan root was accessed")
+
+    monkeypatch.setattr("tgw.plan_graph.approved_plan_binding", forbidden)
+    with pytest.raises(PlanRenderBindingError, match="canonical_plan_context_required"):
+        approved_render_plan_identity(
+            {
+                "plan_projection_path": PROJECTION,
+                "standalone_plan_root": "/run/tgw/no-local-plan",
+                "plan_approved_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+                "plan_approved_solution_hash": "sha256:1c3684135769e5dcabcaf130c55df160a4cecc0d3ebcee6ccd129ab97cdd709b",
+            }
+        )
 
 
 @pytest.mark.parametrize("lane", ["plan_commit", "solution", "plan_files", "self_hash"])

@@ -23,6 +23,7 @@ CARD_RESOURCE_NAMES = {
     "source_tree",
     "execution_environment",
     "authority_conditions",
+    "candidate_evidence",
     "receipt_sink",
 }
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -226,6 +227,7 @@ def craft_handoff(value: Mapping[str, Any], *, receiver_identity: str) -> dict[s
             "Acceptance (exact; do not weaken):",
             *[f"- {item}" for item in card.value["acceptance"]],
             f"Receipt sink: {bindings['receipt_sink']['ref']} ({bindings['receipt_sink']['hash']})",
+            f"Candidate evidence: {bindings['candidate_evidence']['ref']} ({bindings['candidate_evidence']['hash']})",
             f"Lease: {json.dumps(card.value['lease'], sort_keys=True, separators=(',', ':'))}",
         ]
     ) + "\n"

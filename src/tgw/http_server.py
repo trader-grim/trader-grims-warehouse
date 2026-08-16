@@ -12264,6 +12264,11 @@ def _docs_plan_binding() -> dict[str, str]:
     """Return the only public Plan-docs source: a pinned clean materialization."""
     from tgw.plan_graph import approved_plan_binding
 
+    if _cfg.get("plan_projection_path") is not None:
+        raise ValueError(
+            "CANONICAL_PLAN_CONTEXT_REQUIRED: docs are served by registered tgw-context on tgw-lib"
+        )
+
     return approved_plan_binding(
         Path(_cfg.get("standalone_plan_root") or "/opt/TGW/library/plans"),
         approved_plan_commit=_cfg.get("plan_approved_commit"),

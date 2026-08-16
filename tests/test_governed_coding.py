@@ -27,6 +27,7 @@ RESOURCE_CONTENT = {
     "git:s": "source tree",
     "env:e": "execution environment",
     "auth:a": "authority and conditions",
+    "candidate:e": "candidate evidence",
     "receipt:r": "receipt sink",
 }
 RESOURCE_SERVICE = {
@@ -168,6 +169,7 @@ def card_template(card_id):
             "source_tree": binding("git:s"),
             "execution_environment": binding("env:e"),
             "authority_conditions": binding("auth:a"),
+            "candidate_evidence": binding("candidate:e"),
             "receipt_sink": binding("receipt:r"),
         },
         "authority": ["local source and tests only"],

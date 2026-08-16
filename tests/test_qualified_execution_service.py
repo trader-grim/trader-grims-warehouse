@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import tgw.qualified_execution_service as qualified_execution_service
 from tgw.candidate_manifest import create_test_output_artifact, create_test_receipt, load_candidate_test_plan
+from tgw.candidate_review import PACKET_SCHEMA, RESULT_SCHEMA, create_review_report, validate_review_report
 from tgw.qualified_execution_service import (
     POLICY_SCHEMA,
     REQUEST_SCHEMA,
@@ -169,6 +170,48 @@ class MockConfinedRunner:
 
     def _package(self, request: dict, profile_id: str):
         profile = next(item for item in self.policy["profiles"] if item["id"] == profile_id)
+        if profile["kind"] == "review":
+            packet = request["review_packet"]
+            report = create_review_report(
+                packet,
+                {
+                    "semantic": {"verdict": "PASS", "findings": []},
+                    "security": {"verdict": "PASS", "findings": []},
+                },
+            )
+            inputs = {
+                "review_packet_content_sha256": digest(canonical(packet)),
+                "review_packet_hash": packet["packet_hash"],
+                "review_report_content_sha256": digest(canonical(report)),
+                "review_report_hash": report["report_hash"],
+                "runner_path": profile["runner_path"],
+                "runner_sha256": profile["runner_sha256"],
+            }
+            stdout, stderr = canonical(report), b""
+            transcript = issue_runner_transcript(
+                {
+                    "schema": TRANSCRIPT_SCHEMA,
+                    "runner_id": self.descriptor["id"], "runner_identity": self.descriptor["runner_identity"],
+                    "namespace_id": self.descriptor["namespace_id"], "runner_identity_hash": request["runner_identity_hash"],
+                    "service_id": request["service_id"], "client_id": request["client_id"],
+                    "run_id": "runner-result-review", "profile_id": profile_id, "kind": "review",
+                    "candidate_commit": self.candidate, "candidate_tree": self.tree,
+                    "base_commit": self.base, "base_tree": self.base_tree,
+                    "plan_commit": request["plan_commit"], "policy_path": request["policy_path"],
+                    "policy_artifact_hash": request["policy_artifact_hash"], "inputs": inputs,
+                    "runtime": self.result_runtime, "command": [profile["runner_path"]],
+                    "stdout_base64": base64.b64encode(stdout).decode(), "stderr_base64": "",
+                    "stdout_sha256": digest(stdout), "stderr_sha256": digest(stderr),
+                    "output_hash": digest(stdout + b"\0" + stderr), "output_complete": True,
+                    "returncode": 0, "timed_out": False, "timeout_enforced": self.timeout_ok,
+                    "output_limit_enforced": self.output_limit_ok,
+                    "runtime_rehashed_before_dispatch": self.runtime_rehashed, "isolated": True,
+                    "isolation_profile_hash": self.descriptor["isolation_profile_hash"], "status": "PASS",
+                    "attestation_key_id": self.descriptor["attestation_key_id"],
+                },
+                signing_private_key=self.result_key,
+            )
+            return {"transcript": transcript, "review_packet": packet, "review_report": report}
         plan = load_candidate_test_plan(self.repo, source_commit=self.candidate)
         output = create_test_output_artifact(
             scope=profile["scope"],
@@ -293,6 +336,7 @@ def configured(
     runtime_rehashed: bool = True,
     drift_after_identity: bool = False,
     result_signing_key: Ed25519PrivateKey | None = None,
+    review: bool = False,
 ):
     repo, candidate, tree, base, base_tree, test_plan = candidate_repo(tmp_path)
     plan_repo = tmp_path / "plan"
@@ -301,23 +345,30 @@ def configured(
         subprocess.run(command, cwd=plan_repo, check=True)
     runner_key = Ed25519PrivateKey.generate()
     policy_runtime = runner_runtime()
+    profile = (
+        {
+            "id": "independent-review", "kind": "review", "timeout_seconds": 30,
+            "max_output_bytes": 65536, "runner_path": "/runner/bin/review-runner",
+            "runner_sha256": "sha256:" + "7" * 64,
+        }
+        if review
+        else {
+            "id": "focused",
+            "kind": "test",
+            "timeout_seconds": 30,
+            "max_output_bytes": 65536,
+            "scope": "focused",
+            "test_plan_sha256": digest((repo / "agent-services" / "catalogs" / "governed-candidate-test-plan-v1.json").read_bytes()),
+            "test_runner_path": test_plan["runner"]["path"],
+            "test_runner_sha256": test_plan["runner"]["sha256"],
+            "command": ["-m", "pytest", "-q", "tests/test_candidate.py"],
+        }
+    )
     policy = {
         "schema": POLICY_SCHEMA,
         "policy_id": "fixture-policy",
         "runtime": policy_runtime,
-        "profiles": [
-            {
-                "id": "focused",
-                "kind": "test",
-                "timeout_seconds": 30,
-                "max_output_bytes": 65536,
-                "scope": "focused",
-                "test_plan_sha256": digest((repo / "agent-services" / "catalogs" / "governed-candidate-test-plan-v1.json").read_bytes()),
-                "test_runner_path": test_plan["runner"]["path"],
-                "test_runner_sha256": test_plan["runner"]["sha256"],
-                "command": ["-m", "pytest", "-q", "tests/test_candidate.py"],
-            }
-        ],
+        "profiles": [profile],
     }
     policy_path = "policies/qualified-execution.json"
     policy_source = canonical(policy)
@@ -367,7 +418,7 @@ def configured(
                 "id": "fixture-client",
                 "credential_env": "SIGNER_TOKEN",
                 "descriptor_hash": execution_service_descriptor_hash(descriptor),
-                "profiles": ["focused"],
+                "profiles": [profile["id"]],
             }
         ],
         "max_active_requests": 1,
@@ -639,6 +690,51 @@ def test_signer_retains_bounded_client_bound_proof_transcripts(tmp_path):
         proof = response["results"][0]["proof"]
         retained = service.retained_proof(client, proof["run_id"], proof["profile_id"])
         assert retained == {"proof": proof, "transcript": response["results"][0]["transcript"]}
+    finally:
+        runner.stop()
+
+
+def test_real_runner_then_signer_produce_an_acyclic_review_report_proof_chain(tmp_path):
+    config, runner, signer_key, _descriptor, catalog, candidate, tree, base, base_tree = configured(
+        tmp_path, review=True,
+    )
+    packet_unsigned = {
+        "schema": PACKET_SCHEMA, "status": "EXECUTABLE",
+        "candidate_manifest_hash": "sha256:" + "a" * 64,
+        "candidate_source": {"commit": candidate, "tree": tree, "archive_sha256": "sha256:" + "b" * 64},
+        "plan": {"commit": config.plan_commit, "solution_hash": "sha256:" + "c" * 64, "closure_hash": "sha256:" + "d" * 64},
+        "snapshot": {"ref": "file:/isolated/review", "hash": "sha256:" + "e" * 64},
+        "required_dimensions": ["semantic", "security"],
+        "review_contract": {"schema": RESULT_SCHEMA, "pass_requires": "both dimensions PASS with zero findings", "source_mutation": "forbidden", "authority_broadening": "forbidden"},
+        "selected_provider": "independent-reviewer", "receiver_profile": {"id": "reviewer", "version": 1},
+        "runner_argv": ["reviewer"], "hold": None,
+    }
+    packet = {**packet_unsigned, "packet_hash": digest(canonical(packet_unsigned))}
+    runner.start()
+    try:
+        service = QualifiedExecutionService(
+            config, {"fixture-client": "signer-secret"}, signing_private_key=signer_key,
+            environment={"RUNNER_TOKEN": runner.token},
+        )
+        client = service.client_for_authorization("Bearer signer-secret")
+        response = service.execute(
+            {
+                "schema": REQUEST_SCHEMA, "service_id": config.service_id, "client_id": client.client_id,
+                "candidate_commit": candidate, "candidate_tree": tree, "base_commit": base, "base_tree": base_tree,
+                "plan_commit": config.plan_commit, "profiles": ["independent-review"], "review_packet": packet,
+            },
+            client,
+        )
+        produced = response["results"][0]
+        report = validate_review_report(packet, produced["review_report"])
+        proof = validate_execution_proof(
+            produced["proof"], produced["transcript"], catalog=catalog,
+            runner_descriptor=runner.descriptor,
+            expected={"candidate_commit": candidate, "candidate_tree": tree, "base_commit": base, "base_tree": base_tree, "plan_commit": config.plan_commit},
+        )
+        assert proof["inputs"]["review_report_hash"] == report["report_hash"]
+        assert "governed_review_receipt" not in produced["review_report"]
+        assert "review_result" not in produced
     finally:
         runner.stop()
 

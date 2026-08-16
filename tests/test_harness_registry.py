@@ -180,6 +180,7 @@ def test_selection_fields_flow_mechanically_into_promptcraft_card(tmp_path):
                 "source_tree": binding("git:s", "source"),
                 "execution_environment": binding("env:e", "environment"),
                 "authority_conditions": binding("auth:a", "authority"),
+                "candidate_evidence": binding("candidate:e", "candidate evidence"),
                 "receipt_sink": binding("receipt:r", "sink"),
             },
             "authority": ["local source edit"],

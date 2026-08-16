@@ -87,6 +87,12 @@ def approved_render_plan_identity(cfg: Mapping[str, Any]) -> Dict[str, str]:
     legacy ``plan_master_path`` substitute for the exact clean standalone
     Plan materialization approved with its solution.
     """
+    if cfg.get('plan_projection_path') is not None:
+        # The production projection proves authority identity but deliberately
+        # does not duplicate canonical Markdown. Plan-facing render/read
+        # consumers must use the registered tgw-context service on tgw-lib.
+        raise PlanRenderBindingError('canonical_plan_context_required')
+
     from tgw.plan_graph import SourcePreconditionError, approved_plan_binding
 
     try:

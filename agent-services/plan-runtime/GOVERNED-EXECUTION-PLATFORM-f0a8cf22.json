@@ -11,10 +11,10 @@
     }
   ],
   "plan_id": "PLAN-GOVERNED-EXECUTION-PLATFORM",
-  "projection_sha256": "sha256:68f0b812c2481f065ab0e1ce9c88ca7337a8ecc3598ac4139d0172ac00c57ce5",
+  "projection_sha256": "sha256:3199cc613eb8c17690a2a2afc845c6b52a44d621bc2c2505e3a6c091a8d61753",
   "schema": "tgw-plan-runtime-projection/v1",
   "solution": {
-    "closure_hash": "sha256:fd1d4796309b294cfab9f7a877bcccc5f7c6ef230cff2fc0cd7fcbb9dcf9e14c",
+    "closure_hash": "sha256:5d3e52999223f7df9a5421bd0a5f6549c9f0b2965b8cca55adb5c002492ae4a5",
     "complete": true,
     "conformance_providers": [
       {
@@ -25,7 +25,7 @@
       {
         "agreement": "verified",
         "available": true,
-        "closure_hash": "sha256:fd1d4796309b294cfab9f7a877bcccc5f7c6ef230cff2fc0cd7fcbb9dcf9e14c",
+        "closure_hash": "sha256:5d3e52999223f7df9a5421bd0a5f6549c9f0b2965b8cca55adb5c002492ae4a5",
         "id": "luet-pinned-0.9.26@1",
         "result": "agreement"
       }
@@ -86,7 +86,7 @@
       "recovered-promptcraft",
       "shared-tgw-plan-skill"
     ],
-    "solution_hash": "sha256:31ad3fd9faa4da237cdcc1da9b5d4b8cf40a1c4c71962a343fd6c6e175485e1f",
+    "solution_hash": "sha256:1c3684135769e5dcabcaf130c55df160a4cecc0d3ebcee6ccd129ab97cdd709b",
     "unresolved": [],
     "work_units": [
       {
@@ -163,7 +163,8 @@
         "id": "establish:plan.graph-query@1",
         "requires_capabilities": [],
         "resume_from": [
-          "source-commit:edb452e",
+          "service-test:tests/test_context_mcp_server.py",
+          "source:src/tgw/plan_graph",
           "test:tests/test_plan_graph_live.py"
         ],
         "selected_provider": "canonical-plan-graph"
@@ -209,5 +210,5 @@
       }
     ]
   },
-  "solution_sha256": "sha256:729c193cfb38baa2262e443cab925f7976dd7e47bcdc416795875eb98642b653"
+  "solution_sha256": "sha256:f788872c1dfc9f6b1ca22dff874b8fd7a7559508baea6ab3986cef164991a946"
 }

@@ -95,6 +95,7 @@ def card(tree):
             "source_tree": binding(f"git:tree:{tree}", "candidate source archive"),
             "execution_environment": binding("environment:manifest", "environment"),
             "authority_conditions": binding("authority:conditions", "authority"),
+            "candidate_evidence": binding("candidate:evidence", "candidate evidence"),
             "receipt_sink": binding("receipt:sink", "sink"),
         },
         "authority": ["local source and tests only"],

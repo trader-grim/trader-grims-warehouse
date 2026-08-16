@@ -70,6 +70,7 @@ def _registry(**changes):
                 "operation_id": "install-b",
                 "review_receipt": "review:1",
                 "controller_receipt": "controller:1",
+                "migration_receipts": [{"receipt_hash": "sha256:" + "d" * 64}],
             },
         ),
         ("bounded-flake-push", {"repository_id": "tgw-flake", "host_role": "production", "commit": SHA, "remote_ref": "origin/master"}),
@@ -176,7 +177,8 @@ def test_release_failure_invokes_only_registered_rollback_and_receipts_it():
                 "expected_current": "release-a",
                 "operation_id": "install-b",
                 "review_receipt": "review:1",
-                "controller_receipt": "controller:1",
+                    "controller_receipt": "controller:1",
+                    "migration_receipts": [{"receipt_hash": "sha256:" + "d" * 64}],
             },
         }
     )

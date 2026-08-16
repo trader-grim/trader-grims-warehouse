@@ -55,6 +55,7 @@ def card():
                 "source_tree": binding("git:commit-3", "source tree"),
                 "execution_environment": binding("environment:manifest-4", "environment"),
                 "authority_conditions": binding("authority:envelope-5", "authority and conditions"),
+                "candidate_evidence": binding("candidate:evidence-6", "candidate evidence"),
                 "receipt_sink": binding("receipt-store:run-6", "receipt sink"),
             },
             "authority": ["modify only the named source tree", "run local tests"],

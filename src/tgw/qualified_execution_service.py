@@ -34,6 +34,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from tgw.candidate_manifest import load_candidate_test_plan, verify_migration_safety_receipt, verify_test_receipt
+from tgw.candidate_review import CandidateReviewError, validate_review_report
 
 SERVICE_CONFIG_SCHEMA = "tgw-qualified-execution-signer-config/v3"
 SERVICE_DESCRIPTOR_SCHEMA = "tgw-qualified-execution-signer/v2"
@@ -1195,8 +1196,22 @@ class QualifiedExecutionService:
                 )
             )
         else:
-            if set(package) != {"transcript", "review_packet", "review_result"} or package["review_packet"] is None or package["review_result"] is None:
+            if set(package) != {"transcript", "review_packet", "review_report"} or package["review_packet"] is None or package["review_report"] is None:
                 raise QualifiedExecutionError("qualified runner review package is invalid")
+            try:
+                report = validate_review_report(package["review_packet"], package["review_report"])
+            except CandidateReviewError as exc:
+                raise QualifiedExecutionError("qualified runner review report is invalid") from exc
+            expected_inputs = {
+                "review_packet_content_sha256": _hash(package["review_packet"]),
+                "review_packet_hash": package["review_packet"]["packet_hash"],
+                "review_report_content_sha256": _hash(package["review_report"]),
+                "review_report_hash": report["report_hash"],
+                "runner_path": profile["runner_path"],
+                "runner_sha256": profile["runner_sha256"],
+            }
+            if transcript["inputs"] != expected_inputs:
+                raise QualifiedExecutionError("qualified runner review transcript input binding is invalid")
         return result
 
     def execute(self, value: Mapping[str, Any], client: Client, *, reserved: bool = False) -> dict[str, Any]:

@@ -95,6 +95,7 @@ def handoff(source):
                 "source_tree": {"ref": source.resolve().as_uri(), "hash": snapshot_hash(source)},
                 "execution_environment": binding("env:e", "environment"),
                 "authority_conditions": binding("auth:a", "authority and conditions"),
+                "candidate_evidence": binding("candidate:e", "candidate evidence"),
                 "receipt_sink": binding("receipt:r", "receipt sink"),
             },
             "authority": ["read-only semantic review"],

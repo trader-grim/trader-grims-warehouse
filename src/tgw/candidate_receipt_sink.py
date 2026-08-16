@@ -34,6 +34,7 @@ from tgw.candidate_manifest import (
 from tgw.candidate_review import (
     CandidateReviewError,
     candidate_identity,
+    validate_review_report,
     validate_review_result,
 )
 from tgw.governed_coding import admission_gate
@@ -65,7 +66,7 @@ W06_PLAN_SOURCE_PATH = "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml"
 W06_PLAN_SOLUTION_PATH_PREFIX = "plan/execution/solutions/GOVERNED-EXECUTION-PLATFORM-"
 W06_CANDIDATE_CATALOG_PATH = "agent-services/catalogs/governed-execution-platform-v1.json"
 GOVERNED_EXECUTION_BUNDLE_SCHEMA = "tgw-candidate-governed-execution-bundle/v2"
-INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-independent-review-evidence-bundle/v3"
+INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-independent-review-evidence-bundle/v4"
 GOVERNED_CANDIDATE_ADMISSION_SCHEMA = "tgw-governed-candidate-admission-gate/v2"
 GOVERNED_CANDIDATE_PLAN_AUTHORITY_SCHEMA = "tgw-governed-candidate-plan-authority/v1"
 CANDIDATE_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-evidence-bundle/v5"
@@ -104,6 +105,7 @@ _CANDIDATE_EVIDENCE_ARTIFACTS = (
 )
 _INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS = (
     "review_packet",
+    "review_report",
     "review_result",
     "qualified_execution_catalog",
     "qualified_execution_runner_descriptor",
@@ -571,7 +573,7 @@ def _verify_card_candidate_evidence_binding(
     descriptor: PinnedCandidateEvidenceDescriptor,
 ) -> None:
     bindings = card.get("bindings") if isinstance(card, Mapping) else None
-    binding = bindings.get("receipt_sink") if isinstance(bindings, Mapping) else None
+    binding = bindings.get("candidate_evidence") if isinstance(bindings, Mapping) else None
     if binding != descriptor.card_binding():
         raise CandidateReceiptSinkError("execution card candidate-evidence descriptor binding is missing, legacy, or mismatched")
 
@@ -1466,7 +1468,10 @@ def verify_independent_review_evidence_bundle(
         raise CandidateReceiptSinkError("independent review evidence bundle binding mismatch")
     artifacts = {name: _bundle_artifact(sink, bundle[name]) for name in _INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS}
     try:
-        review = validate_review_result(artifacts["review_packet"], artifacts["review_result"])
+        report = validate_review_report(artifacts["review_packet"], artifacts["review_report"])
+        review = validate_review_result(
+            artifacts["review_packet"], artifacts["review_report"], artifacts["review_result"]
+        )
     except CandidateReviewError as exc:
         raise CandidateReceiptSinkError("candidate semantic/security review is invalid") from exc
     if review["status"] != "PASS" or review["candidate_manifest_hash"] != candidate_manifest_hash:
@@ -1490,8 +1495,8 @@ def verify_independent_review_evidence_bundle(
     expected_inputs = {
         "review_packet_content_sha256": _hash(artifacts["review_packet"]),
         "review_packet_hash": review["packet_hash"],
-        "review_result_content_sha256": _hash(artifacts["review_result"]),
-        "review_result_hash": review["result_hash"],
+        "review_report_content_sha256": _hash(artifacts["review_report"]),
+        "review_report_hash": report["report_hash"],
     }
     if normalized_proof["kind"] != "review" or any(inputs.get(field) != item for field, item in expected_inputs.items()):
         raise CandidateReceiptSinkError("qualified review proof does not bind retained packet/result")
@@ -1502,6 +1507,8 @@ def verify_independent_review_evidence_bundle(
         or not _SHA256.fullmatch(str(inputs.get("runner_sha256")))
     ):
         raise CandidateReceiptSinkError("qualified review proof runner binding is invalid")
+    if artifacts["review_result"].get("qualified_execution_proof_hash") != normalized_proof["proof_hash"]:
+        raise CandidateReceiptSinkError("candidate review result does not bind the retained qualified proof")
     return {
         "candidate_manifest_hash": candidate_manifest_hash,
         "review_packet_hash": review["packet_hash"],

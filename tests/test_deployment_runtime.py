@@ -17,6 +17,8 @@ def _compose(tmp_path, **changes):
         "consume_authority": Mock(),
         "backup": Mock(),
         "health": Mock(),
+        "migrate": Mock(),
+        "restore_migration_backup": Mock(),
         "require_authority_schema": Mock(),
         "flake_push": Mock(),
         "flake_switch_record": Mock(),

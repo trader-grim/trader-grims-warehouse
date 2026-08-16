@@ -39,6 +39,7 @@ CARD_RESOURCE_NAMES = frozenset(
         "source_tree",
         "execution_environment",
         "authority_conditions",
+        "candidate_evidence",
         "receipt_sink",
     }
 )

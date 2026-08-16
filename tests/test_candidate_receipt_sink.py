@@ -46,7 +46,7 @@ from tgw.candidate_receipt_sink import (
     load_pinned_candidate_evidence_descriptor,
     load_receipt_sink_descriptor,
 )
-from tgw.candidate_review import PACKET_SCHEMA, RESULT_SCHEMA
+from tgw.candidate_review import PACKET_SCHEMA, REPORT_SCHEMA, RESULT_SCHEMA
 from tgw.execution_resources import (
     RESOURCE_SERVICE_CAPABILITIES,
     ed25519_public_key,
@@ -477,7 +477,8 @@ def role_evidence(*, role, source_commit, source_tree, plan_commit, receipt_sink
         "source_tree": binding(f"git:tree:{source_tree}", "source tree archive"),
         "execution_environment": binding("environment:manifest", "environment"),
         "authority_conditions": binding("authority:conditions", "authority"),
-        "receipt_sink": receipt_sink_binding,
+        "candidate_evidence": receipt_sink_binding,
+        "receipt_sink": binding("execution:evidence-sink", "execution evidence sink"),
     }
     card_unsigned = {
         "schema": "tgw-execution-card/v1",
@@ -807,7 +808,7 @@ def candidate_evidence(candidate_repo, *, source_commit, source_tree, plan_commi
 
 
 def independent_review_evidence(candidate_manifest, independent_review_receipt):
-    """Build X-only review output after cards/roles have been established."""
+    """Build the acyclic packet -> report/proof -> role -> result chain."""
 
     review_packet_unsigned = {
         "schema": PACKET_SCHEMA,
@@ -829,19 +830,18 @@ def independent_review_evidence(candidate_manifest, independent_review_receipt):
         "hold": None,
     }
     review_packet = {**review_packet_unsigned, "packet_hash": object_hash(review_packet_unsigned)}
-    review_result_unsigned = {
-        "schema": RESULT_SCHEMA,
+    review_report_unsigned = {
+        "schema": REPORT_SCHEMA,
         "packet_hash": review_packet["packet_hash"],
         "candidate_manifest_hash": candidate_manifest["manifest_hash"],
         "selected_provider": independent_review_receipt["selected_provider"],
-        "governed_review_receipt": independent_review_receipt,
         "dimensions": {
             "semantic": {"verdict": "PASS", "findings": []},
             "security": {"verdict": "PASS", "findings": []},
         },
         "overall": "PASS",
     }
-    review_result = {**review_result_unsigned, "result_hash": object_hash(review_result_unsigned)}
+    review_report = {**review_report_unsigned, "report_hash": object_hash(review_report_unsigned)}
     source = candidate_manifest["source"]
     runner_descriptor = qualified_runner_descriptor(candidate_manifest["plan"]["commit"])
     execution_proof = qualified_execution_artifact(
@@ -855,15 +855,27 @@ def independent_review_evidence(candidate_manifest, independent_review_receipt):
         inputs={
             "review_packet_content_sha256": object_hash(review_packet),
             "review_packet_hash": review_packet["packet_hash"],
-            "review_result_content_sha256": object_hash(review_result),
-            "review_result_hash": review_result["result_hash"],
+            "review_report_content_sha256": object_hash(review_report),
+            "review_report_hash": review_report["report_hash"],
             "runner_path": "/qualified/review-runner",
             "runner_sha256": "sha256:" + "7" * 64,
         },
         runner_descriptor=runner_descriptor,
     )
+    review_result_unsigned = {
+        "schema": RESULT_SCHEMA,
+        "packet_hash": review_packet["packet_hash"],
+        "candidate_manifest_hash": candidate_manifest["manifest_hash"],
+        "selected_provider": independent_review_receipt["selected_provider"],
+        "review_report_hash": review_report["report_hash"],
+        "qualified_execution_proof_hash": execution_proof["proof"]["proof_hash"],
+        "governed_review_receipt": independent_review_receipt,
+        "overall": "PASS",
+    }
+    review_result = {**review_result_unsigned, "result_hash": object_hash(review_result_unsigned)}
     return {
         "review_packet": review_packet,
+        "review_report": review_report,
         "review_result": review_result,
         "qualified_execution_catalog": qualified_execution_catalog(candidate_manifest["plan"]["commit"], runner_descriptor),
         "qualified_execution_runner_descriptor": runner_descriptor,
@@ -1116,9 +1128,9 @@ def _execution_evidence_sink(
         )
     review = independent_review_evidence(candidate_manifest, evidence_by_role["independent-review"]["role_receipt"])
     if corrupt_w08 == "review":
-        result = review["review_result"]
+        report = review["review_report"]
         unsigned = {
-            **{key: value for key, value in result.items() if key != "result_hash"},
+            **{key: value for key, value in report.items() if key != "report_hash"},
             "dimensions": {
                 "semantic": {"verdict": "PASS", "findings": []},
                 "security": {
@@ -1135,7 +1147,7 @@ def _execution_evidence_sink(
             },
             "overall": "FAIL",
         }
-        review["review_result"] = {**unsigned, "result_hash": object_hash(unsigned)}
+        review["review_report"] = {**unsigned, "report_hash": object_hash(unsigned)}
     if corrupt_w08 == "review-pair":
         # Pair a later, syntactically valid PASS review with the first proof.
         # Only the proof's exact packet/result-byte bindings reject this.
@@ -1144,12 +1156,12 @@ def _execution_evidence_sink(
             "snapshot": {"ref": "sink:later-snapshot", "hash": digest(b"later snapshot")},
         }
         packet = {**packet_unsigned, "packet_hash": object_hash(packet_unsigned)}
-        result_unsigned = {
-            **{key: value for key, value in review["review_result"].items() if key != "result_hash"},
+        report_unsigned = {
+            **{key: value for key, value in review["review_report"].items() if key != "report_hash"},
             "packet_hash": packet["packet_hash"],
         }
         review["review_packet"] = packet
-        review["review_result"] = {**result_unsigned, "result_hash": object_hash(result_unsigned)}
+        review["review_report"] = {**report_unsigned, "report_hash": object_hash(report_unsigned)}
     review_pointers = {}
     for name, value in review.items():
         raw = write_json(sink / "independent-review" / f"{name}.json", value)

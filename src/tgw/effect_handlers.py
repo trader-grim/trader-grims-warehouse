@@ -495,8 +495,9 @@ class TypedEffectHandlerRegistry:
 
     def prepare(self, effect: TypedEffect) -> tuple[str, dict[str, Any], Callable[..., Mapping[str, Any]], Callable[..., Mapping[str, Any]] | None]:
         if effect.kind is EffectKind.CODING_RELEASE:
+            raw_migrations = effect.parameters.get("migration_receipts")
             parameters = _required(
-                effect.parameters,
+                {key: value for key, value in effect.parameters.items() if key != "migration_receipts"},
                 {
                     "candidate_commit",
                     "candidate_tree",
@@ -511,6 +512,10 @@ class TypedEffectHandlerRegistry:
             )
             if not _SHA1.fullmatch(parameters["candidate_commit"]) or not _SHA1.fullmatch(parameters["candidate_tree"]) or not _SHA256.fullmatch(parameters["archive_sha256"]):
                 raise ValueError("coding release hashes are invalid")
+            migrations = raw_migrations
+            if not isinstance(migrations, list) or not migrations or not all(isinstance(item, Mapping) for item in migrations):
+                raise ValueError("coding release requires verified candidate migration receipts")
+            parameters["migration_receipts"] = list(migrations)
         elif effect.kind is EffectKind.BOUNDED_FLAKE_PUSH:
             parameters = _required(effect.parameters, {"repository_id", "host_role", "commit", "remote_ref"})
             if (

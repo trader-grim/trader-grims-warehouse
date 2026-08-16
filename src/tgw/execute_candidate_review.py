@@ -11,9 +11,16 @@ import tarfile
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
-from tgw.candidate_review import generate_review_packet, validate_review_result
+from tgw.candidate_review import (
+    create_review_result,
+    generate_review_packet,
+    validate_review_report,
+    validate_review_result,
+)
+from tgw.execution_resources import HTTPRegisteredResourceResolver
+from tgw.qualified_execution_service import QualifiedExecutionClient
 from tgw.governed_coding import dispatch_role
 from tgw.harness_registry import load_registry, observe_health
 from tgw.review_configuration import configured_review_command
@@ -60,25 +67,47 @@ def _card(
     packet: Mapping[str, Any],
     *,
     observed_at: datetime,
+    candidate_evidence_binding: Mapping[str, Any],
+    receipt_sink_binding: Mapping[str, Any],
+    codegraph_binding: Mapping[str, Any],
+    execution_environment_binding: Mapping[str, Any],
+    review_input_binding: Mapping[str, Any],
 ) -> dict[str, Any]:
     source = manifest["source"]
     plan = manifest["plan"]
+    for label, binding in (
+        ("candidate evidence", candidate_evidence_binding),
+        ("execution receipt sink", receipt_sink_binding),
+        ("CodeGraph", codegraph_binding),
+        ("execution environment", execution_environment_binding),
+        ("qualified review input", review_input_binding),
+    ):
+        if not isinstance(binding, Mapping) or set(binding) != {"ref", "hash"}:
+            raise ValueError(f"candidate review {label} binding is invalid")
+        if not isinstance(binding["ref"], str) or not binding["ref"] or not isinstance(binding["hash"], str) or not binding["hash"].startswith("sha256:"):
+            raise ValueError(f"candidate review {label} binding is invalid")
+    if codegraph_binding["ref"] == packet["snapshot"]["ref"] or codegraph_binding["hash"] == source["archive_sha256"]:
+        raise ValueError("candidate review CodeGraph cannot be substituted by the source snapshot")
+    if execution_environment_binding["hash"] == _hash(packet["runner_argv"]):
+        raise ValueError("candidate review environment cannot be substituted by runner argv")
     return {
         "card_id": "candidate-review-" + str(source["commit"])[:12],
         "solution_id": plan["solution_hash"],
         "plan_commit": plan["commit"],
         "bindings": {
-            "plan_input": {"ref": "candidate:" + packet["candidate_manifest_hash"], "hash": packet["candidate_manifest_hash"]},
+            "plan_input": dict(review_input_binding),
+            "plan_commit": {"ref": "git-plan:" + plan["commit"], "hash": _hash({"commit": plan["commit"]})},
             "plan_graph": {"ref": "tgw-plan:solution", "hash": plan["solution_hash"]},
-            "codegraph_snapshot": {"ref": "git-tree:" + source["tree"], "hash": source["archive_sha256"]},
+            "codegraph_snapshot": dict(codegraph_binding),
             "source_tree": dict(packet["snapshot"]),
-            "execution_environment": {"ref": "provider-health:verified", "hash": _hash(packet["runner_argv"])},
+            "execution_environment": dict(execution_environment_binding),
             "authority_conditions": {"ref": "tgw-plan:closure", "hash": plan["closure_hash"]},
+            "candidate_evidence": dict(candidate_evidence_binding),
+            "receipt_sink": dict(receipt_sink_binding),
         },
         "authority": ["read-only semantic and security review of the bound snapshot"],
         "exclusions": ["source mutation", "deployment", "installation", "authority broadening"],
         "acceptance": ["validated semantic and security verdict bound to the candidate"],
-        "receipt_sink": "candidate-review:" + str(source["commit"]),
         "lease": _review_lease(str(source["commit"]), observed_at=observed_at),
     }
 
@@ -88,6 +117,18 @@ def execute(
     repository: Path,
     *,
     observed_at: datetime | None = None,
+    candidate_evidence_binding: Mapping[str, Any],
+    receipt_sink_binding: Mapping[str, Any],
+    resource_resolver: HTTPRegisteredResourceResolver,
+    resource_service: Mapping[str, Any],
+    resource_service_catalog: Mapping[str, Any],
+    qualified_execution_client: QualifiedExecutionClient,
+    qualified_review_profile: str,
+    base_commit: str,
+    base_tree: str,
+    publish_review_input: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+    codegraph_binding: Mapping[str, Any],
+    execution_environment_binding: Mapping[str, Any],
 ) -> dict[str, Any]:
     execution_observed_at = observed_at or datetime.now(timezone.utc)
     if execution_observed_at.tzinfo is None or execution_observed_at.utcoffset() is None:
@@ -129,49 +170,81 @@ def execute(
         )
         if packet["status"] != "EXECUTABLE":
             return {"packet": packet, "result": None, "validation": None}
+        qualified = qualified_execution_client.execute(
+            candidate_commit=str(manifest["source"]["commit"]),
+            candidate_tree=str(manifest["source"]["tree"]),
+            base_commit=base_commit,
+            base_tree=base_tree,
+            plan_commit=str(manifest["plan"]["commit"]),
+            profiles=[qualified_review_profile],
+            review_packet=packet,
+        )
+        results = qualified.get("results")
+        if not isinstance(results, list) or len(results) != 1:
+            raise ValueError("qualified review did not return exactly one signed report")
+        qualified_result = results[0]
+        if not isinstance(qualified_result, Mapping) or not all(
+            isinstance(qualified_result.get(name), Mapping)
+            for name in ("review_report", "proof", "transcript")
+        ):
+            raise ValueError("qualified review report/proof/transcript is incomplete")
+        report = validate_review_report(packet, qualified_result["review_report"])
+        proof_hash = qualified_result["proof"].get("proof_hash")
+        if not isinstance(proof_hash, str) or not proof_hash.startswith("sha256:"):
+            raise ValueError("qualified review proof identity is invalid")
+        review_input = {
+            "schema": "tgw-qualified-review-governed-input/v1",
+            "packet_hash": packet["packet_hash"],
+            "review_report_hash": report["report_hash"],
+            "qualified_execution_proof_hash": proof_hash,
+        }
+        review_input_binding = publish_review_input(review_input)
         receipt = dispatch_role(
             registry,
             health,
             role="independent-review",
             adapters=adapters,
-            card_template=_card(manifest, packet, observed_at=execution_observed_at),
+            card_template=_card(
+                manifest, packet, observed_at=execution_observed_at,
+                candidate_evidence_binding=candidate_evidence_binding,
+                receipt_sink_binding=receipt_sink_binding,
+                codegraph_binding=codegraph_binding,
+                execution_environment_binding=execution_environment_binding,
+                review_input_binding=review_input_binding,
+            ),
             execution_identity="isolated-review:" + str(manifest["source"]["commit"]),
             required_capabilities=("isolated-snapshot-review",),
+            resource_resolver=resource_resolver,
+            resource_service=resource_service,
+            resource_service_catalog=resource_service_catalog,
         )
-    reports = [
-        artifact["report"]
+    if receipt.get("selected_provider") != packet["selected_provider"]:
+        raise ValueError("governed review receipt provider differs from qualified report")
+    if not any(
+        artifact == {"kind": "qualified_review_report", "report_hash": report["report_hash"]}
         for artifact in receipt.get("artifacts", [])
-        if artifact.get("kind") == "semantic_review" and isinstance(artifact.get("report"), Mapping)
-    ]
-    report = reports[0] if len(reports) == 1 else None
-    passed = receipt["status"] == "PASS" and report is not None and report["verdict"] == "PASS"
-    findings = [] if report is None else report["findings"]
-    dimension = {"verdict": "PASS" if passed else "FAIL", "findings": findings}
-    if not passed and not findings:
-        raise ValueError(
-            "failed review did not return validated findings: "
-            + json.dumps(receipt, sort_keys=True)
-        )
-    unsigned = {
-        "schema": "tgw-integrated-candidate-review-result/v1",
-        "packet_hash": packet["packet_hash"],
-        "candidate_manifest_hash": packet["candidate_manifest_hash"],
-        "selected_provider": packet["selected_provider"],
-        "governed_review_receipt": receipt,
-        "dimensions": {"semantic": dimension, "security": dimension},
-        "overall": "PASS" if passed else "FAIL",
+    ):
+        raise ValueError("governed review receipt does not bind the qualified runner report")
+    result = create_review_result(
+        packet, report, receipt,
+        qualified_execution_proof_hash=proof_hash,
+    )
+    return {
+        "packet": packet,
+        "report": report,
+        "result": result,
+        "validation": validate_review_result(packet, report, result),
     }
-    result = {**unsigned, "result_hash": _hash(unsigned)}
-    return {"packet": packet, "result": result, "validation": validate_review_result(packet, result)}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("manifest", type=Path)
-    parser.add_argument("--repository", type=Path, default=Path.cwd())
-    args = parser.parse_args()
-    print(json.dumps(execute(args.manifest, args.repository.resolve()), sort_keys=True, indent=2))
-    return 0
+    parser.parse_args()
+    parser.error(
+        "candidate review requires externally pinned QES, D, resource-service, CodeGraph, "
+        "environment, and X publisher bindings; the uninstalled template is a HOLD"
+    )
+    return 2
 
 
 if __name__ == "__main__":

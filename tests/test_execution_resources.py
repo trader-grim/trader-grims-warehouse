@@ -27,6 +27,7 @@ def card_and_resources(*, plan_commit_resource=PLAN_COMMIT):
         "git:source": "source tree content",
         "environment:manifest": "execution environment manifest",
         "authority:conditions": "authority and solved conditions",
+        "candidate:evidence": "candidate evidence descriptor",
         "receipt:sink": "registered receipt sink descriptor",
     }
     bindings = {
@@ -42,6 +43,7 @@ def card_and_resources(*, plan_commit_resource=PLAN_COMMIT):
             "source_tree": ("git:source", resources["git:source"]),
             "execution_environment": ("environment:manifest", resources["environment:manifest"]),
             "authority_conditions": ("authority:conditions", resources["authority:conditions"]),
+            "candidate_evidence": ("candidate:evidence", resources["candidate:evidence"]),
             "receipt_sink": ("receipt:sink", resources["receipt:sink"]),
         }.items()
     }

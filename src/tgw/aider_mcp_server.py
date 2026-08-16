@@ -62,6 +62,10 @@ def _plan_runtime_binding() -> tuple[Path, str]:
         os.environ.get('TGW_CONFIG', '/opt/TGW/config/tgw-api-config.json')
     )
     cfg = load_operational_config(config_path)
+    if cfg.get('plan_projection_path') is not None:
+        raise RuntimeError(
+            'CANONICAL_PLAN_CONTEXT_REQUIRED: Aider Plan access is available only through tgw-context on tgw-lib'
+        )
     plan_root = Path(
         os.environ.get(
             'TGW_STANDALONE_PLAN_VAULT',

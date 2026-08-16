@@ -198,7 +198,7 @@ def test_production_plan_projection_replaces_a_local_plan_checkout(tmp_path):
         "standalone_plan_root": "/run/tgw/no-local-plan",
         "plan_repository_root": "/run/tgw/no-local-plan",
         "plan_approved_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
-        "plan_approved_solution_hash": "sha256:31ad3fd9faa4da237cdcc1da9b5d4b8cf40a1c4c71962a343fd6c6e175485e1f",
+        "plan_approved_solution_hash": "sha256:1c3684135769e5dcabcaf130c55df160a4cecc0d3ebcee6ccd129ab97cdd709b",
         "plan_projection_path": str(projection),
         "plan_projection_root": str(protected),
         "plan_projection_trusted_uid": os.getuid(),

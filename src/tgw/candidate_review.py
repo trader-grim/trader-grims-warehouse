@@ -12,7 +12,8 @@ from tgw.governed_coding import validate_receipt
 from tgw.harness_registry import ProviderHealth, select_provider
 
 PACKET_SCHEMA = "tgw-integrated-candidate-review-packet/v1"
-RESULT_SCHEMA = "tgw-integrated-candidate-review-result/v1"
+REPORT_SCHEMA = "tgw-integrated-candidate-review-report/v1"
+RESULT_SCHEMA = "tgw-integrated-candidate-review-result/v2"
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT = re.compile(r"^[0-9a-f]{40}$")
 
@@ -142,24 +143,107 @@ def _validate_dimension(name: str, value: Any) -> None:
         raise CandidateReviewError(f"failed {name} review requires findings")
 
 
-def validate_review_result(
-    packet: Mapping[str, Any], result: Mapping[str, Any]
-) -> dict[str, Any]:
-    """Validate one independent review result against its executable packet."""
-
+def _validate_packet(packet: Mapping[str, Any]) -> None:
     packet_unsigned = dict(packet)
     packet_claimed = packet_unsigned.pop("packet_hash", None)
     if packet.get("schema") != PACKET_SCHEMA or packet_claimed != _hash(packet_unsigned):
         raise CandidateReviewError("review packet hash/schema is invalid")
     if packet.get("status") != "EXECUTABLE":
         raise CandidateReviewError("a held review packet cannot accept a result")
+
+
+def create_review_report(
+    packet: Mapping[str, Any], dimensions: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Create the runner-produced report that precedes all governed receipts."""
+
+    _validate_packet(packet)
+    if not isinstance(dimensions, Mapping) or set(dimensions) != {"semantic", "security"}:
+        raise CandidateReviewError("review report requires semantic and security dimensions")
+    for name in ("semantic", "security"):
+        _validate_dimension(name, dimensions[name])
+    passed = all(dimensions[name]["verdict"] == "PASS" for name in dimensions)
+    unsigned = {
+        "schema": REPORT_SCHEMA,
+        "packet_hash": packet["packet_hash"],
+        "candidate_manifest_hash": packet["candidate_manifest_hash"],
+        "selected_provider": packet["selected_provider"],
+        "dimensions": dict(dimensions),
+        "overall": "PASS" if passed else "FAIL",
+    }
+    return {**unsigned, "report_hash": _hash(unsigned)}
+
+
+def validate_review_report(
+    packet: Mapping[str, Any], report: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate the exact semantic/security report emitted by the qualified runner."""
+
+    _validate_packet(packet)
+    required = {
+        "schema", "packet_hash", "candidate_manifest_hash", "selected_provider",
+        "dimensions", "overall", "report_hash",
+    }
+    if not isinstance(report, Mapping) or set(report) != required or report.get("schema") != REPORT_SCHEMA:
+        raise CandidateReviewError("review report contract is invalid")
+    unsigned = dict(report)
+    claimed = unsigned.pop("report_hash")
+    if claimed != _hash(unsigned):
+        raise CandidateReviewError("review report hash mismatch")
+    for field in ("packet_hash", "candidate_manifest_hash", "selected_provider"):
+        expected = packet["packet_hash"] if field == "packet_hash" else packet[field]
+        if report[field] != expected:
+            raise CandidateReviewError(f"review report {field} mismatch")
+    dimensions = report["dimensions"]
+    if not isinstance(dimensions, Mapping) or set(dimensions) != {"semantic", "security"}:
+        raise CandidateReviewError("review report requires semantic and security dimensions")
+    for name in ("semantic", "security"):
+        _validate_dimension(name, dimensions[name])
+    expected_overall = "PASS" if all(dimensions[name]["verdict"] == "PASS" for name in dimensions) else "FAIL"
+    if report["overall"] != expected_overall:
+        raise CandidateReviewError("review report overall verdict is inconsistent")
+    return dict(report)
+
+
+def create_review_result(
+    packet: Mapping[str, Any],
+    report: Mapping[str, Any],
+    governed_review_receipt: Mapping[str, Any],
+    *,
+    qualified_execution_proof_hash: str,
+) -> dict[str, Any]:
+    """Finalize a report only after both QES proof and governed receipt exist."""
+
+    normalized = validate_review_report(packet, report)
+    unsigned = {
+        "schema": RESULT_SCHEMA,
+        "packet_hash": packet["packet_hash"],
+        "candidate_manifest_hash": packet["candidate_manifest_hash"],
+        "selected_provider": packet["selected_provider"],
+        "review_report_hash": normalized["report_hash"],
+        "qualified_execution_proof_hash": qualified_execution_proof_hash,
+        "governed_review_receipt": dict(governed_review_receipt),
+        "overall": normalized["overall"],
+    }
+    result = {**unsigned, "result_hash": _hash(unsigned)}
+    validate_review_result(packet, report, result)
+    return result
+
+
+def validate_review_result(
+    packet: Mapping[str, Any], report: Mapping[str, Any], result: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate the post-proof result against its packet and runner report."""
+
+    normalized_report = validate_review_report(packet, report)
     if result.get("schema") != RESULT_SCHEMA or set(result) != {
         "schema",
         "packet_hash",
         "candidate_manifest_hash",
         "selected_provider",
+        "review_report_hash",
+        "qualified_execution_proof_hash",
         "governed_review_receipt",
-        "dimensions",
         "overall",
         "result_hash",
     }:
@@ -172,6 +256,10 @@ def validate_review_result(
         expected = packet["packet_hash"] if field == "packet_hash" else packet[field]
         if result[field] != expected:
             raise CandidateReviewError(f"review result {field} mismatch")
+    if result["review_report_hash"] != normalized_report["report_hash"]:
+        raise CandidateReviewError("review result report binding mismatch")
+    if not _SHA256.fullmatch(str(result["qualified_execution_proof_hash"])):
+        raise CandidateReviewError("review result qualified execution proof binding is invalid")
     receipt = result["governed_review_receipt"]
     if not isinstance(receipt, Mapping):
         raise CandidateReviewError("governed review receipt is required")
@@ -180,12 +268,7 @@ def validate_review_result(
         "selected_provider"
     ) != packet["selected_provider"]:
         raise CandidateReviewError("governed review receipt role/provider mismatch")
-    dimensions = result["dimensions"]
-    if not isinstance(dimensions, Mapping) or set(dimensions) != {"semantic", "security"}:
-        raise CandidateReviewError("review result requires semantic and security dimensions")
-    for name in ("semantic", "security"):
-        _validate_dimension(name, dimensions[name])
-    passed = all(dimensions[name]["verdict"] == "PASS" for name in dimensions)
+    passed = normalized_report["overall"] == "PASS"
     if passed and (
         receipt.get("status") != "PASS"
         or receipt.get("established_conditions") != ["reviewed"]
@@ -195,7 +278,7 @@ def validate_review_result(
         receipt.get("status") != "FAIL" or receipt.get("established_conditions") != []
     ):
         raise CandidateReviewError("failed governed review claimed reviewed evidence")
-    expected_overall = "PASS" if passed else "FAIL"
+    expected_overall = normalized_report["overall"]
     if result["overall"] != expected_overall:
         raise CandidateReviewError("review result overall verdict is inconsistent")
     return {
@@ -204,5 +287,7 @@ def validate_review_result(
         "candidate_manifest_hash": packet["candidate_manifest_hash"],
         "packet_hash": packet["packet_hash"],
         "review_receipt_hash": receipt["receipt_hash"],
+        "review_report_hash": normalized_report["report_hash"],
+        "qualified_execution_proof_hash": result["qualified_execution_proof_hash"],
         "result_hash": result["result_hash"],
     }

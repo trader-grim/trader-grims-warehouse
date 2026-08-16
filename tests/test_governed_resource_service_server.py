@@ -39,6 +39,7 @@ REFS = {
     "source_tree": "git:source",
     "execution_environment": "environment:manifest",
     "authority_conditions": "authority:conditions",
+    "candidate_evidence": "candidate:evidence",
     "receipt_sink": "receipt:sink",
 }
 
@@ -56,6 +57,7 @@ def _contents():
         "source_tree": b"source tree content",
         "execution_environment": b"execution environment manifest",
         "authority_conditions": b"authority and solved conditions",
+        "candidate_evidence": b"candidate evidence descriptor",
         "receipt_sink": b"registered receipt sink descriptor",
     }
 

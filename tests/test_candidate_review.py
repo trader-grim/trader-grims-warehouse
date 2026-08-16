@@ -8,7 +8,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tgw.candidate_review import (
     CandidateReviewError,
+    create_review_report,
+    create_review_result,
     generate_review_packet,
+    validate_review_report,
     validate_review_result,
 )
 from tgw.execute_candidate_review import REVIEW_LEASE_SECONDS, _card
@@ -99,7 +102,7 @@ def governed_receipt(packet_value, *, passed):
         name: {"ref": f"test:{name}", "hash": "sha256:" + "c" * 64}
         for name in (
             "plan_input", "plan_commit", "plan_graph", "codegraph_snapshot", "source_tree",
-            "execution_environment", "authority_conditions", "receipt_sink",
+            "execution_environment", "authority_conditions", "candidate_evidence", "receipt_sink",
         )
     }
     handoff_hash = "sha256:" + "b" * 64
@@ -139,7 +142,7 @@ def governed_receipt(packet_value, *, passed):
     return {**unsigned, "receipt_hash": hash_object(unsigned)}
 
 
-def result(packet_value, *, semantic="PASS", security="PASS"):
+def report(packet_value, *, semantic="PASS", security="PASS"):
     passed = semantic == security == "PASS"
 
     def dimension(verdict, message):
@@ -155,19 +158,24 @@ def result(packet_value, *, semantic="PASS", security="PASS"):
             ]
         return {"verdict": verdict, "findings": findings}
 
-    unsigned = {
-        "schema": "tgw-integrated-candidate-review-result/v1",
-        "packet_hash": packet_value["packet_hash"],
-        "candidate_manifest_hash": packet_value["candidate_manifest_hash"],
-        "selected_provider": packet_value["selected_provider"],
-        "governed_review_receipt": governed_receipt(packet_value, passed=passed),
-        "dimensions": {
+    return create_review_report(
+        packet_value,
+        {
             "semantic": dimension(semantic, "semantic defect"),
             "security": dimension(security, "security defect"),
         },
-        "overall": "PASS" if passed else "FAIL",
-    }
-    return {**unsigned, "result_hash": hash_object(unsigned)}
+    )
+
+
+def result(packet_value, *, semantic="PASS", security="PASS"):
+    review_report = report(packet_value, semantic=semantic, security=security)
+    passed = review_report["overall"] == "PASS"
+    return review_report, create_review_result(
+        packet_value,
+        review_report,
+        governed_receipt(packet_value, passed=passed),
+        qualified_execution_proof_hash="sha256:" + "9" * 64,
+    )
 
 
 def test_generator_emits_executable_packet_without_invoking_configured_runner(tmp_path):
@@ -197,9 +205,9 @@ def test_generator_emits_exact_hold_when_isolated_runner_is_not_configured(tmp_p
 
 def test_result_validator_accepts_both_dimensions_only_when_receipt_is_bound(tmp_path):
     value, _ = packet(tmp_path)
-    review = result(value)
+    review_report, review = result(value)
 
-    validated = validate_review_result(value, review)
+    validated = validate_review_result(value, review_report, review)
 
     assert validated["status"] == "PASS"
     assert validated["candidate_manifest_hash"] == value["candidate_manifest_hash"]
@@ -208,9 +216,9 @@ def test_result_validator_accepts_both_dimensions_only_when_receipt_is_bound(tmp
 
 def test_security_failure_is_validated_as_fail_and_never_reviewed(tmp_path):
     value, _ = packet(tmp_path)
-    review = result(value, security="FAIL")
+    review_report, review = result(value, security="FAIL")
 
-    validated = validate_review_result(value, review)
+    validated = validate_review_result(value, review_report, review)
 
     assert validated["status"] == "FAIL"
     assert review["governed_review_receipt"]["established_conditions"] == []
@@ -220,7 +228,8 @@ def test_held_packet_cannot_accept_review_result(tmp_path):
     value, _ = packet(tmp_path, configured=False)
 
     with pytest.raises(CandidateReviewError, match="held"):
-        validate_review_result(value, result(value))
+        review_report, review = result(value)
+        validate_review_result(value, review_report, review)
 
 
 def test_candidate_manifest_and_review_result_tampering_fail_closed(tmp_path):
@@ -240,19 +249,38 @@ def test_candidate_manifest_and_review_result_tampering_fail_closed(tmp_path):
         )
 
     value, _ = packet(tmp_path / "second")
-    review = result(value)
+    review_report, review = result(value)
     review["selected_provider"] = "other"
     with pytest.raises(CandidateReviewError, match="result hash mismatch"):
-        validate_review_result(value, review)
+        validate_review_result(value, review_report, review)
+
+
+def test_result_cannot_precede_or_substitute_the_qualified_report(tmp_path):
+    value, _ = packet(tmp_path)
+    first_report, review = result(value)
+    later_report = report(value, security="FAIL")
+
+    with pytest.raises(CandidateReviewError, match="report binding mismatch"):
+        validate_review_result(value, later_report, review)
+    fabricated = dict(review)
+    fabricated["qualified_execution_proof_hash"] = None
+    fabricated_unsigned = {key: item for key, item in fabricated.items() if key != "result_hash"}
+    fabricated["result_hash"] = hash_object(fabricated_unsigned)
+    with pytest.raises(CandidateReviewError, match="proof binding"):
+        validate_review_result(value, first_report, fabricated)
 
 
 def test_governed_review_card_lease_is_fresh_bounded_and_attempt_specific(tmp_path):
     packet_value, _ = packet(tmp_path)
     observed = datetime(2026, 8, 16, 12, 34, 56, 789, tzinfo=timezone.utc)
 
-    first = _card(manifest(), packet_value, observed_at=observed)["lease"]
+    binding = {"ref": "evidence:descriptor", "hash": "sha256:" + "8" * 64}
+    codegraph = {"ref": "codegraph:snapshot:1", "hash": "sha256:" + "6" * 64}
+    environment = {"ref": "environment:manifest:1", "hash": "sha256:" + "7" * 64}
+    review_input = {"ref": "review:input:1", "hash": "sha256:" + "5" * 64}
+    first = _card(manifest(), packet_value, observed_at=observed, candidate_evidence_binding=binding, receipt_sink_binding={"ref": "x:review", "hash": "sha256:" + "4" * 64}, codegraph_binding=codegraph, execution_environment_binding=environment, review_input_binding=review_input)["lease"]
     second = _card(
-        manifest(), packet_value, observed_at=observed + timedelta(seconds=1)
+        manifest(), packet_value, observed_at=observed + timedelta(seconds=1), candidate_evidence_binding=binding, receipt_sink_binding={"ref": "x:review", "hash": "sha256:" + "4" * 64}, codegraph_binding=codegraph, execution_environment_binding=environment, review_input_binding=review_input
     )["lease"]
 
     assert datetime.fromisoformat(first["expires_at"].replace("Z", "+00:00")) == (
@@ -266,4 +294,23 @@ def test_governed_review_card_rejects_an_unzoned_observation_time(tmp_path):
     packet_value, _ = packet(tmp_path)
 
     with pytest.raises(ValueError, match="include a timezone"):
-        _card(manifest(), packet_value, observed_at=datetime(2026, 8, 16, 12, 0))
+        _card(manifest(), packet_value, observed_at=datetime(2026, 8, 16, 12, 0), candidate_evidence_binding={"ref": "evidence:d", "hash": "sha256:" + "8" * 64}, receipt_sink_binding={"ref": "x:review", "hash": "sha256:" + "4" * 64}, codegraph_binding={"ref": "codegraph:1", "hash": "sha256:" + "6" * 64}, execution_environment_binding={"ref": "env:1", "hash": "sha256:" + "7" * 64}, review_input_binding={"ref": "review:1", "hash": "sha256:" + "5" * 64})
+
+
+def test_governed_review_card_rejects_source_and_argv_substitution(tmp_path):
+    packet_value, _ = packet(tmp_path)
+    common = {
+        "observed_at": datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc),
+        "candidate_evidence_binding": {"ref": "evidence:d", "hash": "sha256:" + "8" * 64},
+        "receipt_sink_binding": {"ref": "x:review", "hash": "sha256:" + "4" * 64},
+        "execution_environment_binding": {"ref": "env:1", "hash": "sha256:" + "7" * 64},
+        "review_input_binding": {"ref": "review:1", "hash": "sha256:" + "5" * 64},
+    }
+    with pytest.raises(ValueError, match="CodeGraph"):
+        _card(manifest(), packet_value, codegraph_binding={"ref": packet_value["snapshot"]["ref"], "hash": manifest()["source"]["archive_sha256"]}, **common)
+    with pytest.raises(ValueError, match="runner argv"):
+        _card(
+            manifest(), packet_value,
+            codegraph_binding={"ref": "codegraph:1", "hash": "sha256:" + "6" * 64},
+            **{**common, "execution_environment_binding": {"ref": "env:argv", "hash": hash_object(packet_value["runner_argv"])}},
+        )

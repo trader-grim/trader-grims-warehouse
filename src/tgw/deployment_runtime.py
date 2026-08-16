@@ -30,6 +30,8 @@ def compose_deployment_controller(
     consume_authority: Callable[..., Mapping[str, Any]],
     backup: Callable[[str, str], Mapping[str, Any]],
     health: Callable[[str, str], Mapping[str, Any]],
+    migrate: Callable[[str, str, Path, tuple[Mapping[str, Any], ...], str], Mapping[str, Any]],
+    restore_migration_backup: Callable[[str, str], Mapping[str, Any]],
     require_authority_schema: Callable[[], None],
     flake_push: Provider,
     flake_switch_record: Provider,
@@ -50,7 +52,7 @@ def compose_deployment_controller(
         raise ValueError("mounted release root is unavailable")
     if not artifact.is_file():
         raise ValueError("mounted candidate artifact is unavailable")
-    for provider in (consume_authority, backup, health, require_authority_schema, flake_push, flake_switch_record, dependency_resubmit):
+    for provider in (consume_authority, backup, health, migrate, restore_migration_backup, require_authority_schema, flake_push, flake_switch_record, dependency_resubmit):
         if not callable(provider):
             raise ValueError("deployment provider binding is unavailable")
     if enable_platform_bootstrap:
@@ -73,6 +75,8 @@ def compose_deployment_controller(
         artifacts={mounts.artifact_ref: artifact},
         backup=backup,
         health=health,
+        migrate=migrate,
+        restore_migration_backup=restore_migration_backup,
     )
     registry = TypedEffectHandlerRegistry(
         release_install=release.install,
