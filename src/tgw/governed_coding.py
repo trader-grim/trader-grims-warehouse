@@ -13,12 +13,12 @@ from tgw.execution_resources import (
     HTTPRegisteredResourceResolver,
     ResourceResolver,
     ResourceVerificationError,
+    card_resource_receipt,
     resource_service_attestation_key,
     resource_service_catalog_hash,
     resource_service_descriptor_hash,
     validate_harness_retrieval_attestation,
     verify_card_resource_service,
-    verify_card_resources,
 )
 from tgw.harness_registry import (
     ProviderHealth,
@@ -153,7 +153,7 @@ def dispatch_role(
         attestation_key = resource_service_attestation_key(
             verified_catalog, verified_service["id"], verified_service["client_id"],
         )
-        resource_receipt = verify_card_resources(card, resource_resolver)
+        resource_receipt = card_resource_receipt(card)
     except ResourceVerificationError as exc:
         return _receipt(
             {

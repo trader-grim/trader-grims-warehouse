@@ -86,6 +86,9 @@ class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
             != RESOURCE_SERVICE_CATALOG["services"][0]["attestation_public_key"]
         ):
             raise ResourceVerificationError("test retrieval attestation key is invalid")
+        for name, binding in kwargs["resources"].items():
+            if self._delegate.fetch(binding["ref"]).content_hash() != binding["hash"]:
+                raise ResourceVerificationError(f"registered resource {name} content hash mismatch")
         payload = {
             "schema": "tgw-registered-resource-retrieval-attestation/v3",
             "service_id": RESOURCE_SERVICE["id"], "run_id": "unit-run",
@@ -269,7 +272,7 @@ def test_runner_cannot_establish_conditions_outside_selected_role(tmp_path):
     assert any(item["kind"] == "contract_failure" for item in receipt["artifacts"])
 
 
-def test_fake_nonempty_resource_hash_holds_before_promptcraft_or_runner_launch(tmp_path):
+def test_fake_nonempty_resource_hash_cannot_produce_a_passing_attested_role(tmp_path):
     registry, health, bound_adapters = setup(tmp_path)
     fake = card_template("fake-resource-card")
     fake["bindings"]["source_tree"]["hash"] = "sha256:" + "0" * 64
@@ -283,12 +286,13 @@ def test_fake_nonempty_resource_hash_holds_before_promptcraft_or_runner_launch(t
         card_template=fake,
     )
 
-    assert receipt["status"] == "HOLD"
-    assert receipt["outcome"] == "resource-verification"
-    assert receipt["promptcraft_receipt_hash"] is None
-    assert receipt["artifacts"] == [
-        {"kind": "resource_verification", "detail": "registered resource source_tree content hash mismatch"}
-    ]
+    assert receipt["status"] == "FAIL"
+    assert receipt["outcome"] == "failed"
+    assert receipt["promptcraft_receipt_hash"] is not None
+    assert receipt["artifacts"][-1] == {
+        "kind": "contract_failure",
+        "detail": "registered resource source_tree content hash mismatch",
+    }
 
 
 def test_core_dispatch_rejects_a_runner_without_a_registered_attestation_verifier(tmp_path):

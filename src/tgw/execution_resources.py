@@ -1,8 +1,9 @@
 """Registered, content-addressed inputs for governed execution cards.
 
-The runner never receives a second, copied execution context.  It receives a
-Promptcraft handoff whose resource receipt proves that the card's registered
-references were fetched and checked before the handoff was created.
+The runner never receives a second, copied execution context.  Promptcraft
+gets a compact card-bound receipt, while an authenticated harness must fetch
+the actual resources through its own opened, card-bound service run before it
+can return PASS evidence.
 """
 
 from __future__ import annotations
@@ -756,7 +757,7 @@ class HTTPRegisteredResourceResolver:
         )
 
     def fetch(self, ref: str) -> RegisteredResource:
-        return self._fetch(ref)
+        raise ResourceVerificationError("registered resource service retrieval requires a harness run")
 
     def _fetch(self, ref: str, *, harness_run_id: str | None = None) -> RegisteredResource:
         if not isinstance(ref, str) or not ref:
@@ -815,16 +816,17 @@ def _binding(value: Any, name: str) -> tuple[str, str]:
     return ref, expected_hash
 
 
-def verify_card_resources(
-    card: Mapping[str, Any], resolver: ResourceResolver
-) -> dict[str, Any]:
-    """Fetch every required card resource and issue one hash-bound receipt.
+def card_resource_receipt(card: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the compact receipt that binds a card to its declared resources.
 
-    This is intentionally performed before Promptcraft is launched.  A card
-    can name a resource, but only a registered resolver may establish that the
-    reference still returns the exact content its card binds.
+    This receipt deliberately does not certify a controller-side resource
+    fetch.  The resource service forbids bare reads, so content verification
+    occurs only inside the receiver's authenticated harness run and is proven
+    by the resulting signed retrieval attestation.
     """
 
+    if not isinstance(card, Mapping):
+        raise ResourceVerificationError("execution card is invalid")
     if not isinstance(card.get("plan_commit"), str) or not card["plan_commit"]:
         raise ResourceVerificationError("card Plan commit is invalid")
     if not isinstance(card.get("card_hash"), str) or not _is_hash(card["card_hash"]):
@@ -840,6 +842,31 @@ def verify_card_resources(
     codegraph_ref, _ = _binding(bindings["codegraph_snapshot"], "codegraph_snapshot")
     if plan_graph_ref == codegraph_ref:
         raise ResourceVerificationError("Plan Graph and CodeGraph must use distinct registered references")
+    resources = {
+        name: {"ref": _binding(bindings[name], name)[0], "hash": _binding(bindings[name], name)[1]}
+        for name in sorted(CARD_RESOURCE_NAMES)
+    }
+    receipt_unsigned = {
+        "schema": RESOURCE_RECEIPT_SCHEMA,
+        "card_hash": card["card_hash"],
+        "plan_commit": card["plan_commit"],
+        "resources": resources,
+    }
+    return {**receipt_unsigned, "receipt_hash": _hash(receipt_unsigned)}
+
+
+def verify_card_resources(
+    card: Mapping[str, Any], resolver: ResourceResolver
+) -> dict[str, Any]:
+    """Verify resource bytes fetched within a caller-provided bound resolver.
+
+    An HTTP resolver only supplies such a resolver through
+    :meth:`HTTPRegisteredResourceResolver.for_harness_run`; bare service reads
+    are denied.  In-process resolvers remain a narrow unit-test seam.
+    """
+
+    expected_receipt = card_resource_receipt(card)
+    bindings = expected_receipt["resources"]
 
     resolved: dict[str, dict[str, str]] = {}
     for name in sorted(CARD_RESOURCE_NAMES):
@@ -870,10 +897,6 @@ def verify_card_resources(
             if bound_commit != card["plan_commit"]:
                 raise ResourceVerificationError("registered Plan commit does not match card")
         resolved[name] = {"ref": ref, "hash": actual_hash}
-    receipt_unsigned = {
-        "schema": RESOURCE_RECEIPT_SCHEMA,
-        "card_hash": card["card_hash"],
-        "plan_commit": card["plan_commit"],
-        "resources": resolved,
-    }
-    return {**receipt_unsigned, "receipt_hash": _hash(receipt_unsigned)}
+    if resolved != expected_receipt["resources"]:
+        raise ResourceVerificationError("registered resource receipt binding mismatch")
+    return expected_receipt

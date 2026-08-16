@@ -3,7 +3,7 @@
   "plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
   "installation_status": "NOT_INSTALLED",
   "service_entry_point": "tgw.governed_resource_service:main",
-  "runtime_config_schema": "tgw-governed-resource-service-config/v3",
+  "runtime_config_schema": "tgw-governed-resource-service-config/v4",
   "descriptor_template": {
     "schema": "tgw-registered-resource-service/v2",
     "id": null,
@@ -26,7 +26,7 @@
       "authority-conditions",
       "receipt-sink"
     ],
-    "client_authentication_requirement": "Every runtime client binding maps one credential environment to one client_id, one execution_identity, and its exact allowed role set. The card, descriptor, and handoff bind that client_id; the service rejects any claimed role or execution identity outside the authenticated client grant.",
+    "client_authentication_requirement": "Every runtime client binding maps one credential environment to one client_id, one unique execution_identity, and one exact role. The card, descriptor, and handoff bind that client_id; the service rejects any claimed role or execution identity outside the authenticated client grant. Resource bytes are available only through an opened run bound to that client, card, role, and identity.",
     "launch_rule": "A deployment must provide an exact configured descriptor, Plan-bound qualified catalog, client credential bindings, and private signing key environment. This template is neither and must not be passed to a card or launcher."
   }
 }

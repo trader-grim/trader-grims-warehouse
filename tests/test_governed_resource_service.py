@@ -17,6 +17,7 @@ from tgw.execution_resources import (
     RESOURCE_SERVICE_CAPABILITIES,
     HTTPRegisteredResourceResolver,
     ResourceVerificationError,
+    card_resource_receipt,
     ed25519_public_key,
     issue_harness_retrieval_attestation,
     resource_service_catalog_hash,
@@ -155,12 +156,11 @@ def resource_service(content, *, token="test-token"):
                 self.send_error(404)
                 return
             run_id = self.headers.get("X-TGW-Harness-Run")
-            if run_id:
-                run = runs.get(run_id)
-                if run is None or ref not in {binding["ref"] for binding in run["resources"].values()}:
-                    self.send_error(403)
-                    return
-                run["seen"].add(ref)
+            run = runs.get(run_id)
+            if run_id is None or run is None or ref not in {binding["ref"] for binding in run["resources"].values()}:
+                self.send_error(403)
+                return
+            run["seen"].add(ref)
             body = json.dumps(
                 {
                     "schema": "tgw-registered-resource/v1",
@@ -285,11 +285,17 @@ def test_http_registered_resource_resolver_fetches_and_verifies_every_binding(mo
     content = resources()
     monkeypatch.setenv("TGW_TEST_RESOURCE_TOKEN", "test-token")
     with resource_service(content) as endpoint:
-        receipt = verify_card_resources(
-            card(content), HTTPRegisteredResourceResolver.from_descriptor(descriptor(endpoint))
+        card_value = card(content)
+        resolver = HTTPRegisteredResourceResolver.from_descriptor(descriptor(endpoint))
+        receipt = card_resource_receipt(card_value)
+        run = resolver.begin_harness_run(
+            card_hash=card_value["card_hash"], role="implementation", execution_identity="test-resource-runner",
+            handoff_hash="sha256:" + "1" * 64, resource_receipt_hash=receipt["receipt_hash"],
+            resources=card_value["bindings"],
         )
+        assert verify_card_resources(card_value, resolver.for_harness_run(run)) == receipt
 
-    assert receipt["resources"] == card(content)["bindings"]
+    assert receipt["resources"] == card_value["bindings"]
     assert receipt["plan_commit"] == PLAN_COMMIT
 
 
@@ -299,8 +305,15 @@ def test_http_registered_resource_content_drift_fails_closed(monkeypatch):
     monkeypatch.setenv("TGW_TEST_RESOURCE_TOKEN", "test-token")
     with resource_service(drifted) as endpoint:
         resolver = HTTPRegisteredResourceResolver.from_descriptor(descriptor(endpoint))
+        card_value = card(bound)
+        receipt = card_resource_receipt(card_value)
+        run = resolver.begin_harness_run(
+            card_hash=card_value["card_hash"], role="implementation", execution_identity="test-resource-runner",
+            handoff_hash="sha256:" + "1" * 64, resource_receipt_hash=receipt["receipt_hash"],
+            resources=card_value["bindings"],
+        )
         with pytest.raises(ResourceVerificationError, match="source_tree content hash mismatch"):
-            verify_card_resources(card(bound), resolver)
+            verify_card_resources(card_value, resolver.for_harness_run(run))
 
 
 def test_qualified_catalog_rejects_an_unbound_service_descriptor(monkeypatch):
@@ -346,8 +359,16 @@ def test_absent_codegraph_holds_before_a_harness_can_receive_the_card(monkeypatc
     monkeypatch.setenv("TGW_TEST_RESOURCE_TOKEN", "test-token")
     with resource_service(missing) as endpoint:
         service = descriptor(endpoint)
+        resolver = HTTPRegisteredResourceResolver.from_descriptor(service)
+        card_value = card(content, service)
+        receipt = card_resource_receipt(card_value)
+        run = resolver.begin_harness_run(
+            card_hash=card_value["card_hash"], role="implementation", execution_identity="test-resource-runner",
+            handoff_hash="sha256:" + "1" * 64, resource_receipt_hash=receipt["receipt_hash"],
+            resources=card_value["bindings"],
+        )
         with pytest.raises(ResourceVerificationError, match="registered resource is unavailable: codegraph:snapshot"):
-            verify_card_resources(card(content, service), HTTPRegisteredResourceResolver.from_descriptor(service))
+            verify_card_resources(card_value, resolver.for_harness_run(run))
 
 
 def test_every_role_retrieves_card_bound_sources_from_the_qualified_service(tmp_path, monkeypatch):
