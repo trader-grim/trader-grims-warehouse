@@ -106,7 +106,6 @@ tgw-hermes-stitch-worker      = "tgw.workers.coding:hermes_stitch_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-script-files = ["scripts/tgw-w09-application-bootstrap"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

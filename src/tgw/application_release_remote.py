@@ -532,6 +532,29 @@ class HostRuntime:
 
     def restore(self, source: Path) -> None:
         db = self.config["database"]
+        self._verify_restore_principal()
+        self._run(
+            "pg_restore",
+            [
+                "--clean",
+                "--if-exists",
+                "--create",
+                "--exit-on-error",
+                "--no-owner",
+                "-h",
+                db["host"],
+                "-p",
+                str(db["port"]),
+                "-U",
+                db["user"],
+                "-d",
+                "postgres",
+                str(source),
+            ],
+        )
+
+    def _verify_restore_principal(self) -> str:
+        db = self.config["database"]
         principal = (
             self._run(
                 "psql",
@@ -559,25 +582,42 @@ class HostRuntime:
         )
         if principal != f"{db['user']}|true":
             raise ApplicationReleaseRemoteError("configured database principal cannot recreate the predecessor database")
-        self._run(
-            "pg_restore",
+        return principal
+
+    def rollback_readiness(self) -> dict[str, Any]:
+        """Prove recreate authority and a readable custom backup without writes."""
+
+        db = self.config["database"]
+        principal = self._verify_restore_principal()
+        backup = self._run(
+            "pg_dump",
             [
-                "--clean",
-                "--if-exists",
-                "--create",
-                "--exit-on-error",
-                "--no-owner",
+                "-Fc",
                 "-h",
                 db["host"],
                 "-p",
                 str(db["port"]),
                 "-U",
                 db["user"],
-                "-d",
-                "postgres",
-                str(source),
+                db["name"],
             ],
+            limit=512 * 1024 * 1024,
         )
+        listing = self._run(
+            "pg_restore",
+            ["--list"],
+            stdin=backup,
+            limit=64 * 1024 * 1024,
+        )
+        if not backup or not listing:
+            raise ApplicationReleaseRemoteError("predecessor backup/restore readiness is absent")
+        return {
+            "principal": principal,
+            "backup_sha256": _hash_bytes(backup),
+            "backup_size": len(backup),
+            "backup_listing_sha256": _hash_bytes(listing),
+            "database_identity_sha256": self.database_identity(),
+        }
 
     def database_identity(self) -> str:
         """Hash deterministic schema and data using the held pg_dump."""
@@ -875,6 +915,9 @@ def execute(
             raise ApplicationReleaseRemoteError("fresh predecessor selector/Nix observation differs")
         actual_predecessor = _predecessor_identity(parameters, config, runtime)
         runtime.systemctl("is-active", config["services"])
+        rollback_readiness = runtime.rollback_readiness()
+        if rollback_readiness["database_identity_sha256"] != parameters["predecessor"]["database_identity_sha256"]:
+            raise ApplicationReleaseRemoteError("rollback readiness database identity differs")
         unrelated = _snapshot(config["unrelated_paths"])
         predecessor = _persist(
             Path(config["receipt_root"]),
@@ -887,6 +930,7 @@ def execute(
                 "services": config["services"],
                 "health_probes": config["health_probes"],
                 "release": actual_predecessor,
+                "rollback_readiness": rollback_readiness,
                 "unrelated_snapshot": unrelated,
             },
         )

@@ -96,6 +96,11 @@ def test_w09_restore_recreates_database_and_removes_post_backup_objects(tmp_path
         }
         runtime = HostRuntime(config)
         predecessor_identity = runtime.database_identity()
+        readiness = runtime.rollback_readiness()
+        assert readiness["principal"] == f"{user}|true"
+        assert readiness["database_identity_sha256"] == predecessor_identity
+        assert readiness["backup_size"] > 0
+        assert readiness["backup_listing_sha256"].startswith("sha256:")
         backup = tmp_path / "predecessor.dump"
         runtime.backup(backup)
         _run(

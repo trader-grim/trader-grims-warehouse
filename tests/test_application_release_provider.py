@@ -57,6 +57,7 @@ def _descriptor(parameters=None):
             "archive_sha256": h("5"),
             "commit": "a" * 40,
             "tree": "b" * 40,
+            "projection_sha256": parameters.get("projection", {}).get("content_sha256", h("e")),
             "effect_parameters_sha256": _hash(parameters),
         },
         "runtime_config": {"path": "/etc/tgw/runtime.json", "content_sha256": h("6")},
@@ -74,6 +75,7 @@ def _descriptor(parameters=None):
             "python_stat": {"uid": 0, "gid": 0, "mode": 0o555, "size": 15600},
             "sudo_stat": {"uid": 0, "gid": 0, "mode": 0o4511, "size": 70712},
             "authorized_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "database_principal": "db|true",
         },
         "bounds": {
             "timeout_seconds": 300,
@@ -124,7 +126,9 @@ def test_descriptor_requires_fixed_tailnet_address_and_full_parameter_binding():
         "candidate_commit": "a" * 40,
         "candidate_tree": "b" * 40,
         "archive_sha256": "sha256:" + "5" * 64,
+        "projection": {"content_sha256": "sha256:" + "e" * 64},
         "runtime_config": {"content_sha256": "sha256:" + "6" * 64},
+        "predecessor": {"database_identity_sha256": "sha256:" + "f" * 64},
         "migrations": ["exact"],
         "nix_system_path": "/nix/store/system-tgw-prod",
         "predecessor_observation_hash": "sha256:" + "e" * 64,
@@ -137,6 +141,9 @@ def test_descriptor_requires_fixed_tailnet_address_and_full_parameter_binding():
         _prerequisite={
             "nix_system_path": parameters.get("nix_system_path"),
             "predecessor_observation_hash": parameters.get("predecessor_observation_hash"),
+            "rollback_readiness": {
+                "database_identity_sha256": parameters["predecessor"]["database_identity_sha256"]
+            },
         },
     )
     SshApplicationReleaseProvider._check_parameters(provider, parameters)
@@ -258,7 +265,9 @@ def test_second_seal_failure_closes_first_memfd(monkeypatch):
         "candidate_commit": "a" * 40,
         "candidate_tree": "b" * 40,
         "archive_sha256": "sha256:" + "5" * 64,
+        "projection": {"content_sha256": "sha256:" + "e" * 64},
         "runtime_config": {"content_sha256": "sha256:" + "6" * 64},
+        "predecessor": {"database_identity_sha256": "sha256:" + "f" * 64},
         "nix_system_path": "/nix/store/system-tgw-prod",
         "predecessor_observation_hash": "sha256:" + "e" * 64,
         "provider_observation_ref": "w09-prerequisite:1",
@@ -288,6 +297,11 @@ def test_second_seal_failure_closes_first_memfd(monkeypatch):
         {
             "nix_system_path": parameters.get("nix_system_path"),
             "predecessor_observation_hash": parameters.get("predecessor_observation_hash"),
+            "rollback_readiness": {
+                "database_identity_sha256": parameters["predecessor"][
+                    "database_identity_sha256"
+                ]
+            },
             "observed_at": "2026-08-16T00:00:00Z",
             "expires_at": "2030-01-01T00:00:00Z",
         },
@@ -340,7 +354,9 @@ def test_popen_failure_is_typed_prelaunch_ambiguity_and_closes_seals(monkeypatch
         "candidate_commit": "a" * 40,
         "candidate_tree": "b" * 40,
         "archive_sha256": "sha256:" + "5" * 64,
+        "projection": {"content_sha256": "sha256:" + "e" * 64},
         "runtime_config": {"content_sha256": "sha256:" + "6" * 64},
+        "predecessor": {"database_identity_sha256": "sha256:" + "f" * 64},
         "nix_system_path": "/nix/store/system-tgw-prod",
         "predecessor_observation_hash": "sha256:" + "e" * 64,
         "provider_observation_ref": "w09-prerequisite:1",
@@ -370,6 +386,11 @@ def test_popen_failure_is_typed_prelaunch_ambiguity_and_closes_seals(monkeypatch
         {
             "nix_system_path": parameters["nix_system_path"],
             "predecessor_observation_hash": parameters["predecessor_observation_hash"],
+            "rollback_readiness": {
+                "database_identity_sha256": parameters["predecessor"][
+                    "database_identity_sha256"
+                ]
+            },
             "observed_at": "2026-08-16T00:00:00Z",
             "expires_at": "2030-01-01T00:00:00Z",
         },

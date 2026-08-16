@@ -173,6 +173,37 @@ def _validate_response_shape(response: Mapping[str, Any]) -> None:
         raise ApplicationReleaseProviderError("remote application release failure hash is invalid")
 
 
+def _validate_rollback_readiness(value: Any) -> dict[str, Any]:
+    readiness = _exact(
+        value,
+        {
+            "principal",
+            "backup_sha256",
+            "backup_size",
+            "backup_listing_sha256",
+            "database_identity_sha256",
+        },
+        "rollback readiness observation",
+    )
+    if (
+        not isinstance(readiness["principal"], str)
+        or not readiness["principal"].endswith("|true")
+        or any(
+            _SHA.fullmatch(str(readiness[name])) is None
+            for name in (
+                "backup_sha256",
+                "backup_listing_sha256",
+                "database_identity_sha256",
+            )
+        )
+        or isinstance(readiness["backup_size"], bool)
+        or not isinstance(readiness["backup_size"], int)
+        or readiness["backup_size"] <= 0
+    ):
+        raise ApplicationReleaseProviderError("rollback readiness observation is invalid")
+    return readiness
+
+
 def validate_provider_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
     descriptor = _exact(
         value,
@@ -227,6 +258,7 @@ def validate_provider_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
             "archive_sha256",
             "commit",
             "tree",
+            "projection_sha256",
             "effect_parameters_sha256",
         },
         "provider candidate",
@@ -235,7 +267,12 @@ def validate_provider_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
     for binding, path_name in ((candidate, "archive_path"), (runtime, "path")):
         if not isinstance(binding[path_name], str) or not binding[path_name].startswith("/"):
             raise ApplicationReleaseProviderError("provider artifact path is invalid")
-    for digest in (candidate["archive_sha256"], candidate["effect_parameters_sha256"], runtime["content_sha256"]):
+    for digest in (
+        candidate["archive_sha256"],
+        candidate["projection_sha256"],
+        candidate["effect_parameters_sha256"],
+        runtime["content_sha256"],
+    ):
         if _SHA.fullmatch(str(digest)) is None:
             raise ApplicationReleaseProviderError("provider artifact hash is invalid")
     if not re.fullmatch(r"[0-9a-f]{40}", str(candidate["commit"])) or not re.fullmatch(r"[0-9a-f]{40}", str(candidate["tree"])):
@@ -256,6 +293,7 @@ def validate_provider_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
             "remote_command_sha256",
             "python_stat",
             "sudo_stat",
+            "database_principal",
         },
         "provider remote boundary",
     )
@@ -263,6 +301,7 @@ def validate_provider_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
         not re.fullmatch(r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^/]+/bin/python3(?:\.[0-9]+)?", str(boundary["python_path"]))
         or not re.fullmatch(r"/run/wrappers/wrappers\.[A-Za-z0-9]+/sudo", str(boundary["sudo_path"]))
         or not str(boundary["config_path"]).startswith("/")
+        or boundary["database_principal"] != "db|true"
     ):
         raise ApplicationReleaseProviderError("provider in-memory sudo boundary is invalid")
     if any(_SHA.fullmatch(str(boundary[name])) is None for name in ("python_sha256", "sudo_sha256", "bootstrap_sha256", "config_sha256")):
@@ -408,6 +447,7 @@ class SshApplicationReleaseProvider:
                 "authorized_public_key_sha256",
                 "credential_scope",
                 "server_forced_command_restriction",
+                "rollback_readiness",
                 "verified",
                 "receipt_hash",
             },
@@ -415,6 +455,7 @@ class SshApplicationReleaseProvider:
         )
         prerequisite_unsigned = dict(prerequisite)
         prerequisite_claimed = prerequisite_unsigned.pop("receipt_hash")
+        rollback_readiness = _validate_rollback_readiness(prerequisite["rollback_readiness"])
         if (
             prerequisite["schema"] != "tgw-w09-db-memory-bootstrap-observation/v1"
             or prerequisite["receipt_id"] != self.descriptor["prerequisite_receipt"]["ref"]
@@ -431,6 +472,7 @@ class SshApplicationReleaseProvider:
             or prerequisite["sudo_db_root_nopasswd"] is not True
             or prerequisite["credential_scope"] != "pre-existing-db-operator-bootstrap"
             or prerequisite["server_forced_command_restriction"] != "not-claimed"
+            or rollback_readiness["principal"] != self.descriptor["remote_boundary"].get("database_principal")
             or prerequisite["authorized_public_key_sha256"] != _hash_bytes((self.descriptor["remote_boundary"]["authorized_public_key"] + "\n").encode())
             or prerequisite["verified"] is not True
             or prerequisite_claimed != _hash(prerequisite_unsigned)
@@ -534,17 +576,19 @@ class SshApplicationReleaseProvider:
             parameters.get("candidate_commit") != candidate["commit"]
             or parameters.get("candidate_tree") != candidate["tree"]
             or parameters.get("archive_sha256") != candidate["archive_sha256"]
+            or parameters.get("projection", {}).get("content_sha256") != candidate["projection_sha256"]
             or parameters.get("runtime_config", {}).get("content_sha256") != runtime["content_sha256"]
             or parameters.get("nix_system_path") != self._prerequisite["nix_system_path"]
             or parameters.get("predecessor_observation_hash") != self._prerequisite["predecessor_observation_hash"]
             or parameters.get("provider_observation_ref") != self.descriptor["prerequisite_receipt"]["ref"]
             or parameters.get("provider_observation_hash") != self.descriptor["prerequisite_receipt"]["sha256"]
             or _hash(parameters) != candidate["effect_parameters_sha256"]
+            or parameters.get("predecessor", {}).get("database_identity_sha256") != self._prerequisite["rollback_readiness"]["database_identity_sha256"]
         ):
             raise ApplicationReleaseProviderError("effect parameters differ from mounted provider artifacts")
 
     def preflight(self, parameters: Mapping[str, Any]) -> None:
-        """Revalidate every mounted input before the one-use grant is consumed."""
+        """Validate the separately authorized fresh observation before consume."""
 
         self._check_parameters(parameters)
         try:

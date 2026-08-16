@@ -125,7 +125,7 @@ def compose_application_bootstrap_controller(
         raise ValueError("immutable W09 terminal receipt sink is unavailable")
     if type(provider) is not SshApplicationReleaseProvider or provider.production_authority is not True:
         raise ValueError("sealed tgw-prod application release provider is unavailable")
-    if not isinstance(controller_evidence, str) or not controller_evidence.startswith("w09-controller-config:sha256:") or not callable(terminal_precheck):
+    if not isinstance(controller_evidence, str) or not controller_evidence.startswith("w09-controller-closure:sha256:") or not callable(terminal_precheck):
         raise ValueError("W09 controller config provenance is unavailable")
     if expected_host != "tgw-prod" or provider.descriptor["target"]["host"] != expected_host:
         raise ValueError("W09 provider target differs from exact production host")
