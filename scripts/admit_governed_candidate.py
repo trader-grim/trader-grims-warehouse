@@ -21,7 +21,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="admit-governed-candidate")
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--candidate", required=True)
-    parser.add_argument("--plan-commit", required=True)
+    parser.add_argument(
+        "--plan-repository", type=Path, required=True,
+        help="operator-configured canonical Plan repository; candidate-local Plan sources are refused",
+    )
+    parser.add_argument(
+        "--plan-approved-ref", required=True,
+        help="operator-configured immutable approved Plan ref, for example refs/tgw/approved/PLAN-ID",
+    )
     parser.add_argument(
         "--receipt-sink-config", type=Path, required=True,
         help="operator-configured pinned Git receipt-sink descriptor; candidate-local configuration is refused",
@@ -33,12 +40,14 @@ def main() -> int:
         sink = PinnedGitReceiptSink(descriptor, candidate_repository=repository)
         announce_script_run(
             "admit_governed_candidate.py",
-            "verify governed candidate execution evidence from a configured immutable receipt sink",
+            "verify governed candidate execution evidence from configured immutable Plan and receipt-sink roots",
             candidate=args.candidate,
-            plan_commit=args.plan_commit,
+            plan_repository=str(args.plan_repository),
+            plan_approved_ref=args.plan_approved_ref,
         )
         gate = candidate_admission_gate(
-            repository, candidate=args.candidate, plan_commit=args.plan_commit, sink=sink,
+            repository, candidate=args.candidate, plan_repository=args.plan_repository,
+            plan_approved_ref=args.plan_approved_ref, sink=sink,
         )
         print(json.dumps(gate, sort_keys=True, separators=(",", ":")))
         return 0 if gate["allowed"] else 3

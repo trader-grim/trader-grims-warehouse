@@ -28,8 +28,10 @@ from tgw.governed_execution_receipt import (
 
 RECEIPT_SINK_SCHEMA = "tgw-pinned-git-candidate-receipt-sink/v1"
 RECEIPT_SINK_MANIFEST_SCHEMA = "tgw-pinned-git-candidate-receipt-sink-manifest/v1"
+RECEIPT_SINK_CARD_BINDING_SCHEMA = "tgw-pinned-git-candidate-receipt-sink-card-binding/v1"
 GOVERNED_EXECUTION_BUNDLE_SCHEMA = "tgw-candidate-governed-execution-bundle/v1"
 GOVERNED_CANDIDATE_ADMISSION_SCHEMA = "tgw-governed-candidate-admission-gate/v1"
+GOVERNED_CANDIDATE_PLAN_AUTHORITY_SCHEMA = "tgw-governed-candidate-plan-authority/v1"
 
 GOVERNED_ROLES = (
     "implementation",
@@ -41,6 +43,7 @@ _GIT_OBJECT = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _SINK_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _ARTIFACT_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@=-]{0,255}\Z")
+_PLAN_REF = re.compile(r"refs/[A-Za-z0-9][A-Za-z0-9._/-]{0,239}\Z")
 _BUNDLE_ARTIFACTS = (
     "candidate_receipt",
     "card",
@@ -113,6 +116,17 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _paths_overlap(left: Path, right: Path) -> bool:
+    """Return whether either configured root contains the other.
+
+    Receipt and Plan repositories are operator-controlled trust roots.  A
+    candidate may not be their parent *or* their child: checking only the
+    latter leaves a candidate nested beneath a supposedly external sink.
+    """
+
+    return _is_within(left, right) or _is_within(right, left)
+
+
 def governed_execution_bundle_ref(source_commit: str, role: str) -> str:
     """Return the one sink reference reserved for a role's evidence bundle."""
 
@@ -151,6 +165,45 @@ def validate_receipt_sink_descriptor(value: Mapping[str, Any]) -> dict[str, Any]
     }
 
 
+def receipt_sink_card_binding_content(descriptor: Mapping[str, Any]) -> dict[str, str]:
+    """Return the stable descriptor content which a card can retrieve.
+
+    The descriptor's ``commit``, ``tree``, and manifest-content hash pin the
+    evidence package that retains the card itself.  Including those dynamic
+    values in the card would require a cryptographic fixed point (the card
+    changes the manifest that it is supposed to hash).  The card therefore
+    binds this stable descriptor identity; :class:`PinnedGitReceiptSink`
+    independently verifies the dynamic Git pin before any artifact is read.
+    """
+
+    normalized = validate_receipt_sink_descriptor(descriptor)
+    return {
+        "schema": RECEIPT_SINK_CARD_BINDING_SCHEMA,
+        "sink_id": normalized["sink_id"],
+        "repository": normalized["repository"],
+        "manifest_path": normalized["manifest_path"],
+    }
+
+
+def receipt_sink_card_binding(descriptor: Mapping[str, Any]) -> dict[str, str]:
+    """Return the exact ``receipt_sink`` ref/hash convention for a card."""
+
+    content = receipt_sink_card_binding_content(descriptor)
+    return {
+        "ref": f"receipt-sink:{content['sink_id']}:descriptor:v1",
+        "hash": _hash(content),
+    }
+
+
+def _verify_card_receipt_sink_binding(card: Mapping[str, Any], descriptor: Mapping[str, Any]) -> None:
+    bindings = card.get("bindings") if isinstance(card, Mapping) else None
+    binding = bindings.get("receipt_sink") if isinstance(bindings, Mapping) else None
+    if binding != receipt_sink_card_binding(descriptor):
+        raise CandidateReceiptSinkError(
+            "execution card receipt sink binding does not match configured pinned descriptor"
+        )
+
+
 def load_receipt_sink_descriptor(path: str | Path, *, candidate_repository: Path) -> dict[str, Any]:
     """Load a separately configured sink descriptor and reject candidate-local config."""
 
@@ -159,8 +212,8 @@ def load_receipt_sink_descriptor(path: str | Path, *, candidate_repository: Path
         candidate_root = candidate_repository.resolve(strict=True)
     except OSError as exc:
         raise CandidateReceiptSinkError("pinned receipt sink configuration is unavailable") from exc
-    if _is_within(descriptor_path, candidate_root):
-        raise CandidateReceiptSinkError("pinned receipt sink configuration must be outside the candidate repository")
+    if _paths_overlap(descriptor_path, candidate_root):
+        raise CandidateReceiptSinkError("pinned receipt sink configuration must be disjoint from the candidate repository")
     try:
         value = json.loads(descriptor_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -217,8 +270,8 @@ class PinnedGitReceiptSink:
             candidate_root = candidate_repository.resolve(strict=True)
         except OSError as exc:
             raise CandidateReceiptSinkError("pinned receipt sink repository is unavailable") from exc
-        if _is_within(self._repository, candidate_root):
-            raise CandidateReceiptSinkError("pinned receipt sink repository must be outside the candidate repository")
+        if _paths_overlap(self._repository, candidate_root):
+            raise CandidateReceiptSinkError("pinned receipt sink repository must be disjoint from the candidate repository")
         commit, tree = _candidate_identity(self._repository, self._descriptor["commit"])
         if commit != self._descriptor["commit"] or tree != self._descriptor["tree"]:
             raise CandidateReceiptSinkError("pinned receipt sink Git identity mismatch")
@@ -238,6 +291,12 @@ class PinnedGitReceiptSink:
             "tree": self._descriptor["tree"],
             "manifest_hash": self._manifest["manifest_hash"],
         }
+
+    @property
+    def descriptor(self) -> dict[str, Any]:
+        """Return the validated external descriptor, not a candidate artifact."""
+
+        return dict(self._descriptor)
 
     def fetch_bytes(self, ref: str) -> bytes:
         """Retrieve a manifest-listed blob and verify its immutable content hash."""
@@ -309,6 +368,7 @@ def verify_governed_execution_bundle(
     ):
         raise CandidateReceiptSinkError("governed execution evidence bundle candidate binding mismatch")
     artifacts = {name: _bundle_artifact(sink, bundle[name]) for name in _BUNDLE_ARTIFACTS}
+    _verify_card_receipt_sink_binding(artifacts["card"], sink.descriptor)
     try:
         receipt = verify_candidate_governed_execution_receipt(
             artifacts["candidate_receipt"],
@@ -327,15 +387,55 @@ def verify_governed_execution_bundle(
     return {"receipt": receipt, "role_receipt": artifacts["role_receipt"], "bundle_hash": bundle["bundle_hash"]}
 
 
+def resolve_approved_plan_authority(
+    repository: Path, *, approved_ref: str, candidate_repository: Path,
+) -> dict[str, str]:
+    """Resolve one externally configured approved Plan reference.
+
+    ``approved_ref`` must name a direct commit ref in an external Plan
+    repository.  Candidate-supplied commit strings are deliberately not
+    accepted as a substitute for this lookup.
+    """
+
+    if not isinstance(approved_ref, str) or _PLAN_REF.fullmatch(approved_ref) is None:
+        raise CandidateReceiptSinkError("approved Plan reference is invalid")
+    try:
+        plan_repository = repository.resolve(strict=True)
+        candidate_root = candidate_repository.resolve(strict=True)
+    except OSError as exc:
+        raise CandidateReceiptSinkError("approved Plan repository is unavailable") from exc
+    if _paths_overlap(plan_repository, candidate_root):
+        raise CandidateReceiptSinkError("approved Plan repository must be disjoint from the candidate repository")
+    try:
+        object_type = _git(plan_repository, "cat-file", "-t", approved_ref).decode().strip()
+        commit = _git(plan_repository, "rev-parse", "--verify", f"{approved_ref}^{{commit}}").decode().strip()
+    except CandidateReceiptSinkError as exc:
+        raise CandidateReceiptSinkError("approved Plan reference is unavailable") from exc
+    if object_type != "commit" or _GIT_OBJECT.fullmatch(commit) is None:
+        raise CandidateReceiptSinkError("approved Plan reference must resolve directly to a commit")
+    return {
+        "schema": GOVERNED_CANDIDATE_PLAN_AUTHORITY_SCHEMA,
+        "repository": str(plan_repository),
+        "approved_ref": approved_ref,
+        "approved_commit": commit,
+    }
+
+
 def candidate_admission_gate(
-    repository: Path, *, candidate: str, plan_commit: str, sink: PinnedGitReceiptSink,
+    repository: Path, *, candidate: str, plan_repository: Path, plan_approved_ref: str,
+    sink: PinnedGitReceiptSink,
 ) -> dict[str, Any]:
     """Fail-closed governed-role admission for one closed candidate Git object."""
 
-    repo = repository.resolve()
+    try:
+        repo = repository.resolve(strict=True)
+    except OSError as exc:
+        raise CandidateReceiptSinkError("candidate repository is unavailable") from exc
+    plan_authority = resolve_approved_plan_authority(
+        plan_repository, approved_ref=plan_approved_ref, candidate_repository=repo,
+    )
+    plan_commit = plan_authority["approved_commit"]
     source_commit, source_tree = _candidate_identity(repo, candidate)
-    if not isinstance(plan_commit, str) or _GIT_OBJECT.fullmatch(plan_commit) is None:
-        raise CandidateReceiptSinkError("candidate admission Plan commit is invalid")
     reasons: list[str] = []
     governed_receipts: list[dict[str, Any]] = []
     role_receipts: list[dict[str, Any]] = []
@@ -365,6 +465,7 @@ def candidate_admission_gate(
         "source_commit": source_commit,
         "source_tree": source_tree,
         "plan_commit": plan_commit,
+        "plan_authority": plan_authority,
         "receipt_sink": sink.identity,
         "allowed": not reasons,
         "reasons": sorted(set(reasons)),

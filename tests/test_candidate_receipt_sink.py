@@ -16,6 +16,9 @@ from tgw.candidate_receipt_sink import (
     candidate_admission_gate,
     governed_execution_bundle_ref,
     load_receipt_sink_descriptor,
+    receipt_sink_card_binding,
+    receipt_sink_card_binding_content,
+    resolve_approved_plan_authority,
 )
 from tgw.execution_resources import (
     RESOURCE_SERVICE_CAPABILITIES,
@@ -25,7 +28,7 @@ from tgw.execution_resources import (
 from tgw.governed_execution_receipt import create_candidate_governed_execution_receipt
 
 ROOT = Path(__file__).resolve().parents[1]
-PLAN_COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
+PLAN_APPROVED_REF = "refs/tgw/approved/GOVERNED-EXECUTION-PLATFORM"
 
 
 def canonical(value):
@@ -56,7 +59,21 @@ def candidate_repository(tmp_path):
     return repo, git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD^{tree}")
 
 
-def service_catalog():
+def approved_plan_repository(tmp_path):
+    repo = tmp_path / "plans"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "plan@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Plan authority"], cwd=repo, check=True)
+    (repo / "plan.txt").write_text("approved governed execution Plan\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "approved Plan"], cwd=repo, check=True)
+    commit = git(repo, "rev-parse", "HEAD")
+    subprocess.run(["git", "update-ref", PLAN_APPROVED_REF, commit], cwd=repo, check=True)
+    return repo, commit
+
+
+def service_catalog(plan_commit):
     service = {
         "schema": "tgw-registered-resource-service/v1",
         "id": "candidate-receipt-service",
@@ -67,7 +84,7 @@ def service_catalog():
     catalog = {
         "schema": "tgw-registered-resource-service-catalog/v2",
         "catalog_ref": "catalog:candidate-receipt-service@1",
-        "plan_commit": PLAN_COMMIT,
+        "plan_commit": plan_commit,
         "services": [{
             "id": service["id"],
             "descriptor_hash": resource_service_descriptor_hash(service),
@@ -77,21 +94,21 @@ def service_catalog():
     return service, catalog
 
 
-def role_evidence(*, role, source_commit, source_tree):
-    service, catalog = service_catalog()
+def role_evidence(*, role, source_commit, source_tree, plan_commit, receipt_sink_binding):
+    service, catalog = service_catalog(plan_commit)
 
     def binding(ref, value):
         return {"ref": ref, "hash": digest(value.encode())}
 
     bindings = {
         "plan_input": binding("plan:input", "Plan input"),
-        "plan_commit": binding("plan:commit", PLAN_COMMIT),
+        "plan_commit": binding("plan:commit", plan_commit),
         "plan_graph": binding("plan:graph", "Plan graph"),
         "codegraph_snapshot": binding("codegraph:snapshot", "CodeGraph"),
         "source_tree": binding(f"git:tree:{source_tree}", "source tree archive"),
         "execution_environment": binding("environment:manifest", "environment"),
         "authority_conditions": binding("authority:conditions", "authority"),
-        "receipt_sink": binding("receipt:sink", "pinned Git receipt sink"),
+        "receipt_sink": receipt_sink_binding,
     }
     card_unsigned = {
         "schema": "tgw-execution-card/v1",
@@ -99,7 +116,7 @@ def role_evidence(*, role, source_commit, source_tree):
         "solution_id": "sha256:" + "1" * 64,
         "role": role,
         "selected_provider": f"candidate-{role}-runner",
-        "plan_commit": PLAN_COMMIT,
+        "plan_commit": plan_commit,
         "resource_service": {
             "id": service["id"],
             "descriptor_hash": resource_service_descriptor_hash(service),
@@ -117,7 +134,7 @@ def role_evidence(*, role, source_commit, source_tree):
     resources_unsigned = {
         "schema": "tgw-execution-resource-receipt/v1",
         "card_hash": card["card_hash"],
-        "plan_commit": PLAN_COMMIT,
+        "plan_commit": plan_commit,
         "resources": {name: bindings[name] for name in sorted(bindings)},
     }
     resources = {**resources_unsigned, "receipt_hash": object_hash(resources_unsigned)}
@@ -168,7 +185,7 @@ def role_evidence(*, role, source_commit, source_tree):
         resource_service_catalog=catalog,
         source_commit=source_commit,
         source_tree=source_tree,
-        plan_commit=PLAN_COMMIT,
+        plan_commit=plan_commit,
     )
     return {
         "candidate_receipt": candidate_receipt,
@@ -186,15 +203,35 @@ def write_json(path, value):
     return raw
 
 
-def pinned_sink(tmp_path, *, candidate_repo, source_commit, source_tree, corrupt_role=None):
+def pinned_sink(
+    tmp_path, *, candidate_repo, source_commit, source_tree, plan_commit,
+    corrupt_role=None, corrupt_sink_binding_role=None,
+):
     sink = tmp_path / "receipt-sink"
     sink.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=sink, check=True)
     subprocess.run(["git", "config", "user.email", "sink@example.invalid"], cwd=sink, check=True)
     subprocess.run(["git", "config", "user.name", "Receipt sink"], cwd=sink, check=True)
+    descriptor_seed = {
+        "schema": RECEIPT_SINK_SCHEMA,
+        "sink_id": "test-receipt-sink",
+        "repository": str(sink.resolve()),
+        "commit": "0" * 40,
+        "tree": "0" * 40,
+        "manifest_path": "manifest.json",
+        "manifest_content_sha256": "sha256:" + "0" * 64,
+    }
+    card_sink_binding = receipt_sink_card_binding(descriptor_seed)
     artifacts = []
     for role in ("implementation", "independent-review", "controller-verification"):
-        evidence = role_evidence(role=role, source_commit=source_commit, source_tree=source_tree)
+        evidence = role_evidence(
+            role=role, source_commit=source_commit, source_tree=source_tree,
+            plan_commit=plan_commit,
+            receipt_sink_binding=(
+                {"ref": "receipt-sink:substituted:descriptor:v1", "hash": "sha256:" + "f" * 64}
+                if role == corrupt_sink_binding_role else card_sink_binding
+            ),
+        )
         pointers = {}
         for name, value in evidence.items():
             raw = write_json(sink / "artifacts" / role / f"{name}.json", value)
@@ -205,7 +242,7 @@ def pinned_sink(tmp_path, *, candidate_repo, source_commit, source_tree, corrupt
             "schema": GOVERNED_EXECUTION_BUNDLE_SCHEMA,
             "source_commit": source_commit,
             "source_tree": source_tree,
-            "plan_commit": PLAN_COMMIT,
+            "plan_commit": plan_commit,
             "role": role,
             **pointers,
         }
@@ -244,25 +281,45 @@ def pinned_sink(tmp_path, *, candidate_repo, source_commit, source_tree, corrupt
 
 def test_pinned_sink_gate_reads_exact_committed_artifacts_and_cli_admits(tmp_path):
     candidate, commit, tree = candidate_repository(tmp_path)
+    plan_repository, plan_commit = approved_plan_repository(tmp_path)
     sink_repository, config = pinned_sink(
         tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree,
+        plan_commit=plan_commit,
     )
     # A mutable worktree file is not evidence: the gate reads the descriptor's
     # exact commit object, not this post-commit edit.
     (sink_repository / "artifacts" / "implementation" / "role_receipt.json").write_text("{}")
     descriptor = load_receipt_sink_descriptor(config, candidate_repository=candidate)
+    assert receipt_sink_card_binding_content(descriptor) == {
+        "schema": "tgw-pinned-git-candidate-receipt-sink-card-binding/v1",
+        "sink_id": "test-receipt-sink",
+        "repository": str(sink_repository.resolve()),
+        "manifest_path": "manifest.json",
+    }
+    assert receipt_sink_card_binding(descriptor) == {
+        "ref": "receipt-sink:test-receipt-sink:descriptor:v1",
+        "hash": digest(canonical(receipt_sink_card_binding_content(descriptor))),
+    }
     gate = candidate_admission_gate(
-        candidate, candidate="HEAD", plan_commit=PLAN_COMMIT,
+        candidate, candidate="HEAD", plan_repository=plan_repository, plan_approved_ref=PLAN_APPROVED_REF,
         sink=PinnedGitReceiptSink(descriptor, candidate_repository=candidate),
     )
 
     assert gate["allowed"] is True
     assert gate["source_commit"] == commit
+    assert gate["plan_commit"] == plan_commit
+    assert gate["plan_authority"] == {
+        "schema": "tgw-governed-candidate-plan-authority/v1",
+        "repository": str(plan_repository.resolve()),
+        "approved_ref": PLAN_APPROVED_REF,
+        "approved_commit": plan_commit,
+    }
     assert len(gate["governed_execution_receipt_hashes"]) == 3
     completed = subprocess.run(
         [
             sys.executable, str(ROOT / "scripts" / "admit_governed_candidate.py"),
-            "--repo", str(candidate), "--candidate", "HEAD", "--plan-commit", PLAN_COMMIT,
+            "--repo", str(candidate), "--candidate", "HEAD",
+            "--plan-repository", str(plan_repository), "--plan-approved-ref", PLAN_APPROVED_REF,
             "--receipt-sink-config", str(config),
         ],
         env={**os.environ, "PYTHONPATH": str(ROOT / "src")}, text=True, capture_output=True, check=False,
@@ -273,13 +330,14 @@ def test_pinned_sink_gate_reads_exact_committed_artifacts_and_cli_admits(tmp_pat
 
 def test_gate_holds_when_a_pinned_bundle_artifact_does_not_match(tmp_path):
     candidate, commit, tree = candidate_repository(tmp_path)
+    plan_repository, plan_commit = approved_plan_repository(tmp_path)
     _sink, config = pinned_sink(
         tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree,
-        corrupt_role="independent-review",
+        plan_commit=plan_commit, corrupt_role="independent-review",
     )
     descriptor = load_receipt_sink_descriptor(config, candidate_repository=candidate)
     gate = candidate_admission_gate(
-        candidate, candidate="HEAD", plan_commit=PLAN_COMMIT,
+        candidate, candidate="HEAD", plan_repository=plan_repository, plan_approved_ref=PLAN_APPROVED_REF,
         sink=PinnedGitReceiptSink(descriptor, candidate_repository=candidate),
     )
 
@@ -287,27 +345,101 @@ def test_gate_holds_when_a_pinned_bundle_artifact_does_not_match(tmp_path):
     assert gate["reasons"] == ["missing-or-invalid-governed-evidence:independent-review"]
 
 
+def test_gate_holds_when_any_card_uses_a_substituted_receipt_sink_binding(tmp_path):
+    candidate, commit, tree = candidate_repository(tmp_path)
+    plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    _sink, config = pinned_sink(
+        tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree,
+        plan_commit=plan_commit, corrupt_sink_binding_role="controller-verification",
+    )
+    descriptor = load_receipt_sink_descriptor(config, candidate_repository=candidate)
+
+    gate = candidate_admission_gate(
+        candidate, candidate="HEAD", plan_repository=plan_repository, plan_approved_ref=PLAN_APPROVED_REF,
+        sink=PinnedGitReceiptSink(descriptor, candidate_repository=candidate),
+    )
+
+    assert gate["allowed"] is False
+    assert gate["reasons"] == ["missing-or-invalid-governed-evidence:controller-verification"]
+
+
+def test_gate_holds_when_the_external_approved_plan_ref_moves(tmp_path):
+    candidate, commit, tree = candidate_repository(tmp_path)
+    plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    _sink, config = pinned_sink(
+        tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree, plan_commit=plan_commit,
+    )
+    (plan_repository / "plan.txt").write_text("a newer but unbound approved Plan\n")
+    subprocess.run(["git", "add", "."], cwd=plan_repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "new approved Plan"], cwd=plan_repository, check=True)
+    subprocess.run(
+        ["git", "update-ref", PLAN_APPROVED_REF, git(plan_repository, "rev-parse", "HEAD")],
+        cwd=plan_repository, check=True,
+    )
+    descriptor = load_receipt_sink_descriptor(config, candidate_repository=candidate)
+
+    gate = candidate_admission_gate(
+        candidate, candidate="HEAD", plan_repository=plan_repository, plan_approved_ref=PLAN_APPROVED_REF,
+        sink=PinnedGitReceiptSink(descriptor, candidate_repository=candidate),
+    )
+
+    assert gate["plan_commit"] != plan_commit
+    assert gate["allowed"] is False
+    assert gate["reasons"] == [
+        "missing-or-invalid-governed-evidence:controller-verification",
+        "missing-or-invalid-governed-evidence:implementation",
+        "missing-or-invalid-governed-evidence:independent-review",
+    ]
+
+
 def test_candidate_local_sink_configuration_or_repository_is_refused(tmp_path):
     candidate, commit, tree = candidate_repository(tmp_path)
-    _sink, config = pinned_sink(tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree)
+    _plans, plan_commit = approved_plan_repository(tmp_path)
+    _sink, config = pinned_sink(
+        tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree, plan_commit=plan_commit,
+    )
     local = candidate / "receipt-sink-config.json"
     local.write_bytes(config.read_bytes())
 
-    with pytest.raises(CandidateReceiptSinkError, match="outside the candidate repository"):
+    with pytest.raises(CandidateReceiptSinkError, match="disjoint from the candidate repository"):
         load_receipt_sink_descriptor(local, candidate_repository=candidate)
 
     descriptor = json.loads(config.read_text())
     descriptor["repository"] = str(candidate)
-    with pytest.raises(CandidateReceiptSinkError, match="outside the candidate repository"):
+    with pytest.raises(CandidateReceiptSinkError, match="disjoint from the candidate repository"):
         PinnedGitReceiptSink(descriptor, candidate_repository=candidate)
+
+
+def test_candidate_nested_beneath_sink_or_plan_root_is_refused(tmp_path):
+    sink_root = tmp_path / "receipt-sink"
+    sink_root.mkdir()
+    candidate = sink_root / "candidate"
+    candidate.mkdir()
+    descriptor = {
+        "schema": RECEIPT_SINK_SCHEMA,
+        "sink_id": "test-receipt-sink",
+        "repository": str(sink_root),
+        "commit": "0" * 40,
+        "tree": "0" * 40,
+        "manifest_path": "manifest.json",
+        "manifest_content_sha256": "sha256:" + "0" * 64,
+    }
+    with pytest.raises(CandidateReceiptSinkError, match="disjoint from the candidate repository"):
+        PinnedGitReceiptSink(descriptor, candidate_repository=candidate)
+    with pytest.raises(CandidateReceiptSinkError, match="disjoint from the candidate repository"):
+        resolve_approved_plan_authority(
+            sink_root, approved_ref=PLAN_APPROVED_REF, candidate_repository=candidate,
+        )
 
 
 def test_cli_requires_an_operator_configured_sink(tmp_path):
     candidate, _commit, _tree = candidate_repository(tmp_path)
+    plan_repository, _plan_commit = approved_plan_repository(tmp_path)
     completed = subprocess.run(
         [
             sys.executable, str(ROOT / "scripts" / "admit_governed_candidate.py"),
-            "--repo", str(candidate), "--candidate", "HEAD", "--plan-commit", PLAN_COMMIT,
+            "--repo", str(candidate), "--candidate", "HEAD",
+            "--plan-repository", str(plan_repository), "--plan-approved-ref", PLAN_APPROVED_REF,
         ],
         env={**os.environ, "PYTHONPATH": str(ROOT / "src")}, text=True, capture_output=True, check=False,
     )
