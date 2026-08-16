@@ -14,19 +14,61 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from tgw.candidate_review import (
+    create_review_report,
     create_review_result,
     generate_review_packet,
     validate_review_report,
     validate_review_result,
 )
 from tgw.execution_resources import HTTPRegisteredResourceResolver
-from tgw.qualified_execution_service import QualifiedExecutionClient
 from tgw.governed_coding import dispatch_role
+from tgw.governed_review_adapter import validate_execution as validate_governed_review_execution
 from tgw.harness_registry import load_registry, observe_health
+from tgw.qualified_execution_service import QualifiedExecutionClient
 from tgw.review_configuration import configured_review_command
 from tgw.review_runner import snapshot_hash
 
 REVIEW_LEASE_SECONDS = 15 * 60
+
+
+def finalize_governed_review(
+    packet: Mapping[str, Any], execution: Mapping[str, Any],
+    governed_review_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Finalize the provider-neutral interactive path without requiring QES."""
+
+    normalized = validate_governed_review_execution(execution)
+    if (
+        normalized["provider"] != packet.get("selected_provider")
+        or normalized["source"] != {
+            "commit": packet.get("candidate_source", {}).get("commit"),
+            "tree": packet.get("candidate_source", {}).get("tree"),
+            "snapshot_hash": packet.get("snapshot", {}).get("hash"),
+        }
+        or normalized["plan_commit"] != packet.get("plan", {}).get("commit")
+    ):
+        raise ValueError("governed review execution does not bind the candidate packet")
+    review = normalized["review"]
+    dimension = {"verdict": review["verdict"], "findings": review["findings"]}
+    report = create_review_report(packet, {"semantic": dimension, "security": dimension})
+    if governed_review_receipt.get("selected_provider") != normalized["provider"]:
+        raise ValueError("governed review receipt provider differs from the execution")
+    if not any(
+        artifact == {
+            "kind": "governed_review_execution",
+            "execution_hash": normalized["execution_hash"],
+        }
+        for artifact in governed_review_receipt.get("artifacts", [])
+    ):
+        raise ValueError("governed review receipt does not bind the execution")
+    result = create_review_result(
+        packet, report, governed_review_receipt,
+        governed_review_execution_hash=normalized["execution_hash"],
+    )
+    return {
+        "packet": dict(packet), "report": report, "execution": normalized,
+        "result": result, "validation": validate_review_result(packet, report, result),
+    }
 
 
 def _canonical(value: Any) -> bytes:

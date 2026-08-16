@@ -17,6 +17,7 @@ import hashlib
 import json
 import re
 import subprocess
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
@@ -42,6 +43,7 @@ from tgw.governed_execution_receipt import (
     GovernedExecutionReceiptError,
     verify_candidate_governed_execution_receipt,
 )
+from tgw.governed_review_adapter import validate_execution as validate_governed_review_execution
 from tgw.plan_catalog import compose_catalog
 from tgw.plan_luet import (
     PINNED_LUET_BINARY_SHA256,
@@ -111,6 +113,15 @@ _INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS = (
     "qualified_execution_runner_descriptor",
     "review_execution_proof",
     "review_execution_transcript",
+)
+_GOVERNED_REVIEW_EVIDENCE_ARTIFACTS = (
+    "review_packet",
+    "review_report",
+    "review_result",
+    "governed_review_execution",
+    "review_card",
+    "review_handoff",
+    "promptcraft_receipt",
 )
 
 
@@ -896,22 +907,28 @@ def validate_candidate_evidence_bundle(value: Mapping[str, Any]) -> dict[str, An
 def validate_independent_review_evidence_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
     """Validate X's review pointers, which are deliberately outside S."""
 
-    required = {
+    common = {
         "schema",
         "source_commit",
         "source_tree",
         "plan_commit",
-        *_INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS,
         "bundle_hash",
     }
-    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA:
+    if not isinstance(value, Mapping) or value.get("schema") != INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA:
+        raise CandidateReceiptSinkError("independent review evidence bundle is invalid")
+    artifact_names: tuple[str, ...]
+    if set(value) == common | set(_INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS):
+        artifact_names = _INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS
+    elif set(value) == common | set(_GOVERNED_REVIEW_EVIDENCE_ARTIFACTS):
+        artifact_names = _GOVERNED_REVIEW_EVIDENCE_ARTIFACTS
+    else:
         raise CandidateReceiptSinkError("independent review evidence bundle is invalid")
     for field in ("source_commit", "source_tree", "plan_commit"):
         if not isinstance(value.get(field), str) or _GIT_OBJECT.fullmatch(value[field]) is None:
             raise CandidateReceiptSinkError("independent review evidence bundle Git binding is invalid")
     result = dict(value)
     refs: set[str] = set()
-    for name in _INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS:
+    for name in artifact_names:
         pointer = _artifact_pointer(value[name], label=f"independent review {name}")
         if pointer["ref"] in refs:
             raise CandidateReceiptSinkError("independent review evidence bundle reuses an artifact")
@@ -1466,7 +1483,12 @@ def verify_independent_review_evidence_bundle(
     bundle = validate_independent_review_evidence_bundle(sink.fetch_object(independent_review_evidence_bundle_ref(source_commit)))
     if bundle["source_commit"] != source_commit or bundle["source_tree"] != source_tree or bundle["plan_commit"] != plan_commit:
         raise CandidateReceiptSinkError("independent review evidence bundle binding mismatch")
-    artifacts = {name: _bundle_artifact(sink, bundle[name]) for name in _INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS}
+    artifact_names = (
+        _GOVERNED_REVIEW_EVIDENCE_ARTIFACTS
+        if "governed_review_execution" in bundle
+        else _INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS
+    )
+    artifacts = {name: _bundle_artifact(sink, bundle[name]) for name in artifact_names}
     try:
         report = validate_review_report(artifacts["review_packet"], artifacts["review_report"])
         review = validate_review_result(
@@ -1478,6 +1500,47 @@ def verify_independent_review_evidence_bundle(
         raise CandidateReceiptSinkError("candidate semantic/security review did not pass")
     if artifacts["review_result"].get("governed_review_receipt") != independent_review_receipt:
         raise CandidateReceiptSinkError("candidate review does not use the retained independent review receipt")
+    if "governed_review_execution" in artifacts:
+        try:
+            execution = validate_governed_review_execution(artifacts["governed_review_execution"])
+            from promptcraft.handoff import ExecutionCard, verify_for_launcher
+
+            card = ExecutionCard.from_mapping(artifacts["review_card"])
+            started_at = datetime.fromisoformat(
+                execution["lifecycle"]["started_at"].replace("Z", "+00:00")
+            )
+            invocation = verify_for_launcher(artifacts["review_handoff"], now=started_at)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise CandidateReceiptSinkError("governed review execution evidence is invalid") from exc
+        if (
+            card.hash != execution["card_hash"]
+            or artifacts["review_handoff"].get("handoff_hash") != execution["handoff_hash"]
+            or artifacts["promptcraft_receipt"] != artifacts["review_handoff"].get("receipt")
+            or artifacts["promptcraft_receipt"].get("receipt_hash") != execution["promptcraft_receipt_hash"]
+            or invocation.get("selected_provider") != execution["provider"]
+            or execution["provider"] != artifacts["review_packet"].get("selected_provider")
+            or execution["source"] != {
+                "commit": source_commit,
+                "tree": source_tree,
+                "snapshot_hash": artifacts["review_packet"]["snapshot"]["hash"],
+            }
+            or execution["plan_commit"] != plan_commit
+            or execution["review"].get("verdict") != "PASS"
+            or artifacts["review_report"].get("dimensions") != {
+                "semantic": {"verdict": "PASS", "findings": []},
+                "security": {"verdict": "PASS", "findings": []},
+            }
+            or artifacts["review_result"].get("governed_review_execution_hash") != execution["execution_hash"]
+        ):
+            raise CandidateReceiptSinkError("governed review execution binding mismatch")
+        return {
+            "candidate_manifest_hash": candidate_manifest_hash,
+            "review_packet_hash": review["packet_hash"],
+            "review_result_hash": review["result_hash"],
+            "governed_review_execution_hash": execution["execution_hash"],
+            "review_execution_provider": execution["provider"],
+            "bundle_hash": bundle["bundle_hash"],
+        }
     common = {
         "candidate_commit": source_commit,
         "candidate_tree": source_tree,

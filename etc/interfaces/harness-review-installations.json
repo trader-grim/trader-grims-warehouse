@@ -20,6 +20,7 @@
       "skill_destination": ".claude/skills",
       "interactive_review": "available",
       "automated_provider": "unavailable-no-admitted-runner",
+      "governed_execution_adapter": "implemented-not-installed",
       "model_authentication": "configured",
       "context_mcp": "configured",
       "production_inventory_mcp": "configured"

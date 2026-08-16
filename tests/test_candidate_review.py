@@ -178,6 +178,21 @@ def result(packet_value, *, semantic="PASS", security="PASS"):
     )
 
 
+def test_governed_interactive_result_is_provider_neutral_and_qes_optional(tmp_path):
+    packet_value, _ = packet(tmp_path)
+    review_report = report(packet_value)
+    review_result = create_review_result(
+        packet_value,
+        review_report,
+        governed_receipt(packet_value, passed=True),
+        governed_review_execution_hash="sha256:" + "8" * 64,
+    )
+    validation = validate_review_result(packet_value, review_report, review_result)
+    assert "qualified_execution_proof_hash" not in review_result
+    assert validation["review_execution_kind"] == "governed-interactive"
+    assert validation["review_execution_provider"] == packet_value["selected_provider"]
+
+
 def test_generator_emits_executable_packet_without_invoking_configured_runner(tmp_path):
     value, marker = packet(tmp_path)
 
@@ -201,6 +216,25 @@ def test_generator_emits_exact_hold_when_isolated_runner_is_not_configured(tmp_p
     )
     assert any("not present" in reason for reason in claude["reasons"])
     assert marker.exists() is False
+
+
+def test_generator_selects_configured_provider_neutral_interactive_review(tmp_path):
+    registry = load_registry(REGISTRY)
+    runner = executable(tmp_path / "governed-review")
+    health = observe_health(
+        registry,
+        coding_config={"commands": {"governed-review": [runner, "{prompt}", "{snapshot}"]}},
+        adapters=adapters(),
+    )
+    source = snapshot(tmp_path)
+    value = generate_review_packet(
+        manifest(), registry, health, adapters=adapters(),
+        snapshot_ref=source.resolve().as_uri(), snapshot_hash=snapshot_hash(source),
+        required_capabilities=("governed-interactive-review",),
+    )
+    assert value["status"] == "EXECUTABLE"
+    assert value["selected_provider"] == "claude"
+    assert value["receiver_profile"] == {"id": "claude-code", "version": 1}
 
 
 def test_result_validator_accepts_both_dimensions_only_when_receipt_is_bound(tmp_path):
