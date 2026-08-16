@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -163,7 +163,10 @@ def _relative(value: Any) -> bool:
 
 def _endpoint(value: Any) -> str:
     parsed = urlsplit(value) if isinstance(value, str) else None
-    loopback = parsed is not None and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+    # Plain HTTP is a test-only transport.  DNS names, including localhost,
+    # can be rebound after descriptor validation, so allow literal loopback
+    # addresses only.  Production endpoints remain HTTPS.
+    loopback = parsed is not None and parsed.hostname in {"127.0.0.1", "::1"}
     if (
         parsed is None
         or parsed.scheme not in {"http", "https"}
@@ -1025,7 +1028,7 @@ class _RunnerClient:
         request.add_header("Content-Type", "application/json")
         request.add_header("Authorization", f"Bearer {self.token}")
         try:
-            with build_opener(_NoRedirect()).open(request, timeout=self.descriptor["timeout_seconds"]) as response:  # nosec: externally provisioned runner descriptor
+            with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=self.descriptor["timeout_seconds"]) as response:  # nosec: externally provisioned runner descriptor
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except (HTTPError, URLError, OSError) as exc:
             raise QualifiedExecutionError("qualified runner request failed") from exc
@@ -1430,7 +1433,7 @@ class QualifiedExecutionClient:
         if self.token:
             request.add_header("Authorization", f"Bearer {self.token}")
         try:
-            with urlopen(request, timeout=self.descriptor["timeout_seconds"]) as response:  # nosec: descriptor is externally provisioned
+            with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=self.descriptor["timeout_seconds"]) as response:  # nosec: descriptor is externally provisioned
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except (HTTPError, URLError, OSError) as exc:
             raise QualifiedExecutionError("qualified execution signer request failed") from exc

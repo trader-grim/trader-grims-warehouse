@@ -764,3 +764,130 @@ def test_runner_bearer_is_not_followed_to_a_redirect_target(tmp_path):
         redirect.shutdown()
         redirect.server_close()
         redirect_thread.join(timeout=5)
+
+
+def test_signer_bearer_is_not_followed_to_a_redirect_target(tmp_path):
+    config, _runner, _signer_key, descriptor, _catalog, candidate, tree, base, base_tree = configured(tmp_path)
+    observed: list[tuple[str, str | None]] = []
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def _record(self):
+            observed.append((self.path, self.headers.get("Authorization")))
+
+        def do_POST(self):  # noqa: N802
+            self._record()
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{redirect.server_port}/redirect-target")
+            self.end_headers()
+
+        def do_GET(self):  # noqa: N802
+            self._record()
+            self.send_response(200)
+            self.end_headers()
+
+    redirect = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    redirect_thread = threading.Thread(target=redirect.serve_forever, daemon=True)
+    redirect_thread.start()
+    try:
+        client = QualifiedExecutionClient(
+            {**descriptor, "endpoint": f"http://127.0.0.1:{redirect.server_port}"},
+            environment={"SIGNER_TOKEN": "signer-secret"},
+        )
+        with pytest.raises(QualifiedExecutionError, match="signer request failed"):
+            client.execute(
+                candidate_commit=candidate,
+                candidate_tree=tree,
+                base_commit=base,
+                base_tree=base_tree,
+                plan_commit=config.plan_commit,
+                profiles=["focused"],
+            )
+        assert observed == [("/v1/proofs", "Bearer signer-secret")]
+    finally:
+        redirect.shutdown()
+        redirect.server_close()
+        redirect_thread.join(timeout=5)
+
+
+def test_qualified_clients_ignore_environment_proxy_before_sending_bearers(tmp_path, monkeypatch):
+    config, runner, _signer_key, descriptor, _catalog, candidate, tree, base, base_tree = configured(tmp_path)
+    proxied: list[str | None] = []
+    delivered: list[tuple[str, str | None]] = []
+
+    class ProxyHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def do_POST(self):  # noqa: N802
+            proxied.append(self.headers.get("Authorization"))
+            self.send_error(502)
+
+    class TargetHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def do_POST(self):  # noqa: N802
+            delivered.append((self.path, self.headers.get("Authorization")))
+            body = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)
+    target = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+    proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+    proxy_thread.start()
+    target_thread.start()
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy.server_port}")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    endpoint = f"http://127.0.0.1:{target.server_port}"
+    try:
+        signer_client = QualifiedExecutionClient(
+            {**descriptor, "endpoint": endpoint},
+            environment={"SIGNER_TOKEN": "signer-secret"},
+        )
+        with pytest.raises(QualifiedExecutionError, match="signer response is invalid"):
+            signer_client.execute(
+                candidate_commit=candidate,
+                candidate_tree=tree,
+                base_commit=base,
+                base_tree=base_tree,
+                plan_commit=config.plan_commit,
+                profiles=["focused"],
+            )
+        runner_client = qualified_execution_service._RunnerClient(
+            {**runner.descriptor, "endpoint": endpoint},
+            environment={"RUNNER_TOKEN": runner.token},
+        )
+        assert runner_client._post("/v1/identity", {"schema": "fixture"}) == {}
+        assert proxied == []
+        assert delivered == [
+            ("/v1/proofs", "Bearer signer-secret"),
+            ("/v1/identity", f"Bearer {runner.token}"),
+        ]
+    finally:
+        proxy.shutdown()
+        proxy.server_close()
+        proxy_thread.join(timeout=5)
+        target.shutdown()
+        target.server_close()
+        target_thread.join(timeout=5)
+
+
+def test_plaintext_qualified_endpoint_requires_a_literal_loopback_address(tmp_path):
+    _config, runner, _signer_key, descriptor, _catalog, _candidate, _tree, _base, _base_tree = configured(tmp_path)
+    with pytest.raises(QualifiedExecutionError, match="endpoint is invalid"):
+        QualifiedExecutionClient({**descriptor, "endpoint": "http://localhost:8000"})
+    with pytest.raises(QualifiedExecutionError, match="endpoint is invalid"):
+        qualified_execution_service._RunnerClient(
+            {**runner.descriptor, "endpoint": "http://localhost:8000"},
+            environment={"RUNNER_TOKEN": runner.token},
+        )
