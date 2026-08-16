@@ -20,6 +20,17 @@ import subprocess
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
+from tgw.candidate_manifest import (
+    CandidateManifestError,
+    verify_migration_safety_receipt,
+    verify_predecessor_release,
+    verify_test_receipt,
+)
+from tgw.candidate_review import (
+    CandidateReviewError,
+    candidate_identity,
+    validate_review_result,
+)
 from tgw.governed_coding import admission_gate
 from tgw.governed_execution_receipt import (
     GovernedExecutionReceiptError,
@@ -32,6 +43,8 @@ RECEIPT_SINK_CARD_BINDING_SCHEMA = "tgw-pinned-git-candidate-receipt-sink-card-b
 GOVERNED_EXECUTION_BUNDLE_SCHEMA = "tgw-candidate-governed-execution-bundle/v1"
 GOVERNED_CANDIDATE_ADMISSION_SCHEMA = "tgw-governed-candidate-admission-gate/v1"
 GOVERNED_CANDIDATE_PLAN_AUTHORITY_SCHEMA = "tgw-governed-candidate-plan-authority/v1"
+REVIEWED_CANDIDATE_EVIDENCE_BUNDLE_SCHEMA = "tgw-reviewed-candidate-evidence-bundle/v1"
+ROLLBACK_MANIFEST_SCHEMA = "tgw-governed-candidate-rollback-manifest/v1"
 
 GOVERNED_ROLES = (
     "implementation",
@@ -42,6 +55,7 @@ GOVERNED_ROLES = (
 _GIT_OBJECT = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _SINK_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
+_RELEASE_GENERATION = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\Z")
 _ARTIFACT_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@=-]{0,255}\Z")
 _PLAN_REF = re.compile(r"refs/[A-Za-z0-9][A-Za-z0-9._/-]{0,239}\Z")
 _BUNDLE_ARTIFACTS = (
@@ -50,6 +64,15 @@ _BUNDLE_ARTIFACTS = (
     "resource_receipt",
     "role_receipt",
     "resource_service_catalog",
+)
+_REVIEWED_CANDIDATE_ARTIFACTS = (
+    "candidate_manifest",
+    "focused_test_receipt",
+    "full_suite_test_receipt",
+    "review_packet",
+    "review_result",
+    "release_manifest",
+    "rollback_manifest",
 )
 
 
@@ -133,6 +156,18 @@ def governed_execution_bundle_ref(source_commit: str, role: str) -> str:
     if _GIT_OBJECT.fullmatch(source_commit) is None or role not in GOVERNED_ROLES:
         raise CandidateReceiptSinkError("governed execution bundle identity is invalid")
     return f"candidate:{source_commit}:governed-execution:{role}"
+
+
+def reviewed_candidate_evidence_bundle_ref(source_commit: str) -> str:
+    """Return the one sink reference reserved for W08 candidate evidence.
+
+    The name is derived solely from the candidate commit.  That prevents a
+    candidate from choosing an unrelated, otherwise valid evidence package.
+    """
+
+    if _GIT_OBJECT.fullmatch(source_commit) is None:
+        raise CandidateReceiptSinkError("reviewed candidate evidence bundle identity is invalid")
+    return f"candidate:{source_commit}:reviewed-release-evidence"
 
 
 def validate_receipt_sink_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -354,6 +389,413 @@ def _bundle_artifact(sink: PinnedGitReceiptSink, pointer: Mapping[str, str]) -> 
     return _object(value, label="governed execution evidence bundle artifact")
 
 
+def _artifact_pointer(value: Any, *, label: str) -> dict[str, str]:
+    """Normalize one hash-bound pointer into the independently pinned sink."""
+
+    if not isinstance(value, Mapping) or set(value) != {"ref", "content_sha256"}:
+        raise CandidateReceiptSinkError(f"{label} artifact pointer is invalid")
+    ref = value.get("ref")
+    digest = value.get("content_sha256")
+    if (
+        not isinstance(ref, str)
+        or _ARTIFACT_REF.fullmatch(ref) is None
+        or not isinstance(digest, str)
+        or _SHA256.fullmatch(digest) is None
+    ):
+        raise CandidateReceiptSinkError(f"{label} artifact pointer is invalid")
+    return {"ref": ref, "content_sha256": digest}
+
+
+def _candidate_blob(repository: Path, commit: str, path: str) -> bytes:
+    if not isinstance(path, str) or not path or PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts:
+        raise CandidateReceiptSinkError("candidate manifest SQL path is invalid")
+    return _git(repository, "show", f"{commit}:{path}")
+
+
+def _candidate_archive_sha256(repository: Path, commit: str) -> str:
+    return _hash_bytes(_git(repository, "archive", "--format=tar", commit))
+
+
+def _candidate_changed_paths(repository: Path, base_commit: str, source_commit: str) -> list[str]:
+    raw = _git(repository, "diff", "--name-only", base_commit, source_commit).decode()
+    paths = sorted(path for path in raw.splitlines() if path)
+    if any(
+        PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts
+        for path in paths
+    ):
+        raise CandidateReceiptSinkError("candidate changed path is invalid")
+    return paths
+
+
+def _candidate_file_hashes(repository: Path, commit: str) -> dict[str, str]:
+    """Return the exact regular-file content map release installation retains."""
+
+    records = _git(repository, "ls-tree", "-r", "-z", commit).split(b"\0")
+    files: dict[str, str] = {}
+    for record in records:
+        if not record:
+            continue
+        try:
+            header, raw_path = record.split(b"\t", 1)
+            _mode, object_type, object_id = header.split(b" ", 2)
+            path = raw_path.decode("utf-8")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise CandidateReceiptSinkError("candidate release file identity is invalid") from exc
+        if object_type != b"blob" or not path or path in files:
+            raise CandidateReceiptSinkError("candidate release file identity is invalid")
+        files[path] = hashlib.sha256(_git(repository, "cat-file", "blob", object_id.decode())).hexdigest()
+    if not files:
+        raise CandidateReceiptSinkError("candidate release manifest files are invalid")
+    return dict(sorted(files.items()))
+
+
+def _validate_release_manifest(
+    value: Mapping[str, Any], *, repository: Path, commit: str, tree: str,
+) -> dict[str, Any]:
+    """Check a release-installer manifest against the exact committed source.
+
+    The release installer writes this document while materializing an immutable
+    generation.  W08 does not install the candidate, but it must preserve the
+    exact manifest that installation will consume.  Checking its source
+    identity and archive digest here rejects a release manifest copied from a
+    neighboring candidate before deployment can begin.
+    """
+
+    required = {
+        "schema", "generation", "commit", "tree", "git_tree", "src_root",
+        "archive_sha256", "content_manifest_sha256", "file_count", "files",
+    }
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != required
+        or value.get("schema") != "tgw-release-manifest-v1"
+    ):
+        raise CandidateReceiptSinkError("candidate release manifest schema is invalid")
+    generation = value.get("generation")
+    if not isinstance(generation, str) or _RELEASE_GENERATION.fullmatch(generation) is None:
+        raise CandidateReceiptSinkError("candidate release manifest generation is invalid")
+    if value.get("commit") != commit or value.get("git_tree") != tree:
+        raise CandidateReceiptSinkError("candidate release manifest source binding mismatch")
+    if value.get("tree") != f"exact-git-archive:{commit}" or value.get("src_root") != "src":
+        raise CandidateReceiptSinkError("candidate release manifest archive identity is invalid")
+    archive_sha256 = _candidate_archive_sha256(repository, commit).removeprefix("sha256:")
+    if value.get("archive_sha256") != archive_sha256:
+        raise CandidateReceiptSinkError("candidate release manifest archive hash mismatch")
+    files = value.get("files")
+    if (
+        not isinstance(files, Mapping)
+        or not files
+        or not isinstance(value.get("file_count"), int)
+        or value["file_count"] != len(files)
+    ):
+        raise CandidateReceiptSinkError("candidate release manifest files are invalid")
+    for path, digest in files.items():
+        if (
+            not isinstance(path, str)
+            or not path
+            or PurePosixPath(path).is_absolute()
+            or ".." in PurePosixPath(path).parts
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise CandidateReceiptSinkError("candidate release manifest files are invalid")
+    if dict(files) != _candidate_file_hashes(repository, commit):
+        raise CandidateReceiptSinkError("candidate release manifest files do not match source")
+    expected_content_hash = hashlib.sha256(
+        (json.dumps(dict(sorted(files.items())), sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    if value.get("content_manifest_sha256") != expected_content_hash:
+        raise CandidateReceiptSinkError("candidate release manifest content hash is invalid")
+    return dict(value)
+
+
+def validate_reviewed_candidate_evidence_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate W08's compact immutable pointer bundle before dereferencing it."""
+
+    required = {
+        "schema", "source_commit", "source_tree", "plan_commit",
+        *_REVIEWED_CANDIDATE_ARTIFACTS, "migration_receipts", "bundle_hash",
+    }
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != required
+        or value.get("schema") != REVIEWED_CANDIDATE_EVIDENCE_BUNDLE_SCHEMA
+    ):
+        raise CandidateReceiptSinkError("reviewed candidate evidence bundle is invalid")
+    for field in ("source_commit", "source_tree", "plan_commit"):
+        if not isinstance(value.get(field), str) or _GIT_OBJECT.fullmatch(value[field]) is None:
+            raise CandidateReceiptSinkError("reviewed candidate evidence bundle Git binding is invalid")
+    result = dict(value)
+    refs: set[str] = set()
+    for name in _REVIEWED_CANDIDATE_ARTIFACTS:
+        pointer = _artifact_pointer(value[name], label=f"reviewed candidate {name}")
+        if pointer["ref"] in refs:
+            raise CandidateReceiptSinkError("reviewed candidate evidence bundle reuses an artifact")
+        refs.add(pointer["ref"])
+        result[name] = pointer
+    migrations = value.get("migration_receipts")
+    if not isinstance(migrations, list):
+        raise CandidateReceiptSinkError("reviewed candidate migration receipt pointers are invalid")
+    normalized_migrations: list[dict[str, str]] = []
+    for migration in migrations:
+        pointer = _artifact_pointer(migration, label="reviewed candidate migration receipt")
+        if pointer["ref"] in refs:
+            raise CandidateReceiptSinkError("reviewed candidate evidence bundle reuses an artifact")
+        refs.add(pointer["ref"])
+        normalized_migrations.append(pointer)
+    result["migration_receipts"] = normalized_migrations
+    unsigned = dict(value)
+    claimed = unsigned.pop("bundle_hash")
+    if not isinstance(claimed, str) or _SHA256.fullmatch(claimed) is None or claimed != _hash(unsigned):
+        raise CandidateReceiptSinkError("reviewed candidate evidence bundle hash is invalid")
+    return result
+
+
+def _verify_candidate_manifest_evidence(
+    manifest: Mapping[str, Any], *, repository: Path, source_commit: str, source_tree: str,
+    plan_commit: str, focused_receipt: Mapping[str, Any], full_suite_receipt: Mapping[str, Any],
+    migration_receipts: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Re-derive every W08 manifest binding from exact source and sink blobs."""
+
+    try:
+        manifest_hash = candidate_identity(manifest)
+    except CandidateReviewError as exc:
+        raise CandidateReceiptSinkError("candidate manifest cannot establish candidate identity") from exc
+    source = manifest.get("source")
+    plan = manifest.get("plan")
+    tests = manifest.get("tests")
+    database = manifest.get("database")
+    if (
+        not isinstance(source, Mapping)
+        or set(source) != {"commit", "tree", "archive_sha256", "base_commit", "changed_paths"}
+        or not isinstance(plan, Mapping)
+        or set(plan) != {"commit", "solution_hash", "closure_hash"}
+        or not isinstance(tests, Mapping)
+        or set(tests) != {"focused", "full_suite"}
+        or not isinstance(database, Mapping)
+        or set(database) != {
+            "changed_sql_paths", "migration_paths", "schema_snapshot_paths", "backup_restore",
+        }
+    ):
+        raise CandidateReceiptSinkError("candidate manifest W08 fields are invalid")
+    if source.get("commit") != source_commit or source.get("tree") != source_tree:
+        raise CandidateReceiptSinkError("candidate manifest source binding mismatch")
+    if source.get("archive_sha256") != _candidate_archive_sha256(repository, source_commit):
+        raise CandidateReceiptSinkError("candidate manifest archive hash mismatch")
+    base_commit = source.get("base_commit")
+    if not isinstance(base_commit, str) or _GIT_OBJECT.fullmatch(base_commit) is None:
+        raise CandidateReceiptSinkError("candidate manifest predecessor binding is invalid")
+    base_tree = _git(repository, "rev-parse", f"{base_commit}^{{tree}}").decode().strip()
+    if _GIT_OBJECT.fullmatch(base_tree) is None:
+        raise CandidateReceiptSinkError("candidate manifest predecessor binding is invalid")
+    ancestry = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", base_commit, source_commit],
+        cwd=repository, capture_output=True, check=False,
+    )
+    if ancestry.returncode:
+        raise CandidateReceiptSinkError("candidate manifest predecessor is not an ancestor")
+    predecessor = manifest.get("predecessor_release")
+    if (
+        not isinstance(predecessor, Mapping)
+        or set(predecessor) != {
+            "generation", "commit", "tree", "archive_sha256", "release_manifest_hash",
+        }
+        or not isinstance(predecessor.get("generation"), str)
+        or predecessor.get("commit") != base_commit
+        or predecessor.get("tree") != base_tree
+        or not isinstance(predecessor.get("archive_sha256"), str)
+        or _SHA256.fullmatch(predecessor["archive_sha256"]) is None
+        or not isinstance(predecessor.get("release_manifest_hash"), str)
+        or _SHA256.fullmatch(predecessor["release_manifest_hash"]) is None
+    ):
+        raise CandidateReceiptSinkError("candidate manifest predecessor release is invalid")
+    if plan.get("commit") != plan_commit:
+        raise CandidateReceiptSinkError("candidate manifest Plan binding mismatch")
+    if not all(isinstance(plan.get(field), str) and _SHA256.fullmatch(plan[field]) for field in ("solution_hash", "closure_hash")):
+        raise CandidateReceiptSinkError("candidate manifest Plan solution binding is invalid")
+    if manifest.get("candidate_closed") is not True or manifest.get("installed") is not False:
+        raise CandidateReceiptSinkError("candidate manifest must be closed and uninstalled")
+    if tests.get("focused") != focused_receipt or tests.get("full_suite") != full_suite_receipt:
+        raise CandidateReceiptSinkError("sink test receipts do not match the candidate manifest")
+    try:
+        verified_focused = verify_test_receipt(
+            focused_receipt, scope="focused", source_commit=source_commit, source_tree=source_tree,
+        )
+        verified_full = verify_test_receipt(
+            full_suite_receipt, scope="full", source_commit=source_commit, source_tree=source_tree,
+        )
+    except CandidateManifestError as exc:
+        raise CandidateReceiptSinkError("candidate test evidence is invalid") from exc
+    changed_paths = _candidate_changed_paths(repository, base_commit, source_commit)
+    if source.get("changed_paths") != changed_paths:
+        raise CandidateReceiptSinkError("candidate manifest changed path binding mismatch")
+    changed_sql = [path for path in changed_paths if path.endswith(".sql") or "/migrations/" in path]
+    if database.get("changed_sql_paths") != changed_sql:
+        raise CandidateReceiptSinkError("candidate manifest SQL path binding mismatch")
+    stored_migrations = database.get("backup_restore")
+    if not isinstance(stored_migrations, list) or len(stored_migrations) != len(migration_receipts):
+        raise CandidateReceiptSinkError("candidate migration evidence is incomplete")
+    if any(not isinstance(receipt, Mapping) for receipt in stored_migrations):
+        raise CandidateReceiptSinkError("candidate migration evidence is invalid")
+    if list(stored_migrations) != migration_receipts:
+        raise CandidateReceiptSinkError("sink migration receipts do not match the candidate manifest")
+    verified_migrations = []
+    migration_paths: set[str] = set()
+    snapshot_paths: set[str] = set()
+    for receipt in migration_receipts:
+        path = receipt.get("migration_path")
+        if not isinstance(path, str) or path in migration_paths or path not in changed_sql:
+            raise CandidateReceiptSinkError("candidate migration evidence does not cover exact SQL changes")
+        snapshot_path = receipt.get("schema_snapshot_path")
+        snapshot = (
+            _candidate_blob(repository, source_commit, snapshot_path)
+            if isinstance(snapshot_path, str) and snapshot_path in changed_sql
+            else None
+        )
+        if snapshot_path is not None and snapshot is None:
+            raise CandidateReceiptSinkError("candidate migration snapshot binding is invalid")
+        try:
+            verified = verify_migration_safety_receipt(
+                receipt,
+                candidate_commit=source_commit,
+                candidate_tree=source_tree,
+                base_commit=base_commit,
+                base_tree=base_tree,
+                migration_paths=(path,),
+                migration_source=_candidate_blob(repository, source_commit, path),
+                schema_snapshot_source=snapshot,
+            )
+        except CandidateManifestError as exc:
+            raise CandidateReceiptSinkError("candidate migration evidence is invalid") from exc
+        verified_migrations.append(verified)
+        migration_paths.add(path)
+        if verified.schema_snapshot_path is not None:
+            snapshot_paths.add(verified.schema_snapshot_path)
+    if migration_paths | snapshot_paths != set(changed_sql):
+        raise CandidateReceiptSinkError("candidate migration evidence does not cover every SQL change")
+    if database.get("migration_paths") != sorted(migration_paths) or database.get("schema_snapshot_paths") != sorted(snapshot_paths):
+        raise CandidateReceiptSinkError("candidate migration path summaries are invalid")
+    return {
+        "manifest": dict(manifest),
+        "manifest_hash": manifest_hash,
+        "base_commit": base_commit,
+        "base_tree": base_tree,
+        "focused_receipt": verified_focused,
+        "full_suite_receipt": verified_full,
+        "migration_receipts": verified_migrations,
+    }
+
+
+def _verify_rollback_manifest(
+    value: Mapping[str, Any], *, candidate: Mapping[str, Any], release_manifest: Mapping[str, Any],
+    repository: Path, source_commit: str, source_tree: str,
+) -> dict[str, Any]:
+    """Require a hash-bound rollback target equal to the selected predecessor."""
+
+    required = {
+        "schema", "candidate_commit", "candidate_tree", "candidate_manifest_hash",
+        "release_manifest_hash", "rollback_release_manifest", "manifest_hash",
+    }
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != required
+        or value.get("schema") != ROLLBACK_MANIFEST_SCHEMA
+    ):
+        raise CandidateReceiptSinkError("candidate rollback manifest schema is invalid")
+    unsigned = dict(value)
+    claimed = unsigned.pop("manifest_hash")
+    if not isinstance(claimed, str) or _SHA256.fullmatch(claimed) is None or claimed != _hash(unsigned):
+        raise CandidateReceiptSinkError("candidate rollback manifest hash is invalid")
+    if (
+        value.get("candidate_commit") != source_commit
+        or value.get("candidate_tree") != source_tree
+        or value.get("candidate_manifest_hash") != candidate["manifest_hash"]
+        or value.get("release_manifest_hash") != _hash(release_manifest)
+    ):
+        raise CandidateReceiptSinkError("candidate rollback manifest binding mismatch")
+    rollback_release = value.get("rollback_release_manifest")
+    if not isinstance(rollback_release, Mapping):
+        raise CandidateReceiptSinkError("candidate rollback release manifest is invalid")
+    try:
+        predecessor = verify_predecessor_release(
+            rollback_release, base_commit=candidate["base_commit"], base_tree=candidate["base_tree"],
+        )
+    except CandidateManifestError as exc:
+        raise CandidateReceiptSinkError("candidate rollback release manifest is invalid") from exc
+    if predecessor != candidate["manifest"]["predecessor_release"]:
+        raise CandidateReceiptSinkError("candidate rollback target does not match the selected predecessor")
+    _validate_release_manifest(
+        rollback_release, repository=repository,
+        commit=candidate["base_commit"], tree=candidate["base_tree"],
+    )
+    return dict(value)
+
+
+def verify_reviewed_candidate_evidence_bundle(
+    sink: PinnedGitReceiptSink, *, repository: Path, source_commit: str, source_tree: str,
+    plan_commit: str, independent_review_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Verify W08 evidence retained by the external sink for one candidate.
+
+    Candidate-local receipt paths are never an input.  This routine obtains a
+    complete bundle from the immutable sink, rechecks it against committed Git
+    objects, and only then accepts the review and release/rollback records.
+    """
+
+    bundle = validate_reviewed_candidate_evidence_bundle(
+        sink.fetch_object(reviewed_candidate_evidence_bundle_ref(source_commit))
+    )
+    if (
+        bundle["source_commit"] != source_commit
+        or bundle["source_tree"] != source_tree
+        or bundle["plan_commit"] != plan_commit
+    ):
+        raise CandidateReceiptSinkError("reviewed candidate evidence bundle binding mismatch")
+    artifacts = {
+        name: _bundle_artifact(sink, bundle[name])
+        for name in _REVIEWED_CANDIDATE_ARTIFACTS
+    }
+    migration_artifacts = [
+        _bundle_artifact(sink, pointer)
+        for pointer in bundle["migration_receipts"]
+    ]
+    candidate = _verify_candidate_manifest_evidence(
+        artifacts["candidate_manifest"], repository=repository,
+        source_commit=source_commit, source_tree=source_tree, plan_commit=plan_commit,
+        focused_receipt=artifacts["focused_test_receipt"],
+        full_suite_receipt=artifacts["full_suite_test_receipt"],
+        migration_receipts=migration_artifacts,
+    )
+    try:
+        review = validate_review_result(artifacts["review_packet"], artifacts["review_result"])
+    except CandidateReviewError as exc:
+        raise CandidateReceiptSinkError("candidate semantic/security review is invalid") from exc
+    if review["status"] != "PASS" or review["candidate_manifest_hash"] != candidate["manifest_hash"]:
+        raise CandidateReceiptSinkError("candidate semantic/security review did not pass")
+    if artifacts["review_result"].get("governed_review_receipt") != independent_review_receipt:
+        raise CandidateReceiptSinkError("candidate review does not use the retained independent review receipt")
+    release_manifest = _validate_release_manifest(
+        artifacts["release_manifest"], repository=repository,
+        commit=source_commit, tree=source_tree,
+    )
+    rollback_manifest = _verify_rollback_manifest(
+        artifacts["rollback_manifest"], candidate=candidate, release_manifest=release_manifest,
+        repository=repository, source_commit=source_commit, source_tree=source_tree,
+    )
+    return {
+        "candidate_manifest_hash": candidate["manifest_hash"],
+        "focused_test_receipt_hash": candidate["focused_receipt"]["receipt_hash"],
+        "full_suite_test_receipt_hash": candidate["full_suite_receipt"]["receipt_hash"],
+        "migration_receipt_hashes": sorted(receipt.receipt_hash for receipt in candidate["migration_receipts"]),
+        "review_packet_hash": review["packet_hash"],
+        "review_result_hash": review["result_hash"],
+        "release_manifest_hash": _hash(release_manifest),
+        "rollback_manifest_hash": rollback_manifest["manifest_hash"],
+        "bundle_hash": bundle["bundle_hash"],
+    }
+
+
 def verify_governed_execution_bundle(
     sink: PinnedGitReceiptSink, *, source_commit: str, source_tree: str, plan_commit: str, role: str,
 ) -> dict[str, Any]:
@@ -452,6 +894,21 @@ def candidate_admission_gate(
         governed_receipts.append(verified["receipt"])
         role_receipts.append(verified["role_receipt"])
         bundle_hashes.append(verified["bundle_hash"])
+    reviewed_candidate_evidence: dict[str, Any] | None = None
+    independent_review_receipt = next(
+        (receipt for receipt in role_receipts if receipt.get("role") == "independent-review"),
+        None,
+    )
+    if independent_review_receipt is None:
+        reasons.append("missing-or-invalid-reviewed-candidate-evidence")
+    else:
+        try:
+            reviewed_candidate_evidence = verify_reviewed_candidate_evidence_bundle(
+                sink, repository=repo, source_commit=source_commit, source_tree=source_tree,
+                plan_commit=plan_commit, independent_review_receipt=independent_review_receipt,
+            )
+        except CandidateReceiptSinkError:
+            reasons.append("missing-or-invalid-reviewed-candidate-evidence")
     role_gate: dict[str, Any] | None = None
     if len(role_receipts) == len(GOVERNED_ROLES):
         try:
@@ -471,6 +928,7 @@ def candidate_admission_gate(
         "reasons": sorted(set(reasons)),
         "governed_execution_receipt_hashes": sorted(receipt["receipt_hash"] for receipt in governed_receipts),
         "bundle_hashes": sorted(bundle_hashes),
+        "reviewed_candidate_evidence": reviewed_candidate_evidence,
         "role_gate": role_gate,
     }
     return {**unsigned, "gate_hash": _hash(unsigned)}

@@ -7,10 +7,17 @@ from pathlib import Path
 
 import pytest
 
+from tgw.candidate_manifest import (
+    build_candidate_manifest,
+    create_migration_safety_receipt,
+    create_test_receipt,
+)
 from tgw.candidate_receipt_sink import (
     GOVERNED_EXECUTION_BUNDLE_SCHEMA,
     RECEIPT_SINK_MANIFEST_SCHEMA,
     RECEIPT_SINK_SCHEMA,
+    REVIEWED_CANDIDATE_EVIDENCE_BUNDLE_SCHEMA,
+    ROLLBACK_MANIFEST_SCHEMA,
     CandidateReceiptSinkError,
     PinnedGitReceiptSink,
     candidate_admission_gate,
@@ -19,7 +26,9 @@ from tgw.candidate_receipt_sink import (
     receipt_sink_card_binding,
     receipt_sink_card_binding_content,
     resolve_approved_plan_authority,
+    reviewed_candidate_evidence_bundle_ref,
 )
+from tgw.candidate_review import PACKET_SCHEMA, RESULT_SCHEMA
 from tgw.execution_resources import (
     RESOURCE_SERVICE_CAPABILITIES,
     resource_service_catalog_hash,
@@ -53,7 +62,13 @@ def candidate_repository(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "app.py").write_text("answer = 0\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=repo, check=True)
     (repo / "app.py").write_text("answer = 42\n")
+    (repo / "src" / "migrations").mkdir(parents=True)
+    (repo / "src" / "migrations" / "001.sql").write_text("CREATE TABLE first_proof(id integer);\n")
+    (repo / "src" / "migrations" / "002.sql").write_text("CREATE TABLE second_proof(id integer);\n")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "candidate"], cwd=repo, check=True)
     return repo, git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD^{tree}")
@@ -203,9 +218,147 @@ def write_json(path, value):
     return raw
 
 
+def release_manifest(repo, commit, generation):
+    tree = git(repo, "rev-parse", f"{commit}^{{tree}}")
+    files = {
+        path: hashlib.sha256(
+            subprocess.check_output(["git", "show", f"{commit}:{path}"], cwd=repo)
+        ).hexdigest()
+        for path in git(repo, "ls-tree", "-r", "--name-only", commit).splitlines()
+    }
+    archive = subprocess.check_output(["git", "archive", "--format=tar", commit], cwd=repo)
+    content_manifest = hashlib.sha256(
+        (json.dumps(dict(sorted(files.items())), sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    return {
+        "schema": "tgw-release-manifest-v1",
+        "generation": generation,
+        "commit": commit,
+        "tree": f"exact-git-archive:{commit}",
+        "git_tree": tree,
+        "src_root": "src",
+        "archive_sha256": hashlib.sha256(archive).hexdigest(),
+        "content_manifest_sha256": content_manifest,
+        "file_count": len(files),
+        "files": files,
+    }
+
+
+def migration_receipt(repo, *, path, source_commit, source_tree, base_commit, base_tree):
+    return create_migration_safety_receipt(
+        candidate_commit=source_commit,
+        candidate_tree=source_tree,
+        base_commit=base_commit,
+        base_tree=base_tree,
+        migration_path=path,
+        migration_source=subprocess.check_output(["git", "show", f"{source_commit}:{path}"], cwd=repo),
+        postgres_version="PostgreSQL 17.10",
+        backup=f"backup:{path}".encode(),
+        source_schema=f"source-schema:{path}".encode(),
+        restored_schema=f"source-schema:{path}".encode(),
+        source_data=f"source-data:{path}".encode(),
+        restored_data=f"source-data:{path}".encode(),
+        migrated_schema=f"migrated-schema:{path}".encode(),
+        migrated_data=f"migrated-data:{path}".encode(),
+        verified=True,
+    ).__dict__
+
+
+def reviewed_candidate_evidence(
+    candidate_repo, *, source_commit, source_tree, plan_commit, independent_review_receipt,
+):
+    base_commit = git(candidate_repo, "rev-parse", f"{source_commit}^")
+    base_tree = git(candidate_repo, "rev-parse", f"{base_commit}^{{tree}}")
+    predecessor = release_manifest(candidate_repo, base_commit, "previous")
+    focused = create_test_receipt(
+        scope="focused", command=("pytest", "tests/test_governed_resource_service.py"),
+        source_commit=source_commit, source_tree=source_tree, returncode=0,
+        stdout=b"focused passed\n",
+    )
+    full = create_test_receipt(
+        scope="full", command=("pytest", "-q"), source_commit=source_commit,
+        source_tree=source_tree, returncode=0, stdout=b"full suite passed\n",
+    )
+    migrations = [
+        migration_receipt(
+            candidate_repo, path=path, source_commit=source_commit, source_tree=source_tree,
+            base_commit=base_commit, base_tree=base_tree,
+        )
+        for path in ("src/migrations/001.sql", "src/migrations/002.sql")
+    ]
+    candidate_manifest = build_candidate_manifest(
+        candidate_repo,
+        commit=source_commit,
+        base_commit=base_commit,
+        predecessor_release=predecessor,
+        plan_commit=plan_commit,
+        solution_hash="sha256:" + "1" * 64,
+        closure_hash="sha256:" + "2" * 64,
+        focused_receipt=focused,
+        full_suite_receipt=full,
+        migration_receipts=migrations,
+    )
+    review_packet_unsigned = {
+        "schema": PACKET_SCHEMA,
+        "status": "EXECUTABLE",
+        "candidate_manifest_hash": candidate_manifest["manifest_hash"],
+        "candidate_source": {
+            key: candidate_manifest["source"][key]
+            for key in ("commit", "tree", "archive_sha256")
+        },
+        "plan": candidate_manifest["plan"],
+        "snapshot": {"ref": "sink:candidate-snapshot", "hash": digest(b"candidate snapshot")},
+        "required_dimensions": ["semantic", "security"],
+        "review_contract": {
+            "schema": RESULT_SCHEMA,
+            "pass_requires": "both dimensions PASS with zero findings",
+            "source_mutation": "forbidden",
+            "authority_broadening": "forbidden",
+        },
+        "selected_provider": independent_review_receipt["selected_provider"],
+        "receiver_profile": {"id": "reviewer", "version": 1},
+        "runner_argv": ["reviewer"],
+        "hold": None,
+    }
+    review_packet = {**review_packet_unsigned, "packet_hash": object_hash(review_packet_unsigned)}
+    review_result_unsigned = {
+        "schema": RESULT_SCHEMA,
+        "packet_hash": review_packet["packet_hash"],
+        "candidate_manifest_hash": candidate_manifest["manifest_hash"],
+        "selected_provider": independent_review_receipt["selected_provider"],
+        "governed_review_receipt": independent_review_receipt,
+        "dimensions": {
+            "semantic": {"verdict": "PASS", "findings": []},
+            "security": {"verdict": "PASS", "findings": []},
+        },
+        "overall": "PASS",
+    }
+    review_result = {**review_result_unsigned, "result_hash": object_hash(review_result_unsigned)}
+    release = release_manifest(candidate_repo, source_commit, "candidate")
+    rollback_unsigned = {
+        "schema": ROLLBACK_MANIFEST_SCHEMA,
+        "candidate_commit": source_commit,
+        "candidate_tree": source_tree,
+        "candidate_manifest_hash": candidate_manifest["manifest_hash"],
+        "release_manifest_hash": object_hash(release),
+        "rollback_release_manifest": predecessor,
+    }
+    rollback = {**rollback_unsigned, "manifest_hash": object_hash(rollback_unsigned)}
+    return {
+        "candidate_manifest": candidate_manifest,
+        "focused_test_receipt": focused,
+        "full_suite_test_receipt": full,
+        "migration_receipts": migrations,
+        "review_packet": review_packet,
+        "review_result": review_result,
+        "release_manifest": release,
+        "rollback_manifest": rollback,
+    }
+
+
 def pinned_sink(
     tmp_path, *, candidate_repo, source_commit, source_tree, plan_commit,
-    corrupt_role=None, corrupt_sink_binding_role=None,
+    corrupt_role=None, corrupt_sink_binding_role=None, corrupt_w08=None,
 ):
     sink = tmp_path / "receipt-sink"
     sink.mkdir()
@@ -223,6 +376,7 @@ def pinned_sink(
     }
     card_sink_binding = receipt_sink_card_binding(descriptor_seed)
     artifacts = []
+    evidence_by_role = {}
     for role in ("implementation", "independent-review", "controller-verification"):
         evidence = role_evidence(
             role=role, source_commit=source_commit, source_tree=source_tree,
@@ -232,6 +386,7 @@ def pinned_sink(
                 if role == corrupt_sink_binding_role else card_sink_binding
             ),
         )
+        evidence_by_role[role] = evidence
         pointers = {}
         for name, value in evidence.items():
             raw = write_json(sink / "artifacts" / role / f"{name}.json", value)
@@ -254,6 +409,79 @@ def pinned_sink(
         artifacts.append({
             "ref": governed_execution_bundle_ref(source_commit, role),
             "path": f"bundles/{role}.json",
+            "content_sha256": digest(bundle_raw),
+        })
+    w08 = reviewed_candidate_evidence(
+        candidate_repo, source_commit=source_commit, source_tree=source_tree,
+        plan_commit=plan_commit,
+        independent_review_receipt=evidence_by_role["independent-review"]["role_receipt"],
+    )
+    if corrupt_w08 == "review":
+        review = w08["review_result"]
+        review_unsigned = {
+            **{key: value for key, value in review.items() if key != "result_hash"},
+            "dimensions": {
+                "semantic": {"verdict": "PASS", "findings": []},
+                "security": {
+                    "verdict": "FAIL",
+                    "findings": [{
+                        "severity": "high", "path": "app.py", "line": 1,
+                        "message": "review finding",
+                    }],
+                },
+            },
+            "overall": "FAIL",
+        }
+        w08["review_result"] = {**review_unsigned, "result_hash": object_hash(review_unsigned)}
+    if corrupt_w08 in {"focused", "full"}:
+        key = "focused_test_receipt" if corrupt_w08 == "focused" else "full_suite_test_receipt"
+        receipt = dict(w08[key])
+        receipt["command"] = ["pytest", "tests/not-the-retained-command"]
+        receipt_unsigned = {field: item for field, item in receipt.items() if field != "receipt_hash"}
+        w08[key] = {**receipt_unsigned, "receipt_hash": object_hash(receipt_unsigned)}
+    if corrupt_w08 == "release":
+        release = dict(w08["release_manifest"])
+        release["archive_sha256"] = "0" * 64
+        w08["release_manifest"] = release
+    if corrupt_w08 == "rollback":
+        rollback = dict(w08["rollback_manifest"])
+        rollback["candidate_commit"] = "0" * 40
+        rollback_unsigned = {key: value for key, value in rollback.items() if key != "manifest_hash"}
+        w08["rollback_manifest"] = {**rollback_unsigned, "manifest_hash": object_hash(rollback_unsigned)}
+    pointers = {}
+    for name, value in w08.items():
+        if name == "migration_receipts":
+            continue
+        raw = write_json(sink / "reviewed-candidate" / f"{name}.json", value)
+        ref = f"artifact:{source_commit}:w08:{name}"
+        artifacts.append({
+            "ref": ref, "path": f"reviewed-candidate/{name}.json", "content_sha256": digest(raw),
+        })
+        pointers[name] = {"ref": ref, "content_sha256": digest(raw)}
+    migration_pointers = []
+    for index, receipt in enumerate(w08["migration_receipts"], start=1):
+        raw = write_json(sink / "reviewed-candidate" / f"migration-{index}.json", receipt)
+        ref = f"artifact:{source_commit}:w08:migration-{index}"
+        artifacts.append({
+            "ref": ref, "path": f"reviewed-candidate/migration-{index}.json", "content_sha256": digest(raw),
+        })
+        migration_pointers.append({"ref": ref, "content_sha256": digest(raw)})
+    if corrupt_w08 == "migration":
+        migration_pointers = migration_pointers[:-1]
+    w08_bundle_unsigned = {
+        "schema": REVIEWED_CANDIDATE_EVIDENCE_BUNDLE_SCHEMA,
+        "source_commit": source_commit,
+        "source_tree": source_tree,
+        "plan_commit": plan_commit,
+        **pointers,
+        "migration_receipts": migration_pointers,
+    }
+    w08_bundle = {**w08_bundle_unsigned, "bundle_hash": object_hash(w08_bundle_unsigned)}
+    if corrupt_w08 != "missing":
+        bundle_raw = write_json(sink / "bundles" / "reviewed-candidate.json", w08_bundle)
+        artifacts.append({
+            "ref": reviewed_candidate_evidence_bundle_ref(source_commit),
+            "path": "bundles/reviewed-candidate.json",
             "content_sha256": digest(bundle_raw),
         })
     manifest_unsigned = {
@@ -315,6 +543,10 @@ def test_pinned_sink_gate_reads_exact_committed_artifacts_and_cli_admits(tmp_pat
         "approved_commit": plan_commit,
     }
     assert len(gate["governed_execution_receipt_hashes"]) == 3
+    assert gate["reviewed_candidate_evidence"] is not None
+    assert len(gate["reviewed_candidate_evidence"]["migration_receipt_hashes"]) == 2
+    assert gate["reviewed_candidate_evidence"]["candidate_manifest_hash"].startswith("sha256:")
+    assert gate["reviewed_candidate_evidence"]["review_result_hash"].startswith("sha256:")
     completed = subprocess.run(
         [
             sys.executable, str(ROOT / "scripts" / "admit_governed_candidate.py"),
@@ -342,7 +574,10 @@ def test_gate_holds_when_a_pinned_bundle_artifact_does_not_match(tmp_path):
     )
 
     assert gate["allowed"] is False
-    assert gate["reasons"] == ["missing-or-invalid-governed-evidence:independent-review"]
+    assert gate["reasons"] == [
+        "missing-or-invalid-governed-evidence:independent-review",
+        "missing-or-invalid-reviewed-candidate-evidence",
+    ]
 
 
 def test_gate_holds_when_any_card_uses_a_substituted_receipt_sink_binding(tmp_path):
@@ -389,7 +624,28 @@ def test_gate_holds_when_the_external_approved_plan_ref_moves(tmp_path):
         "missing-or-invalid-governed-evidence:controller-verification",
         "missing-or-invalid-governed-evidence:implementation",
         "missing-or-invalid-governed-evidence:independent-review",
+        "missing-or-invalid-reviewed-candidate-evidence",
     ]
+
+
+@pytest.mark.parametrize("corruption", ["missing", "focused", "full", "migration", "review", "release", "rollback"])
+def test_gate_requires_every_sink_retained_w08_artifact(tmp_path, corruption):
+    candidate, commit, tree = candidate_repository(tmp_path)
+    plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    _sink, config = pinned_sink(
+        tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree,
+        plan_commit=plan_commit, corrupt_w08=corruption,
+    )
+    descriptor = load_receipt_sink_descriptor(config, candidate_repository=candidate)
+
+    gate = candidate_admission_gate(
+        candidate, candidate="HEAD", plan_repository=plan_repository, plan_approved_ref=PLAN_APPROVED_REF,
+        sink=PinnedGitReceiptSink(descriptor, candidate_repository=candidate),
+    )
+
+    assert gate["allowed"] is False
+    assert gate["reasons"] == ["missing-or-invalid-reviewed-candidate-evidence"]
+    assert gate["reviewed_candidate_evidence"] is None
 
 
 def test_candidate_local_sink_configuration_or_repository_is_refused(tmp_path):

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run the fail-closed, receipt-sink-backed governed candidate admission gate."""
+"""Run the fail-closed, receipt-sink-backed governed candidate admission gate.
+
+The sink must retain both governed-role receipts and the complete W08 reviewed
+candidate bundle (tests, migration proof, semantic/security review, release,
+and rollback records).  Candidate-local paths never satisfy that requirement.
+"""
 
 from __future__ import annotations
 
@@ -40,7 +45,7 @@ def main() -> int:
         sink = PinnedGitReceiptSink(descriptor, candidate_repository=repository)
         announce_script_run(
             "admit_governed_candidate.py",
-            "verify governed candidate execution evidence from configured immutable Plan and receipt-sink roots",
+            "verify governed execution plus W08 release-candidate evidence from immutable Plan and receipt-sink roots",
             candidate=args.candidate,
             plan_repository=str(args.plan_repository),
             plan_approved_ref=args.plan_approved_ref,
