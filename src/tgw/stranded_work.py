@@ -31,6 +31,7 @@ _SEMANTIC_SURFACES = (
     "status",
 )
 _SKIPPED_DISCOVERY_DIRECTORIES = {".git", ".venv", "__pycache__", ".pytest_cache", "node_modules"}
+_ARTIFACT_EXTENSIONS = {".bundle", ".zip", ".tar", ".tgz", ".gz", ".xz", ".zst"}
 
 
 def _git(path: Path, *args: str) -> str:
@@ -279,15 +280,85 @@ def inventory_worktrees(repositories: Iterable[Path]) -> dict[str, Any]:
     return payload
 
 
+def inventory_preservation_artifacts(roots: Iterable[Path]) -> dict[str, Any]:
+    """Catalogue non-worktree evidence before any reconciliation or cleanup.
+
+    Git worktree discovery alone misses the things most likely to be stranded
+    during recovery: exported bundles, archived releases, runtime receipts,
+    and Plan/Todo material that names an execution root.  This remains
+    deliberately read-only and reports traversal failures as evidence.
+    """
+    records: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, str]] = []
+    for source_root in roots:
+        try:
+            root = source_root.resolve()
+            if not root.exists():
+                diagnostics.append({
+                    "path": str(root), "classification": "MISSING-ARTIFACT-ROOT",
+                    "error": "FileNotFoundError",
+                })
+                continue
+        except OSError as exc:
+            diagnostics.append({
+                "path": str(source_root), "classification": "INACCESSIBLE-ARTIFACT-ROOT",
+                "error": type(exc).__name__,
+            })
+            continue
+
+        def onerror(exc: OSError) -> None:
+            diagnostics.append({
+                "path": str(exc.filename or root), "classification": "INACCESSIBLE-ARTIFACT-PATH",
+                "error": type(exc).__name__,
+            })
+
+        for current, directories, files in os.walk(root, onerror=onerror):
+            directories[:] = [name for name in directories if name not in _SKIPPED_DISCOVERY_DIRECTORIES]
+            current_path = Path(current)
+            for filename in sorted(files):
+                path = current_path / filename
+                relative = path.relative_to(root).as_posix()
+                lowered = relative.casefold()
+                suffixes = "".join(path.suffixes).casefold()
+                categories: list[str] = []
+                if path.suffix.casefold() == ".bundle":
+                    categories.append("BUNDLE")
+                if (
+                    path.suffix.casefold() in _ARTIFACT_EXTENSIONS
+                    or any(token in lowered for token in ("archive", "release", "snapshot"))
+                ):
+                    categories.append("ARCHIVE_OR_RELEASE")
+                if any(token in lowered for token in ("receipt", "result", "run-manifest", "evidence")):
+                    categories.append("RUNTIME_RECEIPT")
+                if any(token in lowered for token in ("/plan/", "/todo", "todo-", "taskboard")):
+                    categories.append("PLAN_OR_TODO")
+                if not categories:
+                    continue
+                record = _file_record(path, relative)
+                record.update({"root": str(root), "categories": categories, "suffixes": suffixes})
+                records.append(record)
+    payload = {
+        "schema": "tgw-stranded-work-preservation-artifacts/v1",
+        "records": sorted(records, key=lambda item: (item["root"], item["path"])),
+        "diagnostics": sorted(diagnostics, key=lambda item: (item["path"], item["classification"])),
+    }
+    payload["inventory_sha256"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return payload
+
+
 def inventory_environment(roots: Iterable[Path]) -> dict[str, Any]:
     roots = tuple(roots)
     repositories, discovery_diagnostics = discover_repositories_with_diagnostics(roots)
     worktree_inventory = inventory_worktrees(repositories)
+    artifact_inventory = inventory_preservation_artifacts(roots)
     payload = {
         "schema": "tgw-stranded-work-environment/v1",
         "roots": [str(path.resolve()) for path in roots],
         "repositories": [inspect_repository(path) for path in repositories],
         "worktrees": worktree_inventory["worktrees"],
+        "preservation_artifacts": artifact_inventory,
         "discovery_diagnostics": discovery_diagnostics,
         "summary": {
             "repository_count": len(repositories),
@@ -304,6 +375,8 @@ def inventory_environment(roots: Iterable[Path]) -> dict[str, Any]:
                 item["classification"] == "EVIDENCE-RESIDUE"
                 for item in worktree_inventory["worktrees"]
             ),
+            "preservation_artifact_count": len(artifact_inventory["records"]),
+            "artifact_diagnostic_count": len(artifact_inventory["diagnostics"]),
         },
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

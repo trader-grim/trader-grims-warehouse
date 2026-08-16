@@ -7,6 +7,7 @@ from tgw.stranded_work import (
     inspect_repository,
     inspect_worktree,
     inventory_environment,
+    inventory_preservation_artifacts,
     inventory_worktrees,
 )
 
@@ -106,6 +107,8 @@ def test_environment_inventory_discovers_nested_repository(tmp_path: Path):
         "stranded_work_count": 0,
         "inaccessible_worktree_count": 0,
         "evidence_residue_count": 0,
+        "preservation_artifact_count": 0,
+        "artifact_diagnostic_count": 0,
     }
 
 
@@ -168,3 +171,21 @@ def test_discovery_reports_missing_roots_and_semantic_surfaces(tmp_path: Path):
     assert all(worktree["semantic_inventory"][surface] for surface in (
         "request", "display", "decision", "execute", "receipt", "status",
     ))
+
+
+def test_preservation_artifact_inventory_keeps_bundle_archive_receipt_and_plan_todo(tmp_path: Path):
+    (tmp_path / "recovery.bundle").write_text("bundle\n")
+    (tmp_path / "releases").mkdir()
+    (tmp_path / "releases" / "release-a.tar.gz").write_text("release\n")
+    (tmp_path / "runtime-receipt.json").write_text("{}\n")
+    (tmp_path / "plan").mkdir()
+    (tmp_path / "plan" / "TODO-1721.md").write_text("reconcile\n")
+
+    inventory = inventory_preservation_artifacts([tmp_path])
+    by_path = {item["path"]: item["categories"] for item in inventory["records"]}
+
+    assert by_path["recovery.bundle"] == ["BUNDLE", "ARCHIVE_OR_RELEASE"]
+    assert "ARCHIVE_OR_RELEASE" in by_path["releases/release-a.tar.gz"]
+    assert by_path["runtime-receipt.json"] == ["RUNTIME_RECEIPT"]
+    assert by_path["plan/TODO-1721.md"] == ["PLAN_OR_TODO"]
+    assert inventory["inventory_sha256"]
