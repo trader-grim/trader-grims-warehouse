@@ -76,6 +76,8 @@ def test_installation_catalog_does_not_confuse_skill_and_provider_status():
     )
     harnesses = {item["id"]: item for item in value["harnesses"]}
     assert harnesses["codex"]["automated_provider"] == "codex-isolated-review-runner"
+    assert harnesses["claude"]["interactive_review"] == "available"
+    assert harnesses["claude"]["model_authentication"] == "configured"
     assert harnesses["claude"]["automated_provider"] == "unavailable-no-admitted-runner"
     assert harnesses["hermes"]["automated_provider"] == "unregistered"
     assert harnesses["hermes"]["context_mcp"] == "configured"

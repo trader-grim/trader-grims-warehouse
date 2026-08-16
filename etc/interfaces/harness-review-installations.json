@@ -18,8 +18,9 @@
       "id": "claude",
       "account": "claude",
       "skill_destination": ".claude/skills",
-      "interactive_review": "available-after-login",
+      "interactive_review": "available",
       "automated_provider": "unavailable-no-admitted-runner",
+      "model_authentication": "configured",
       "context_mcp": "configured",
       "production_inventory_mcp": "configured"
     },
