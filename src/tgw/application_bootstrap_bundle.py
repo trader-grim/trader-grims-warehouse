@@ -73,6 +73,8 @@ def _bundle_from_archive(archive: bytes) -> tuple[bytes, str, str, bytes]:
                 path = Path(member.name)
                 if path.is_absolute() or ".." in path.parts or member.issym() or member.islnk():
                     raise ControllerBundleError("controller source archive contains an unsafe entry")
+                if path.suffix in {".pyc", ".pyo"} or "__pycache__" in path.parts:
+                    raise ControllerBundleError("controller source archive contains bytecode")
                 if member.name == PROJECTION_PATH:
                     extracted = source.extractfile(member)
                     if extracted is None:

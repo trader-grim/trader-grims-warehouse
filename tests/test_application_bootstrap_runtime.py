@@ -92,6 +92,7 @@ def _real_launcher_build(
     binding_path: Path,
     stem: str = "real",
     occupied_output: bool = False,
+    occupied_cwd: bool = False,
 ) -> dict:
     compiler = Path(shutil.which("cc")).resolve()
     tracer = Path(shutil.which("strace")).resolve()
@@ -122,6 +123,10 @@ def _real_launcher_build(
         output_root=environment_root,
         trusted_uid=os.getuid(),
     )
+    if occupied_cwd:
+        neighbor = scratch / "ambient-neighbor"
+        neighbor.write_bytes(b"not admitted by the build receipt")
+        neighbor.chmod(0o400)
     build_root = _protected_dir(tmp_path / f"{stem}-build")
     if occupied_output:
         output_name = (
@@ -205,6 +210,25 @@ def test_real_launcher_build_producer_pins_discovered_environment_and_static_out
     )
     assert build["launcher"]["elf"]["pt_interp"] is None
     assert build["launcher"]["elf"]["needed"] == []
+    environment_receipt = json.loads(
+        Path(build["build_environment"]["path"]).read_text()
+    )
+    assert environment_receipt["cwd"]["path"] == environment_receipt["environment"]["TMPDIR"]
+    assert "$SCRATCH" in environment_receipt["accesses"]
+
+
+def test_real_launcher_build_rejects_cwd_changed_after_environment_issue(tmp_path):
+    source_binding, source = _real_launcher_source_receipt(tmp_path)
+    with pytest.raises(runtime.ControllerRuntimeError, match="build cwd"):
+        _real_launcher_build(
+            tmp_path,
+            source_binding=source_binding,
+            source=source,
+            binding_path=Path("/etc/tgw/w09-controller-runtime.fds"),
+            stem="changed-cwd",
+            occupied_cwd=True,
+        )
+    assert list((tmp_path / "changed-cwd-build").iterdir()) == []
 
 
 def test_real_launcher_build_rejects_source_swap_after_compiler_use(
@@ -409,6 +433,24 @@ def test_materializer_removes_prior_outputs_when_later_atomic_write_fails(
     assert list(fixture["output"].iterdir()) == []
 
 
+def test_materializer_rejects_bytecode_in_native_file_inputs(tmp_path):
+    fixture = _fixture(tmp_path)
+    bytecode = tmp_path / "neighbor.pyc"
+    bytecode.write_bytes(b"preexisting bytecode")
+    bytecode.chmod(0o400)
+    with pytest.raises(runtime.ControllerRuntimeError, match="contains bytecode"):
+        runtime.materialize_controller_runtime(
+            controller_source_receipt=fixture["source"],
+            launcher_build_receipt=fixture["build"],
+            python_path=fixture["python"],
+            native_files=[*fixture["native"], bytecode],
+            runtime_trees=[fixture["tree"]],
+            import_roots=[fixture["tree"]],
+            output_root=fixture["output"],
+            trusted_uid=os.getuid(),
+        )
+
+
 def _native_python_closure(python: Path, extra_files=()):
     paths = {python, *map(Path, extra_files)}
     for executable in tuple(paths):
@@ -487,12 +529,21 @@ def test_actual_controller_bundle_imports_under_compiled_held_runtime(tmp_path):
     shutil.copy2(cffi_backend, site / cffi_backend.name)
     for bytecode in site.rglob("*.py[co]"):
         bytecode.unlink()
+    for cache in sorted(site.rglob("__pycache__"), reverse=True):
+        cache.rmdir()
     for item in sorted(site.rglob("*"), reverse=True):
         if not item.is_symlink():
             item.chmod(0o500 if item.is_dir() else 0o400)
     site.chmod(0o500)
     stdlib = Path(f"/usr/lib/python{sys.version_info.major}.{sys.version_info.minor}")
-    runtime_files = [path for path in stdlib.rglob("*") if path.is_file() and not path.is_symlink()]
+    runtime_files = [
+        path
+        for path in stdlib.rglob("*")
+        if path.is_file()
+        and not path.is_symlink()
+        and path.suffix not in {".pyc", ".pyo"}
+        and "__pycache__" not in path.parts
+    ]
     runtime_files.extend(path for path in site.rglob("*") if path.is_file() and path.suffix == ".so")
     native_closure = _native_python_closure(python, runtime_files)
 

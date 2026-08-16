@@ -965,6 +965,7 @@ def _run_held_bounded(
     timeout: int,
     limit: int,
     env: Mapping[str, str] | None = None,
+    cwd: str | None = None,
 ) -> tuple[int, bytes, bytes]:
     process = subprocess.Popen(
         argv,
@@ -974,6 +975,7 @@ def _run_held_bounded(
         start_new_session=True,
         pass_fds=pass_fds,
         env=None if env is None else dict(env),
+        cwd=cwd,
     )
     failure: Exception | None = None
     try:

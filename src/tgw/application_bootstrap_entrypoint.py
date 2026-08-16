@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import mmap
 import os
 import re
 import stat
@@ -249,6 +250,11 @@ def _tree_digest(root: Path, *, trusted_uid: int, trusted_gid: int) -> str:
         if count > 100_000:
             raise ValueError("controller runtime tree exceeds its entry bound")
         relative = path.relative_to(root).as_posix()
+        if (
+            path.suffix in {".pyc", ".pyo"}
+            or "__pycache__" in path.relative_to(root).parts
+        ):
+            raise ValueError("controller runtime tree contains bytecode")
         item = os.lstat(path)
         if (
             item.st_uid != trusted_uid
@@ -565,7 +571,12 @@ def _hold_controller_runtime(
         ):
             raise ValueError("controller runtime manifest hash/schema is invalid")
         paths = [item.get("path") if isinstance(item, Mapping) else None for item in manifest["files"]]
-        if any(not isinstance(path, str) for path in paths):
+        if any(
+            not isinstance(path, str)
+            or Path(path).suffix in {".pyc", ".pyo"}
+            or "__pycache__" in Path(path).parts
+            for path in paths
+        ):
             raise ValueError("controller runtime file set is invalid")
         if paths != sorted(set(paths)):
             raise ValueError("controller runtime file set is invalid")
@@ -817,17 +828,21 @@ def _revalidate_controller_runtime(
         if location.startswith(sys.argv[0] + "/"):
             continue
         cached = getattr(module, "__cached__", None)
-        if location.endswith((".pyc", ".pyo")):
-            loaded.add(str(Path(location).resolve(strict=True)))
-            continue
-        if isinstance(cached, str) and Path(cached).exists():
-            loaded.add(str(Path(cached).resolve(strict=True)))
+        if location.endswith((".pyc", ".pyo")) or (
+            isinstance(cached, str) and Path(cached).exists()
+        ):
+            raise OSError("controller imported bytecode")
         loaded.add(str(Path(location).resolve(strict=True)))
     roots = [Path(item["path"]).resolve(strict=True) for item in manifest["trees"]]
+    held_mapping_identities = _held_mapping_identities(
+        manifest,
+        artifacts,
+    )
     mapped = _mapped_runtime_identity(
         Path("/proc/self/maps").read_text(encoding="utf-8"),
         allowed_bindings=allowed_bindings,
         roots=roots,
+        expected_identities=held_mapping_identities,
     )
     unexpected = {
         path
@@ -879,7 +894,7 @@ def _mapped_runtime_identity(
     *,
     allowed_bindings: Mapping[str, Mapping[str, Any]],
     roots: list[Path],
-    map_files_root: Path | None = None,
+    expected_identities: Mapping[str, tuple[int, int]] | None = None,
 ) -> dict[str, tuple[int, int]]:
     mapped: dict[str, tuple[int, int]] = {}
     for line in maps_raw.splitlines():
@@ -894,32 +909,21 @@ def _mapped_runtime_identity(
                 raise OSError("controller native mapping identity is invalid") from exc
             resolved = str(Path(fields[5]).resolve(strict=True))
             identity = (os.makedev(major, minor), inode)
-            if map_files_root is not None:
-                try:
-                    if resolved == str(Path("/proc/self/exe").resolve(strict=True)):
-                        mapped_metadata = os.stat("/proc/self/exe", follow_symlinks=True)
-                    else:
-                        mapped_metadata = os.stat(
-                            map_files_root / fields[0],
-                            follow_symlinks=True,
-                        )
-                except OSError as exc:
-                    raise OSError(
-                        "controller map_files identity is unavailable: "
-                        + fields[0]
-                        + ":"
-                        + resolved
-                    ) from exc
-                identity = (mapped_metadata.st_dev, mapped_metadata.st_ino)
             prior = mapped.setdefault(resolved, identity)
             if prior != identity:
                 raise OSError("controller native mapping path has multiple identities")
             binding = allowed_bindings.get(resolved)
-            if binding is not None and identity[1] != binding["ino"]:
+            expected = (
+                expected_identities.get(resolved)
+                if expected_identities is not None
+                else ((binding["dev"], binding["ino"]) if binding is not None else None)
+            )
+            if binding is not None and identity != expected:
                 raise OSError(
-                    "controller native mapping differs from its held manifest inode: "
+                    "controller native mapping differs from its held file mapping: "
                     + resolved
-                    + f":{identity[1]}!={binding['ino']}"
+                    + ":sha256:"
+                    + sha256(_canonical([identity, expected])).hexdigest()
                 )
     mapped_tree_neighbors = {
         path
@@ -930,6 +934,55 @@ def _mapped_runtime_identity(
     if mapped_tree_neighbors:
         raise OSError("controller mapped an unbound native neighbor from an import root")
     return mapped
+
+
+def _held_mapping_identities(
+    manifest: Mapping[str, Any],
+    artifacts: list[tuple[Path, int, bytes, tuple[int, ...]]],
+) -> dict[str, tuple[int, int]]:
+    """Learn map-device identities by mapping the already-held exact FDs."""
+
+    bindings = {
+        str(Path(item["path"]).resolve(strict=True)): item
+        for item in manifest["files"]
+    }
+    descriptors = {}
+    for path, fd, raw, identity in artifacts:
+        resolved = str(path.resolve(strict=True))
+        binding = bindings.get(resolved)
+        if (
+            binding is not None
+            and raw
+            and identity[0] == binding["dev"]
+            and identity[1] == binding["ino"]
+        ):
+            descriptors.setdefault(resolved, fd)
+    if set(descriptors) != {path for path, item in bindings.items() if item["size"] > 0}:
+        raise OSError("controller held mapping closure is incomplete")
+    probes = []
+    try:
+        for path in sorted(descriptors):
+            probes.append(mmap.mmap(descriptors[path], 1, access=mmap.ACCESS_READ))
+        raw = Path("/proc/self/maps").read_text(encoding="utf-8")
+        observed: dict[str, set[tuple[int, int]]] = {path: set() for path in descriptors}
+        for line in raw.splitlines():
+            fields = line.split(maxsplit=5)
+            if len(fields) != 6 or not fields[5].startswith("/") or fields[5].endswith(" (deleted)"):
+                continue
+            resolved = str(Path(fields[5]).resolve(strict=True))
+            if resolved not in observed:
+                continue
+            major, minor = (int(value, 16) for value in fields[3].split(":", 1))
+            observed[resolved].add((os.makedev(major, minor), int(fields[4])))
+        if any(len(identities) != 1 for identities in observed.values()):
+            raise OSError("controller held file did not produce one exact mapping identity")
+        result = {path: next(iter(identities)) for path, identities in observed.items()}
+        if any(result[path][1] != bindings[path]["ino"] for path in result):
+            raise OSError("controller held map inode differs from held file")
+        return result
+    finally:
+        for probe in reversed(probes):
+            probe.close()
 
 
 def _held_import_roots(
@@ -1338,6 +1391,7 @@ def _isolated_runtime() -> bool:
         bool(sys.flags.isolated)
         and bool(sys.flags.dont_write_bytecode)
         and bool(sys.flags.no_site)
+        and sys.pycache_prefix == "/proc/self/fd/2147483647"
         and "PYTHONPATH" not in os.environ
     )
 

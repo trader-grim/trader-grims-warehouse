@@ -48,6 +48,7 @@ def _validate_build_environment(value: Mapping[str, Any]) -> dict[str, Any]:
         "schema",
         "compiler",
         "tracer",
+        "cwd",
         "inputs",
         "accesses",
         "discovery_trace_sha256",
@@ -57,8 +58,10 @@ def _validate_build_environment(value: Mapping[str, Any]) -> dict[str, Any]:
     }:
         raise ControllerRuntimeError("controller build environment schema is not exact")
     binding_fields = {"path", "sha256", "dev", "ino", "uid", "gid", "mode", "nlink", "size"}
+    directory_binding_fields = binding_fields | {"mtime_ns", "ctime_ns"}
     compiler = value.get("compiler")
     tracer = value.get("tracer")
+    cwd = value.get("cwd")
     inputs = value.get("inputs")
     accesses = value.get("accesses")
     environment = value.get("environment")
@@ -67,6 +70,9 @@ def _validate_build_environment(value: Mapping[str, Any]) -> dict[str, Any]:
         or set(compiler) != binding_fields
         or not isinstance(tracer, Mapping)
         or set(tracer) != binding_fields
+        or not isinstance(cwd, Mapping)
+        or set(cwd) != directory_binding_fields
+        or cwd.get("mode") != 0o700
         or not isinstance(inputs, list)
         or any(not isinstance(item, Mapping) or set(item) != binding_fields for item in inputs)
         or inputs != sorted(inputs, key=lambda item: str(item["path"]))
@@ -79,6 +85,7 @@ def _validate_build_environment(value: Mapping[str, Any]) -> dict[str, Any]:
         or set(environment) != {"PATH", "LANG", "LC_ALL", "TMPDIR"}
         or environment["LANG"] != "C"
         or environment["LC_ALL"] != "C"
+        or cwd.get("path") != environment["TMPDIR"]
         or value.get("closure_sha256") != _digest(_canonical(inputs))
     ):
         raise ControllerRuntimeError("controller build environment content is invalid")
@@ -93,6 +100,7 @@ def _run_build_trace(
     output_path: str,
     binding_path: str,
     environment: Mapping[str, str],
+    cwd_fd: int,
     extra_fds: Sequence[int] = (),
 ) -> tuple[bytes, bytes, list[str]]:
     from tgw.a3_preintegration_observation import _run_held_bounded
@@ -121,10 +129,11 @@ def _run_build_trace(
     ]
     returncode, stdout, stderr = _run_held_bounded(
         command,
-        pass_fds=tuple({tracer_fd, compiler_fd, source_fd, *extra_fds}),
+        pass_fds=tuple({tracer_fd, compiler_fd, source_fd, cwd_fd, *extra_fds}),
         timeout=120,
         limit=16 * 1024 * 1024,
         env=environment,
+        cwd=f"/proc/{os.getpid()}/fd/{cwd_fd}",
     )
     if returncode != 0:
         raise ControllerRuntimeError("controller launcher compiler trace failed")
@@ -300,6 +309,20 @@ def discover_launcher_build_inputs(
     output_created = False
     output_name = "launcher-discovery"
     try:
+        if (
+            set(environment) != {"PATH", "LANG", "LC_ALL", "TMPDIR"}
+            or environment["LANG"] != "C"
+            or environment["LC_ALL"] != "C"
+        ):
+            raise ControllerRuntimeError("controller build environment is not exact")
+        scratch, scratch_fd = _binding(
+            Path(environment["TMPDIR"]),
+            directory=True,
+            trusted_uid=trusted_uid,
+        )
+        held.append(scratch_fd)
+        if scratch["mode"] != 0o700 or any(Path(environment["TMPDIR"]).iterdir()):
+            raise ControllerRuntimeError("controller build cwd is not protected and empty")
         _source, source_fd = _binding(
             launcher_source,
             directory=False,
@@ -334,6 +357,7 @@ def discover_launcher_build_inputs(
             output_path=output_path,
             binding_path=str(binding_path),
             environment=environment,
+            cwd_fd=scratch_fd,
             extra_fds=(output_fd,),
         )
         excluded = {
@@ -346,6 +370,9 @@ def discover_launcher_build_inputs(
             scratch=Path(environment["TMPDIR"]),
             excluded=excluded,
         )
+        if any(Path(environment["TMPDIR"]).iterdir()):
+            raise ControllerRuntimeError("controller build cwd retained compiler outputs")
+        _postcheck_binding(scratch, scratch_fd, directory=True)
         return {
             "inputs": inputs,
             "accesses": accesses,
@@ -415,6 +442,7 @@ def issue_build_environment_manifest(
             "schema": BUILD_ENVIRONMENT_SCHEMA,
             "compiler": compiler,
             "tracer": tracer,
+            "cwd": scratch,
             "inputs": inputs,
             "accesses": discovered_accesses,
             "discovery_trace_sha256": discovery["trace_sha256"],
@@ -425,6 +453,7 @@ def issue_build_environment_manifest(
         root_fd, _identity = _open_protected_root(Path(output_root), trusted_uid)
         name = "build-environment-" + receipt["receipt_sha256"].removeprefix("sha256:") + ".json"
         identity = _write_once(root_fd, name, _canonical(receipt), 0o400)
+        _postcheck_binding(scratch, scratch_fd, directory=True)
         return {
             **receipt,
             "path": str(Path(output_root) / name),
@@ -503,6 +532,8 @@ def produce_launcher_build(
         )
         held.append(scratch_fd)
         postchecks.append((scratch, scratch_fd, True))
+        if scratch != build_environment.get("cwd"):
+            raise ControllerRuntimeError("controller build cwd differs from its receipt")
         if scratch["mode"] != 0o700 or any(Path(environment["TMPDIR"]).iterdir()):
             raise ControllerRuntimeError("controller build scratch is not protected and empty")
         compiler_binding = build_environment["compiler"]
@@ -562,6 +593,7 @@ def produce_launcher_build(
             output_path=output_proc,
             binding_path=str(binding_path),
             environment=environment,
+            cwd_fd=scratch_fd,
             extra_fds=(output_fd,),
         )
         output_path = Path(output_root) / output_name
@@ -608,10 +640,11 @@ def produce_launcher_build(
 
         version_rc, version_stdout, version_stderr = _run_held_bounded(
             [f"/proc/self/fd/{compiler_fd}", "--version"],
-            pass_fds=(compiler_fd,),
+            pass_fds=(compiler_fd, scratch_fd),
             timeout=10,
             limit=64 * 1024,
             env=environment,
+            cwd=f"/proc/{os.getpid()}/fd/{scratch_fd}",
         )
         if version_rc != 0:
             raise ControllerRuntimeError("controller compiler version probe failed")
@@ -969,6 +1002,11 @@ def materialize_controller_runtime(
             raise ControllerRuntimeError("controller bundle differs from source receipt")
 
         paths = sorted(set([Path(python_path), *map(Path, native_files)]), key=str)
+        if any(
+            path.suffix in {".pyc", ".pyo"} or "__pycache__" in path.parts
+            for path in paths
+        ):
+            raise ControllerRuntimeError("controller native file closure contains bytecode")
         file_bindings: list[dict[str, Any]] = []
         raw_by_path: dict[str, bytes] = {}
         for path in paths:
@@ -983,17 +1021,17 @@ def materialize_controller_runtime(
 
         tree_bindings: list[dict[str, Any]] = []
         for path in sorted(set(map(Path, runtime_trees)), key=str):
-            if any(
-                item.is_file() and item.suffix in {".pyc", ".pyo"}
-                for item in path.rglob("*")
-            ):
-                raise ControllerRuntimeError("controller runtime tree contains unbound bytecode")
             binding, fd = _binding(path, directory=True, trusted_uid=trusted_uid)
             held.append(fd)
             tree_bindings.append(binding)
         tree_paths = [item["path"] for item in tree_bindings]
         admitted_imports = sorted(set(map(str, import_roots)))
-        if any(path not in tree_paths for path in admitted_imports):
+        if any(
+            path not in tree_paths
+            or Path(path).suffix in {".pyc", ".pyo"}
+            or "__pycache__" in Path(path).parts
+            for path in admitted_imports
+        ):
             raise ControllerRuntimeError("controller import root is outside runtime trees")
 
         unsigned_manifest = {

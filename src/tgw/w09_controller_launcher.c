@@ -332,6 +332,8 @@ int main(int argc, char **argv) {
         (char *)"python3",
         (char *)"-I",
         (char *)"-B",
+        (char *)"-X",
+        (char *)"pycache_prefix=/proc/self/fd/2147483647",
         (char *)"-S",
         bundle_argument,
         NULL,

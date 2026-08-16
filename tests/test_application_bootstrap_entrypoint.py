@@ -51,11 +51,17 @@ def _tree_binding(path: Path):
     }
 
 
-def _maps_line(path: Path, *, inode: int | None = None) -> str:
+def _maps_line(
+    path: Path,
+    *,
+    inode: int | None = None,
+    device: int | None = None,
+) -> str:
     metadata = path.stat()
+    mapped_device = metadata.st_dev if device is None else device
     return (
         "7f000000-7f001000 r-xp 00000000 "
-        f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x} "
+        f"{os.major(mapped_device):02x}:{os.minor(mapped_device):02x} "
         f"{metadata.st_ino if inode is None else inode} {path}\n"
     )
 
@@ -65,12 +71,28 @@ def test_mapped_runtime_rejects_same_bytes_at_a_new_inode(tmp_path):
     admitted.write_bytes(b"same bytes")
     admitted.chmod(0o400)
     binding = _binding(admitted)
-    with pytest.raises(OSError, match="held manifest inode"):
+    with pytest.raises(OSError, match="held file mapping"):
         entrypoint._mapped_runtime_identity(
             _maps_line(admitted, inode=admitted.stat().st_ino + 1),
             allowed_bindings={str(admitted.resolve()): binding},
             roots=[],
-            map_files_root=None,
+        )
+
+
+def test_mapped_runtime_rejects_same_inode_at_a_different_device(tmp_path):
+    admitted = tmp_path / "admitted.so"
+    admitted.write_bytes(b"same inode evidence")
+    admitted.chmod(0o400)
+    binding = _binding(admitted)
+    different_device = os.makedev(
+        os.major(admitted.stat().st_dev) + 1,
+        os.minor(admitted.stat().st_dev),
+    )
+    with pytest.raises(OSError, match="held file mapping"):
+        entrypoint._mapped_runtime_identity(
+            _maps_line(admitted, device=different_device),
+            allowed_bindings={str(admitted.resolve()): binding},
+            roots=[],
         )
 
 
@@ -86,7 +108,23 @@ def test_mapped_runtime_rejects_unbound_neighbor_inside_import_root(tmp_path):
             _maps_line(neighbor),
             allowed_bindings={},
             roots=[root.resolve()],
-            map_files_root=None,
+        )
+
+
+def test_runtime_tree_rejects_preexisting_bytecode_before_import(tmp_path):
+    root = tmp_path / "site"
+    cache = root / "__pycache__"
+    cache.mkdir(parents=True)
+    bytecode = cache / "neighbor.cpython-313.pyc"
+    bytecode.write_bytes(b"preexisting bytecode")
+    bytecode.chmod(0o400)
+    cache.chmod(0o500)
+    root.chmod(0o500)
+    with pytest.raises(ValueError, match="contains bytecode"):
+        entrypoint._tree_digest(
+            root,
+            trusted_uid=os.getuid(),
+            trusted_gid=os.getgid(),
         )
 
 

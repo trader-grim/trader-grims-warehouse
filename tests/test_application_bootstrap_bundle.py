@@ -28,7 +28,7 @@ REQUIRED = (
 )
 
 
-def _archive(*, unsafe=False):
+def _archive(*, unsafe=False, bytecode=False):
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:") as archive:
         entries = {
@@ -38,6 +38,8 @@ def _archive(*, unsafe=False):
         }
         if unsafe:
             entries["../escape.py"] = b"neighbor"
+        if bytecode:
+            entries["src/tgw/__pycache__/neighbor.pyc"] = b"bytecode"
         for name, raw in entries.items():
             info = tarfile.TarInfo(name)
             info.size = len(raw)
@@ -64,6 +66,11 @@ def test_controller_bundle_is_deterministic_source_only_and_projection_bound():
 def test_controller_bundle_rejects_archive_traversal_before_materialization():
     with pytest.raises(ControllerBundleError, match="unsafe entry"):
         _bundle_from_archive(_archive(unsafe=True))
+
+
+def test_controller_bundle_rejects_preexisting_bytecode():
+    with pytest.raises(ControllerBundleError, match="contains bytecode"):
+        _bundle_from_archive(_archive(bytecode=True))
 
 
 def test_write_once_removes_partial_file_after_short_write(tmp_path, monkeypatch):
