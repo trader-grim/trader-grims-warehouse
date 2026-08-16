@@ -7,13 +7,20 @@ references were fetched and checked before the handoff was created.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlsplit
+from urllib.request import Request, urlopen
 
 RESOURCE_RECEIPT_SCHEMA = "tgw-execution-resource-receipt/v1"
+RESOURCE_SERVICE_SCHEMA = "tgw-registered-resource-service/v1"
+RESOURCE_RESPONSE_SCHEMA = "tgw-registered-resource/v1"
 CARD_RESOURCE_NAMES = frozenset(
     {
         "plan_input",
@@ -27,6 +34,9 @@ CARD_RESOURCE_NAMES = frozenset(
     }
 )
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_SERVICE_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
+_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
+_MAX_RESOURCE_RESPONSE_BYTES = 4 * 1024 * 1024
 
 
 class ResourceVerificationError(ValueError):
@@ -109,6 +119,108 @@ class RegisteredResourceResolver:
             return self._resources[ref]
         except KeyError as exc:
             raise ResourceVerificationError(f"registered resource is unavailable: {ref}") from exc
+
+
+class HTTPRegisteredResourceResolver:
+    """Retrieve raw content from one explicitly registered HTTP resource service.
+
+    The service has no authority to assert a content hash: the resolver
+    computes it from the returned bytes and compares it to the immutable card.
+    This adapter accepts only the small versioned response contract below and
+    rejects redirects, unregistered service identities, malformed base64, and
+    transport failures before a launcher can be reached.
+    """
+
+    def __init__(
+        self, *, service_id: str, endpoint: str, credential: str | None = None,
+        timeout_seconds: int = 15,
+    ) -> None:
+        if not isinstance(service_id, str) or _SERVICE_ID.fullmatch(service_id) is None:
+            raise ResourceVerificationError("registered resource service id is invalid")
+        if not isinstance(endpoint, str):
+            raise ResourceVerificationError("registered resource service endpoint is invalid")
+        parsed = urlsplit(endpoint)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.query
+            or parsed.fragment
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ResourceVerificationError("registered resource service endpoint is invalid")
+        if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= 60:
+            raise ResourceVerificationError("registered resource service timeout is invalid")
+        if credential is not None and (not isinstance(credential, str) or not credential):
+            raise ResourceVerificationError("registered resource service credential is invalid")
+        self._service_id = service_id
+        self._endpoint = endpoint.rstrip("/")
+        self._credential = credential
+        self._timeout_seconds = timeout_seconds
+
+    @classmethod
+    def from_descriptor(
+        cls, descriptor: Mapping[str, Any], *, environment: Mapping[str, str] | None = None,
+    ) -> "HTTPRegisteredResourceResolver":
+        required = {"schema", "id", "endpoint", "credential_env", "timeout_seconds"}
+        if not isinstance(descriptor, Mapping) or set(descriptor) != required:
+            raise ResourceVerificationError("registered resource service descriptor is invalid")
+        if descriptor["schema"] != RESOURCE_SERVICE_SCHEMA:
+            raise ResourceVerificationError("registered resource service descriptor schema is invalid")
+        credential_env = descriptor["credential_env"]
+        credential = None
+        if credential_env is not None:
+            if not isinstance(credential_env, str) or _ENV_NAME.fullmatch(credential_env) is None:
+                raise ResourceVerificationError("registered resource service credential environment is invalid")
+            values = os.environ if environment is None else environment
+            credential = values.get(credential_env)
+            if not credential:
+                raise ResourceVerificationError("registered resource service credential is unavailable")
+        return cls(
+            service_id=descriptor["id"],
+            endpoint=descriptor["endpoint"],
+            credential=credential,
+            timeout_seconds=descriptor["timeout_seconds"],
+        )
+
+    def fetch(self, ref: str) -> RegisteredResource:
+        if not isinstance(ref, str) or not ref:
+            raise ResourceVerificationError("registered resource reference is invalid")
+        target = self._endpoint + "/v1/resources/" + quote(ref, safe="")
+        request = Request(target, method="GET")
+        request.add_header("Accept", "application/json")
+        if self._credential is not None:
+            request.add_header("Authorization", f"Bearer {self._credential}")
+        try:
+            with urlopen(request, timeout=self._timeout_seconds) as response:  # nosec: descriptor is an explicit registered service
+                if response.geturl() != target:
+                    raise ResourceVerificationError("registered resource service redirected request")
+                content_type = response.headers.get_content_type()
+                if content_type != "application/json":
+                    raise ResourceVerificationError("registered resource service response type is invalid")
+                payload = response.read(_MAX_RESOURCE_RESPONSE_BYTES + 1)
+        except ResourceVerificationError:
+            raise
+        except (HTTPError, URLError, OSError) as exc:
+            raise ResourceVerificationError("registered resource service request failed") from exc
+        if len(payload) > _MAX_RESOURCE_RESPONSE_BYTES:
+            raise ResourceVerificationError("registered resource service response is too large")
+        try:
+            value = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ResourceVerificationError("registered resource service response is not JSON") from exc
+        required = {"schema", "service_id", "ref", "content_base64"}
+        if not isinstance(value, Mapping) or set(value) != required:
+            raise ResourceVerificationError("registered resource service response contract is invalid")
+        if value["schema"] != RESOURCE_RESPONSE_SCHEMA or value["service_id"] != self._service_id:
+            raise ResourceVerificationError("registered resource service response identity is invalid")
+        if value["ref"] != ref or not isinstance(value["content_base64"], str):
+            raise ResourceVerificationError("registered resource service response binding is invalid")
+        try:
+            content = base64.b64decode(value["content_base64"], validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ResourceVerificationError("registered resource service content encoding is invalid") from exc
+        return RegisteredResource.from_bytes(content)
 
 
 def _binding(value: Any, name: str) -> tuple[str, str]:
