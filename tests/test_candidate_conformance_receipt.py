@@ -1,16 +1,18 @@
 import hashlib
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from tgw.candidate_manifest import (
     CandidateManifestError,
     build_candidate_manifest,
+    create_luet_conformance_receipt,
     create_test_receipt,
     graph_hash,
 )
-from tgw.plan_luet import LUET_REVISION, LUET_VERSION, PROVIDER_ID
+from tgw.plan_luet import LUET_REVISION, LUET_VERSION, PINNED_LUET_BINARY_SHA256, PROVIDER_ID, normalize_conformance_graph
 
 
 def _repo(tmp_path):
@@ -36,9 +38,10 @@ def _receipt(graph, commit, tree):
         "provider_id": PROVIDER_ID,
         "luet_version": LUET_VERSION,
         "luet_revision": LUET_REVISION,
-        "binary_sha256": "sha256:" + "b" * 64,
+        "binary_sha256": PINNED_LUET_BINARY_SHA256,
         "plan_commit": "plan",
-        "graph_hash": graph_hash(graph),
+        "input_graph_hash": graph_hash(graph),
+        "graph_hash": graph_hash(normalize_conformance_graph(graph)),
         "closure_hash": "sha256:closure",
         "source_commit": commit,
         "source_tree": tree,
@@ -49,7 +52,7 @@ def _receipt(graph, commit, tree):
     return value
 
 
-def _manifest(repo, commit, graph, receipt=None):
+def _manifest(repo, commit, graph, receipt=None, *, plan_commit="plan"):
     tree = subprocess.check_output(["git", "rev-parse", f"{commit}^{{tree}}"], cwd=repo, text=True).strip()
     base = subprocess.check_output(["git", "rev-parse", f"{commit}^"], cwd=repo, text=True).strip()
     base_tree = subprocess.check_output(["git", "rev-parse", f"{base}^{{tree}}"], cwd=repo, text=True).strip()
@@ -61,7 +64,7 @@ def _manifest(repo, commit, graph, receipt=None):
             "schema": "tgw-release-manifest-v1", "generation": "previous",
             "commit": base, "git_tree": base_tree, "archive_sha256": "a" * 64,
         },
-        plan_commit="plan",
+        plan_commit=plan_commit,
         solution_hash="sha256:solution",
         closure_hash="sha256:closure",
         focused_receipt=create_test_receipt(
@@ -86,7 +89,28 @@ def test_persisted_pinned_receipt_enables_candidate_without_live_luet(tmp_path):
     assert manifest["dispatchable"] is True
 
 
-@pytest.mark.parametrize("field", ["plan_commit", "graph_hash", "closure_hash", "source_commit", "source_tree", "luet_revision"])
+def test_catalog_input_round_trips_from_luet_receipt_to_candidate_manifest(tmp_path):
+    repo, _base, commit, tree = _repo(tmp_path)
+    catalog = json.loads(
+        (Path(__file__).resolve().parents[1] / "agent-services/catalogs/governed-execution-platform-v1.json").read_text()
+    )
+    receipt = create_luet_conformance_receipt(
+        {
+            "provider_id": PROVIDER_ID, "available": True, "status": "AGREEMENT",
+            "closure_hash": "sha256:closure", "selected_providers": ["fixture"],
+        },
+        graph=catalog, plan_commit=catalog["plan_commit"], source_commit=commit,
+        source_tree=tree, binary_sha256=PINNED_LUET_BINARY_SHA256,
+    )
+    manifest = _manifest(
+        repo, commit, catalog, receipt, plan_commit=catalog["plan_commit"],
+    )
+    assert receipt["input_graph_hash"] == graph_hash(catalog)
+    assert receipt["graph_hash"] == graph_hash(normalize_conformance_graph(catalog))
+    assert manifest["conformance"]["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize("field", ["plan_commit", "input_graph_hash", "graph_hash", "closure_hash", "source_commit", "source_tree", "luet_revision"])
 def test_stale_or_unpinned_receipt_is_rejected(tmp_path, field):
     repo, _base, commit, tree = _repo(tmp_path)
     graph = {"schema": "tgw-plan/v2", "plan_commit": "plan"}

@@ -24,10 +24,70 @@ from tgw.plan_solver import CapabilityGraph, PlanResolutionError, Requirement, s
 LUET_VERSION = "0.9.26"
 LUET_REVISION = "48f17dbc7a9edb94b1415a2eeeac4e5c2d45f5d3"
 PROVIDER_ID = f"luet-pinned-{LUET_VERSION}@1"
+PINNED_LUET_BINARY_SHA256 = "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87"
 _VERSION = "1.0"
 _PROVIDER_CATEGORY = "tgw-provider"
 _CAPABILITY_CATEGORY = "tgw-capability"
 _SELECTOR_CATEGORY = "tgw-selector"
+
+
+def normalize_conformance_graph(document: Mapping[str, Any]) -> dict[str, Any]:
+    """Canonicalize a checked-in provider catalog to the solver graph shape.
+
+    The raw catalog remains an immutable input identity.  This conversion is
+    shared by receipt production and verification so neither side can silently
+    hash a different representation of the same declared fixture.
+    """
+    if not isinstance(document, Mapping):
+        raise ValueError("Luet conformance graph must be a JSON object")
+    if document.get("schema") == "tgw-plan/v2":
+        return dict(document)
+    required = {
+        "schema", "id", "plan_id", "plan_commit", "profiles", "capabilities",
+        "providers", "observations",
+    }
+    if document.get("schema") != "tgw-plan-provider-catalog/v1" or set(document) != required:
+        raise ValueError("Luet conformance input is neither a capability graph nor provider catalog")
+    profiles = document["profiles"]
+    if not isinstance(profiles, Mapping) or set(profiles) != {"production"}:
+        raise ValueError("provider catalog lacks the production profile")
+    production = profiles["production"]
+    if not isinstance(production, Mapping) or set(production) != {"minimum_state"}:
+        raise ValueError("provider catalog production profile is invalid")
+    capabilities = document["capabilities"]
+    if not isinstance(capabilities, list) or not all(isinstance(item, str) and item for item in capabilities):
+        raise ValueError("provider catalog capabilities are invalid")
+    return {
+        **document,
+        "schema": "tgw-plan/v2",
+        "target": {
+            "id": document["plan_id"],
+            "profile": "production",
+            "minimum_state": production["minimum_state"],
+            "required_capabilities": capabilities,
+        },
+    }
+
+
+def pinned_luet_binary_sha256(binary: Path | str) -> str:
+    """Return the executable content identity, rejecting a non-file input."""
+    target = Path(binary)
+    if not target.is_file() or not os.access(target, os.X_OK):
+        raise ValueError(f"pinned Luet binary is not an executable file: {target}")
+    return "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest()
+
+
+def verify_pinned_luet_binary(binary: Path | str) -> str:
+    """Fail before resolution if the explicitly supplied Luet is not the pin."""
+    observed = pinned_luet_binary_sha256(binary)
+    if observed != PINNED_LUET_BINARY_SHA256:
+        raise ValueError("Luet binary does not match the pinned executable hash")
+    version = subprocess.run(
+        [str(binary), "--version"], check=False, capture_output=True, text=True, timeout=10,
+    )
+    if version.returncode or f"luet version {LUET_VERSION}" not in (version.stdout + version.stderr).lower():
+        raise ValueError("Luet binary does not report the pinned version")
+    return observed
 
 
 def _package_name(identity: str) -> str:

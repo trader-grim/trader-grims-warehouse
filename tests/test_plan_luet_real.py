@@ -16,14 +16,13 @@ from typing import Any
 
 import pytest
 
-from tgw.plan_luet import LUET_VERSION, conform
+from tgw.plan_luet import LUET_VERSION, PINNED_LUET_BINARY_SHA256, conform
 from tgw.plan_solver import solve
 
 pytestmark = pytest.mark.real_luet
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
-PINNED_LUET_BINARY_SHA256 = "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87"
 
 
 @pytest.fixture(scope="module")
