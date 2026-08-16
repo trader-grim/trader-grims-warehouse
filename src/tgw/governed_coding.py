@@ -108,7 +108,6 @@ def dispatch_role(
     independent_from: Sequence[str] = (),
     resource_resolver: ResourceResolver | None = None,
     resource_service: Mapping[str, Any] | None = None,
-    require_harness_retrieval_attestation: bool = False,
     run: Run = subprocess.run,
 ) -> dict[str, Any]:
     """Select, adapt, execute, and bind one role result to an immutable receipt."""
@@ -222,28 +221,27 @@ def dispatch_role(
     allowed = _ROLE_CONDITIONS[role]
     attestation_hash: str | None = None
     attestation_error: str | None = None
-    if require_harness_retrieval_attestation:
-        if not isinstance(resource_resolver, HTTPRegisteredResourceResolver):
-            attestation_error = "registered resource resolver cannot verify harness retrieval attestation"
-        elif harness_retrieval_attestation is None:
-            attestation_error = "runner did not return a service-issued retrieval attestation"
-        else:
-            try:
-                verified_attestation = resource_resolver.verify_harness_retrieval_attestation(
-                    harness_retrieval_attestation,
-                    card_hash=card["card_hash"], role=role,
-                    execution_identity=execution_identity, handoff_hash=handoff["handoff_hash"],
-                    resource_receipt_hash=resource_receipt["receipt_hash"], resources=card["bindings"],
-                )
-                attestation_hash = str(verified_attestation["attestation_hash"])
-            except ResourceVerificationError as exc:
-                attestation_error = str(exc)
+    if not isinstance(resource_resolver, HTTPRegisteredResourceResolver):
+        attestation_error = "registered resource resolver cannot verify harness retrieval attestation"
+    elif harness_retrieval_attestation is None:
+        attestation_error = "runner did not return a service-issued retrieval attestation"
+    else:
+        try:
+            verified_attestation = resource_resolver.verify_harness_retrieval_attestation(
+                harness_retrieval_attestation,
+                card_hash=card["card_hash"], role=role,
+                execution_identity=execution_identity, handoff_hash=handoff["handoff_hash"],
+                resource_receipt_hash=resource_receipt["receipt_hash"], resources=card["bindings"],
+            )
+            attestation_hash = str(verified_attestation["attestation_hash"])
+        except ResourceVerificationError as exc:
+            attestation_error = str(exc)
     valid_success = (
         outcome == "satisfied"
         and _ROLE_REQUIRED[role] <= set(established)
         and set(established) <= allowed
         and harness_resource_receipt_hash == resource_receipt["receipt_hash"]
-        and (not require_harness_retrieval_attestation or attestation_hash is not None)
+        and attestation_hash is not None
     )
     if not valid_success:
         established = []
@@ -267,6 +265,7 @@ def dispatch_role(
             "resource_receipt_hash": resource_receipt["receipt_hash"],
             "harness_resource_receipt_hash": harness_resource_receipt_hash,
             "harness_retrieval_attestation_hash": attestation_hash,
+            "harness_retrieval_attestation": harness_retrieval_attestation,
             "resource_service_descriptor_hash": resource_service_descriptor_hash(verified_service),
             "outcome": outcome,
             "established_conditions": established,
@@ -288,6 +287,7 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
         "HOLD",
     }:
         raise GovernedCodingError("governed coding receipt contract is invalid")
+    attestation = receipt.get("harness_retrieval_attestation")
     if receipt.get("status") == "PASS" and (
         not isinstance(receipt.get("selected_provider"), str)
         or not isinstance(receipt.get("card_hash"), str)
@@ -295,10 +295,9 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
         or not isinstance(receipt.get("resource_receipt_hash"), str)
         or receipt.get("harness_resource_receipt_hash") != receipt.get("resource_receipt_hash")
         or not isinstance(receipt.get("resource_service_descriptor_hash"), str)
-        or (
-            receipt.get("harness_retrieval_attestation_hash") is not None
-            and not isinstance(receipt.get("harness_retrieval_attestation_hash"), str)
-        )
+        or not isinstance(receipt.get("harness_retrieval_attestation_hash"), str)
+        or not isinstance(attestation, Mapping)
+        or attestation.get("attestation_hash") != receipt.get("harness_retrieval_attestation_hash")
         or not _ROLE_REQUIRED[str(receipt["role"])]
         <= set(receipt.get("established_conditions", ()))
     ):

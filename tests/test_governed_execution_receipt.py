@@ -100,6 +100,7 @@ def role_receipt(card_value, resource_value):
         "resource_receipt_hash": resource_value["receipt_hash"],
         "harness_resource_receipt_hash": resource_value["receipt_hash"],
         "harness_retrieval_attestation_hash": "sha256:" + "d" * 64,
+        "harness_retrieval_attestation": {"attestation_hash": "sha256:" + "d" * 64},
         "resource_service_descriptor_hash": canonical_hash(RESOURCE_SERVICE),
         "outcome": "satisfied",
         "established_conditions": ["implemented"],

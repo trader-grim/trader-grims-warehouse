@@ -98,6 +98,8 @@ def governed_receipt(packet_value, *, passed):
         "promptcraft_receipt_hash": "sha256:promptcraft",
         "resource_receipt_hash": "sha256:resources",
         "harness_resource_receipt_hash": "sha256:resources",
+        "harness_retrieval_attestation_hash": "sha256:" + "a" * 64,
+        "harness_retrieval_attestation": {"attestation_hash": "sha256:" + "a" * 64},
         "resource_service_descriptor_hash": "sha256:service",
         "outcome": "satisfied" if passed else "failed",
         "established_conditions": ["reviewed"] if passed else [],

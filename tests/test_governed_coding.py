@@ -1,7 +1,7 @@
 import hashlib
 from pathlib import Path
 
-from tgw.execution_resources import RegisteredResourceResolver
+from tgw.execution_resources import HTTPRegisteredResourceResolver, RegisteredResourceResolver, ResourceVerificationError
 from tgw.governed_coding import admission_gate, dispatch_role
 from tgw.harness_registry import load_registry, observe_health
 
@@ -25,6 +25,27 @@ RESOURCE_SERVICE = {
     "credential_env": None,
     "timeout_seconds": 5,
 }
+TEST_ATTESTATION_HASH = "sha256:" + "a" * 64
+
+
+class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
+    """Inject a narrow in-process verifier for role-selection unit tests.
+
+    Real service attestation and its echo-only rejection are exercised against
+    HTTP in ``test_governed_resource_service``.  These tests isolate provider
+    selection and gate behavior while retaining the mandatory dispatcher seam.
+    """
+
+    def __init__(self) -> None:
+        self._delegate = RegisteredResourceResolver(RESOURCE_CONTENT)
+
+    def fetch(self, ref):
+        return self._delegate.fetch(ref)
+
+    def verify_harness_retrieval_attestation(self, attestation, **_kwargs):
+        if attestation != {"attestation_hash": TEST_ATTESTATION_HASH}:
+            raise ResourceVerificationError("test retrieval attestation is invalid")
+        return dict(attestation)
 
 
 def service_hash():
@@ -44,11 +65,14 @@ def runner(path: Path, *, fail_review=False, overclaim=False):
         f"overclaim={overclaim!r}\n"
         "conditions={'implementation':['implemented'],'independent-review':['reviewed'],'controller-verification':['tested','linted','controller_verified']}[role]\n"
         "resource_receipt_hash=handoff['resource_receipt']['receipt_hash']\n"
+        "attestation={'attestation_hash':'sha256:" + "a" * 64 + "'}\n"
         "if overclaim and role=='implementation': conditions=['reviewed']\n"
         "if fail_review and role=='independent-review':\n"
-        " result={'outcome':'failed','established_conditions':[],'artifacts':[{'kind':'review','verdict':'FAIL'}],'resource_receipt_hash':resource_receipt_hash}\n"
+        " result={'outcome':'failed','established_conditions':[],'artifacts':[{'kind':'review','verdict':'FAIL'}],\n"
+        " 'resource_receipt_hash':resource_receipt_hash,'resource_retrieval_attestation':attestation}\n"
         "else:\n"
-        " result={'outcome':'satisfied','established_conditions':conditions,'artifacts':[{'kind':'runner','role':role}],'resource_receipt_hash':resource_receipt_hash}\n"
+        " result={'outcome':'satisfied','established_conditions':conditions,'artifacts':[{'kind':'runner','role':role}],\n"
+        " 'resource_receipt_hash':resource_receipt_hash,'resource_retrieval_attestation':attestation}\n"
         "print(json.dumps(result))\n"
     )
     path.chmod(0o755)
@@ -93,7 +117,7 @@ def card_template(card_id):
 
 
 def resource_resolver():
-    return RegisteredResourceResolver(RESOURCE_CONTENT)
+    return UnitAttestedResourceResolver()
 
 
 def setup(tmp_path, *, fail_review=False, overclaim=False):

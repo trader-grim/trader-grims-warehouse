@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from tgw.execution_resources import RegisteredResource, RegisteredResourceResolver
+from tgw.execution_resources import (
+    HTTPRegisteredResourceResolver,
+    RegisteredResource,
+    RegisteredResourceResolver,
+    ResourceVerificationError,
+)
 from tgw.governed_coding import admission_gate, dispatch_role
 from tgw.harness_registry import load_registry, observe_health
 from tgw.review_runner import run_review, snapshot_hash
@@ -24,6 +29,7 @@ RESOURCE_SERVICE = {
     "credential_env": None,
     "timeout_seconds": 5,
 }
+TEST_ATTESTATION_HASH = "sha256:" + "a" * 64
 
 
 def snapshot(tmp_path):
@@ -88,19 +94,34 @@ def handoff(source):
     )
 
 
+class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
+    """Unit seam for non-review role selection; live attestation uses HTTP."""
+
+    def __init__(self, source):
+        self._delegate = RegisteredResourceResolver(
+            {
+                "plan:p": "plan input",
+                "plan-commit:fb9": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+                "graph:g": "plan graph",
+                "code:c": "code graph",
+                source.resolve().as_uri(): RegisteredResource(source, snapshot_hash),
+                "env:e": "environment",
+                "auth:a": "authority and conditions",
+                "receipt:r": "receipt sink",
+            }
+        )
+
+    def fetch(self, ref):
+        return self._delegate.fetch(ref)
+
+    def verify_harness_retrieval_attestation(self, attestation, **_kwargs):
+        if attestation != {"attestation_hash": TEST_ATTESTATION_HASH}:
+            raise ResourceVerificationError("test retrieval attestation is invalid")
+        return dict(attestation)
+
+
 def resource_resolver(source):
-    return RegisteredResourceResolver(
-        {
-            "plan:p": "plan input",
-            "plan-commit:fb9": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
-            "graph:g": "plan graph",
-            "code:c": "code graph",
-            source.resolve().as_uri(): RegisteredResource(source, snapshot_hash),
-            "env:e": "environment",
-            "auth:a": "authority and conditions",
-            "receipt:r": "receipt sink",
-        }
-    )
+    return UnitAttestedResourceResolver(source)
 
 
 def backend(path, verdict="PASS", mutate=False):
@@ -305,13 +326,14 @@ def simple_runner(path):
         "'controller-verification':['controller_verified']}[r]\n"
         "print(json.dumps({'outcome':'satisfied',"
         "'established_conditions':c,'artifacts':[],"
-        "'resource_receipt_hash':h['resource_receipt']['receipt_hash']}))\n"
+        "'resource_receipt_hash':h['resource_receipt']['receipt_hash'],"
+        "'resource_retrieval_attestation':{'attestation_hash':'sha256:" + "a" * 64 + "'}}))\n"
     )
     path.chmod(0o755)
     return str(path)
 
 
-def test_same_vendor_different_isolated_context_is_admissible(tmp_path):
+def test_unattested_isolated_review_cannot_admit_even_with_distinct_context(tmp_path):
     source = snapshot(tmp_path)
     registry = load_registry(ROOT / "agent-services/catalogs/harness-providers-v1.json")
     provider = backend(tmp_path / "review-provider")
@@ -353,8 +375,9 @@ def test_same_vendor_different_isolated_context_is_admissible(tmp_path):
     assert providers[implementation["selected_provider"]]["vendor_family"] == "codex"
     assert providers[review["selected_provider"]]["vendor_family"] == "codex"
     assert implementation["execution_identity"] != review["execution_identity"]
-    assert review["status"] == "PASS", json.dumps(review, indent=2)
-    assert admission_gate([implementation, review, controller])["allowed"] is True
+    assert review["status"] == "FAIL", json.dumps(review, indent=2)
+    assert "did not return a service-issued retrieval attestation" in review["artifacts"][-1]["detail"]
+    assert admission_gate([implementation, review, controller])["allowed"] is False
 
 
 def test_failed_isolated_review_blocks_governed_admission(tmp_path):

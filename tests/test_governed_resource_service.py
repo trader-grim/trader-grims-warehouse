@@ -358,7 +358,6 @@ def test_every_role_retrieves_card_bound_sources_from_the_qualified_service(tmp_
                 required_capabilities=capabilities,
                 resource_resolver=resolver,
                 resource_service=service,
-                require_harness_retrieval_attestation=True,
             )
             for role, capabilities in (
                 ("implementation", ["source-mutation"]),
@@ -385,7 +384,6 @@ def test_every_role_retrieves_card_bound_sources_from_the_qualified_service(tmp_
             required_capabilities=["source-mutation"],
             resource_resolver=resolver,
             resource_service=service,
-            require_harness_retrieval_attestation=True,
         )
 
     assert [receipt["status"] for receipt in receipts] == ["PASS", "PASS", "PASS"]

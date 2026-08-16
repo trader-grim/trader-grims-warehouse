@@ -85,7 +85,6 @@ def main() -> int:
             independent_from=args.independent_from,
             resource_resolver=resolver,
             resource_service=resource_service,
-            require_harness_retrieval_attestation=True,
         )
         print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
         return 0 if receipt["status"] == "PASS" else 2
