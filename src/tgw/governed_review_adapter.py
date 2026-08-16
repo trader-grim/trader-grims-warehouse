@@ -35,7 +35,8 @@ from tgw.execution_resources import (
     resource_service_descriptor_hash,
     validate_harness_retrieval_attestation,
 )
-from tgw.review_runner import ReviewRunnerError, _validate_report
+from tgw.review_contract import ReviewRunnerError
+from tgw.review_contract import validate_review_report as _validate_report
 
 EXECUTION_SCHEMA = "tgw-governed-review-execution/v1"
 IDENTITY_SCHEMA = "tgw-governed-review-provider-identity/v1"
