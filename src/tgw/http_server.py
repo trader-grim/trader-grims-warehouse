@@ -46,8 +46,9 @@ from .ebay.draft_specifics import is_envelope as _is_ebay_draft_envelope
 from .ebay.inventory_diff import apply_inventory_diff, diff_ebay_draft_to_inventory
 from .item_mutation import item_generation
 from .items import _archive_before_overwrite, atomic_write_json, create_item, locationupdate
-from .operator_console_host import configured_console_mount
+from .operator_console_host import configured_authority_principal, configured_console_mount
 from .operator_console_plugin import mount_operator_console
+from .plan_authority import AuthorityPrincipal, PrincipalRole
 from .queue import state_machine
 from .readiness import check_ebay, readiness_html
 from .resolver import load_item_doc
@@ -336,7 +337,42 @@ def _require_auth(
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
 
 
-def _require_plan_executor(request: Request) -> str:
+def _configured_authority_principal(field: str, role: PrincipalRole, binding: str) -> AuthorityPrincipal:
+    """Construct an authority principal from server configuration only."""
+    try:
+        return configured_authority_principal(
+            _cfg, field=field, role=role, authentication_binding=binding,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"named Plan authority {role.value} principal is not configured",
+        ) from exc
+
+
+def _require_plan_operator(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(_security),
+    request: Request = None,
+) -> AuthorityPrincipal:
+    """Map an authenticated API key or web session to one named operator.
+
+    Authentication mechanism labels are not durable operator identities.  The
+    host must explicitly bind each accepted mechanism to a configured named
+    principal before any authority mutation or console read can occur.
+    """
+    mechanism = _require_auth(credentials, request)
+    if mechanism == "operator:api-key":
+        return _configured_authority_principal(
+            "plan_authority_operator_api_principal", PrincipalRole.OPERATOR, "api-key",
+        )
+    if mechanism == "operator:web-session":
+        return _configured_authority_principal(
+            "plan_authority_operator_session_principal", PrincipalRole.OPERATOR, "web-session",
+        )
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid Plan authority operator")
+
+
+def _require_plan_executor(request: Request) -> AuthorityPrincipal:
     """Authenticate a dedicated effect executor, never an operator session.
 
     Operator credentials may request/decide and inspect authority.  They cannot
@@ -346,18 +382,19 @@ def _require_plan_executor(request: Request) -> str:
     """
     reference = _cfg.get("plan_authority_executor_credential_env")
     supplied = request.headers.get("X-TGW-Executor-Authorization", "")
-    identity = request.headers.get("X-TGW-Executor-Identity", "")
     expected = os.environ.get(reference) if isinstance(reference, str) else None
     if (
         not expected
-        or not identity
-        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}", identity)
         or not supplied.startswith("Bearer ")
     ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid Plan authority executor")
     if not secrets.compare_digest(supplied.removeprefix("Bearer ").encode(), expected.encode()):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid Plan authority executor")
-    return f"executor:{identity}"
+    if request.headers.get("X-TGW-Executor-Identity"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="client-supplied executor identity is forbidden")
+    return _configured_authority_principal(
+        "plan_authority_executor_principal", PrincipalRole.EXECUTOR, f"credential-env:{reference}",
+    )
 
 
 AUTH = Depends(_require_auth)
@@ -368,7 +405,7 @@ mount_operator_console(
     app,
     configured_console_mount(
         lambda: _cfg,
-        require_operator=_require_auth,
+        require_operator=_require_plan_operator,
         require_executor=_require_plan_executor,
     ),
 )

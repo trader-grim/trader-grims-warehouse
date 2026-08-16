@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS plan_authority_effect_receipts (
     effect_hash text NOT NULL,
     effect_generation text NOT NULL,
     handler_id text,
+    -- Every new execution attempt has a configured server-derived named
+    -- executor.  Legacy rows remain nullable so migration does not invent
+    -- provenance that was never authenticated.
+    executor_principal text,
     -- Retained solely for safe migration/read compatibility with v1 receipts.
     consumed_at timestamptz,
     started_at timestamptz NOT NULL DEFAULT NOW(),
@@ -65,6 +69,8 @@ ALTER TABLE plan_authority_effect_receipts
     DROP CONSTRAINT IF EXISTS plan_authority_effect_receipts_request_id_key;
 ALTER TABLE plan_authority_effect_receipts
     ADD COLUMN IF NOT EXISTS handler_id text;
+ALTER TABLE plan_authority_effect_receipts
+    ADD COLUMN IF NOT EXISTS executor_principal text;
 ALTER TABLE plan_authority_effect_receipts
     ADD COLUMN IF NOT EXISTS started_at timestamptz;
 ALTER TABLE plan_authority_effect_receipts

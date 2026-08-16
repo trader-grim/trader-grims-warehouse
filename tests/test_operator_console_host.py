@@ -8,11 +8,13 @@ from fastapi.testclient import TestClient
 from tgw.operator_console_host import (
     DEFAULT_PLAN_ROOT,
     ConfiguredAuthorityStore,
+    configured_authority_principal,
     configured_console_mount,
     current_plan_commit,
     load_solution,
     plan_root,
 )
+from tgw.plan_authority import AuthorityPrincipal, PrincipalRole
 
 
 def _plan(tmp_path: Path) -> tuple[Path, str]:
@@ -108,10 +110,10 @@ def test_configured_mount_is_late_bound_and_reuses_auth_functions():
     config = {}
 
     def operator():
-        return "operator"
+        return AuthorityPrincipal("operator:fixture-alice", PrincipalRole.OPERATOR, "test-session")
 
     def executor():
-        return "executor"
+        return AuthorityPrincipal("executor:fixture-runner", PrincipalRole.EXECUTOR, "test-credential")
     mount = configured_console_mount(
         lambda: config, require_operator=operator, require_executor=executor,
     )
@@ -121,6 +123,22 @@ def test_configured_mount_is_late_bound_and_reuses_auth_functions():
     assert mount.execute_effect is not None
     with pytest.raises(RuntimeError, match="not configured"):
         mount.store.list()
+
+
+def test_configured_host_principals_are_named_role_bound_and_fail_closed():
+    operator = configured_authority_principal(
+        {"plan_authority_operator_session_principal": "operator:alice"},
+        field="plan_authority_operator_session_principal",
+        role=PrincipalRole.OPERATOR,
+        authentication_binding="web-session",
+    )
+    assert operator.identity == "operator:alice"
+    assert operator.authentication_binding == "web-session"
+    with pytest.raises(RuntimeError, match="not configured"):
+        configured_authority_principal(
+            {}, field="plan_authority_executor_principal",
+            role=PrincipalRole.EXECUTOR, authentication_binding="credential-env:TEST",
+        )
 
 
 def test_canonical_http_app_mounts_console_and_refuses_unpinned_docs():

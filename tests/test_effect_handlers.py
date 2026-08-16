@@ -12,6 +12,7 @@ DIGEST = "c" * 64
 BOOTSTRAP_REF = f"candidate:{SHA}:bootstrap-deployment:v1"
 BOOTSTRAP_HASH = "sha256:" + "d" * 64
 BOOTSTRAP_GENERATION = "candidate-release"
+EXECUTOR = "executor:fixture-runner"
 
 
 class _AuthorityStore:
@@ -83,11 +84,12 @@ def test_registered_effects_consume_exact_authority_then_invoke_only_their_handl
     generation = BOOTSTRAP_GENERATION if kind == "approval-platform-bootstrap-deployment" else "generation-2"
     effect = TypedEffect.parse({"kind": kind, "generation": generation, "parameters": parameters})
 
-    receipt = AuthorityEffectController(registry, authority).execute(request_id="request:1", effect=effect)
+    receipt = AuthorityEffectController(registry, authority).execute(request_id="request:1", effect=effect, executor_principal=EXECUTOR)
 
     authority.begin_execution.assert_called_once_with(
         "request:1", effect_hash=effect.effect_hash, generation=generation,
         handler_id=receipt.handler_id,
+        executor_principal=EXECUTOR,
     )
     authority.complete_execution.assert_called_once_with(
         "authority:1", outcome="succeeded", evidence=receipt.evidence,
@@ -95,6 +97,7 @@ def test_registered_effects_consume_exact_authority_then_invoke_only_their_handl
     )
     assert receipt.outcome is EffectOutcome.SUCCEEDED
     assert receipt.effect_hash == effect.effect_hash
+    assert receipt.executor_principal == EXECUTOR
     assert receipt.receipt_hash.startswith("sha256:")
     handler_id, _, _, _ = registry.prepare(effect)
     assert receipt.handler_id == handler_id
@@ -129,7 +132,7 @@ def test_arbitrary_commands_hosts_paths_and_queues_fail_before_authority_consume
     authority = _AuthorityStore()
     with pytest.raises(ValueError):
         parsed = TypedEffect.parse(effect)
-        AuthorityEffectController(registry, authority).execute(request_id="request:1", effect=parsed)
+        AuthorityEffectController(registry, authority).execute(request_id="request:1", effect=parsed, executor_principal=EXECUTOR)
     authority.begin_execution.assert_not_called()
 
 
@@ -143,7 +146,7 @@ def test_retry_and_ambiguity_emit_distinct_receipts(exception, outcome):
     effect = TypedEffect.parse({"kind": "dependency-resubmit", "generation": "g2", "parameters": {"dependency_id": "W", "queue_id": "coding", "failed_generation": "g1"}})
     authority = _AuthorityStore(receipt_id="a")
 
-    receipt = AuthorityEffectController(registry, authority).execute(request_id="r", effect=effect)
+    receipt = AuthorityEffectController(registry, authority).execute(request_id="r", effect=effect, executor_principal=EXECUTOR)
 
     assert receipt.outcome is outcome
     assert str(exception) in receipt.detail
@@ -175,7 +178,7 @@ def test_release_failure_invokes_only_registered_rollback_and_receipts_it():
     )
 
     authority = _AuthorityStore()
-    receipt = AuthorityEffectController(registry, authority).execute(request_id="request:1", effect=effect)
+    receipt = AuthorityEffectController(registry, authority).execute(request_id="request:1", effect=effect, executor_principal=EXECUTOR)
 
     assert receipt.outcome is EffectOutcome.ROLLED_BACK
     assert receipt.rollback_receipt == "rollback:exact"
@@ -191,7 +194,7 @@ def test_authority_rejection_prevents_handler_invocation():
     effect = TypedEffect.parse({"kind": "dependency-resubmit", "generation": "g2", "parameters": {"dependency_id": "W", "queue_id": "coding", "failed_generation": "g1"}})
 
     with pytest.raises(ValueError, match="already executing"):
-        AuthorityEffectController(registry, _AuthorityStore(begin_error=ValueError("already executing"))).execute(request_id="r", effect=effect)
+        AuthorityEffectController(registry, _AuthorityStore(begin_error=ValueError("already executing"))).execute(request_id="r", effect=effect, executor_principal=EXECUTOR)
     assert all(provider.call_count == 0 for provider in providers.values())
 
 
@@ -202,7 +205,7 @@ def test_authority_canary_is_internal_receipt_only_and_cannot_broaden_purpose():
         "kind": "authority-canary", "generation": "w10-canary-1",
         "parameters": {"canary_id": "canary:w10-1", "purpose": "verify-plan-authority-roundtrip"},
     })
-    receipt = AuthorityEffectController(registry, authority).execute(request_id="request:canary", effect=effect)
+    receipt = AuthorityEffectController(registry, authority).execute(request_id="request:canary", effect=effect, executor_principal=EXECUTOR)
     assert receipt.outcome is EffectOutcome.SUCCEEDED
     assert receipt.handler_id == "authority-canary-receipt-only@1"
     assert receipt.evidence[0].startswith("authority-canary:sha256:")
@@ -213,7 +216,7 @@ def test_authority_canary_is_internal_receipt_only_and_cannot_broaden_purpose():
         "parameters": {"canary_id": "canary:w10-2", "purpose": "deploy-platform"},
     })
     with pytest.raises(ValueError, match="harmless registered bound"):
-        AuthorityEffectController(registry, authority).execute(request_id="request:bad", effect=broadened)
+        AuthorityEffectController(registry, authority).execute(request_id="request:bad", effect=broadened, executor_principal=EXECUTOR)
     assert authority.begin_execution.call_count == 1
 
 
@@ -229,13 +232,16 @@ def test_bootstrap_effect_rejects_host_path_command_digest_and_cas_broadening_be
     for change in changes:
         effect = {"kind": "approval-platform-bootstrap-deployment", "generation": BOOTSTRAP_GENERATION, "parameters": {**base, **change}}
         with pytest.raises(ValueError):
-            AuthorityEffectController(registry, authority).execute(request_id="bootstrap", effect=TypedEffect.parse(effect))
+            AuthorityEffectController(registry, authority).execute(
+                request_id="bootstrap", effect=TypedEffect.parse(effect), executor_principal=EXECUTOR,
+            )
     with pytest.raises(ValueError, match="does not match"):
         AuthorityEffectController(registry, authority).execute(
             request_id="bootstrap",
             effect=TypedEffect.parse({
                 "kind": "approval-platform-bootstrap-deployment", "generation": "wrong-generation", "parameters": base,
             }),
+            executor_principal=EXECUTOR,
         )
     authority.begin_execution.assert_not_called()
 
@@ -249,7 +255,7 @@ def test_bootstrap_provider_failure_rolls_back_only_registered_prior_closure():
         "kind": "approval-platform-bootstrap-deployment", "generation": BOOTSTRAP_GENERATION, "parameters": parameters,
     })
     authority = _AuthorityStore(receipt_id="bootstrap:attempt")
-    receipt = AuthorityEffectController(registry, authority).execute(request_id="bootstrap", effect=effect)
+    receipt = AuthorityEffectController(registry, authority).execute(request_id="bootstrap", effect=effect, executor_principal=EXECUTOR)
     assert receipt.outcome is EffectOutcome.ROLLED_BACK
     assert receipt.rollback_receipt == "nixos:prior-closure-restored"
     rollback.assert_called_once_with(parameters)
@@ -265,6 +271,7 @@ def test_bootstrap_dry_run_provider_receives_only_a_verified_immutable_contract_
             "kind": "approval-platform-bootstrap-deployment", "generation": BOOTSTRAP_GENERATION,
             "parameters": parameters,
         }),
+        executor_principal=EXECUTOR,
     )
 
     assert receipt.outcome is EffectOutcome.SUCCEEDED
@@ -280,5 +287,7 @@ def test_bootstrap_effect_without_an_exact_contract_resolver_holds_before_author
     })
 
     with pytest.raises(ValueError, match="resolver is not mounted"):
-        AuthorityEffectController(registry, authority).execute(request_id="bootstrap:unmounted", effect=effect)
+        AuthorityEffectController(registry, authority).execute(
+            request_id="bootstrap:unmounted", effect=effect, executor_principal=EXECUTOR,
+        )
     authority.begin_execution.assert_not_called()

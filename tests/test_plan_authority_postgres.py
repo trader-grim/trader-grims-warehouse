@@ -15,11 +15,13 @@ import psycopg2
 import pytest
 
 from tgw.operator_console import project_request
+from tgw.operator_console_host import ConfiguredAuthorityStore
 from tgw.plan_authority import AuthorityDecision, AuthorityRequest, PostgresAuthorityStore
 from tgw.plan_solver import solve
 
 _DSN = os.environ.get("TGW_TEST_PLAN_AUTHORITY_DSN")
 _COMMIT = "e" * 40
+_EXECUTOR = "executor:postgres-canary"
 
 
 def _database_is_available() -> bool:
@@ -92,6 +94,7 @@ def test_postgres_preserves_full_decision_history_and_retry_then_terminal_receip
     first = store.begin_execution(
         request.request_id, effect_hash=request.effect.effect_hash,
         generation=request.effect.generation, handler_id="authority-canary-receipt-only@1",
+        executor_principal=_EXECUTOR,
     )
     retry = store.complete_execution(first["receipt_id"], outcome="retry", detail="temporary provider outage")
     assert retry["outcome"] == "retry"
@@ -101,6 +104,7 @@ def test_postgres_preserves_full_decision_history_and_retry_then_terminal_receip
     second = store.begin_execution(
         request.request_id, effect_hash=request.effect.effect_hash,
         generation=request.effect.generation, handler_id="authority-canary-receipt-only@1",
+        executor_principal=_EXECUTOR,
     )
     terminal = store.complete_execution(second["receipt_id"], outcome="ambiguous", detail="provider outcome unknown")
     assert terminal["outcome"] == "ambiguous"
@@ -108,11 +112,13 @@ def test_postgres_preserves_full_decision_history_and_retry_then_terminal_receip
         store.begin_execution(
             request.request_id, effect_hash=request.effect.effect_hash,
             generation=request.effect.generation, handler_id="authority-canary-receipt-only@1",
+        executor_principal=_EXECUTOR,
         )
 
     row = store.get(request.request_id)
     assert row["decision_kind"] == "approve"
     assert row["outcome"] == "ambiguous"
+    assert row["executor_principal"] == _EXECUTOR
     events = store.events(request.request_id)
     assert [event["event_type"] for event in events] == [
         "requested", "decided", "decided", "decided", "execution-started",
@@ -130,6 +136,7 @@ def test_postgres_reconcile_settles_an_active_attempt_as_auditable_ambiguity():
     attempt = store.begin_execution(
         request.request_id, effect_hash=request.effect.effect_hash,
         generation=request.effect.generation, handler_id="authority-canary-receipt-only@1",
+        executor_principal=_EXECUTOR,
     )
     assert store.get(request.request_id)["receipt_id"] == attempt["receipt_id"]
     assert project_request(store.get(request.request_id))["status"] == "reconciliation_required"
@@ -137,6 +144,7 @@ def test_postgres_reconcile_settles_an_active_attempt_as_auditable_ambiguity():
         store.begin_execution(
             request.request_id, effect_hash=request.effect.effect_hash,
             generation=request.effect.generation, handler_id="authority-canary-receipt-only@1",
+        executor_principal=_EXECUTOR,
         )
     with pytest.raises(ValueError, match="requires evidence"):
         store.decide(AuthorityDecision.create(request.request_id, {
@@ -158,10 +166,35 @@ def test_postgres_reconcile_settles_an_active_attempt_as_auditable_ambiguity():
         store.begin_execution(
             request.request_id, effect_hash=request.effect.effect_hash,
             generation=request.effect.generation, handler_id="authority-canary-receipt-only@1",
+        executor_principal=_EXECUTOR,
         )
     assert [event["event_type"] for event in store.events(request.request_id)] == [
         "requested", "decided", "execution-started", "execution-reconciled", "decided",
     ]
+
+
+def test_disposable_postgres_configured_host_canary_seam_retains_executor_provenance():
+    """Exercise the late-bound host store only against an explicitly disposable DSN.
+
+    This persists an authority-canary lifecycle fence but never invokes a
+    provider, deploys, or creates an external credential.
+    """
+    store = ConfiguredAuthorityStore(lambda: {"postgres_dsn": _DSN})
+    request = _request()
+    store.create_request(request)
+    store.decide(AuthorityDecision.create(request.request_id, {
+        "kind": "approve", "decided_by": "operator:postgres", "reason": "configured host seam",
+    }))
+    attempt = store.begin_execution(
+        request.request_id,
+        effect_hash=request.effect.effect_hash,
+        generation=request.effect.generation,
+        handler_id="authority-canary-receipt-only@1",
+        executor_principal=_EXECUTOR,
+    )
+    completed = store.complete_execution(attempt["receipt_id"], outcome="succeeded")
+    assert completed["executor_principal"] == _EXECUTOR
+    assert project_request(store.get(request.request_id))["execution"]["executor_principal"] == _EXECUTOR
 
 
 def test_postgres_migrates_v1_single_decision_and_eager_consumption_schema():
@@ -221,8 +254,8 @@ def test_postgres_migrates_v1_single_decision_and_eager_consumption_schema():
         cursor.execute("""
             SELECT column_name FROM information_schema.columns
              WHERE table_name='plan_authority_effect_receipts'
-               AND column_name IN ('handler_id','started_at','completed_at','outcome','evidence','rollback_receipt','detail')
+               AND column_name IN ('handler_id','executor_principal','started_at','completed_at','outcome','evidence','rollback_receipt','detail')
         """)
         assert {row[0] for row in cursor.fetchall()} == {
-            "handler_id", "started_at", "completed_at", "outcome", "evidence", "rollback_receipt", "detail",
+            "handler_id", "executor_principal", "started_at", "completed_at", "outcome", "evidence", "rollback_receipt", "detail",
         }

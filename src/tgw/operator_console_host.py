@@ -10,12 +10,34 @@ from typing import Any, Callable, Mapping
 
 from tgw.effect_handlers import AuthorityEffectController, EffectHandlerError, TypedEffectHandlerRegistry
 from tgw.operator_console_plugin import OperatorConsoleMount
-from tgw.plan_authority import PostgresAuthorityStore
+from tgw.plan_authority import AuthorityPrincipal, PostgresAuthorityStore, PrincipalRole
 
 DEFAULT_PLAN_ROOT = Path("/opt/TGW/library/plans")
 _IDENTITY = re.compile(r"^[A-Za-z0-9:._-]+$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _SOLUTION_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def configured_authority_principal(
+    config: Mapping[str, Any],
+    *,
+    field: str,
+    role: PrincipalRole,
+    authentication_binding: str,
+) -> AuthorityPrincipal:
+    """Resolve one named PlanAuthority principal from host configuration.
+
+    This deliberately has no fallback identity: a configured credential or
+    session mechanism that lacks a matching principal cannot use the console.
+    """
+    try:
+        return AuthorityPrincipal(
+            identity=config.get(field),
+            role=role,
+            authentication_binding=authentication_binding,
+        )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"named Plan authority {role.value} principal is not configured") from exc
 
 
 def plan_root(config: Mapping[str, Any]) -> Path:
@@ -85,9 +107,13 @@ class ConfiguredAuthorityStore:
     def decide(self, decision):
         return self._store().decide(decision)
 
-    def begin_execution(self, request_id, *, effect_hash, generation, handler_id):
+    def begin_execution(self, request_id, *, effect_hash, generation, handler_id, executor_principal):
         return self._store().begin_execution(
-            request_id, effect_hash=effect_hash, generation=generation, handler_id=handler_id,
+            request_id,
+            effect_hash=effect_hash,
+            generation=generation,
+            handler_id=handler_id,
+            executor_principal=executor_principal,
         )
 
     def complete_execution(self, receipt_id, *, outcome, evidence=(), rollback_receipt=None, detail=""):

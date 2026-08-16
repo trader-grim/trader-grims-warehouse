@@ -54,7 +54,13 @@ class AuthorityExecutionStore(Protocol):
     """
 
     def begin_execution(
-        self, request_id: str, *, effect_hash: str, generation: str, handler_id: str,
+        self,
+        request_id: str,
+        *,
+        effect_hash: str,
+        generation: str,
+        handler_id: str,
+        executor_principal: str,
     ) -> Mapping[str, Any]: ...
 
     def complete_execution(
@@ -90,6 +96,7 @@ class EffectExecutionReceipt:
     effect_kind: str
     generation: str
     handler_id: str
+    executor_principal: str
     outcome: EffectOutcome
     evidence: tuple[str, ...]
     rollback_receipt: str | None = None
@@ -226,32 +233,39 @@ class AuthorityEffectController:
         self.registry = registry
         self.authority_store = authority_store
 
-    def execute(self, *, request_id: str, effect: TypedEffect) -> EffectExecutionReceipt:
+    def execute(
+        self,
+        *,
+        request_id: str,
+        effect: TypedEffect,
+        executor_principal: str,
+    ) -> EffectExecutionReceipt:
         handler_id, parameters, handler, rollback = self.registry.prepare(effect)
         authority = self.authority_store.begin_execution(
             request_id,
             effect_hash=effect.effect_hash,
             generation=effect.generation,
             handler_id=handler_id,
+            executor_principal=executor_principal,
         )
         receipt_id = str(authority["receipt_id"])
         try:
             result = handler(parameters)
             evidence = tuple(sorted(str(item) for item in result.get("evidence", ())))
-            return self._complete(request_id, receipt_id, effect, handler_id, EffectOutcome.SUCCEEDED, evidence)
+            return self._complete(request_id, receipt_id, effect, handler_id, executor_principal, EffectOutcome.SUCCEEDED, evidence)
         except RetryableEffect as exc:
-            return self._complete(request_id, receipt_id, effect, handler_id, EffectOutcome.RETRY, (), detail=str(exc))
+            return self._complete(request_id, receipt_id, effect, handler_id, executor_principal, EffectOutcome.RETRY, (), detail=str(exc))
         except AmbiguousEffect as exc:
-            return self._complete(request_id, receipt_id, effect, handler_id, EffectOutcome.AMBIGUOUS, (), detail=str(exc))
+            return self._complete(request_id, receipt_id, effect, handler_id, executor_principal, EffectOutcome.AMBIGUOUS, (), detail=str(exc))
         except Exception as exc:
             if rollback is not None:
                 try:
                     rolled_back = rollback(parameters)
                     rollback_receipt = str(rolled_back["receipt"])
-                    return self._complete(request_id, receipt_id, effect, handler_id, EffectOutcome.ROLLED_BACK, (), rollback_receipt=rollback_receipt, detail=str(exc))
+                    return self._complete(request_id, receipt_id, effect, handler_id, executor_principal, EffectOutcome.ROLLED_BACK, (), rollback_receipt=rollback_receipt, detail=str(exc))
                 except Exception as rollback_exc:
-                    return self._complete(request_id, receipt_id, effect, handler_id, EffectOutcome.FAILED, (), detail=f"effect={exc}; rollback={rollback_exc}")
-            return self._complete(request_id, receipt_id, effect, handler_id, EffectOutcome.FAILED, (), detail=str(exc))
+                    return self._complete(request_id, receipt_id, effect, handler_id, executor_principal, EffectOutcome.FAILED, (), detail=f"effect={exc}; rollback={rollback_exc}")
+            return self._complete(request_id, receipt_id, effect, handler_id, executor_principal, EffectOutcome.FAILED, (), detail=str(exc))
 
     def _complete(
         self,
@@ -259,6 +273,7 @@ class AuthorityEffectController:
         authority_receipt_id: str,
         effect: TypedEffect,
         handler_id: str,
+        executor_principal: str,
         outcome: EffectOutcome,
         evidence: tuple[str, ...],
         *,
@@ -276,14 +291,34 @@ class AuthorityEffectController:
             detail=detail,
         )
         return self._receipt(
-            request_id, authority_receipt_id, effect, handler_id, outcome,
+            request_id, authority_receipt_id, effect, handler_id, executor_principal, outcome,
             evidence, rollback_receipt=rollback_receipt, detail=detail,
         )
 
     @staticmethod
     def _receipt(
-        request_id: str, authority_receipt_id: str, effect: TypedEffect, handler_id: str, outcome: EffectOutcome, evidence: tuple[str, ...], *, rollback_receipt: str | None = None, detail: str = ""
+        request_id: str,
+        authority_receipt_id: str,
+        effect: TypedEffect,
+        handler_id: str,
+        executor_principal: str,
+        outcome: EffectOutcome,
+        evidence: tuple[str, ...],
+        *,
+        rollback_receipt: str | None = None,
+        detail: str = "",
     ) -> EffectExecutionReceipt:
         return EffectExecutionReceipt(
-            "tgw-effect-execution-receipt/v1", request_id, authority_receipt_id, effect.effect_hash, effect.kind.value, effect.generation, handler_id, outcome, evidence, rollback_receipt, detail
+            "tgw-effect-execution-receipt/v2",
+            request_id,
+            authority_receipt_id,
+            effect.effect_hash,
+            effect.kind.value,
+            effect.generation,
+            handler_id,
+            executor_principal,
+            outcome,
+            evidence,
+            rollback_receipt,
+            detail,
         )

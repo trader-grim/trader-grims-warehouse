@@ -6,10 +6,12 @@ from fastapi.testclient import TestClient
 
 from tgw.effect_handlers import AuthorityEffectController, EffectOutcome, TypedEffectHandlerRegistry
 from tgw.operator_console import project_request
-from tgw.plan_authority import create_authority_router
+from tgw.plan_authority import AuthorityPrincipal, PrincipalRole, create_authority_router
 from tgw.plan_solver import solve
 
 COMMIT = "f" * 40
+OPERATOR = AuthorityPrincipal("operator:canary-reviewer", PrincipalRole.OPERATOR, "test-session")
+EXECUTOR = AuthorityPrincipal("executor:canary-runner", PrincipalRole.EXECUTOR, "test-credential")
 
 
 def _solution():
@@ -66,7 +68,7 @@ class MemoryAuthority:
             result.update({"settled_receipt_id": active["receipt_id"], "execution_outcome": "ambiguous"})
         return result
 
-    def begin_execution(self, request_id, *, effect_hash, generation, handler_id):
+    def begin_execution(self, request_id, *, effect_hash, generation, handler_id, executor_principal):
         request = self.requests[request_id]
         attempts = self.attempts.setdefault(request_id, [])
         if self.decisions.get(request_id, [])[-1:] != ["approve"] or any(
@@ -76,7 +78,11 @@ class MemoryAuthority:
         if request.effect.effect_hash != effect_hash or request.effect.generation != generation:
             raise ValueError("effect mismatch")
         receipt_id = "canary-authority:" + request_id + ":" + str(len(attempts) + 1)
-        attempts.append({"receipt_id": receipt_id, "handler_id": handler_id})
+        attempts.append({
+            "receipt_id": receipt_id,
+            "handler_id": handler_id,
+            "executor_principal": executor_principal,
+        })
         self.event_rows[request_id].append({"event_type": "execution-started"})
         return {"receipt_id": receipt_id}
 
@@ -105,6 +111,7 @@ class MemoryAuthority:
             "receipt_id": attempt.get("receipt_id"),
             "completed_at": attempt.get("completed_at"),
             "outcome": attempt.get("outcome"),
+            "executor_principal": attempt.get("executor_principal"),
             "execution_evidence": attempt.get("evidence", ()),
             "detail": attempt.get("detail", ""),
         }
@@ -135,7 +142,7 @@ def test_request_decision_consume_execution_receipt_and_hold_reconcile_paths():
     app = FastAPI()
     app.include_router(create_authority_router(
         store, current_plan_commit=lambda: COMMIT, load_solution=lambda _: solution,
-        require_operator=lambda: "operator:canary-test", require_executor=lambda: "executor:canary-test",
+        require_operator=lambda: OPERATOR, require_executor=lambda: EXECUTOR,
         execute_effect=controller.execute,
     ))
     client = TestClient(app)
@@ -166,7 +173,7 @@ def test_http_reconcile_settles_an_abandoned_active_execution_as_ambiguous():
     app = FastAPI()
     app.include_router(create_authority_router(
         store, current_plan_commit=lambda: COMMIT, load_solution=lambda _: solution,
-        require_operator=lambda: "operator:canary-test", require_executor=lambda: "executor:canary-test",
+        require_operator=lambda: OPERATOR, require_executor=lambda: EXECUTOR,
     ))
     client = TestClient(app)
     body = _body(solution, "w10-canary-abandoned")
@@ -177,7 +184,7 @@ def test_http_reconcile_settles_an_abandoned_active_execution_as_ambiguous():
     request = store.requests[request_id]
     store.begin_execution(
         request_id, effect_hash=request.effect.effect_hash, generation=request.effect.generation,
-        handler_id="authority-canary-receipt-only@1",
+        handler_id="authority-canary-receipt-only@1", executor_principal=EXECUTOR.identity,
     )
     assert project_request(store.get(request_id))["status"] == "reconciliation_required"
     assert client.post(f"/api/plan-authority/requests/{request_id}/decisions", json={

@@ -4,15 +4,48 @@
 <style>
 body{font:16px system-ui,sans-serif;background:#101216;color:#e5e7eb;margin:0;padding:2rem}main{max-width:70rem;margin:auto}
 .notice,.card{border:1px solid #46505f;border-radius:.6rem;padding:1rem;margin:1rem 0;background:#181c22}.notice{border-color:#8a6d2f;color:#f2d68a}
-.meta{font:13px ui-monospace,monospace;color:#aab2bf;overflow-wrap:anywhere}.actions{color:#9fd3ad}.error{color:#ff9b9b}
+.meta{font:13px ui-monospace,monospace;color:#aab2bf;overflow-wrap:anywhere}.actions{color:#9fd3ad}.error{color:#ff9b9b}.details{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem}.details dt{color:#aab2bf}.details dd{margin:0;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#11151a;padding:.7rem;border-radius:.35rem}button{margin:.25rem}
 </style></head><body><main><h1>Operator Authority</h1>
-<p>The status, evidence, and legal actions for Plan-bound effects.</p>
+<p>The exact scope, evidence, decisions, execution provenance, and legal actions for Plan-bound effects.</p>
 <div class="notice">Only records from PlanAuthority grant authority. Agent Runs, Todos, PP-CLIP, listing state, notifications, and visiting this page do not approve an effect.</div>
 <section id="requests">Loading authority records…</section>
 <script>
 const esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-fetch('/api/operator-console/requests').then(async r=>{const d=await r.json();if(!r.ok)throw Error(d.detail||r.statusText);return d}).then(d=>{
- const root=document.getElementById('requests'); if(!d.requests.length){root.textContent='No authority requests exist.';return}
- root.innerHTML=d.requests.map(x=>`<article class="card"><h2>${esc(x.summary)}</h2><b>${esc(x.status)}</b><p class="actions">Legal actions: ${esc(x.legal_actions.join(', '))}</p><p>Evidence: ${esc(x.evidence.join(', '))}</p><div class="meta">Request ${esc(x.request_id)}<br>Plan ${esc(x.plan_commit)}<br>Closure ${esc(x.closure_hash)}<br>Effect ${esc(x.effect.kind)} @ ${esc(x.effect.generation)}</div></article>`).join('')
-}).catch(e=>document.getElementById('requests').innerHTML=`<p class="error">Authority unavailable: ${esc(e.message)}</p>`);
+const json=v=>esc(JSON.stringify(v??{},null,2));
+const list=v=>Array.isArray(v)&&v.length?esc(v.join(', ')):'—';
+async function decide(requestId,kind){
+ const reason=window.prompt(`${kind}: reason`); if(!reason||!reason.trim())return;
+ let reconciliation_evidence=[];
+ if(kind==='reconcile'){
+   const raw=window.prompt('Reconciliation evidence identities (one per line)');
+   reconciliation_evidence=(raw||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+   if(!reconciliation_evidence.length)return;
+ }
+ const response=await fetch(`/api/plan-authority/requests/${encodeURIComponent(requestId)}/decisions`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,reason:reason.trim(),reconciliation_evidence})});
+ if(!response.ok){const body=await response.json().catch(()=>({}));throw Error(body.detail||response.statusText)}
+ await load();
+}
+function controls(x){
+ const allowed=new Set(x.legal_actions||[]); const buttons=['approve','hold','reconcile'].filter(kind=>allowed.has(kind));
+ return buttons.map(kind=>`<button type="button" data-request="${esc(x.request_id)}" data-decision="${kind}">${esc(kind)}</button>`).join('')||'No operator decision is currently legal.';
+}
+function card(x){
+ const effect=x.effect||{},decision=x.decision||{},execution=x.execution||{};
+ return `<article class="card"><h2>${esc(x.summary)}</h2><p><b>Status:</b> ${esc(x.status)}</p>
+ <p class="actions">Legal actions: ${list(x.legal_actions)}</p><h3>Exact effect scope</h3><dl class="details">
+ <dt>Kind</dt><dd>${esc(effect.kind)}</dd><dt>Generation</dt><dd>${esc(effect.generation)}</dd><dt>Effect hash</dt><dd class="meta">${esc(effect.hash)}</dd><dt>Parameters</dt><dd><pre>${json(effect.parameters)}</pre></dd></dl>
+ <h3>Bound Plan solution</h3><dl class="details"><dt>Request</dt><dd class="meta">${esc(x.request_id)}</dd><dt>Requested by</dt><dd>${esc(x.requested_by)}</dd><dt>Plan commit</dt><dd class="meta">${esc(x.plan_commit)}</dd><dt>Solution hash</dt><dd class="meta">${esc(x.solution_hash)}</dd><dt>Closure hash</dt><dd class="meta">${esc(x.closure_hash)}</dd><dt>Graph</dt><dd>${esc(x.graph_id)}</dd><dt>Object generation</dt><dd>${esc(x.object_generation)}</dd><dt>Expires</dt><dd>${esc(x.expires_at)}</dd></dl>
+ <h3>Evidence</h3><p class="meta">${list(x.evidence)}</p>
+ <h3>Decision</h3><dl class="details"><dt>Kind</dt><dd>${esc(decision.kind)}</dd><dt>Principal</dt><dd>${esc(decision.by)}</dd><dt>Reason</dt><dd>${esc(decision.reason)}</dd><dt>At</dt><dd>${esc(decision.at)}</dd><dt>Reconciliation evidence</dt><dd class="meta">${list(decision.reconciliation_evidence)}</dd></dl>
+ <h3>Execution / receipt provenance</h3><dl class="details"><dt>Receipt</dt><dd class="meta">${esc(execution.receipt_id||x.receipt_id)}</dd><dt>Executor principal</dt><dd>${esc(execution.executor_principal)}</dd><dt>Handler</dt><dd>${esc(execution.handler_id)}</dd><dt>Started</dt><dd>${esc(execution.started_at)}</dd><dt>Completed</dt><dd>${esc(execution.completed_at)}</dd><dt>Outcome</dt><dd>${esc(execution.outcome)}</dd><dt>Evidence</dt><dd class="meta">${list(execution.evidence)}</dd><dt>Rollback receipt</dt><dd class="meta">${esc(execution.rollback_receipt)}</dd><dt>Detail</dt><dd>${esc(execution.detail)}</dd></dl>
+ <h3>Authenticated operator decision</h3><div class="decision-controls">${controls(x)}</div></article>`;
+}
+async function load(){
+ const root=document.getElementById('requests');
+ try { const response=await fetch('/api/operator-console/requests'); const data=await response.json(); if(!response.ok)throw Error(data.detail||response.statusText);
+   root.innerHTML=data.requests.length?data.requests.map(card).join(''):'No authority requests exist.';
+   root.querySelectorAll('[data-decision]').forEach(button=>button.addEventListener('click',async()=>{try{await decide(button.dataset.request,button.dataset.decision)}catch(error){window.alert(`Decision rejected: ${error.message}`)}}));
+ } catch(error) { root.innerHTML=`<p class="error">Authority unavailable: ${esc(error.message)}</p>`; }
+}
+load();
 </script></main></body></html>

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -104,6 +106,11 @@ class _AuthorityCard extends StatelessWidget {
     final status = (request['status'] ?? request['outcome'] ?? request['decision_kind'] ?? 'pending').toString();
     final effect = request['effect'];
     final effectKind = effect is Map ? effect['kind'] : request['effect_kind'];
+    final effectMap = effect is Map ? Map<String, dynamic>.from(effect) : const <String, dynamic>{};
+    final decision = request['decision'];
+    final decisionMap = decision is Map ? Map<String, dynamic>.from(decision) : const <String, dynamic>{};
+    final execution = request['execution'];
+    final executionMap = execution is Map ? Map<String, dynamic>.from(execution) : const <String, dynamic>{};
     final legalActions = request['legal_actions'];
     final canDecide = legalActions is List
         ? legalActions.map((action) => action.toString()).toSet()
@@ -123,6 +130,48 @@ class _AuthorityCard extends StatelessWidget {
             Text('Request: $requestId', style: Theme.of(context).textTheme.bodySmall),
             if (effectKind != null) Text('Effect: $effectKind', style: Theme.of(context).textTheme.bodySmall),
             const SizedBox(height: 8),
+            const Text('Exact effect scope', style: TextStyle(fontWeight: FontWeight.bold)),
+            _AuthorityDetail(label: 'Kind', value: effectMap['kind']),
+            _AuthorityDetail(label: 'Generation', value: effectMap['generation']),
+            _AuthorityDetail(label: 'Effect hash', value: effectMap['hash'], mono: true),
+            _AuthorityDetail(
+              label: 'Parameters',
+              value: const JsonEncoder.withIndent('  ').convert(effectMap['parameters'] ?? const {}),
+              mono: true,
+            ),
+            const SizedBox(height: 8),
+            const Text('Bound Plan solution', style: TextStyle(fontWeight: FontWeight.bold)),
+            _AuthorityDetail(label: 'Requested by', value: request['requested_by']),
+            _AuthorityDetail(label: 'Plan commit', value: request['plan_commit'], mono: true),
+            _AuthorityDetail(label: 'Solution hash', value: request['solution_hash'], mono: true),
+            _AuthorityDetail(label: 'Closure hash', value: request['closure_hash'], mono: true),
+            _AuthorityDetail(label: 'Graph', value: request['graph_id']),
+            _AuthorityDetail(label: 'Object generation', value: request['object_generation']),
+            _AuthorityDetail(label: 'Evidence', value: _identityList(request['evidence']), mono: true),
+            const SizedBox(height: 8),
+            const Text('Decision', style: TextStyle(fontWeight: FontWeight.bold)),
+            _AuthorityDetail(label: 'Kind', value: decisionMap['kind']),
+            _AuthorityDetail(label: 'Principal', value: decisionMap['by']),
+            _AuthorityDetail(label: 'Reason', value: decisionMap['reason']),
+            _AuthorityDetail(label: 'At', value: decisionMap['at']),
+            _AuthorityDetail(
+              label: 'Reconciliation evidence',
+              value: _identityList(decisionMap['reconciliation_evidence']),
+              mono: true,
+            ),
+            const SizedBox(height: 8),
+            const Text('Execution / receipt provenance', style: TextStyle(fontWeight: FontWeight.bold)),
+            _AuthorityDetail(label: 'Receipt', value: executionMap['receipt_id'] ?? request['receipt_id'], mono: true),
+            _AuthorityDetail(label: 'Executor principal', value: executionMap['executor_principal']),
+            _AuthorityDetail(label: 'Handler', value: executionMap['handler_id']),
+            _AuthorityDetail(label: 'Started', value: executionMap['started_at']),
+            _AuthorityDetail(label: 'Completed', value: executionMap['completed_at']),
+            _AuthorityDetail(label: 'Outcome', value: executionMap['outcome']),
+            _AuthorityDetail(label: 'Evidence', value: _identityList(executionMap['evidence']), mono: true),
+            _AuthorityDetail(label: 'Rollback receipt', value: executionMap['rollback_receipt'], mono: true),
+            _AuthorityDetail(label: 'Detail', value: executionMap['detail']),
+            const SizedBox(height: 8),
+            const Text('Authenticated operator decision', style: TextStyle(fontWeight: FontWeight.bold)),
             Wrap(
               spacing: 8,
               children: [
@@ -136,6 +185,35 @@ class _AuthorityCard extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+String _identityList(dynamic value) {
+  if (value is! List || value.isEmpty) return '—';
+  return value.map((item) => item.toString()).join('\n');
+}
+
+class _AuthorityDetail extends StatelessWidget {
+  final String label;
+  final dynamic value;
+  final bool mono;
+
+  const _AuthorityDetail({required this.label, required this.value, this.mono = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final text = value == null || value.toString().isEmpty ? '—' : value.toString();
+    final style = mono ? Theme.of(context).textTheme.bodySmall?.copyWith(fontFamily: 'monospace') : null;
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 150, child: Text('$label:', style: Theme.of(context).textTheme.bodySmall)),
+          Expanded(child: SelectableText(text, style: style)),
+        ],
       ),
     );
   }

@@ -95,6 +95,9 @@ def load_config(path: Path) -> Dict[str, Any]:
     plan_approved_commit = raw.get("plan_approved_commit")
     plan_approved_solution_hash = raw.get("plan_approved_solution_hash")
     plan_authority_executor_credential_env = raw.get("plan_authority_executor_credential_env")
+    plan_authority_executor_principal = raw.get("plan_authority_executor_principal")
+    plan_authority_operator_api_principal = raw.get("plan_authority_operator_api_principal")
+    plan_authority_operator_session_principal = raw.get("plan_authority_operator_session_principal")
     plan_git_path = p("plan_git_path", "git")
 
     # If an approved commit is configured, every canonical path below must be
@@ -146,6 +149,30 @@ def load_config(path: Path) -> Dict[str, Any]:
         or not re.fullmatch(r"[A-Z][A-Z0-9_]*", plan_authority_executor_credential_env)
     ):
         raise ValueError("plan_authority_executor_credential_env must name an environment variable")
+
+    def authority_principal(value: Any, role: str, field: str) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not re.fullmatch(
+            rf"{role}:[A-Za-z0-9][A-Za-z0-9._@/-]{{0,191}}", value,
+        ):
+            raise ValueError(f"{field} must name a configured {role} principal")
+        # Authentication mechanism labels are deliberately not principals.
+        if value in {f"{role}:api-key", f"{role}:web-session", f"{role}:default", f"{role}:unknown"}:
+            raise ValueError(f"{field} must be a named person or service, not an authentication mechanism")
+        return value
+
+    plan_authority_executor_principal = authority_principal(
+        plan_authority_executor_principal, "executor", "plan_authority_executor_principal",
+    )
+    plan_authority_operator_api_principal = authority_principal(
+        plan_authority_operator_api_principal, "operator", "plan_authority_operator_api_principal",
+    )
+    plan_authority_operator_session_principal = authority_principal(
+        plan_authority_operator_session_principal, "operator", "plan_authority_operator_session_principal",
+    )
+    if (plan_authority_executor_credential_env is None) != (plan_authority_executor_principal is None):
+        raise ValueError("Plan authority executor credential and named principal must be configured together")
 
     full_catalog_path = p("full_catalog_path", str(catalog_root / "master-catalog.json"))
     search_catalog_path = p("search_catalog_path", str(catalog_root / "search-catalog.json"))
@@ -288,6 +315,9 @@ def load_config(path: Path) -> Dict[str, Any]:
         "plan_approved_commit": plan_approved_commit,
         "plan_approved_solution_hash": plan_approved_solution_hash,
         "plan_authority_executor_credential_env": plan_authority_executor_credential_env,
+        "plan_authority_executor_principal": plan_authority_executor_principal,
+        "plan_authority_operator_api_principal": plan_authority_operator_api_principal,
+        "plan_authority_operator_session_principal": plan_authority_operator_session_principal,
         "plan_git_path": plan_git_path,
         "plan_inbox_path": plan_vault_path / "inbox",
         # Canonical Plan intent lives only in the standalone repository.  The

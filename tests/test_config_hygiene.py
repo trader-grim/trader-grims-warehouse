@@ -90,6 +90,24 @@ def test_legacy_plan_vault_is_filtered_from_operational_sync_scan(tmp_path):
     assert cfg["sync_conflict_roots"] == [catalog]
 
 
+def test_plan_authority_credentials_and_sessions_require_named_principals(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path, {
+        "plan_authority_executor_credential_env": "TGW_TEST_AUTHORITY_EXECUTOR_TOKEN",
+        "plan_authority_executor_principal": "executor:authority-runner",
+        "plan_authority_operator_api_principal": "operator:alice",
+        "plan_authority_operator_session_principal": "operator:alice",
+    }))
+    assert cfg["plan_authority_executor_principal"] == "executor:authority-runner"
+    assert cfg["plan_authority_operator_api_principal"] == "operator:alice"
+
+    with pytest.raises(ValueError, match="named person or service"):
+        load_config(_write_cfg(tmp_path, {"plan_authority_operator_api_principal": "operator:api-key"}))
+    with pytest.raises(ValueError, match="configured together"):
+        load_config(_write_cfg(tmp_path, {
+            "plan_authority_executor_credential_env": "TGW_TEST_AUTHORITY_EXECUTOR_TOKEN",
+        }))
+
+
 def test_approved_plan_content_must_be_exact_clean_commit(tmp_path):
     root = tmp_path / "approved"
     root.mkdir()

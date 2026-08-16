@@ -13,7 +13,13 @@ from typing import Any, Callable, Mapping
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 
-from tgw.plan_authority import AUTHORITY_SCHEMA, AuthorityStore, create_authority_router
+from tgw.plan_authority import (
+    AUTHORITY_SCHEMA,
+    AuthorityStore,
+    PrincipalRole,
+    create_authority_router,
+    require_authenticated_principal,
+)
 
 CONSOLE_SCHEMA = "tgw-operator-console/v1"
 DISCOVERY_SCHEMA = "tgw-operator-console-discovery/v1"
@@ -78,6 +84,7 @@ def project_request(row: Mapping[str, Any], *, now: datetime | None = None) -> d
         "request_id": row.get("request_id"),
         "status": status,
         "summary": row.get("summary"),
+        "requested_by": row.get("requested_by"),
         "plan_commit": row.get("plan_commit"),
         "solution_hash": row.get("solution_hash"),
         "closure_hash": row.get("closure_hash"),
@@ -100,7 +107,9 @@ def project_request(row: Mapping[str, Any], *, now: datetime | None = None) -> d
         } if row.get("decision_kind") else None,
         "receipt_id": row.get("receipt_id"),
         "execution": {
+            "receipt_id": row.get("receipt_id"),
             "handler_id": row.get("handler_id"),
+            "executor_principal": row.get("executor_principal"),
             "started_at": row.get("started_at"),
             "completed_at": row.get("completed_at"),
             "outcome": row.get("outcome"),
@@ -134,8 +143,9 @@ def create_operator_console_router(
         execute_effect=execute_effect,
     ))
 
-    @router.get("/api/operator-console/discovery", dependencies=[Depends(require_operator)])
-    def discovery():
+    @router.get("/api/operator-console/discovery")
+    def discovery(operator_identity: Any = Depends(require_operator)):
+        require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR)
         return {
             "schema": DISCOVERY_SCHEMA,
             "site": "/form/plan-authority",
@@ -147,12 +157,14 @@ def create_operator_console_router(
             "non_authority_surfaces": NON_AUTHORITY_SURFACES,
         }
 
-    @router.get("/api/operator-console/requests", dependencies=[Depends(require_operator)])
-    def requests(limit: int = 100):
+    @router.get("/api/operator-console/requests")
+    def requests(limit: int = 100, operator_identity: Any = Depends(require_operator)):
+        require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR)
         return {"schema": CONSOLE_SCHEMA, "requests": [project_request(row) for row in store.list(limit)]}
 
-    @router.get("/api/operator-console/requests/{request_id}", dependencies=[Depends(require_operator)])
-    def request(request_id: str):
+    @router.get("/api/operator-console/requests/{request_id}")
+    def request(request_id: str, operator_identity: Any = Depends(require_operator)):
+        require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR)
         row = store.get(request_id)
         if row is None:
             raise HTTPException(404, "request not found")
@@ -162,8 +174,9 @@ def create_operator_console_router(
             "events": store.events(request_id),
         }
 
-    @router.get("/form/plan-authority", response_class=HTMLResponse, dependencies=[Depends(require_operator)])
-    def site():
+    @router.get("/form/plan-authority", response_class=HTMLResponse)
+    def site(operator_identity: Any = Depends(require_operator)):
+        require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR)
         return HTMLResponse(_CLIENT.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
 
     return router

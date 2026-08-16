@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from tgw.plan_solver import validate_for_dispatch
 
 AUTHORITY_SCHEMA = "tgw-plan-authority/v1"
+_PRINCIPAL_IDENTITY = re.compile(r"^(operator|executor):[A-Za-z0-9][A-Za-z0-9._@/-]{0,191}$")
 
 
 def _canonical(value: Any) -> bytes:
@@ -31,6 +33,45 @@ class DecisionKind(str, Enum):
     APPROVE = "approve"
     HOLD = "hold"
     RECONCILE = "reconcile"
+
+
+class PrincipalRole(str, Enum):
+    """The two deliberately separate PlanAuthority mutation roles."""
+
+    OPERATOR = "operator"
+    EXECUTOR = "executor"
+
+
+@dataclass(frozen=True)
+class AuthorityPrincipal:
+    """A named principal derived by a configured host authentication seam.
+
+    This is intentionally not a string alias.  Authority routes refuse raw
+    strings, so a dependency must attest both the named configured principal
+    and the distinct role before a request, decision, or consumption occurs.
+    ``authentication_binding`` is non-secret provenance (for example
+    ``session`` or ``credential-env:TGW_AUTHORITY_EXECUTOR_TOKEN``), not a
+    user-controlled HTTP field.
+    """
+
+    identity: str
+    role: PrincipalRole
+    authentication_binding: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, str) or not _PRINCIPAL_IDENTITY.fullmatch(self.identity):
+            raise ValueError("authority principal identity is invalid")
+        if not self.identity.startswith(f"{self.role.value}:"):
+            raise ValueError("authority principal identity does not match its role")
+        if not isinstance(self.authentication_binding, str) or not self.authentication_binding:
+            raise ValueError("authority principal authentication binding is required")
+
+
+def require_authenticated_principal(value: Any, role: PrincipalRole) -> AuthorityPrincipal:
+    """Reject untyped or wrong-role dependency output at every authority route."""
+    if not isinstance(value, AuthorityPrincipal) or value.role is not role:
+        raise HTTPException(401, f"configured authenticated {role.value} principal is required")
+    return value
 
 
 class EffectKind(str, Enum):
@@ -170,7 +211,15 @@ class AuthorityDecision:
 class AuthorityStore(Protocol):
     def create_request(self, request: AuthorityRequest) -> Mapping[str, Any]: ...
     def decide(self, decision: AuthorityDecision) -> Mapping[str, Any]: ...
-    def begin_execution(self, request_id: str, *, effect_hash: str, generation: str, handler_id: str) -> Mapping[str, Any]: ...
+    def begin_execution(
+        self,
+        request_id: str,
+        *,
+        effect_hash: str,
+        generation: str,
+        handler_id: str,
+        executor_principal: str,
+    ) -> Mapping[str, Any]: ...
     def complete_execution(
         self,
         receipt_id: str,
@@ -317,6 +366,7 @@ class PostgresAuthorityStore:
         effect_hash: str,
         generation: str,
         handler_id: str,
+        executor_principal: str,
     ) -> Mapping[str, Any]:
         """Durably claim one approved effect without consuming its approval.
 
@@ -324,6 +374,12 @@ class PostgresAuthorityStore:
         stopped executor remains visible and cannot be replayed as if no call
         had reached the registered provider.
         """
+        if (
+            not isinstance(executor_principal, str)
+            or not _PRINCIPAL_IDENTITY.fullmatch(executor_principal)
+            or not executor_principal.startswith("executor:")
+        ):
+            raise ValueError("configured executor principal is required")
         receipt_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
         with self._connection() as con, con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -338,8 +394,8 @@ class PostgresAuthorityStore:
                 raise ValueError("request is absent")
             cur.execute(
                 """INSERT INTO plan_authority_effect_receipts
-                   (receipt_id,request_id,effect_hash,effect_generation,handler_id,started_at)
-                   SELECT %s,r.request_id,r.effect_hash,r.effect_generation,%s,%s
+                   (receipt_id,request_id,effect_hash,effect_generation,handler_id,executor_principal,started_at)
+                   SELECT %s,r.request_id,r.effect_hash,r.effect_generation,%s,%s,%s
                      FROM plan_authority_requests r
                     WHERE r.request_id=%s AND r.expires_at>%s
                       AND r.effect_hash=%s AND r.effect_generation=%s
@@ -359,7 +415,7 @@ class PostgresAuthorityStore:
                              AND active.completed_at IS NULL
                       )
                    RETURNING *""",
-                (receipt_id, handler_id, now, request_id, now, effect_hash, generation),
+                (receipt_id, handler_id, executor_principal, now, request_id, now, effect_hash, generation),
             )
             row = cur.fetchone()
             if row is None:
@@ -371,6 +427,7 @@ class PostgresAuthorityStore:
                 "effect_hash": effect_hash,
                 "generation": generation,
                 "handler_id": handler_id,
+                "executor_principal": executor_principal,
                 "started_at": now.isoformat(),
             }
             self._event(cur, request_id, "execution-started", receipt)
@@ -405,7 +462,7 @@ class PostgresAuthorityStore:
             if row is None:
                 raise ValueError("execution receipt is absent or already completed")
             receipt = dict(row)
-            receipt["schema"] = "tgw-effect-execution-receipt/v1"
+            receipt["schema"] = "tgw-effect-execution-receipt/v2"
             self._event(cur, str(row["request_id"]), "execution-completed", {
                 "receipt_id": str(row["receipt_id"]),
                 "outcome": outcome,
@@ -444,7 +501,7 @@ class PostgresAuthorityStore:
         return f"""SELECT r.*,d.decision_id,d.decision_kind,d.decided_by,
                           d.reason AS decision_reason,d.reconciliation_evidence,d.decided_at,
                           e.receipt_id,e.started_at,e.completed_at,e.outcome,
-                          e.handler_id,e.evidence AS execution_evidence,
+                          e.handler_id,e.executor_principal,e.evidence AS execution_evidence,
                           e.rollback_receipt,e.detail,
                           e.completed_at AS consumed_at
                      FROM plan_authority_requests r
@@ -478,24 +535,14 @@ def create_authority_router(
 
     router = APIRouter(prefix="/api/plan-authority", tags=["plan-authority"])
 
-    def authenticated_operator_identity(value: Any) -> str:
-        """Bind mutation receipts to the identity returned by host auth.
-
-        Request JSON is untrusted.  In particular, it must never be able to
-        choose the principal recorded in a durable authority request or
-        decision.  The host's operator dependency is the only identity
-        authority for this router.
-        """
-        if not isinstance(value, str) or not value.strip():
-            raise HTTPException(401, "authenticated operator identity is required")
-        return value.strip()
-
-    @router.get("/requests", dependencies=[Depends(require_operator)])
-    def list_requests(limit: int = 100):
+    @router.get("/requests")
+    def list_requests(limit: int = 100, operator_identity: Any = Depends(require_operator)):
+        require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR)
         return {"schema": AUTHORITY_SCHEMA, "requests": store.list(limit)}
 
-    @router.get("/requests/{request_id}", dependencies=[Depends(require_operator)])
-    def get_request(request_id: str):
+    @router.get("/requests/{request_id}")
+    def get_request(request_id: str, operator_identity: Any = Depends(require_operator)):
+        require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR)
         row = store.get(request_id)
         if row is None:
             raise HTTPException(404, "request not found")
@@ -505,7 +552,7 @@ def create_authority_router(
     def request_effect(body: dict[str, Any], operator_identity: Any = Depends(require_operator)):
         try:
             payload = dict(body)
-            payload["requested_by"] = authenticated_operator_identity(operator_identity)
+            payload["requested_by"] = require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR).identity
             solution = load_solution(str(payload["solution_hash"]))
             request = AuthorityRequest.create(payload, solution=solution, current_plan_commit=current_plan_commit())
             return {"schema": AUTHORITY_SCHEMA, "request": store.create_request(request)}
@@ -516,13 +563,17 @@ def create_authority_router(
     def decide(request_id: str, body: dict[str, Any], operator_identity: Any = Depends(require_operator)):
         try:
             payload = dict(body)
-            payload["decided_by"] = authenticated_operator_identity(operator_identity)
+            payload["decided_by"] = require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR).identity
             return {"schema": AUTHORITY_SCHEMA, "request": store.decide(AuthorityDecision.create(request_id, payload))}
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    @router.post("/requests/{request_id}/consume", dependencies=[Depends(require_executor)])
-    def consume(request_id: str, body: dict[str, Any] | None = None):
+    @router.post("/requests/{request_id}/consume")
+    def consume(
+        request_id: str,
+        body: dict[str, Any] | None = None,
+        executor_identity: Any = Depends(require_executor),
+    ):
         """Execute the already-recorded typed effect through a registered handler.
 
         This endpoint deliberately accepts no client-supplied effect hash or
@@ -534,6 +585,7 @@ def create_authority_router(
                 raise ValueError("consume takes no effect payload; the approved request is authoritative")
             if execute_effect is None:
                 raise ValueError("no registered effect executor is mounted")
+            executor = require_authenticated_principal(executor_identity, PrincipalRole.EXECUTOR)
             row = store.get(request_id)
             if row is None:
                 raise ValueError("request not found")
@@ -544,7 +596,11 @@ def create_authority_router(
             })
             if effect.effect_hash != row["effect_hash"]:
                 raise ValueError("stored request effect binding is invalid")
-            receipt = execute_effect(request_id=request_id, effect=effect)
+            receipt = execute_effect(
+                request_id=request_id,
+                effect=effect,
+                executor_principal=executor.identity,
+            )
             if is_dataclass(receipt):
                 receipt = asdict(receipt)
             if not isinstance(receipt, Mapping):
