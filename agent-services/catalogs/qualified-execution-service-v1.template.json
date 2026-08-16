@@ -2,9 +2,9 @@
   "schema": "tgw-qualified-execution-service-installation-template/v1",
   "installation_status": "NOT_INSTALLED",
   "service_entry_point": "tgw.qualified_execution_service:main",
-  "runtime_config_schema": "tgw-qualified-execution-service-config/v1",
+  "runtime_config_schema": "tgw-qualified-execution-signer-config/v2",
   "descriptor_template": {
-    "schema": "tgw-qualified-execution-service/v1",
+    "schema": "tgw-qualified-execution-signer/v2",
     "id": null,
     "client_id": null,
     "endpoint": null,
@@ -12,12 +12,14 @@
     "timeout_seconds": null
   },
   "qualification_requirements": {
-    "catalog_schema": "tgw-qualified-execution-service-catalog/v1",
-    "proof_schema": "tgw-qualified-execution-proof/v1",
-    "transcript_schema": "tgw-qualified-execution-transcript/v1",
-    "attestation_key_requirement": "The externally installed runtime names an environment variable holding its raw base64 Ed25519 private key. Catalogs pin only the matching public key and key identifier; no credential, endpoint, repository, or key is present here.",
-    "policy_requirement": "Runtime configuration maps each credential to one client_id and exact profile grants, pins one external Plan commit, an explicit bounded active-request capacity, runtime interpreter/dependency/environment digests, and exact allowlisted test command/runner, migration runner, or review runner profiles. The service itself resolves the candidate/base trees and performs execution.",
-    "retention_requirement": "A PASS proof requires the complete retained transcript. Candidate admission S must retain one signed test/migration proof pair for every receipt; independent-review X retains a separate review proof pair whose signed input hashes equal the exact review packet and result bytes.",
-    "launch_rule": "This template is not a service configuration and must not be passed to a launcher, card, or admission gate. Deployment must provision the isolated repository checkout, policy configuration, client credentials, signing key, and immutable catalog separately."
+    "catalog_schema": "tgw-qualified-execution-service-catalog/v2",
+    "runner_descriptor_schema": "tgw-qualified-execution-runner/v1",
+    "proof_schema": "tgw-qualified-execution-proof/v2",
+    "transcript_schema": "tgw-qualified-runner-transcript/v2",
+    "attestation_key_requirement": "The signer and separately identified confined runner each have their own externally provisioned Ed25519 key. Catalogs pin the signer key, Plan policy artifact hash, and runner descriptor hash; no key, endpoint, repository, or credential belongs in this template.",
+    "policy_requirement": "The signer configuration maps each credential to one client_id, exact signer-descriptor hash, and exact profile grants, pins an external Plan repository/commit and its policy artifact hash, and sets bounded active and per-client retained-proof capacities. The Plan policy pins runner/interpreter/dependency/environment hashes and every test runner/command. The signer and runner each declare a distinct identity and namespace.",
+    "runner_requirement": "The runner descriptor itself pins the exact Plan commit, policy path/hash, and allowed profile IDs. Candidate workloads execute only in that independently provisioned confined runner. Immediately before dispatch the signer obtains a nonce-bound runner identity that rehashes runner/interpreter/dependency identities; its transcript must bind that identity hash and attest rehash-before-dispatch, isolation, hard timeout, output limit, and complete output. No same-process or local Popen fallback exists.",
+    "retention_requirement": "The signer retains a bounded per-client proof/transcript readback. A PASS proof requires the complete runner-signed transcript. S retains one catalog, runner descriptor, and test/migration proof pair for every receipt; X separately retains the same trust artifacts and a review proof whose signed input hashes equal the exact review packet and result bytes.",
+    "launch_rule": "This template is not a service configuration and must not be passed to a launcher, card, or admission gate. Deployment must provision isolated signer and runner identities/namespaces, immutable Plan policy, client and runner credentials, separate keys, and pinned catalog/descriptor artifacts."
   }
 }

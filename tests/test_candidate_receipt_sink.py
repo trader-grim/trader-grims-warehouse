@@ -51,12 +51,15 @@ from tgw.execution_resources import (
 from tgw.governed_execution_receipt import create_candidate_governed_execution_receipt
 from tgw.qualified_execution_service import (
     PROOF_SCHEMA,
+    RUNNER_DESCRIPTOR_SCHEMA,
     SERVICE_CATALOG_SCHEMA,
     SERVICE_DESCRIPTOR_SCHEMA,
     TRANSCRIPT_SCHEMA,
     execution_public_key,
     execution_service_descriptor_hash,
     issue_execution_proof,
+    issue_runner_transcript,
+    qualified_runner_descriptor_hash,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +68,7 @@ TEST_ATTESTATION_KEY_ID = "candidate-sink-attestation-key-1"
 TEST_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
 TEST_EXECUTION_ATTESTATION_KEY_ID = "candidate-qualified-execution-key-1"
 TEST_EXECUTION_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
+TEST_RUNNER_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
 
 
 def canonical(value):
@@ -170,7 +174,26 @@ def service_catalog(plan_commit):
     return service, catalog
 
 
-def qualified_execution_catalog(plan_commit):
+def qualified_runner_descriptor(plan_commit):
+    return {
+        "schema": RUNNER_DESCRIPTOR_SCHEMA,
+        "id": "candidate-confined-runner",
+        "runner_identity": "candidate-confined-runner-identity",
+        "namespace_id": "candidate-runner-namespace",
+        "endpoint": "https://qualified-runner.invalid",
+        "credential_env": "CANDIDATE_RUNNER_TOKEN",
+        "timeout_seconds": 5,
+        "attestation_key_id": "candidate-runner-key-1",
+        "attestation_public_key": execution_public_key(TEST_RUNNER_ATTESTATION_PRIVATE_KEY),
+        "isolation_profile_hash": "sha256:" + "2" * 64,
+        "plan_commit": plan_commit,
+        "policy_path": "policies/qualified-execution.json",
+        "policy_artifact_hash": "sha256:" + "8" * 64,
+        "profiles": ["focused-tests", "full-tests", "migration-1", "migration-2", "independent-review"],
+    }
+
+
+def qualified_execution_catalog(plan_commit, runner_descriptor):
     service = {
         "schema": SERVICE_DESCRIPTOR_SCHEMA,
         "id": "candidate-qualified-execution",
@@ -183,11 +206,16 @@ def qualified_execution_catalog(plan_commit):
         "schema": SERVICE_CATALOG_SCHEMA,
         "catalog_ref": "catalog:candidate-qualified-execution@1",
         "plan_commit": plan_commit,
+        "policy_artifact_hash": "sha256:" + "8" * 64,
         "services": [
             {
                 "id": service["id"],
                 "client_id": service["client_id"],
+                "signer_identity": "candidate-qualified-signer",
+                "signer_namespace_id": "candidate-qualified-signer-namespace",
                 "descriptor_hash": execution_service_descriptor_hash(service),
+                "runner_descriptor_hash": qualified_runner_descriptor_hash(runner_descriptor),
+                "policy_artifact_hash": "sha256:" + "8" * 64,
                 "capabilities": [
                     "candidate-review-execution",
                     "candidate-test-execution",
@@ -210,11 +238,28 @@ def qualified_execution_artifact(
     base_tree,
     plan_commit,
     inputs,
+    runner_descriptor,
 ):
     command = ["/qualified/execution-runner", kind]
     stdout, stderr = b"qualified execution PASS\n", b""
+    runtime_environment = {"LANG": "C.UTF-8"}
+    runtime = {
+        "runner_path": "/qualified/runner",
+        "runner_sha256": "sha256:" + "2" * 64,
+        "interpreter_path": "/qualified/python",
+        "interpreter_sha256": "sha256:" + "3" * 64,
+        "interpreter_version_sha256": "sha256:" + "4" * 64,
+        "dependency_manifest_path": "/qualified/dependencies.lock",
+        "dependency_manifest_sha256": "sha256:" + "5" * 64,
+        "environment": runtime_environment,
+        "environment_hash": object_hash(runtime_environment),
+    }
     transcript_unsigned = {
         "schema": TRANSCRIPT_SCHEMA,
+        "runner_id": runner_descriptor["id"],
+        "runner_identity": runner_descriptor["runner_identity"],
+        "namespace_id": runner_descriptor["namespace_id"],
+        "runner_identity_hash": "sha256:" + "7" * 64,
         "service_id": "candidate-qualified-execution",
         "client_id": "candidate-qualified-client",
         "run_id": f"run-{kind}-{profile_id}",
@@ -225,6 +270,10 @@ def qualified_execution_artifact(
         "base_commit": base_commit,
         "base_tree": base_tree,
         "plan_commit": plan_commit,
+        "policy_path": "policies/qualified-execution.json",
+        "policy_artifact_hash": "sha256:" + "8" * 64,
+        "inputs": inputs,
+        "runtime": runtime,
         "command": command,
         "stdout_base64": base64.b64encode(stdout).decode(),
         "stderr_base64": base64.b64encode(stderr).decode(),
@@ -234,13 +283,30 @@ def qualified_execution_artifact(
         "output_complete": True,
         "returncode": 0,
         "timed_out": False,
+        "timeout_enforced": True,
+        "output_limit_enforced": True,
+        "runtime_rehashed_before_dispatch": True,
+        "isolated": True,
+        "isolation_profile_hash": runner_descriptor["isolation_profile_hash"],
         "status": "PASS",
+        "attestation_key_id": runner_descriptor["attestation_key_id"],
     }
-    transcript = {**transcript_unsigned, "transcript_hash": object_hash(transcript_unsigned)}
-    runtime_environment = {"LANG": "C.UTF-8"}
+    transcript = issue_runner_transcript(transcript_unsigned, signing_private_key=TEST_RUNNER_ATTESTATION_PRIVATE_KEY)
     proof_unsigned = {
         "schema": PROOF_SCHEMA,
         "service_id": transcript["service_id"],
+        "signer_identity": "candidate-qualified-signer",
+        "signer_namespace_id": "candidate-qualified-signer-namespace",
+        "signer_descriptor_hash": execution_service_descriptor_hash(
+            {
+                "schema": SERVICE_DESCRIPTOR_SCHEMA,
+                "id": "candidate-qualified-execution",
+                "client_id": "candidate-qualified-client",
+                "endpoint": "https://qualified-execution.invalid",
+                "credential_env": None,
+                "timeout_seconds": 5,
+            }
+        ),
         "client_id": transcript["client_id"],
         "run_id": transcript["run_id"],
         "profile_id": profile_id,
@@ -250,18 +316,17 @@ def qualified_execution_artifact(
         "base_commit": base_commit,
         "base_tree": base_tree,
         "plan_commit": plan_commit,
+        "policy_path": "policies/qualified-execution.json",
+        "policy_artifact_hash": "sha256:" + "8" * 64,
+        "runner_id": transcript["runner_id"],
+        "runner_identity": transcript["runner_identity"],
+        "namespace_id": transcript["namespace_id"],
+        "runner_descriptor_hash": qualified_runner_descriptor_hash(runner_descriptor),
+        "runner_identity_hash": transcript["runner_identity_hash"],
+        "runner_result_hash": transcript["runner_result_hash"],
         "inputs": inputs,
-        "runtime": {
-            "interpreter_path": "/qualified/python",
-            "interpreter_sha256": "sha256:" + "3" * 64,
-            "interpreter_version_sha256": "sha256:" + "4" * 64,
-            "dependency_manifest_path": "/qualified/dependencies.lock",
-            "dependency_manifest_sha256": "sha256:" + "5" * 64,
-            "environment": runtime_environment,
-            "environment_hash": object_hash(runtime_environment),
-        },
+        "runtime": runtime,
         "command": command,
-        "transcript_hash": transcript["transcript_hash"],
         "output_hash": transcript["output_hash"],
         "output_complete": True,
         "returncode": 0,
@@ -508,7 +573,8 @@ def candidate_evidence(candidate_repo, *, source_commit, source_tree, plan_commi
         "rollback_release_manifest": predecessor,
     }
     rollback = {**rollback_unsigned, "manifest_hash": object_hash(rollback_unsigned)}
-    execution_catalog = qualified_execution_catalog(plan_commit)
+    runner_descriptor = qualified_runner_descriptor(plan_commit)
+    execution_catalog = qualified_execution_catalog(plan_commit, runner_descriptor)
     execution_proofs = [
         qualified_execution_artifact(
             kind="test",
@@ -527,6 +593,7 @@ def candidate_evidence(candidate_repo, *, source_commit, source_tree, plan_commi
                 "test_receipt_hash": focused["receipt_hash"],
                 "test_output_artifact_hash": focused_output["artifact_hash"],
             },
+            runner_descriptor=runner_descriptor,
         ),
         qualified_execution_artifact(
             kind="test",
@@ -545,6 +612,7 @@ def candidate_evidence(candidate_repo, *, source_commit, source_tree, plan_commi
                 "test_receipt_hash": full["receipt_hash"],
                 "test_output_artifact_hash": full_output["artifact_hash"],
             },
+            runner_descriptor=runner_descriptor,
         ),
         *[
             qualified_execution_artifact(
@@ -578,6 +646,7 @@ def candidate_evidence(candidate_repo, *, source_commit, source_tree, plan_commi
                     "runner_sha256": "sha256:" + "6" * 64,
                     "migration_receipt_hash": receipt["receipt_hash"],
                 },
+                runner_descriptor=runner_descriptor,
             )
             for index, receipt in enumerate(migrations, start=1)
         ],
@@ -592,6 +661,7 @@ def candidate_evidence(candidate_repo, *, source_commit, source_tree, plan_commi
         "release_manifest": release,
         "rollback_manifest": rollback,
         "qualified_execution_catalog": execution_catalog,
+        "qualified_execution_runner_descriptor": runner_descriptor,
         "execution_proofs": execution_proofs,
     }
 
@@ -633,6 +703,7 @@ def independent_review_evidence(candidate_manifest, independent_review_receipt):
     }
     review_result = {**review_result_unsigned, "result_hash": object_hash(review_result_unsigned)}
     source = candidate_manifest["source"]
+    runner_descriptor = qualified_runner_descriptor(candidate_manifest["plan"]["commit"])
     execution_proof = qualified_execution_artifact(
         kind="review",
         profile_id="independent-review",
@@ -649,11 +720,13 @@ def independent_review_evidence(candidate_manifest, independent_review_receipt):
             "runner_path": "/qualified/review-runner",
             "runner_sha256": "sha256:" + "7" * 64,
         },
+        runner_descriptor=runner_descriptor,
     )
     return {
         "review_packet": review_packet,
         "review_result": review_result,
-        "qualified_execution_catalog": qualified_execution_catalog(candidate_manifest["plan"]["commit"]),
+        "qualified_execution_catalog": qualified_execution_catalog(candidate_manifest["plan"]["commit"], runner_descriptor),
+        "qualified_execution_runner_descriptor": runner_descriptor,
         "review_execution_proof": execution_proof["proof"],
         "review_execution_transcript": execution_proof["transcript"],
     }
@@ -725,6 +798,15 @@ def _candidate_evidence_sink(
         proof = dict(evidence["execution_proofs"][0]["proof"])
         proof["inputs"] = {**proof["inputs"], "scope": "forged"}
         evidence["execution_proofs"][0] = {**evidence["execution_proofs"][0], "proof": proof}
+    if corrupt_w08 == "runner-descriptor":
+        evidence["qualified_execution_runner_descriptor"] = {
+            **evidence["qualified_execution_runner_descriptor"],
+            "namespace_id": "forged-runner-namespace",
+        }
+    if corrupt_w08 == "signer-descriptor":
+        catalog = dict(evidence["qualified_execution_catalog"])
+        catalog["services"] = [{**catalog["services"][0], "descriptor_hash": "sha256:" + "0" * 64}]
+        evidence["qualified_execution_catalog"] = catalog
     artifacts = []
     pointers = {}
     for name, value in evidence.items():
@@ -1098,6 +1180,8 @@ def test_gate_rejects_a_legacy_or_substituted_card_receipt_sink_binding(tmp_path
         "release",
         "rollback",
         "execution-proof",
+        "runner-descriptor",
+        "signer-descriptor",
     ],
 )
 def test_gate_requires_every_retained_s_or_x_evidence_artifact(tmp_path, corruption):
@@ -1262,7 +1346,11 @@ def test_bootstrap_contract_is_derived_from_exact_w08_s_d_evidence_and_retained_
     candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
     _s, _d, execution_sink, descriptor_config, _execution_config = pinned_sinks(
-        tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree, plan_commit=plan_commit,
+        tmp_path,
+        candidate_repo=candidate,
+        source_commit=commit,
+        source_tree=tree,
+        plan_commit=plan_commit,
     )
     descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
     contract = derive_bootstrap_deployment_contract(
@@ -1274,11 +1362,17 @@ def test_bootstrap_contract_is_derived_from_exact_w08_s_d_evidence_and_retained_
         deployment_declaration=_bootstrap_deployment_declaration(),
     )
     ref, execution_config = _append_bootstrap_deployment_contract(
-        execution_sink, source_commit=commit, contract=contract, tmp_path=tmp_path,
+        execution_sink,
+        source_commit=commit,
+        contract=contract,
+        tmp_path=tmp_path,
     )
 
     verified = _bootstrap_contract_resolver(
-        candidate, plan_repository, descriptor_config, execution_config,
+        candidate,
+        plan_repository,
+        descriptor_config,
+        execution_config,
     ).resolve(ref, contract["contract_hash"])
 
     assert ref == bootstrap_deployment_contract_ref(commit)
@@ -1296,13 +1390,18 @@ def test_bootstrap_contract_is_derived_from_exact_w08_s_d_evidence_and_retained_
 
 
 @pytest.mark.parametrize(
-    "corruption", ["candidate", "sink", "symbolic-closure", "typed-effect", "rollback-contract"],
+    "corruption",
+    ["candidate", "sink", "symbolic-closure", "typed-effect", "rollback-contract"],
 )
 def test_bootstrap_contract_rejects_widened_or_mismatched_w08_and_closure_bindings(tmp_path, corruption):
     candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
     _s, _d, execution_sink, descriptor_config, _execution_config = pinned_sinks(
-        tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree, plan_commit=plan_commit,
+        tmp_path,
+        candidate_repo=candidate,
+        source_commit=commit,
+        source_tree=tree,
+        plan_commit=plan_commit,
     )
     descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
     contract = derive_bootstrap_deployment_contract(
@@ -1327,10 +1426,16 @@ def test_bootstrap_contract_rejects_widened_or_mismatched_w08_and_closure_bindin
     unsigned = {key: value for key, value in contract.items() if key != "contract_hash"}
     contract["contract_hash"] = object_hash(unsigned)
     ref, execution_config = _append_bootstrap_deployment_contract(
-        execution_sink, source_commit=commit, contract=contract, tmp_path=tmp_path,
+        execution_sink,
+        source_commit=commit,
+        contract=contract,
+        tmp_path=tmp_path,
     )
 
     with pytest.raises(BootstrapDeploymentContractError):
         _bootstrap_contract_resolver(
-            candidate, plan_repository, descriptor_config, execution_config,
+            candidate,
+            plan_repository,
+            descriptor_config,
+            execution_config,
         ).resolve(ref, contract["contract_hash"])

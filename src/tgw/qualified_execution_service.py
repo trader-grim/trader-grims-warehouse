@@ -1,13 +1,10 @@
-"""Qualified execution proofs for candidate tests and PostgreSQL migrations.
+"""Separated qualified-runner and proof-signer contract.
 
-This service is intentionally separate from the governed resource service.
-Resource retrieval attestations prove that a harness fetched card resources;
-they do not prove that a command ran.  This module owns the stronger claim:
-an externally configured service resolved one exact Git candidate and ran an
-allowlisted profile in its own bounded environment.
-
-No endpoint, bearer, repository, or signing key is supplied by this source.
-Those are deployment inputs.  The public catalog is merely a verifier pin.
+The signer never starts candidate code.  It resolves immutable Git and Plan
+objects, authenticates a separately provisioned confined runner over HTTPS (or
+an operator-provisioned loopback test endpoint), validates the runner's fresh
+identity and signed result, then signs the retained proof.  A deployment must
+provide the runner; this module intentionally contains no local fallback.
 """
 
 from __future__ import annotations
@@ -20,12 +17,10 @@ import json
 import os
 import re
 import secrets
-import selectors
-import signal
+import socket
 import subprocess
-import tempfile
 import threading
-import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -38,48 +33,42 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
-from tgw.candidate_manifest import (
-    CandidateManifestError,
-    create_test_output_artifact,
-    create_test_receipt,
-    load_candidate_test_plan,
-    verify_migration_safety_receipt,
-)
+from tgw.candidate_manifest import load_candidate_test_plan, verify_migration_safety_receipt, verify_test_receipt
 
-SERVICE_CONFIG_SCHEMA = "tgw-qualified-execution-service-config/v1"
-SERVICE_DESCRIPTOR_SCHEMA = "tgw-qualified-execution-service/v1"
-SERVICE_CATALOG_SCHEMA = "tgw-qualified-execution-service-catalog/v1"
-REQUEST_SCHEMA = "tgw-qualified-execution-request/v1"
-RESPONSE_SCHEMA = "tgw-qualified-execution-response/v1"
-PROOF_SCHEMA = "tgw-qualified-execution-proof/v1"
-TRANSCRIPT_SCHEMA = "tgw-qualified-execution-transcript/v1"
+SERVICE_CONFIG_SCHEMA = "tgw-qualified-execution-signer-config/v2"
+SERVICE_DESCRIPTOR_SCHEMA = "tgw-qualified-execution-signer/v2"
+SERVICE_CATALOG_SCHEMA = "tgw-qualified-execution-service-catalog/v2"
+RUNNER_DESCRIPTOR_SCHEMA = "tgw-qualified-execution-runner/v1"
+POLICY_SCHEMA = "tgw-qualified-execution-policy/v1"
+RUNNER_IDENTITY_SCHEMA = "tgw-qualified-runner-identity/v1"
+TRANSCRIPT_SCHEMA = "tgw-qualified-runner-transcript/v2"
+PROOF_SCHEMA = "tgw-qualified-execution-proof/v2"
+REQUEST_SCHEMA = "tgw-qualified-execution-request/v2"
+RESPONSE_SCHEMA = "tgw-qualified-execution-response/v2"
+RUNNER_IDENTITY_REQUEST_SCHEMA = "tgw-qualified-runner-identity-request/v1"
+RUNNER_EXECUTE_REQUEST_SCHEMA = "tgw-qualified-runner-execute-request/v1"
+RUNNER_RESPONSE_SCHEMA = "tgw-qualified-runner-response/v1"
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
-_GIT_OBJECT = re.compile(r"[0-9a-f]{40}\Z")
+_GIT = re.compile(r"[0-9a-f]{40}\Z")
+_ID = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,127}\Z")
 _SERVICE_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
-_CLIENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _PROFILE_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
-_KEY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
-_RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+_ENV = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
+_NONCE = re.compile(r"[A-Za-z0-9_-]{24,128}\Z")
 _PATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\Z")
 _MAX_REQUEST_BYTES = 128 * 1024
 _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
-_CAPABILITIES = frozenset(
-    {
-        "candidate-test-execution",
-        "postgresql-migration-execution",
-        "candidate-review-execution",
-    }
-)
+_MAX_BODY_READ_SECONDS = 10
+_CAPABILITIES = frozenset({"candidate-test-execution", "postgresql-migration-execution", "candidate-review-execution"})
 
 
 class QualifiedExecutionError(ValueError):
-    """A qualified execution request, proof, or configuration is invalid."""
+    pass
 
 
 class QualifiedExecutionConfigurationError(ValueError):
-    """The externally provisioned execution service configuration is invalid."""
+    pass
 
 
 class _ProtocolError(ValueError):
@@ -96,42 +85,34 @@ def _canonical(value: Any) -> bytes:
 
 
 def _hash(value: Any) -> str:
-    return "sha256:" + hashlib.sha256(_canonical(value)).hexdigest()
+    return _hash_bytes(_canonical(value))
 
 
 def _hash_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
-def _is_hash(value: Any) -> bool:
+def _hash_ok(value: Any) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
 
 
-def _valid_relative_path(value: Any) -> bool:
-    return isinstance(value, str) and _PATH.fullmatch(value) is not None and not value.startswith("/") and ".." not in Path(value).parts
-
-
-def _base64(value: Any, *, label: str, length: int | None = None) -> bytes:
+def _b64(value: Any, *, label: str, length: int | None = None) -> bytes:
     if not isinstance(value, str):
         raise QualifiedExecutionError(f"{label} is invalid")
     try:
-        decoded = base64.b64decode(value, validate=True)
+        raw = base64.b64decode(value, validate=True)
     except (TypeError, ValueError) as exc:
         raise QualifiedExecutionError(f"{label} is invalid") from exc
-    if base64.b64encode(decoded).decode("ascii") != value or (length is not None and len(decoded) != length):
+    if base64.b64encode(raw).decode() != value or (length is not None and len(raw) != length):
         raise QualifiedExecutionError(f"{label} is invalid")
-    return decoded
+    return raw
 
 
 def _private_key(value: Ed25519PrivateKey | str | bytes) -> Ed25519PrivateKey:
-    raw: bytes
     if isinstance(value, Ed25519PrivateKey):
         return value
-    if isinstance(value, bytes):
-        raw = value
-    elif isinstance(value, str):
-        raw = _base64(value, label="qualified execution private key", length=32)
-    else:
+    raw = value if isinstance(value, bytes) else _b64(value, label="qualified execution private key", length=32) if isinstance(value, str) else None
+    if raw is None:
         raise QualifiedExecutionError("qualified execution private key is invalid")
     try:
         return Ed25519PrivateKey.from_private_bytes(raw)
@@ -140,15 +121,13 @@ def _private_key(value: Ed25519PrivateKey | str | bytes) -> Ed25519PrivateKey:
 
 
 def execution_public_key(value: Ed25519PrivateKey | Ed25519PublicKey | str | bytes) -> str:
-    """Return the canonical raw Ed25519 public-key representation for a catalog."""
-
     key = value if isinstance(value, Ed25519PublicKey) else _private_key(value).public_key()
-    return base64.b64encode(key.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)).decode("ascii")
+    return base64.b64encode(key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
 
 
 def _public_key(value: Any) -> Ed25519PublicKey:
     try:
-        return Ed25519PublicKey.from_public_bytes(_base64(value, label="qualified execution public key", length=32))
+        return Ed25519PublicKey.from_public_bytes(_b64(value, label="qualified execution public key", length=32))
     except ValueError as exc:
         raise QualifiedExecutionError("qualified execution public key is invalid") from exc
 
@@ -158,47 +137,56 @@ def _environment(value: Any) -> dict[str, str]:
         raise QualifiedExecutionError("qualified execution environment is invalid")
     normalized: dict[str, str] = {}
     for key, item in value.items():
-        if not isinstance(key, str) or _ENV_NAME.fullmatch(key) is None or not isinstance(item, str):
+        if not isinstance(key, str) or _ENV.fullmatch(key) is None or not isinstance(item, str):
             raise QualifiedExecutionError("qualified execution environment is invalid")
         normalized[key] = item
     return dict(sorted(normalized.items()))
 
 
-def _descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
-    required = {"schema", "id", "client_id", "endpoint", "credential_env", "timeout_seconds"}
-    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != SERVICE_DESCRIPTOR_SCHEMA:
-        raise QualifiedExecutionError("qualified execution service descriptor is invalid")
-    service_id, client_id, endpoint = value.get("id"), value.get("client_id"), value.get("endpoint")
-    credential_env, timeout_seconds = value.get("credential_env"), value.get("timeout_seconds")
-    parsed = urlsplit(endpoint) if isinstance(endpoint, str) else None
+def _relative(value: Any) -> bool:
+    return isinstance(value, str) and _PATH.fullmatch(value) is not None and not value.startswith("/") and ".." not in Path(value).parts
+
+
+def _endpoint(value: Any) -> str:
+    parsed = urlsplit(value) if isinstance(value, str) else None
     loopback = parsed is not None and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
     if (
-        not isinstance(service_id, str)
-        or _SERVICE_ID.fullmatch(service_id) is None
-        or not isinstance(client_id, str)
-        or _CLIENT_ID.fullmatch(client_id) is None
-        or not isinstance(endpoint, str)
-        or parsed is None
+        parsed is None
         or parsed.scheme not in {"http", "https"}
         or not parsed.netloc
         or parsed.query
         or parsed.fragment
-        or parsed.username is not None
-        or parsed.password is not None
+        or parsed.username
+        or parsed.password
         or (parsed.scheme == "http" and not loopback)
-        or (credential_env is not None and (not isinstance(credential_env, str) or _ENV_NAME.fullmatch(credential_env) is None))
-        or not isinstance(timeout_seconds, int)
-        or isinstance(timeout_seconds, bool)
-        or not 1 <= timeout_seconds <= 3600
     ):
-        raise QualifiedExecutionError("qualified execution service descriptor is invalid")
+        raise QualifiedExecutionError("qualified execution endpoint is invalid")
+    return str(value).rstrip("/")
+
+
+def _descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
+    fields = {"schema", "id", "client_id", "endpoint", "credential_env", "timeout_seconds"}
+    if not isinstance(value, Mapping) or set(value) != fields or value.get("schema") != SERVICE_DESCRIPTOR_SCHEMA:
+        raise QualifiedExecutionError("qualified execution signer descriptor is invalid")
+    if (
+        not isinstance(value.get("id"), str)
+        or _SERVICE_ID.fullmatch(value["id"]) is None
+        or not isinstance(value.get("client_id"), str)
+        or _ID.fullmatch(value["client_id"]) is None
+        or value.get("credential_env") is not None
+        and (not isinstance(value["credential_env"], str) or _ENV.fullmatch(value["credential_env"]) is None)
+        or not isinstance(value.get("timeout_seconds"), int)
+        or isinstance(value["timeout_seconds"], bool)
+        or not 1 <= value["timeout_seconds"] <= 3600
+    ):
+        raise QualifiedExecutionError("qualified execution signer descriptor is invalid")
     return {
         "schema": SERVICE_DESCRIPTOR_SCHEMA,
-        "id": service_id,
-        "client_id": client_id,
-        "endpoint": endpoint.rstrip("/"),
-        "credential_env": credential_env,
-        "timeout_seconds": timeout_seconds,
+        "id": value["id"],
+        "client_id": value["client_id"],
+        "endpoint": _endpoint(value["endpoint"]),
+        "credential_env": value["credential_env"],
+        "timeout_seconds": value["timeout_seconds"],
     }
 
 
@@ -206,69 +194,248 @@ def execution_service_descriptor_hash(value: Mapping[str, Any]) -> str:
     return _hash(_descriptor(value))
 
 
+def _runner_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
+    fields = {
+        "schema",
+        "id",
+        "runner_identity",
+        "namespace_id",
+        "endpoint",
+        "credential_env",
+        "timeout_seconds",
+        "attestation_key_id",
+        "attestation_public_key",
+        "isolation_profile_hash",
+        "plan_commit",
+        "policy_path",
+        "policy_artifact_hash",
+        "profiles",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields or value.get("schema") != RUNNER_DESCRIPTOR_SCHEMA:
+        raise QualifiedExecutionError("qualified runner descriptor is invalid")
+    for field in ("id", "runner_identity", "namespace_id", "attestation_key_id"):
+        if not isinstance(value.get(field), str) or _ID.fullmatch(value[field]) is None:
+            raise QualifiedExecutionError("qualified runner descriptor identity is invalid")
+    if (
+        not isinstance(value.get("credential_env"), str)
+        or _ENV.fullmatch(value["credential_env"]) is None
+        or not isinstance(value.get("timeout_seconds"), int)
+        or isinstance(value["timeout_seconds"], bool)
+        or not 1 <= value["timeout_seconds"] <= 3600
+        or not _hash_ok(value.get("isolation_profile_hash"))
+        or not isinstance(value.get("plan_commit"), str)
+        or _GIT.fullmatch(value["plan_commit"]) is None
+        or not _relative(value.get("policy_path"))
+        or not _hash_ok(value.get("policy_artifact_hash"))
+        or not isinstance(value.get("profiles"), list)
+        or not value["profiles"]
+        or len(set(value["profiles"])) != len(value["profiles"])
+        or not all(isinstance(profile, str) and _PROFILE_ID.fullmatch(profile) is not None for profile in value["profiles"])
+    ):
+        raise QualifiedExecutionError("qualified runner descriptor is invalid")
+    _public_key(value.get("attestation_public_key"))
+    return {**dict(value), "endpoint": _endpoint(value["endpoint"]), "profiles": sorted(value["profiles"])}
+
+
+def qualified_runner_descriptor_hash(value: Mapping[str, Any]) -> str:
+    return _hash(_runner_descriptor(value))
+
+
 def validate_execution_service_catalog(value: Mapping[str, Any]) -> dict[str, Any]:
-    required = {"schema", "catalog_ref", "plan_commit", "services"}
-    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != SERVICE_CATALOG_SCHEMA:
+    fields = {"schema", "catalog_ref", "plan_commit", "policy_artifact_hash", "services"}
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != fields
+        or value.get("schema") != SERVICE_CATALOG_SCHEMA
+        or not isinstance(value.get("catalog_ref"), str)
+        or not value["catalog_ref"]
+        or not isinstance(value.get("plan_commit"), str)
+        or _GIT.fullmatch(value["plan_commit"]) is None
+        or not _hash_ok(value.get("policy_artifact_hash"))
+        or not isinstance(value.get("services"), list)
+        or not value["services"]
+    ):
         raise QualifiedExecutionError("qualified execution service catalog is invalid")
-    if not isinstance(value.get("catalog_ref"), str) or not value["catalog_ref"]:
-        raise QualifiedExecutionError("qualified execution service catalog reference is invalid")
-    if not isinstance(value.get("plan_commit"), str) or _GIT_OBJECT.fullmatch(value["plan_commit"]) is None:
-        raise QualifiedExecutionError("qualified execution service catalog Plan binding is invalid")
-    services = value.get("services")
-    if not isinstance(services, list) or not services:
-        raise QualifiedExecutionError("qualified execution service catalog is empty")
     normalized: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
-    for item in services:
-        fields = {"id", "client_id", "descriptor_hash", "capabilities", "attestation_key_id", "attestation_public_key"}
-        if not isinstance(item, Mapping) or set(item) != fields:
-            raise QualifiedExecutionError("qualified execution service catalog entry is invalid")
-        identity = (item.get("id"), item.get("client_id"))
-        capabilities = item.get("capabilities")
+    entry_fields = {
+        "id",
+        "client_id",
+        "signer_identity",
+        "signer_namespace_id",
+        "descriptor_hash",
+        "runner_descriptor_hash",
+        "policy_artifact_hash",
+        "capabilities",
+        "attestation_key_id",
+        "attestation_public_key",
+    }
+    for entry in value["services"]:
+        if not isinstance(entry, Mapping) or set(entry) != entry_fields:
+            raise QualifiedExecutionError("qualified execution catalog entry is invalid")
+        identity = (entry.get("id"), entry.get("client_id"))
+        capabilities = entry.get("capabilities")
         if (
             not isinstance(identity[0], str)
             or _SERVICE_ID.fullmatch(identity[0]) is None
             or not isinstance(identity[1], str)
-            or _CLIENT_ID.fullmatch(identity[1]) is None
+            or _ID.fullmatch(identity[1]) is None
             or identity in seen
-            or not _is_hash(item.get("descriptor_hash"))
-            or not isinstance(item.get("attestation_key_id"), str)
-            or _KEY_ID.fullmatch(item["attestation_key_id"]) is None
+            or not isinstance(entry.get("signer_identity"), str)
+            or _ID.fullmatch(entry["signer_identity"]) is None
+            or not isinstance(entry.get("signer_namespace_id"), str)
+            or _ID.fullmatch(entry["signer_namespace_id"]) is None
+            or not all(_hash_ok(entry.get(field)) for field in ("descriptor_hash", "runner_descriptor_hash", "policy_artifact_hash"))
+            or entry["policy_artifact_hash"] != value["policy_artifact_hash"]
             or not isinstance(capabilities, list)
-            or not all(isinstance(cap, str) and cap in _CAPABILITIES for cap in capabilities)
+            or not capabilities
             or len(set(capabilities)) != len(capabilities)
+            or not all(isinstance(item, str) and item in _CAPABILITIES for item in capabilities)
+            or not isinstance(entry.get("attestation_key_id"), str)
+            or _ID.fullmatch(entry["attestation_key_id"]) is None
         ):
-            raise QualifiedExecutionError("qualified execution service catalog entry is invalid")
-        _public_key(item.get("attestation_public_key"))
+            raise QualifiedExecutionError("qualified execution catalog entry is invalid")
+        _public_key(entry.get("attestation_public_key"))
         seen.add(identity)
-        normalized.append(
-            {
-                "id": identity[0],
-                "client_id": identity[1],
-                "descriptor_hash": item["descriptor_hash"],
-                "capabilities": sorted(capabilities),
-                "attestation_key_id": item["attestation_key_id"],
-                "attestation_public_key": item["attestation_public_key"],
-            }
-        )
-    return {"schema": SERVICE_CATALOG_SCHEMA, "catalog_ref": value["catalog_ref"], "plan_commit": value["plan_commit"], "services": normalized}
+        normalized.append({**dict(entry), "capabilities": sorted(capabilities)})
+    return {"schema": SERVICE_CATALOG_SCHEMA, "catalog_ref": value["catalog_ref"], "plan_commit": value["plan_commit"], "policy_artifact_hash": value["policy_artifact_hash"], "services": normalized}
 
 
 def execution_service_catalog_hash(value: Mapping[str, Any]) -> str:
     return _hash(validate_execution_service_catalog(value))
 
 
-def execution_service_attestation_key(catalog: Mapping[str, Any], service_id: str, client_id: str) -> dict[str, str]:
+def _catalog_entry(catalog: Mapping[str, Any], service_id: str, client_id: str) -> dict[str, Any]:
     normalized = validate_execution_service_catalog(catalog)
     entry = next((item for item in normalized["services"] if (item["id"], item["client_id"]) == (service_id, client_id)), None)
     if entry is None:
         raise QualifiedExecutionError("qualified execution service is absent from catalog")
-    return {"attestation_key_id": entry["attestation_key_id"], "attestation_public_key": entry["attestation_public_key"]}
+    return {**entry, "plan_commit": normalized["plan_commit"], "catalog_policy_artifact_hash": normalized["policy_artifact_hash"]}
+
+
+def _runtime(value: Any) -> dict[str, Any]:
+    fields = {
+        "runner_path",
+        "runner_sha256",
+        "interpreter_path",
+        "interpreter_sha256",
+        "interpreter_version_sha256",
+        "dependency_manifest_path",
+        "dependency_manifest_sha256",
+        "environment",
+        "environment_hash",
+    }
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != fields
+        or not all(isinstance(value.get(field), str) and value[field] for field in ("runner_path", "interpreter_path", "dependency_manifest_path"))
+        or not all(_hash_ok(value.get(field)) for field in ("runner_sha256", "interpreter_sha256", "interpreter_version_sha256", "dependency_manifest_sha256", "environment_hash"))
+    ):
+        raise QualifiedExecutionError("qualified runner runtime is invalid")
+    environment = _environment(value.get("environment"))
+    if value["environment_hash"] != _hash(environment):
+        raise QualifiedExecutionError("qualified runner environment hash is invalid")
+    return {**dict(value), "environment": environment}
+
+
+def _identity_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    fields = {
+        "schema",
+        "runner_id",
+        "runner_identity",
+        "namespace_id",
+        "nonce",
+        "plan_commit",
+        "policy_path",
+        "policy_artifact_hash",
+        "isolation_profile_hash",
+        "runtime",
+        "attestation_key_id",
+    }
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != fields
+        or value.get("schema") != RUNNER_IDENTITY_SCHEMA
+        or not all(isinstance(value.get(field), str) and _ID.fullmatch(value[field]) is not None for field in ("runner_id", "runner_identity", "namespace_id", "attestation_key_id"))
+        or not isinstance(value.get("nonce"), str)
+        or _NONCE.fullmatch(value["nonce"]) is None
+        or not isinstance(value.get("plan_commit"), str)
+        or _GIT.fullmatch(value["plan_commit"]) is None
+        or not _relative(value.get("policy_path"))
+        or not _hash_ok(value.get("policy_artifact_hash"))
+        or not _hash_ok(value.get("isolation_profile_hash"))
+    ):
+        raise QualifiedExecutionError("qualified runner identity is invalid")
+    return {**dict(value), "runtime": _runtime(value.get("runtime"))}
+
+
+def issue_runner_identity(value: Mapping[str, Any], *, signing_private_key: Ed25519PrivateKey | str | bytes) -> dict[str, Any]:
+    payload = _identity_payload(value)
+    identity_hash = _hash(payload)
+    return {**payload, "identity_hash": identity_hash, "signature": base64.b64encode(_private_key(signing_private_key).sign(_canonical({**payload, "identity_hash": identity_hash}))).decode()}
+
+
+def _validate_runner_identity(value: Mapping[str, Any], *, descriptor: Mapping[str, Any], nonce: str, plan_commit: str, policy_path: str, policy_artifact_hash: str) -> dict[str, Any]:
+    desc = _runner_descriptor(descriptor)
+    fields = set(
+        _identity_payload(
+            {
+                "schema": RUNNER_IDENTITY_SCHEMA,
+                "runner_id": "a",
+                "runner_identity": "a",
+                "namespace_id": "a",
+                "nonce": "a" * 24,
+                "plan_commit": "0" * 40,
+                "policy_path": "policy.json",
+                "policy_artifact_hash": "sha256:" + "0" * 64,
+                "isolation_profile_hash": "sha256:" + "0" * 64,
+                "runtime": {
+                    "runner_path": "x",
+                    "runner_sha256": "sha256:" + "0" * 64,
+                    "interpreter_path": "x",
+                    "interpreter_sha256": "sha256:" + "0" * 64,
+                    "interpreter_version_sha256": "sha256:" + "0" * 64,
+                    "dependency_manifest_path": "x",
+                    "dependency_manifest_sha256": "sha256:" + "0" * 64,
+                    "environment": {},
+                    "environment_hash": _hash({}),
+                },
+                "attestation_key_id": "a",
+            }
+        ).keys()
+    ) | {"identity_hash", "signature"}
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise QualifiedExecutionError("qualified runner identity is invalid")
+    payload = _identity_payload({key: item for key, item in value.items() if key not in {"identity_hash", "signature"}})
+    if (
+        value.get("identity_hash") != _hash(payload)
+        or payload["runner_id"] != desc["id"]
+        or payload["runner_identity"] != desc["runner_identity"]
+        or payload["namespace_id"] != desc["namespace_id"]
+        or payload["attestation_key_id"] != desc["attestation_key_id"]
+        or payload["nonce"] != nonce
+        or payload["plan_commit"] != plan_commit
+        or payload["policy_path"] != policy_path
+        or payload["policy_artifact_hash"] != policy_artifact_hash
+        or payload["isolation_profile_hash"] != desc["isolation_profile_hash"]
+    ):
+        raise QualifiedExecutionError("qualified runner identity binding is invalid")
+    try:
+        _public_key(desc["attestation_public_key"]).verify(
+            _b64(value.get("signature"), label="qualified runner identity signature", length=64), _canonical({**payload, "identity_hash": value["identity_hash"]})
+        )
+    except InvalidSignature as exc:
+        raise QualifiedExecutionError("qualified runner identity signature is invalid") from exc
+    return {**payload, "identity_hash": value["identity_hash"], "signature": value["signature"]}
 
 
 def _transcript_payload(value: Mapping[str, Any]) -> dict[str, Any]:
-    required = {
+    fields = {
         "schema",
+        "runner_id",
+        "runner_identity",
+        "namespace_id",
+        "runner_identity_hash",
         "service_id",
         "client_id",
         "run_id",
@@ -279,6 +446,10 @@ def _transcript_payload(value: Mapping[str, Any]) -> dict[str, Any]:
         "base_commit",
         "base_tree",
         "plan_commit",
+        "policy_path",
+        "policy_artifact_hash",
+        "inputs",
+        "runtime",
         "command",
         "stdout_base64",
         "stderr_base64",
@@ -288,126 +459,66 @@ def _transcript_payload(value: Mapping[str, Any]) -> dict[str, Any]:
         "output_complete",
         "returncode",
         "timed_out",
-        "status",
-    }
-    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != TRANSCRIPT_SCHEMA:
-        raise QualifiedExecutionError("qualified execution transcript is invalid")
-    for field, pattern in (("service_id", _SERVICE_ID), ("client_id", _CLIENT_ID), ("run_id", _RUN_ID), ("profile_id", _PROFILE_ID)):
-        if not isinstance(value.get(field), str) or pattern.fullmatch(value[field]) is None:
-            raise QualifiedExecutionError("qualified execution transcript identity is invalid")
-    if value.get("kind") not in {"test", "migration", "review"}:
-        raise QualifiedExecutionError("qualified execution transcript kind is invalid")
-    for field in ("candidate_commit", "candidate_tree", "base_commit", "base_tree", "plan_commit"):
-        if not isinstance(value.get(field), str) or _GIT_OBJECT.fullmatch(value[field]) is None:
-            raise QualifiedExecutionError("qualified execution transcript Git binding is invalid")
-    command = value.get("command")
-    if not isinstance(command, list) or not command or not all(isinstance(arg, str) and arg for arg in command):
-        raise QualifiedExecutionError("qualified execution transcript command is invalid")
-    stdout, stderr = _base64(value.get("stdout_base64"), label="qualified execution stdout"), _base64(value.get("stderr_base64"), label="qualified execution stderr")
-    if value.get("stdout_sha256") != _hash_bytes(stdout) or value.get("stderr_sha256") != _hash_bytes(stderr):
-        raise QualifiedExecutionError("qualified execution transcript output hash is invalid")
-    if value.get("output_hash") != _hash_bytes(stdout + b"\0" + stderr):
-        raise QualifiedExecutionError("qualified execution transcript combined output hash is invalid")
-    if not isinstance(value.get("output_complete"), bool) or not isinstance(value.get("returncode"), int) or isinstance(value["returncode"], bool) or not isinstance(value.get("timed_out"), bool):
-        raise QualifiedExecutionError("qualified execution transcript status is invalid")
-    if value.get("status") not in {"PASS", "FAIL"}:
-        raise QualifiedExecutionError("qualified execution transcript status is invalid")
-    return dict(value)
-
-
-def _proof_payload(value: Mapping[str, Any]) -> dict[str, Any]:
-    required = {
-        "schema",
-        "service_id",
-        "client_id",
-        "run_id",
-        "profile_id",
-        "kind",
-        "candidate_commit",
-        "candidate_tree",
-        "base_commit",
-        "base_tree",
-        "plan_commit",
-        "inputs",
-        "runtime",
-        "command",
-        "transcript_hash",
-        "output_hash",
-        "output_complete",
-        "returncode",
-        "timed_out",
+        "timeout_enforced",
+        "output_limit_enforced",
+        "runtime_rehashed_before_dispatch",
+        "isolated",
+        "isolation_profile_hash",
         "status",
         "attestation_key_id",
     }
-    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != PROOF_SCHEMA:
-        raise QualifiedExecutionError("qualified execution proof is invalid")
-    for field, pattern in (("service_id", _SERVICE_ID), ("client_id", _CLIENT_ID), ("run_id", _RUN_ID), ("profile_id", _PROFILE_ID), ("attestation_key_id", _KEY_ID)):
-        if not isinstance(value.get(field), str) or pattern.fullmatch(value[field]) is None:
-            raise QualifiedExecutionError("qualified execution proof identity is invalid")
-    if value.get("kind") not in {"test", "migration", "review"}:
-        raise QualifiedExecutionError("qualified execution proof kind is invalid")
-    for field in ("candidate_commit", "candidate_tree", "base_commit", "base_tree", "plan_commit"):
-        if not isinstance(value.get(field), str) or _GIT_OBJECT.fullmatch(value[field]) is None:
-            raise QualifiedExecutionError("qualified execution proof Git binding is invalid")
-    if not isinstance(value.get("inputs"), Mapping) or not isinstance(value.get("runtime"), Mapping):
-        raise QualifiedExecutionError("qualified execution proof inputs are invalid")
+    if not isinstance(value, Mapping) or set(value) != fields or value.get("schema") != TRANSCRIPT_SCHEMA:
+        raise QualifiedExecutionError("qualified runner transcript is invalid")
+    for field in ("runner_id", "runner_identity", "namespace_id", "service_id", "client_id", "run_id", "profile_id", "attestation_key_id"):
+        if not isinstance(value.get(field), str) or _ID.fullmatch(value[field]) is None:
+            raise QualifiedExecutionError("qualified runner transcript identity is invalid")
+    if (
+        value.get("kind") not in {"test", "migration", "review"}
+        or not _hash_ok(value.get("runner_identity_hash"))
+        or not all(isinstance(value.get(field), str) and _GIT.fullmatch(value[field]) is not None for field in ("candidate_commit", "candidate_tree", "base_commit", "base_tree", "plan_commit"))
+        or not _relative(value.get("policy_path"))
+        or not _hash_ok(value.get("policy_artifact_hash"))
+        or not _hash_ok(value.get("isolation_profile_hash"))
+        or not isinstance(value.get("inputs"), Mapping)
+    ):
+        raise QualifiedExecutionError("qualified runner transcript binding is invalid")
     command = value.get("command")
-    if not isinstance(command, list) or not command or not all(isinstance(arg, str) and arg for arg in command):
-        raise QualifiedExecutionError("qualified execution proof command is invalid")
-    for field in ("transcript_hash", "output_hash"):
-        if not _is_hash(value.get(field)):
-            raise QualifiedExecutionError("qualified execution proof hash is invalid")
+    if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
+        raise QualifiedExecutionError("qualified runner transcript command is invalid")
+    stdout, stderr = _b64(value.get("stdout_base64"), label="qualified runner stdout"), _b64(value.get("stderr_base64"), label="qualified runner stderr")
+    if value.get("stdout_sha256") != _hash_bytes(stdout) or value.get("stderr_sha256") != _hash_bytes(stderr) or value.get("output_hash") != _hash_bytes(stdout + b"\0" + stderr):
+        raise QualifiedExecutionError("qualified runner transcript output hash is invalid")
     if (
         not isinstance(value.get("output_complete"), bool)
         or not isinstance(value.get("returncode"), int)
         or isinstance(value["returncode"], bool)
-        or not isinstance(value.get("timed_out"), bool)
+        or not all(isinstance(value.get(field), bool) for field in ("timed_out", "timeout_enforced", "output_limit_enforced", "runtime_rehashed_before_dispatch", "isolated"))
         or value.get("status") not in {"PASS", "FAIL"}
     ):
-        raise QualifiedExecutionError("qualified execution proof status is invalid")
-    runtime_fields = {
-        "interpreter_path",
-        "interpreter_sha256",
-        "interpreter_version_sha256",
-        "dependency_manifest_path",
-        "dependency_manifest_sha256",
-        "environment",
-        "environment_hash",
+        raise QualifiedExecutionError("qualified runner transcript status is invalid")
+    return {**dict(value), "inputs": dict(value["inputs"]), "runtime": _runtime(value["runtime"])}
+
+
+def issue_runner_transcript(value: Mapping[str, Any], *, signing_private_key: Ed25519PrivateKey | str | bytes) -> dict[str, Any]:
+    payload = _transcript_payload(value)
+    runner_result_hash = _hash(payload)
+    return {
+        **payload,
+        "runner_result_hash": runner_result_hash,
+        "runner_signature": base64.b64encode(_private_key(signing_private_key).sign(_canonical({**payload, "runner_result_hash": runner_result_hash}))).decode(),
     }
-    runtime = value["runtime"]
-    if set(runtime) != runtime_fields or not isinstance(runtime.get("interpreter_path"), str) or not isinstance(runtime.get("dependency_manifest_path"), str):
-        raise QualifiedExecutionError("qualified execution proof runtime is invalid")
-    if not all(_is_hash(runtime.get(field)) for field in ("interpreter_sha256", "interpreter_version_sha256", "dependency_manifest_sha256", "environment_hash")):
-        raise QualifiedExecutionError("qualified execution proof runtime is invalid")
-    environment = _environment(runtime.get("environment"))
-    if runtime["environment_hash"] != _hash(environment):
-        raise QualifiedExecutionError("qualified execution proof environment hash is invalid")
-    return {**dict(value), "inputs": dict(value["inputs"]), "runtime": {**dict(runtime), "environment": environment}}
 
 
-def issue_execution_proof(value: Mapping[str, Any], *, signing_private_key: Ed25519PrivateKey | str | bytes) -> dict[str, Any]:
-    """Sign a qualified-execution payload.  Only the execution service calls this in production."""
-
-    payload = _proof_payload(value)
-    proof_hash = _hash(payload)
-    signed = {**payload, "proof_hash": proof_hash}
-    signature = _private_key(signing_private_key).sign(_canonical(signed))
-    return {**signed, "signature": base64.b64encode(signature).decode("ascii")}
-
-
-def validate_execution_proof(
-    proof: Mapping[str, Any],
-    transcript: Mapping[str, Any],
-    *,
-    catalog: Mapping[str, Any],
-    expected: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Verify a signed proof and its complete retained transcript against a catalog key."""
-
+def _validate_runner_transcript(value: Mapping[str, Any], *, descriptor: Mapping[str, Any], identity: Mapping[str, Any], expected: Mapping[str, Any]) -> dict[str, Any]:
+    desc = _runner_descriptor(descriptor)
     required = set(
-        _proof_payload(
+        _transcript_payload(
             {
-                "schema": PROOF_SCHEMA,
+                "schema": TRANSCRIPT_SCHEMA,
+                "runner_id": "a",
+                "runner_identity": "a",
+                "namespace_id": "a",
+                "runner_identity_hash": "sha256:" + "0" * 64,
                 "service_id": "a",
                 "client_id": "a",
                 "run_id": "a",
@@ -418,47 +529,72 @@ def validate_execution_proof(
                 "base_commit": "0" * 40,
                 "base_tree": "0" * 40,
                 "plan_commit": "0" * 40,
+                "policy_path": "policy.json",
+                "policy_artifact_hash": "sha256:" + "0" * 64,
                 "inputs": {},
-                "runtime": {
-                    "interpreter_path": "x",
-                    "interpreter_sha256": "sha256:" + "0" * 64,
-                    "interpreter_version_sha256": "sha256:" + "0" * 64,
-                    "dependency_manifest_path": "x",
-                    "dependency_manifest_sha256": "sha256:" + "0" * 64,
-                    "environment": {},
-                    "environment_hash": _hash({}),
-                },
+                "runtime": identity["runtime"],
                 "command": ["x"],
-                "transcript_hash": "sha256:" + "0" * 64,
-                "output_hash": "sha256:" + "0" * 64,
+                "stdout_base64": "",
+                "stderr_base64": "",
+                "stdout_sha256": _hash_bytes(b""),
+                "stderr_sha256": _hash_bytes(b""),
+                "output_hash": _hash_bytes(b"\0"),
                 "output_complete": True,
                 "returncode": 0,
                 "timed_out": False,
+                "timeout_enforced": True,
+                "output_limit_enforced": True,
+                "runtime_rehashed_before_dispatch": True,
+                "isolated": True,
+                "isolation_profile_hash": desc["isolation_profile_hash"],
                 "status": "PASS",
-                "attestation_key_id": "a",
+                "attestation_key_id": desc["attestation_key_id"],
             }
         ).keys()
-    ) | {"proof_hash", "signature"}
-    if not isinstance(proof, Mapping) or set(proof) != required:
-        raise QualifiedExecutionError("qualified execution proof is invalid")
-    payload = _proof_payload({key: item for key, item in proof.items() if key not in {"proof_hash", "signature"}})
-    if not _is_hash(proof.get("proof_hash")) or proof["proof_hash"] != _hash(payload):
-        raise QualifiedExecutionError("qualified execution proof hash is invalid")
-    signature = _base64(proof.get("signature"), label="qualified execution proof signature", length=64)
-    key = execution_service_attestation_key(catalog, payload["service_id"], payload["client_id"])
-    if payload["attestation_key_id"] != key["attestation_key_id"]:
-        raise QualifiedExecutionError("qualified execution proof key identity is invalid")
+    ) | {"runner_result_hash", "runner_signature"}
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise QualifiedExecutionError("qualified runner transcript is invalid")
+    payload = _transcript_payload({key: item for key, item in value.items() if key not in {"runner_result_hash", "runner_signature"}})
+    if (
+        value.get("runner_result_hash") != _hash(payload)
+        or payload["runner_id"] != desc["id"]
+        or payload["runner_identity"] != desc["runner_identity"]
+        or payload["namespace_id"] != desc["namespace_id"]
+        or payload["runner_identity_hash"] != identity["identity_hash"]
+        or payload["attestation_key_id"] != desc["attestation_key_id"]
+        or payload["isolation_profile_hash"] != desc["isolation_profile_hash"]
+        or payload["runtime"] != identity["runtime"]
+    ):
+        raise QualifiedExecutionError("qualified runner transcript binding is invalid")
+    for field, item in expected.items():
+        if payload.get(field) != item:
+            raise QualifiedExecutionError("qualified runner transcript expected binding mismatch")
     try:
-        _public_key(key["attestation_public_key"]).verify(signature, _canonical({**payload, "proof_hash": proof["proof_hash"]}))
+        _public_key(desc["attestation_public_key"]).verify(
+            _b64(value.get("runner_signature"), label="qualified runner transcript signature", length=64), _canonical({**payload, "runner_result_hash": value["runner_result_hash"]})
+        )
     except InvalidSignature as exc:
-        raise QualifiedExecutionError("qualified execution proof signature is invalid") from exc
-    if not isinstance(transcript, Mapping):
-        raise QualifiedExecutionError("qualified execution transcript is invalid")
-    normalized_transcript = _transcript_payload({key: item for key, item in transcript.items() if key != "transcript_hash"})
-    if set(transcript) != set(normalized_transcript) | {"transcript_hash"} or transcript.get("transcript_hash") != _hash(normalized_transcript):
-        raise QualifiedExecutionError("qualified execution transcript hash is invalid")
-    for field in (
+        raise QualifiedExecutionError("qualified runner transcript signature is invalid") from exc
+    if payload["status"] == "PASS" and (
+        not payload["isolated"]
+        or not payload["timeout_enforced"]
+        or not payload["output_limit_enforced"]
+        or not payload["runtime_rehashed_before_dispatch"]
+        or not payload["output_complete"]
+        or payload["timed_out"]
+        or payload["returncode"] != 0
+    ):
+        raise QualifiedExecutionError("qualified runner PASS confinement/deadline attestation is invalid")
+    return {**payload, "runner_result_hash": value["runner_result_hash"], "runner_signature": value["runner_signature"]}
+
+
+def _proof_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    fields = {
+        "schema",
         "service_id",
+        "signer_identity",
+        "signer_namespace_id",
+        "signer_descriptor_hash",
         "client_id",
         "run_id",
         "profile_id",
@@ -468,19 +604,148 @@ def validate_execution_proof(
         "base_commit",
         "base_tree",
         "plan_commit",
+        "policy_path",
+        "policy_artifact_hash",
+        "runner_id",
+        "runner_identity",
+        "namespace_id",
+        "runner_descriptor_hash",
+        "runner_identity_hash",
+        "runner_result_hash",
+        "inputs",
+        "runtime",
         "command",
         "output_hash",
         "output_complete",
         "returncode",
         "timed_out",
         "status",
+        "attestation_key_id",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields or value.get("schema") != PROOF_SCHEMA:
+        raise QualifiedExecutionError("qualified execution proof is invalid")
+    for field in (
+        "service_id",
+        "signer_identity",
+        "signer_namespace_id",
+        "client_id",
+        "run_id",
+        "profile_id",
+        "runner_id",
+        "runner_identity",
+        "namespace_id",
+        "attestation_key_id",
     ):
-        if normalized_transcript[field] != payload[field]:
-            raise QualifiedExecutionError("qualified execution proof transcript binding mismatch")
-    if payload["transcript_hash"] != transcript["transcript_hash"]:
+        if not isinstance(value.get(field), str) or _ID.fullmatch(value[field]) is None:
+            raise QualifiedExecutionError("qualified execution proof identity is invalid")
+    if (
+        value.get("kind") not in {"test", "migration", "review"}
+        or not all(isinstance(value.get(field), str) and _GIT.fullmatch(value[field]) is not None for field in ("candidate_commit", "candidate_tree", "base_commit", "base_tree", "plan_commit"))
+        or not _relative(value.get("policy_path"))
+        or not all(
+            _hash_ok(value.get(field))
+            for field in (
+                "signer_descriptor_hash",
+                "policy_artifact_hash",
+                "runner_descriptor_hash",
+                "runner_identity_hash",
+                "runner_result_hash",
+                "output_hash",
+            )
+        )
+        or not isinstance(value.get("inputs"), Mapping)
+        or not isinstance(value.get("command"), list)
+        or not value["command"]
+        or not all(isinstance(item, str) and item for item in value["command"])
+        or not isinstance(value.get("output_complete"), bool)
+        or not isinstance(value.get("returncode"), int)
+        or isinstance(value["returncode"], bool)
+        or not isinstance(value.get("timed_out"), bool)
+        or value.get("status") not in {"PASS", "FAIL"}
+    ):
+        raise QualifiedExecutionError("qualified execution proof is invalid")
+    return {**dict(value), "inputs": dict(value["inputs"]), "runtime": _runtime(value.get("runtime"))}
+
+
+def issue_execution_proof(value: Mapping[str, Any], *, signing_private_key: Ed25519PrivateKey | str | bytes) -> dict[str, Any]:
+    payload = _proof_payload(value)
+    proof_hash = _hash(payload)
+    return {**payload, "proof_hash": proof_hash, "signature": base64.b64encode(_private_key(signing_private_key).sign(_canonical({**payload, "proof_hash": proof_hash}))).decode()}
+
+
+def validate_execution_proof(
+    proof: Mapping[str, Any], transcript: Mapping[str, Any], *, catalog: Mapping[str, Any], runner_descriptor: Mapping[str, Any], expected: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    # Verify signer catalog pin, runner descriptor pin, and independently signed
+    # runner transcript.  The signer signature alone is deliberately not enough.
+    if not isinstance(proof, Mapping) or "proof_hash" not in proof or "signature" not in proof:
+        raise QualifiedExecutionError("qualified execution proof is invalid")
+    payload = _proof_payload({key: item for key, item in proof.items() if key not in {"proof_hash", "signature"}})
+    if set(proof) != set(payload) | {"proof_hash", "signature"} or proof.get("proof_hash") != _hash(payload):
+        raise QualifiedExecutionError("qualified execution proof hash is invalid")
+    entry = _catalog_entry(catalog, payload["service_id"], payload["client_id"])
+    runner = _runner_descriptor(runner_descriptor)
+    if (
+        entry["signer_identity"] != payload["signer_identity"]
+        or entry["signer_namespace_id"] != payload["signer_namespace_id"]
+        or entry["descriptor_hash"] != payload["signer_descriptor_hash"]
+        or entry["attestation_key_id"] != payload["attestation_key_id"]
+        or entry["plan_commit"] != payload["plan_commit"]
+        or entry["catalog_policy_artifact_hash"] != payload["policy_artifact_hash"]
+        or entry["runner_descriptor_hash"] != payload["runner_descriptor_hash"]
+        or qualified_runner_descriptor_hash(runner) != payload["runner_descriptor_hash"]
+        or runner["plan_commit"] != payload["plan_commit"]
+        or runner["policy_path"] != payload["policy_path"]
+        or runner["policy_artifact_hash"] != payload["policy_artifact_hash"]
+        or payload["profile_id"] not in runner["profiles"]
+    ):
+        raise QualifiedExecutionError("qualified execution catalog/runner binding is invalid")
+    try:
+        _public_key(entry["attestation_public_key"]).verify(
+            _b64(proof.get("signature"), label="qualified execution proof signature", length=64), _canonical({**payload, "proof_hash": proof["proof_hash"]})
+        )
+    except InvalidSignature as exc:
+        raise QualifiedExecutionError("qualified execution proof signature is invalid") from exc
+    runner_result = _validate_runner_transcript(
+        transcript,
+        descriptor=runner_descriptor,
+        identity={"runtime": payload["runtime"], "identity_hash": payload["runner_identity_hash"]},
+        expected={
+            field: payload[field]
+            for field in (
+                "service_id",
+                "client_id",
+                "run_id",
+                "profile_id",
+                "kind",
+                "candidate_commit",
+                "candidate_tree",
+                "base_commit",
+                "base_tree",
+                "plan_commit",
+                "policy_path",
+                "policy_artifact_hash",
+                "runner_identity_hash",
+                "inputs",
+                "command",
+                "output_hash",
+                "output_complete",
+                "returncode",
+                "timed_out",
+                "status",
+            )
+        },
+    )
+    if (
+        runner_result["runner_result_hash"] != payload["runner_result_hash"]
+        or runner_result["runner_identity_hash"] != payload["runner_identity_hash"]
+        or runner_result["runner_id"] != payload["runner_id"]
+        or runner_result["runner_identity"] != payload["runner_identity"]
+        or runner_result["namespace_id"] != payload["namespace_id"]
+    ):
         raise QualifiedExecutionError("qualified execution proof transcript binding mismatch")
     if payload["status"] == "PASS" and (not payload["output_complete"] or payload["timed_out"] or payload["returncode"] != 0):
-        raise QualifiedExecutionError("qualified execution proof passing status is invalid")
+        raise QualifiedExecutionError("qualified execution proof PASS status is invalid")
     if expected is not None:
         for field, item in expected.items():
             if payload.get(field) != item:
@@ -489,765 +754,549 @@ def validate_execution_proof(
 
 
 @dataclass(frozen=True)
-class RuntimeProfile:
-    interpreter_path: Path
-    interpreter_sha256: str
-    dependency_manifest_path: Path
-    dependency_manifest_sha256: str
-    environment: Mapping[str, str]
-
-
-@dataclass(frozen=True)
 class Client:
     client_id: str
     credential_env: str
-    allowed_profiles: tuple[str, ...]
+    descriptor_hash: str
+    profiles: tuple[str, ...]
 
 
 @dataclass(frozen=True)
-class Profile:
-    profile_id: str
-    kind: str
-    timeout_seconds: int
-    max_output_bytes: int
-    scope: str | None = None
-    test_plan_sha256: str | None = None
-    test_runner_path: str | None = None
-    test_runner_sha256: str | None = None
-    command: tuple[str, ...] | None = None
-    migration_path: str | None = None
-    schema_snapshot_path: str | None = None
-    runner_path: Path | None = None
-    runner_sha256: str | None = None
+class Policy:
+    path: str
+    artifact_hash: str
+    runtime: Mapping[str, Any]
+    profiles: Mapping[str, Mapping[str, Any]]
 
 
 @dataclass(frozen=True)
 class QualifiedExecutionConfig:
     service_id: str
+    signer_identity: str
+    signer_namespace_id: str
     repository: Path
     plan_repository: Path
     plan_commit: str
-    max_active_requests: int
+    policy: Policy
+    runner: Mapping[str, Any]
     clients: Mapping[str, Client]
+    max_active_requests: int
+    max_retained_proofs_per_client: int
     attestation_key_id: str
     attestation_private_key_env: str
-    runtime: RuntimeProfile
-    profiles: Mapping[str, Profile]
 
     @classmethod
     def parse(cls, value: Mapping[str, Any]) -> "QualifiedExecutionConfig":
         fields = {
             "schema",
             "service_id",
+            "signer_identity",
+            "signer_namespace_id",
             "repository",
             "plan_repository",
             "plan_commit",
-            "max_active_requests",
+            "policy_path",
+            "policy_artifact_hash",
+            "runner",
             "clients",
+            "max_active_requests",
+            "max_retained_proofs_per_client",
             "attestation_key_id",
             "attestation_private_key_env",
-            "runtime",
-            "profiles",
         }
         if not isinstance(value, Mapping) or set(value) != fields or value.get("schema") != SERVICE_CONFIG_SCHEMA:
-            raise QualifiedExecutionConfigurationError("qualified execution service configuration is invalid")
-        service_id, repository, plan_repository, plan_commit, max_active_requests = (
-            value.get("service_id"),
-            value.get("repository"),
-            value.get("plan_repository"),
-            value.get("plan_commit"),
-            value.get("max_active_requests"),
-        )
-        if not isinstance(service_id, str) or _SERVICE_ID.fullmatch(service_id) is None or not isinstance(repository, str) or not isinstance(plan_repository, str):
-            raise QualifiedExecutionConfigurationError("qualified execution service identity is invalid")
-        if not isinstance(plan_commit, str) or _GIT_OBJECT.fullmatch(plan_commit) is None:
-            raise QualifiedExecutionConfigurationError("qualified execution Plan binding is invalid")
-        if not isinstance(max_active_requests, int) or isinstance(max_active_requests, bool) or not 1 <= max_active_requests <= 64:
-            raise QualifiedExecutionConfigurationError("qualified execution request capacity is invalid")
-        root = Path(repository)
+            raise QualifiedExecutionConfigurationError("qualified execution signer configuration is invalid")
+        for field in ("signer_identity", "signer_namespace_id", "attestation_key_id"):
+            if not isinstance(value.get(field), str) or _ID.fullmatch(value[field]) is None:
+                raise QualifiedExecutionConfigurationError("qualified execution signer identity is invalid")
+        if not isinstance(value.get("service_id"), str) or _SERVICE_ID.fullmatch(value["service_id"]) is None:
+            raise QualifiedExecutionConfigurationError("qualified execution signer identity is invalid")
+        if (
+            not isinstance(value.get("repository"), str)
+            or not isinstance(value.get("plan_repository"), str)
+            or not isinstance(value.get("plan_commit"), str)
+            or _GIT.fullmatch(value["plan_commit"]) is None
+            or not _relative(value.get("policy_path"))
+            or not _hash_ok(value.get("policy_artifact_hash"))
+            or not isinstance(value.get("attestation_private_key_env"), str)
+            or _ENV.fullmatch(value["attestation_private_key_env"]) is None
+            or not isinstance(value.get("max_active_requests"), int)
+            or isinstance(value["max_active_requests"], bool)
+            or not 1 <= value["max_active_requests"] <= 64
+            or not isinstance(value.get("max_retained_proofs_per_client"), int)
+            or isinstance(value["max_retained_proofs_per_client"], bool)
+            or not 1 <= value["max_retained_proofs_per_client"] <= 256
+        ):
+            raise QualifiedExecutionConfigurationError("qualified execution signer configuration is invalid")
         try:
-            if not root.is_absolute() or root.is_symlink() or not root.resolve(strict=True).is_dir():
+            repository, plans = Path(value["repository"]).resolve(strict=True), Path(value["plan_repository"]).resolve(strict=True)
+            if not repository.is_dir() or not plans.is_dir() or repository == plans or repository.is_relative_to(plans) or plans.is_relative_to(repository):
                 raise OSError
-            root = root.resolve(strict=True)
-            subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=root, check=True, capture_output=True)
-        except (OSError, subprocess.CalledProcessError) as exc:
-            raise QualifiedExecutionConfigurationError("qualified execution repository is unavailable") from exc
-        plan_root = Path(plan_repository)
-        try:
-            if not plan_root.is_absolute() or plan_root.is_symlink() or not plan_root.resolve(strict=True).is_dir():
+            subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=repository, check=True, capture_output=True)
+            if _git(plans, "rev-parse", f"{value['plan_commit']}^{{commit}}") != value["plan_commit"]:
                 raise OSError
-            plan_root = plan_root.resolve(strict=True)
-            if plan_root == root or root.is_relative_to(plan_root) or plan_root.is_relative_to(root):
-                raise OSError
-            configured_plan = str(_git(plan_root, "rev-parse", f"{plan_commit}^{{commit}}")).strip()
+            policy_blob = _git_bytes(plans, "show", f"{value['plan_commit']}:{value['policy_path']}")
         except (OSError, QualifiedExecutionError) as exc:
-            raise QualifiedExecutionConfigurationError("qualified execution Plan source is unavailable") from exc
-        if configured_plan != plan_commit:
-            raise QualifiedExecutionConfigurationError("qualified execution Plan binding is invalid")
-        clients_value = value.get("clients")
-        clients: dict[str, Client] = {}
-        envs: set[str] = set()
-        if not isinstance(clients_value, list) or not clients_value:
-            raise QualifiedExecutionConfigurationError("qualified execution clients are invalid")
-        for item in clients_value:
-            if not isinstance(item, Mapping) or set(item) != {"id", "credential_env", "profiles"}:
-                raise QualifiedExecutionConfigurationError("qualified execution client is invalid")
-            client_id, credential_env, allowed_profiles = item.get("id"), item.get("credential_env"), item.get("profiles")
-            if (
-                not isinstance(client_id, str)
-                or _CLIENT_ID.fullmatch(client_id) is None
-                or client_id in clients
-                or not isinstance(credential_env, str)
-                or _ENV_NAME.fullmatch(credential_env) is None
-                or credential_env in envs
-                or not isinstance(allowed_profiles, list)
-                or not allowed_profiles
-                or not all(isinstance(profile_id, str) and _PROFILE_ID.fullmatch(profile_id) for profile_id in allowed_profiles)
-                or len(set(allowed_profiles)) != len(allowed_profiles)
-            ):
-                raise QualifiedExecutionConfigurationError("qualified execution client is invalid")
-            clients[client_id] = Client(client_id, credential_env, tuple(allowed_profiles))
-            envs.add(credential_env)
-        key_id, key_env = value.get("attestation_key_id"), value.get("attestation_private_key_env")
-        if not isinstance(key_id, str) or _KEY_ID.fullmatch(key_id) is None or not isinstance(key_env, str) or _ENV_NAME.fullmatch(key_env) is None:
-            raise QualifiedExecutionConfigurationError("qualified execution signing configuration is invalid")
-        runtime_value = value.get("runtime")
-        runtime_fields = {"interpreter_path", "interpreter_sha256", "dependency_manifest_path", "dependency_manifest_sha256", "environment"}
-        if not isinstance(runtime_value, Mapping) or set(runtime_value) != runtime_fields:
-            raise QualifiedExecutionConfigurationError("qualified execution runtime is invalid")
+            raise QualifiedExecutionConfigurationError("qualified execution signer trust roots are unavailable") from exc
+        if _hash_bytes(policy_blob) != value["policy_artifact_hash"]:
+            raise QualifiedExecutionConfigurationError("qualified execution Plan policy artifact hash is invalid")
+        policy = _policy(policy_blob, path=value["policy_path"], artifact_hash=value["policy_artifact_hash"])
         try:
-            interpreter, dependency = Path(runtime_value["interpreter_path"]), Path(runtime_value["dependency_manifest_path"])
-            if (
-                not interpreter.is_absolute()
-                or interpreter.is_symlink()
-                or not interpreter.resolve(strict=True).is_file()
-                or not dependency.is_absolute()
-                or dependency.is_symlink()
-                or not dependency.resolve(strict=True).is_file()
-            ):
-                raise OSError
-            interpreter, dependency = interpreter.resolve(strict=True), dependency.resolve(strict=True)
-            interpreter_hash, dependency_hash = _hash_bytes(interpreter.read_bytes()), _hash_bytes(dependency.read_bytes())
-        except (OSError, TypeError) as exc:
-            raise QualifiedExecutionConfigurationError("qualified execution runtime is unavailable") from exc
-        if runtime_value.get("interpreter_sha256") != interpreter_hash or runtime_value.get("dependency_manifest_sha256") != dependency_hash:
-            raise QualifiedExecutionConfigurationError("qualified execution runtime digest is invalid")
-        try:
-            environment = _environment(runtime_value.get("environment"))
+            runner = _runner_descriptor(value.get("runner"))
         except QualifiedExecutionError as exc:
-            raise QualifiedExecutionConfigurationError("qualified execution runtime environment is invalid") from exc
-        profiles_value = value.get("profiles")
-        if not isinstance(profiles_value, list) or not profiles_value:
-            raise QualifiedExecutionConfigurationError("qualified execution profiles are invalid")
-        profiles: dict[str, Profile] = {}
-        for item in profiles_value:
-            if not isinstance(item, Mapping):
-                raise QualifiedExecutionConfigurationError("qualified execution profile is invalid")
-            profile_id, kind = item.get("id"), item.get("kind")
-            common = {"id", "kind", "timeout_seconds", "max_output_bytes"}
-            if not isinstance(profile_id, str) or _PROFILE_ID.fullmatch(profile_id) is None or profile_id in profiles or kind not in {"test", "migration", "review"}:
-                raise QualifiedExecutionConfigurationError("qualified execution profile is invalid")
-            timeout, output_limit = item.get("timeout_seconds"), item.get("max_output_bytes")
+            raise QualifiedExecutionConfigurationError("qualified execution runner trust descriptor is invalid") from exc
+        if runner["runner_identity"] in {value["signer_identity"], value["signer_namespace_id"]} or runner["namespace_id"] in {
+            value["signer_identity"],
+            value["signer_namespace_id"],
+        }:
+            raise QualifiedExecutionConfigurationError("qualified runner must not share signer identity or namespace")
+        if runner["plan_commit"] != value["plan_commit"] or runner["policy_path"] != value["policy_path"] or runner["policy_artifact_hash"] != value["policy_artifact_hash"]:
+            raise QualifiedExecutionConfigurationError("qualified runner does not pin the configured Plan policy")
+        if any(profile not in policy.profiles for profile in runner["profiles"]):
+            raise QualifiedExecutionConfigurationError("qualified runner declares an unknown Plan profile")
+        clients: dict[str, Client] = {}
+        credentials: set[str] = set()
+        if not isinstance(value.get("clients"), list) or not value["clients"]:
+            raise QualifiedExecutionConfigurationError("qualified execution clients are invalid")
+        for item in value["clients"]:
             if (
-                not isinstance(timeout, int)
-                or isinstance(timeout, bool)
-                or not 1 <= timeout <= 3600
-                or not isinstance(output_limit, int)
-                or isinstance(output_limit, bool)
-                or not 1 <= output_limit <= _MAX_RESPONSE_BYTES // 2
+                not isinstance(item, Mapping)
+                or set(item) != {"id", "credential_env", "descriptor_hash", "profiles"}
+                or not isinstance(item.get("id"), str)
+                or _ID.fullmatch(item["id"]) is None
+                or item["id"] in clients
+                or not isinstance(item.get("credential_env"), str)
+                or _ENV.fullmatch(item["credential_env"]) is None
+                or item["credential_env"] in credentials
+                or not _hash_ok(item.get("descriptor_hash"))
+                or not isinstance(item.get("profiles"), list)
+                or not item["profiles"]
+                or len(set(item["profiles"])) != len(item["profiles"])
+                or not all(isinstance(profile, str) and profile in policy.profiles for profile in item["profiles"])
+                or not all(profile in runner["profiles"] for profile in item["profiles"])
             ):
-                raise QualifiedExecutionConfigurationError("qualified execution profile limits are invalid")
-            if kind == "test":
-                required = common | {"scope", "test_plan_sha256", "test_runner_path", "test_runner_sha256", "command"}
-                if (
-                    set(item) != required
-                    or item.get("scope") not in {"focused", "full"}
-                    or not _is_hash(item.get("test_plan_sha256"))
-                    or not _valid_relative_path(item.get("test_runner_path"))
-                    or not _is_hash(item.get("test_runner_sha256"))
-                    or not isinstance(item.get("command"), list)
-                    or not item["command"]
-                    or not all(isinstance(argument, str) and argument for argument in item["command"])
-                ):
-                    raise QualifiedExecutionConfigurationError("qualified execution test profile is invalid")
-                profiles[profile_id] = Profile(
-                    profile_id,
-                    kind,
-                    timeout,
-                    output_limit,
-                    scope=item["scope"],
-                    test_plan_sha256=item["test_plan_sha256"],
-                    test_runner_path=item["test_runner_path"],
-                    test_runner_sha256=item["test_runner_sha256"],
-                    command=tuple(item["command"]),
-                )
-            elif kind == "migration":
-                required = common | {"migration_path", "schema_snapshot_path", "runner_path", "runner_sha256"}
-                if (
-                    set(item) != required
-                    or not _valid_relative_path(item.get("migration_path"))
-                    or (item.get("schema_snapshot_path") is not None and not _valid_relative_path(item.get("schema_snapshot_path")))
-                    or not isinstance(item.get("runner_path"), str)
-                    or not _is_hash(item.get("runner_sha256"))
-                ):
-                    raise QualifiedExecutionConfigurationError("qualified execution migration profile is invalid")
-                runner = Path(item["runner_path"])
-                try:
-                    if not runner.is_absolute() or runner.is_symlink() or not runner.resolve(strict=True).is_file() or _hash_bytes(runner.resolve(strict=True).read_bytes()) != item["runner_sha256"]:
-                        raise OSError
-                    runner = runner.resolve(strict=True)
-                except OSError as exc:
-                    raise QualifiedExecutionConfigurationError("qualified execution migration runner is invalid") from exc
-                profiles[profile_id] = Profile(
-                    profile_id,
-                    kind,
-                    timeout,
-                    output_limit,
-                    migration_path=item["migration_path"],
-                    schema_snapshot_path=item["schema_snapshot_path"],
-                    runner_path=runner,
-                    runner_sha256=item["runner_sha256"],
-                )
-            else:
-                required = common | {"runner_path", "runner_sha256"}
-                if set(item) != required or not isinstance(item.get("runner_path"), str) or not _is_hash(item.get("runner_sha256")):
-                    raise QualifiedExecutionConfigurationError("qualified execution review profile is invalid")
-                runner = Path(item["runner_path"])
-                try:
-                    if not runner.is_absolute() or runner.is_symlink() or not runner.resolve(strict=True).is_file() or _hash_bytes(runner.resolve(strict=True).read_bytes()) != item["runner_sha256"]:
-                        raise OSError
-                    runner = runner.resolve(strict=True)
-                except OSError as exc:
-                    raise QualifiedExecutionConfigurationError("qualified execution review runner is invalid") from exc
-                profiles[profile_id] = Profile(
-                    profile_id,
-                    kind,
-                    timeout,
-                    output_limit,
-                    runner_path=runner,
-                    runner_sha256=item["runner_sha256"],
-                )
-        if any(not set(client.allowed_profiles) <= set(profiles) for client in clients.values()):
-            raise QualifiedExecutionConfigurationError("qualified execution client profile grant is invalid")
+                raise QualifiedExecutionConfigurationError("qualified execution client grant is invalid")
+            clients[item["id"]] = Client(item["id"], item["credential_env"], item["descriptor_hash"], tuple(item["profiles"]))
+            credentials.add(item["credential_env"])
         return cls(
-            str(service_id),
-            root,
-            plan_root,
-            plan_commit,
-            max_active_requests,
+            value["service_id"],
+            value["signer_identity"],
+            value["signer_namespace_id"],
+            repository,
+            plans,
+            value["plan_commit"],
+            policy,
+            runner,
             clients,
-            str(key_id),
-            str(key_env),
-            RuntimeProfile(interpreter, interpreter_hash, dependency, dependency_hash, environment),
-            profiles,
+            value["max_active_requests"],
+            value["max_retained_proofs_per_client"],
+            value["attestation_key_id"],
+            value["attestation_private_key_env"],
         )
+
+
+def _policy(source: bytes, *, path: str, artifact_hash: str) -> Policy:
+    try:
+        value = json.loads(source)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise QualifiedExecutionConfigurationError("qualified execution Plan policy is unreadable") from exc
+    fields = {"schema", "policy_id", "runtime", "profiles"}
+    if not isinstance(value, Mapping) or set(value) != fields or value.get("schema") != POLICY_SCHEMA or not isinstance(value.get("policy_id"), str) or _ID.fullmatch(value["policy_id"]) is None:
+        raise QualifiedExecutionConfigurationError("qualified execution Plan policy is invalid")
+    runtime = _runtime(value.get("runtime"))
+    profiles_value = value.get("profiles")
+    profiles: dict[str, Mapping[str, Any]] = {}
+    if not isinstance(profiles_value, list) or not profiles_value:
+        raise QualifiedExecutionConfigurationError("qualified execution policy profiles are invalid")
+    for profile in profiles_value:
+        if (
+            not isinstance(profile, Mapping)
+            or not isinstance(profile.get("id"), str)
+            or _PROFILE_ID.fullmatch(profile["id"]) is None
+            or profile["id"] in profiles
+            or profile.get("kind") not in {"test", "migration", "review"}
+        ):
+            raise QualifiedExecutionConfigurationError("qualified execution policy profile is invalid")
+        common = {"id", "kind", "timeout_seconds", "max_output_bytes"}
+        if (
+            not isinstance(profile.get("timeout_seconds"), int)
+            or isinstance(profile["timeout_seconds"], bool)
+            or not 1 <= profile["timeout_seconds"] <= 3600
+            or not isinstance(profile.get("max_output_bytes"), int)
+            or isinstance(profile["max_output_bytes"], bool)
+            or not 1 <= profile["max_output_bytes"] <= _MAX_RESPONSE_BYTES // 2
+        ):
+            raise QualifiedExecutionConfigurationError("qualified execution policy profile limits are invalid")
+        if profile["kind"] == "test":
+            needed = common | {"scope", "test_plan_sha256", "test_runner_path", "test_runner_sha256", "command"}
+            valid = (
+                profile.get("scope") in {"focused", "full"}
+                and _hash_ok(profile.get("test_plan_sha256"))
+                and _relative(profile.get("test_runner_path"))
+                and _hash_ok(profile.get("test_runner_sha256"))
+                and isinstance(profile.get("command"), list)
+                and profile["command"]
+                and all(isinstance(item, str) and item for item in profile["command"])
+            )
+        elif profile["kind"] == "migration":
+            needed = common | {"migration_path", "schema_snapshot_path", "runner_path", "runner_sha256"}
+            valid = (
+                _relative(profile.get("migration_path"))
+                and (profile.get("schema_snapshot_path") is None or _relative(profile["schema_snapshot_path"]))
+                and isinstance(profile.get("runner_path"), str)
+                and profile["runner_path"].startswith("/")
+                and _hash_ok(profile.get("runner_sha256"))
+            )
+        else:
+            needed = common | {"runner_path", "runner_sha256"}
+            valid = isinstance(profile.get("runner_path"), str) and profile["runner_path"].startswith("/") and _hash_ok(profile.get("runner_sha256"))
+        if set(profile) != needed or not valid:
+            raise QualifiedExecutionConfigurationError("qualified execution policy profile is invalid")
+        profiles[profile["id"]] = dict(profile)
+    return Policy(path, artifact_hash, runtime, profiles)
 
 
 def load_qualified_execution_config(path: str | os.PathLike[str]) -> QualifiedExecutionConfig:
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise QualifiedExecutionConfigurationError("qualified execution service configuration is unreadable") from exc
+        raise QualifiedExecutionConfigurationError("qualified execution signer configuration is unreadable") from exc
     return QualifiedExecutionConfig.parse(value)
 
 
-def _git(repo: Path, *args: str, text: bool = True) -> str | bytes:
+def _git(repo: Path, *args: str) -> str:
     try:
-        completed = subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=text)
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError) as exc:
-        raise QualifiedExecutionError("qualified execution candidate Git object is unavailable") from exc
-    return completed.stdout
+        raise QualifiedExecutionError("qualified execution Git object is unavailable") from exc
 
 
-def _exact_candidate(config: QualifiedExecutionConfig, value: Mapping[str, Any], client: Client) -> tuple[str, str, str, str, str]:
-    fields = {
-        "schema",
-        "service_id",
-        "client_id",
-        "candidate_commit",
-        "candidate_tree",
-        "base_commit",
-        "base_tree",
-        "plan_commit",
-        "profiles",
-        "review_packet",
-    }
-    if not isinstance(value, Mapping) or set(value) != fields or value.get("schema") != REQUEST_SCHEMA or value.get("service_id") != config.service_id:
-        raise _ProtocolError(400, "qualified execution request is invalid")
-    for field in ("candidate_commit", "candidate_tree", "base_commit", "base_tree", "plan_commit"):
-        if not isinstance(value.get(field), str) or _GIT_OBJECT.fullmatch(value[field]) is None:
-            raise _ProtocolError(400, "qualified execution request Git binding is invalid")
-    profiles = value.get("profiles")
-    if not isinstance(profiles, list) or not profiles or not all(isinstance(item, str) and _PROFILE_ID.fullmatch(item) for item in profiles) or len(set(profiles)) != len(profiles):
-        raise _ProtocolError(400, "qualified execution request profiles are invalid")
-    if any(profile not in config.profiles for profile in profiles):
-        raise _ProtocolError(403, "qualified execution profile is not configured")
-    if not set(profiles) <= set(client.allowed_profiles):
-        raise _ProtocolError(403, "qualified execution profile is not granted to client")
-    if value.get("plan_commit") != config.plan_commit:
-        raise _ProtocolError(403, "qualified execution Plan is not configured")
+def _git_bytes(repo: Path, *args: str) -> bytes:
     try:
-        candidate = str(_git(config.repository, "rev-parse", f"{value['candidate_commit']}^{{commit}}")).strip()
-        candidate_tree = str(_git(config.repository, "rev-parse", f"{candidate}^{{tree}}")).strip()
-        base = str(_git(config.repository, "rev-parse", f"{value['base_commit']}^{{commit}}")).strip()
-        base_tree = str(_git(config.repository, "rev-parse", f"{base}^{{tree}}")).strip()
-        subprocess.run(["git", "merge-base", "--is-ancestor", base, candidate], cwd=config.repository, check=True, capture_output=True)
-    except (QualifiedExecutionError, subprocess.CalledProcessError) as exc:
-        raise _ProtocolError(409, "qualified execution candidate ancestry is invalid") from exc
-    if candidate != value["candidate_commit"] or candidate_tree != value["candidate_tree"] or base != value["base_commit"] or base_tree != value["base_tree"]:
-        raise _ProtocolError(409, "qualified execution candidate tree binding is invalid")
-    return candidate, candidate_tree, base, base_tree, str(value["plan_commit"])
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise QualifiedExecutionError("qualified execution Git object is unavailable") from exc
 
 
-@dataclass(frozen=True)
-class _BoundedResult:
-    stdout: bytes
-    stderr: bytes
-    returncode: int
-    timed_out: bool
-    output_complete: bool
+class _RunnerClient:
+    def __init__(self, descriptor: Mapping[str, Any], *, environment: Mapping[str, str] | None = None) -> None:
+        self.descriptor = _runner_descriptor(descriptor)
+        token = (os.environ if environment is None else environment).get(self.descriptor["credential_env"])
+        if not token:
+            raise QualifiedExecutionConfigurationError("qualified runner credential is unavailable")
+        self.token = token
 
+    def _post(self, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        request = Request(self.descriptor["endpoint"] + path, data=_canonical(payload), method="POST")
+        request.add_header("Content-Type", "application/json")
+        request.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urlopen(request, timeout=self.descriptor["timeout_seconds"]) as response:  # nosec: externally provisioned runner descriptor
+                raw = response.read(_MAX_RESPONSE_BYTES + 1)
+        except (HTTPError, URLError, OSError) as exc:
+            raise QualifiedExecutionError("qualified runner request failed") from exc
+        if len(raw) > _MAX_RESPONSE_BYTES:
+            raise QualifiedExecutionError("qualified runner response is too large")
+        try:
+            value = json.loads(raw.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise QualifiedExecutionError("qualified runner response is invalid") from exc
+        if not isinstance(value, Mapping):
+            raise QualifiedExecutionError("qualified runner response is invalid")
+        return dict(value)
 
-def _run_bounded(
-    command: Sequence[str],
-    *,
-    cwd: Path,
-    environment: Mapping[str, str],
-    timeout_seconds: int,
-    max_output_bytes: int,
-) -> _BoundedResult:
-    """Run an allowlisted command, killing on deadline or unretained output.
-
-    A passing proof is emitted only if the complete stdout/stderr body fits the
-    configured retention limit.  An overflowing process is killed and can
-    retain only a marked prefix, never a passing transcript.
-    """
-
-    try:
-        process = subprocess.Popen(
-            list(command),
-            cwd=cwd,
-            env=dict(environment),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+    def identity(self, *, signer_identity: str, plan_commit: str, policy_path: str, policy_artifact_hash: str) -> dict[str, Any]:
+        nonce = secrets.token_urlsafe(24)
+        value = self._post(
+            "/v1/identity",
+            {
+                "schema": RUNNER_IDENTITY_REQUEST_SCHEMA,
+                "signer_identity": signer_identity,
+                "nonce": nonce,
+                "plan_commit": plan_commit,
+                "policy_path": policy_path,
+                "policy_artifact_hash": policy_artifact_hash,
+            },
         )
-    except OSError as exc:
-        return _BoundedResult(b"", str(exc).encode("utf-8", errors="replace"), 127, False, True)
-    assert process.stdout is not None and process.stderr is not None
+        return _validate_runner_identity(
+            value,
+            descriptor=self.descriptor,
+            nonce=nonce,
+            plan_commit=plan_commit,
+            policy_path=policy_path,
+            policy_artifact_hash=policy_artifact_hash,
+        )
 
-    def kill_process_group() -> None:
-        if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-    output = {"stdout": bytearray(), "stderr": bytearray()}
-    total, timed_out, overflow = 0, False, False
-    deadline = time.monotonic() + timeout_seconds
-    try:
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 and process.poll() is None:
-                timed_out = True
-                kill_process_group()
-            for key, _mask in selector.select(timeout=max(0.0, min(0.1, remaining))):
-                chunk = os.read(key.fileobj.fileno(), 64 * 1024)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                available = max_output_bytes - total
-                if available < len(chunk):
-                    output[key.data].extend(chunk[: max(available, 0)])
-                    total += max(available, 0)
-                    overflow = True
-                    kill_process_group()
-                else:
-                    output[key.data].extend(chunk)
-                    total += len(chunk)
-        returncode = process.wait(timeout=5)
-    finally:
-        selector.close()
-        if process.poll() is None:
-            kill_process_group()
-            process.wait()
-    return _BoundedResult(bytes(output["stdout"]), bytes(output["stderr"]), returncode, timed_out, not overflow)
+    def execute(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        response = self._post("/v1/execute", value)
+        if (
+            response.get("schema") != RUNNER_RESPONSE_SCHEMA
+            or set(response) != {"schema", "runner_id", "results"}
+            or response.get("runner_id") != self.descriptor["id"]
+            or not isinstance(response.get("results"), list)
+        ):
+            raise QualifiedExecutionError("qualified runner response is invalid")
+        return response
 
 
 class QualifiedExecutionService:
-    """Actual execution authority configured outside a candidate repository."""
+    """Signer authority; candidate workloads run only in the external runner."""
 
-    def __init__(self, config: QualifiedExecutionConfig, credentials: Mapping[str, str], *, signing_private_key: Ed25519PrivateKey | str | bytes) -> None:
+    def __init__(self, config: QualifiedExecutionConfig, credentials: Mapping[str, str], *, signing_private_key: Ed25519PrivateKey | str | bytes, environment: Mapping[str, str] | None = None) -> None:
         if set(credentials) != set(config.clients):
-            raise QualifiedExecutionConfigurationError("qualified execution credentials are unavailable")
-        resolved: list[tuple[str, Client]] = []
+            raise QualifiedExecutionConfigurationError("qualified execution client credentials are unavailable")
+        pairs: list[tuple[str, Client]] = []
         for client_id, client in config.clients.items():
-            credential = credentials.get(client_id)
-            if not isinstance(credential, str) or not credential or any(hmac.compare_digest(credential, known) for known, _ in resolved):
-                raise QualifiedExecutionConfigurationError("qualified execution credentials are invalid")
-            resolved.append((credential, client))
-        try:
-            execution_public_key(signing_private_key)
-        except QualifiedExecutionError as exc:
-            raise QualifiedExecutionConfigurationError("qualified execution signing key is invalid") from exc
-        self.config, self._credentials, self._key = config, tuple(resolved), signing_private_key
-        self._lock = threading.Lock()
+            token = credentials.get(client_id)
+            if not isinstance(token, str) or not token or any(hmac.compare_digest(token, known) for known, _client in pairs):
+                raise QualifiedExecutionConfigurationError("qualified execution client credentials are invalid")
+            pairs.append((token, client))
+        _private_key(signing_private_key)
+        self.config, self._credentials, self._key = config, tuple(pairs), signing_private_key
+        self._runner = _RunnerClient(config.runner, environment=environment)
         self._slots = threading.BoundedSemaphore(config.max_active_requests)
+        self._completed = {client_id: deque(maxlen=config.max_retained_proofs_per_client) for client_id in config.clients}
+        self._completed_lock = threading.Lock()
 
     def client_for_authorization(self, authorization: str | None) -> Client | None:
         if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
             return None
-        bearer = authorization.removeprefix("Bearer ")
-        for known, client in self._credentials:
-            if hmac.compare_digest(bearer, known):
-                return client
+        token = authorization.removeprefix("Bearer ")
+        return next((client for known, client in self._credentials if hmac.compare_digest(token, known)), None)
+
+    def acquire_slot(self) -> bool:
+        return self._slots.acquire(blocking=False)
+
+    def release_slot(self) -> None:
+        self._slots.release()
+
+    def _retain(self, client_id: str, results: Sequence[Mapping[str, Any]]) -> None:
+        """Keep bounded proof/transcript readback per credential-bound client."""
+
+        with self._completed_lock:
+            retained = self._completed[client_id]
+            for result in results:
+                retained.append(
+                    {
+                        "proof": dict(result["proof"]),
+                        "transcript": dict(result["transcript"]),
+                    }
+                )
+
+    def retained_proof(self, client: Client, run_id: str, profile_id: str) -> dict[str, Any] | None:
+        if self.config.clients.get(client.client_id) != client or _ID.fullmatch(run_id) is None or _PROFILE_ID.fullmatch(profile_id) is None:
+            return None
+        with self._completed_lock:
+            for retained in reversed(self._completed[client.client_id]):
+                proof = retained["proof"]
+                if proof["run_id"] == run_id and proof["profile_id"] == profile_id:
+                    return {"proof": dict(proof), "transcript": dict(retained["transcript"])}
         return None
 
-    def _runtime(self, worktree: Path) -> tuple[dict[str, str], dict[str, Any]]:
-        runtime = self.config.runtime
-        environment = dict(runtime.environment)
-        # No ambient environment is inherited.  These two paths are service
-        # created and are recorded exactly in the signed runtime binding.
-        environment["PYTHONPATH"] = str(worktree / "src")
-        environment["TGW_LOG_ROOT"] = str(worktree / ".qualified-execution-logs")
-        version = _run_bounded([str(runtime.interpreter_path), "--version"], cwd=worktree, environment=environment, timeout_seconds=15, max_output_bytes=16 * 1024)
-        if version.returncode != 0 or version.timed_out or not version.output_complete:
-            raise QualifiedExecutionError("qualified execution interpreter is unavailable")
-        normalized_environment = dict(sorted(environment.items()))
-        return normalized_environment, {
-            "interpreter_path": str(runtime.interpreter_path),
-            "interpreter_sha256": runtime.interpreter_sha256,
-            "interpreter_version_sha256": _hash_bytes(version.stdout + b"\0" + version.stderr),
-            "dependency_manifest_path": str(runtime.dependency_manifest_path),
-            "dependency_manifest_sha256": runtime.dependency_manifest_sha256,
-            "environment": normalized_environment,
-            "environment_hash": _hash(normalized_environment),
-        }
-
-    def _transcript(self, *, client: Client, run_id: str, profile: Profile, candidate: tuple[str, str, str, str, str], command: list[str], result: _BoundedResult) -> dict[str, Any]:
-        commit, tree, base, base_tree, plan = candidate
-        status = "PASS" if result.returncode == 0 and not result.timed_out and result.output_complete else "FAIL"
-        unsigned = {
-            "schema": TRANSCRIPT_SCHEMA,
-            "service_id": self.config.service_id,
-            "client_id": client.client_id,
-            "run_id": run_id,
-            "profile_id": profile.profile_id,
-            "kind": profile.kind,
-            "candidate_commit": commit,
-            "candidate_tree": tree,
-            "base_commit": base,
-            "base_tree": base_tree,
-            "plan_commit": plan,
-            "command": command,
-            "stdout_base64": base64.b64encode(result.stdout).decode("ascii"),
-            "stderr_base64": base64.b64encode(result.stderr).decode("ascii"),
-            "stdout_sha256": _hash_bytes(result.stdout),
-            "stderr_sha256": _hash_bytes(result.stderr),
-            "output_hash": _hash_bytes(result.stdout + b"\0" + result.stderr),
-            "output_complete": result.output_complete,
-            "returncode": result.returncode,
-            "timed_out": result.timed_out,
-            "status": status,
-        }
-        return {**unsigned, "transcript_hash": _hash(unsigned)}
-
-    def _proof(
-        self,
-        *,
-        client: Client,
-        run_id: str,
-        profile: Profile,
-        candidate: tuple[str, str, str, str, str],
-        command: list[str],
-        transcript: Mapping[str, Any],
-        runtime: Mapping[str, Any],
-        inputs: Mapping[str, Any],
-        status: str | None = None,
-    ) -> dict[str, Any]:
-        payload = {
-            "schema": PROOF_SCHEMA,
-            "service_id": self.config.service_id,
-            "client_id": client.client_id,
-            "run_id": run_id,
-            "profile_id": profile.profile_id,
-            "kind": profile.kind,
-            "candidate_commit": candidate[0],
-            "candidate_tree": candidate[1],
-            "base_commit": candidate[2],
-            "base_tree": candidate[3],
-            "plan_commit": candidate[4],
-            "inputs": dict(inputs),
-            "runtime": dict(runtime),
-            "command": command,
-            "transcript_hash": transcript["transcript_hash"],
-            "output_hash": transcript["output_hash"],
-            "output_complete": transcript["output_complete"],
-            "returncode": transcript["returncode"],
-            "timed_out": transcript["timed_out"],
-            "status": status or transcript["status"],
-            "attestation_key_id": self.config.attestation_key_id,
-        }
-        return issue_execution_proof(payload, signing_private_key=self._key)
-
-    def _execute_test(
-        self, client: Client, run_id: str, profile: Profile, candidate: tuple[str, str, str, str, str], worktree: Path, environment: Mapping[str, str], runtime: Mapping[str, Any]
-    ) -> dict[str, Any]:
-        try:
-            test_plan = load_candidate_test_plan(self.config.repository, source_commit=candidate[0])
-        except CandidateManifestError as exc:
-            raise QualifiedExecutionError("qualified execution canonical test plan is invalid") from exc
+    def _candidate(self, value: Mapping[str, Any], client: Client) -> tuple[str, str, str, str]:
+        fields = {"schema", "service_id", "client_id", "candidate_commit", "candidate_tree", "base_commit", "base_tree", "plan_commit", "profiles", "review_packet"}
         if (
-            test_plan["sha256"] != profile.test_plan_sha256
-            or test_plan["runner_path"] != profile.test_runner_path
-            or test_plan["runner_sha256"] != profile.test_runner_sha256
-            or test_plan["commands"][str(profile.scope)] != list(profile.command or ())
+            not isinstance(value, Mapping)
+            or set(value) != fields
+            or value.get("schema") != REQUEST_SCHEMA
+            or value.get("service_id") != self.config.service_id
+            or value.get("client_id") != client.client_id
         ):
-            raise QualifiedExecutionError("qualified execution canonical test plan is not service-approved")
-        command = [str(self.config.runtime.interpreter_path), *(profile.command or ())]
-        result = _run_bounded(command, cwd=worktree, environment=environment, timeout_seconds=profile.timeout_seconds, max_output_bytes=profile.max_output_bytes)
-        transcript = self._transcript(client=client, run_id=run_id, profile=profile, candidate=candidate, command=command, result=result)
-        output = create_test_output_artifact(
-            scope=str(profile.scope), command=list(profile.command or ()), source_commit=candidate[0], source_tree=candidate[1], stdout=result.stdout, stderr=result.stderr
-        )
-        receipt = create_test_receipt(
-            scope=str(profile.scope),
-            command=list(profile.command or ()),
-            source_commit=candidate[0],
-            source_tree=candidate[1],
-            returncode=result.returncode,
-            test_plan=test_plan,
-            output_artifact=output,
-        )
-        inputs = {
-            "scope": profile.scope,
-            "test_plan_path": test_plan["path"],
-            "test_plan_sha256": test_plan["sha256"],
-            "test_runner_path": test_plan["runner_path"],
-            "test_runner_sha256": test_plan["runner_sha256"],
-            "test_receipt_hash": receipt["receipt_hash"],
-            "test_output_artifact_hash": output["artifact_hash"],
-        }
-        proof_status = "PASS" if transcript["status"] == "PASS" and receipt["status"] == "PASS" else "FAIL"
-        return {
-            "proof": self._proof(client=client, run_id=run_id, profile=profile, candidate=candidate, command=command, transcript=transcript, runtime=runtime, inputs=inputs, status=proof_status),
-            "transcript": transcript,
-            "test_receipt": receipt,
-            "test_output": output,
-        }
+            raise _ProtocolError(400, "qualified execution request is invalid")
+        if value.get("plan_commit") != self.config.plan_commit:
+            raise _ProtocolError(403, "qualified execution Plan is not configured")
+        profiles = value.get("profiles")
+        if not isinstance(profiles, list) or not profiles or len(set(profiles)) != len(profiles) or not all(isinstance(item, str) and item in client.profiles for item in profiles):
+            raise _ProtocolError(403, "qualified execution profile is not granted to client")
+        try:
+            candidate = _git(self.config.repository, "rev-parse", f"{value['candidate_commit']}^{{commit}}")
+            tree = _git(self.config.repository, "rev-parse", f"{candidate}^{{tree}}")
+            base = _git(self.config.repository, "rev-parse", f"{value['base_commit']}^{{commit}}")
+            base_tree = _git(self.config.repository, "rev-parse", f"{base}^{{tree}}")
+            subprocess.run(["git", "merge-base", "--is-ancestor", base, candidate], cwd=self.config.repository, check=True, capture_output=True)
+        except (QualifiedExecutionError, subprocess.CalledProcessError) as exc:
+            raise _ProtocolError(409, "qualified execution candidate ancestry is invalid") from exc
+        if (candidate, tree, base, base_tree) != (value["candidate_commit"], value["candidate_tree"], value["base_commit"], value["base_tree"]):
+            raise _ProtocolError(409, "qualified execution candidate tree binding is invalid")
+        wants_review = any(self.config.policy.profiles[item]["kind"] == "review" for item in profiles)
+        if wants_review != isinstance(value["review_packet"], Mapping):
+            raise _ProtocolError(400, "qualified execution review packet binding is invalid")
+        return candidate, tree, base, base_tree
 
-    def _execute_migration(
-        self, client: Client, run_id: str, profile: Profile, candidate: tuple[str, str, str, str, str], worktree: Path, environment: Mapping[str, str], runtime: Mapping[str, Any]
-    ) -> dict[str, Any]:
-        assert profile.runner_path is not None and profile.migration_path is not None and profile.runner_sha256 is not None
-        # Never place a service output under candidate-controlled paths: a
-        # committed symlink must not redirect the externally configured runner
-        # into another filesystem location.
-        output_path = worktree.parent / f".qualified-migration-receipt-{run_id}.json"
-        command = [str(profile.runner_path), "--repo", str(self.config.repository), "--commit", candidate[0], "--base-commit", candidate[2], "--output", str(output_path)]
-        result = _run_bounded(command, cwd=worktree, environment=environment, timeout_seconds=profile.timeout_seconds, max_output_bytes=profile.max_output_bytes)
-        transcript = self._transcript(client=client, run_id=run_id, profile=profile, candidate=candidate, command=command, result=result)
-        source = bytes(_git(self.config.repository, "show", f"{candidate[0]}:{profile.migration_path}", text=False))
-        snapshot = bytes(_git(self.config.repository, "show", f"{candidate[0]}:{profile.schema_snapshot_path}", text=False)) if profile.schema_snapshot_path else None
-        receipt: dict[str, Any] | None = None
-        if transcript["status"] == "PASS":
-            try:
-                receipt_value = json.loads(output_path.read_text(encoding="utf-8"))
-                receipt = asdict(
-                    verify_migration_safety_receipt(
-                        receipt_value,
-                        candidate_commit=candidate[0],
-                        candidate_tree=candidate[1],
-                        base_commit=candidate[2],
-                        base_tree=candidate[3],
-                        migration_paths=(profile.migration_path,),
-                        migration_source=source,
-                        schema_snapshot_source=snapshot,
-                    )
+    def _validate_artifacts(self, package: Mapping[str, Any], transcript: Mapping[str, Any], candidate: tuple[str, str, str, str]) -> dict[str, Any]:
+        profile = self.config.policy.profiles[transcript["profile_id"]]
+        result = dict(package)
+        if transcript["kind"] == "test":
+            if set(package) != {"transcript", "test_receipt", "test_output"}:
+                raise QualifiedExecutionError("qualified runner test package is invalid")
+            plan = load_candidate_test_plan(self.config.repository, source_commit=candidate[0])
+            if (
+                plan["sha256"] != profile["test_plan_sha256"]
+                or plan["runner_path"] != profile["test_runner_path"]
+                or plan["runner_sha256"] != profile["test_runner_sha256"]
+                or plan["commands"][profile["scope"]] != profile["command"]
+            ):
+                raise QualifiedExecutionError("qualified runner test policy/candidate binding is invalid")
+            verify_test_receipt(package["test_receipt"], scope=profile["scope"], source_commit=candidate[0], source_tree=candidate[1], test_plan=plan, output_artifact=package["test_output"])
+        elif transcript["kind"] == "migration":
+            if set(package) != {"transcript", "migration_receipt"}:
+                raise QualifiedExecutionError("qualified runner migration package is invalid")
+            source = _git_bytes(self.config.repository, "show", f"{candidate[0]}:{profile['migration_path']}")
+            snapshot = _git_bytes(self.config.repository, "show", f"{candidate[0]}:{profile['schema_snapshot_path']}") if profile["schema_snapshot_path"] else None
+            result["migration_receipt"] = asdict(
+                verify_migration_safety_receipt(
+                    package["migration_receipt"],
+                    candidate_commit=candidate[0],
+                    candidate_tree=candidate[1],
+                    base_commit=candidate[2],
+                    base_tree=candidate[3],
+                    migration_paths=(profile["migration_path"],),
+                    migration_source=source,
+                    schema_snapshot_source=snapshot,
                 )
-            except (OSError, json.JSONDecodeError, CandidateManifestError):
-                transcript = {**transcript, "status": "FAIL"}
-                unsigned = {key: item for key, item in transcript.items() if key != "transcript_hash"}
-                transcript = {**unsigned, "transcript_hash": _hash(unsigned)}
-        inputs = {
-            "migration_path": profile.migration_path,
-            "migration_sha256": _hash_bytes(source),
-            "schema_snapshot_path": profile.schema_snapshot_path,
-            "schema_snapshot_sha256": _hash_bytes(snapshot) if snapshot is not None else None,
-            "runner_path": str(profile.runner_path),
-            "runner_sha256": profile.runner_sha256,
-            "migration_receipt_hash": receipt["receipt_hash"] if receipt is not None else None,
-        }
-        return {
-            "proof": self._proof(
-                client=client,
-                run_id=run_id,
-                profile=profile,
-                candidate=candidate,
-                command=command,
-                transcript=transcript,
-                runtime=runtime,
-                inputs=inputs,
-                status="PASS" if receipt is not None and transcript["status"] == "PASS" else "FAIL",
-            ),
-            "transcript": transcript,
-            "migration_receipt": receipt,
-        }
+            )
+        else:
+            if set(package) != {"transcript", "review_packet", "review_result"} or package["review_packet"] is None or package["review_result"] is None:
+                raise QualifiedExecutionError("qualified runner review package is invalid")
+        return result
 
-    def _execute_review(
-        self,
-        client: Client,
-        run_id: str,
-        profile: Profile,
-        candidate: tuple[str, str, str, str, str],
-        worktree: Path,
-        environment: Mapping[str, str],
-        runtime: Mapping[str, Any],
-        review_packet: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        """Run an operator-pinned review runner over the exact packet bytes.
-
-        The review packet is an input, rather than an authority claim.  Its
-        canonical bytes are fed to the configured runner and both those bytes
-        and the complete parsed result are bound into the signed proof.  A
-        later result cannot therefore be substituted for a valid review run.
-        """
-
-        assert profile.runner_path is not None and profile.runner_sha256 is not None
-        packet = dict(review_packet)
-        packet_bytes = _canonical(packet)
-        # A file avoids an unbounded stdin write before the bounded process
-        # supervisor begins draining pipes.  The service creates this exact
-        # canonical packet; a candidate cannot select a different input path.
-        packet_path = worktree.parent / f".tgw-qualified-review-packet-{run_id}.json"
-        packet_path.write_bytes(packet_bytes)
-        command = [str(profile.runner_path), "--review-packet", str(packet_path)]
-        result = _run_bounded(
-            command,
-            cwd=worktree,
-            environment=environment,
-            timeout_seconds=profile.timeout_seconds,
-            max_output_bytes=profile.max_output_bytes,
-        )
-        transcript = self._transcript(
-            client=client,
-            run_id=run_id,
-            profile=profile,
-            candidate=candidate,
-            command=command,
-            result=result,
-        )
-        review_result: dict[str, Any] | None = None
-        if transcript["status"] == "PASS":
-            try:
-                parsed = json.loads(result.stdout.decode("utf-8"))
-                if not isinstance(parsed, Mapping):
-                    raise ValueError
-                review_result = dict(parsed)
-            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-                unsigned = {key: item for key, item in transcript.items() if key != "transcript_hash"}
-                transcript = {**unsigned, "status": "FAIL", "transcript_hash": _hash({**unsigned, "status": "FAIL"})}
-        inputs = {
-            "review_packet_content_sha256": _hash_bytes(packet_bytes),
-            "review_packet_hash": packet.get("packet_hash"),
-            "review_result_content_sha256": _hash(review_result) if review_result is not None else None,
-            "review_result_hash": review_result.get("result_hash") if review_result is not None else None,
-            "runner_path": str(profile.runner_path),
-            "runner_sha256": profile.runner_sha256,
-        }
-        return {
-            "proof": self._proof(
-                client=client,
-                run_id=run_id,
-                profile=profile,
-                candidate=candidate,
-                command=command,
-                transcript=transcript,
-                runtime=runtime,
-                inputs=inputs,
-                status="PASS" if review_result is not None and transcript["status"] == "PASS" else "FAIL",
-            ),
-            "transcript": transcript,
-            "review_packet": packet,
-            "review_result": review_result,
-        }
-
-    def execute(self, value: Mapping[str, Any], client: Client) -> dict[str, Any]:
+    def execute(self, value: Mapping[str, Any], client: Client, *, reserved: bool = False) -> dict[str, Any]:
         if self.config.clients.get(client.client_id) != client:
             raise _ProtocolError(403, "qualified execution client grant is invalid")
-        if not self._slots.acquire(blocking=False):
+        acquired = reserved or self.acquire_slot()
+        if not acquired:
             raise _ProtocolError(429, "qualified execution request capacity is exhausted")
         try:
-            return self._execute(value, client)
+            candidate = self._candidate(value, client)
+            # Fresh signed identity is requested immediately before dispatch;
+            # the confined runner is responsible for rehashing these executable
+            # identities in that identity response and again in its result.
+            identity = self._runner.identity(
+                signer_identity=self.config.signer_identity,
+                plan_commit=self.config.plan_commit,
+                policy_path=self.config.policy.path,
+                policy_artifact_hash=self.config.policy.artifact_hash,
+            )
+            if identity["runtime"] != self.config.policy.runtime:
+                raise QualifiedExecutionError("qualified runner runtime changed after policy load")
+            request = {
+                "schema": RUNNER_EXECUTE_REQUEST_SCHEMA,
+                "service_id": self.config.service_id,
+                "signer_identity": self.config.signer_identity,
+                "client_id": client.client_id,
+                "runner_id": self.config.runner["id"],
+                "runner_descriptor_hash": qualified_runner_descriptor_hash(self.config.runner),
+                "runner_identity_hash": identity["identity_hash"],
+                "plan_commit": self.config.plan_commit,
+                "policy_path": self.config.policy.path,
+                "policy_artifact_hash": self.config.policy.artifact_hash,
+                "candidate_commit": candidate[0],
+                "candidate_tree": candidate[1],
+                "base_commit": candidate[2],
+                "base_tree": candidate[3],
+                "profiles": list(value["profiles"]),
+                "review_packet": dict(value["review_packet"]) if value["review_packet"] is not None else None,
+            }
+            response = self._runner.execute(request)
+            if len(response["results"]) != len(value["profiles"]):
+                raise QualifiedExecutionError("qualified runner response coverage is invalid")
+            results: list[dict[str, Any]] = []
+            for profile_id, package in zip(value["profiles"], response["results"], strict=True):
+                if not isinstance(package, Mapping) or not isinstance(package.get("transcript"), Mapping):
+                    raise QualifiedExecutionError("qualified runner response package is invalid")
+                profile = self.config.policy.profiles[profile_id]
+                expected = {
+                    "runner_id": self.config.runner["id"],
+                    "runner_identity": self.config.runner["runner_identity"],
+                    "namespace_id": self.config.runner["namespace_id"],
+                    "service_id": self.config.service_id,
+                    "client_id": client.client_id,
+                    "profile_id": profile_id,
+                    "kind": profile["kind"],
+                    "candidate_commit": candidate[0],
+                    "candidate_tree": candidate[1],
+                    "base_commit": candidate[2],
+                    "base_tree": candidate[3],
+                    "plan_commit": self.config.plan_commit,
+                    "policy_path": self.config.policy.path,
+                    "policy_artifact_hash": self.config.policy.artifact_hash,
+                }
+                if profile["kind"] == "test":
+                    expected["command"] = [self.config.policy.runtime["interpreter_path"], *profile["command"]]
+                transcript = _validate_runner_transcript(package["transcript"], descriptor=self.config.runner, identity=identity, expected=expected)
+                package = self._validate_artifacts(package, transcript, candidate)
+                proof = issue_execution_proof(
+                    {
+                        "schema": PROOF_SCHEMA,
+                        "service_id": self.config.service_id,
+                        "signer_identity": self.config.signer_identity,
+                        "signer_namespace_id": self.config.signer_namespace_id,
+                        "signer_descriptor_hash": client.descriptor_hash,
+                        "client_id": client.client_id,
+                        "run_id": transcript["run_id"],
+                        "profile_id": profile_id,
+                        "kind": profile["kind"],
+                        "candidate_commit": candidate[0],
+                        "candidate_tree": candidate[1],
+                        "base_commit": candidate[2],
+                        "base_tree": candidate[3],
+                        "plan_commit": self.config.plan_commit,
+                        "policy_path": self.config.policy.path,
+                        "policy_artifact_hash": self.config.policy.artifact_hash,
+                        "runner_id": transcript["runner_id"],
+                        "runner_identity": transcript["runner_identity"],
+                        "namespace_id": transcript["namespace_id"],
+                        "runner_descriptor_hash": qualified_runner_descriptor_hash(self.config.runner),
+                        "runner_identity_hash": transcript["runner_identity_hash"],
+                        "runner_result_hash": transcript["runner_result_hash"],
+                        "inputs": transcript["inputs"],
+                        "runtime": transcript["runtime"],
+                        "command": transcript["command"],
+                        "output_hash": transcript["output_hash"],
+                        "output_complete": transcript["output_complete"],
+                        "returncode": transcript["returncode"],
+                        "timed_out": transcript["timed_out"],
+                        "status": transcript["status"],
+                        "attestation_key_id": self.config.attestation_key_id,
+                    },
+                    signing_private_key=self._key,
+                )
+                results.append({**package, "proof": proof, "transcript": transcript})
+            response = {
+                "schema": RESPONSE_SCHEMA,
+                "service_id": self.config.service_id,
+                "client_id": client.client_id,
+                "candidate_commit": candidate[0],
+                "candidate_tree": candidate[1],
+                "base_commit": candidate[2],
+                "base_tree": candidate[3],
+                "plan_commit": self.config.plan_commit,
+                "policy_artifact_hash": self.config.policy.artifact_hash,
+                "runner_descriptor_hash": qualified_runner_descriptor_hash(self.config.runner),
+                "results": results,
+            }
+            # Results are retained only once the complete response structure is
+            # available to the caller; per-client deques prevent one client
+            # from consuming another client's retained proof capacity.
+            self._retain(client.client_id, results)
+            return response
+        except QualifiedExecutionError as exc:
+            raise _ProtocolError(409, str(exc)) from exc
         finally:
-            self._slots.release()
-
-    def _execute(self, value: Mapping[str, Any], client: Client) -> dict[str, Any]:
-        if value.get("client_id") != client.client_id:
-            raise _ProtocolError(400, "qualified execution client identity is invalid")
-        candidate = _exact_candidate(self.config, value, client)
-        requested = list(value["profiles"])
-        review_packet = value["review_packet"]
-        wants_review = any(self.config.profiles[profile_id].kind == "review" for profile_id in requested)
-        if wants_review != isinstance(review_packet, Mapping):
-            raise _ProtocolError(400, "qualified execution review packet binding is invalid")
-        results: list[dict[str, Any]] = []
-        with self._lock, tempfile.TemporaryDirectory(prefix="tgw-qualified-execution-") as temporary:
-            try:
-                for index, profile_id in enumerate(requested, start=1):
-                    # A profile may execute untrusted candidate code.  It gets
-                    # a fresh detached tree, never the filesystem observed by
-                    # a previous test/migration/review profile.
-                    worktree = Path(temporary) / f"candidate-{index}"
-                    profile = self.config.profiles[profile_id]
-                    try:
-                        subprocess.run(
-                            ["git", "-C", str(self.config.repository), "worktree", "add", "--detach", str(worktree), candidate[0]],
-                            check=True,
-                            capture_output=True,
-                        )
-                        environment, runtime = self._runtime(worktree)
-                        run_id = secrets.token_urlsafe(24)
-                        if profile.kind == "test":
-                            results.append(self._execute_test(client, run_id, profile, candidate, worktree, environment, runtime))
-                        elif profile.kind == "migration":
-                            results.append(self._execute_migration(client, run_id, profile, candidate, worktree, environment, runtime))
-                        else:
-                            assert isinstance(review_packet, Mapping)
-                            results.append(self._execute_review(client, run_id, profile, candidate, worktree, environment, runtime, review_packet))
-                    finally:
-                        if worktree.exists():
-                            subprocess.run(
-                                ["git", "-C", str(self.config.repository), "worktree", "remove", "--force", str(worktree)],
-                                check=False,
-                                capture_output=True,
-                            )
-            except (OSError, subprocess.CalledProcessError, QualifiedExecutionError) as exc:
-                raise _ProtocolError(409, str(exc)) from exc
-        return {
-            "schema": RESPONSE_SCHEMA,
-            "service_id": self.config.service_id,
-            "client_id": client.client_id,
-            "candidate_commit": candidate[0],
-            "candidate_tree": candidate[1],
-            "base_commit": candidate[2],
-            "base_tree": candidate[3],
-            "plan_commit": candidate[4],
-            "results": results,
-        }
+            if acquired:
+                self.release_slot()
 
 
 def create_qualified_execution_server(
-    config: QualifiedExecutionConfig, credentials: Mapping[str, str], *, signing_private_key: Ed25519PrivateKey | str | bytes, host: str = "127.0.0.1", port: int = 0
+    config: QualifiedExecutionConfig,
+    credentials: Mapping[str, str],
+    *,
+    signing_private_key: Ed25519PrivateKey | str | bytes,
+    environment: Mapping[str, str] | None = None,
+    host: str = "127.0.0.1",
+    port: int = 0,
 ) -> ThreadingHTTPServer:
-    if not isinstance(host, str) or not host or not isinstance(port, int) or not 0 <= port <= 65535:
-        raise QualifiedExecutionConfigurationError("qualified execution service bind address is invalid")
-    state = QualifiedExecutionService(config, credentials, signing_private_key=signing_private_key)
+    state = QualifiedExecutionService(config, credentials, signing_private_key=signing_private_key, environment=environment)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -1255,71 +1304,76 @@ def create_qualified_execution_server(
         def log_message(self, _format: str, *_args: Any) -> None:
             return
 
-        def _send(self, status: int, value: Mapping[str, Any]) -> None:
-            body = _canonical(value)
-            if len(body) > _MAX_RESPONSE_BYTES:
-                self.send_error(507, "qualified execution response is too large")
-                return
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
         def do_POST(self) -> None:  # noqa: N802
             client = state.client_for_authorization(self.headers.get("Authorization"))
-            if client is None:
+            if client is None or urlsplit(self.path).path != "/v1/proofs" or self.headers.get_content_type() != "application/json":
                 self.send_error(404)
                 return
-            parsed = urlsplit(self.path)
-            if parsed.path != "/v1/proofs" or parsed.query or parsed.fragment or self.headers.get_content_type() != "application/json":
-                self.send_error(404)
+            if not state.acquire_slot():
+                self.send_error(429)
                 return
             try:
                 length = int(self.headers.get("Content-Length", "-1"))
                 if not 0 < length <= _MAX_REQUEST_BYTES:
                     raise _ProtocolError(400, "qualified execution request body is invalid")
+                self.connection.settimeout(_MAX_BODY_READ_SECONDS)
                 raw = self.rfile.read(length)
+                self.connection.settimeout(None)
                 if len(raw) != length:
                     raise _ProtocolError(400, "qualified execution request body is incomplete")
-                value = json.loads(raw.decode("utf-8"))
+                value = json.loads(raw.decode())
                 if not isinstance(value, Mapping):
                     raise _ProtocolError(400, "qualified execution request is invalid")
-                self._send(200, state.execute(value, client))
+                body = _canonical(state.execute(value, client, reserved=True))
+                if len(body) > _MAX_RESPONSE_BYTES:
+                    raise _ProtocolError(507, "qualified execution response is too large")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             except (ValueError, json.JSONDecodeError) as exc:
                 error = exc if isinstance(exc, _ProtocolError) else _ProtocolError(400, "qualified execution request is invalid")
                 self.send_error(error.status, str(error))
+            except socket.timeout:
+                self.send_error(408, "qualified execution request body timed out")
+            finally:
+                self.connection.settimeout(None)
+
+        def do_GET(self) -> None:  # noqa: N802
+            client = state.client_for_authorization(self.headers.get("Authorization"))
+            parts = urlsplit(self.path).path.split("/")
+            if client is None or len(parts) != 5 or parts[:3] != ["", "v1", "proofs"]:
+                self.send_error(404)
+                return
+            retained = state.retained_proof(client, parts[3], parts[4])
+            if retained is None:
+                self.send_error(404)
+                return
+            body = _canonical(retained)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
     return ThreadingHTTPServer((host, port), Handler)
 
 
 class QualifiedExecutionClient:
-    """Thin client: it submits identities; it never executes or signs a proof."""
-
     def __init__(self, descriptor: Mapping[str, Any], *, environment: Mapping[str, str] | None = None) -> None:
-        normalized = _descriptor(descriptor)
-        credential = None
-        if normalized["credential_env"] is not None:
-            credential = (os.environ if environment is None else environment).get(normalized["credential_env"])
-            if not credential:
-                raise QualifiedExecutionError("qualified execution service credential is unavailable")
-        self._descriptor, self._credential = normalized, credential
+        self.descriptor = _descriptor(descriptor)
+        self.token = (os.environ if environment is None else environment).get(self.descriptor["credential_env"]) if self.descriptor["credential_env"] else None
+        if self.descriptor["credential_env"] and not self.token:
+            raise QualifiedExecutionError("qualified execution signer credential is unavailable")
 
     def execute(
-        self,
-        *,
-        candidate_commit: str,
-        candidate_tree: str,
-        base_commit: str,
-        base_tree: str,
-        plan_commit: str,
-        profiles: Sequence[str],
-        review_packet: Mapping[str, Any] | None = None,
+        self, *, candidate_commit: str, candidate_tree: str, base_commit: str, base_tree: str, plan_commit: str, profiles: Sequence[str], review_packet: Mapping[str, Any] | None = None
     ) -> dict[str, Any]:
-        payload = {
+        value = {
             "schema": REQUEST_SCHEMA,
-            "service_id": self._descriptor["id"],
-            "client_id": self._descriptor["client_id"],
+            "service_id": self.descriptor["id"],
+            "client_id": self.descriptor["client_id"],
             "candidate_commit": candidate_commit,
             "candidate_tree": candidate_tree,
             "base_commit": base_commit,
@@ -1328,42 +1382,41 @@ class QualifiedExecutionClient:
             "profiles": list(profiles),
             "review_packet": dict(review_packet) if review_packet is not None else None,
         }
-        request = Request(self._descriptor["endpoint"] + "/v1/proofs", data=_canonical(payload), method="POST")
+        request = Request(self.descriptor["endpoint"] + "/v1/proofs", data=_canonical(value), method="POST")
         request.add_header("Content-Type", "application/json")
-        request.add_header("Accept", "application/json")
-        if self._credential is not None:
-            request.add_header("Authorization", f"Bearer {self._credential}")
+        if self.token:
+            request.add_header("Authorization", f"Bearer {self.token}")
         try:
-            with urlopen(request, timeout=self._descriptor["timeout_seconds"]) as response:  # nosec: descriptor is operator-provisioned
+            with urlopen(request, timeout=self.descriptor["timeout_seconds"]) as response:  # nosec: descriptor is externally provisioned
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except (HTTPError, URLError, OSError) as exc:
-            raise QualifiedExecutionError("qualified execution service request failed") from exc
+            raise QualifiedExecutionError("qualified execution signer request failed") from exc
         if len(raw) > _MAX_RESPONSE_BYTES:
-            raise QualifiedExecutionError("qualified execution service response is too large")
+            raise QualifiedExecutionError("qualified execution signer response is too large")
         try:
-            response = json.loads(raw.decode("utf-8"))
+            response = json.loads(raw.decode())
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise QualifiedExecutionError("qualified execution service response is invalid") from exc
+            raise QualifiedExecutionError("qualified execution signer response is invalid") from exc
         if not isinstance(response, Mapping) or response.get("schema") != RESPONSE_SCHEMA:
-            raise QualifiedExecutionError("qualified execution service response is invalid")
+            raise QualifiedExecutionError("qualified execution signer response is invalid")
         return dict(response)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="tgw-qualified-execution-service")
+    parser = argparse.ArgumentParser(prog="tgw-qualified-execution-signer")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     args = parser.parse_args(argv)
     try:
         config = load_qualified_execution_config(args.config)
-        credentials = {client_id: os.environ.get(client.credential_env, "") for client_id, client in config.clients.items()}
+        credentials = {key: os.environ.get(client.credential_env, "") for key, client in config.clients.items()}
         key = os.environ.get(config.attestation_private_key_env)
         if not key:
-            raise QualifiedExecutionConfigurationError("qualified execution signing key is unavailable")
+            raise QualifiedExecutionConfigurationError("qualified execution signer key is unavailable")
         server = create_qualified_execution_server(config, credentials, signing_private_key=key, host=args.host, port=args.port)
     except (OSError, QualifiedExecutionConfigurationError) as exc:
-        print(json.dumps({"error": str(exc), "error_type": type(exc).__name__}), file=os.sys.stderr)
+        print(str(exc), file=os.sys.stderr)
         return 2
     try:
         server.serve_forever()
@@ -1371,4 +1424,3 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         server.server_close()
-    return 0

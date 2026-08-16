@@ -49,10 +49,10 @@ PINNED_CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA = "tgw-pinned-git-candidate-evidence
 CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA = "tgw-candidate-evidence-descriptor/v1"
 CANDIDATE_EVIDENCE_CARD_BINDING_SCHEMA = "tgw-candidate-evidence-descriptor-card-binding/v2"
 GOVERNED_EXECUTION_BUNDLE_SCHEMA = "tgw-candidate-governed-execution-bundle/v2"
-INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-independent-review-evidence-bundle/v2"
+INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-independent-review-evidence-bundle/v3"
 GOVERNED_CANDIDATE_ADMISSION_SCHEMA = "tgw-governed-candidate-admission-gate/v2"
 GOVERNED_CANDIDATE_PLAN_AUTHORITY_SCHEMA = "tgw-governed-candidate-plan-authority/v1"
-CANDIDATE_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-evidence-bundle/v3"
+CANDIDATE_EVIDENCE_BUNDLE_SCHEMA = "tgw-candidate-evidence-bundle/v4"
 ROLLBACK_MANIFEST_SCHEMA = "tgw-governed-candidate-rollback-manifest/v1"
 
 GOVERNED_ROLES = (
@@ -83,11 +83,13 @@ _CANDIDATE_EVIDENCE_ARTIFACTS = (
     "release_manifest",
     "rollback_manifest",
     "qualified_execution_catalog",
+    "qualified_execution_runner_descriptor",
 )
 _INDEPENDENT_REVIEW_EVIDENCE_ARTIFACTS = (
     "review_packet",
     "review_result",
     "qualified_execution_catalog",
+    "qualified_execution_runner_descriptor",
     "review_execution_proof",
     "review_execution_transcript",
 )
@@ -187,7 +189,7 @@ def candidate_evidence_bundle_ref(source_commit: str) -> str:
 
     if _GIT_OBJECT.fullmatch(source_commit) is None:
         raise CandidateReceiptSinkError("candidate evidence bundle identity is invalid")
-    return f"candidate:{source_commit}:candidate-evidence:v3"
+    return f"candidate:{source_commit}:candidate-evidence:v4"
 
 
 def independent_review_evidence_bundle_ref(source_commit: str) -> str:
@@ -195,7 +197,7 @@ def independent_review_evidence_bundle_ref(source_commit: str) -> str:
 
     if _GIT_OBJECT.fullmatch(source_commit) is None:
         raise CandidateReceiptSinkError("independent review evidence bundle identity is invalid")
-    return f"candidate:{source_commit}:independent-review-evidence:v2"
+    return f"candidate:{source_commit}:independent-review-evidence:v3"
 
 
 def validate_receipt_sink_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -735,6 +737,7 @@ def _verify_candidate_manifest_evidence(
     full_suite_output_artifact: Mapping[str, Any],
     migration_receipts: list[Mapping[str, Any]],
     qualified_execution_catalog: Mapping[str, Any],
+    qualified_execution_runner_descriptor: Mapping[str, Any],
     execution_proofs: list[tuple[Mapping[str, Any], Mapping[str, Any]]],
 ) -> dict[str, Any]:
     """Re-derive every W08 manifest binding from exact source and sink blobs."""
@@ -877,6 +880,7 @@ def _verify_candidate_manifest_evidence(
         raise CandidateReceiptSinkError("candidate migration path summaries are invalid")
     _verify_qualified_candidate_execution(
         catalog=qualified_execution_catalog,
+        runner_descriptor=qualified_execution_runner_descriptor,
         proofs=execution_proofs,
         repository=repository,
         source_commit=source_commit,
@@ -929,11 +933,18 @@ def _verified_execution_proof(
     transcript: Mapping[str, Any],
     *,
     catalog: Mapping[str, Any],
+    runner_descriptor: Mapping[str, Any],
     expected: Mapping[str, Any],
     capability: str,
 ) -> dict[str, Any]:
     try:
-        normalized = validate_execution_proof(proof, transcript, catalog=catalog, expected=expected)
+        normalized = validate_execution_proof(
+            proof,
+            transcript,
+            catalog=catalog,
+            runner_descriptor=runner_descriptor,
+            expected=expected,
+        )
     except QualifiedExecutionError as exc:
         raise CandidateReceiptSinkError("candidate qualified execution proof is invalid") from exc
     if normalized["status"] != "PASS":
@@ -950,6 +961,7 @@ def _verified_execution_proof(
 def _verify_qualified_candidate_execution(
     *,
     catalog: Mapping[str, Any],
+    runner_descriptor: Mapping[str, Any],
     proofs: list[tuple[Mapping[str, Any], Mapping[str, Any]]],
     repository: Path,
     source_commit: str,
@@ -1014,6 +1026,7 @@ def _verify_qualified_candidate_execution(
                 proof,
                 transcript,
                 catalog=catalog,
+                runner_descriptor=runner_descriptor,
                 expected=common,
                 capability="candidate-test-execution",
             )
@@ -1027,6 +1040,7 @@ def _verify_qualified_candidate_execution(
                 proof,
                 transcript,
                 catalog=catalog,
+                runner_descriptor=runner_descriptor,
                 expected=common,
                 capability="postgresql-migration-execution",
             )
@@ -1150,6 +1164,7 @@ def verify_candidate_evidence_bundle(
         full_suite_output_artifact=artifacts["full_suite_test_output"],
         migration_receipts=migration_artifacts,
         qualified_execution_catalog=artifacts["qualified_execution_catalog"],
+        qualified_execution_runner_descriptor=artifacts["qualified_execution_runner_descriptor"],
         execution_proofs=execution_proofs,
     )
     release_manifest = _validate_release_manifest(
@@ -1214,6 +1229,7 @@ def verify_independent_review_evidence_bundle(
         artifacts["review_execution_proof"],
         artifacts["review_execution_transcript"],
         catalog=artifacts["qualified_execution_catalog"],
+        runner_descriptor=artifacts["qualified_execution_runner_descriptor"],
         expected=common,
         capability="candidate-review-execution",
     )
