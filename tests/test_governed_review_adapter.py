@@ -473,32 +473,20 @@ def _fixture(
         **context_service_unsigned,
         "descriptor_hash": _hash(context_service_unsigned),
     }
-    egress_private_key = Ed25519PrivateKey.generate()
     network_unsigned = {
-        "schema": "tgw-governed-review-network-policy/v1",
-        "mode": "shared-network-enforced-endpoints",
-        "endpoints": sorted(["https://api.anthropic.com", mcp_endpoint]),
-        "enforcement_key_id": "test-egress-key",
-        "enforcement_public_key": _public_key(egress_private_key),
+        "schema": "tgw-governed-review-network-environment/v1",
+        "mode": "shared-host-network",
+        "observed_endpoints": sorted(["https://api.anthropic.com", mcp_endpoint]),
+        "endpoint_confinement": False,
     }
     network_hash = _hash(network_unsigned)
-    enforcement_unsigned = {
-        "schema": "tgw-governed-review-egress-enforcement/v1",
-        "status": "ENFORCED", "policy_hash": network_hash,
-        "enforcement_id": "test-egress", "observed_at": "2026-08-16T00:00:00+00:00",
-        "expires_at": "2026-08-17T00:00:00+00:00", "key_id": "test-egress-key",
-    }
-    network_policy = {
-        **network_unsigned, "policy_hash": network_hash,
-        "enforcement_receipt": _signed_receipt(enforcement_unsigned, egress_private_key),
-    }
+    network_environment = {**network_unsigned, "policy_hash": network_hash}
     execution_environment = tmp_path / "execution-environment.json"
     execution_environment.write_text(json.dumps({
         "schema": "tgw-governed-review-environment-authority/v1",
         "provider": "claude", "runtime_uid": os.getuid(), "runtime_gid": os.getgid(),
-        "egress_key_id": "test-egress-key",
-        "egress_public_key": _public_key(egress_private_key),
-        "network_policy_hash": network_hash,
+        "network_environment_hash": network_hash,
+        "network_mode": "shared-host-network",
     }, sort_keys=True, separators=(",", ":")))
     execution_environment.chmod(0o444)
     health_unsigned = {
@@ -570,7 +558,7 @@ def _fixture(
             "forbidden_argv_tokens": ["--dangerously-skip-permissions"],
             "required_mcp_tools": [required_mcp_tool],
         },
-        "network_policy": network_policy,
+        "network_environment": network_environment,
         "health": {**health_unsigned, "evidence_hash": _hash(health_unsigned)},
     }
     return source, executable, identity, environment, context_private_key
@@ -917,7 +905,7 @@ def test_stale_health_mutation_tool_and_unbound_mcp_command_hold(tmp_path):
         _run(values[0], values[1], values[2], values[3], values[4])
 
 
-def test_context_closure_card_binding_and_network_policy_are_exact(tmp_path):
+def test_context_closure_card_binding_and_network_environment_are_exact(tmp_path):
     source, executable, identity, environment, identity_private_key = _fixture(tmp_path)
 
     stale_context = json.loads(json.dumps(identity))
@@ -929,15 +917,15 @@ def test_context_closure_card_binding_and_network_policy_are_exact(tmp_path):
 
     invalid_network = json.loads(json.dumps(identity))
     unsigned = {
-        "schema": "tgw-governed-review-network-policy/v1",
-        "mode": "shared-network-admitted-endpoints",
-        "endpoints": ["https://user:secret@api.anthropic.com"],
-        "enforcement_key_id": "invalid", "enforcement_public_key": "invalid",
+        "schema": "tgw-governed-review-network-environment/v1",
+        "mode": "shared-network-enforced-endpoints",
+        "observed_endpoints": ["https://api.anthropic.com"],
+        "endpoint_confinement": True,
     }
-    invalid_network["network_policy"] = {
+    invalid_network["network_environment"] = {
         **unsigned, "policy_hash": _hash(unsigned),
     }
-    with pytest.raises(ReviewRunnerError, match="network policy is invalid"):
+    with pytest.raises(ReviewRunnerError, match="network environment is invalid"):
         _run(source, executable, invalid_network, environment, identity_private_key)
 
     argv_mismatch = json.loads(json.dumps(identity))
@@ -1006,7 +994,7 @@ def test_context_grant_is_preissued_exact_and_fresh(tmp_path):
         validate_execution(substituted)
 
 
-def test_context_comparison_report_and_enforced_egress_are_not_claims(tmp_path):
+def test_context_comparison_report_and_shared_network_are_exact(tmp_path):
     source, executable, identity, environment, private_key = _fixture(tmp_path)
 
     def substituted_bytes(bundle):
@@ -1078,42 +1066,13 @@ def test_context_comparison_report_and_enforced_egress_are_not_claims(tmp_path):
     with pytest.raises(ReviewRunnerError, match="finding is invalid"):
         validate_execution(malformed_report)
 
-    unenforced = json.loads(json.dumps(identity))
-    unenforced["network_policy"]["enforcement_receipt"]["status"] = "CLAIMED"
-    with pytest.raises(ReviewRunnerError, match="egress policy|receipt hash"):
-        _run(source, executable, unenforced, environment, private_key)
-
-    substituted_key = Ed25519PrivateKey.generate()
-    substituted_unsigned = {
-        **{
-            name: value for name, value in identity["network_policy"].items()
-            if name not in {"policy_hash", "enforcement_receipt"}
-        },
-        "enforcement_key_id": "attacker-egress-key",
-        "enforcement_public_key": _public_key(substituted_key),
+    false_enforcement = json.loads(json.dumps(identity))
+    false_enforcement["network_environment"]["enforcement_receipt"] = {
+        "status": "ENFORCED",
     }
-    substituted_hash = _hash(substituted_unsigned)
-    substituted_receipt = {
-        **{
-            name: value
-            for name, value in identity["network_policy"][
-                "enforcement_receipt"
-            ].items()
-            if name not in {"receipt_hash", "signature"}
-        },
-        "policy_hash": substituted_hash,
-        "key_id": "attacker-egress-key",
-    }
-    substituted_egress = json.loads(json.dumps(identity))
-    substituted_egress["network_policy"] = {
-        **substituted_unsigned, "policy_hash": substituted_hash,
-        "enforcement_receipt": _signed_receipt(
-            substituted_receipt, substituted_key
-        ),
-    }
-    with pytest.raises(ReviewRunnerError, match="environment authority|network policy"):
+    with pytest.raises(ReviewRunnerError, match="network environment"):
         _run(
-            source, executable, substituted_egress, environment, private_key,
+            source, executable, false_enforcement, environment, private_key,
         )
 
     substituted_service = json.loads(json.dumps(identity))

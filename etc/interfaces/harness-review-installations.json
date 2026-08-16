@@ -25,7 +25,7 @@
       "protected_review_projection": "not-installed",
       "context_bundle_service": "not-installed",
       "review_evidence_sink": "not-installed",
-      "review_egress_policy": "not-installed",
+      "review_network_mode": "shared-host-network",
       "live_readiness": "HOLD_NOT_INSTALLED",
       "model_authentication": "configured",
       "context_mcp": "configured",

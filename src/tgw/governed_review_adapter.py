@@ -535,7 +535,7 @@ def validate_execution(value: Mapping[str, Any]) -> dict[str, Any]:
         "skill_source_provenance", "sandbox_layout", "context_bundle_service",
         "sandbox_identity",
         "environment_sha256", "argv_template", "argv_template_hash",
-        "command_policy", "network_policy", "health",
+        "command_policy", "network_environment", "health",
     }
     if not isinstance(provider_identity, Mapping) or set(provider_identity) != identity_fields or provider_identity.get("schema") != IDENTITY_SCHEMA:
         raise ReviewRunnerError("governed review live provider identity is invalid")
@@ -603,15 +603,16 @@ def validate_execution(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ReviewRunnerError("governed review provider health time is invalid") from exc
     if not observed <= started < expires:
         raise ReviewRunnerError("governed review provider health was stale at execution")
-    network_policy = _validate_network_policy(
-        provider_identity.get("network_policy"), observed_at=started,
+    network_environment = _validate_network_environment(
+        provider_identity.get("network_environment"),
     )
     context_service = _validate_context_service(
         provider_identity.get("context_bundle_service"),
     )
     if (
-        context_service["context_service_endpoint"] not in network_policy["endpoints"]
-        or context_service["broker_endpoint"] in network_policy["endpoints"]
+        context_service["context_service_endpoint"]
+        not in network_environment["observed_endpoints"]
+        or context_service["broker_endpoint"] in network_environment["observed_endpoints"]
     ):
         raise ReviewRunnerError("governed review context service egress is not admitted")
     invocation = value.get("invocation")
@@ -621,7 +622,7 @@ def validate_execution(value: Mapping[str, Any]) -> dict[str, Any]:
             "argv_sha256", "argv_template_hash", "tool_policy", "skill_contract_hash",
             "skill_manifest_hash", "held_mcp_config", "installed_skill_discovery",
             "sandbox_profile_hash", "pid_namespace", "root_read_only",
-            "network_policy_hash", "runtime_uid", "runtime_gid",
+            "network_environment_hash", "runtime_uid", "runtime_gid",
             "timeout_seconds", "output_limit", "context_grant_hash",
             "context_grant",
         }
@@ -633,7 +634,8 @@ def validate_execution(value: Mapping[str, Any]) -> dict[str, Any]:
         or invocation.get("sandbox_profile_hash") != _hash(list(_SANDBOX_FLAGS))
         or invocation.get("pid_namespace") is not True
         or invocation.get("root_read_only") is not True
-        or invocation.get("network_policy_hash") != provider_identity.get("network_policy", {}).get("policy_hash")
+        or invocation.get("network_environment_hash")
+        != provider_identity.get("network_environment", {}).get("policy_hash")
         or invocation.get("runtime_uid") != provider_identity.get("sandbox_identity", {}).get("uid")
         or invocation.get("runtime_gid") != provider_identity.get("sandbox_identity", {}).get("gid")
     ):
@@ -712,21 +714,36 @@ def _bounded_run(
     def terminate() -> None:
         if process is None:
             return
+
+        def group_exists() -> bool:
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                return False
+            return True
+
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        try:
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
+        term_deadline = time.monotonic() + 1
+        while group_exists() and time.monotonic() < term_deadline:
+            process.poll()
+            time.sleep(0.01)
+        if group_exists():
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired as exc:
-                raise ReviewRunnerError("governed review process could not be reaped") from exc
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired as exc:
+            raise ReviewRunnerError("governed review process could not be reaped") from exc
+        kill_deadline = time.monotonic() + 1
+        while group_exists() and time.monotonic() < kill_deadline:
+            time.sleep(0.01)
+        if group_exists():
+            raise ReviewRunnerError("governed review process group could not be reaped")
 
     try:
         process = subprocess.Popen(
@@ -1071,7 +1088,7 @@ def run_governed_review(
             "held_mcp_config": True,
             "installed_skill_discovery": "protected-held-contract-only",
             "sandbox_profile_hash": _hash(list(_SANDBOX_FLAGS)),
-            "network_policy_hash": provider_identity["network_policy"]["policy_hash"],
+            "network_environment_hash": provider_identity["network_environment"]["policy_hash"],
             "context_grant_hash": context_grant["request_hash"],
             "context_grant": context_grant,
             "runtime_uid": held["sandbox_identity"]["uid"],
@@ -1353,29 +1370,27 @@ def _validate_card_context_service(
         raise ReviewRunnerError("governed review card resource service differs from provider context")
 
 
-def _validate_network_policy(
-    value: Any, *, observed_at: datetime, expected_key_id: str | None = None,
-    expected_public_key: str | None = None,
-) -> dict[str, Any]:
+def _validate_network_environment(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != {
-        "schema", "mode", "endpoints", "enforcement_key_id",
-        "enforcement_public_key", "policy_hash", "enforcement_receipt",
+        "schema", "mode", "observed_endpoints", "endpoint_confinement",
+        "policy_hash",
     }:
-        raise ReviewRunnerError("governed review network policy is invalid")
-    endpoints = value.get("endpoints")
+        raise ReviewRunnerError("governed review network environment is invalid")
+    endpoints = value.get("observed_endpoints")
     endpoint_strings = (
         isinstance(endpoints, list)
         and all(isinstance(item, str) for item in endpoints)
     )
     parsed_endpoints = [urllib_parse.urlsplit(item) for item in endpoints] if endpoint_strings else []
     policy_unsigned = {
-        "schema": value.get("schema"), "mode": value.get("mode"), "endpoints": endpoints,
-        "enforcement_key_id": value.get("enforcement_key_id"),
-        "enforcement_public_key": value.get("enforcement_public_key"),
+        "schema": value.get("schema"), "mode": value.get("mode"),
+        "observed_endpoints": endpoints,
+        "endpoint_confinement": value.get("endpoint_confinement"),
     }
     if (
-        value.get("schema") != "tgw-governed-review-network-policy/v1"
-        or value.get("mode") != "shared-network-enforced-endpoints"
+        value.get("schema") != "tgw-governed-review-network-environment/v1"
+        or value.get("mode") != "shared-host-network"
+        or value.get("endpoint_confinement") is not False
         or not endpoints
         or not endpoint_strings
         or endpoints != sorted(set(endpoints))
@@ -1391,43 +1406,9 @@ def _validate_network_policy(
             and not parsed.query and not parsed.fragment
             for parsed in parsed_endpoints
         )
-        or not isinstance(value.get("enforcement_key_id"), str)
-        or not value["enforcement_key_id"]
-        or not isinstance(value.get("enforcement_public_key"), str)
-        or not value["enforcement_public_key"]
         or value.get("policy_hash") != _hash(policy_unsigned)
-        or expected_key_id is not None and value.get("enforcement_key_id") != expected_key_id
-        or expected_public_key is not None
-        and value.get("enforcement_public_key") != expected_public_key
     ):
-        raise ReviewRunnerError("governed review network policy is invalid")
-    receipt = value.get("enforcement_receipt")
-    if not isinstance(receipt, Mapping) or set(receipt) != {
-        "schema", "status", "policy_hash", "enforcement_id", "observed_at",
-        "expires_at", "key_id", "receipt_hash", "signature",
-    }:
-        raise ReviewRunnerError("governed review egress enforcement receipt is invalid")
-    try:
-        enforced_at = datetime.fromisoformat(str(receipt["observed_at"]).replace("Z", "+00:00"))
-        expires_at = datetime.fromisoformat(str(receipt["expires_at"]).replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ReviewRunnerError("governed review egress enforcement time is invalid") from exc
-    if (
-        receipt.get("schema") != "tgw-governed-review-egress-enforcement/v1"
-        or receipt.get("status") != "ENFORCED"
-        or receipt.get("policy_hash") != value["policy_hash"]
-        or receipt.get("key_id") != value["enforcement_key_id"]
-        or not isinstance(receipt.get("enforcement_id"), str)
-        or not receipt["enforcement_id"]
-        or not isinstance(receipt.get("key_id"), str)
-        or not receipt["key_id"]
-        or not enforced_at <= observed_at < expires_at
-    ):
-        raise ReviewRunnerError("governed review egress policy is not enforced")
-    _verify_ed25519_receipt(
-        receipt, public_key=value["enforcement_public_key"],
-        label="governed review egress enforcement",
-    )
+        raise ReviewRunnerError("governed review network environment is invalid")
     return dict(value)
 
 
@@ -1440,7 +1421,7 @@ def validate_execution_identity(
         "skill_source_provenance", "sandbox_layout", "context_bundle_service",
         "sandbox_identity",
         "environment_sha256", "argv_template", "argv_template_hash",
-        "command_policy", "network_policy", "health",
+        "command_policy", "network_environment", "health",
     }
     if not isinstance(identity, Mapping) or set(identity) != required or identity.get("schema") != IDENTITY_SCHEMA:
         raise ReviewRunnerError("governed review provider identity is invalid")
@@ -1564,13 +1545,14 @@ def validate_execution_identity(
             raise ReviewRunnerError("governed review command policy is not enforced by argv")
     if list(provider_argv).count("{mcp_config}") != 1:
         raise ReviewRunnerError("governed review command does not consume held MCP config")
-    network_policy = _validate_network_policy(
-        identity.get("network_policy"), observed_at=observed_at,
+    network_environment = _validate_network_environment(
+        identity.get("network_environment"),
     )
     context_service = _validate_context_service(identity.get("context_bundle_service"))
     if (
-        context_service["context_service_endpoint"] not in network_policy["endpoints"]
-        or context_service["broker_endpoint"] in network_policy["endpoints"]
+        context_service["context_service_endpoint"]
+        not in network_environment["observed_endpoints"]
+        or context_service["broker_endpoint"] in network_environment["observed_endpoints"]
     ):
         raise ReviewRunnerError("governed review context service egress is not admitted")
     if identity.get("environment_sha256") != _hash(dict(environment)):
@@ -1665,7 +1647,7 @@ def validate_execution_identity(
             not isinstance(environment_authority, Mapping)
             or set(environment_authority) != {
                 "schema", "provider", "runtime_uid", "runtime_gid",
-                "egress_key_id", "egress_public_key", "network_policy_hash",
+                "network_environment_hash", "network_mode",
             }
             or environment_authority.get("schema")
             != "tgw-governed-review-environment-authority/v1"
@@ -1674,15 +1656,11 @@ def validate_execution_identity(
             or environment_authority.get("runtime_gid") != sandbox_identity["gid"]
             or artifacts["execution_environment"]["content_sha256"]
             != policy["context_bindings"]["execution_environment"]["hash"]
-            or environment_authority.get("network_policy_hash")
-            != network_policy["policy_hash"]
+            or environment_authority.get("network_environment_hash")
+            != network_environment["policy_hash"]
+            or environment_authority.get("network_mode") != "shared-host-network"
         ):
             raise ReviewRunnerError("governed review environment authority is invalid")
-        _validate_network_policy(
-            network_policy, observed_at=observed_at,
-            expected_key_id=environment_authority["egress_key_id"],
-            expected_public_key=environment_authority["egress_public_key"],
-        )
         return {
             "sandbox_fd": sandbox_fd, "runtime_fd": runtime_fd,
             "execution_environment_fd": execution_environment_fd,

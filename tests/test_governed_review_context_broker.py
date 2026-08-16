@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pytest
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tgw import context_mcp_server
@@ -32,6 +34,7 @@ from tgw.governed_review_context_broker import (
     ReviewContextBrokerError,
     _attach_config_guard,
     _load_protected_config,
+    broker_server_from_config,
     create_review_context_broker_server,
 )
 
@@ -39,6 +42,14 @@ from tgw.governed_review_context_broker import (
 def _hash(value):
     raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _private_key(private_key):
+    return base64.b64encode(private_key.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )).decode()
 
 
 def test_broker_config_is_root_protected_held_and_xy_checked(tmp_path):
@@ -189,12 +200,61 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
         }
         with pytest.raises(ReviewContextBrokerError, match="window"):
             broker.validate_grant(overlong_grant)
+        monkeypatch.setenv("BROKER_SIGNING", _private_key(broker_private_key))
+        monkeypatch.setenv("BROKER_REQUEST", "config-request-secret")
+        monkeypatch.setenv("BROKER_READBACK", "config-readback-secret")
+        broker_config = {
+            "schema": "tgw-context-review-broker-config/v1",
+            "backend_descriptor": descriptor,
+            "backend_execution_identity": "review-context-broker-service",
+            "backend_attestation_key_id": "review-source-key-1",
+            "backend_attestation_public_key": ed25519_public_key(backend_private_key),
+            "service_id": "review-context-service", "client_id": "review-provider",
+            "attestation_key_id": "review-context-key-1",
+            "attestation_public_key": ed25519_public_key(broker_private_key),
+            "signing_private_key_env": "BROKER_SIGNING",
+            "request_grants": [{
+                "client_id": "review-provider",
+                "credential_env": "BROKER_REQUEST", "request": broker_request,
+            }],
+            "readback_clients": [{
+                "client_id": "review-provider", "credential_env": "BROKER_READBACK",
+            }],
+        }
+        configured = broker_server_from_config(
+            broker_config, environment=os.environ, host="127.0.0.1", port=0,
+        )
+        configured.server_close()
+        wrong_key = json.loads(json.dumps(broker_config))
+        wrong_key["attestation_public_key"] = ed25519_public_key(
+            Ed25519PrivateKey.generate()
+        )
+        with pytest.raises(ReviewContextBrokerError, match="identity differs"):
+            broker_server_from_config(
+                wrong_key, environment=os.environ, host="127.0.0.1", port=0,
+            )
+        malformed_key = {**broker_config, "attestation_public_key": "not-base64"}
+        with pytest.raises(ReviewContextBrokerError, match="signing key is invalid"):
+            broker_server_from_config(
+                malformed_key, environment=os.environ, host="127.0.0.1", port=0,
+            )
+        malformed_backend = {
+            **broker_config, "backend_attestation_public_key": "not-base64",
+        }
+        with pytest.raises(ReviewContextBrokerError, match="signing key is invalid"):
+            broker_server_from_config(
+                malformed_backend, environment=os.environ, host="127.0.0.1", port=0,
+            )
+        with pytest.raises(ReviewContextBrokerError, match="credentials are invalid"):
+            create_review_context_broker_server(
+                broker, request_grants={"shared": broker_request},
+                readback_credentials={
+                    "review-provider": "shared", "other-client": "shared",
+                },
+            )
         broker_server = create_review_context_broker_server(
             broker, request_grants={"one-use-request": broker_request},
-            readback_credentials={
-                "review-provider": "controller-readback",
-                "other-client": "other-readback",
-            },
+            readback_credentials={"review-provider": "controller-readback"},
         )
         broker_thread = threading.Thread(
             target=broker_server.serve_forever, daemon=True,
@@ -240,7 +300,7 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
         with pytest.raises(HTTPError) as cross_client:
             urlopen(Request(
                 readback_url,
-                headers={"Authorization": "Bearer other-readback"},
+                headers={"Authorization": "Bearer wrong-readback"},
             ))
         assert cross_client.value.code == 404
         retained_service_bundle = json.loads(urlopen(Request(

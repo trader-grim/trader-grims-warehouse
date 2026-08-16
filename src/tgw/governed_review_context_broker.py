@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 from urllib.parse import unquote, urlsplit
 
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tgw.execution_resources import (
@@ -96,6 +97,10 @@ class PrivilegedReviewContextBroker:
         self._grant_clock = grant_clock
         self._bundles: dict[str, tuple[dict[str, Any], float]] = {}
         self._lock = threading.Lock()
+
+    @property
+    def client_id(self) -> str:
+        return self._client_id
 
     @staticmethod
     def _request(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -344,12 +349,14 @@ def create_review_context_broker_server(
     if (
         not grants
         or any(not isinstance(key, str) or not key for key in grants)
-        or not readback_credentials
+        or any(grant["client_id"] != broker.client_id for grant in grants.values())
+        or set(readback_credentials) != {broker.client_id}
         or any(
             not isinstance(client, str) or not client
             or not isinstance(credential, str) or not credential
             for client, credential in readback_credentials.items()
         )
+        or len(set(readback_credentials.values())) != len(readback_credentials)
         or set(grants) & set(readback_credentials.values())
     ):
         raise ReviewContextBrokerError("review context broker credentials are invalid")
@@ -463,6 +470,7 @@ def broker_server_from_config(
         "schema", "backend_descriptor", "backend_execution_identity",
         "backend_attestation_key_id", "backend_attestation_public_key",
         "service_id", "client_id", "attestation_key_id",
+        "attestation_public_key",
         "signing_private_key_env", "request_grants", "readback_clients",
     }
     if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != BROKER_CONFIG_SCHEMA:
@@ -472,8 +480,35 @@ def broker_server_from_config(
     if not signing_key:
         raise ReviewContextBrokerError("review context broker signing key is unavailable")
     try:
+        signing_private_key = Ed25519PrivateKey.from_private_bytes(
+            base64.b64decode(signing_key, validate=True)
+        )
+        derived_public_key = base64.b64encode(
+            signing_private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode()
+        backend_public_key = base64.b64decode(
+            str(value.get("backend_attestation_public_key", "")), validate=True,
+        )
+        configured_public_key = base64.b64decode(
+            str(value.get("attestation_public_key", "")), validate=True,
+        )
+    except ValueError as exc:
+        raise ReviewContextBrokerError("review context broker signing key is invalid") from exc
+    if (
+        len(backend_public_key) != 32
+        or len(configured_public_key) != 32
+        or derived_public_key != value.get("attestation_public_key")
+    ):
+        raise ReviewContextBrokerError("review context broker signing identity differs")
+    try:
         backend = HTTPRegisteredResourceResolver.from_descriptor(
             value["backend_descriptor"], environment=environment,
+        )
+        backend.check_health(
+            attestation_key_id=str(value["backend_attestation_key_id"]),
         )
     except ResourceVerificationError as exc:
         raise ReviewContextBrokerError("review context broker backend is invalid") from exc
@@ -495,9 +530,15 @@ def broker_server_from_config(
         if not isinstance(item, Mapping) or set(item) != {"client_id", "credential_env"}:
             raise ReviewContextBrokerError("review context broker readback client is invalid")
         credential = environment.get(str(item["credential_env"]), "")
-        if not credential or item["client_id"] in readback_credentials:
+        if (
+            not credential
+            or item["client_id"] in readback_credentials
+            or credential in readback_credentials.values()
+        ):
             raise ReviewContextBrokerError("review context broker readback client is invalid")
         readback_credentials[str(item["client_id"])] = credential
+    if set(readback_credentials) != {str(value["client_id"])}:
+        raise ReviewContextBrokerError("review context broker readback coverage is invalid")
     broker = PrivilegedReviewContextBroker(
         backend=backend,
         backend_execution_identity=str(value["backend_execution_identity"]),
@@ -505,7 +546,7 @@ def broker_server_from_config(
         backend_attestation_public_key=str(value["backend_attestation_public_key"]),
         service_id=str(value["service_id"]), client_id=str(value["client_id"]),
         attestation_key_id=str(value["attestation_key_id"]),
-        signing_private_key=signing_key,
+        signing_private_key=signing_private_key,
     )
     return create_review_context_broker_server(
         broker, request_grants=request_grants,

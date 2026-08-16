@@ -83,8 +83,8 @@ Before launch, the controller must create and freeze:
    credential, the controller receives a different readback credential, and
    both signing authorities remain unavailable to the provider; and
 6. a protected X-store descriptor whose exact reference and descriptor hash
-   equal the card's `receipt_sink` binding, plus a fresh signed receipt from
-   the host egress controller proving the admitted endpoint policy is active.
+   equal the card's `receipt_sink` binding, plus an exact execution-environment
+   record stating that provider networking is the shared host network.
 
 The adapter holds the root-owned request, source root, sandbox, runtime,
 executable, skill, MCP config, and credential descriptors
@@ -148,11 +148,13 @@ bound Plan, source, CodeGraph, and environment bindings must exactly equal the
 retained card.
 
 The sandbox intentionally shares the host network because the selected model
-provider and admitted MCP route require it. This is not networkless isolation.
-The provider identity binds a sorted exact endpoint allow-list and its
-hash. Bubblewrap does not enforce an endpoint allow-list, so admission also
-requires a fresh Ed25519-signed `ENFORCED` receipt from the host egress
-controller for that exact policy. Model endpoints remain HTTPS. The governed
+provider and admitted MCP route require it. This is not networkless isolation,
+and it is not endpoint confinement. The provider identity records the observed
+model and context-service endpoints for exact environment evidence, with
+`mode=shared-host-network` and `endpoint_confinement=false`; it makes no claim
+that Bubblewrap enforces an allow-list. Per-cgroup or proxy confinement belongs
+to the separately planned PP-AIOPS network effort and is not a W08 admission
+dependency. Model endpoints remain HTTPS. The governed
 context service is exact loopback HTTP SSE, and the separately controlled
 context service reaches the broker over exact loopback HTTP. Both shipped
 servers reject non-loopback binds; no unimplemented TLS proxy is claimed. The
@@ -198,12 +200,12 @@ current selected provider is HOLD, not disabled: its executable and existing
 credential are present, but the protected generic skill, loopback MCP config,
 minimal runtime projections, separately privileged context broker
 and its protected backend credential/signing authority, registered signed
-context readback, X publisher, protected execution-environment authority, and
-host egress enforcement have not been issued. Before first
+context readback, X publisher, and protected execution-environment authority
+have not been issued. Before first
 production use, the release operator must install a reviewed successor,
 provision those root-owned projections plus snapshot staging and the X-store,
-capture a fresh provider identity/health receipt, prove the matching egress
-policy, run the focused tests, then perform one real minimal-root bubblewrap
+capture a fresh provider identity/health receipt, bind the truthful shared-host
+network environment, run the focused tests, then perform one real minimal-root bubblewrap
 review smoke and one real candidate review with secrets excluded from retained
 evidence. Do not ask the operator to authenticate again unless the fresh
 provider health check itself fails.
@@ -223,7 +225,10 @@ tgw-governed-review-context-broker \
 ```
 
 Its root-owned config carries only environment-variable names for secrets and
-one exact, fresh, time-bounded request grant. The request credential is consumed once; abandoned
+one exact, fresh, time-bounded request grant. Startup derives the broker public
+key from the loaded private key and requires exact equality with the configured
+key, validates backend health/key identity, and requires unique, disjoint
+request/readback credentials with exact client coverage. The request credential is consumed once; abandoned
 bundles expire, and the exact client-bound readback is also consumed once.
 The governed MCP daemon is separately started with
 `--governed-review-sse`; it binds only loopback and exposes only the strict

@@ -87,7 +87,7 @@ def test_installation_catalog_does_not_confuse_skill_and_provider_status():
     assert harnesses["claude"]["protected_review_projection"] == "not-installed"
     assert harnesses["claude"]["context_bundle_service"] == "not-installed"
     assert harnesses["claude"]["review_evidence_sink"] == "not-installed"
-    assert harnesses["claude"]["review_egress_policy"] == "not-installed"
+    assert harnesses["claude"]["review_network_mode"] == "shared-host-network"
     assert harnesses["claude"]["governed_runtime_identity"] == {
         "uid": 1006, "gid": 1006,
     }
