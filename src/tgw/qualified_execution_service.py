@@ -1430,7 +1430,7 @@ class QualifiedExecutionClient:
         if self.token:
             request.add_header("Authorization", f"Bearer {self.token}")
         try:
-            with urlopen(request, timeout=self.descriptor["timeout_seconds"]) as response:  # nosec: descriptor is externally provisioned
+            with build_opener(_NoRedirect()).open(request, timeout=self.descriptor["timeout_seconds"]) as response:  # nosec: descriptor is externally provisioned
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except (HTTPError, URLError, OSError) as exc:
             raise QualifiedExecutionError("qualified execution signer request failed") from exc
