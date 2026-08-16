@@ -830,6 +830,63 @@ def _predecessor_identity(
     return identity
 
 
+def _successor_identity(
+    parameters: Mapping[str, Any],
+    config: Mapping[str, Any],
+    runtime: HostRuntime,
+    *,
+    runtime_config_size: int,
+    expected: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Observe the exact selected successor and optionally require equality."""
+
+    root = Path(config["release_root"])
+    generation = parameters["generation"]
+    release = root / "releases" / generation
+    if current_generation(root) != generation:
+        raise ApplicationReleaseRemoteError("selector does not name the bound successor")
+    selector = Path(config["current_selector"])
+    if selector.resolve(strict=True) != release.resolve(strict=True):
+        raise ApplicationReleaseRemoteError("selector target differs from the bound successor")
+    verification = verify(root, generation)
+    manifest = json.loads((release / ".release-manifest.json").read_bytes())
+    projection = release / parameters["projection"]["release_path"]
+    _config_raw, config_identity = _active_config_identity(config)
+    successor_config = config["active_config_metadata"]
+    identity = {
+        "generation": generation,
+        "selector_target": str(release),
+        "commit": manifest.get("commit"),
+        "tree": manifest.get("git_tree"),
+        "archive_sha256": "sha256:" + str(manifest.get("archive_sha256")),
+        "release_manifest_hash": _hash(manifest),
+        "content_manifest_sha256": "sha256:" + str(manifest.get("content_manifest_sha256")),
+        "projection_sha256": _hash_bytes(projection.read_bytes()) if projection.is_file() else None,
+        **config_identity,
+        "database_identity_sha256": runtime.database_identity(),
+    }
+    contract_identity = {
+        "generation": generation,
+        "selector_target": parameters["immutable_generation_path"],
+        "commit": parameters["candidate_commit"],
+        "tree": parameters["candidate_tree"],
+        "archive_sha256": parameters["archive_sha256"],
+        "projection_sha256": parameters["projection"]["content_sha256"],
+        "runtime_config_sha256": parameters["runtime_config"]["content_sha256"],
+        "runtime_config_uid": successor_config["uid"],
+        "runtime_config_gid": successor_config["gid"],
+        "runtime_config_mode": successor_config["mode"],
+        "runtime_config_size": runtime_config_size,
+    }
+    if (
+        verification.get("status") != "PASS"
+        or any(identity.get(name) != value for name, value in contract_identity.items())
+        or (expected is not None and identity != dict(expected))
+    ):
+        raise ApplicationReleaseRemoteError("live successor identity differs from its W09 binding")
+    return identity
+
+
 def _reconcile(parameters: Mapping[str, Any], config: Mapping[str, Any], runtime: HostRuntime, journal: dict[str, Any]) -> dict[str, Any]:
     root = Path(config["release_root"])
     operation = parameters["operation_id"]
@@ -1002,13 +1059,50 @@ def execute(
             gid=successor_config["gid"],
         )
         evidence.append(_stage(config, journal, "generation-activated", ["selection:" + selected["operation_id"]]))
+        successor_before_restart = _successor_identity(
+            parameters,
+            config,
+            runtime,
+            runtime_config_size=len(request["runtime_config_bytes"]),
+        )
         runtime.systemctl("restart", config["services"])
         evidence.append(_stage(config, journal, "successor-restarted", ["services:successor"]))
         runtime.health()
+        successor = _successor_identity(
+            parameters,
+            config,
+            runtime,
+            runtime_config_size=len(request["runtime_config_bytes"]),
+            expected=successor_before_restart,
+        )
         if _snapshot(config["unrelated_paths"]) != unrelated:
             raise ApplicationReleaseRemoteError("unrelated host state changed")
-        evidence.append(_stage(config, journal, "successor-verified", ["health:successor", "unrelated:unchanged"]))
-        result = {"status": "SUCCEEDED", "evidence": evidence}
+        successor_receipt = _persist(
+            Path(config["receipt_root"]),
+            "successor",
+            {
+                "schema": "tgw-w09-application-successor/v1",
+                "operation_id": operation,
+                "successor": successor,
+                "services": config["services"],
+                "health_probes": config["health_probes"],
+                "unrelated_snapshot": unrelated,
+            },
+        )
+        evidence.append(
+            _stage(
+                config,
+                journal,
+                "successor-verified",
+                [successor_receipt, "health:successor", "unrelated:unchanged"],
+            )
+        )
+        result = {
+            "status": "SUCCEEDED",
+            "receipt": successor_receipt,
+            "successor": successor,
+            "evidence": evidence,
+        }
     except Exception as exc:
         result = _reconcile(parameters, config, runtime, journal)
         result["detail_hash"] = _hash_bytes(str(exc).encode())

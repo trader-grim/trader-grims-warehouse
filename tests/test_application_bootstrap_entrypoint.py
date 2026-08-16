@@ -51,6 +51,45 @@ def _tree_binding(path: Path):
     }
 
 
+def _maps_line(path: Path, *, inode: int | None = None) -> str:
+    metadata = path.stat()
+    return (
+        "7f000000-7f001000 r-xp 00000000 "
+        f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x} "
+        f"{metadata.st_ino if inode is None else inode} {path}\n"
+    )
+
+
+def test_mapped_runtime_rejects_same_bytes_at_a_new_inode(tmp_path):
+    admitted = tmp_path / "admitted.so"
+    admitted.write_bytes(b"same bytes")
+    admitted.chmod(0o400)
+    binding = _binding(admitted)
+    with pytest.raises(OSError, match="held manifest inode"):
+        entrypoint._mapped_runtime_identity(
+            _maps_line(admitted, inode=admitted.stat().st_ino + 1),
+            allowed_bindings={str(admitted.resolve()): binding},
+            roots=[],
+            map_files_root=None,
+        )
+
+
+def test_mapped_runtime_rejects_unbound_neighbor_inside_import_root(tmp_path):
+    root = tmp_path / "site"
+    root.mkdir()
+    neighbor = root / "neighbor.so"
+    neighbor.write_bytes(b"native neighbor")
+    neighbor.chmod(0o400)
+    root.chmod(0o500)
+    with pytest.raises(OSError, match="unbound native neighbor"):
+        entrypoint._mapped_runtime_identity(
+            _maps_line(neighbor),
+            allowed_bindings={},
+            roots=[root.resolve()],
+            map_files_root=None,
+        )
+
+
 def _materialized_identity(path: Path):
     metadata = path.stat()
     return [

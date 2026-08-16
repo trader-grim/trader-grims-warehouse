@@ -103,7 +103,7 @@ def _real_launcher_build(
         "TMPDIR": str(scratch),
     }
     discovery_root = _protected_dir(tmp_path / f"{stem}-discovery")
-    inputs = runtime.discover_launcher_build_inputs(
+    discovery = runtime.discover_launcher_build_inputs(
         launcher_source=Path(source["controller_launcher_source"]["materialized_path"]),
         compiler_path=compiler,
         tracer_path=tracer,
@@ -112,12 +112,12 @@ def _real_launcher_build(
         environment=environment,
         trusted_uid=os.getuid(),
     )
-    assert inputs
+    assert discovery["inputs"]
     environment_root = _protected_dir(tmp_path / f"{stem}-environment")
     environment_receipt = runtime.issue_build_environment_manifest(
         compiler_path=compiler,
         tracer_path=tracer,
-        input_paths=inputs,
+        discovery=discovery,
         environment=environment,
         output_root=environment_root,
         trusted_uid=os.getuid(),
@@ -288,6 +288,41 @@ def test_real_launcher_build_never_removes_preexisting_neighbor(tmp_path):
     assert (tmp_path / "occupied-build-build" / output_name).read_bytes() == b"neighbor"
 
 
+@pytest.mark.parametrize(
+    "trace",
+    [
+        b'openat(AT_FDCWD, "relative-input.h", O_RDONLY) = 3\n',
+        b'openat(AT_FDCWD, "/etc/ld.so"..., O_RDONLY) = 3\n',
+        b'mystery_file_call("/etc/passwd") = 0\n',
+        b'[pid 7] openat(AT_FDCWD, "/etc/passwd", <unfinished ...>\n',
+    ],
+)
+def test_build_trace_parser_rejects_relative_truncated_unknown_or_unfinished(
+    tmp_path,
+    trace,
+):
+    with pytest.raises(runtime.ControllerRuntimeError, match="compiler trace"):
+        runtime._parse_trace_accesses(
+            trace,
+            scratch=tmp_path,
+            excluded=set(),
+        )
+
+
+def test_build_trace_parser_decodes_escapes_and_rejoins_resumed_records(tmp_path):
+    trace = (
+        b'[pid 7] openat(AT_FDCWD, "/etc/ld\\056so\\056cache", <unfinished ...>\n'
+        b'[pid 7] <... openat resumed>O_RDONLY|O_CLOEXEC) = 3\n'
+    )
+    inputs, accesses = runtime._parse_trace_accesses(
+        trace,
+        scratch=tmp_path,
+        excluded=set(),
+    )
+    assert Path("/etc/ld.so.cache") in inputs
+    assert "/etc/ld.so.cache" in accesses
+
+
 def _fixture(tmp_path):
     source_binding, source = _real_launcher_source_receipt(tmp_path)
     tree = tmp_path / "site-packages"
@@ -450,6 +485,8 @@ def test_actual_controller_bundle_imports_under_compiled_held_runtime(tmp_path):
             )
     cffi_backend = Path(__import__("_cffi_backend").__file__)
     shutil.copy2(cffi_backend, site / cffi_backend.name)
+    for bytecode in site.rglob("*.py[co]"):
+        bytecode.unlink()
     for item in sorted(site.rglob("*"), reverse=True):
         if not item.is_symlink():
             item.chmod(0o500 if item.is_dir() else 0o400)

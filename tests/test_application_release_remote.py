@@ -1,6 +1,8 @@
 import base64
 import copy
 import hashlib
+import json
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -12,6 +14,7 @@ from tgw.application_release_remote import (
     ApplicationReleaseRemoteError,
     _hash,
     _reconcile,
+    _successor_identity,
     validate_request,
 )
 
@@ -217,3 +220,67 @@ def test_reconcile_rechecks_exact_predecessor_after_service_restart(
     assert observations.call_count == 2
     runtime.systemctl.assert_called_once_with("restart", ["tgw-api.service"])
     runtime.health.assert_called_once_with()
+
+
+def test_successor_postrestart_observation_rejects_database_mutation(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "root"
+    release = root / "releases" / "release-b"
+    release.mkdir(parents=True)
+    selector = root / "current"
+    selector.symlink_to(Path("releases") / "release-b")
+    projection = release / "agent-services/plan-runtime/projection.json"
+    projection.parent.mkdir(parents=True)
+    projection.write_bytes(b"projection")
+    manifest = {
+        "commit": "a" * 40,
+        "git_tree": "b" * 40,
+        "archive_sha256": "1" * 64,
+        "content_manifest_sha256": "2" * 64,
+    }
+    (release / ".release-manifest.json").write_text(json.dumps(manifest))
+    active = tmp_path / "active.json"
+    active.write_bytes(b"runtime config")
+    active.chmod(0o640)
+    runtime = Mock()
+    runtime.database_identity.side_effect = ["sha256:" + "3" * 64, "sha256:" + "4" * 64]
+    monkeypatch.setattr(remote_module, "current_generation", lambda _root: "release-b")
+    monkeypatch.setattr(remote_module, "verify", lambda _root, _generation: {"status": "PASS"})
+    parameters = {
+        "generation": "release-b",
+        "immutable_generation_path": str(release),
+        "candidate_commit": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "archive_sha256": "sha256:" + "1" * 64,
+        "projection": {
+            "release_path": "agent-services/plan-runtime/projection.json",
+            "content_sha256": remote_module._hash_bytes(b"projection"),
+        },
+        "runtime_config": {"content_sha256": remote_module._hash_bytes(b"runtime config")},
+    }
+    config = {
+        "release_root": str(root),
+        "current_selector": str(selector),
+        "active_config_path": str(active),
+        "active_config_metadata": {
+            "uid": active.stat().st_uid,
+            "gid": active.stat().st_gid,
+            "mode": 0o640,
+        },
+    }
+    before = _successor_identity(
+        parameters,
+        config,
+        runtime,
+        runtime_config_size=len(b"runtime config"),
+    )
+    with pytest.raises(ApplicationReleaseRemoteError, match="successor identity"):
+        _successor_identity(
+            parameters,
+            config,
+            runtime,
+            runtime_config_size=len(b"runtime config"),
+            expected=before,
+        )

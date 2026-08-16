@@ -8,6 +8,7 @@ not discover dependencies from PATH or execute the application deployment.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -48,6 +49,8 @@ def _validate_build_environment(value: Mapping[str, Any]) -> dict[str, Any]:
         "compiler",
         "tracer",
         "inputs",
+        "accesses",
+        "discovery_trace_sha256",
         "environment",
         "closure_sha256",
         "receipt_sha256",
@@ -57,6 +60,7 @@ def _validate_build_environment(value: Mapping[str, Any]) -> dict[str, Any]:
     compiler = value.get("compiler")
     tracer = value.get("tracer")
     inputs = value.get("inputs")
+    accesses = value.get("accesses")
     environment = value.get("environment")
     if (
         not isinstance(compiler, Mapping)
@@ -67,6 +71,10 @@ def _validate_build_environment(value: Mapping[str, Any]) -> dict[str, Any]:
         or any(not isinstance(item, Mapping) or set(item) != binding_fields for item in inputs)
         or inputs != sorted(inputs, key=lambda item: str(item["path"]))
         or len({item["path"] for item in inputs}) != len(inputs)
+        or not isinstance(accesses, list)
+        or accesses != sorted(set(accesses))
+        or any(not isinstance(item, str) or not item for item in accesses)
+        or _SHA.fullmatch(str(value.get("discovery_trace_sha256"))) is None
         or not isinstance(environment, Mapping)
         or set(environment) != {"PATH", "LANG", "LC_ALL", "TMPDIR"}
         or environment["LANG"] != "C"
@@ -93,6 +101,8 @@ def _run_build_trace(
         f"/proc/self/fd/{tracer_fd}",
         "-f",
         "-qq",
+        "-s",
+        "4096",
         "-e",
         "trace=%file",
         "--",
@@ -121,20 +131,123 @@ def _run_build_trace(
     return stdout, stderr, command
 
 
-def _trace_regular_paths(raw: bytes, *, excluded: set[Path]) -> list[Path]:
-    paths = set()
-    for encoded in re.findall(rb'"(/[^"\\]*)"', raw):
-        path = Path(encoded.decode(errors="strict"))
-        if path in excluded or str(path).startswith("/proc/"):
+_ONE_PATH_SYSCALLS = {
+    "access", "chdir", "chmod", "chown", "creat", "execve", "lchown",
+    "lstat", "mkdir", "mknod", "open", "readlink", "rmdir", "stat",
+    "getcwd", "statfs", "truncate", "unlink", "utime", "utimes",
+    "faccessat", "faccessat2", "fchmodat", "fchownat", "mkdirat", "mknodat",
+    "newfstatat", "openat", "openat2", "readlinkat", "statx", "unlinkat",
+}
+_TWO_PATH_SYSCALLS = {
+    "link", "linkat", "rename", "renameat", "renameat2", "symlink", "symlinkat",
+}
+_QUOTED = re.compile(r'"(?:\\.|[^"\\])*"')
+
+
+def _complete_trace_lines(raw: bytes) -> list[str]:
+    pending: dict[str, str] = {}
+    completed = []
+    for raw_line in raw.decode("utf-8", errors="strict").splitlines():
+        line = raw_line.strip()
+        match = re.match(r"^(\[pid\s+[0-9]+\]\s+)?(.*)$", line)
+        if match is None:
+            raise ControllerRuntimeError("compiler trace line prefix is invalid")
+        pid = match.group(1) or "leader"
+        body = match.group(2)
+        if body.startswith(("--- ", "+++ ")):
             continue
-        try:
-            path = path.resolve(strict=True)
-            metadata = path.lstat()
-        except FileNotFoundError:
+        if body.endswith(" <unfinished ...>"):
+            if pid in pending:
+                raise ControllerRuntimeError("compiler trace has nested unfinished records")
+            pending[pid] = body.removesuffix(" <unfinished ...>")
             continue
-        if stat.S_ISREG(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
-            paths.add(path)
-    return sorted(paths, key=str)
+        resumed = re.match(r"^<\.\.\.\s+([a-zA-Z0-9_]+) resumed>(.*)$", body)
+        if resumed is not None:
+            prefix = pending.pop(pid, None)
+            if prefix is None or not prefix.startswith(resumed.group(1) + "("):
+                raise ControllerRuntimeError("compiler trace resumed record is unmatched")
+            body = prefix + resumed.group(2)
+        completed.append(body)
+    if pending:
+        raise ControllerRuntimeError("compiler trace ended with unfinished records")
+    return completed
+
+
+def _normalize_trace_path(path: str, *, scratch: Path) -> tuple[str, Path | None]:
+    if not path.startswith("/"):
+        raise ControllerRuntimeError("compiler trace contains a relative file access")
+    lexical = Path(os.path.normpath(path))
+    if lexical == scratch or lexical.is_relative_to(scratch):
+        return "$SCRATCH", None
+    if str(lexical).startswith("/proc/"):
+        parts = list(lexical.parts)
+        if len(parts) > 2 and (parts[2] == "self" or parts[2].isdecimal()):
+            parts[2] = "$PID"
+        if "fd" in parts:
+            index = parts.index("fd")
+            if len(parts) > index + 1:
+                match = re.fullmatch(r"[0-9]+(.*)", parts[index + 1])
+                if match is not None:
+                    parts[index + 1] = "$FD" + match.group(1)
+        return "/".join(parts), None
+    try:
+        resolved = lexical.resolve(strict=True)
+    except FileNotFoundError:
+        return str(lexical), None
+    metadata = resolved.lstat()
+    if stat.S_ISREG(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+        return str(resolved), resolved
+    return str(resolved), None
+
+
+def _parse_trace_accesses(
+    raw: bytes,
+    *,
+    scratch: Path,
+    excluded: set[Path],
+) -> tuple[list[Path], list[str]]:
+    regular = set()
+    accesses = set()
+    excluded_resolved = {path.resolve() for path in excluded}
+    for line in _complete_trace_lines(raw):
+        if re.search(r'"(?:\\.|[^"\\])*"\.\.\.', line):
+            raise ControllerRuntimeError("compiler trace path arguments are truncated")
+        syscall = re.match(r"^([a-zA-Z0-9_]+)\(", line)
+        if syscall is None:
+            raise ControllerRuntimeError("compiler trace contains an unparsed record")
+        name = syscall.group(1)
+        if name in _ONE_PATH_SYSCALLS:
+            count = 1
+        elif name in _TWO_PATH_SYSCALLS:
+            count = 2
+        else:
+            raise ControllerRuntimeError(
+                "compiler trace contains an unknown file syscall: " + name
+            )
+        encoded = _QUOTED.findall(line)
+        if len(encoded) < count or (count and "..." in encoded[0]):
+            raise ControllerRuntimeError("compiler trace path arguments are incomplete")
+        for token in encoded[:count]:
+            try:
+                decoded = ast.literal_eval(token)
+            except (SyntaxError, ValueError) as exc:
+                raise ControllerRuntimeError("compiler trace path escape is invalid") from exc
+            if not isinstance(decoded, str):
+                raise ControllerRuntimeError("compiler trace path is not text")
+            lexical = Path(os.path.normpath(decoded))
+            if lexical.is_absolute():
+                try:
+                    resolved_for_exclusion = lexical.resolve(strict=True)
+                except FileNotFoundError:
+                    resolved_for_exclusion = lexical
+                if resolved_for_exclusion in excluded_resolved:
+                    accesses.add("$OUTPUT")
+                    continue
+            normalized, existing = _normalize_trace_path(decoded, scratch=scratch)
+            accesses.add(normalized)
+            if existing is not None and existing not in excluded_resolved:
+                regular.add(existing)
+    return sorted(regular, key=str), sorted(accesses)
 
 
 def _postcheck_binding(expected: Mapping[str, Any], fd: int, *, directory: bool) -> None:
@@ -179,7 +292,7 @@ def discover_launcher_build_inputs(
     binding_path: Path,
     environment: Mapping[str, str],
     trusted_uid: int = 0,
-) -> list[Path]:
+) -> dict[str, Any]:
     """Run a non-admitted discovery build and return its concrete file inputs."""
     held: list[int] = []
     root_fd = -1
@@ -224,13 +337,20 @@ def discover_launcher_build_inputs(
             extra_fds=(output_fd,),
         )
         excluded = {
+            Path(output_root).resolve(),
             (Path(output_root) / output_name).resolve(),
             Path(output_path),
-            launcher_source.resolve(),
-            compiler_path.resolve(),
-            tracer_path.resolve(),
         }
-        return _trace_regular_paths(trace, excluded=excluded)
+        inputs, accesses = _parse_trace_accesses(
+            trace,
+            scratch=Path(environment["TMPDIR"]),
+            excluded=excluded,
+        )
+        return {
+            "inputs": inputs,
+            "accesses": accesses,
+            "trace_sha256": _digest(trace),
+        }
     finally:
         if output_fd >= 0:
             os.close(output_fd)
@@ -250,7 +370,7 @@ def issue_build_environment_manifest(
     *,
     compiler_path: Path,
     tracer_path: Path,
-    input_paths: Sequence[Path],
+    discovery: Mapping[str, Any],
     environment: Mapping[str, str],
     output_root: Path,
     trusted_uid: int = 0,
@@ -277,8 +397,17 @@ def issue_build_environment_manifest(
         held.append(fd)
         tracer, fd = _binding(tracer_path, directory=False, trusted_uid=trusted_uid)
         held.append(fd)
+        discovered_inputs = discovery.get("inputs")
+        discovered_accesses = discovery.get("accesses")
+        if (
+            not isinstance(discovered_inputs, list)
+            or not isinstance(discovered_accesses, list)
+            or discovered_accesses != sorted(set(discovered_accesses))
+            or _SHA.fullmatch(str(discovery.get("trace_sha256"))) is None
+        ):
+            raise ControllerRuntimeError("controller build discovery is invalid")
         inputs = []
-        for path in sorted(set(map(Path, input_paths)), key=str):
+        for path in sorted(set(map(Path, discovered_inputs)), key=str):
             item, fd = _binding(path, directory=False, trusted_uid=trusted_uid)
             held.append(fd)
             inputs.append(item)
@@ -287,6 +416,8 @@ def issue_build_environment_manifest(
             "compiler": compiler,
             "tracer": tracer,
             "inputs": inputs,
+            "accesses": discovered_accesses,
+            "discovery_trace_sha256": discovery["trace_sha256"],
             "environment": dict(environment),
             "closure_sha256": _digest(_canonical(inputs)),
         }
@@ -434,17 +565,27 @@ def produce_launcher_build(
             extra_fds=(output_fd,),
         )
         output_path = Path(output_root) / output_name
-        accessed = set(
-            _trace_regular_paths(
-                trace,
-                excluded={output_path, Path(output_proc)},
-            )
+        accessed_paths, accesses = _parse_trace_accesses(
+            trace,
+            scratch=Path(environment["TMPDIR"]),
+            excluded={Path(output_root), output_path, Path(output_proc)},
         )
-        unexpected = accessed - admitted_paths
+        unexpected = set(accessed_paths) - admitted_paths
         if unexpected:
             raise ControllerRuntimeError(
                 "controller build accessed an unadmitted file set: "
                 + _digest(_canonical(sorted(map(str, unexpected))))
+            )
+        if accesses != build_environment["accesses"]:
+            raise ControllerRuntimeError(
+                "controller build file-access trace differs from discovery: "
+                + json.dumps(
+                    {
+                        "added": sorted(set(accesses) - set(build_environment["accesses"])),
+                        "removed": sorted(set(build_environment["accesses"]) - set(accesses)),
+                    },
+                    sort_keys=True,
+                )
             )
         if any(Path(environment["TMPDIR"]).iterdir()):
             raise ControllerRuntimeError("controller compiler left unbound scratch outputs")
@@ -723,6 +864,8 @@ def materialize_controller_runtime(
         expected_argv_tail = [
             "-f",
             "-qq",
+            "-s",
+            "4096",
             "-e",
             "trace=%file",
             "--",
@@ -746,16 +889,16 @@ def materialize_controller_runtime(
             or build.get("command")
             != ["cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-x", "c"]
             or build.get("executed_argv_sha256") != _digest(_canonical(executed_argv))
-            or len(executed_argv) != 18
+            or len(executed_argv) != 20
             or re.fullmatch(r"/proc/self/fd/[0-9]+", str(executed_argv[0])) is None
-            or executed_argv[1:6] != expected_argv_tail
-            or re.fullmatch(r"/proc/self/fd/[0-9]+", str(executed_argv[6])) is None
-            or executed_argv[7:12] != ["-static", "-O2", "-Wall", "-Wextra", "-Werror"]
-            or executed_argv[12] != f'-DBINDING_PATH="{build.get("binding_path")}"'
-            or executed_argv[13] != "-o"
-            or re.fullmatch(r"/proc/[0-9]+/fd/[0-9]+", str(executed_argv[14])) is None
-            or executed_argv[15:17] != ["-x", "c"]
-            or re.fullmatch(r"/proc/[0-9]+/fd/[0-9]+", str(executed_argv[17])) is None
+            or executed_argv[1:8] != expected_argv_tail
+            or re.fullmatch(r"/proc/self/fd/[0-9]+", str(executed_argv[8])) is None
+            or executed_argv[9:14] != ["-static", "-O2", "-Wall", "-Wextra", "-Werror"]
+            or executed_argv[14] != f'-DBINDING_PATH="{build.get("binding_path")}"'
+            or executed_argv[15] != "-o"
+            or re.fullmatch(r"/proc/[0-9]+/fd/[0-9]+", str(executed_argv[16])) is None
+            or executed_argv[17:19] != ["-x", "c"]
+            or re.fullmatch(r"/proc/[0-9]+/fd/[0-9]+", str(executed_argv[19])) is None
             or not isinstance(build.get("binding_path"), str)
             or not Path(build["binding_path"]).is_absolute()
         ):
@@ -840,6 +983,11 @@ def materialize_controller_runtime(
 
         tree_bindings: list[dict[str, Any]] = []
         for path in sorted(set(map(Path, runtime_trees)), key=str):
+            if any(
+                item.is_file() and item.suffix in {".pyc", ".pyo"}
+                for item in path.rglob("*")
+            ):
+                raise ControllerRuntimeError("controller runtime tree contains unbound bytecode")
             binding, fd = _binding(path, directory=True, trusted_uid=trusted_uid)
             held.append(fd)
             tree_bindings.append(binding)

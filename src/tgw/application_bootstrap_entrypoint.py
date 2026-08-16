@@ -797,12 +797,18 @@ def _revalidate_controller_runtime(
     manifest: Mapping[str, Any],
     artifacts: list[tuple[Path, int, bytes, tuple[int, ...]]],
     trees: list[tuple[Path, int, str, tuple[int, ...], int, int]],
-) -> None:
+    *,
+    freeze_mapped: bool = False,
+) -> str:
     for artifact in artifacts:
         _revalidate_runtime_artifact(artifact)
     for tree in trees:
         _revalidate_runtime_tree(tree)
-    allowed = {str(Path(item["path"]).resolve(strict=True)) for item in manifest["files"]}
+    allowed_bindings = {
+        str(Path(item["path"]).resolve(strict=True)): item
+        for item in manifest["files"]
+    }
+    allowed = set(allowed_bindings)
     loaded = set()
     for module in tuple(sys.modules.values()):
         location = getattr(module, "__file__", None)
@@ -810,24 +816,131 @@ def _revalidate_controller_runtime(
             continue
         if location.startswith(sys.argv[0] + "/"):
             continue
+        cached = getattr(module, "__cached__", None)
+        if location.endswith((".pyc", ".pyo")):
+            loaded.add(str(Path(location).resolve(strict=True)))
+            continue
+        if isinstance(cached, str) and Path(cached).exists():
+            loaded.add(str(Path(cached).resolve(strict=True)))
         loaded.add(str(Path(location).resolve(strict=True)))
-    mapped = set()
-    for line in Path("/proc/self/maps").read_text(encoding="utf-8").splitlines():
-        fields = line.split(maxsplit=5)
-        if len(fields) == 6 and fields[5].startswith("/"):
-            if fields[5].endswith(" (deleted)"):
-                raise OSError("controller native mapping was deleted during execution")
-            mapped.add(str(Path(fields[5]).resolve(strict=True)))
     roots = [Path(item["path"]).resolve(strict=True) for item in manifest["trees"]]
+    mapped = _mapped_runtime_identity(
+        Path("/proc/self/maps").read_text(encoding="utf-8"),
+        allowed_bindings=allowed_bindings,
+        roots=roots,
+    )
     unexpected = {
         path
-        for path in (loaded | mapped) - allowed
+        for path in (loaded | set(mapped)) - allowed
         if not any(Path(path).is_relative_to(root) for root in roots)
     }
+    unexpected |= {
+        path
+        for path in loaded
+        if path.endswith((".pyc", ".pyo")) and path not in allowed
+    }
+    mapped_tree_neighbors = {
+        path
+        for path in mapped
+        if path not in allowed
+        and any(Path(path).is_relative_to(root) for root in roots)
+    }
+    unexpected |= mapped_tree_neighbors
     if unexpected:
         if os.environ.get("TGW_W09_RUNTIME_PROBE") == "1":
             sys.stderr.write("w09-runtime-probe-unexpected:" + json.dumps(sorted(unexpected)) + "\n")
         raise OSError("loaded controller modules are absent from the protected runtime manifest: " + "sha256:" + sha256(_canonical(sorted(unexpected))).hexdigest())
+    mapped_evidence = "sha256:" + sha256(
+        _canonical(
+            [
+                {
+                    "path": path,
+                    "dev": identity[0],
+                    "ino": identity[1],
+                    "sha256": allowed_bindings[path]["sha256"],
+                }
+                for path, identity in sorted(mapped.items())
+                if path in allowed_bindings
+            ]
+        )
+    ).hexdigest()
+    prior_evidence = manifest.get("_mapped_runtime_sha256")
+    if prior_evidence is not None and prior_evidence != mapped_evidence:
+        raise OSError("controller native mapping set changed after admission")
+    if freeze_mapped:
+        if not isinstance(manifest, dict):
+            raise OSError("controller runtime manifest cannot retain mapping evidence")
+        manifest["_mapped_runtime_sha256"] = mapped_evidence
+    return mapped_evidence
+
+
+def _mapped_runtime_identity(
+    maps_raw: str,
+    *,
+    allowed_bindings: Mapping[str, Mapping[str, Any]],
+    roots: list[Path],
+    map_files_root: Path | None = None,
+) -> dict[str, tuple[int, int]]:
+    mapped: dict[str, tuple[int, int]] = {}
+    for line in maps_raw.splitlines():
+        fields = line.split(maxsplit=5)
+        if len(fields) == 6 and fields[5].startswith("/"):
+            if fields[5].endswith(" (deleted)"):
+                raise OSError("controller native mapping was deleted during execution")
+            try:
+                major, minor = (int(value, 16) for value in fields[3].split(":", 1))
+                inode = int(fields[4])
+            except (TypeError, ValueError) as exc:
+                raise OSError("controller native mapping identity is invalid") from exc
+            resolved = str(Path(fields[5]).resolve(strict=True))
+            identity = (os.makedev(major, minor), inode)
+            if map_files_root is not None:
+                try:
+                    if resolved == str(Path("/proc/self/exe").resolve(strict=True)):
+                        mapped_metadata = os.stat("/proc/self/exe", follow_symlinks=True)
+                    else:
+                        mapped_metadata = os.stat(
+                            map_files_root / fields[0],
+                            follow_symlinks=True,
+                        )
+                except OSError as exc:
+                    raise OSError(
+                        "controller map_files identity is unavailable: "
+                        + fields[0]
+                        + ":"
+                        + resolved
+                    ) from exc
+                identity = (mapped_metadata.st_dev, mapped_metadata.st_ino)
+            prior = mapped.setdefault(resolved, identity)
+            if prior != identity:
+                raise OSError("controller native mapping path has multiple identities")
+            binding = allowed_bindings.get(resolved)
+            if binding is not None and identity[1] != binding["ino"]:
+                raise OSError(
+                    "controller native mapping differs from its held manifest inode: "
+                    + resolved
+                    + f":{identity[1]}!={binding['ino']}"
+                )
+    mapped_tree_neighbors = {
+        path
+        for path in mapped
+        if path not in allowed_bindings
+        and any(Path(path).is_relative_to(root) for root in roots)
+    }
+    if mapped_tree_neighbors:
+        raise OSError("controller mapped an unbound native neighbor from an import root")
+    return mapped
+
+
+def _held_import_roots(
+    manifest: Mapping[str, Any],
+    trees: list[tuple[Path, int, str, tuple[int, ...], int, int]],
+) -> list[str]:
+    by_path = {str(path): fd for path, fd, _digest, _identity, _uid, _gid in trees}
+    try:
+        return [f"/proc/self/fd/{by_path[path]}" for path in manifest["import_roots"]]
+    except KeyError as exc:
+        raise OSError("controller import root is not held") from exc
 
 
 def _hold_controller_source(
@@ -1006,7 +1119,7 @@ def execute_from_fixed_config(path: Path = CONFIG_PATH) -> Mapping[str, Any]:
         if not _isolated_runtime() or Path("/proc/self/exe").resolve(strict=True) != python_path:
             raise ValueError("W09 controller must run through its exact isolated interpreter")
         _revalidate_controller_runtime(runtime_manifest, runtime_artifacts, runtime_trees)
-        for import_root in reversed(runtime_manifest["import_roots"]):
+        for import_root in reversed(_held_import_roots(runtime_manifest, runtime_trees)):
             sys.path.insert(0, import_root)
         source_receipt, source_artifacts, source_evidence = _hold_controller_source(
             config["controller_source"],
@@ -1041,7 +1154,13 @@ def execute_from_fixed_config(path: Path = CONFIG_PATH) -> Mapping[str, Any]:
         from tgw.deployment_runtime import compose_application_bootstrap_controller
         from tgw.effect_completion_store import ImmutableEffectCompletionStore
 
-        _revalidate_controller_runtime(runtime_manifest, runtime_artifacts, runtime_trees)
+        mapped_evidence = _revalidate_controller_runtime(
+            runtime_manifest,
+            runtime_artifacts,
+            runtime_trees,
+            freeze_mapped=True,
+        )
+        runtime_evidence += ":mapped:" + mapped_evidence
         repository_paths = config["protected_repositories"]
         if (
             not isinstance(repository_paths, list)
@@ -1158,7 +1277,12 @@ def execute_from_fixed_config(path: Path = CONFIG_PATH) -> Mapping[str, Any]:
 
         def terminal_precheck() -> None:
             _revalidate_config(path, config_fd, config_raw, config_identity)
-            _revalidate_controller_runtime(runtime_manifest, runtime_artifacts, runtime_trees)
+            _revalidate_controller_runtime(
+                runtime_manifest,
+                runtime_artifacts,
+                runtime_trees,
+                freeze_mapped=True,
+            )
             for artifact in source_artifacts:
                 _revalidate_runtime_artifact(artifact)
 
@@ -1275,7 +1399,7 @@ def _runtime_probe_main() -> int:
     )
     errors: list[Exception] = []
     try:
-        for import_root in reversed(manifest["import_roots"]):
+        for import_root in reversed(_held_import_roots(manifest, trees)):
             sys.path.insert(0, import_root)
         for module in (
             "tgw.application_deployment_contract",
@@ -1286,8 +1410,21 @@ def _runtime_probe_main() -> int:
             "tgw.effect_completion_store",
         ):
             __import__(module)
-        _revalidate_controller_runtime(manifest, artifacts, trees)
-        sys.stdout.buffer.write(_canonical({"schema": "tgw-w09-runtime-probe/v1", "evidence": evidence}) + b"\n")
+        mapped_evidence = _revalidate_controller_runtime(
+            manifest,
+            artifacts,
+            trees,
+            freeze_mapped=True,
+        )
+        sys.stdout.buffer.write(
+            _canonical(
+                {
+                    "schema": "tgw-w09-runtime-probe/v1",
+                    "evidence": evidence + ":mapped:" + mapped_evidence,
+                }
+            )
+            + b"\n"
+        )
         return 0
     finally:
         _close_runtime_artifacts(artifacts, errors)
