@@ -4,7 +4,12 @@ import subprocess
 
 import pytest
 
-from tgw.candidate_manifest import CandidateManifestError, build_candidate_manifest, graph_hash
+from tgw.candidate_manifest import (
+    CandidateManifestError,
+    build_candidate_manifest,
+    create_test_receipt,
+    graph_hash,
+)
 from tgw.plan_luet import LUET_REVISION, LUET_VERSION, PROVIDER_ID
 
 
@@ -42,6 +47,7 @@ def _receipt(graph, commit, tree):
 
 
 def _manifest(repo, commit, graph, receipt=None):
+    tree = subprocess.check_output(["git", "rev-parse", f"{commit}^{{tree}}"], cwd=repo, text=True).strip()
     return build_candidate_manifest(
         repo,
         commit=commit,
@@ -49,8 +55,14 @@ def _manifest(repo, commit, graph, receipt=None):
         plan_commit="plan",
         solution_hash="sha256:solution",
         closure_hash="sha256:closure",
-        focused_receipt={"status": "passed"},
-        full_suite=("pytest", "-q"),
+        focused_receipt=create_test_receipt(
+            scope="focused", command=("pytest", "tests/selected"), source_commit=commit,
+            source_tree=tree, returncode=0,
+        ),
+        full_suite_receipt=create_test_receipt(
+            scope="full", command=("pytest", "-q"), source_commit=commit,
+            source_tree=tree, returncode=0,
+        ),
         graph=graph,
         conformance_receipt=receipt,
     )
@@ -75,9 +87,34 @@ def test_stale_or_unpinned_receipt_is_rejected(tmp_path, field):
         _manifest(repo, commit, graph, receipt)
 
 
-def test_missing_receipt_prepares_held_candidate(tmp_path):
+def test_missing_conformance_receipt_prepares_held_candidate_but_never_omits_test_proof(tmp_path):
     repo, commit, _ = _repo(tmp_path)
     manifest = _manifest(repo, commit, {"schema": "tgw-plan/v2"})
     assert manifest["conformance"]["status"] == "MISSING"
     assert manifest["dispatchable"] is False
-    assert manifest["tests"]["full_suite"]["status"] == "DEFINED_NOT_RUN"
+    assert manifest["tests"]["full_suite"]["status"] == "PASS"
+
+
+@pytest.mark.parametrize("scope", ["focused", "full"])
+def test_missing_failing_or_wrong_candidate_test_proof_is_rejected(tmp_path, scope):
+    repo, commit, tree = _repo(tmp_path)
+    receipt = create_test_receipt(
+        scope=scope, command=("pytest",), source_commit=commit, source_tree=tree,
+        returncode=1,
+    )
+    kwargs = {
+        "focused_receipt": create_test_receipt(
+            scope="focused", command=("pytest",), source_commit=commit, source_tree=tree,
+            returncode=0,
+        ),
+        "full_suite_receipt": create_test_receipt(
+            scope="full", command=("pytest", "-q"), source_commit=commit, source_tree=tree,
+            returncode=0,
+        ),
+    }
+    kwargs[f"{scope}_receipt" if scope == "focused" else "full_suite_receipt"] = receipt
+    with pytest.raises(CandidateManifestError, match="not passing"):
+        build_candidate_manifest(
+            repo, commit=commit, base_commit=commit, plan_commit="plan",
+            solution_hash="sha256:solution", closure_hash="sha256:closure", **kwargs,
+        )

@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from tgw.candidate_manifest import CandidateManifestError, build_candidate_manifest, verify_backup_restore
+from tgw.candidate_manifest import (
+    CandidateManifestError,
+    build_candidate_manifest,
+    create_test_receipt,
+    verify_backup_restore,
+)
 
 
 def _repo(tmp_path: Path):
@@ -23,14 +28,22 @@ def _repo(tmp_path: Path):
 
 
 def _manifest(repo, base, **changes):
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, text=True).strip()
     values = dict(
         commit="HEAD",
         base_commit=base,
         plan_commit="plan-commit",
         solution_hash="sha256:solution",
         closure_hash="sha256:closure",
-        focused_receipt={"status": "passed", "count": 1},
-        full_suite=("pytest", "-q"),
+        focused_receipt=create_test_receipt(
+            scope="focused", command=("pytest", "tests/selected"), source_commit=commit,
+            source_tree=tree, returncode=0,
+        ),
+        full_suite_receipt=create_test_receipt(
+            scope="full", command=("pytest", "-q"), source_commit=commit,
+            source_tree=tree, returncode=0,
+        ),
     )
     values.update(changes)
     return build_candidate_manifest(repo, **values)
@@ -45,7 +58,7 @@ def test_manifest_is_reproducible_from_closed_commit_and_ignores_dirty_worktree(
     assert first == second
     assert first["candidate_closed"] is True
     assert first["installed"] is False
-    assert first["tests"]["full_suite"]["status"] == "DEFINED_NOT_RUN"
+    assert first["tests"]["full_suite"]["status"] == "PASS"
 
 
 def test_database_change_requires_verified_backup_restore(tmp_path):
@@ -77,6 +90,11 @@ def test_failed_restore_cannot_admit_migration_candidate(tmp_path):
 def test_manifest_hash_covers_plan_test_and_migration_bindings(tmp_path):
     repo, base = _repo(tmp_path)
     first = _manifest(repo, base)
-    changed = _manifest(repo, base, focused_receipt={"status": "passed", "count": 2})
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, text=True).strip()
+    changed = _manifest(repo, base, focused_receipt=create_test_receipt(
+        scope="focused", command=("pytest", "tests/other"), source_commit=commit,
+        source_tree=tree, returncode=0,
+    ))
     assert first["manifest_hash"] != changed["manifest_hash"]
     json.dumps(first)

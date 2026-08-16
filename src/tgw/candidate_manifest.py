@@ -16,6 +16,9 @@ class CandidateManifestError(ValueError):
     pass
 
 
+TEST_RECEIPT_SCHEMA = "tgw-candidate-test-receipt/v1"
+
+
 def _git(repo: Path, *args: str, text: bool = True) -> str | bytes:
     result = subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=text)
     return result.stdout
@@ -32,6 +35,79 @@ class MigrationSafetyReceipt:
 
 def graph_hash(graph: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(json.dumps(graph, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _canonical_hash(value: Mapping[str, Any]) -> str:
+    return "sha256:" + hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def create_test_receipt(
+    *,
+    scope: str,
+    command: Sequence[str],
+    source_commit: str,
+    source_tree: str,
+    returncode: int,
+    stdout: bytes = b"",
+    stderr: bytes = b"",
+) -> dict[str, Any]:
+    """Create an exact-candidate test receipt from an executed command.
+
+    The output bodies intentionally stay outside the compact manifest; their
+    hashes make the recorded outcome tamper evident while an evidence sink can
+    retain the full log.
+    """
+    if scope not in {"focused", "full"}:
+        raise CandidateManifestError("test receipt scope is invalid")
+    if not command or not all(isinstance(item, str) and item for item in command):
+        raise CandidateManifestError("test receipt command is invalid")
+    if not isinstance(returncode, int):
+        raise CandidateManifestError("test receipt return code is invalid")
+    receipt = {
+        "schema": TEST_RECEIPT_SCHEMA,
+        "scope": scope,
+        "command": list(command),
+        "source_commit": source_commit,
+        "source_tree": source_tree,
+        "returncode": returncode,
+        "status": "PASS" if returncode == 0 else "FAIL",
+        "stdout_sha256": "sha256:" + hashlib.sha256(stdout).hexdigest(),
+        "stderr_sha256": "sha256:" + hashlib.sha256(stderr).hexdigest(),
+    }
+    receipt["receipt_hash"] = _canonical_hash(receipt)
+    return receipt
+
+
+def verify_test_receipt(
+    receipt: Mapping[str, Any], *, scope: str, source_commit: str, source_tree: str,
+) -> dict[str, Any]:
+    """Accept only a hash-bound successful test run for this candidate."""
+    required = {
+        "schema", "scope", "command", "source_commit", "source_tree", "returncode",
+        "status", "stdout_sha256", "stderr_sha256", "receipt_hash",
+    }
+    if set(receipt) != required or receipt.get("schema") != TEST_RECEIPT_SCHEMA:
+        raise CandidateManifestError("test receipt schema is invalid")
+    if receipt.get("scope") != scope:
+        raise CandidateManifestError("test receipt scope binding mismatch")
+    if receipt.get("source_commit") != source_commit or receipt.get("source_tree") != source_tree:
+        raise CandidateManifestError("test receipt source binding mismatch")
+    if receipt.get("status") != "PASS" or receipt.get("returncode") != 0:
+        raise CandidateManifestError("candidate test receipt is not passing")
+    command = receipt.get("command")
+    if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
+        raise CandidateManifestError("test receipt command is invalid")
+    for field in ("stdout_sha256", "stderr_sha256", "receipt_hash"):
+        value = receipt.get(field)
+        if not isinstance(value, str) or len(value) != 71 or not value.startswith("sha256:"):
+            raise CandidateManifestError("test receipt hash is invalid")
+    unsigned = dict(receipt)
+    claimed = unsigned.pop("receipt_hash")
+    if claimed != _canonical_hash(unsigned):
+        raise CandidateManifestError("test receipt hash mismatch")
+    return dict(receipt)
 
 
 def create_luet_conformance_receipt(
@@ -124,7 +200,7 @@ def build_candidate_manifest(
     solution_hash: str,
     closure_hash: str,
     focused_receipt: Mapping[str, Any],
-    full_suite: Sequence[str],
+    full_suite_receipt: Mapping[str, Any],
     graph: Mapping[str, Any] | None = None,
     conformance_receipt: Mapping[str, Any] | None = None,
     migration_receipt: MigrationSafetyReceipt | None = None,
@@ -139,6 +215,12 @@ def build_candidate_manifest(
     migrations = tuple(path for path in changed if path.endswith(".sql") or "/migrations/" in path)
     if migrations and (migration_receipt is None or not migration_receipt.verified):
         raise CandidateManifestError("candidate changes database schema without a verified backup/restore receipt")
+    focused = verify_test_receipt(
+        focused_receipt, scope="focused", source_commit=exact_commit, source_tree=tree,
+    )
+    full_suite = verify_test_receipt(
+        full_suite_receipt, scope="full", source_commit=exact_commit, source_tree=tree,
+    )
     if conformance_receipt is not None:
         if graph is None:
             raise CandidateManifestError("graph is required with a Luet conformance receipt")
@@ -158,8 +240,8 @@ def build_candidate_manifest(
         "plan": {"commit": plan_commit, "solution_hash": solution_hash, "closure_hash": closure_hash},
         "conformance": conformance,
         "tests": {
-            "focused": dict(focused_receipt),
-            "full_suite": {"command": list(full_suite), "status": "DEFINED_NOT_RUN"},
+            "focused": focused,
+            "full_suite": full_suite,
         },
         "database": {
             "migration_paths": list(migrations),
