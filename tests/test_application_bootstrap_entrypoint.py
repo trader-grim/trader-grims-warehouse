@@ -214,6 +214,7 @@ def test_controller_runtime_is_held_and_rejects_in_place_source_change(
     launcher_config.write_text(
         "schema=tgw-w09-controller-launch-fds/v1\n"
         f"python={python}\n"
+        f"python_home={runtime_tree}\n"
         f"bundle={bundle}\n"
         f"closure={closure}\n"
         f"receipt={receipt_path}\n"
@@ -224,6 +225,7 @@ def test_controller_runtime_is_held_and_rejects_in_place_source_change(
         "files": files,
         "trees": trees,
         "import_roots": [str(runtime_tree)],
+        "python_home": str(runtime_tree),
     }
     manifest["manifest_sha256"] = "sha256:" + hashlib.sha256(entrypoint._canonical(manifest)).hexdigest()
     manifest_path = tmp_path / "runtime.json"
@@ -413,23 +415,43 @@ def test_compiled_native_launcher_passes_exact_held_execution_fds(tmp_path):
     binding = tmp_path / "runtime.fds"
     receipt = tmp_path / "runtime.receipt.json"
     python = Path(sys.executable).resolve(strict=True)
+    python_home = Path("/usr")
+    home_metadata = python_home.stat()
+    home_binding = {
+        "path": str(python_home),
+        "sha256": "sha256:" + "0" * 64,
+        "dev": home_metadata.st_dev,
+        "ino": home_metadata.st_ino,
+        "uid": home_metadata.st_uid,
+        "gid": home_metadata.st_gid,
+        "mode": stat.S_IMODE(home_metadata.st_mode),
+        "nlink": home_metadata.st_nlink,
+        "size": home_metadata.st_size,
+    }
     bundle.write_text(
         "import os,sys\n"
         "assert len(sys.argv) == 1 and sys.argv[0].startswith('/proc/self/fd/')\n"
         "for key in ('TGW_W09_LAUNCHER_FD','TGW_W09_PYTHON_FD',"
         "'TGW_W09_BUNDLE_FD','TGW_W09_LAUNCH_BINDING_FD',"
-        "'TGW_W09_CLOSURE_FD','TGW_W09_RUNTIME_RECEIPT_FD'):\n"
+        "'TGW_W09_CLOSURE_FD','TGW_W09_RUNTIME_RECEIPT_FD',"
+        "'TGW_W09_PYTHON_HOME_FD'):\n"
         " os.fstat(int(os.environ[key]))\n"
         "print('held-launch-ok')\n"
     )
     bundle.chmod(0o400)
-    closure.write_bytes(entrypoint._preexec_closure([{**_binding(python), "elf": None}]))
+    closure.write_bytes(
+        entrypoint._preexec_closure(
+            [{**_binding(python), "elf": None}],
+            [home_binding],
+        )
+    )
     closure.chmod(0o400)
     receipt.write_bytes(b"{}")
     receipt.chmod(0o400)
     binding.write_text(
         "schema=tgw-w09-controller-launch-fds/v1\n"
         f"python={python}\n"
+        f"python_home={python_home}\n"
         f"bundle={bundle}\n"
         f"closure={closure}\n"
         f"receipt={receipt}\n"

@@ -541,21 +541,13 @@ def _hold_controller_runtime(
             except Exception:
                 os.close(inherited_fd)
                 raise
-        expected_launcher_config = (
-            "schema=tgw-w09-controller-launch-fds/v1\n"
-            f"python={named['python'][0]}\n"
-            f"bundle={named['bundle'][0]}\n"
-            f"closure={named['closure'][0]}\n"
-            f"receipt={named['receipt'][0]}\n"
-        ).encode()
-        if named["launcher_config"][2] != expected_launcher_config:
-            raise ValueError("controller launcher config does not bind exact execution inputs")
         manifest = json.loads(named["manifest"][2])
         if not isinstance(manifest, dict) or set(manifest) != {
             "schema",
             "files",
             "trees",
             "import_roots",
+            "python_home",
             "manifest_sha256",
         }:
             raise ValueError("controller runtime manifest is invalid")
@@ -590,8 +582,20 @@ def _hold_controller_runtime(
             not isinstance(manifest["import_roots"], list)
             or manifest["import_roots"] != sorted(set(manifest["import_roots"]))
             or any(path not in tree_paths for path in manifest["import_roots"])
+            or not isinstance(manifest["python_home"], str)
+            or manifest["python_home"] not in tree_paths
         ):
             raise ValueError("controller admitted import roots are invalid")
+        expected_launcher_config = (
+            "schema=tgw-w09-controller-launch-fds/v1\n"
+            f"python={named['python'][0]}\n"
+            f"python_home={manifest['python_home']}\n"
+            f"bundle={named['bundle'][0]}\n"
+            f"closure={named['closure'][0]}\n"
+            f"receipt={named['receipt'][0]}\n"
+        ).encode()
+        if named["launcher_config"][2] != expected_launcher_config:
+            raise ValueError("controller launcher config does not bind exact execution inputs")
         closure_start = len(artifacts)
         for index, binding in enumerate(manifest["files"]):
             if not isinstance(binding, Mapping) or set(binding) != {
@@ -996,6 +1000,37 @@ def _held_import_roots(
         raise OSError("controller import root is not held") from exc
 
 
+def _validate_early_python_home(
+    manifest: Mapping[str, Any],
+    trees: list[tuple[Path, int, str, tuple[int, ...], int, int]],
+) -> None:
+    raw_fd = os.environ.get("TGW_W09_PYTHON_HOME_FD", "")
+    if not raw_fd.isdecimal():
+        raise ValueError("controller Python-home descriptor handoff is absent")
+    home_fd = int(raw_fd)
+    home_path = str(manifest["python_home"])
+    held = next((tree for tree in trees if str(tree[0]) == home_path), None)
+    if held is None:
+        raise ValueError("controller Python home is not held")
+    metadata = os.fstat(home_fd)
+    if (metadata.st_dev, metadata.st_ino) != (held[3][0], held[3][1]):
+        raise ValueError("controller Python-home handoff differs from its manifest")
+    proc_root = f"/proc/self/fd/{home_fd}"
+    if sys.prefix != proc_root or sys.exec_prefix != proc_root:
+        raise ValueError("controller Python initialized outside its held home")
+    stdlib_root = (
+        f"{proc_root}/lib/python{sys.version_info.major}.{sys.version_info.minor}"
+    )
+    for module in tuple(sys.modules.values()):
+        location = getattr(module, "__file__", None)
+        if not isinstance(location, str):
+            continue
+        if location == sys.argv[0] or location.startswith(sys.argv[0] + "/"):
+            continue
+        if location != stdlib_root and not location.startswith(stdlib_root + "/"):
+            raise ValueError("controller loaded an early module outside its held Python home")
+
+
 def _hold_controller_source(
     binding: Any,
     runtime_bundle: tuple[Path, int, bytes, tuple[int, ...]],
@@ -1168,6 +1203,7 @@ def execute_from_fixed_config(path: Path = CONFIG_PATH) -> Mapping[str, Any]:
             config["controller_runtime"],
             require_launcher=True,
         )
+        _validate_early_python_home(runtime_manifest, runtime_trees)
         python_path = runtime_artifacts[1][0].resolve(strict=True)
         if not _isolated_runtime() or Path("/proc/self/exe").resolve(strict=True) != python_path:
             raise ValueError("W09 controller must run through its exact isolated interpreter")
@@ -1388,11 +1424,13 @@ def execute_from_fixed_config(path: Path = CONFIG_PATH) -> Mapping[str, Any]:
 
 def _isolated_runtime() -> bool:
     return (
-        bool(sys.flags.isolated)
-        and bool(sys.flags.dont_write_bytecode)
+        bool(sys.flags.dont_write_bytecode)
         and bool(sys.flags.no_site)
+        and bool(sys.flags.no_user_site)
+        and bool(sys.flags.safe_path)
         and sys.pycache_prefix == "/proc/self/fd/2147483647"
         and "PYTHONPATH" not in os.environ
+        and "PYTHONUSERBASE" not in os.environ
     )
 
 
@@ -1451,6 +1489,7 @@ def _runtime_probe_main() -> int:
         runtime,
         require_launcher=True,
     )
+    _validate_early_python_home(manifest, trees)
     errors: list[Exception] = []
     try:
         for import_root in reversed(_held_import_roots(manifest, trees)):

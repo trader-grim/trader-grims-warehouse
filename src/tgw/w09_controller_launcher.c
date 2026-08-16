@@ -25,6 +25,7 @@
 #define MAX_BINDING_BYTES 8192
 #define MAX_CLOSURE_BYTES (4 * 1024 * 1024)
 #define MAX_RUNTIME_FILES 2048
+#define PYTHON_HOME_FD 900
 #define RUNTIME_FD_BASE 1000
 
 static int protected_metadata(const struct stat *value, int executable) {
@@ -135,6 +136,7 @@ static int read_binding(int fd, char *raw, size_t capacity) {
 static int parse_binding(
     char *raw,
     char **python,
+    char **python_home,
     char **bundle,
     char **closure,
     char **receipt
@@ -144,36 +146,43 @@ static int parse_binding(
     char *separator;
     char *second;
     char *third;
+    char *fourth;
     char *end;
     if (strncmp(raw, prefix, sizeof(prefix) - 1) != 0) {
         return 0;
     }
     *python = raw + sizeof(prefix) - 1;
     separator = strchr(*python, '\n');
-    if (separator == NULL || strncmp(separator + 1, "bundle=", 7) != 0) {
+    if (separator == NULL || strncmp(separator + 1, "python_home=", 12) != 0) {
         return 0;
     }
     *separator = '\0';
-    *bundle = separator + 8;
-    second = strchr(*bundle, '\n');
-    if (second == NULL || strncmp(second + 1, "closure=", 8) != 0) {
+    *python_home = separator + 13;
+    second = strchr(*python_home, '\n');
+    if (second == NULL || strncmp(second + 1, "bundle=", 7) != 0) {
         return 0;
     }
     *second = '\0';
-    *closure = second + 9;
-    third = strchr(*closure, '\n');
-    if (third == NULL || strncmp(third + 1, "receipt=", 8) != 0) {
+    *bundle = second + 8;
+    third = strchr(*bundle, '\n');
+    if (third == NULL || strncmp(third + 1, "closure=", 8) != 0) {
         return 0;
     }
     *third = '\0';
-    *receipt = third + 9;
+    *closure = third + 9;
+    fourth = strchr(*closure, '\n');
+    if (fourth == NULL || strncmp(fourth + 1, "receipt=", 8) != 0) {
+        return 0;
+    }
+    *fourth = '\0';
+    *receipt = fourth + 9;
     end = strchr(*receipt, '\n');
     if (end == NULL || end[1] != '\0') {
         return 0;
     }
     *end = '\0';
-    return (*python)[0] == '/' && (*bundle)[0] == '/' && (*closure)[0] == '/' &&
-        (*receipt)[0] == '/';
+    return (*python)[0] == '/' && (*python_home)[0] == '/' &&
+        (*bundle)[0] == '/' && (*closure)[0] == '/' && (*receipt)[0] == '/';
 }
 
 static int parse_unsigned(const char *text, unsigned long long *value) {
@@ -183,11 +192,16 @@ static int parse_unsigned(const char *text, unsigned long long *value) {
     return errno == 0 && end != text && *end == '\0';
 }
 
-static int hold_runtime_closure(int closure_fd) {
+static int hold_runtime_closure(
+    int closure_fd,
+    const char *python_home,
+    int *python_home_fd
+) {
     static char raw[MAX_CLOSURE_BYTES + 1];
     char *line;
     char *save_line = NULL;
     int count = 0;
+    *python_home_fd = -1;
 
     if (lseek(closure_fd, 0, SEEK_SET) < 0 ||
         !read_binding(closure_fd, raw, MAX_CLOSURE_BYTES)) {
@@ -242,7 +256,26 @@ static int hold_runtime_closure(int closure_fd) {
             (unsigned long long)observed.st_size != expected[6]) {
             return -1;
         }
+        if (source_fd == PYTHON_HOME_FD) {
+            source_fd = fcntl(
+                source_fd,
+                F_DUPFD_CLOEXEC,
+                RUNTIME_FD_BASE + MAX_RUNTIME_FILES
+            );
+            if (source_fd < 0) {
+                return -1;
+            }
+        }
         target_fd = RUNTIME_FD_BASE + count;
+        if (directory_leaf && strcmp(fields[7], python_home) == 0) {
+            if (*python_home_fd >= 0 ||
+                dup2(source_fd, PYTHON_HOME_FD) < 0 ||
+                !retain_fd(PYTHON_HOME_FD)) {
+                close(source_fd);
+                return -1;
+            }
+            *python_home_fd = PYTHON_HOME_FD;
+        }
         if (source_fd == target_fd) {
             source_fd = fcntl(source_fd, F_DUPFD_CLOEXEC, RUNTIME_FD_BASE + MAX_RUNTIME_FILES);
             if (source_fd < 0) {
@@ -256,7 +289,7 @@ static int hold_runtime_closure(int closure_fd) {
         close(source_fd);
         ++count;
     }
-    return count > 0 ? count : -1;
+    return count > 0 && *python_home_fd == PYTHON_HOME_FD ? count : -1;
 }
 
 int main(int argc, char **argv) {
@@ -264,6 +297,8 @@ int main(int argc, char **argv) {
     char bundle_argument[64];
     char launcher_environment[64];
     char python_environment[64];
+    char python_home_environment[64];
+    char python_home_fd_environment[64];
     char bundle_environment[64];
     char binding_environment[64];
     char closure_environment[64];
@@ -274,12 +309,14 @@ int main(int argc, char **argv) {
     char probe_environment[] = "TGW_W09_RUNTIME_PROBE=1";
 #endif
     char *python_path = NULL;
+    char *python_home_path = NULL;
     char *bundle_path = NULL;
     char *closure_path = NULL;
     char *receipt_path = NULL;
     int binding_fd;
     int launcher_fd;
     int python_fd;
+    int python_home_fd;
     int bundle_fd;
     int closure_fd;
     int runtime_count;
@@ -299,6 +336,7 @@ int main(int argc, char **argv) {
         !parse_binding(
             binding,
             &python_path,
+            &python_home_path,
             &bundle_path,
             &closure_path,
             &receipt_path
@@ -309,7 +347,11 @@ int main(int argc, char **argv) {
     bundle_fd = open_protected(bundle_path, 0, 0);
     closure_fd = open_protected(closure_path, 0, 0);
     receipt_fd = open_protected(receipt_path, 0, 0);
-    runtime_count = closure_fd < 0 ? -1 : hold_runtime_closure(closure_fd);
+    runtime_count = closure_fd < 0 ? -1 : hold_runtime_closure(
+        closure_fd,
+        python_home_path,
+        &python_home_fd
+    );
     if (python_fd < 0 || bundle_fd < 0 || closure_fd < 0 || receipt_fd < 0 ||
         runtime_count < 1 ||
         !retain_fd(binding_fd) || !retain_fd(launcher_fd) ||
@@ -320,6 +362,8 @@ int main(int argc, char **argv) {
     if (snprintf(bundle_argument, sizeof(bundle_argument), "/proc/self/fd/%d", bundle_fd) < 0 ||
         snprintf(launcher_environment, sizeof(launcher_environment), "TGW_W09_LAUNCHER_FD=%d", launcher_fd) < 0 ||
         snprintf(python_environment, sizeof(python_environment), "TGW_W09_PYTHON_FD=%d", python_fd) < 0 ||
+        snprintf(python_home_environment, sizeof(python_home_environment), "PYTHONHOME=/proc/self/fd/%d", python_home_fd) < 0 ||
+        snprintf(python_home_fd_environment, sizeof(python_home_fd_environment), "TGW_W09_PYTHON_HOME_FD=%d", python_home_fd) < 0 ||
         snprintf(bundle_environment, sizeof(bundle_environment), "TGW_W09_BUNDLE_FD=%d", bundle_fd) < 0 ||
         snprintf(binding_environment, sizeof(binding_environment), "TGW_W09_LAUNCH_BINDING_FD=%d", binding_fd) < 0 ||
         snprintf(closure_environment, sizeof(closure_environment), "TGW_W09_CLOSURE_FD=%d", closure_fd) < 0 ||
@@ -330,11 +374,12 @@ int main(int argc, char **argv) {
     }
     char *const python_argv[] = {
         (char *)"python3",
-        (char *)"-I",
+        (char *)"-S",
+        (char *)"-s",
+        (char *)"-P",
         (char *)"-B",
         (char *)"-X",
         (char *)"pycache_prefix=/proc/self/fd/2147483647",
-        (char *)"-S",
         bundle_argument,
         NULL,
     };
@@ -343,8 +388,10 @@ int main(int argc, char **argv) {
         (char *)"LC_ALL=C",
         (char *)"PATH=",
         (char *)"PYTHONDONTWRITEBYTECODE=1",
+        python_home_environment,
         launcher_environment,
         python_environment,
+        python_home_fd_environment,
         bundle_environment,
         binding_environment,
         closure_environment,

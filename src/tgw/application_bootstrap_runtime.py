@@ -49,9 +49,11 @@ def _validate_build_environment(value: Mapping[str, Any]) -> dict[str, Any]:
         "compiler",
         "tracer",
         "cwd",
+        "scratch",
         "inputs",
         "accesses",
         "discovery_trace_sha256",
+        "discovery_directories",
         "environment",
         "closure_sha256",
         "receipt_sha256",
@@ -62,9 +64,11 @@ def _validate_build_environment(value: Mapping[str, Any]) -> dict[str, Any]:
     compiler = value.get("compiler")
     tracer = value.get("tracer")
     cwd = value.get("cwd")
+    scratch = value.get("scratch")
     inputs = value.get("inputs")
     accesses = value.get("accesses")
     environment = value.get("environment")
+    discovery_directories = value.get("discovery_directories")
     if (
         not isinstance(compiler, Mapping)
         or set(compiler) != binding_fields
@@ -73,6 +77,9 @@ def _validate_build_environment(value: Mapping[str, Any]) -> dict[str, Any]:
         or not isinstance(cwd, Mapping)
         or set(cwd) != directory_binding_fields
         or cwd.get("mode") != 0o700
+        or not isinstance(scratch, Mapping)
+        or set(scratch) != directory_binding_fields
+        or scratch.get("mode") != 0o700
         or not isinstance(inputs, list)
         or any(not isinstance(item, Mapping) or set(item) != binding_fields for item in inputs)
         or inputs != sorted(inputs, key=lambda item: str(item["path"]))
@@ -81,11 +88,25 @@ def _validate_build_environment(value: Mapping[str, Any]) -> dict[str, Any]:
         or accesses != sorted(set(accesses))
         or any(not isinstance(item, str) or not item for item in accesses)
         or _SHA.fullmatch(str(value.get("discovery_trace_sha256"))) is None
+        or not isinstance(discovery_directories, Mapping)
+        or set(discovery_directories) != {"cwd", "scratch_before", "scratch_after"}
+        or any(
+            not isinstance(item, Mapping) or set(item) != directory_binding_fields
+            for item in discovery_directories.values()
+        )
+        or discovery_directories["cwd"] != cwd
+        or discovery_directories["scratch_after"] != scratch
+        or any(
+            discovery_directories["scratch_before"][name]
+            != discovery_directories["scratch_after"][name]
+            for name in ("path", "dev", "ino", "uid", "gid", "mode", "nlink", "sha256")
+        )
         or not isinstance(environment, Mapping)
         or set(environment) != {"PATH", "LANG", "LC_ALL", "TMPDIR"}
         or environment["LANG"] != "C"
         or environment["LC_ALL"] != "C"
-        or cwd.get("path") != environment["TMPDIR"]
+        or scratch.get("path") != environment["TMPDIR"]
+        or cwd.get("path") == scratch.get("path")
         or value.get("closure_sha256") != _digest(_canonical(inputs))
     ):
         raise ControllerRuntimeError("controller build environment content is invalid")
@@ -186,8 +207,17 @@ def _normalize_trace_path(path: str, *, scratch: Path) -> tuple[str, Path | None
     if not path.startswith("/"):
         raise ControllerRuntimeError("compiler trace contains a relative file access")
     lexical = Path(os.path.normpath(path))
-    if lexical == scratch or lexical.is_relative_to(scratch):
+    if lexical == scratch:
         return "$SCRATCH", None
+    if lexical.is_relative_to(scratch):
+        relative = lexical.relative_to(scratch).as_posix()
+        compiler_temporary = re.fullmatch(
+            r"cc[A-Za-z0-9]{6}(\.(?:o|s|res|cdtor\.o|cdtor\.c))",
+            relative,
+        )
+        if compiler_temporary is not None:
+            return "$SCRATCH/$CC_TMP" + compiler_temporary.group(1), None
+        return "$SCRATCH/" + relative, None
     if str(lexical).startswith("/proc/"):
         parts = list(lexical.parts)
         if len(parts) > 2 and (parts[2] == "self" or parts[2].isdecimal()):
@@ -262,22 +292,35 @@ def _parse_trace_accesses(
 def _postcheck_binding(expected: Mapping[str, Any], fd: int, *, directory: bool) -> None:
     held = os.fstat(fd)
     named = os.stat(expected["path"], follow_symlinks=False)
-    for name, value in (
+    identity_checks = [
         ("dev", held.st_dev),
         ("ino", held.st_ino),
         ("uid", held.st_uid),
         ("gid", held.st_gid),
         ("mode", stat.S_IMODE(held.st_mode)),
         ("nlink", held.st_nlink),
-    ):
-        if expected[name] != value or value != {
-            "dev": named.st_dev,
-            "ino": named.st_ino,
-            "uid": named.st_uid,
-            "gid": named.st_gid,
-            "mode": stat.S_IMODE(named.st_mode),
-            "nlink": named.st_nlink,
-        }[name]:
+    ]
+    if directory:
+        identity_checks.extend(
+            [
+                ("size", held.st_size),
+                ("mtime_ns", held.st_mtime_ns),
+                ("ctime_ns", held.st_ctime_ns),
+            ]
+        )
+    named_values = {
+        "dev": named.st_dev,
+        "ino": named.st_ino,
+        "uid": named.st_uid,
+        "gid": named.st_gid,
+        "mode": stat.S_IMODE(named.st_mode),
+        "nlink": named.st_nlink,
+        "size": named.st_size,
+        "mtime_ns": named.st_mtime_ns,
+        "ctime_ns": named.st_ctime_ns,
+    }
+    for name, value in identity_checks:
+        if expected[name] != value or value != named_values[name]:
             raise ControllerRuntimeError("controller build input changed during use")
     if directory:
         if _tree_digest(
@@ -292,6 +335,40 @@ def _postcheck_binding(expected: Mapping[str, Any], fd: int, *, directory: bool)
         raise ControllerRuntimeError("controller build file changed during use")
 
 
+def _observe_directory_phase(expected: Mapping[str, Any], fd: int) -> dict[str, Any]:
+    """Observe one exact empty-directory boundary through held and named identities."""
+
+    held = os.fstat(fd)
+    observed = {
+        "path": expected["path"],
+        "dev": held.st_dev,
+        "ino": held.st_ino,
+        "uid": held.st_uid,
+        "gid": held.st_gid,
+        "mode": stat.S_IMODE(held.st_mode),
+        "nlink": held.st_nlink,
+        "size": held.st_size,
+        "sha256": _tree_digest(
+            Path(f"/proc/self/fd/{fd}"),
+            trusted_uid=held.st_uid,
+            trusted_gid=held.st_gid,
+        ),
+        "mtime_ns": held.st_mtime_ns,
+        "ctime_ns": held.st_ctime_ns,
+    }
+    named = os.stat(expected["path"], follow_symlinks=False)
+    if (
+        any(
+            observed[name] != expected[name]
+            for name in ("path", "dev", "ino", "uid", "gid", "mode", "nlink", "sha256")
+        )
+        or (held.st_dev, held.st_ino, held.st_mtime_ns, held.st_ctime_ns)
+        != (named.st_dev, named.st_ino, named.st_mtime_ns, named.st_ctime_ns)
+    ):
+        raise ControllerRuntimeError("controller build directory phase is not exact")
+    return observed
+
+
 def discover_launcher_build_inputs(
     *,
     launcher_source: Path,
@@ -300,6 +377,7 @@ def discover_launcher_build_inputs(
     output_root: Path,
     binding_path: Path,
     environment: Mapping[str, str],
+    cwd_path: Path,
     trusted_uid: int = 0,
 ) -> dict[str, Any]:
     """Run a non-admitted discovery build and return its concrete file inputs."""
@@ -322,7 +400,15 @@ def discover_launcher_build_inputs(
         )
         held.append(scratch_fd)
         if scratch["mode"] != 0o700 or any(Path(environment["TMPDIR"]).iterdir()):
-            raise ControllerRuntimeError("controller build cwd is not protected and empty")
+            raise ControllerRuntimeError("controller build scratch is not protected and empty")
+        cwd, cwd_fd = _binding(cwd_path, directory=True, trusted_uid=trusted_uid)
+        held.append(cwd_fd)
+        if (
+            cwd["path"] == scratch["path"]
+            or cwd["mode"] != 0o700
+            or any(cwd_path.iterdir())
+        ):
+            raise ControllerRuntimeError("controller build cwd is not distinct, protected, and empty")
         _source, source_fd = _binding(
             launcher_source,
             directory=False,
@@ -357,7 +443,7 @@ def discover_launcher_build_inputs(
             output_path=output_path,
             binding_path=str(binding_path),
             environment=environment,
-            cwd_fd=scratch_fd,
+            cwd_fd=cwd_fd,
             extra_fds=(output_fd,),
         )
         excluded = {
@@ -372,11 +458,17 @@ def discover_launcher_build_inputs(
         )
         if any(Path(environment["TMPDIR"]).iterdir()):
             raise ControllerRuntimeError("controller build cwd retained compiler outputs")
-        _postcheck_binding(scratch, scratch_fd, directory=True)
+        scratch_after = _observe_directory_phase(scratch, scratch_fd)
+        _postcheck_binding(cwd, cwd_fd, directory=True)
         return {
             "inputs": inputs,
             "accesses": accesses,
             "trace_sha256": _digest(trace),
+            "directories": {
+                "cwd": cwd,
+                "scratch_before": scratch,
+                "scratch_after": scratch_after,
+            },
         }
     finally:
         if output_fd >= 0:
@@ -399,6 +491,7 @@ def issue_build_environment_manifest(
     tracer_path: Path,
     discovery: Mapping[str, Any],
     environment: Mapping[str, str],
+    cwd_path: Path,
     output_root: Path,
     trusted_uid: int = 0,
 ) -> dict[str, Any]:
@@ -420,17 +513,29 @@ def issue_build_environment_manifest(
         held.append(scratch_fd)
         if scratch["mode"] != 0o700 or any(Path(environment["TMPDIR"]).iterdir()):
             raise ControllerRuntimeError("controller build scratch is not protected and empty")
+        cwd, cwd_fd = _binding(cwd_path, directory=True, trusted_uid=trusted_uid)
+        held.append(cwd_fd)
+        if (
+            cwd["path"] == scratch["path"]
+            or cwd["mode"] != 0o700
+            or any(cwd_path.iterdir())
+        ):
+            raise ControllerRuntimeError("controller build cwd is not distinct, protected, and empty")
         compiler, fd = _binding(compiler_path, directory=False, trusted_uid=trusted_uid)
         held.append(fd)
         tracer, fd = _binding(tracer_path, directory=False, trusted_uid=trusted_uid)
         held.append(fd)
         discovered_inputs = discovery.get("inputs")
         discovered_accesses = discovery.get("accesses")
+        discovered_directories = discovery.get("directories")
         if (
             not isinstance(discovered_inputs, list)
             or not isinstance(discovered_accesses, list)
             or discovered_accesses != sorted(set(discovered_accesses))
             or _SHA.fullmatch(str(discovery.get("trace_sha256"))) is None
+            or not isinstance(discovered_directories, Mapping)
+            or discovered_directories.get("cwd") != cwd
+            or discovered_directories.get("scratch_after") != scratch
         ):
             raise ControllerRuntimeError("controller build discovery is invalid")
         inputs = []
@@ -442,10 +547,12 @@ def issue_build_environment_manifest(
             "schema": BUILD_ENVIRONMENT_SCHEMA,
             "compiler": compiler,
             "tracer": tracer,
-            "cwd": scratch,
+            "cwd": cwd,
+            "scratch": scratch,
             "inputs": inputs,
             "accesses": discovered_accesses,
             "discovery_trace_sha256": discovery["trace_sha256"],
+            "discovery_directories": dict(discovered_directories),
             "environment": dict(environment),
             "closure_sha256": _digest(_canonical(inputs)),
         }
@@ -454,6 +561,7 @@ def issue_build_environment_manifest(
         name = "build-environment-" + receipt["receipt_sha256"].removeprefix("sha256:") + ".json"
         identity = _write_once(root_fd, name, _canonical(receipt), 0o400)
         _postcheck_binding(scratch, scratch_fd, directory=True)
+        _postcheck_binding(cwd, cwd_fd, directory=True)
         return {
             **receipt,
             "path": str(Path(output_root) / name),
@@ -531,11 +639,22 @@ def produce_launcher_build(
             trusted_uid=trusted_uid,
         )
         held.append(scratch_fd)
-        postchecks.append((scratch, scratch_fd, True))
-        if scratch != build_environment.get("cwd"):
-            raise ControllerRuntimeError("controller build cwd differs from its receipt")
+        if scratch != build_environment.get("scratch"):
+            raise ControllerRuntimeError("controller build scratch differs from its receipt")
         if scratch["mode"] != 0o700 or any(Path(environment["TMPDIR"]).iterdir()):
             raise ControllerRuntimeError("controller build scratch is not protected and empty")
+        cwd_binding = build_environment["cwd"]
+        cwd, cwd_fd = _binding(
+            Path(cwd_binding["path"]),
+            directory=True,
+            trusted_uid=trusted_uid,
+        )
+        held.append(cwd_fd)
+        postchecks.append((cwd, cwd_fd, True))
+        if cwd != cwd_binding or cwd["path"] == scratch["path"] or any(
+            Path(cwd["path"]).iterdir()
+        ):
+            raise ControllerRuntimeError("controller build cwd differs from its receipt")
         compiler_binding = build_environment["compiler"]
         tracer_binding = build_environment["tracer"]
         compiler, compiler_fd = _binding(
@@ -593,7 +712,7 @@ def produce_launcher_build(
             output_path=output_proc,
             binding_path=str(binding_path),
             environment=environment,
-            cwd_fd=scratch_fd,
+            cwd_fd=cwd_fd,
             extra_fds=(output_fd,),
         )
         output_path = Path(output_root) / output_name
@@ -621,6 +740,7 @@ def produce_launcher_build(
             )
         if any(Path(environment["TMPDIR"]).iterdir()):
             raise ControllerRuntimeError("controller compiler left unbound scratch outputs")
+        scratch_after = _observe_directory_phase(scratch, scratch_fd)
         os.fchmod(output_fd, 0o500)
         os.fsync(output_fd)
         launcher_raw = os.pread(output_fd, 4 * 1024 * 1024 + 1, 0)
@@ -640,11 +760,11 @@ def produce_launcher_build(
 
         version_rc, version_stdout, version_stderr = _run_held_bounded(
             [f"/proc/self/fd/{compiler_fd}", "--version"],
-            pass_fds=(compiler_fd, scratch_fd),
+            pass_fds=(compiler_fd, cwd_fd),
             timeout=10,
             limit=64 * 1024,
             env=environment,
-            cwd=f"/proc/{os.getpid()}/fd/{scratch_fd}",
+            cwd=f"/proc/{os.getpid()}/fd/{cwd_fd}",
         )
         if version_rc != 0:
             raise ControllerRuntimeError("controller compiler version probe failed")
@@ -689,6 +809,11 @@ def produce_launcher_build(
             "executed_argv": executed_argv,
             "executed_argv_sha256": _digest(_canonical(executed_argv)),
             "binding_path": str(binding_path),
+            "build_directories": {
+                "cwd": cwd,
+                "scratch_before": scratch,
+                "scratch_after": scratch_after,
+            },
             "build_environment": dict(build_environment_receipt),
             "build_environment_receipt_sha256": build_environment["receipt_sha256"],
             "trace": {
@@ -712,6 +837,7 @@ def produce_launcher_build(
         os.fsync(root_fd)
         for expected, fd, directory in postchecks:
             _postcheck_binding(expected, fd, directory=directory)
+        _postcheck_binding(scratch_after, scratch_fd, directory=True)
         named_root = os.stat(output_root, follow_symlinks=False)
         held_root = os.fstat(root_fd)
         if (named_root.st_dev, named_root.st_ino) != (held_root.st_dev, held_root.st_ino):
@@ -866,6 +992,7 @@ def materialize_controller_runtime(
     native_files: Sequence[Path],
     runtime_trees: Sequence[Path],
     import_roots: Sequence[Path],
+    python_home: Path,
     output_root: Path,
     trusted_uid: int = 0,
 ) -> dict[str, Any]:
@@ -892,6 +1019,7 @@ def materialize_controller_runtime(
         launcher = build.get("launcher")
         compiler = build.get("compiler")
         build_environment_binding = build.get("build_environment")
+        build_directories = build.get("build_directories")
         trace_binding = build.get("trace")
         executed_argv = build.get("executed_argv")
         expected_argv_tail = [
@@ -908,6 +1036,8 @@ def materialize_controller_runtime(
             or not isinstance(launcher, Mapping)
             or not isinstance(compiler, Mapping)
             or not isinstance(build_environment_binding, Mapping)
+            or not isinstance(build_directories, Mapping)
+            or set(build_directories) != {"cwd", "scratch_before", "scratch_after"}
             or not isinstance(trace_binding, Mapping)
             or not isinstance(executed_argv, list)
             or build.get("controller_source_receipt_sha256") != source.get("receipt_sha256")
@@ -954,6 +1084,13 @@ def materialize_controller_runtime(
             or environment_receipt["closure_sha256"] != compiler["closure_sha256"]
             or environment_receipt["compiler"]["path"] != compiler["path"]
             or environment_receipt["compiler"]["sha256"] != compiler["sha256"]
+            or build_directories["cwd"] != environment_receipt["cwd"]
+            or build_directories["scratch_before"] != environment_receipt["scratch"]
+            or any(
+                build_directories["scratch_before"][name]
+                != build_directories["scratch_after"][name]
+                for name in ("path", "dev", "ino", "uid", "gid", "mode", "nlink", "sha256")
+            )
         ):
             raise ControllerRuntimeError("controller build environment cross-binding differs")
         trace_identity = trace_binding.get("identity")
@@ -1025,6 +1162,16 @@ def materialize_controller_runtime(
             held.append(fd)
             tree_bindings.append(binding)
         tree_paths = [item["path"] for item in tree_bindings]
+        python_home_path = str(Path(python_home))
+        if python_home_path not in tree_paths:
+            raise ControllerRuntimeError("controller Python home is outside runtime trees")
+        stdlib_roots = [
+            item
+            for item in (Path(python_home) / "lib").iterdir()
+            if item.is_dir() and re.fullmatch(r"python[0-9]+\.[0-9]+", item.name)
+        ]
+        if len(stdlib_roots) != 1:
+            raise ControllerRuntimeError("controller Python home layout is not exact")
         admitted_imports = sorted(set(map(str, import_roots)))
         if any(
             path not in tree_paths
@@ -1039,6 +1186,7 @@ def materialize_controller_runtime(
             "files": file_bindings,
             "trees": tree_bindings,
             "import_roots": admitted_imports,
+            "python_home": python_home_path,
         }
         manifest = {
             **unsigned_manifest,
@@ -1061,6 +1209,7 @@ def materialize_controller_runtime(
         config_raw = (
             "schema=tgw-w09-controller-launch-fds/v1\n"
             f"python={python_resolved}\n"
+            f"python_home={python_home_path}\n"
             f"bundle={source_bundle['path']}\n"
             f"closure={Path(output_root) / closure_name}\n"
             f"receipt={Path(output_root) / receipt_name}\n"
