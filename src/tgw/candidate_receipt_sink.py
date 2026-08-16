@@ -39,17 +39,17 @@ from tgw.governed_execution_receipt import (
     GovernedExecutionReceiptError,
     verify_candidate_governed_execution_receipt,
 )
-from tgw.qualified_execution_service import (
-    QualifiedExecutionError,
-    validate_execution_proof,
-    validate_execution_service_catalog,
-)
 from tgw.plan_luet import (
     PINNED_LUET_BINARY_SHA256,
     PROVIDER_ID,
     normalize_conformance_graph,
 )
 from tgw.plan_solver import PlanResolutionError, solve, validate_for_dispatch
+from tgw.qualified_execution_service import (
+    QualifiedExecutionError,
+    validate_execution_proof,
+    validate_execution_service_catalog,
+)
 
 RECEIPT_SINK_SCHEMA = "tgw-pinned-git-candidate-receipt-sink/v1"
 RECEIPT_SINK_MANIFEST_SCHEMA = "tgw-pinned-git-candidate-receipt-sink-manifest/v1"

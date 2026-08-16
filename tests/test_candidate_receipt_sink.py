@@ -42,8 +42,6 @@ from tgw.candidate_receipt_sink import (
     load_pinned_candidate_evidence_descriptor,
     load_receipt_sink_descriptor,
 )
-from tgw.plan_luet import PINNED_LUET_BINARY_SHA256, PROVIDER_ID
-from tgw.plan_solver import solve
 from tgw.candidate_review import PACKET_SCHEMA, RESULT_SCHEMA
 from tgw.execution_resources import (
     RESOURCE_SERVICE_CAPABILITIES,
@@ -53,6 +51,8 @@ from tgw.execution_resources import (
     resource_service_descriptor_hash,
 )
 from tgw.governed_execution_receipt import create_candidate_governed_execution_receipt
+from tgw.plan_luet import PINNED_LUET_BINARY_SHA256, PROVIDER_ID
+from tgw.plan_solver import solve
 from tgw.qualified_execution_service import (
     PROOF_SCHEMA,
     RUNNER_DESCRIPTOR_SCHEMA,
