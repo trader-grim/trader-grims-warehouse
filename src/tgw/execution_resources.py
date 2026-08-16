@@ -18,13 +18,17 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+
 RESOURCE_RECEIPT_SCHEMA = "tgw-execution-resource-receipt/v1"
 RESOURCE_SERVICE_SCHEMA = "tgw-registered-resource-service/v1"
 RESOURCE_SERVICE_CATALOG_SCHEMA = "tgw-registered-resource-service-catalog/v2"
 RESOURCE_SERVICE_HEALTH_SCHEMA = "tgw-registered-resource-health/v1"
 RESOURCE_RESPONSE_SCHEMA = "tgw-registered-resource/v1"
 HARNESS_RUN_SCHEMA = "tgw-registered-resource-harness-run/v1"
-HARNESS_RETRIEVAL_ATTESTATION_SCHEMA = "tgw-registered-resource-retrieval-attestation/v1"
+HARNESS_RETRIEVAL_ATTESTATION_SCHEMA = "tgw-registered-resource-retrieval-attestation/v2"
 CARD_RESOURCE_NAMES = frozenset(
     {
         "plan_input",
@@ -41,6 +45,7 @@ _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _SERVICE_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+_KEY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _GIT_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _MAX_RESOURCE_RESPONSE_BYTES = 4 * 1024 * 1024
 _RESOURCE_SERVICE_DESCRIPTOR_FIELDS = {
@@ -85,50 +90,161 @@ def _is_hash(value: Any) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
 
 
-def validate_harness_retrieval_attestation(
-    attestation: Mapping[str, Any], *, expected: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Validate a durable service retrieval record before it can become evidence.
+def _base64(value: Any, *, label: str, length: int) -> bytes:
+    if not isinstance(value, str):
+        raise ResourceVerificationError(f"{label} is invalid")
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (TypeError, ValueError) as exc:
+        raise ResourceVerificationError(f"{label} is invalid") from exc
+    if len(decoded) != length or base64.b64encode(decoded).decode("ascii") != value:
+        raise ResourceVerificationError(f"{label} is invalid")
+    return decoded
 
-    A bare hash is not an attestation.  The record carries the service and run
-    identities plus every content-addressed card binding, and its hash covers
-    the complete canonical form.  ``expected`` lets the dispatch and candidate
-    paths bind it to their independently held card and handoff identities.
-    """
+
+def _public_key(value: str) -> Ed25519PublicKey:
+    try:
+        return Ed25519PublicKey.from_public_bytes(_base64(value, label="harness retrieval attestation public key", length=32))
+    except ValueError as exc:
+        raise ResourceVerificationError("harness retrieval attestation public key is invalid") from exc
+
+
+def _private_key(value: Ed25519PrivateKey | str | bytes) -> Ed25519PrivateKey:
+    if isinstance(value, Ed25519PrivateKey):
+        return value
+    if isinstance(value, bytes):
+        raw = value
+    elif isinstance(value, str):
+        raw = _base64(value, label="harness retrieval attestation private key", length=32)
+    else:
+        raise ResourceVerificationError("harness retrieval attestation private key is invalid")
+    if len(raw) != 32:
+        raise ResourceVerificationError("harness retrieval attestation private key is invalid")
+    try:
+        return Ed25519PrivateKey.from_private_bytes(raw)
+    except ValueError as exc:
+        raise ResourceVerificationError("harness retrieval attestation private key is invalid") from exc
+
+
+def ed25519_public_key(value: Ed25519PrivateKey | Ed25519PublicKey | str | bytes) -> str:
+    """Return the canonical base64 raw Ed25519 public key for a catalog entry."""
+
+    if isinstance(value, Ed25519PublicKey):
+        key = value
+    else:
+        key = _private_key(value).public_key()
+    return base64.b64encode(
+        key.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
+    ).decode("ascii")
+
+
+def _attestation_payload(value: Mapping[str, Any]) -> dict[str, Any]:
     required = {
         "schema", "service_id", "run_id", "card_hash", "role", "execution_identity",
-        "handoff_hash", "resource_receipt_hash", "resources", "attestation_hash",
+        "handoff_hash", "resource_receipt_hash", "resources", "attestation_key_id",
     }
-    if not isinstance(attestation, Mapping) or set(attestation) != required:
+    if not isinstance(value, Mapping) or set(value) != required:
         raise ResourceVerificationError("harness retrieval attestation is invalid")
-    if attestation.get("schema") != HARNESS_RETRIEVAL_ATTESTATION_SCHEMA:
+    if value.get("schema") != HARNESS_RETRIEVAL_ATTESTATION_SCHEMA:
         raise ResourceVerificationError("harness retrieval attestation schema is invalid")
-    if not isinstance(attestation.get("service_id"), str) or _SERVICE_ID.fullmatch(attestation["service_id"]) is None:
+    if not isinstance(value.get("service_id"), str) or _SERVICE_ID.fullmatch(value["service_id"]) is None:
         raise ResourceVerificationError("harness retrieval attestation service identity is invalid")
-    if not isinstance(attestation.get("run_id"), str) or _RUN_ID.fullmatch(attestation["run_id"]) is None:
+    if not isinstance(value.get("run_id"), str) or _RUN_ID.fullmatch(value["run_id"]) is None:
         raise ResourceVerificationError("harness retrieval attestation run identity is invalid")
-    if not isinstance(attestation.get("role"), str) or not attestation["role"]:
+    if not isinstance(value.get("role"), str) or not value["role"]:
         raise ResourceVerificationError("harness retrieval attestation role is invalid")
-    if not isinstance(attestation.get("execution_identity"), str) or not attestation["execution_identity"]:
+    if not isinstance(value.get("execution_identity"), str) or not value["execution_identity"]:
         raise ResourceVerificationError("harness retrieval attestation execution identity is invalid")
-    for field in ("card_hash", "handoff_hash", "resource_receipt_hash", "attestation_hash"):
-        if not _is_hash(attestation.get(field)):
+    if not isinstance(value.get("attestation_key_id"), str) or _KEY_ID.fullmatch(value["attestation_key_id"]) is None:
+        raise ResourceVerificationError("harness retrieval attestation key identity is invalid")
+    for field in ("card_hash", "handoff_hash", "resource_receipt_hash"):
+        if not _is_hash(value.get(field)):
             raise ResourceVerificationError("harness retrieval attestation hash is invalid")
-    resources = attestation.get("resources")
+    resources = value.get("resources")
     if not isinstance(resources, Mapping) or set(resources) != CARD_RESOURCE_NAMES:
         raise ResourceVerificationError("harness retrieval attestation resources are invalid")
     normalized_resources = {name: dict(resources[name]) for name in sorted(CARD_RESOURCE_NAMES)}
     for name, binding in normalized_resources.items():
         _binding(binding, name)
-    unsigned = dict(attestation)
-    claimed = unsigned.pop("attestation_hash")
-    if claimed != _hash(unsigned):
+    return {
+        "schema": HARNESS_RETRIEVAL_ATTESTATION_SCHEMA,
+        "service_id": value["service_id"],
+        "run_id": value["run_id"],
+        "card_hash": value["card_hash"],
+        "role": value["role"],
+        "execution_identity": value["execution_identity"],
+        "handoff_hash": value["handoff_hash"],
+        "resource_receipt_hash": value["resource_receipt_hash"],
+        "resources": normalized_resources,
+        "attestation_key_id": value["attestation_key_id"],
+    }
+
+
+def issue_harness_retrieval_attestation(
+    value: Mapping[str, Any], *, signing_private_key: Ed25519PrivateKey | str | bytes,
+) -> dict[str, Any]:
+    """Issue a canonical Ed25519 retrieval attestation.
+
+    The caller supplies only the signed payload, including the catalog-pinned
+    ``attestation_key_id``.  ``attestation_hash`` addresses that payload and
+    the signature authenticates the payload plus its hash.  The helper is used
+    by the service and by explicit test seams; it never discovers key material
+    from source or a catalog.
+    """
+
+    payload = _attestation_payload(value)
+    attestation_hash = _hash(payload)
+    signed = {**payload, "attestation_hash": attestation_hash}
+    signature = _private_key(signing_private_key).sign(_canonical(signed))
+    return {**signed, "signature": base64.b64encode(signature).decode("ascii")}
+
+
+def validate_harness_retrieval_attestation(
+    attestation: Mapping[str, Any], *, expected: Mapping[str, Any] | None = None,
+    attestation_key_id: str | None = None, attestation_public_key: str | None = None,
+) -> dict[str, Any]:
+    """Validate a durable service retrieval record before it can become evidence.
+
+    A bare hash is not an attestation.  The record carries the service and run
+    identities plus every content-addressed card binding.  Its hash covers the
+    signatureless payload and the Ed25519 signature covers that payload plus
+    the hash.  ``expected`` lets the dispatch and candidate paths bind it to
+    independently held card and handoff identities.  Passing both a public key
+    and key id authenticates it against the catalog; callers that merely parse
+    an artifact may omit both, but must not treat that as trusted evidence.
+    """
+    required = {
+        "schema", "service_id", "run_id", "card_hash", "role", "execution_identity",
+        "handoff_hash", "resource_receipt_hash", "resources", "attestation_key_id",
+        "attestation_hash", "signature",
+    }
+    if not isinstance(attestation, Mapping) or set(attestation) != required:
+        raise ResourceVerificationError("harness retrieval attestation is invalid")
+    payload = _attestation_payload(
+        {key: value for key, value in attestation.items() if key not in {"attestation_hash", "signature"}}
+    )
+    claimed = attestation.get("attestation_hash")
+    if not _is_hash(claimed) or claimed != _hash(payload):
         raise ResourceVerificationError("harness retrieval attestation hash mismatch")
+    signature = _base64(attestation.get("signature"), label="harness retrieval attestation signature", length=64)
+    if (attestation_key_id is None) != (attestation_public_key is None):
+        raise ResourceVerificationError("harness retrieval attestation trust binding is invalid")
+    if attestation_key_id is not None:
+        if not isinstance(attestation_key_id, str) or _KEY_ID.fullmatch(attestation_key_id) is None:
+            raise ResourceVerificationError("harness retrieval attestation trust binding is invalid")
+        if payload["attestation_key_id"] != attestation_key_id:
+            raise ResourceVerificationError("harness retrieval attestation key identity mismatch")
+        try:
+            _public_key(str(attestation_public_key)).verify(
+                signature, _canonical({**payload, "attestation_hash": claimed})
+            )
+        except InvalidSignature as exc:
+            raise ResourceVerificationError("harness retrieval attestation signature is invalid") from exc
     if expected is not None:
         for key, value in expected.items():
-            if attestation.get(key) != value:
+            if payload.get(key) != value:
                 raise ResourceVerificationError("harness retrieval attestation binding mismatch")
-    return {**dict(attestation), "resources": normalized_resources}
+    return {**payload, "attestation_hash": claimed, "signature": attestation["signature"]}
 
 
 def validate_resource_service_descriptor(descriptor: Mapping[str, Any]) -> dict[str, Any]:
@@ -201,15 +317,22 @@ def validate_resource_service_catalog(catalog: Mapping[str, Any]) -> dict[str, A
     normalized: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in services:
-        if not isinstance(item, Mapping) or set(item) != {"id", "descriptor_hash", "capabilities"}:
+        if not isinstance(item, Mapping) or set(item) != {
+            "id", "descriptor_hash", "capabilities", "attestation_key_id", "attestation_public_key",
+        }:
             raise ResourceVerificationError("registered resource service catalog entry is invalid")
         service_id = item["id"]
         descriptor_hash = item["descriptor_hash"]
         capabilities = item["capabilities"]
+        attestation_key_id = item["attestation_key_id"]
+        attestation_public_key = item["attestation_public_key"]
         if not isinstance(service_id, str) or _SERVICE_ID.fullmatch(service_id) is None or service_id in seen:
             raise ResourceVerificationError("registered resource service catalog identity is invalid")
         if not _is_hash(descriptor_hash):
             raise ResourceVerificationError("registered resource service catalog descriptor hash is invalid")
+        if not isinstance(attestation_key_id, str) or _KEY_ID.fullmatch(attestation_key_id) is None:
+            raise ResourceVerificationError("registered resource service catalog attestation key identity is invalid")
+        _public_key(attestation_public_key)
         if (
             not isinstance(capabilities, list)
             or not all(isinstance(value, str) and value for value in capabilities)
@@ -222,6 +345,8 @@ def validate_resource_service_catalog(catalog: Mapping[str, Any]) -> dict[str, A
                 "id": service_id,
                 "descriptor_hash": descriptor_hash,
                 "capabilities": sorted(capabilities),
+                "attestation_key_id": attestation_key_id,
+                "attestation_public_key": attestation_public_key,
             }
         )
     return {
@@ -246,6 +371,21 @@ def load_resource_service_catalog(path: str | os.PathLike[str]) -> dict[str, Any
     return validate_resource_service_catalog(value)
 
 
+def resource_service_attestation_key(
+    catalog: Mapping[str, Any], service_id: str,
+) -> dict[str, str]:
+    """Return the immutable catalog-pinned trust key for one service identity."""
+
+    normalized = validate_resource_service_catalog(catalog)
+    entry = next((item for item in normalized["services"] if item["id"] == service_id), None)
+    if entry is None:
+        raise ResourceVerificationError("registered resource service is absent from qualified catalog")
+    return {
+        "attestation_key_id": entry["attestation_key_id"],
+        "attestation_public_key": entry["attestation_public_key"],
+    }
+
+
 def verify_resource_service_registration(
     catalog: Mapping[str, Any], descriptor: Mapping[str, Any], *, resolver: "HTTPRegisteredResourceResolver | None" = None,
 ) -> dict[str, Any]:
@@ -266,7 +406,7 @@ def verify_resource_service_registration(
             "registered resource service lacks capabilities: " + ", ".join(sorted(missing))
         )
     if resolver is not None:
-        resolver.check_health()
+        resolver.check_health(attestation_key_id=entry["attestation_key_id"])
     return normalized_descriptor
 
 
@@ -428,8 +568,11 @@ class HTTPRegisteredResourceResolver:
             timeout_seconds=normalized["timeout_seconds"],
         )
 
-    def check_health(self) -> None:
-        """Fail closed unless the catalog-selected service reports its own identity."""
+    def check_health(self, *, attestation_key_id: str) -> None:
+        """Fail closed unless the catalog-selected service reports its signing identity."""
+
+        if not isinstance(attestation_key_id, str) or _KEY_ID.fullmatch(attestation_key_id) is None:
+            raise ResourceVerificationError("registered resource service attestation key identity is invalid")
 
         target = self._endpoint + "/v1/health"
         request = Request(target, method="GET")
@@ -452,6 +595,7 @@ class HTTPRegisteredResourceResolver:
         if value != {
             "schema": RESOURCE_SERVICE_HEALTH_SCHEMA,
             "service_id": self._service_id,
+            "attestation_key_id": attestation_key_id,
             "status": "healthy",
         }:
             raise ResourceVerificationError("registered resource service health identity is invalid")
@@ -536,10 +680,15 @@ class HTTPRegisteredResourceResolver:
     def verify_harness_retrieval_attestation(
         self, attestation: Mapping[str, Any], *, card_hash: str, role: str,
         execution_identity: str, handoff_hash: str, resource_receipt_hash: str,
-        resources: Mapping[str, Any],
+        resources: Mapping[str, Any], attestation_key_id: str,
+        attestation_public_key: str,
     ) -> dict[str, Any]:
         """Read back the service record; a runner cannot self-attest by echoing."""
-        local = validate_harness_retrieval_attestation(attestation)
+        local = validate_harness_retrieval_attestation(
+            attestation,
+            attestation_key_id=attestation_key_id,
+            attestation_public_key=attestation_public_key,
+        )
         run_id = local.get("run_id")
         if not isinstance(run_id, str) or _RUN_ID.fullmatch(run_id) is None:
             raise ResourceVerificationError("harness retrieval attestation run id is invalid")
@@ -555,7 +704,12 @@ class HTTPRegisteredResourceResolver:
             "handoff_hash": handoff_hash, "resource_receipt_hash": resource_receipt_hash,
             "resources": {name: resources[name] for name in sorted(CARD_RESOURCE_NAMES)},
         }
-        return validate_harness_retrieval_attestation(recorded, expected=expected)
+        return validate_harness_retrieval_attestation(
+            recorded,
+            expected=expected,
+            attestation_key_id=attestation_key_id,
+            attestation_public_key=attestation_public_key,
+        )
 
     def fetch(self, ref: str) -> RegisteredResource:
         return self._fetch(ref)

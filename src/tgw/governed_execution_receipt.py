@@ -17,6 +17,7 @@ from tgw.execution_resources import (
     CARD_RESOURCE_NAMES,
     RESOURCE_RECEIPT_SCHEMA,
     ResourceVerificationError,
+    resource_service_attestation_key,
     validate_harness_retrieval_attestation,
     verify_card_resource_service_catalog,
 )
@@ -132,6 +133,9 @@ def create_candidate_governed_execution_receipt(
     card_hash, bindings = _bound_card(card, source_tree=source_tree, plan_commit=plan_commit)
     try:
         verify_card_resource_service_catalog(card, resource_service_catalog)
+        attestation_key = resource_service_attestation_key(
+            resource_service_catalog, card["resource_service"]["id"],
+        )
     except ResourceVerificationError as exc:
         raise GovernedExecutionReceiptError(f"execution card resource service catalog is invalid: {exc}") from exc
     resource_hash = _bound_resource_receipt(
@@ -168,6 +172,7 @@ def create_candidate_governed_execution_receipt(
                 "resource_receipt_hash": resource_hash, "resources": {name: bindings[name] for name in sorted(bindings)},
                 "service_id": card["resource_service"]["id"],
             },
+            **attestation_key,
         )
     except ResourceVerificationError as exc:
         raise GovernedExecutionReceiptError(f"governed role retrieval attestation is invalid: {exc}") from exc
@@ -237,6 +242,9 @@ def verify_candidate_governed_execution_receipt(
     if not isinstance(attestation, Mapping) or attestation.get("attestation_hash") != receipt["harness_retrieval_attestation_hash"]:
         raise GovernedExecutionReceiptError("candidate governed execution receipt attestation is invalid")
     try:
+        attestation_key = resource_service_attestation_key(
+            resource_service_catalog, str(receipt["service_id"]),
+        )
         validate_harness_retrieval_attestation(
             attestation,
             expected={
@@ -245,6 +253,7 @@ def verify_candidate_governed_execution_receipt(
                 "handoff_hash": receipt["handoff_hash"],
                 "resource_receipt_hash": receipt["resource_receipt_hash"],
             },
+            **attestation_key,
         )
     except ResourceVerificationError as exc:
         raise GovernedExecutionReceiptError(f"candidate governed execution receipt attestation is invalid: {exc}") from exc

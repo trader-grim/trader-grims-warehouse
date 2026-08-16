@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tgw.candidate_manifest import (
     build_candidate_manifest,
@@ -31,6 +32,8 @@ from tgw.candidate_receipt_sink import (
 from tgw.candidate_review import PACKET_SCHEMA, RESULT_SCHEMA
 from tgw.execution_resources import (
     RESOURCE_SERVICE_CAPABILITIES,
+    ed25519_public_key,
+    issue_harness_retrieval_attestation,
     resource_service_catalog_hash,
     resource_service_descriptor_hash,
 )
@@ -38,6 +41,8 @@ from tgw.governed_execution_receipt import create_candidate_governed_execution_r
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAN_APPROVED_REF = "refs/tgw/approved/GOVERNED-EXECUTION-PLATFORM"
+TEST_ATTESTATION_KEY_ID = "candidate-sink-attestation-key-1"
+TEST_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
 
 
 def canonical(value):
@@ -104,6 +109,8 @@ def service_catalog(plan_commit):
             "id": service["id"],
             "descriptor_hash": resource_service_descriptor_hash(service),
             "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
+            "attestation_key_id": TEST_ATTESTATION_KEY_ID,
+            "attestation_public_key": ed25519_public_key(TEST_ATTESTATION_PRIVATE_KEY),
         }],
     }
     return service, catalog
@@ -155,8 +162,8 @@ def role_evidence(*, role, source_commit, source_tree, plan_commit, receipt_sink
     resources = {**resources_unsigned, "receipt_hash": object_hash(resources_unsigned)}
     execution_identity = f"isolated-context:{role}"
     handoff_hash = "sha256:" + hashlib.sha256(f"handoff:{role}".encode()).hexdigest()
-    attestation_unsigned = {
-        "schema": "tgw-registered-resource-retrieval-attestation/v1",
+    attestation_payload = {
+        "schema": "tgw-registered-resource-retrieval-attestation/v2",
         "service_id": service["id"],
         "run_id": f"run-{role}",
         "card_hash": card["card_hash"],
@@ -165,8 +172,11 @@ def role_evidence(*, role, source_commit, source_tree, plan_commit, receipt_sink
         "handoff_hash": handoff_hash,
         "resource_receipt_hash": resources["receipt_hash"],
         "resources": {name: bindings[name] for name in sorted(bindings)},
+        "attestation_key_id": TEST_ATTESTATION_KEY_ID,
     }
-    attestation = {**attestation_unsigned, "attestation_hash": object_hash(attestation_unsigned)}
+    attestation = issue_harness_retrieval_attestation(
+        attestation_payload, signing_private_key=TEST_ATTESTATION_PRIVATE_KEY,
+    )
     conditions = {
         "implementation": ["implemented"],
         "independent-review": ["reviewed"],

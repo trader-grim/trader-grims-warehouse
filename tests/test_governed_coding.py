@@ -2,11 +2,15 @@ import hashlib
 import json
 from pathlib import Path
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from tgw.execution_resources import (
     RESOURCE_SERVICE_CAPABILITIES,
     HTTPRegisteredResourceResolver,
     RegisteredResourceResolver,
     ResourceVerificationError,
+    ed25519_public_key,
+    issue_harness_retrieval_attestation,
     resource_service_catalog_hash,
 )
 from tgw.governed_coding import admission_gate, dispatch_role
@@ -33,6 +37,8 @@ RESOURCE_SERVICE = {
     "timeout_seconds": 5,
 }
 TEST_ATTESTATION_HASH = "sha256:" + "a" * 64
+TEST_ATTESTATION_KEY_ID = "unit-attestation-key-1"
+TEST_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
 
 
 def service_hash():
@@ -49,6 +55,8 @@ RESOURCE_SERVICE_CATALOG = {
         "id": RESOURCE_SERVICE["id"],
         "descriptor_hash": service_hash(),
         "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
+        "attestation_key_id": TEST_ATTESTATION_KEY_ID,
+        "attestation_public_key": ed25519_public_key(TEST_ATTESTATION_PRIVATE_KEY),
     }],
 }
 
@@ -70,17 +78,23 @@ class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
     def verify_harness_retrieval_attestation(self, attestation, **kwargs):
         if attestation != {"attestation_hash": TEST_ATTESTATION_HASH}:
             raise ResourceVerificationError("test retrieval attestation is invalid")
-        unsigned = {
-            "schema": "tgw-registered-resource-retrieval-attestation/v1",
+        if (
+            kwargs.get("attestation_key_id") != TEST_ATTESTATION_KEY_ID
+            or kwargs.get("attestation_public_key")
+            != RESOURCE_SERVICE_CATALOG["services"][0]["attestation_public_key"]
+        ):
+            raise ResourceVerificationError("test retrieval attestation key is invalid")
+        payload = {
+            "schema": "tgw-registered-resource-retrieval-attestation/v2",
             "service_id": RESOURCE_SERVICE["id"], "run_id": "unit-run",
-            **kwargs,
+            "card_hash": kwargs["card_hash"], "role": kwargs["role"],
+            "execution_identity": kwargs["execution_identity"], "handoff_hash": kwargs["handoff_hash"],
+            "resource_receipt_hash": kwargs["resource_receipt_hash"], "resources": kwargs["resources"],
+            "attestation_key_id": TEST_ATTESTATION_KEY_ID,
         }
-        return {
-            **unsigned,
-            "attestation_hash": "sha256:" + hashlib.sha256(
-                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest(),
-        }
+        return issue_harness_retrieval_attestation(
+            payload, signing_private_key=TEST_ATTESTATION_PRIVATE_KEY,
+        )
 
 
 def runner(path: Path, *, fail_review=False, overclaim=False):

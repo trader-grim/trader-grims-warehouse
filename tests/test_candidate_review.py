@@ -3,17 +3,20 @@ import json
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tgw.candidate_review import (
     CandidateReviewError,
     generate_review_packet,
     validate_review_result,
 )
+from tgw.execution_resources import issue_harness_retrieval_attestation
 from tgw.harness_registry import load_registry, observe_health
 from tgw.review_runner import snapshot_hash
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "agent-services/catalogs/harness-providers-v1.json"
+TEST_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
 
 
 def hash_object(value):
@@ -98,14 +101,17 @@ def governed_receipt(packet_value, *, passed):
         )
     }
     handoff_hash = "sha256:" + "b" * 64
-    attestation_unsigned = {
-        "schema": "tgw-registered-resource-retrieval-attestation/v1",
+    attestation_payload = {
+        "schema": "tgw-registered-resource-retrieval-attestation/v2",
         "service_id": "review-service", "run_id": "review-run", "card_hash": card_hash,
         "role": "independent-review", "execution_identity": "review-context:1",
         "handoff_hash": handoff_hash, "resource_receipt_hash": resource_receipt_hash,
         "resources": resources,
+        "attestation_key_id": "candidate-review-test-key-1",
     }
-    attestation = {**attestation_unsigned, "attestation_hash": hash_object(attestation_unsigned)}
+    attestation = issue_harness_retrieval_attestation(
+        attestation_payload, signing_private_key=TEST_ATTESTATION_PRIVATE_KEY,
+    )
     unsigned = {
         "schema": "tgw-governed-coding-receipt/v1",
         "status": "PASS" if passed else "FAIL",

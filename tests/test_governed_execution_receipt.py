@@ -6,8 +6,14 @@ import sys
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from tgw.execution_resources import RESOURCE_SERVICE_CAPABILITIES, resource_service_catalog_hash
+from tgw.execution_resources import (
+    RESOURCE_SERVICE_CAPABILITIES,
+    ed25519_public_key,
+    issue_harness_retrieval_attestation,
+    resource_service_catalog_hash,
+)
 from tgw.governed_execution_receipt import (
     GovernedExecutionReceiptError,
     create_candidate_governed_execution_receipt,
@@ -23,6 +29,8 @@ RESOURCE_SERVICE = {
     "credential_env": None,
     "timeout_seconds": 5,
 }
+TEST_ATTESTATION_KEY_ID = "candidate-attestation-key-1"
+TEST_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
 
 
 def canonical_hash(value):
@@ -39,6 +47,8 @@ RESOURCE_SERVICE_CATALOG = {
         "id": RESOURCE_SERVICE["id"],
         "descriptor_hash": canonical_hash(RESOURCE_SERVICE),
         "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
+        "attestation_key_id": TEST_ATTESTATION_KEY_ID,
+        "attestation_public_key": ed25519_public_key(TEST_ATTESTATION_PRIVATE_KEY),
     }],
 }
 
@@ -105,8 +115,8 @@ def resource_receipt(card_value):
 
 def role_receipt(card_value, resource_value):
     handoff_hash = "sha256:" + "b" * 64
-    attestation_unsigned = {
-        "schema": "tgw-registered-resource-retrieval-attestation/v1",
+    attestation_payload = {
+        "schema": "tgw-registered-resource-retrieval-attestation/v2",
         "service_id": RESOURCE_SERVICE["id"],
         "run_id": "candidate-run",
         "card_hash": card_value["card_hash"],
@@ -115,8 +125,11 @@ def role_receipt(card_value, resource_value):
         "handoff_hash": handoff_hash,
         "resource_receipt_hash": resource_value["receipt_hash"],
         "resources": {name: value for name, value in sorted(card_value["bindings"].items())},
+        "attestation_key_id": TEST_ATTESTATION_KEY_ID,
     }
-    attestation = {**attestation_unsigned, "attestation_hash": canonical_hash(attestation_unsigned)}
+    attestation = issue_harness_retrieval_attestation(
+        attestation_payload, signing_private_key=TEST_ATTESTATION_PRIVATE_KEY,
+    )
     unsigned = {
         "schema": "tgw-governed-coding-receipt/v1",
         "status": "PASS",

@@ -11,11 +11,14 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tgw.execution_resources import (
     RESOURCE_SERVICE_CAPABILITIES,
     HTTPRegisteredResourceResolver,
     ResourceVerificationError,
+    ed25519_public_key,
+    issue_harness_retrieval_attestation,
     resource_service_catalog_hash,
     resource_service_descriptor_hash,
     verify_card_resource_service,
@@ -27,6 +30,8 @@ from tgw.harness_registry import load_registry, observe_health
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAN_COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
+TEST_ATTESTATION_KEY_ID = "resource-service-test-key-1"
+TEST_ATTESTATION_PRIVATE_KEY = Ed25519PrivateKey.generate()
 
 
 def canonical_hash(value):
@@ -112,6 +117,7 @@ def resource_service(content, *, token="test-token"):
                     {
                         "schema": "tgw-registered-resource-health/v1",
                         "service_id": "test-resource-service",
+                        "attestation_key_id": TEST_ATTESTATION_KEY_ID,
                         "status": "healthy",
                     },
                     sort_keys=True,
@@ -209,14 +215,17 @@ def resource_service(content, *, token="test-token"):
             if run["seen"] != {binding["ref"] for binding in run["resources"].values()}:
                 self.send_error(409)
                 return
-            unsigned = {
-                "schema": "tgw-registered-resource-retrieval-attestation/v1",
+            payload = {
+                "schema": "tgw-registered-resource-retrieval-attestation/v2",
                 "service_id": "test-resource-service", "run_id": run_id,
                 "card_hash": run["card_hash"], "role": run["role"],
                 "execution_identity": run["execution_identity"], "handoff_hash": run["handoff_hash"],
                 "resource_receipt_hash": run["resource_receipt_hash"], "resources": run["resources"],
+                "attestation_key_id": TEST_ATTESTATION_KEY_ID,
             }
-            attestation = {**unsigned, "attestation_hash": canonical_hash(unsigned)}
+            attestation = issue_harness_retrieval_attestation(
+                payload, signing_private_key=TEST_ATTESTATION_PRIVATE_KEY,
+            )
             run["attestation"] = attestation
             body = json.dumps(attestation, sort_keys=True).encode()
             self.send_response(200)
@@ -256,6 +265,8 @@ def catalog(service):
                 "id": service["id"],
                 "descriptor_hash": resource_service_descriptor_hash(service),
                 "capabilities": sorted(RESOURCE_SERVICE_CAPABILITIES),
+                "attestation_key_id": TEST_ATTESTATION_KEY_ID,
+                "attestation_public_key": ed25519_public_key(TEST_ATTESTATION_PRIVATE_KEY),
             }
         ],
     }
@@ -341,7 +352,7 @@ def test_every_role_retrieves_card_bound_sources_from_the_qualified_service(tmp_
     monkeypatch.setenv("TGW_TEST_RESOURCE_TOKEN", "test-token")
     runner = tmp_path / "all-role-runner"
     runner.write_text(
-        "#!/usr/bin/env python3\n"
+        f"#!{sys.executable}\n"
         "import json,sys\n"
         "from tgw.execution_resources import HTTPRegisteredResourceResolver,verify_card_resources\n"
         "handoff=json.load(sys.stdin)\n"
@@ -419,7 +430,7 @@ def test_every_role_retrieves_card_bound_sources_from_the_qualified_service(tmp_
             resource_service_catalog=catalog(service),
         )
 
-    assert [receipt["status"] for receipt in receipts] == ["PASS", "PASS", "PASS"]
+    assert [receipt["status"] for receipt in receipts] == ["PASS", "PASS", "PASS"], json.dumps(receipts, indent=2)
     assert all(receipt["harness_resource_receipt_hash"] == receipt["resource_receipt_hash"] for receipt in receipts)
     assert all(receipt["harness_retrieval_attestation_hash"] for receipt in receipts)
     assert echo_receipt["status"] == "FAIL"
@@ -430,7 +441,7 @@ def test_non_test_governed_role_script_dispatches_via_registered_resource_servic
     content = resources()
     runner = tmp_path / "runner"
     runner.write_text(
-        "#!/usr/bin/env python3\n"
+        f"#!{sys.executable}\n"
         "import json,sys\n"
         "from tgw.execution_resources import HTTPRegisteredResourceResolver,verify_card_resources\n"
         "handoff=json.load(sys.stdin)\n"

@@ -13,6 +13,7 @@ from tgw.execution_resources import (
     HTTPRegisteredResourceResolver,
     ResourceResolver,
     ResourceVerificationError,
+    resource_service_attestation_key,
     resource_service_catalog_hash,
     resource_service_descriptor_hash,
     validate_harness_retrieval_attestation,
@@ -149,6 +150,7 @@ def dispatch_role(
         verified_service, verified_catalog = verify_card_resource_service(
             card, resource_service, resource_service_catalog,
         )
+        attestation_key = resource_service_attestation_key(verified_catalog, verified_service["id"])
         resource_receipt = verify_card_resources(card, resource_resolver)
     except ResourceVerificationError as exc:
         return _receipt(
@@ -232,14 +234,15 @@ def dispatch_role(
         attestation_error = "runner did not return a service-issued retrieval attestation"
     else:
         try:
-                verified_attestation = resource_resolver.verify_harness_retrieval_attestation(
+            verified_attestation = resource_resolver.verify_harness_retrieval_attestation(
                 harness_retrieval_attestation,
                 card_hash=card["card_hash"], role=role,
                 execution_identity=execution_identity, handoff_hash=handoff["handoff_hash"],
                 resource_receipt_hash=resource_receipt["receipt_hash"], resources=card["bindings"],
-                )
-                attestation_hash = str(verified_attestation["attestation_hash"])
-                harness_retrieval_attestation = verified_attestation
+                **attestation_key,
+            )
+            attestation_hash = str(verified_attestation["attestation_hash"])
+            harness_retrieval_attestation = verified_attestation
         except ResourceVerificationError as exc:
             attestation_error = str(exc)
     valid_success = (
