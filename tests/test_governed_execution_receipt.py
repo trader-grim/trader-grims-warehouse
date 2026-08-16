@@ -150,13 +150,21 @@ def test_candidate_receipt_binds_card_resources_and_role_to_exact_git_identity(t
         card=card_value,
         resource_receipt=resources,
         role_receipt=role,
+        resource_service_catalog=RESOURCE_SERVICE_CATALOG,
         source_commit=commit,
         source_tree=tree,
         plan_commit=PLAN_COMMIT,
     )
 
     assert verify_candidate_governed_execution_receipt(
-        receipt, source_commit=commit, source_tree=tree, plan_commit=PLAN_COMMIT
+        receipt,
+        card=card_value,
+        resource_receipt=resources,
+        role_receipt=role,
+        resource_service_catalog=RESOURCE_SERVICE_CATALOG,
+        source_commit=commit,
+        source_tree=tree,
+        plan_commit=PLAN_COMMIT,
     ) == receipt
     assert receipt["role_receipt_hash"] == role["receipt_hash"]
 
@@ -176,6 +184,7 @@ def test_candidate_receipt_rejects_a_structurally_plausible_but_tampered_attesta
             card=card_value,
             resource_receipt=resources,
             role_receipt=role,
+            resource_service_catalog=RESOURCE_SERVICE_CATALOG,
             source_commit=commit,
             source_tree=tree,
             plan_commit=PLAN_COMMIT,
@@ -191,6 +200,7 @@ def test_candidate_receipt_verifier_rejects_a_compact_forged_attestation(tmp_pat
         card=card_value,
         resource_receipt=resources,
         role_receipt=role,
+        resource_service_catalog=RESOURCE_SERVICE_CATALOG,
         source_commit=commit,
         source_tree=tree,
         plan_commit=PLAN_COMMIT,
@@ -203,7 +213,14 @@ def test_candidate_receipt_verifier_rejects_a_compact_forged_attestation(tmp_pat
 
     with pytest.raises(GovernedExecutionReceiptError, match="attestation is invalid"):
         verify_candidate_governed_execution_receipt(
-            receipt, source_commit=commit, source_tree=tree, plan_commit=PLAN_COMMIT,
+            receipt,
+            card=card_value,
+            resource_receipt=resources,
+            role_receipt=role,
+            resource_service_catalog=RESOURCE_SERVICE_CATALOG,
+            source_commit=commit,
+            source_tree=tree,
+            plan_commit=PLAN_COMMIT,
         )
 
 
@@ -216,6 +233,7 @@ def test_candidate_receipt_verifier_binds_service_execution_and_handoff_identiti
         card=card_value,
         resource_receipt=resources,
         role_receipt=role,
+        resource_service_catalog=RESOURCE_SERVICE_CATALOG,
         source_commit=commit,
         source_tree=tree,
         plan_commit=PLAN_COMMIT,
@@ -227,7 +245,14 @@ def test_candidate_receipt_verifier_binds_service_execution_and_handoff_identiti
 
     with pytest.raises(GovernedExecutionReceiptError, match="attestation is invalid"):
         verify_candidate_governed_execution_receipt(
-            receipt, source_commit=commit, source_tree=tree, plan_commit=PLAN_COMMIT,
+            receipt,
+            card=card_value,
+            resource_receipt=resources,
+            role_receipt=role,
+            resource_service_catalog=RESOURCE_SERVICE_CATALOG,
+            source_commit=commit,
+            source_tree=tree,
+            plan_commit=PLAN_COMMIT,
         )
 
 
@@ -246,6 +271,7 @@ def test_candidate_receipt_refuses_a_role_descriptor_from_another_service(tmp_pa
             card=card_value,
             resource_receipt=resources,
             role_receipt=role,
+            resource_service_catalog=RESOURCE_SERVICE_CATALOG,
             source_commit=commit,
             source_tree=tree,
             plan_commit=PLAN_COMMIT,
@@ -266,6 +292,7 @@ def test_candidate_binding_refuses_a_card_for_another_source_tree(tmp_path):
             card=card_value,
             resource_receipt=resources,
             role_receipt=role_receipt(card_value, resources),
+            resource_service_catalog=RESOURCE_SERVICE_CATALOG,
             source_commit=commit,
             source_tree=tree,
             plan_commit=PLAN_COMMIT,
@@ -280,9 +307,11 @@ def test_candidate_receipt_script_resolves_the_requested_closed_candidate(tmp_pa
     card_path = tmp_path / "card.json"
     resources_path = tmp_path / "resources.json"
     role_path = tmp_path / "role.json"
+    catalog_path = tmp_path / "resource-service-catalog.json"
     card_path.write_text(json.dumps(card_value))
     resources_path.write_text(json.dumps(resources))
     role_path.write_text(json.dumps(role))
+    catalog_path.write_text(json.dumps(RESOURCE_SERVICE_CATALOG))
 
     completed = subprocess.run(
         [
@@ -294,6 +323,7 @@ def test_candidate_receipt_script_resolves_the_requested_closed_candidate(tmp_pa
             "--card", str(card_path),
             "--resource-receipt", str(resources_path),
             "--role-receipt", str(role_path),
+            "--resource-service-catalog", str(catalog_path),
         ],
         env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
         text=True,

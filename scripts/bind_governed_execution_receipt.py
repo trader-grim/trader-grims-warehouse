@@ -41,6 +41,7 @@ def main() -> int:
     parser.add_argument("--card", type=Path, required=True)
     parser.add_argument("--resource-receipt", type=Path, required=True)
     parser.add_argument("--role-receipt", type=Path, required=True)
+    parser.add_argument("--resource-service-catalog", type=Path, required=True)
     args = parser.parse_args()
     try:
         repo = args.repo.resolve()
@@ -56,6 +57,7 @@ def main() -> int:
             card=_object(args.card, "execution card"),
             resource_receipt=_object(args.resource_receipt, "execution resource receipt"),
             role_receipt=_object(args.role_receipt, "governed role receipt"),
+            resource_service_catalog=_object(args.resource_service_catalog, "registered resource service catalog"),
             source_commit=commit,
             source_tree=tree,
             plan_commit=args.plan_commit,

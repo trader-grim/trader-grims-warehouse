@@ -18,6 +18,7 @@ from tgw.execution_resources import (
     RESOURCE_RECEIPT_SCHEMA,
     ResourceVerificationError,
     validate_harness_retrieval_attestation,
+    verify_card_resource_service_catalog,
 )
 from tgw.governed_coding import validate_receipt
 
@@ -118,7 +119,7 @@ def _bound_resource_receipt(
 
 def create_candidate_governed_execution_receipt(
     *, card: Mapping[str, Any], resource_receipt: Mapping[str, Any], role_receipt: Mapping[str, Any],
-    source_commit: str, source_tree: str, plan_commit: str,
+    resource_service_catalog: Mapping[str, Any], source_commit: str, source_tree: str, plan_commit: str,
 ) -> dict[str, Any]:
     """Create a PASS receipt only when all three role artifacts bind one candidate."""
 
@@ -129,6 +130,10 @@ def create_candidate_governed_execution_receipt(
     if not isinstance(plan_commit, str) or not plan_commit:
         raise GovernedExecutionReceiptError("candidate Plan commit is invalid")
     card_hash, bindings = _bound_card(card, source_tree=source_tree, plan_commit=plan_commit)
+    try:
+        verify_card_resource_service_catalog(card, resource_service_catalog)
+    except ResourceVerificationError as exc:
+        raise GovernedExecutionReceiptError(f"execution card resource service catalog is invalid: {exc}") from exc
     resource_hash = _bound_resource_receipt(
         resource_receipt, card_hash=card_hash, plan_commit=plan_commit, bindings=bindings,
     )
@@ -193,9 +198,16 @@ def create_candidate_governed_execution_receipt(
 
 
 def verify_candidate_governed_execution_receipt(
-    receipt: Mapping[str, Any], *, source_commit: str, source_tree: str, plan_commit: str,
+    receipt: Mapping[str, Any], *, card: Mapping[str, Any], resource_receipt: Mapping[str, Any],
+    role_receipt: Mapping[str, Any], resource_service_catalog: Mapping[str, Any],
+    source_commit: str, source_tree: str, plan_commit: str,
 ) -> dict[str, Any]:
-    """Verify the compact persisted receipt without fetching mutable resources."""
+    """Verify a compact join against the immutable artifacts it names.
+
+    A compact receipt contains hashes, not copied execution context.  It is
+    therefore never sufficient by itself: callers must supply the exact card,
+    resource/role receipts, and catalog retained by the receipt sink.
+    """
 
     required = {
         "schema", "status", "source_commit", "source_tree", "plan_commit", "role",
@@ -236,17 +248,15 @@ def verify_candidate_governed_execution_receipt(
         )
     except ResourceVerificationError as exc:
         raise GovernedExecutionReceiptError(f"candidate governed execution receipt attestation is invalid: {exc}") from exc
-    if (
-        not isinstance(receipt.get("role"), str)
-        or not isinstance(receipt.get("selected_provider"), str)
-        or not isinstance(receipt.get("service_id"), str)
-        or not isinstance(receipt.get("execution_identity"), str)
-        or not isinstance(receipt.get("handoff_hash"), str)
-        or not isinstance(receipt.get("resource_service_descriptor_hash"), str)
-        or _SHA256.fullmatch(receipt["resource_service_descriptor_hash"]) is None
-        or not isinstance(receipt.get("resource_service_catalog_ref"), str)
-        or not isinstance(receipt.get("resource_service_catalog_hash"), str)
-        or _SHA256.fullmatch(receipt["resource_service_catalog_hash"]) is None
-    ):
-        raise GovernedExecutionReceiptError("candidate governed execution receipt role binding is invalid")
+    expected_receipt = create_candidate_governed_execution_receipt(
+        card=card,
+        resource_receipt=resource_receipt,
+        role_receipt=role_receipt,
+        resource_service_catalog=resource_service_catalog,
+        source_commit=source_commit,
+        source_tree=source_tree,
+        plan_commit=plan_commit,
+    )
+    if receipt != expected_receipt:
+        raise GovernedExecutionReceiptError("candidate governed execution receipt artifacts do not match")
     return dict(receipt)

@@ -275,22 +275,35 @@ def verify_card_resource_service(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Check that descriptor and qualified catalog are both card-bound."""
 
-    binding = card.get("resource_service")
+    normalized_catalog = verify_card_resource_service_catalog(card, catalog)
+    binding = card["resource_service"]
+    normalized = validate_resource_service_descriptor(descriptor)
+    if binding["id"] != normalized["id"] or binding["descriptor_hash"] != resource_service_descriptor_hash(normalized):
+        raise ResourceVerificationError("card resource service binding mismatch")
+    return normalized, normalized_catalog
+
+
+def verify_card_resource_service_catalog(
+    card: Mapping[str, Any], catalog: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Require the card's service identity to resolve inside its exact catalog."""
+
+    binding = card.get("resource_service") if isinstance(card, Mapping) else None
     if not isinstance(binding, Mapping) or set(binding) != {
         "id", "descriptor_hash", "catalog_ref", "catalog_hash",
     }:
         raise ResourceVerificationError("card resource service binding is invalid")
     normalized_catalog = validate_resource_service_catalog(catalog)
-    normalized = validate_resource_service_descriptor(descriptor)
-    if binding["id"] != normalized["id"] or binding["descriptor_hash"] != resource_service_descriptor_hash(normalized):
-        raise ResourceVerificationError("card resource service binding mismatch")
     if (
         binding["catalog_ref"] != normalized_catalog["catalog_ref"]
         or binding["catalog_hash"] != resource_service_catalog_hash(normalized_catalog)
         or normalized_catalog["plan_commit"] != card.get("plan_commit")
     ):
         raise ResourceVerificationError("card resource service catalog binding mismatch")
-    return normalized, normalized_catalog
+    entry = next((item for item in normalized_catalog["services"] if item["id"] == binding["id"]), None)
+    if entry is None or entry["descriptor_hash"] != binding["descriptor_hash"]:
+        raise ResourceVerificationError("card resource service is not qualified by its catalog")
+    return normalized_catalog
 
 
 @dataclass(frozen=True)
