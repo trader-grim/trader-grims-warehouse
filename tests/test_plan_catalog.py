@@ -7,7 +7,7 @@ import pytest
 from tgw.plan_catalog import CATALOG_SCHEMA, compose_catalog, load_provider_catalog
 from tgw.plan_solver import PlanResolutionError, solve
 
-COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
+COMMIT = "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99"
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "agent-services/catalogs/governed-execution-platform-v1.json"
 TARGET_CAPABILITIES = [
@@ -39,6 +39,8 @@ def test_canonical_catalog_composes_complete_closure_as_work_not_installed_state
     solution = solve(composed, expected_plan_commit=COMMIT)
 
     assert explicit["schema"] == CATALOG_SCHEMA
+    assert "code.graph-query@1" in explicit["capabilities"]
+    assert any(provider["id"] == "canonical-code-graph" for provider in explicit["providers"])
     assert composed["catalog_gaps"] == []
     assert solution["complete"] is True
     assert solution["satisfied_installed"] == []

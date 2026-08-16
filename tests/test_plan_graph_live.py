@@ -71,3 +71,11 @@ def test_live_plan_graph_uses_configured_git_executable(tmp_path):
     wrapper.chmod(0o755)
     result = live_plan_graph(root, 'PP-ALPHA-001', git_path=str(wrapper))
     assert result['plan_commit']
+
+
+def test_live_plan_graph_uses_explicit_disk_backed_runtime(tmp_path):
+    root = _plan_repo(tmp_path)
+    runtime = tmp_path / 'disk-runtime'
+    result = live_plan_graph(root, 'PP-ALPHA-001', runtime_root=runtime)
+    assert result['ok'] is True
+    assert (runtime / 'tgw-plan-graph').is_dir()

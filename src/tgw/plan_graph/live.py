@@ -101,7 +101,7 @@ def source_envelope(root: Path, allowlist: Path, *, git_path: str = "git") -> di
 def live_plan_graph(
     plan_root: Path | str = DEFAULT_PLAN_ROOT, task: str = "", *,
     receiver: str = "codex", operation: str = "brief", limit: int = 12,
-    git_path: str = "git",
+    git_path: str = "git", runtime_root: Path | str | None = None,
 ) -> dict[str, Any]:
     """Build and query one exact, clean standalone-Plan snapshot."""
     if not isinstance(task, str) or not task.strip():
@@ -116,7 +116,12 @@ def live_plan_graph(
         raise ValueError(f"unknown operation: {operation}")
 
     root = Path(plan_root).resolve(strict=True)
-    runtime = Path(tempfile.gettempdir()) / "tgw-plan-graph"
+    runtime_base = (
+        Path(runtime_root)
+        if runtime_root is not None
+        else Path(os.environ.get("TGW_PLAN_GRAPH_RUNTIME", tempfile.gettempdir()))
+    )
+    runtime = runtime_base / "tgw-plan-graph"
     runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
     paths = _selected_paths(root)
     allowlist = runtime / f"allowlist-{_sha(str(root).encode())}.txt"

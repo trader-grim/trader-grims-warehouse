@@ -18,6 +18,24 @@ going forward.
 
 ## Where your actual instructions live
 
+### Codex and other coding harnesses
+
+Before changing code, reconciling implementation, or reporting completion,
+retrieve one exact task bundle from the registered `tgw-context` MCP on
+**tgw-lib**.  The bundle binds the approved standalone Plan, relevant committed
+runbooks, and the CodeGraph snapshot to exact commits and hashes.  Follow its
+citations rather than relying on conversation memory or an embedded Plan copy.
+
+Keep these statuses separate in every report: Master Plan, selected Plan or PP,
+Todo, source implementation, review/admission, deployment, live verification,
+and operator acceptance.  In particular, completion of W11 in
+`GOVERNED-EXECUTION-PLATFORM-v1.yaml` is completion of that platform Plan only;
+it does **not** mean that the TGW Master Plan has been coded or completed.
+
+If `tgw-context` is unavailable, stop Plan-derived coding and report the missing
+context service.  Do not substitute `CLAUDE.md`, `docs/TGW-Plan-Vault`, a release,
+an actor worktree, or chat history as Plan authority.
+
 - **Tigwa / Leotha (Hermes personas):** `docs/TGW-Plan-Vault/plan/pp/PP-HERMES-EA-001.md`
   is your real operating contract — roles, authority boundaries, the
   IN TRAINING scope, the branch-review exception, the emergency-override
