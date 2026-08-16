@@ -44,6 +44,7 @@ from tgw.governed_execution_receipt import (
     verify_candidate_governed_execution_receipt,
 )
 from tgw.governed_review_adapter import validate_execution as validate_governed_review_execution
+from tgw.governed_review_adapter import validate_execution_handoff_binding
 from tgw.plan_catalog import compose_catalog
 from tgw.plan_luet import (
     PINNED_LUET_BINARY_SHA256,
@@ -1510,6 +1511,9 @@ def verify_independent_review_evidence_bundle(
                 execution["lifecycle"]["started_at"].replace("Z", "+00:00")
             )
             invocation = verify_for_launcher(artifacts["review_handoff"], now=started_at)
+            validate_execution_handoff_binding(
+                execution, card.value, artifacts["review_handoff"],
+            )
         except (ValueError, TypeError, KeyError) as exc:
             raise CandidateReceiptSinkError("governed review execution evidence is invalid") from exc
         if (

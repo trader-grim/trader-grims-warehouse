@@ -281,10 +281,25 @@ def execute(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.parse_args()
+    parser.add_argument("--governed-request", type=Path)
+    arguments = parser.parse_args()
+    if arguments.governed_request is not None:
+        from tgw.governed_review_adapter import execute_request
+
+        try:
+            execution = execute_request(arguments.governed_request)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        print(json.dumps({
+            "schema": "tgw-governed-review-result-summary/v1",
+            "provider": execution["provider"],
+            "execution_hash": execution["execution_hash"],
+            "verdict": execution["review"]["verdict"],
+        }, sort_keys=True, separators=(",", ":")))
+        return 0
     parser.error(
-        "candidate review requires externally pinned QES, D, resource-service, CodeGraph, "
-        "environment, and X publisher bindings; the uninstalled template is a HOLD"
+        "candidate review requires --governed-request or the optional externally pinned QES path; "
+        "the unconfigured template is a HOLD"
     )
     return 2
 

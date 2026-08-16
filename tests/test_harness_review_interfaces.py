@@ -79,6 +79,11 @@ def test_installation_catalog_does_not_confuse_skill_and_provider_status():
     assert harnesses["claude"]["interactive_review"] == "available"
     assert harnesses["claude"]["model_authentication"] == "configured"
     assert harnesses["claude"]["automated_provider"] == "unavailable-no-admitted-runner"
+    assert harnesses["claude"]["governed_execution_adapter"] == (
+        "implemented-not-installed"
+    )
+    assert harnesses["claude"]["protected_review_projection"] == "not-installed"
+    assert harnesses["claude"]["review_egress_policy"] == "not-installed"
     assert harnesses["hermes"]["automated_provider"] == "unregistered"
     assert harnesses["hermes"]["context_mcp"] == "configured"
     assert harnesses["hermes"]["production_inventory_mcp"] == (

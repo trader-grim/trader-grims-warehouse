@@ -22,22 +22,25 @@ Promptcraft receiver identity, provider identity record, execution record,
 governed role receipt, and pinned X-store bundle must all name the same
 provider. Admission never branches on the string `claude`.
 
-## Current selected implementation
+## Current selected provider evidence
 
 The currently proven implementation is the `claude` account on tgw-lib:
 
 - Claude Code 2.1.223 at `/home/claude/.local/bin/claude` (resolve and capture
   the exact non-symlink target before use);
-- canonical `tgw-review` skill installed at
-  `/home/claude/.claude/skills/tgw-review`;
-- `tgw` and `tgw-context` MCP servers in `/home/claude/.claude.json`;
+- discovered `tgw-review` skill link at
+  `/home/claude/.claude/skills/tgw-review` (not an admitted execution input);
+- provider-neutral protected skill, context-provider, MCP-config, and runtime
+  projections supplied by the review controller;
 - current first-party Claude authentication; and
 - receiver identity `claude:tgw-review`.
 
-Never retain email addresses, OAuth material, tokens, or the full auth file in
-review evidence. Retain a non-secret account-identity hash, provider/version,
-exact configured-command link identity, resolved executable/skill/MCP hashes,
-and the authentication health boolean.
+Never retain email addresses, OAuth material, tokens, credential content, or a
+credential hash in review evidence. The provider's existing credential is
+mounted read-only at the provider's expected location inside an ephemeral
+HOME. Evidence retains only its non-secret reference and held file metadata,
+plus a non-secret account identity, fresh health receipt, provider/version,
+and exact configured/resolved artifact identities.
 
 The 2026-08-16 observation recorded the current provider implementation as:
 
@@ -52,6 +55,14 @@ These values are provider evidence, not constants in the admission protocol.
 A fresh execution must recapture them and HOLD if either named/link identity or
 the held target differs before, during, or after use.
 
+The same observation found the discovered skill link to be a mode-0777
+provider-owned symlink whose `SKILL.md` resolved to a codex:tgw-coders
+mode-0664 development file. That tree is valid canonical source material but
+is not an executable review input. Installation must atomically create a
+root-owned, non-writable projection and retain a projection receipt binding
+its canonical source manifest to the protected manifest. No reauthentication
+is required for that operation.
+
 ## Required inputs
 
 Before launch, the controller must create and freeze:
@@ -61,28 +72,50 @@ Before launch, the controller must create and freeze:
 2. Plan f0, solution/closure, CodeGraph, execution environment, candidate
    evidence, and receipt-sink bindings;
 3. an unexpired independent-review execution card and Promptcraft handoff;
-4. the provider's exact executable, version, account identity, canonical skill,
-   MCP configuration identity, closed environment, and allowed ownership; and
+4. the provider's exact executable, version, account identity, root-protected
+   generic-skill projection and source-provenance receipt, held MCP config,
+   held executable context-provider closure, minimal runtime closure, closed
+   environment, fresh authentication-health evidence, and per-artifact owner
+   policy;
 5. an X-store publisher bound by the card's `receipt_sink` binding.
 
-The adapter holds the source root and executable/skill/MCP artifacts through
-use, executes the held executable via `/proc/self/fd`, bounds time and combined
-output, terminates and proves the process group empty, rechecks named and held
-identities, validates exactly one `tgw-code-review/v1` result, and requires the
-bound X-store publisher to acknowledge the execution hash.
+The adapter holds the root-owned request, source root, sandbox, runtime,
+context provider, executable, skill, MCP config, and credential descriptors
+through use. It launches a minimal-root bubblewrap PID namespace, executes the
+held executable via `/proc/self/fd`, installs the exact protected skill into an
+ephemeral HOME, and passes the held MCP config with strict settings. Time and
+combined output are bounded; PID-namespace teardown proves descendants cannot
+escape. Named and held identities are rechecked, exactly one
+`tgw-code-review/v1` result is accepted, and the card-bound X-store must return
+an exact pinned readback.
 
-For the current Claude implementation the admitted provider command is the
-historical command, expressed with exact adapter framing:
+For the current provider implementation, the registry may select an argv such
+as the following. The admission schema does not depend on this provider or
+these flags; it binds the exact configured template and the generic tool and
+network policies:
 
 ```text
-<resolved-claude-executable> -p {prompt} --model opus --effort high \
-  --max-turns 35 --tools Read,Bash,Glob,Grep \
+<resolved-provider-executable> -p {prompt} --model opus --effort high \
+  --max-turns 35 --tools Read,Glob,Grep,Skill,<exact-read-only-MCP-tools> \
+  --disallowedTools Bash,Edit,Write,NotebookEdit \
   --permission-mode dontAsk --setting-sources '' \
+  --mcp-config {mcp_config} --strict-mcp-config \
   --add-dir {snapshot} --output-format json --no-session-persistence
 ```
 
-`{prompt}` and `{snapshot}` must each occur exactly once. The adapter replaces
-the executable and snapshot paths with held `/proc/self/fd` identities.
+`{prompt}`, `{snapshot}`, and `{mcp_config}` must each occur exactly once. The
+adapter replaces executable and config inputs with held `/proc/self/fd`
+identities and maps the held source snapshot read-only. The MCP config may
+name only executable files within the held context-provider manifest. Its
+bound Plan, source, CodeGraph, and environment bindings must exactly equal the
+retained card.
+
+The sandbox intentionally shares the host network because the selected model
+provider and admitted MCP route require it. This is not networkless isolation.
+The provider identity binds a sorted exact HTTPS endpoint allow-list and its
+hash as admission evidence. Production additionally needs the corresponding
+host egress enforcement; the adapter does not claim bubblewrap enforces an
+endpoint allow-list.
 
 ## Evidence and admission
 
@@ -106,12 +139,28 @@ requires the independent governed receipt to name the retained execution.
 
 ## Installation status
 
-This source change is a candidate only. It is not installed or deployed.
-Before first production use, the release operator must install the reviewed
-commit, provision a root-owned snapshot staging directory and X-store
-publisher, capture a fresh provider identity, run the focused tests below, and
-perform one real Claude review with secrets excluded from its retained
-evidence.
+This source change is a candidate only. It is not installed or deployed. The
+current selected provider is HOLD, not disabled: its executable and existing
+credential are present, but the protected generic skill, context-provider,
+MCP-config, and minimal runtime projections have not been issued. Before first
+production use, the release operator must install a reviewed successor,
+provision those root-owned projections plus snapshot staging and the X-store,
+capture a fresh provider identity/health receipt, prove the matching egress
+policy, run the focused tests, then perform one real minimal-root bubblewrap
+review smoke and one real candidate review with secrets excluded from retained
+evidence. Do not ask the operator to authenticate again unless the fresh
+provider health check itself fails.
+
+The installed fixed entry point is:
+
+```bash
+tgw-governed-review --request /run/tgw-review/root-owned-request.json
+```
+
+The request must be a bounded, root-owned, non-writable, single-link regular
+file. The entry point holds and rechecks that exact file through provider
+execution and pinned X-store publication; ad hoc argv composition is not an
+operator interface.
 
 ```bash
 PYTHONPATH=src pytest -q \
