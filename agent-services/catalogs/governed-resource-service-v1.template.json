@@ -1,0 +1,28 @@
+{
+  "schema": "tgw-registered-resource-service-installation-template/v1",
+  "plan_commit": "fb9fee3e9db756ad0f5071525e943794bf1dab9b",
+  "installation_status": "NOT_INSTALLED",
+  "service_entry_point": "tgw.governed_resource_service:main",
+  "runtime_config_schema": "tgw-governed-resource-service-config/v1",
+  "descriptor_template": {
+    "schema": "tgw-registered-resource-service/v1",
+    "id": null,
+    "endpoint": null,
+    "credential_env": null,
+    "timeout_seconds": null
+  },
+  "qualification_requirements": {
+    "catalog_schema": "tgw-registered-resource-service-catalog/v2",
+    "required_capabilities": [
+      "registered-resource-retrieval",
+      "plan-source",
+      "plan-graph",
+      "codegraph-snapshot",
+      "source-tree",
+      "execution-environment",
+      "authority-conditions",
+      "receipt-sink"
+    ],
+    "launch_rule": "A deployment must provide an exact configured descriptor and a Plan-bound qualified catalog. This template is neither and must not be passed to a card or launcher."
+  }
+}
