@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run the fail-closed, receipt-sink-backed governed candidate admission gate.
+"""Run the fail-closed S→D→X governed candidate admission gate.
 
-The sink must retain both governed-role receipts and the complete W08 reviewed
-candidate bundle (tests, migration proof, semantic/security review, release,
-and rollback records).  Candidate-local paths never satisfy that requirement.
+S retains pre-execution candidate evidence (tests, migration proof, release,
+and rollback).  An external exact D descriptor pins S before cards are made;
+X then retains governed execution and independent-review artifacts.  Candidate
+paths, a legacy one-store configuration, and static-only bindings are refused.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from tgw.candidate_receipt_sink import (
     CandidateReceiptSinkError,
     PinnedGitReceiptSink,
     candidate_admission_gate,
+    load_pinned_candidate_evidence_descriptor,
     load_receipt_sink_descriptor,
 )
 from tgw.logging import announce_script_run
@@ -35,24 +37,35 @@ def main() -> int:
         help="operator-configured immutable approved Plan ref, for example refs/tgw/approved/PLAN-ID",
     )
     parser.add_argument(
-        "--receipt-sink-config", type=Path, required=True,
-        help="operator-configured pinned Git receipt-sink descriptor; candidate-local configuration is refused",
+        "--candidate-evidence-descriptor-config", type=Path, required=True,
+        help="operator-configured pinned Git D descriptor for exact candidate-evidence store S",
+    )
+    parser.add_argument(
+        "--execution-evidence-sink-config", type=Path, required=True,
+        help="operator-configured pinned Git execution/review store X descriptor",
     )
     args = parser.parse_args()
     try:
         repository = args.repo.resolve(strict=True)
-        descriptor = load_receipt_sink_descriptor(args.receipt_sink_config, candidate_repository=repository)
-        sink = PinnedGitReceiptSink(descriptor, candidate_repository=repository)
+        candidate_evidence_descriptor = load_pinned_candidate_evidence_descriptor(
+            args.candidate_evidence_descriptor_config, candidate_repository=repository,
+        )
+        execution_descriptor = load_receipt_sink_descriptor(
+            args.execution_evidence_sink_config, candidate_repository=repository,
+        )
+        execution_sink = PinnedGitReceiptSink(execution_descriptor, candidate_repository=repository)
         announce_script_run(
             "admit_governed_candidate.py",
-            "verify governed execution plus W08 release-candidate evidence from immutable Plan and receipt-sink roots",
+            "verify acyclic candidate evidence, descriptor, governed execution, and review roots",
             candidate=args.candidate,
             plan_repository=str(args.plan_repository),
             plan_approved_ref=args.plan_approved_ref,
         )
         gate = candidate_admission_gate(
             repository, candidate=args.candidate, plan_repository=args.plan_repository,
-            plan_approved_ref=args.plan_approved_ref, sink=sink,
+            plan_approved_ref=args.plan_approved_ref,
+            candidate_evidence_descriptor=candidate_evidence_descriptor,
+            execution_sink=execution_sink,
         )
         print(json.dumps(gate, sort_keys=True, separators=(",", ":")))
         return 0 if gate["allowed"] else 3

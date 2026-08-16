@@ -16,20 +16,22 @@ from tgw.candidate_manifest import (
     load_candidate_test_plan,
 )
 from tgw.candidate_receipt_sink import (
+    CANDIDATE_EVIDENCE_BUNDLE_SCHEMA,
+    CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA,
     GOVERNED_EXECUTION_BUNDLE_SCHEMA,
+    INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA,
+    PINNED_CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA,
     RECEIPT_SINK_MANIFEST_SCHEMA,
     RECEIPT_SINK_SCHEMA,
-    REVIEWED_CANDIDATE_EVIDENCE_BUNDLE_SCHEMA,
     ROLLBACK_MANIFEST_SCHEMA,
     CandidateReceiptSinkError,
     PinnedGitReceiptSink,
     candidate_admission_gate,
+    candidate_evidence_bundle_ref,
     governed_execution_bundle_ref,
+    independent_review_evidence_bundle_ref,
+    load_pinned_candidate_evidence_descriptor,
     load_receipt_sink_descriptor,
-    receipt_sink_card_binding,
-    receipt_sink_card_binding_content,
-    resolve_approved_plan_authority,
-    reviewed_candidate_evidence_bundle_ref,
 )
 from tgw.candidate_review import PACKET_SCHEMA, RESULT_SCHEMA
 from tgw.execution_resources import (
@@ -302,9 +304,9 @@ def migration_receipt(repo, *, path, source_commit, source_tree, base_commit, ba
     ).__dict__
 
 
-def reviewed_candidate_evidence(
-    candidate_repo, *, source_commit, source_tree, plan_commit, independent_review_receipt,
-):
+def candidate_evidence(candidate_repo, *, source_commit, source_tree, plan_commit):
+    """Build S-only evidence before the external descriptor and any card exist."""
+
     base_commit = git(candidate_repo, "rev-parse", f"{source_commit}^")
     base_tree = git(candidate_repo, "rev-parse", f"{base_commit}^{{tree}}")
     predecessor = release_manifest(candidate_repo, base_commit, "previous")
@@ -351,6 +353,31 @@ def reviewed_candidate_evidence(
         full_suite_output_artifact=full_output,
         migration_receipts=migrations,
     )
+    release = release_manifest(candidate_repo, source_commit, "candidate")
+    rollback_unsigned = {
+        "schema": ROLLBACK_MANIFEST_SCHEMA,
+        "candidate_commit": source_commit,
+        "candidate_tree": source_tree,
+        "candidate_manifest_hash": candidate_manifest["manifest_hash"],
+        "release_manifest_hash": object_hash(release),
+        "rollback_release_manifest": predecessor,
+    }
+    rollback = {**rollback_unsigned, "manifest_hash": object_hash(rollback_unsigned)}
+    return {
+        "candidate_manifest": candidate_manifest,
+        "focused_test_receipt": focused,
+        "focused_test_output": focused_output,
+        "full_suite_test_receipt": full,
+        "full_suite_test_output": full_output,
+        "migration_receipts": migrations,
+        "release_manifest": release,
+        "rollback_manifest": rollback,
+    }
+
+
+def independent_review_evidence(candidate_manifest, independent_review_receipt):
+    """Build X-only review output after cards/roles have been established."""
+
     review_packet_unsigned = {
         "schema": PACKET_SCHEMA,
         "status": "EXECUTABLE",
@@ -387,66 +414,154 @@ def reviewed_candidate_evidence(
         "overall": "PASS",
     }
     review_result = {**review_result_unsigned, "result_hash": object_hash(review_result_unsigned)}
-    release = release_manifest(candidate_repo, source_commit, "candidate")
-    rollback_unsigned = {
-        "schema": ROLLBACK_MANIFEST_SCHEMA,
-        "candidate_commit": source_commit,
-        "candidate_tree": source_tree,
-        "candidate_manifest_hash": candidate_manifest["manifest_hash"],
-        "release_manifest_hash": object_hash(release),
-        "rollback_release_manifest": predecessor,
-    }
-    rollback = {**rollback_unsigned, "manifest_hash": object_hash(rollback_unsigned)}
     return {
-        "candidate_manifest": candidate_manifest,
-        "focused_test_receipt": focused,
-        "focused_test_output": focused_output,
-        "full_suite_test_receipt": full,
-        "full_suite_test_output": full_output,
-        "migration_receipts": migrations,
         "review_packet": review_packet,
         "review_result": review_result,
-        "release_manifest": release,
-        "rollback_manifest": rollback,
     }
 
 
-def pinned_sink(
-    tmp_path, *, candidate_repo, source_commit, source_tree, plan_commit,
-    corrupt_role=None, corrupt_sink_binding_role=None, corrupt_w08=None,
-):
-    sink = tmp_path / "receipt-sink"
-    sink.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=sink, check=True)
-    subprocess.run(["git", "config", "user.email", "sink@example.invalid"], cwd=sink, check=True)
-    subprocess.run(["git", "config", "user.name", "Receipt sink"], cwd=sink, check=True)
-    descriptor_seed = {
+def _new_sink(path: Path, *, email: str, name: str):
+    path.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", email], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", name], cwd=path, check=True)
+
+
+def _commit_sink(sink: Path, *, sink_id: str, artifacts: list[dict], message: str):
+    manifest_unsigned = {
+        "schema": RECEIPT_SINK_MANIFEST_SCHEMA,
+        "sink_id": sink_id,
+        "artifacts": artifacts,
+    }
+    manifest = {**manifest_unsigned, "manifest_hash": object_hash(manifest_unsigned)}
+    manifest_raw = write_json(sink / "manifest.json", manifest)
+    subprocess.run(["git", "add", "."], cwd=sink, check=True)
+    subprocess.run(["git", "commit", "-qm", message], cwd=sink, check=True)
+    return {
         "schema": RECEIPT_SINK_SCHEMA,
-        "sink_id": "test-receipt-sink",
+        "sink_id": sink_id,
         "repository": str(sink.resolve()),
-        "commit": "0" * 40,
-        "tree": "0" * 40,
+        "commit": git(sink, "rev-parse", "HEAD"),
+        "tree": git(sink, "rev-parse", "HEAD^{tree}"),
         "manifest_path": "manifest.json",
-        "manifest_content_sha256": "sha256:" + "0" * 64,
+        "manifest_content_sha256": digest(manifest_raw),
     }
-    card_sink_binding = receipt_sink_card_binding(descriptor_seed)
+
+
+def _candidate_evidence_sink(
+    tmp_path, *, candidate_repo, source_commit, source_tree, plan_commit,
+    corrupt_w08=None,
+):
+    sink = tmp_path / "candidate-evidence-sink"
+    _new_sink(sink, email="candidate-evidence@example.invalid", name="Candidate evidence S")
+    evidence = candidate_evidence(
+        candidate_repo, source_commit=source_commit, source_tree=source_tree, plan_commit=plan_commit,
+    )
+    if corrupt_w08 in {"focused", "full"}:
+        key = "focused_test_receipt" if corrupt_w08 == "focused" else "full_suite_test_receipt"
+        receipt = dict(evidence[key])
+        receipt["command"] = ["pytest", "tests/not-the-retained-command"]
+        receipt_unsigned = {field: item for field, item in receipt.items() if field != "receipt_hash"}
+        evidence[key] = {**receipt_unsigned, "receipt_hash": object_hash(receipt_unsigned)}
+    if corrupt_w08 == "focused-output":
+        output = dict(evidence["focused_test_output"])
+        output["stdout_base64"] = "dGFtcGVyZWQ="
+        output_unsigned = {field: item for field, item in output.items() if field != "artifact_hash"}
+        evidence["focused_test_output"] = {**output_unsigned, "artifact_hash": object_hash(output_unsigned)}
+    if corrupt_w08 == "release":
+        evidence["release_manifest"] = {**evidence["release_manifest"], "archive_sha256": "0" * 64}
+    if corrupt_w08 == "rollback":
+        rollback = {**evidence["rollback_manifest"], "candidate_commit": "0" * 40}
+        rollback_unsigned = {key: value for key, value in rollback.items() if key != "manifest_hash"}
+        evidence["rollback_manifest"] = {**rollback_unsigned, "manifest_hash": object_hash(rollback_unsigned)}
+    artifacts = []
+    pointers = {}
+    for name, value in evidence.items():
+        if name == "migration_receipts":
+            continue
+        raw = write_json(sink / "candidate-evidence" / f"{name}.json", value)
+        ref = f"artifact:{source_commit}:candidate-evidence:{name}"
+        artifacts.append({
+            "ref": ref, "path": f"candidate-evidence/{name}.json", "content_sha256": digest(raw),
+        })
+        pointers[name] = {"ref": ref, "content_sha256": digest(raw)}
+    migration_pointers = []
+    for index, receipt in enumerate(evidence["migration_receipts"], start=1):
+        raw = write_json(sink / "candidate-evidence" / f"migration-{index}.json", receipt)
+        ref = f"artifact:{source_commit}:candidate-evidence:migration-{index}"
+        artifacts.append({
+            "ref": ref, "path": f"candidate-evidence/migration-{index}.json", "content_sha256": digest(raw),
+        })
+        migration_pointers.append({"ref": ref, "content_sha256": digest(raw)})
+    if corrupt_w08 == "migration":
+        migration_pointers = migration_pointers[:-1]
+    bundle_unsigned = {
+        "schema": CANDIDATE_EVIDENCE_BUNDLE_SCHEMA,
+        "source_commit": source_commit,
+        "source_tree": source_tree,
+        "plan_commit": plan_commit,
+        **pointers,
+        "migration_receipts": migration_pointers,
+    }
+    bundle = {**bundle_unsigned, "bundle_hash": object_hash(bundle_unsigned)}
+    if corrupt_w08 != "missing":
+        bundle_raw = write_json(sink / "bundles" / "candidate-evidence.json", bundle)
+        artifacts.append({
+            "ref": candidate_evidence_bundle_ref(source_commit),
+            "path": "bundles/candidate-evidence.json",
+            "content_sha256": digest(bundle_raw),
+        })
+    descriptor = _commit_sink(
+        sink, sink_id="candidate-evidence-sink", artifacts=artifacts, message="immutable candidate evidence S",
+    )
+    return sink, descriptor, evidence
+
+
+def _pinned_candidate_evidence_descriptor(tmp_path, candidate_repo, candidate_sink_descriptor):
+    authority = tmp_path / "candidate-evidence-descriptor-authority"
+    _new_sink(authority, email="descriptor@example.invalid", name="Candidate evidence descriptor D")
+    descriptor_content = {
+        "schema": CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA,
+        "candidate_evidence_sink": candidate_sink_descriptor,
+    }
+    raw = write_json(authority / "descriptor.json", descriptor_content)
+    subprocess.run(["git", "add", "."], cwd=authority, check=True)
+    subprocess.run(["git", "commit", "-qm", "pin candidate evidence S"], cwd=authority, check=True)
+    pin = {
+        "schema": PINNED_CANDIDATE_EVIDENCE_DESCRIPTOR_SCHEMA,
+        "repository": str(authority.resolve()),
+        "commit": git(authority, "rev-parse", "HEAD"),
+        "tree": git(authority, "rev-parse", "HEAD^{tree}"),
+        "path": "descriptor.json",
+        "content_sha256": digest(raw),
+    }
+    config = tmp_path / "candidate-evidence-descriptor-config.json"
+    write_json(config, pin)
+    return authority, config
+
+
+def _execution_evidence_sink(
+    tmp_path, *, source_commit, source_tree, plan_commit, candidate_manifest,
+    candidate_evidence_descriptor, corrupt_role=None, corrupt_sink_binding_role=None, corrupt_w08=None,
+):
+    sink = tmp_path / "execution-evidence-sink"
+    _new_sink(sink, email="execution-evidence@example.invalid", name="Execution evidence X")
     artifacts = []
     evidence_by_role = {}
     for role in ("implementation", "independent-review", "controller-verification"):
         evidence = role_evidence(
-            role=role, source_commit=source_commit, source_tree=source_tree,
-            plan_commit=plan_commit,
+            role=role, source_commit=source_commit, source_tree=source_tree, plan_commit=plan_commit,
             receipt_sink_binding=(
-                {"ref": "receipt-sink:substituted:descriptor:v1", "hash": "sha256:" + "f" * 64}
-                if role == corrupt_sink_binding_role else card_sink_binding
+                {"ref": "receipt-sink:legacy:descriptor:v1", "hash": "sha256:" + "f" * 64}
+                if role == corrupt_sink_binding_role else candidate_evidence_descriptor.card_binding()
             ),
         )
         evidence_by_role[role] = evidence
         pointers = {}
         for name, value in evidence.items():
-            raw = write_json(sink / "artifacts" / role / f"{name}.json", value)
-            ref = f"artifact:{source_commit}:{role}:{name}"
-            artifacts.append({"ref": ref, "path": f"artifacts/{role}/{name}.json", "content_sha256": digest(raw)})
+            raw = write_json(sink / "governed-execution" / role / f"{name}.json", value)
+            ref = f"artifact:{source_commit}:governed-execution:{role}:{name}"
+            artifacts.append({"ref": ref, "path": f"governed-execution/{role}/{name}.json", "content_sha256": digest(raw)})
             pointers[name] = {"ref": ref, "content_sha256": digest(raw)}
         bundle_unsigned = {
             "schema": GOVERNED_EXECUTION_BUNDLE_SCHEMA,
@@ -460,159 +575,115 @@ def pinned_sink(
         if role == corrupt_role:
             bundle["role_receipt"] = {**bundle["role_receipt"], "content_sha256": "sha256:" + "0" * 64}
             bundle["bundle_hash"] = object_hash({key: value for key, value in bundle.items() if key != "bundle_hash"})
-        bundle_raw = write_json(sink / "bundles" / f"{role}.json", bundle)
+        raw = write_json(sink / "bundles" / f"governed-{role}.json", bundle)
         artifacts.append({
             "ref": governed_execution_bundle_ref(source_commit, role),
-            "path": f"bundles/{role}.json",
-            "content_sha256": digest(bundle_raw),
+            "path": f"bundles/governed-{role}.json", "content_sha256": digest(raw),
         })
-    w08 = reviewed_candidate_evidence(
-        candidate_repo, source_commit=source_commit, source_tree=source_tree,
-        plan_commit=plan_commit,
-        independent_review_receipt=evidence_by_role["independent-review"]["role_receipt"],
-    )
+    review = independent_review_evidence(candidate_manifest, evidence_by_role["independent-review"]["role_receipt"])
     if corrupt_w08 == "review":
-        review = w08["review_result"]
-        review_unsigned = {
-            **{key: value for key, value in review.items() if key != "result_hash"},
+        result = review["review_result"]
+        unsigned = {
+            **{key: value for key, value in result.items() if key != "result_hash"},
             "dimensions": {
                 "semantic": {"verdict": "PASS", "findings": []},
-                "security": {
-                    "verdict": "FAIL",
-                    "findings": [{
-                        "severity": "high", "path": "app.py", "line": 1,
-                        "message": "review finding",
-                    }],
-                },
+                "security": {"verdict": "FAIL", "findings": [{
+                    "severity": "high", "path": "app.py", "line": 1, "message": "review finding",
+                }]},
             },
             "overall": "FAIL",
         }
-        w08["review_result"] = {**review_unsigned, "result_hash": object_hash(review_unsigned)}
-    if corrupt_w08 in {"focused", "full"}:
-        key = "focused_test_receipt" if corrupt_w08 == "focused" else "full_suite_test_receipt"
-        receipt = dict(w08[key])
-        receipt["command"] = ["pytest", "tests/not-the-retained-command"]
-        receipt_unsigned = {field: item for field, item in receipt.items() if field != "receipt_hash"}
-        w08[key] = {**receipt_unsigned, "receipt_hash": object_hash(receipt_unsigned)}
-    if corrupt_w08 == "focused-output":
-        output = dict(w08["focused_test_output"])
-        output["stdout_base64"] = "dGFtcGVyZWQ="
-        output_unsigned = {field: item for field, item in output.items() if field != "artifact_hash"}
-        w08["focused_test_output"] = {**output_unsigned, "artifact_hash": object_hash(output_unsigned)}
-    if corrupt_w08 == "release":
-        release = dict(w08["release_manifest"])
-        release["archive_sha256"] = "0" * 64
-        w08["release_manifest"] = release
-    if corrupt_w08 == "rollback":
-        rollback = dict(w08["rollback_manifest"])
-        rollback["candidate_commit"] = "0" * 40
-        rollback_unsigned = {key: value for key, value in rollback.items() if key != "manifest_hash"}
-        w08["rollback_manifest"] = {**rollback_unsigned, "manifest_hash": object_hash(rollback_unsigned)}
-    pointers = {}
-    for name, value in w08.items():
-        if name == "migration_receipts":
-            continue
-        raw = write_json(sink / "reviewed-candidate" / f"{name}.json", value)
-        ref = f"artifact:{source_commit}:w08:{name}"
-        artifacts.append({
-            "ref": ref, "path": f"reviewed-candidate/{name}.json", "content_sha256": digest(raw),
-        })
-        pointers[name] = {"ref": ref, "content_sha256": digest(raw)}
-    migration_pointers = []
-    for index, receipt in enumerate(w08["migration_receipts"], start=1):
-        raw = write_json(sink / "reviewed-candidate" / f"migration-{index}.json", receipt)
-        ref = f"artifact:{source_commit}:w08:migration-{index}"
-        artifacts.append({
-            "ref": ref, "path": f"reviewed-candidate/migration-{index}.json", "content_sha256": digest(raw),
-        })
-        migration_pointers.append({"ref": ref, "content_sha256": digest(raw)})
-    if corrupt_w08 == "migration":
-        migration_pointers = migration_pointers[:-1]
-    w08_bundle_unsigned = {
-        "schema": REVIEWED_CANDIDATE_EVIDENCE_BUNDLE_SCHEMA,
+        review["review_result"] = {**unsigned, "result_hash": object_hash(unsigned)}
+    review_pointers = {}
+    for name, value in review.items():
+        raw = write_json(sink / "independent-review" / f"{name}.json", value)
+        ref = f"artifact:{source_commit}:independent-review:{name}"
+        artifacts.append({"ref": ref, "path": f"independent-review/{name}.json", "content_sha256": digest(raw)})
+        review_pointers[name] = {"ref": ref, "content_sha256": digest(raw)}
+    review_bundle_unsigned = {
+        "schema": INDEPENDENT_REVIEW_EVIDENCE_BUNDLE_SCHEMA,
         "source_commit": source_commit,
         "source_tree": source_tree,
         "plan_commit": plan_commit,
-        **pointers,
-        "migration_receipts": migration_pointers,
+        **review_pointers,
     }
-    w08_bundle = {**w08_bundle_unsigned, "bundle_hash": object_hash(w08_bundle_unsigned)}
-    if corrupt_w08 != "missing":
-        bundle_raw = write_json(sink / "bundles" / "reviewed-candidate.json", w08_bundle)
-        artifacts.append({
-            "ref": reviewed_candidate_evidence_bundle_ref(source_commit),
-            "path": "bundles/reviewed-candidate.json",
-            "content_sha256": digest(bundle_raw),
-        })
-    manifest_unsigned = {
-        "schema": RECEIPT_SINK_MANIFEST_SCHEMA,
-        "sink_id": "test-receipt-sink",
-        "artifacts": artifacts,
-    }
-    manifest = {**manifest_unsigned, "manifest_hash": object_hash(manifest_unsigned)}
-    manifest_raw = write_json(sink / "manifest.json", manifest)
-    subprocess.run(["git", "add", "."], cwd=sink, check=True)
-    subprocess.run(["git", "commit", "-qm", "immutable candidate evidence"], cwd=sink, check=True)
-    descriptor = {
-        "schema": RECEIPT_SINK_SCHEMA,
-        "sink_id": "test-receipt-sink",
-        "repository": str(sink.resolve()),
-        "commit": git(sink, "rev-parse", "HEAD"),
-        "tree": git(sink, "rev-parse", "HEAD^{tree}"),
-        "manifest_path": "manifest.json",
-        "manifest_content_sha256": digest(manifest_raw),
-    }
-    config = tmp_path / "receipt-sink-config.json"
+    review_bundle = {**review_bundle_unsigned, "bundle_hash": object_hash(review_bundle_unsigned)}
+    raw = write_json(sink / "bundles" / "independent-review.json", review_bundle)
+    artifacts.append({
+        "ref": independent_review_evidence_bundle_ref(source_commit),
+        "path": "bundles/independent-review.json", "content_sha256": digest(raw),
+    })
+    descriptor = _commit_sink(
+        sink, sink_id="execution-evidence-sink", artifacts=artifacts, message="immutable governed execution and review X",
+    )
+    config = tmp_path / "execution-evidence-sink-config.json"
     write_json(config, descriptor)
     return sink, config
 
 
-def test_pinned_sink_gate_reads_exact_committed_artifacts_and_cli_admits(tmp_path):
+def pinned_sinks(
+    tmp_path, *, candidate_repo, source_commit, source_tree, plan_commit,
+    corrupt_role=None, corrupt_sink_binding_role=None, corrupt_w08=None,
+):
+    candidate_sink, candidate_sink_descriptor, evidence = _candidate_evidence_sink(
+        tmp_path, candidate_repo=candidate_repo, source_commit=source_commit, source_tree=source_tree,
+        plan_commit=plan_commit, corrupt_w08=corrupt_w08,
+    )
+    descriptor_authority, candidate_descriptor_config = _pinned_candidate_evidence_descriptor(
+        tmp_path, candidate_repo, candidate_sink_descriptor,
+    )
+    descriptor = load_pinned_candidate_evidence_descriptor(
+        candidate_descriptor_config, candidate_repository=candidate_repo,
+    )
+    execution_sink, execution_config = _execution_evidence_sink(
+        tmp_path, source_commit=source_commit, source_tree=source_tree, plan_commit=plan_commit,
+        candidate_manifest=evidence["candidate_manifest"], candidate_evidence_descriptor=descriptor,
+        corrupt_role=corrupt_role, corrupt_sink_binding_role=corrupt_sink_binding_role, corrupt_w08=corrupt_w08,
+    )
+    return candidate_sink, descriptor_authority, execution_sink, candidate_descriptor_config, execution_config
+
+
+def _gate(candidate, plan_repository, descriptor_config, execution_config):
+    descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
+    execution_sink = PinnedGitReceiptSink(
+        load_receipt_sink_descriptor(execution_config, candidate_repository=candidate),
+        candidate_repository=candidate,
+    )
+    return candidate_admission_gate(
+        candidate, candidate="HEAD", plan_repository=plan_repository, plan_approved_ref=PLAN_APPROVED_REF,
+        candidate_evidence_descriptor=descriptor, execution_sink=execution_sink,
+    )
+
+
+def test_acyclic_two_store_gate_reads_exact_committed_artifacts_and_cli_admits(tmp_path):
     candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
-    sink_repository, config = pinned_sink(
-        tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree,
-        plan_commit=plan_commit,
+    candidate_sink, authority, execution_sink, descriptor_config, execution_config = pinned_sinks(
+        tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree, plan_commit=plan_commit,
     )
-    # A mutable worktree file is not evidence: the gate reads the descriptor's
-    # exact commit object, not this post-commit edit.
-    (sink_repository / "artifacts" / "implementation" / "role_receipt.json").write_text("{}")
-    descriptor = load_receipt_sink_descriptor(config, candidate_repository=candidate)
-    assert receipt_sink_card_binding_content(descriptor) == {
-        "schema": "tgw-pinned-git-candidate-receipt-sink-card-binding/v1",
-        "sink_id": "test-receipt-sink",
-        "repository": str(sink_repository.resolve()),
-        "manifest_path": "manifest.json",
-    }
-    assert receipt_sink_card_binding(descriptor) == {
-        "ref": "receipt-sink:test-receipt-sink:descriptor:v1",
-        "hash": digest(canonical(receipt_sink_card_binding_content(descriptor))),
-    }
-    gate = candidate_admission_gate(
-        candidate, candidate="HEAD", plan_repository=plan_repository, plan_approved_ref=PLAN_APPROVED_REF,
-        sink=PinnedGitReceiptSink(descriptor, candidate_repository=candidate),
-    )
+    (execution_sink / "governed-execution" / "implementation" / "role_receipt.json").write_text("{}")
+    descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
+    binding = descriptor.card_binding()
+    assert binding["ref"] == "candidate-evidence:candidate-evidence-sink:descriptor:v2"
+    assert binding["hash"].startswith("sha256:")
+    assert descriptor.identity["repository"] == str(authority.resolve())
+    assert descriptor.candidate_evidence_sink_descriptor["repository"] == str(candidate_sink.resolve())
+    gate = _gate(candidate, plan_repository, descriptor_config, execution_config)
 
     assert gate["allowed"] is True
     assert gate["source_commit"] == commit
     assert gate["plan_commit"] == plan_commit
-    assert gate["plan_authority"] == {
-        "schema": "tgw-governed-candidate-plan-authority/v1",
-        "repository": str(plan_repository.resolve()),
-        "approved_ref": PLAN_APPROVED_REF,
-        "approved_commit": plan_commit,
-    }
-    assert len(gate["governed_execution_receipt_hashes"]) == 3
-    assert gate["reviewed_candidate_evidence"] is not None
-    assert len(gate["reviewed_candidate_evidence"]["migration_receipt_hashes"]) == 2
-    assert gate["reviewed_candidate_evidence"]["candidate_manifest_hash"].startswith("sha256:")
-    assert gate["reviewed_candidate_evidence"]["review_result_hash"].startswith("sha256:")
+    assert gate["candidate_evidence"] is not None
+    assert len(gate["candidate_evidence"]["migration_receipt_hashes"]) == 2
+    assert gate["independent_review_evidence"]["review_result_hash"].startswith("sha256:")
+    assert gate["candidate_evidence_descriptor"]["descriptor_hash"] == descriptor.identity["descriptor_hash"]
     completed = subprocess.run(
         [
             sys.executable, str(ROOT / "scripts" / "admit_governed_candidate.py"),
             "--repo", str(candidate), "--candidate", "HEAD",
             "--plan-repository", str(plan_repository), "--plan-approved-ref", PLAN_APPROVED_REF,
-            "--receipt-sink-config", str(config),
+            "--candidate-evidence-descriptor-config", str(descriptor_config),
+            "--execution-evidence-sink-config", str(execution_config),
         ],
         env={**os.environ, "PYTHONPATH": str(ROOT / "src")}, text=True, capture_output=True, check=False,
     )
@@ -620,137 +691,98 @@ def test_pinned_sink_gate_reads_exact_committed_artifacts_and_cli_admits(tmp_pat
     assert json.loads(completed.stdout)["gate_hash"] == gate["gate_hash"]
 
 
-def test_gate_holds_when_a_pinned_bundle_artifact_does_not_match(tmp_path):
+def test_gate_holds_when_x_bundle_artifact_does_not_match(tmp_path):
     candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
-    _sink, config = pinned_sink(
+    _s, _d, _x, descriptor_config, execution_config = pinned_sinks(
         tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree,
         plan_commit=plan_commit, corrupt_role="independent-review",
     )
-    descriptor = load_receipt_sink_descriptor(config, candidate_repository=candidate)
-    gate = candidate_admission_gate(
-        candidate, candidate="HEAD", plan_repository=plan_repository, plan_approved_ref=PLAN_APPROVED_REF,
-        sink=PinnedGitReceiptSink(descriptor, candidate_repository=candidate),
-    )
-
+    gate = _gate(candidate, plan_repository, descriptor_config, execution_config)
     assert gate["allowed"] is False
     assert gate["reasons"] == [
         "missing-or-invalid-governed-evidence:independent-review",
-        "missing-or-invalid-reviewed-candidate-evidence",
+        "missing-or-invalid-independent-review-evidence",
     ]
 
 
-def test_gate_holds_when_any_card_uses_a_substituted_receipt_sink_binding(tmp_path):
+def test_gate_rejects_a_legacy_or_substituted_card_receipt_sink_binding(tmp_path):
     candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
-    _sink, config = pinned_sink(
+    _s, _d, _x, descriptor_config, execution_config = pinned_sinks(
         tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree,
         plan_commit=plan_commit, corrupt_sink_binding_role="controller-verification",
     )
-    descriptor = load_receipt_sink_descriptor(config, candidate_repository=candidate)
-
-    gate = candidate_admission_gate(
-        candidate, candidate="HEAD", plan_repository=plan_repository, plan_approved_ref=PLAN_APPROVED_REF,
-        sink=PinnedGitReceiptSink(descriptor, candidate_repository=candidate),
-    )
-
+    gate = _gate(candidate, plan_repository, descriptor_config, execution_config)
     assert gate["allowed"] is False
     assert gate["reasons"] == ["missing-or-invalid-governed-evidence:controller-verification"]
-
-
-def test_gate_holds_when_the_external_approved_plan_ref_moves(tmp_path):
-    candidate, commit, tree = candidate_repository(tmp_path)
-    plan_repository, plan_commit = approved_plan_repository(tmp_path)
-    _sink, config = pinned_sink(
-        tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree, plan_commit=plan_commit,
-    )
-    (plan_repository / "plan.txt").write_text("a newer but unbound approved Plan\n")
-    subprocess.run(["git", "add", "."], cwd=plan_repository, check=True)
-    subprocess.run(["git", "commit", "-qm", "new approved Plan"], cwd=plan_repository, check=True)
-    subprocess.run(
-        ["git", "update-ref", PLAN_APPROVED_REF, git(plan_repository, "rev-parse", "HEAD")],
-        cwd=plan_repository, check=True,
-    )
-    descriptor = load_receipt_sink_descriptor(config, candidate_repository=candidate)
-
-    gate = candidate_admission_gate(
-        candidate, candidate="HEAD", plan_repository=plan_repository, plan_approved_ref=PLAN_APPROVED_REF,
-        sink=PinnedGitReceiptSink(descriptor, candidate_repository=candidate),
-    )
-
-    assert gate["plan_commit"] != plan_commit
-    assert gate["allowed"] is False
-    assert gate["reasons"] == [
-        "missing-or-invalid-governed-evidence:controller-verification",
-        "missing-or-invalid-governed-evidence:implementation",
-        "missing-or-invalid-governed-evidence:independent-review",
-        "missing-or-invalid-reviewed-candidate-evidence",
-    ]
 
 
 @pytest.mark.parametrize("corruption", [
     "missing", "focused", "full", "focused-output", "migration", "review", "release", "rollback",
 ])
-def test_gate_requires_every_sink_retained_w08_artifact(tmp_path, corruption):
+def test_gate_requires_every_retained_s_or_x_evidence_artifact(tmp_path, corruption):
     candidate, commit, tree = candidate_repository(tmp_path)
     plan_repository, plan_commit = approved_plan_repository(tmp_path)
-    _sink, config = pinned_sink(
+    _s, _d, _x, descriptor_config, execution_config = pinned_sinks(
         tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree,
         plan_commit=plan_commit, corrupt_w08=corruption,
     )
-    descriptor = load_receipt_sink_descriptor(config, candidate_repository=candidate)
-
-    gate = candidate_admission_gate(
-        candidate, candidate="HEAD", plan_repository=plan_repository, plan_approved_ref=PLAN_APPROVED_REF,
-        sink=PinnedGitReceiptSink(descriptor, candidate_repository=candidate),
-    )
-
+    gate = _gate(candidate, plan_repository, descriptor_config, execution_config)
     assert gate["allowed"] is False
-    assert gate["reasons"] == ["missing-or-invalid-reviewed-candidate-evidence"]
-    assert gate["reviewed_candidate_evidence"] is None
+    expected = ["missing-or-invalid-independent-review-evidence"] if corruption == "review" else [
+        "missing-or-invalid-candidate-evidence", "missing-or-invalid-independent-review-evidence",
+    ]
+    assert gate["reasons"] == expected
 
 
-def test_candidate_local_sink_configuration_or_repository_is_refused(tmp_path):
+def test_gate_rejects_a_one_store_cycle_even_when_both_pins_are_individually_valid(tmp_path):
     candidate, commit, tree = candidate_repository(tmp_path)
-    _plans, plan_commit = approved_plan_repository(tmp_path)
-    _sink, config = pinned_sink(
+    plan_repository, plan_commit = approved_plan_repository(tmp_path)
+    _s, _d, _x, descriptor_config, _execution_config = pinned_sinks(
         tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree, plan_commit=plan_commit,
     )
-    local = candidate / "receipt-sink-config.json"
-    local.write_bytes(config.read_bytes())
-
-    with pytest.raises(CandidateReceiptSinkError, match="disjoint from the candidate repository"):
-        load_receipt_sink_descriptor(local, candidate_repository=candidate)
-
-    descriptor = json.loads(config.read_text())
-    descriptor["repository"] = str(candidate)
-    with pytest.raises(CandidateReceiptSinkError, match="disjoint from the candidate repository"):
-        PinnedGitReceiptSink(descriptor, candidate_repository=candidate)
-
-
-def test_candidate_nested_beneath_sink_or_plan_root_is_refused(tmp_path):
-    sink_root = tmp_path / "receipt-sink"
-    sink_root.mkdir()
-    candidate = sink_root / "candidate"
-    candidate.mkdir()
-    descriptor = {
-        "schema": RECEIPT_SINK_SCHEMA,
-        "sink_id": "test-receipt-sink",
-        "repository": str(sink_root),
-        "commit": "0" * 40,
-        "tree": "0" * 40,
-        "manifest_path": "manifest.json",
-        "manifest_content_sha256": "sha256:" + "0" * 64,
-    }
-    with pytest.raises(CandidateReceiptSinkError, match="disjoint from the candidate repository"):
-        PinnedGitReceiptSink(descriptor, candidate_repository=candidate)
-    with pytest.raises(CandidateReceiptSinkError, match="disjoint from the candidate repository"):
-        resolve_approved_plan_authority(
-            sink_root, approved_ref=PLAN_APPROVED_REF, candidate_repository=candidate,
+    descriptor = load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
+    with pytest.raises(CandidateReceiptSinkError, match="must be disjoint"):
+        candidate_admission_gate(
+            candidate, candidate="HEAD", plan_repository=plan_repository, plan_approved_ref=PLAN_APPROVED_REF,
+            candidate_evidence_descriptor=descriptor,
+            execution_sink=PinnedGitReceiptSink(
+                descriptor.candidate_evidence_sink_descriptor, candidate_repository=candidate,
+            ),
         )
 
 
-def test_cli_requires_an_operator_configured_sink(tmp_path):
+def test_pinned_candidate_evidence_descriptor_rejects_a_tampered_dynamic_s_pin(tmp_path):
+    candidate, commit, tree = candidate_repository(tmp_path)
+    _plans, plan_commit = approved_plan_repository(tmp_path)
+    _s, _d, _x, descriptor_config, _execution_config = pinned_sinks(
+        tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree, plan_commit=plan_commit,
+    )
+    pin = json.loads(descriptor_config.read_text())
+    pin["content_sha256"] = "sha256:" + "0" * 64
+    descriptor_config.write_bytes(canonical(pin))
+    with pytest.raises(CandidateReceiptSinkError, match="content hash mismatch"):
+        load_pinned_candidate_evidence_descriptor(descriptor_config, candidate_repository=candidate)
+
+
+def test_candidate_local_descriptor_configuration_or_repository_is_refused(tmp_path):
+    candidate, commit, tree = candidate_repository(tmp_path)
+    _plans, plan_commit = approved_plan_repository(tmp_path)
+    _s, _d, _x, descriptor_config, execution_config = pinned_sinks(
+        tmp_path, candidate_repo=candidate, source_commit=commit, source_tree=tree, plan_commit=plan_commit,
+    )
+    local = candidate / "candidate-evidence-descriptor-config.json"
+    local.write_bytes(descriptor_config.read_bytes())
+    with pytest.raises(CandidateReceiptSinkError, match="disjoint from the candidate repository"):
+        load_pinned_candidate_evidence_descriptor(local, candidate_repository=candidate)
+    execution_descriptor = json.loads(execution_config.read_text())
+    execution_descriptor["repository"] = str(candidate)
+    with pytest.raises(CandidateReceiptSinkError, match="disjoint from the candidate repository"):
+        PinnedGitReceiptSink(execution_descriptor, candidate_repository=candidate)
+
+
+def test_cli_requires_both_operator_configured_evidence_roots(tmp_path):
     candidate, _commit, _tree = candidate_repository(tmp_path)
     plan_repository, _plan_commit = approved_plan_repository(tmp_path)
     completed = subprocess.run(
@@ -761,6 +793,5 @@ def test_cli_requires_an_operator_configured_sink(tmp_path):
         ],
         env={**os.environ, "PYTHONPATH": str(ROOT / "src")}, text=True, capture_output=True, check=False,
     )
-
     assert completed.returncode == 2
-    assert "--receipt-sink-config" in completed.stderr
+    assert "--candidate-evidence-descriptor-config" in completed.stderr
