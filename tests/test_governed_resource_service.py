@@ -94,6 +94,8 @@ def card(content, service=None):
 
 @contextmanager
 def resource_service(content, *, token="test-token"):
+    runs = {}
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, _format, *_args):
             pass
@@ -115,6 +117,23 @@ def resource_service(content, *, token="test-token"):
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            attestation_prefix = "/v1/harness-runs/"
+            if parsed.path.startswith(attestation_prefix) and parsed.path.endswith("/attestation"):
+                if self.headers.get("Authorization") != f"Bearer {token}":
+                    self.send_error(404)
+                    return
+                run_id = unquote(parsed.path[len(attestation_prefix):-len("/attestation")]).strip("/")
+                run = runs.get(run_id)
+                if run is None or "attestation" not in run:
+                    self.send_error(404)
+                    return
+                body = json.dumps(run["attestation"], sort_keys=True).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             prefix = "/v1/resources/"
             if not parsed.path.startswith(prefix) or self.headers.get("Authorization") != f"Bearer {token}":
                 self.send_error(404)
@@ -123,6 +142,13 @@ def resource_service(content, *, token="test-token"):
             if ref not in content:
                 self.send_error(404)
                 return
+            run_id = self.headers.get("X-TGW-Harness-Run")
+            if run_id:
+                run = runs.get(run_id)
+                if run is None or ref not in {binding["ref"] for binding in run["resources"].values()}:
+                    self.send_error(403)
+                    return
+                run["seen"].add(ref)
             body = json.dumps(
                 {
                     "schema": "tgw-registered-resource/v1",
@@ -132,6 +158,62 @@ def resource_service(content, *, token="test-token"):
                 },
                 sort_keys=True,
             ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):  # noqa: N802
+            if self.headers.get("Authorization") != f"Bearer {token}":
+                self.send_error(404)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                value = json.loads(self.rfile.read(length).decode())
+            except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+                self.send_error(400)
+                return
+            if self.path == "/v1/harness-runs":
+                required = {
+                    "schema", "service_id", "card_hash", "role", "execution_identity",
+                    "handoff_hash", "resource_receipt_hash", "resources",
+                }
+                if set(value) != required or value["schema"] != "tgw-registered-resource-harness-run/v1" or value["service_id"] != "test-resource-service":
+                    self.send_error(400)
+                    return
+                run_id = f"run-{len(runs) + 1}"
+                runs[run_id] = {**value, "seen": set()}
+                body = json.dumps({**value, "run_id": run_id}, sort_keys=True).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            prefix = "/v1/harness-runs/"
+            suffix = "/complete"
+            if not self.path.startswith(prefix) or not self.path.endswith(suffix):
+                self.send_error(404)
+                return
+            run_id = unquote(self.path[len(prefix):-len(suffix)]).strip("/")
+            run = runs.get(run_id)
+            if run is None or value != {"schema": "tgw-registered-resource-harness-run/v1", "run_id": run_id}:
+                self.send_error(400)
+                return
+            if run["seen"] != {binding["ref"] for binding in run["resources"].values()}:
+                self.send_error(409)
+                return
+            unsigned = {
+                "schema": "tgw-registered-resource-retrieval-attestation/v1",
+                "service_id": "test-resource-service", "run_id": run_id,
+                "card_hash": run["card_hash"], "role": run["role"],
+                "execution_identity": run["execution_identity"], "handoff_hash": run["handoff_hash"],
+                "resource_receipt_hash": run["resource_receipt_hash"], "resources": run["resources"],
+            }
+            attestation = {**unsigned, "attestation_hash": canonical_hash(unsigned)}
+            run["attestation"] = attestation
+            body = json.dumps(attestation, sort_keys=True).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -232,11 +314,14 @@ def test_every_role_retrieves_card_bound_sources_from_the_qualified_service(tmp_
         "import json,sys\n"
         "from tgw.execution_resources import HTTPRegisteredResourceResolver,verify_card_resources\n"
         "handoff=json.load(sys.stdin)\n"
-        "actual=verify_card_resources(handoff['card'],HTTPRegisteredResourceResolver.from_descriptor(handoff['resource_service']))\n"
+        "resolver=HTTPRegisteredResourceResolver.from_descriptor(handoff['resource_service'])\n"
+        "run=resolver.begin_harness_run(card_hash=handoff['card']['card_hash'],role=handoff['card']['role'],execution_identity=handoff['receipt']['receiver_identity'],handoff_hash=handoff['handoff_hash'],resource_receipt_hash=handoff['resource_receipt']['receipt_hash'],resources=handoff['card']['bindings'])\n"
+        "actual=verify_card_resources(handoff['card'],resolver.for_harness_run(run))\n"
         "assert actual == handoff['resource_receipt']\n"
+        "attestation=resolver.complete_harness_run(run)\n"
         "role=handoff['card']['role']\n"
         "conditions={'implementation':['implemented'],'independent-review':['reviewed'],'controller-verification':['tested','linted','controller_verified']}[role]\n"
-        "print(json.dumps({'outcome':'satisfied','established_conditions':conditions,'artifacts':[], 'resource_receipt_hash':actual['receipt_hash']}))\n"
+        "print(json.dumps({'outcome':'satisfied','established_conditions':conditions,'artifacts':[], 'resource_receipt_hash':actual['receipt_hash'],'resource_retrieval_attestation':attestation}))\n"
     )
     runner.chmod(0o755)
     registry_value = {
@@ -273,6 +358,7 @@ def test_every_role_retrieves_card_bound_sources_from_the_qualified_service(tmp_
                 required_capabilities=capabilities,
                 resource_resolver=resolver,
                 resource_service=service,
+                require_harness_retrieval_attestation=True,
             )
             for role, capabilities in (
                 ("implementation", ["source-mutation"]),
@@ -280,9 +366,33 @@ def test_every_role_retrieves_card_bound_sources_from_the_qualified_service(tmp_
                 ("controller-verification", ["tests"]),
             )
         ]
+        # The pre-launch receipt is visible in the handoff.  An untrusted
+        # runner could echo it without fetching anything; only the service
+        # read-back attestation makes that claim fail closed.
+        runner.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json,sys\n"
+            "handoff=json.load(sys.stdin)\n"
+            "print(json.dumps({'outcome':'satisfied','established_conditions':['implemented'],'artifacts':[],'resource_receipt_hash':handoff['resource_receipt']['receipt_hash']}))\n"
+        )
+        echo_receipt = dispatch_role(
+            registry,
+            health,
+            role="implementation",
+            adapters=adapters,
+            card_template=card_template(content, service),
+            execution_identity="qualified-service:echo-only",
+            required_capabilities=["source-mutation"],
+            resource_resolver=resolver,
+            resource_service=service,
+            require_harness_retrieval_attestation=True,
+        )
 
     assert [receipt["status"] for receipt in receipts] == ["PASS", "PASS", "PASS"]
     assert all(receipt["harness_resource_receipt_hash"] == receipt["resource_receipt_hash"] for receipt in receipts)
+    assert all(receipt["harness_retrieval_attestation_hash"] for receipt in receipts)
+    assert echo_receipt["status"] == "FAIL"
+    assert "did not return a service-issued retrieval attestation" in echo_receipt["artifacts"][-1]["detail"]
 
 
 def test_non_test_governed_role_script_dispatches_via_registered_resource_service(tmp_path):
@@ -294,10 +404,13 @@ def test_non_test_governed_role_script_dispatches_via_registered_resource_servic
         "from tgw.execution_resources import HTTPRegisteredResourceResolver,verify_card_resources\n"
         "handoff=json.load(sys.stdin)\n"
         "assert handoff['resource_service']['id'] == 'test-resource-service'\n"
-        "actual=verify_card_resources(handoff['card'],HTTPRegisteredResourceResolver.from_descriptor(handoff['resource_service']))\n"
+        "resolver=HTTPRegisteredResourceResolver.from_descriptor(handoff['resource_service'])\n"
+        "run=resolver.begin_harness_run(card_hash=handoff['card']['card_hash'],role=handoff['card']['role'],execution_identity=handoff['receipt']['receiver_identity'],handoff_hash=handoff['handoff_hash'],resource_receipt_hash=handoff['resource_receipt']['receipt_hash'],resources=handoff['card']['bindings'])\n"
+        "actual=verify_card_resources(handoff['card'],resolver.for_harness_run(run))\n"
         "assert actual == handoff['resource_receipt']\n"
+        "attestation=resolver.complete_harness_run(run)\n"
         "print(json.dumps({'outcome':'satisfied','established_conditions':['implemented'],\n"
-        "'artifacts':[], 'resource_receipt_hash':actual['receipt_hash']}))\n"
+        "'artifacts':[], 'resource_receipt_hash':actual['receipt_hash'],'resource_retrieval_attestation':attestation}))\n"
     )
     runner.chmod(0o755)
     registry = {

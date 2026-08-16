@@ -23,6 +23,8 @@ RESOURCE_SERVICE_SCHEMA = "tgw-registered-resource-service/v1"
 RESOURCE_SERVICE_CATALOG_SCHEMA = "tgw-registered-resource-service-catalog/v1"
 RESOURCE_SERVICE_HEALTH_SCHEMA = "tgw-registered-resource-health/v1"
 RESOURCE_RESPONSE_SCHEMA = "tgw-registered-resource/v1"
+HARNESS_RUN_SCHEMA = "tgw-registered-resource-harness-run/v1"
+HARNESS_RETRIEVAL_ATTESTATION_SCHEMA = "tgw-registered-resource-retrieval-attestation/v1"
 CARD_RESOURCE_NAMES = frozenset(
     {
         "plan_input",
@@ -38,6 +40,7 @@ CARD_RESOURCE_NAMES = frozenset(
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _SERVICE_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
+_RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _MAX_RESOURCE_RESPONSE_BYTES = 4 * 1024 * 1024
 _RESOURCE_SERVICE_DESCRIPTOR_FIELDS = {
     "schema", "id", "endpoint", "credential_env", "timeout_seconds",
@@ -270,6 +273,17 @@ class RegisteredResourceResolver:
             raise ResourceVerificationError(f"registered resource is unavailable: {ref}") from exc
 
 
+class HarnessRunResolver:
+    """A harness-scoped view that causes the service to audit each fetch."""
+
+    def __init__(self, service: "HTTPRegisteredResourceResolver", run_id: str) -> None:
+        self._service = service
+        self._run_id = run_id
+
+    def fetch(self, ref: str) -> RegisteredResource:
+        return self._service._fetch(ref, harness_run_id=self._run_id)
+
+
 class HTTPRegisteredResourceResolver:
     """Retrieve raw content from one explicitly registered HTTP resource service.
 
@@ -349,7 +363,121 @@ class HTTPRegisteredResourceResolver:
         }:
             raise ResourceVerificationError("registered resource service health identity is invalid")
 
+    def _json_request(
+        self, target: str, *, method: str, value: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        data = None if value is None else _canonical(value)
+        request = Request(target, data=data, method=method)
+        request.add_header("Accept", "application/json")
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        if self._credential is not None:
+            request.add_header("Authorization", f"Bearer {self._credential}")
+        try:
+            with urlopen(request, timeout=self._timeout_seconds) as response:  # nosec: registered endpoint
+                if response.geturl() != target or response.headers.get_content_type() != "application/json":
+                    raise ResourceVerificationError("registered resource service attestation response is invalid")
+                payload = response.read(128 * 1024)
+        except ResourceVerificationError:
+            raise
+        except (HTTPError, URLError, OSError) as exc:
+            raise ResourceVerificationError("registered resource service attestation request failed") from exc
+        try:
+            result = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ResourceVerificationError("registered resource service attestation response is not JSON") from exc
+        if not isinstance(result, Mapping):
+            raise ResourceVerificationError("registered resource service attestation response is invalid")
+        return result
+
+    def begin_harness_run(
+        self, *, card_hash: str, role: str, execution_identity: str, handoff_hash: str,
+        resource_receipt_hash: str, resources: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Ask the service to open an auditable harness-specific retrieval run."""
+        if not all(_is_hash(value) for value in (card_hash, handoff_hash, resource_receipt_hash)):
+            raise ResourceVerificationError("harness retrieval run hash binding is invalid")
+        if not isinstance(role, str) or not role or not isinstance(execution_identity, str) or not execution_identity:
+            raise ResourceVerificationError("harness retrieval run identity is invalid")
+        expected_resources = {name: resources[name] for name in sorted(CARD_RESOURCE_NAMES)} if set(resources) == CARD_RESOURCE_NAMES else None
+        if expected_resources is None:
+            raise ResourceVerificationError("harness retrieval run resources are invalid")
+        payload = {
+            "schema": HARNESS_RUN_SCHEMA, "service_id": self._service_id,
+            "card_hash": card_hash, "role": role, "execution_identity": execution_identity,
+            "handoff_hash": handoff_hash, "resource_receipt_hash": resource_receipt_hash,
+            "resources": expected_resources,
+        }
+        result = dict(self._json_request(self._endpoint + "/v1/harness-runs", method="POST", value=payload))
+        required = set(payload) | {"run_id"}
+        if set(result) != required or any(result[key] != payload[key] for key in payload):
+            raise ResourceVerificationError("registered resource service harness run binding is invalid")
+        if not isinstance(result["run_id"], str) or _RUN_ID.fullmatch(result["run_id"]) is None:
+            raise ResourceVerificationError("registered resource service harness run id is invalid")
+        return result
+
+    def for_harness_run(self, run: Mapping[str, Any]) -> HarnessRunResolver:
+        if not isinstance(run, Mapping) or run.get("schema") != HARNESS_RUN_SCHEMA:
+            raise ResourceVerificationError("harness retrieval run is invalid")
+        run_id = run.get("run_id")
+        if not isinstance(run_id, str) or _RUN_ID.fullmatch(run_id) is None:
+            raise ResourceVerificationError("harness retrieval run id is invalid")
+        return HarnessRunResolver(self, run_id)
+
+    def complete_harness_run(self, run: Mapping[str, Any]) -> dict[str, Any]:
+        """Close a run after the harness fetched every bound source itself."""
+        if not isinstance(run, Mapping) or run.get("schema") != HARNESS_RUN_SCHEMA:
+            raise ResourceVerificationError("harness retrieval run is invalid")
+        run_id = run.get("run_id")
+        if not isinstance(run_id, str) or _RUN_ID.fullmatch(run_id) is None:
+            raise ResourceVerificationError("harness retrieval run id is invalid")
+        result = dict(self._json_request(
+            self._endpoint + "/v1/harness-runs/" + quote(run_id, safe="") + "/complete",
+            method="POST", value={"schema": HARNESS_RUN_SCHEMA, "run_id": run_id},
+        ))
+        required = {
+            "schema", "service_id", "run_id", "card_hash", "role", "execution_identity",
+            "handoff_hash", "resource_receipt_hash", "resources", "attestation_hash",
+        }
+        if set(result) != required or result.get("schema") != HARNESS_RETRIEVAL_ATTESTATION_SCHEMA:
+            raise ResourceVerificationError("registered resource service retrieval attestation is invalid")
+        if result.get("service_id") != self._service_id or result.get("run_id") != run_id:
+            raise ResourceVerificationError("registered resource service retrieval attestation binding is invalid")
+        return result
+
+    def verify_harness_retrieval_attestation(
+        self, attestation: Mapping[str, Any], *, card_hash: str, role: str,
+        execution_identity: str, handoff_hash: str, resource_receipt_hash: str,
+        resources: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Read back the service record; a runner cannot self-attest by echoing."""
+        if not isinstance(attestation, Mapping) or attestation.get("schema") != HARNESS_RETRIEVAL_ATTESTATION_SCHEMA:
+            raise ResourceVerificationError("harness retrieval attestation is invalid")
+        run_id = attestation.get("run_id")
+        if not isinstance(run_id, str) or _RUN_ID.fullmatch(run_id) is None:
+            raise ResourceVerificationError("harness retrieval attestation run id is invalid")
+        recorded = dict(self._json_request(
+            self._endpoint + "/v1/harness-runs/" + quote(run_id, safe="") + "/attestation",
+            method="GET",
+        ))
+        if recorded != dict(attestation):
+            raise ResourceVerificationError("harness retrieval attestation was not issued by the service")
+        expected = {
+            "schema": HARNESS_RETRIEVAL_ATTESTATION_SCHEMA, "service_id": self._service_id,
+            "card_hash": card_hash, "role": role, "execution_identity": execution_identity,
+            "handoff_hash": handoff_hash, "resource_receipt_hash": resource_receipt_hash,
+            "resources": {name: resources[name] for name in sorted(CARD_RESOURCE_NAMES)},
+        }
+        if any(recorded.get(key) != value for key, value in expected.items()):
+            raise ResourceVerificationError("harness retrieval attestation binding mismatch")
+        if not _is_hash(recorded.get("attestation_hash")):
+            raise ResourceVerificationError("harness retrieval attestation hash is invalid")
+        return recorded
+
     def fetch(self, ref: str) -> RegisteredResource:
+        return self._fetch(ref)
+
+    def _fetch(self, ref: str, *, harness_run_id: str | None = None) -> RegisteredResource:
         if not isinstance(ref, str) or not ref:
             raise ResourceVerificationError("registered resource reference is invalid")
         target = self._endpoint + "/v1/resources/" + quote(ref, safe="")
@@ -357,6 +485,8 @@ class HTTPRegisteredResourceResolver:
         request.add_header("Accept", "application/json")
         if self._credential is not None:
             request.add_header("Authorization", f"Bearer {self._credential}")
+        if harness_run_id is not None:
+            request.add_header("X-TGW-Harness-Run", harness_run_id)
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:  # nosec: descriptor is an explicit registered service
                 if response.geturl() != target:

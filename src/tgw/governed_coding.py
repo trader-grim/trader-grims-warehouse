@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from tgw.execution_resources import (
+    HTTPRegisteredResourceResolver,
     ResourceResolver,
     ResourceVerificationError,
     resource_service_descriptor_hash,
@@ -107,6 +108,7 @@ def dispatch_role(
     independent_from: Sequence[str] = (),
     resource_resolver: ResourceResolver | None = None,
     resource_service: Mapping[str, Any] | None = None,
+    require_harness_retrieval_attestation: bool = False,
     run: Run = subprocess.run,
 ) -> dict[str, Any]:
     """Select, adapt, execute, and bind one role result to an immutable receipt."""
@@ -195,6 +197,7 @@ def dispatch_role(
     outcome = "failed"
     established: list[str] = []
     harness_resource_receipt_hash: str | None = None
+    harness_retrieval_attestation: Mapping[str, Any] | None = None
     if runner.returncode:
         artifacts.append({"kind": "runner_failure", "detail": runner.stderr[-500:]})
     else:
@@ -207,18 +210,40 @@ def dispatch_role(
             raw_established = result.get("established_conditions", [])
             raw_artifacts = result.get("artifacts", [])
             raw_resource_hash = result.get("resource_receipt_hash")
+            raw_attestation = result.get("resource_retrieval_attestation")
             if isinstance(raw_established, list) and all(isinstance(item, str) for item in raw_established):
                 established = raw_established
             if isinstance(raw_artifacts, list):
                 artifacts = raw_artifacts
             if isinstance(raw_resource_hash, str):
                 harness_resource_receipt_hash = raw_resource_hash
+            if isinstance(raw_attestation, Mapping):
+                harness_retrieval_attestation = raw_attestation
     allowed = _ROLE_CONDITIONS[role]
+    attestation_hash: str | None = None
+    attestation_error: str | None = None
+    if require_harness_retrieval_attestation:
+        if not isinstance(resource_resolver, HTTPRegisteredResourceResolver):
+            attestation_error = "registered resource resolver cannot verify harness retrieval attestation"
+        elif harness_retrieval_attestation is None:
+            attestation_error = "runner did not return a service-issued retrieval attestation"
+        else:
+            try:
+                verified_attestation = resource_resolver.verify_harness_retrieval_attestation(
+                    harness_retrieval_attestation,
+                    card_hash=card["card_hash"], role=role,
+                    execution_identity=execution_identity, handoff_hash=handoff["handoff_hash"],
+                    resource_receipt_hash=resource_receipt["receipt_hash"], resources=card["bindings"],
+                )
+                attestation_hash = str(verified_attestation["attestation_hash"])
+            except ResourceVerificationError as exc:
+                attestation_error = str(exc)
     valid_success = (
         outcome == "satisfied"
         and _ROLE_REQUIRED[role] <= set(established)
         and set(established) <= allowed
         and harness_resource_receipt_hash == resource_receipt["receipt_hash"]
+        and (not require_harness_retrieval_attestation or attestation_hash is not None)
     )
     if not valid_success:
         established = []
@@ -227,6 +252,8 @@ def dispatch_role(
             detail = "runner claimed conditions outside role authority"
             if harness_resource_receipt_hash != resource_receipt["receipt_hash"]:
                 detail = "runner did not prove retrieval of the card-bound resource receipt"
+            elif attestation_error is not None:
+                detail = attestation_error
             artifacts.append({"kind": "contract_failure", "detail": detail})
     return _receipt(
         {
@@ -239,6 +266,7 @@ def dispatch_role(
             "promptcraft_receipt_hash": handoff["receipt"]["receipt_hash"],
             "resource_receipt_hash": resource_receipt["receipt_hash"],
             "harness_resource_receipt_hash": harness_resource_receipt_hash,
+            "harness_retrieval_attestation_hash": attestation_hash,
             "resource_service_descriptor_hash": resource_service_descriptor_hash(verified_service),
             "outcome": outcome,
             "established_conditions": established,
@@ -267,6 +295,10 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
         or not isinstance(receipt.get("resource_receipt_hash"), str)
         or receipt.get("harness_resource_receipt_hash") != receipt.get("resource_receipt_hash")
         or not isinstance(receipt.get("resource_service_descriptor_hash"), str)
+        or (
+            receipt.get("harness_retrieval_attestation_hash") is not None
+            and not isinstance(receipt.get("harness_retrieval_attestation_hash"), str)
+        )
         or not _ROLE_REQUIRED[str(receipt["role"])]
         <= set(receipt.get("established_conditions", ()))
     ):

@@ -99,6 +99,7 @@ def role_receipt(card_value, resource_value):
         "promptcraft_receipt_hash": "sha256:" + "a" * 64,
         "resource_receipt_hash": resource_value["receipt_hash"],
         "harness_resource_receipt_hash": resource_value["receipt_hash"],
+        "harness_retrieval_attestation_hash": "sha256:" + "d" * 64,
         "resource_service_descriptor_hash": canonical_hash(RESOURCE_SERVICE),
         "outcome": "satisfied",
         "established_conditions": ["implemented"],

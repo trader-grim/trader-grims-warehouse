@@ -133,6 +133,8 @@ def create_candidate_governed_execution_receipt(
         role_receipt.get("card_hash") != card_hash
         or role_receipt.get("resource_receipt_hash") != resource_hash
         or role_receipt.get("harness_resource_receipt_hash") != resource_hash
+        or not isinstance(role_receipt.get("harness_retrieval_attestation_hash"), str)
+        or _SHA256.fullmatch(str(role_receipt.get("harness_retrieval_attestation_hash"))) is None
         or role_receipt.get("selected_provider") != card["selected_provider"]
         or role_receipt.get("role") != card["role"]
     ):
@@ -150,6 +152,7 @@ def create_candidate_governed_execution_receipt(
         "selected_provider": card["selected_provider"],
         "card_hash": card_hash,
         "resource_receipt_hash": resource_hash,
+        "harness_retrieval_attestation_hash": role_receipt["harness_retrieval_attestation_hash"],
         "role_receipt_hash": role_hash,
     }
     return {**unsigned, "receipt_hash": _hash(unsigned)}
@@ -162,7 +165,8 @@ def verify_candidate_governed_execution_receipt(
 
     required = {
         "schema", "status", "source_commit", "source_tree", "plan_commit", "role",
-        "selected_provider", "card_hash", "resource_receipt_hash", "role_receipt_hash", "receipt_hash",
+        "selected_provider", "card_hash", "resource_receipt_hash", "harness_retrieval_attestation_hash",
+        "role_receipt_hash", "receipt_hash",
     }
     if not isinstance(receipt, Mapping) or set(receipt) != required or receipt.get("schema") != SCHEMA:
         raise GovernedExecutionReceiptError("candidate governed execution receipt schema is invalid")
@@ -178,7 +182,7 @@ def verify_candidate_governed_execution_receipt(
         or receipt.get("plan_commit") != plan_commit
     ):
         raise GovernedExecutionReceiptError("candidate governed execution receipt binding mismatch")
-    for field in ("card_hash", "resource_receipt_hash", "role_receipt_hash"):
+    for field in ("card_hash", "resource_receipt_hash", "harness_retrieval_attestation_hash", "role_receipt_hash"):
         if not isinstance(receipt.get(field), str) or _SHA256.fullmatch(receipt[field]) is None:
             raise GovernedExecutionReceiptError("candidate governed execution receipt artifact hash is invalid")
     if not isinstance(receipt.get("role"), str) or not isinstance(receipt.get("selected_provider"), str):
