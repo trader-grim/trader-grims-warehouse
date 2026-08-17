@@ -426,6 +426,17 @@ def test_published_false_no_listing():
     assert _result(snap, "published") == FingerprintResult.FALSE
 
 
+def test_listing_provider_conflict_is_not_a_healthy_listable_state(tmp_path):
+    goal = GoalProfile("listable", "1", ("listing_provider_consistent",))
+    snapshot = _snapshot(_make_item(
+        ebay_listing_conflict={
+            "kind": "active_trading_listing_differs_from_inventory_binding",
+            "trading_listing_id": "227471641954",
+        },
+    ), goal, tmp_path)
+    assert _result(snapshot, "listing_provider_consistent") == FingerprintResult.FALSE
+
+
 # ---------------------------------------------------------------------------
 # valid_condition
 # ---------------------------------------------------------------------------

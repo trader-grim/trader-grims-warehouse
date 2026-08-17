@@ -97,7 +97,7 @@ TGW_EBAY_LISTABLE = GoalProfile(
         "inventory_available", "item_has_photos", "ai_identified", "draft_generated", "priced",
         "photos_uploaded", "staged", "staged_content_current",
         "valid_condition", "valid_category",
-        "title_ok", "published",
+        "title_ok", "published", "listing_provider_consistent",
     ),
 )
 

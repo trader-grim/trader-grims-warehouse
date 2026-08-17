@@ -507,7 +507,7 @@ def sync_active_listings(cfg: Dict[str, Any], itemdata_root: Path,
     """
     stats: Dict[str, Any] = {
         'fetched': 0, 'matched': 0, 'updated': 0,
-        'skipped_inventory': 0, 'orphaned': 0, 'errors': 0,
+        'skipped_inventory': 0, 'listing_conflicts': 0, 'orphaned': 0, 'errors': 0,
         'orphans': [],
     }
 
@@ -641,6 +641,41 @@ def _apply_active_listing(listing: Dict[str, Any], itemdata_root: Path,
     existing = item.get('ebay_listing', {})
 
     if existing.get('api') == 'inventory' and existing.get('listing_id'):
+        # GetMyeBaySelling observes every active account listing, including
+        # Inventory-managed listings.  It must never overwrite that binding.
+        # A different active ItemID for the same SKU is nevertheless a real
+        # conflict (for example an eBay cancellation relist) and must remain
+        # visible to workflow evaluation and the operator.
+        if str(existing.get('listing_id')) != str(listing.get('listing_id')):
+            conflict = {
+                'schema': 'ebay-listing-conflict/v1',
+                'kind': 'active_trading_listing_differs_from_inventory_binding',
+                'sync_source': 'trading_getmyebayselling',
+                'inventory_listing_id': str(existing.get('listing_id') or ''),
+                'inventory_listing_status': str(
+                    existing.get('listing_status') or existing.get('status') or ''
+                ),
+                'inventory_offer_id': str(
+                    (item.get('ebay_offer') or {}).get('offer_id') or ''
+                ),
+                'trading_listing_id': str(listing.get('listing_id') or ''),
+                'trading_listing_status': str(listing.get('status') or ''),
+                'detected_at': synced_at,
+            }
+            existing_conflict = item.get('ebay_listing_conflict')
+            # Preserve the first observation for the same conflict so a
+            # periodic observation does not create a new item generation.
+            if isinstance(existing_conflict, dict):
+                prior = dict(existing_conflict)
+                prior.pop('detected_at', None)
+                comparable = dict(conflict)
+                comparable.pop('detected_at', None)
+                if prior == comparable:
+                    conflict['detected_at'] = existing_conflict.get('detected_at', synced_at)
+            if existing_conflict != conflict and not dry_run:
+                fence_patch_item(cfg, sku, {'ebay_listing_conflict': conflict})
+                stats['updated'] += 1
+            stats['listing_conflicts'] += 1
         stats['skipped_inventory'] += 1
         return
 

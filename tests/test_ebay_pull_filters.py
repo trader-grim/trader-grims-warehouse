@@ -148,6 +148,37 @@ def test_sku_filter_writes_listing_data_to_json(tmp_path):
     assert doc["ebay_listing"]["live_price"] == "29.99"
 
 
+def test_inventory_bound_sku_records_different_active_listing_as_conflict(tmp_path):
+    """The account-wide Trading feed must not overwrite an Inventory binding."""
+    _write_item(tmp_path, "tgw001", {
+        "ebay_listing": {
+            "api": "inventory", "listing_id": "inventory-listing",
+            "listing_status": "ACTIVE",
+        },
+        "ebay_offer": {"offer_id": "offer-1"},
+    })
+    with patch.object(pull, "get_my_ebay_selling", return_value=[_listing("other-listing", "tgw001")]):
+        stats = pull.sync_active_listings(
+            {"pretty": False, "api_key": "test-api-key"}, tmp_path,
+            "2026-08-17T15:25:00Z", sku_filter={"tgw001"},
+        )
+
+    item = json.loads((tmp_path / "tgw001" / "tgw001.json").read_text())
+    assert item["ebay_listing"]["listing_id"] == "inventory-listing"
+    assert item["ebay_listing_conflict"] == {
+        "schema": "ebay-listing-conflict/v1",
+        "kind": "active_trading_listing_differs_from_inventory_binding",
+        "sync_source": "trading_getmyebayselling",
+        "inventory_listing_id": "inventory-listing",
+        "inventory_listing_status": "ACTIVE",
+        "inventory_offer_id": "offer-1",
+        "trading_listing_id": "other-listing",
+        "trading_listing_status": "Active",
+        "detected_at": "2026-08-17T15:25:00Z",
+    }
+    assert stats["listing_conflicts"] == 1
+
+
 # ---------------------------------------------------------------------------
 # listing_index SKU filtering (sold-orders path)
 # ---------------------------------------------------------------------------

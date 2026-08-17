@@ -293,6 +293,17 @@ def inventory_available(item: Mapping[str, Any]) -> bool:
         return False
 
 
+def _listing_provider_consistent(item: Dict[str, Any]) -> bool:
+    """No active listing conflicts with the canonical Inventory binding."""
+    conflict = item.get("ebay_listing_conflict")
+    return not (
+        isinstance(conflict, dict)
+        and conflict.get("kind")
+        == "active_trading_listing_differs_from_inventory_binding"
+        and str(conflict.get("trading_listing_id") or "").strip()
+    )
+
+
 def _valid_condition(item: Dict[str, Any]) -> bool:
     """condition field is a known canonical value."""
     cond = _get_str(item, "condition")
@@ -345,6 +356,7 @@ def _check_pipeline_error(item: Dict[str, Any]) -> Optional[EvidenceAssertion]:
 
 _ITEM_CHECKERS: dict[str, callable] = {
     "inventory_available": inventory_available,
+    "listing_provider_consistent": _listing_provider_consistent,
     "item_has_photos": _has_photos,
     "photos_uploaded": _photos_uploaded,
     "ai_identified": _ai_identified,
@@ -362,6 +374,10 @@ _ITEM_REASONS: dict[str, tuple[str, str]] = {
     "inventory_available": (
         "inventory status and quantity permit listing",
         "inventory is terminal or has no available quantity",
+    ),
+    "listing_provider_consistent": (
+        "one authoritative listing binding",
+        "active listing conflicts with Inventory binding",
     ),
     "item_has_photos": ("photos present", "no photos"),
     "photos_uploaded": ("photos uploaded to eBay/draft", "photos not yet uploaded"),
