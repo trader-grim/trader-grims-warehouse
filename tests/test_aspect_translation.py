@@ -11,6 +11,7 @@ _ASPECTS = [
     {"name": "Type", "required": True, "mode": "SELECTION_ONLY",
      "allowed_values": ["Brooch", "Necklace"]},
     {"name": "Brand", "required": False, "mode": "FREE_TEXT", "allowed_values": []},
+    {"name": "Model", "required": True, "mode": "FREE_TEXT", "allowed_values": []},
     {"name": "Metal", "required": False, "mode": "SELECTION_ONLY",
      "allowed_values": ["Gold", "Silver"]},
 ]
@@ -39,6 +40,13 @@ def test_free_text_aspect_passes_through():
         result = translate_inventory_to_ebay_draft(
             {"Brand": "Unbranded"}, "12345", {})
     assert result == {"Brand": "Unbranded"}
+
+
+def test_identity_model_is_projected_when_the_category_requires_it():
+    with patch("tgw.ebay.aspect_translation.get_aspects", _get_aspects):
+        result = translate_inventory_to_ebay_draft(
+            {"Model": "Sensor 2"}, "12345", {})
+    assert result == {"Model": "Sensor 2"}
 
 
 def test_already_filled_keys_are_skipped():

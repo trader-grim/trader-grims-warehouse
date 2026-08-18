@@ -29,8 +29,13 @@ _RAW_ASPECTS = {
             'aspectValues': [{'localizedValue': 'Red'}, {'localizedValue': 'Blue'}],
         },
         {
-            'localizedAspectName': 'MPN',  # in _SKIP_ASPECTS — should be filtered
+            'localizedAspectName': 'MPN',
             'aspectConstraint': {'aspectRequired': False, 'aspectMode': 'FREE_TEXT'},
+            'aspectValues': [],
+        },
+        {
+            'localizedAspectName': 'Model',
+            'aspectConstraint': {'aspectRequired': True, 'aspectMode': 'FREE_TEXT'},
             'aspectValues': [],
         },
     ],
@@ -49,13 +54,13 @@ class TestGetAspectsCaching:
     def setup_method(self):
         _reset_cache()
 
-    def test_filters_skip_list_and_structures_result(self, tmp_path):
+    def test_retains_identity_aspects_and_filters_only_non_listing_units(self, tmp_path):
         cfg = _cfg(tmp_path)
         with patch.object(specifics, 'get_category_tree_id', return_value='0'), \
              patch.object(specifics, 'ebay_get', return_value=_RAW_ASPECTS):
             result = specifics.get_aspects(cfg, '12345')
         names = {a['name'] for a in result}
-        assert names == {'Brand', 'Color'}
+        assert names == {'Brand', 'Color', 'MPN', 'Model'}
         color = next(a for a in result if a['name'] == 'Color')
         assert color['allowed_values'] == ['Red', 'Blue']
 
@@ -102,7 +107,7 @@ class TestGetAspectsCaching:
         _reset_cache()  # simulate a new process — memory cache gone, disk remains
         with patch.object(specifics, 'ebay_get', side_effect=AssertionError('must not hit live API')):
             result = specifics.get_aspects(cfg, '12345')
-        assert {a['name'] for a in result} == {'Brand', 'Color'}
+        assert {a['name'] for a in result} == {'Brand', 'Color', 'MPN', 'Model'}
 
     def test_different_categories_cached_independently(self, tmp_path):
         cfg = _cfg(tmp_path)
@@ -114,13 +119,12 @@ class TestGetAspectsCaching:
             r1 = specifics.get_aspects(cfg, '111')
             r2 = specifics.get_aspects(cfg, '222')
         assert mock_get.call_count == 2
-        assert {a['name'] for a in r1} == {'Brand', 'Color'}
+        assert {a['name'] for a in r1} == {'Brand', 'Color', 'MPN', 'Model'}
         assert {a['name'] for a in r2} == {'Size'}
 
-    def test_old_disk_cache_is_permanent_no_refetch(self, tmp_path):
-        # Session 42 / R0.4: cached aspects never auto-expire (same policy as
-        # the category tree) — an arbitrarily old entry is served with NO live
-        # call. Refresh happens only via `tgw warm-ebay-aspects`.
+    def test_old_filter_revision_is_refetched_for_identity_aspects(self, tmp_path):
+        # Identity-aspects v2 intentionally invalidates the old projection:
+        # it omitted Model/MPN and could falsely report a draft complete.
         cfg = _cfg(tmp_path)
         cache_path = tmp_path / 'ebay-aspects-cache.json'
         import json
@@ -131,8 +135,8 @@ class TestGetAspectsCaching:
         with patch.object(specifics, 'get_category_tree_id', return_value='0'), \
              patch.object(specifics, 'ebay_get', return_value=_RAW_ASPECTS) as mock_get:
             result = specifics.get_aspects(cfg, '12345')
-        assert mock_get.call_count == 0
-        assert {a['name'] for a in result} == {'Vintage'}
+        assert mock_get.call_count == 1
+        assert {a['name'] for a in result} == {'Brand', 'Color', 'MPN', 'Model'}
 
     def test_bulk_shard_fallback_no_live_call(self, tmp_path):
         # A category absent from the per-category cache but present in the
@@ -142,7 +146,9 @@ class TestGetAspectsCaching:
         bulk = tmp_path / 'ebay-aspects-bulk'
         bulk.mkdir()
         (bulk / '777.json').write_text(json.dumps({
-            '_cached_at': 1, 'name': 'Widgets',
+            '_cached_at': 1,
+            '_aspect_filter_revision': specifics._ASPECT_FILTER_REVISION,
+            'name': 'Widgets',
             'aspects': [{'name': 'Size', 'required': True,
                          'mode': 'SELECTION_ONLY', 'allowed_values': ['S', 'M']}],
         }))

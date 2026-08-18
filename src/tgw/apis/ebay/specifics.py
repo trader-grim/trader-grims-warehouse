@@ -46,11 +46,15 @@ from tgw.catalog import atomic_write_json as _atomic_write_cache_json
 
 log = logging.getLogger(__name__)
 
-# Aspects we skip — not useful for AI to fill (operator/product-lookup handles these)
+# Aspects we skip — not useful for AI to fill.
 # California Prop 65 Warning was previously skipped as "legal boilerplate" but Dave
 # flagged (session 39, item tgw202605060201087) that it's a real, near-universal
 # aspect that must be shown/filled like any other — removed from the skip list.
-_SKIP_ASPECTS = {'MPN', 'Model', 'Unit Quantity', 'Unit Type'}
+# MPN and Model must remain in the category schema: both the AI and the
+# Inventory Record already preserve these identity values, and omitting them
+# here prevented Set A -> eBay-draft projection even when eBay required one.
+_SKIP_ASPECTS = {'Unit Quantity', 'Unit Type'}
+_ASPECT_FILTER_REVISION = "identity-aspects-v2"
 
 _aspects_mem_cache: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -160,7 +164,10 @@ def _load_bulk_shard(cfg: Dict[str, Any], category_id: str) -> Optional[List[Dic
     if not shard.exists():
         return None
     try:
-        return json.loads(shard.read_text(encoding='utf-8'))['aspects']
+        data = json.loads(shard.read_text(encoding='utf-8'))
+        if data.get('_aspect_filter_revision') != _ASPECT_FILTER_REVISION:
+            return None
+        return data['aspects']
     except (OSError, ValueError, KeyError) as exc:
         log.warning('bulk aspects shard %s unreadable: %s', shard, exc)
         return None
@@ -208,6 +215,7 @@ def bulk_refresh_aspects(cfg: Dict[str, Any]) -> Dict[str, Any]:
         # (100/day pool), defeating the whole point of this bulk download.
         _atomic_write_cache_json(shard, {
             '_cached_at': fetched_at,
+            '_aspect_filter_revision': _ASPECT_FILTER_REVISION,
             'name': entry.get('category', {}).get('categoryName', ''),
             'aspects': _structure_aspects(entry.get('aspects', [])),
         }, pretty=False)
@@ -232,7 +240,10 @@ def get_aspects(cfg: Dict[str, Any], category_id: str) -> List[Dict[str, Any]]:
     cache_path = _aspects_cache_path(cfg)
     disk_cache = _load_aspects_disk_cache(cache_path)
     entry = disk_cache.get(category_id)
-    if entry and 'aspects' in entry:
+    if (
+        entry and 'aspects' in entry
+        and entry.get('_aspect_filter_revision') == _ASPECT_FILTER_REVISION
+    ):
         _aspects_mem_cache[category_id] = entry['aspects']
         return entry['aspects']
 
@@ -252,7 +263,11 @@ def get_aspects(cfg: Dict[str, Any], category_id: str) -> List[Dict[str, Any]]:
         # a flock across a FRESH read+merge+atomic-write — the live fetch
         # above already happened outside the lock, so this doesn't
         # serialize concurrent live API calls, only the disk merge itself.
-        entry = {'_cached_at': time.time(), 'aspects': results}
+        entry = {
+            '_cached_at': time.time(),
+            '_aspect_filter_revision': _ASPECT_FILTER_REVISION,
+            'aspects': results,
+        }
         try:
             locked_merge_cache_json(
                 cache_path,
@@ -323,7 +338,10 @@ def warm_missing_aspects(cfg: Dict[str, Any], category_ids: List[str],
         if cid in _aspects_mem_cache:
             continue
         entry = disk_cache.get(cid)
-        if entry and 'aspects' in entry:
+        if (
+            entry and 'aspects' in entry
+            and entry.get('_aspect_filter_revision') == _ASPECT_FILTER_REVISION
+        ):
             continue
         if _load_bulk_shard(cfg, cid) is not None:
             continue
