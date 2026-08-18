@@ -1,6 +1,7 @@
 """Read-only per-item workflow projection for operator Action Cards."""
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -22,8 +23,16 @@ def _json_value(value: Any) -> Any:
 def build_item_action_card(
     item_path: str | Path,
     attempts: Sequence[Mapping[str, Any]] = (),
+    *,
+    provider_identity: str = "",
 ) -> dict[str, Any]:
-    """Rebuild the current EBAY_LISTABLE graph and join immutable attempts."""
+    """Rebuild the current EBAY_LISTABLE graph and join immutable attempts.
+
+    A stage is authoritative only when its durable provider-effect receipt is
+    bound to the configured eBay identity.  The operational HTTP projection
+    supplies that identity; callers without one intentionally receive a
+    ledger-free, read-only graph.
+    """
     ambiguities: set[str] = set()
     contracts = {(item.identity, item.version): item for item in TGW_TREATMENTS}
     attempt_rows: list[dict[str, Any]] = []
@@ -69,8 +78,16 @@ def build_item_action_card(
             "finished_at": _json_value(row.get("finished_at")),
         })
 
+    stage_receipt_lookup = None
+    if provider_identity:
+        from .listing_migration import _authoritative_stage_lookup
+
+        item = json.loads(Path(item_path).read_text(encoding="utf-8"))
+        stage_receipt_lookup = _authoritative_stage_lookup(item, provider_identity)
+
     snapshot = build_item_snapshot(
         item_path, TGW_EBAY_LISTABLE, treatments=TGW_TREATMENTS,
+        stage_receipt_lookup=stage_receipt_lookup,
         external_effect_ambiguities=tuple(ambiguities),
     )
     preliminary_graph = evaluate(

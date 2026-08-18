@@ -1013,7 +1013,9 @@ def item_workflow(sku: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
     try:
         attempts = _workflow_attempt_rows(sku)
-        card = build_item_action_card(json_path, attempts)
+        card = build_item_action_card(
+            json_path, attempts, provider_identity=_workflow_provider_identity(),
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -9211,7 +9213,9 @@ def item_detail_form(sku: str):
                     j[k] = j[k].isoformat()
         from .workflow.action_cards import build_item_action_card
 
-        workflow_card = build_item_action_card(json_path, attempts)
+        workflow_card = build_item_action_card(
+            json_path, attempts, provider_identity=_workflow_provider_identity(),
+        )
     except Exception as exc:
         log.warning("queue job fetch failed for %s: %s", sku, exc)
 

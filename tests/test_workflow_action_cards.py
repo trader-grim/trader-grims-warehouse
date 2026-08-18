@@ -184,6 +184,37 @@ def test_api_projection_uses_canonical_attempt_query(tmp_path, monkeypatch):
     assert response["workflow"]["active_attempts"][0]["job_id"] == "job-entity"
 
 
+def test_operational_projection_uses_authoritative_stage_receipt(tmp_path, monkeypatch):
+    path = _item(tmp_path, condition="Used")
+    item = json.loads(path.read_text(encoding="utf-8"))
+    item["draft_listing"] = {"title": "Example", "category_id": "123"}
+    item["price"] = 10
+    item["image"] = "a.jpg"
+    item["ebay_offer"] = {
+        "offer_id": "offer-1", "status": "UNPUBLISHED",
+        "provider_effect_id": "effect-1",
+    }
+    from tgw.workflow.operator_authority import listing_content_identity
+
+    item["ebay_offer"]["stage_content_identity"] = listing_content_identity(item)
+    path.write_text(json.dumps(item), encoding="utf-8")
+    monkeypatch.setattr(
+        "tgw.workflow.listing_migration._authoritative_stage_lookup",
+        lambda item, provider: lambda sku: {
+            "receipt_id": "effect-1",
+            "content_identity": item["ebay_offer"]["stage_content_identity"],
+            "offer_id": "offer-1",
+        },
+    )
+
+    card = build_item_action_card(path, provider_identity="account-1")
+    staged = next(
+        fingerprint for fingerprint in card["fingerprints"]
+        if fingerprint["condition_id"] == "staged_content_current"
+    )
+    assert staged["result"] == "true"
+
+
 def test_attempt_query_uses_entity_identity_with_legacy_sku_fallback(monkeypatch):
     cursor = MagicMock()
     cursor.__enter__.return_value = cursor
