@@ -183,8 +183,10 @@ def test_governed_operator_edit_during_model_call_conflicts_without_stale_write(
     })
     worker.owner = "worker-1"
 
-    with pytest.raises(Exception, match="mutation did not commit: CONFLICT"):
-        worker.handle(job)
+    receipt = worker.handle(job)
+
+    assert receipt["outcome"] == "satisfied"
+    assert receipt["evidence"]["reason_code"] == "MUTATION_CONFLICT_REEVALUATE"
 
     after = json.loads(path.read_text(encoding="utf-8"))
     assert after["title"] == "Old Title"

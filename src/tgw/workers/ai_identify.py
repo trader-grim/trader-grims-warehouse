@@ -443,6 +443,22 @@ class AIIdentifyWorker(QueueWorker):
                     project=project,
                 )
                 status = str(result.status).upper()
+            if status == "CONFLICT":
+                # A concurrent canonical write won.  Preserve this attempt in
+                # the receipt, but complete it so QueueWorker enqueues one
+                # evaluation of the winning generation.  A conflict is normal
+                # convergence, not an operator-visible terminal failure.
+                receipt = success_receipt(
+                    changed=False,
+                    resulting_generation=result.resulting_generation,
+                )
+                receipt["evidence"].update({
+                    "operation_id": operation_id,
+                    "mutation_status": status,
+                    "detail": result.detail,
+                    "reason_code": "MUTATION_CONFLICT_REEVALUATE",
+                })
+                return receipt
             if status != "COMMITTED":
                 outcome = {
                     "CONFLICT": "conflict",

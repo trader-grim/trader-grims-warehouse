@@ -455,6 +455,22 @@ class EbayDraftWorker(QueueWorker):
                 operation_id=operation_id, project=project,
             )
             status = str(result.status).upper()
+        if status == "CONFLICT":
+            # The authoritative item moved while this draft was being built.
+            # Finish this attempt with no established condition so the common
+            # evaluator selects the next action from the winning generation.
+            # Do not strand the item behind a dead letter that Retry cannot
+            # repair.
+            receipt = self._governed_receipt(
+                payload, sku, outcome="satisfied", changed=False,
+                resulting_generation=result.resulting_generation,
+                operation_id=operation_id, mutation_status=status,
+            )
+            receipt["evidence"].update({
+                "detail": result.detail,
+                "reason_code": "MUTATION_CONFLICT_REEVALUATE",
+            })
+            return receipt
         if status != "COMMITTED":
             outcome = {
                 "CONFLICT": "conflict", "REPAIR_REQUIRED": "repair_required",

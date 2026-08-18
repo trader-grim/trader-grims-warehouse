@@ -113,8 +113,10 @@ def test_checkpoint_replay_refuses_newer_operator_generation(tmp_path, monkeypat
     )
     monkeypatch.setattr(draft_mod, "upsert_catalog_row", lambda *_: {"ok": True})
 
-    with pytest.raises(Exception, match="mutation did not commit: CONFLICT"):
-        _worker(tmp_path).handle(job)
+    receipt = _worker(tmp_path).handle(job)
+
+    assert receipt["outcome"] == "satisfied"
+    assert receipt["evidence"]["reason_code"] == "MUTATION_CONFLICT_REEVALUATE"
 
     after = json.loads(path.read_text())
     assert after["operator_note"] == "newer edit"

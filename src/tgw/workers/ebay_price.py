@@ -136,6 +136,20 @@ class EbayPriceWorker(QueueWorker):
                 operation_id=operation_id, project=project,
             )
             status = str(result.status).upper()
+        if status == "CONFLICT":
+            # A later canonical mutation won.  Let workflow evaluation decide
+            # whether a current price, draft, or photo resync is now needed;
+            # this attempt remains durable history but is not a dead letter.
+            receipt = self._receipt(
+                payload, sku, outcome="satisfied", changed=False,
+                resulting_generation=result.resulting_generation,
+                operation_id=operation_id, mutation_status=status,
+            )
+            receipt["evidence"].update({
+                "detail": result.detail,
+                "reason_code": "MUTATION_CONFLICT_REEVALUATE",
+            })
+            return receipt
         if status != "COMMITTED":
             outcome = {
                 "CONFLICT": "conflict", "REPAIR_REQUIRED": "repair_required",
