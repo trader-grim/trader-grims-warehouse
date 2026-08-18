@@ -7851,6 +7851,19 @@ def _render_item_detail_html(
             title=("Synchronize current local photos with eBay and the draft order; "
                    "a failed synchronization will be recorded as a dead letter"),
         ))
+        # Photo synchronization is a repair prerequisite, not a replacement
+        # for the operator's listing command.  The governed List action issues
+        # the one publish-capable grant and the server graph then runs upload,
+        # stage, and publish in order.  Hiding it here stranded otherwise
+        # draft-ready items behind a repair button (live: tgw202506241901452).
+        if _has_draft:
+            _line.append(_abtn(
+                "List on eBay",
+                "listOnEbay()",
+                "green",
+                title=("Start the full listing workflow; it will synchronize "
+                       "photos before staging and publishing"),
+            ))
     elif _has_error and not is_active:
         def _job_reason_code(job: Dict[str, Any]) -> str:
             """Read a worker reason from its persisted queue payload.
