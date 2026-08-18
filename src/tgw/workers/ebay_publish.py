@@ -42,6 +42,25 @@ log = logging.getLogger(__name__)
 QUEUE_NAME = 'ebay_publish'
 
 
+def _rejection_detail(exc: requests.exceptions.HTTPError) -> Dict[str, Any]:
+    """Retain eBay's bounded rejection payload for the operator and receipt."""
+    response = exc.response
+    status = response.status_code if response is not None else 0
+    detail: Dict[str, Any] = {"http_status": status}
+    if response is None:
+        detail["message"] = str(exc)[:2000]
+        return detail
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = response.text[:4000]
+    if isinstance(payload, dict):
+        detail["response"] = payload
+    else:
+        detail["response_text"] = str(payload)[:4000]
+    return detail
+
+
 def _build_reprice_schedule(stages: List[Dict[str, Any]],
                              comps: Dict[str, Any],
                              category_id: str,
@@ -175,15 +194,16 @@ class EbayPublishWorker(QueueWorker):
         except requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 0
             if status in (400, 422):
+                rejection = _rejection_detail(exc)
                 rejected = finish_provider_effect(
                     effect.effect_id, state='rejected',
-                    error_detail=f'HTTP {status}: {exc}',
+                    error_detail=json.dumps(rejection, sort_keys=True),
                 )
                 raise TreatmentFailure(
                     f'{sku}: provider definitively rejected publish',
                     self._provider_effect_receipt(
                         payload, sku, rejected.effect_id, 'failed',
-                        'PROVIDER_EFFECT_REJECTED', None,
+                        'PROVIDER_EFFECT_REJECTED', rejection,
                     ),
                 ) from exc
             ambiguous = finish_provider_effect(

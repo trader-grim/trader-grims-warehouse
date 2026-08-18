@@ -517,6 +517,7 @@ def test_provider_effect_definitive_rejection_is_terminal_not_fallback(
     )
     response = requests.Response()
     response.status_code = 400
+    response._content = b'{"errors":[{"errorId":25001,"message":"missing policy"}]}'
     monkeypatch.setattr(
         publish_mod, 'publish_offer',
         lambda *args: (_ for _ in ()).throw(
@@ -530,8 +531,15 @@ def test_provider_effect_definitive_rejection_is_terminal_not_fallback(
         )
 
     assert outcomes[0]['state'] == 'rejected'
+    assert outcomes[0]['error_detail'] == (
+        '{"http_status": 400, "response": {"errors": [{"errorId": 25001, '
+        '"message": "missing policy"}]}}'
+    )
     assert caught.value.result['outcome'] == 'failed'
     assert caught.value.result['evidence']['reason_code'] == 'PROVIDER_EFFECT_REJECTED'
+    assert caught.value.result['evidence']['provider_result']['response']['errors'][0][
+        'errorId'
+    ] == 25001
 
 
 def test_provider_effect_rejected_replay_never_posts_again(publisher, monkeypatch):
