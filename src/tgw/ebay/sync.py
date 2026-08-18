@@ -197,10 +197,24 @@ def extract_ebay_error_field(body: str) -> Optional[str]:
                 found = m.group(1)
                 return _EBAY_FIELD_TO_DRAFT_FIELD.get(found, found)
         for key in ('longMessage', 'message'):
-            m = _bracket_re.search(e.get(key) or '')
+            message = e.get(key) or ''
+            m = _bracket_re.search(message)
             if m:
                 found = m.group(1)
                 return _EBAY_FIELD_TO_DRAFT_FIELD.get(found, found)
+            # Inventory API aspect validation uses e.g. ``Release Title's
+            # value ...`` rather than a bracketed field reference.  That is
+            # an aspect name, not the listing title; preserve it verbatim so
+            # the editor can mark the matching data-aspect input.
+            marker = "'s value"
+            if marker in message:
+                # Take only the sentence fragment immediately before the
+                # marker.  The leading sentence is usually eBay's generic
+                # wrapper ("A user error has occurred."), not part of the
+                # aspect name.
+                found = message.split(marker, 1)[0].rsplit('.', 1)[-1].strip()
+                if found:
+                    return _EBAY_FIELD_TO_DRAFT_FIELD.get(found, found)
     return None
 
 

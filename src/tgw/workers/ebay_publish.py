@@ -195,6 +195,18 @@ class EbayPublishWorker(QueueWorker):
             status = exc.response.status_code if exc.response is not None else 0
             if status in (400, 422):
                 rejection = _rejection_detail(exc)
+                body_text = exc.response.text if exc.response is not None else ''
+                # The governed path retained the provider rejection in
+                # Postgres but did not persist the C11 item finding that the
+                # editor uses to flag the exact invalid control.
+                fence_patch_item(self.config, sku, {'pipeline_error': {
+                    'code': 'ebay_rejected',
+                    'detail': _format_ebay_error(body_text, status),
+                    'raw': body_text[:800],
+                    'ts': datetime.now(timezone.utc).isoformat(),
+                    'source': 'ebay_publish',
+                    'field': _extract_ebay_error_field(body_text),
+                }})
                 rejected = finish_provider_effect(
                     effect.effect_id, state='rejected',
                     error_detail=json.dumps(rejection, sort_keys=True),

@@ -49,6 +49,17 @@ def test_bracket_fallback_against_longmessage_when_no_parameters():
     assert extract_ebay_error_field(body) == "price"
 
 
+def test_extracts_inventory_aspect_named_in_publish_validation_message():
+    body = json.dumps({
+        "errors": [{
+            "message": ("A user error has occurred. Release Title's value of "
+                        "\"A Long Album Name\" is too long. Enter a value of no "
+                        "more than 65 characters."),
+        }],
+    })
+    assert extract_ebay_error_field(body) == "Release Title"
+
+
 def test_no_field_reference_returns_none_not_a_guess():
     body = json.dumps({"errors": [{"message": "Something went wrong"}]})
     assert extract_ebay_error_field(body) is None

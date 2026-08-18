@@ -251,7 +251,9 @@ def _build_prompt(item: Dict[str, Any], aspects: List[Dict[str, Any]],
                     vals = ', '.join(av[:30]) + f' ... ({len(av)} total)'
                 lines.append(f'  {a["name"]}{req}: choose from [{vals}]')
             else:
-                lines.append(f'  {a["name"]}{req}: free text')
+                max_length = a.get('max_length')
+                limit = f' (maximum {max_length} characters)' if max_length else ''
+                lines.append(f'  {a["name"]}{req}: free text{limit}')
         lines.append('')
     lines.append('Photos of the item are attached — examine all of them before answering.')
     lines.append('Respond with JSON: {"Brand": "...", "Theme": "...", ...}')
@@ -772,10 +774,28 @@ class EbayDraftWorker(QueueWorker):
                 if val not in aspect['allowed_values']:
                     log.warning('invalid value %r for %r — skipping', val, name)
                     continue
+            max_length = aspect.get('max_length')
+            if max_length and len(val) > max_length:
+                log.warning('over-length value for %r (%d > %d) — skipping',
+                            name, len(val), max_length)
+                continue
             item_specifics[name] = val
 
         # Prefilled values override AI output (product database is authoritative)
         item_specifics.update(prefilled)
+
+        # Product lookup values are authoritative about identity, but not
+        # exempt from category limits.  Do not silently truncate facts: leave
+        # an over-limit value absent for operator correction instead of making
+        # a publish that eBay will certainly reject.
+        for aspect in aspects:
+            max_length = aspect.get('max_length')
+            name = aspect['name']
+            value = item_specifics.get(name)
+            if max_length and isinstance(value, str) and len(value) > max_length:
+                log.warning('over-length prefilled value for %r (%d > %d) — removing',
+                            name, len(value), max_length)
+                item_specifics.pop(name, None)
 
         # Backfill required aspects the AI left blank — eBay rejects at staging
         # if any required aspect is missing.

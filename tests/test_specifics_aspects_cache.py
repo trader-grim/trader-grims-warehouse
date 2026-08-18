@@ -39,6 +39,18 @@ class TestGetAspectsCachePersistence:
         disk = json.loads(cache_path.read_text())
         assert 'cat1' in disk
 
+    def test_keeps_ebay_aspect_max_length(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        raw = {'aspects': [{'localizedAspectName': 'Release Title',
+                            'aspectConstraint': {'aspectMaxLength': 65},
+                            'aspectValues': []}]}
+        with patch.object(specifics, 'ebay_get', return_value=raw), \
+             patch.object(specifics, 'get_category_tree_id', return_value='0'):
+            result = specifics.get_aspects(cfg, 'cat1')
+        assert result == [{'name': 'Release Title', 'required': False,
+                           'mode': 'FREE_TEXT', 'allowed_values': [],
+                           'max_length': 65}]
+
     def test_two_different_categories_both_persist_not_last_write_wins(self, tmp_path):
         # Regression for #1239: the old plain write_text read disk_cache
         # once per call and wrote the whole dict back — fine sequentially,

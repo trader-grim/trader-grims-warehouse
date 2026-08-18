@@ -480,6 +480,11 @@ def test_provider_effect_ambiguous_restart_never_blind_replays(
             TimeoutError('response lost')
         ),
     )
+    findings = []
+    monkeypatch.setattr(
+        publish_mod, 'fence_patch_item',
+        lambda cfg, sku, patch: findings.append((cfg, sku, patch)),
+    )
 
     with pytest.raises(TreatmentFailure) as first:
         publisher.handle({'payload_json': payload})
@@ -524,6 +529,11 @@ def test_provider_effect_definitive_rejection_is_terminal_not_fallback(
             requests.exceptions.HTTPError('rejected', response=response)
         ),
     )
+    findings = []
+    monkeypatch.setattr(
+        publish_mod, 'fence_patch_item',
+        lambda cfg, sku, patch: findings.append((cfg, sku, patch)),
+    )
 
     with pytest.raises(TreatmentFailure) as caught:
         publisher._publish_with_provider_effect(
@@ -540,6 +550,51 @@ def test_provider_effect_definitive_rejection_is_terminal_not_fallback(
     assert caught.value.result['evidence']['provider_result']['response']['errors'][0][
         'errorId'
     ] == 25001
+    assert findings[0][2]['pipeline_error']['code'] == 'ebay_rejected'
+
+
+def test_governed_publish_rejection_persists_exact_aspect_field(publisher, monkeypatch):
+    import requests
+
+    import tgw.provider_effects as effects
+    from tgw.provider_effects import ProviderEffect
+
+    payload = _governed_job('SKU-1')['payload_json']
+    payload.update({'condition_hash': 'condition-1',
+                    'pre_authority_condition_hash': 'pre-1'})
+    effect = ProviderEffect(
+        effect_id='c' * 64, provider='ebay', operation='publish-offer',
+        entity_type='item', entity_id='SKU-1', object_generation='generation-1',
+        graph_id='graph-1', treatment_id='ebay-publish', treatment_version='1',
+        condition_hash='condition-1', request={'offer_id': 'OFF1'},
+        authority={'authority_id': 'authority-1'}, state='dispatched',
+    )
+    monkeypatch.setattr(effects, 'reserve_and_begin_authorized_effect', lambda **kwargs: effect)
+    monkeypatch.setattr(effects, 'finish_provider_effect', lambda *args, **kwargs: effect)
+    response = requests.Response()
+    response.status_code = 400
+    response._content = (
+        b'{"errors":[{"errorId":25002,"message":"A user error has occurred. '
+        b"Release Title's value of \\\"Long Album Name\\\" is too long. Enter a value "
+        b'of no more than 65 characters."}]}'
+    )
+    monkeypatch.setattr(
+        publish_mod, 'publish_offer',
+        lambda *args: (_ for _ in ()).throw(
+            requests.exceptions.HTTPError('rejected', response=response)),
+    )
+    findings = []
+    monkeypatch.setattr(
+        publish_mod, 'fence_patch_item',
+        lambda cfg, sku, patch: findings.append((sku, patch)),
+    )
+
+    with pytest.raises(TreatmentFailure):
+        publisher._publish_with_provider_effect(payload, 'SKU-1', 'OFF1', {'sku': 'SKU-1'})
+
+    finding = findings[0][1]['pipeline_error']
+    assert finding['field'] == 'Release Title'
+    assert finding['code'] == 'ebay_rejected'
 
 
 def test_provider_effect_rejected_replay_never_posts_again(publisher, monkeypatch):

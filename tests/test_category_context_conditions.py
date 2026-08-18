@@ -81,3 +81,10 @@ def test_no_aspects_error_when_lookup_succeeds(tmp_path):
 
     assert result["aspects_error"] is None
     assert len(result["aspects"]) == 1
+
+
+def test_editor_script_exposes_category_aspect_max_length():
+    """A taxonomy aspect limit must become an actual input maxlength hint."""
+    script = http_server._CATEGORY_CONTEXT_IIFE
+    assert "maxlength=" in script
+    assert "maxHint" in script

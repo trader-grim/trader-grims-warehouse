@@ -82,11 +82,21 @@ def _structure_aspects(raw_aspects: List[Dict[str, Any]]) -> List[Dict[str, Any]
         allowed = [v.get('localizedValue', '')
                    for v in aspect.get('aspectValues', [])
                    if v.get('localizedValue')]
+        # eBay constrains some FREE_TEXT values per category.  Preserve that
+        # metadata so a listing never discovers it only at publish time.
+        max_length = constraint.get('aspectMaxLength')
+        try:
+            max_length = int(max_length) if max_length is not None else None
+        except (TypeError, ValueError):
+            max_length = None
+        if max_length is not None and max_length < 1:
+            max_length = None
         results.append({
             'name':           name,
             'required':       constraint.get('aspectRequired', False),
             'mode':           constraint.get('aspectMode', 'FREE_TEXT'),
             'allowed_values': allowed,
+            'max_length':     max_length,
         })
     return results
 
