@@ -6632,7 +6632,7 @@ def test_item_detail_workflow_card_shows_photo_sync_fingerprint(
     assert reason in html
 
 
-def test_item_detail_photo_sync_warning_offers_resync_not_stale_retry():
+def test_item_detail_photo_sync_warning_keeps_list_action_not_stale_retry():
     """Current condition evidence outranks an older failed attempt.
 
     A draft can have every local photo represented in ``ebay_photos`` while its
@@ -6686,10 +6686,9 @@ def test_item_detail_photo_sync_warning_offers_resync_not_stale_retry():
     )
 
     assert action_line is not None
-    assert '>Resync Photos</button>' in action_line.group(1)
-    assert 'onclick="resyncPhotos()"' in action_line.group(1)
     assert '>List on eBay</button>' in action_line.group(1)
     assert 'onclick="listOnEbay()"' in action_line.group(1)
+    assert '>Resync Photos</button>' not in action_line.group(1)
     assert '>Retry</button>' not in action_line.group(1)
     assert '>Needs attention</button>' not in action_line.group(1)
 

@@ -7838,24 +7838,10 @@ def _render_item_detail_html(
             _line.append(_abtn("List on eBay", "listOnEbay()", "green",
                                title="Save draft, run every needed step, and publish"))
     elif _needs_photo_resync:
-        # Current condition evidence outranks historical failed attempts.  The
-        # resync endpoint queues the bounded ebay_upload treatment when local,
-        # hosted, or draft-order identities differ.  If that treatment cannot
-        # establish photos_uploaded, its ordinary worker failure is preserved as
-        # a dead letter with the real upload/synchronization error; retrying an
-        # older stage/evaluator job cannot repair this condition.
-        _line.append(_abtn(
-            "Resync Photos",
-            "resyncPhotos()",
-            "yellow",
-            title=("Synchronize current local photos with eBay and the draft order; "
-                   "a failed synchronization will be recorded as a dead letter"),
-        ))
-        # Photo synchronization is a repair prerequisite, not a replacement
-        # for the operator's listing command.  The governed List action issues
-        # the one publish-capable grant and the server graph then runs upload,
-        # stage, and publish in order.  Hiding it here stranded otherwise
-        # draft-ready items behind a repair button (live: tgw202506241901452).
+        # Photo repair belongs beside the photo evidence, where the dedicated
+        # Resync Photos control already exists.  The action line remains the
+        # operator command surface: List issues the publish-capable grant and
+        # the server graph runs upload, stage, and publish in order.
         if _has_draft:
             _line.append(_abtn(
                 "List on eBay",
