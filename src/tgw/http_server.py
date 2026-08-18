@@ -7803,6 +7803,7 @@ def _render_item_detail_html(
 
     _has_error = bool(_pe_norm) or any(
         j.get("state") == "dead_letter"
+        and not j.get("provider_effect_reconciled")
         and _after_baseline(j)
         and not _superseded_by_success(j)
         and not _duplicate_provider_effect_lost_to_success(j)
@@ -9241,6 +9242,13 @@ def item_detail_form(sku: str):
             json_path, attempts, provider_identity=_workflow_provider_identity(),
             reconciled_provider_effect_ids=reconciled_effect_ids,
         )
+        reconciled_jobs = {
+            str(attempt["job_id"])
+            for attempt in workflow_card.get("attempts", [])
+            if attempt.get("provider_effect_reconciled") and attempt.get("job_id")
+        }
+        for job in jobs:
+            job["provider_effect_reconciled"] = str(job.get("job_id")) in reconciled_jobs
     except Exception as exc:
         log.warning("queue job fetch failed for %s: %s", sku, exc)
 
