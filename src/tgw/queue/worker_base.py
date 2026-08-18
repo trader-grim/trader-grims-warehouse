@@ -152,10 +152,15 @@ def _waiting_treatment_receipt_error(value: Any, job: Dict[str, Any]) -> str | N
 
 _RECOVER_INTERVAL_S = 60   # how often to call recover_expired_jobs
 
+
+class JobTimeoutError(RuntimeError):
+    """A worker's bounded execution window elapsed."""
+
 # Transient error patterns that warrant automatic requeue rather than dead-letter.
 # (substring match, case-insensitive) → requeue delay in seconds.
 # Order matters: first match wins.
 _TRANSIENT_ERRORS: list[tuple[str, int]] = [
+    ('job execution timed out', 120),  # bounded call; retry instead of wedging
     ('token is expired',       900),   # eBay token lapsed; wait for token_refresh
     ('no ebay photo urls yet', 600),   # ebay_upload still running
     ('directory not empty',     30),   # transient OS race in catalog_rebuild
@@ -331,7 +336,7 @@ class QueueWorker:
 
         try:
             state_machine.mark_running(job_id, self.owner, lease_token)
-            _handle_result = self.handle(job)
+            _handle_result = self._handle_with_deadline(job)
         except HardFailure as exc:
             log.error('job %s hard failure (dead_letter): %s', job_id, exc)
             state_machine.mark_dead_letter(
@@ -453,6 +458,37 @@ class QueueWorker:
                     quota.set_context('background', f'worker:{self.queue_name}')
                 except Exception as exc:  # pragma: no cover - defensive
                     log.debug('quota context restore skipped: %s', exc)
+
+    def _handle_with_deadline(self, job: Dict[str, Any]) -> Any:
+        """Run opt-in remote work with a hard process-level deadline.
+
+        Queue leases protect the row, not a provider SDK that remains blocked.
+        A worker may set ``job_timeout_s``; timeout then follows the ordinary
+        transient-retry path rather than leaving a live process stuck forever.
+        """
+        timeout_s = float(getattr(self, "job_timeout_s", 0) or 0)
+        if timeout_s <= 0 or not hasattr(signal, "setitimer"):
+            return self.handle(job)
+
+        import threading
+
+        if threading.current_thread() is not threading.main_thread():
+            return self.handle(job)
+
+        def _expired(_signum: int, _frame: Any) -> None:
+            raise JobTimeoutError(
+                f"job execution timed out after {timeout_s:g}s "
+                f"(queue={self.queue_name}, job={job.get('job_id')})"
+            )
+
+        previous_handler = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, _expired)
+        signal.setitimer(signal.ITIMER_REAL, timeout_s)
+        try:
+            return self.handle(job)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
 
     # ------------------------------------------------------------------
     # Subclass contract

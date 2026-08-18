@@ -30,6 +30,11 @@ log = logging.getLogger(__name__)
 # use this set instead of hardcoding provider names at call sites.
 CLOUD_PROVIDERS = {'openrouter', 'google_direct'}
 
+# The google-genai SDK otherwise leaves its synchronous HTTP request unbounded.
+# Keep this below AIIdentifyWorker's job deadline so a stalled connection is
+# retried instead of keeping a live worker stuck indefinitely.
+_GOOGLE_REQUEST_TIMEOUT_S = 75
+
 # Dave, 2026-07-09: which provider/model serves a task is a CONFIG decision,
 # never a code decision — "why change code just to change models?" This file
 # used to carry a hardcoded per-task _DEFAULTS dict as a silent fallback,
@@ -357,7 +362,10 @@ def _call_google_direct(
 
     genai = _require_genai()
     api_key = load_google_key(cfg)
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key,
+        http_options={"timeout": _GOOGLE_REQUEST_TIMEOUT_S},
+    )
 
     parts: List[Dict[str, Any]] = [
         {'inline_data': {'mime_type': 'image/jpeg', 'data': b64}}

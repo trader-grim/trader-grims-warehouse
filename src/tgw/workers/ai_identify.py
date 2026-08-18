@@ -286,6 +286,11 @@ def _encode_resized(img_path: Path, max_px: int = _VISION_MAX_PX) -> tuple[str, 
 
 
 class AIIdentifyWorker(QueueWorker):
+    # The queue lease is five minutes.  Leave time to persist the terminal
+    # receipt, and requeue a live-but-stalled model request before its lease
+    # expires and strands this worker process.
+    job_timeout_s = 240
+
     def run(self) -> None:
         provider, model = get_task_model(self.config, "ai_identify")
         if provider == "ollama":

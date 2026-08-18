@@ -87,3 +87,28 @@ def test_non_transient_error_still_falls_through_to_mark_failed(monkeypatch):
 
     assert calls["mark_failed"] is True
     assert calls["requeue"] is False
+
+
+def test_bounded_job_timeout_requeues_instead_of_stranding_worker(monkeypatch):
+    class _TimedWorker(_FakeWorker):
+        job_timeout_s = 0.01
+
+        def handle(self, job):
+            import time
+            time.sleep(1)
+
+    calls = {"delay": None}
+    monkeypatch.setattr(state_machine, "mark_running", lambda *a, **k: None)
+    monkeypatch.setattr(
+        state_machine,
+        "requeue_with_backoff",
+        lambda _job, _owner, _token, delay, _detail: calls.__setitem__("delay", delay),
+    )
+    monkeypatch.setattr(
+        state_machine, "mark_failed",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must requeue")),
+    )
+
+    _TimedWorker()._process(_job(attempt_count=1))
+
+    assert calls["delay"] == 120

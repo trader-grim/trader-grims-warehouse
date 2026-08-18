@@ -58,7 +58,9 @@ class _FakeClient:
 def _patch_genai(monkeypatch, response=None, exc=None, calls=None):
     fake_models = _FakeModels(response=response or _FakeResponse(), exc=exc, calls=calls)
     fake_client = _FakeClient(fake_models)
-    fake_genai_module = SimpleNamespace(Client=lambda api_key: fake_client)
+    fake_genai_module = SimpleNamespace(
+        Client=lambda api_key, http_options=None: fake_client,
+    )
 
     monkeypatch.setattr('tgw.apis.google_genai._require_genai', lambda: fake_genai_module)
     monkeypatch.setattr('tgw.apis.google_genai.load_google_key', lambda cfg: 'fake-key')
@@ -120,7 +122,9 @@ class TestCallGoogleDirect:
 
         fake_client = _FakeClient(_FlakyModels())
         monkeypatch.setattr('tgw.apis.google_genai._require_genai',
-                           lambda: SimpleNamespace(Client=lambda api_key: fake_client))
+                           lambda: SimpleNamespace(
+                               Client=lambda api_key, http_options=None: fake_client,
+                           ))
         monkeypatch.setattr('tgw.apis.google_genai.load_google_key', lambda cfg: 'fake-key')
         sleeps = []
         monkeypatch.setattr(llm_mod.time, 'sleep', lambda s: sleeps.append(s))
