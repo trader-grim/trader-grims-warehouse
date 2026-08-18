@@ -1378,7 +1378,14 @@ def patch_item(
     # ebay_stage enqueue call sites in this file (this one and the sibling
     # "ebay_update" action were the only two without it).
     _DRAFT_LISTING_FIELDS = {"draft_listing"}
-    if not _machine_write and _DRAFT_LISTING_FIELDS.intersection(body.fields):
+    # List on eBay saves the draft immediately before dispatching the governed
+    # publish chain.  That chain owns its prerequisite stage; auto-pushing here
+    # would create a second, force-restage authority for the same click and
+    # leave a spurious provider-effect-binding dead letter behind.
+    _draft_intent = request.headers.get("X-TGW-Draft-Intent", "")
+    if (not _machine_write
+            and _draft_intent != "publish"
+            and _DRAFT_LISTING_FIELDS.intersection(body.fields)):
         offer_id = (doc_before.get("ebay_offer") or {}).get("offer_id")
         if offer_id:
             try:
@@ -7727,10 +7734,34 @@ def _render_item_detail_html(
             for other in jobs
         )
 
+    def _duplicate_provider_effect_lost_to_success(j: Dict[str, Any]) -> bool:
+        """Hide only the known duplicate-stage loser, never a real failure.
+
+        A List click used to race its draft-save auto-stage against the governed
+        listing stage.  The loser reports a binding mismatch after the winning
+        stage has already committed.  It remains in the job ledger, but is not
+        an operator repair state when the same generation has a successful
+        sibling stage receipt.
+        """
+        if (j.get("state") != "dead_letter"
+                or j.get("queue_name") != "ebay_stage"
+                or "provider effect binding mismatch" not in str(j.get("error_detail") or "")):
+            return False
+        payload = j.get("payload_json")
+        generation = payload.get("object_generation") if isinstance(payload, dict) else None
+        return isinstance(generation, str) and bool(generation) and any(
+            other.get("queue_name") == "ebay_stage"
+            and other.get("state") == "succeeded"
+            and isinstance(other.get("payload_json"), dict)
+            and other["payload_json"].get("object_generation") == generation
+            for other in jobs
+        )
+
     _has_error = bool(_pe_norm) or any(
         j.get("state") == "dead_letter"
         and _after_baseline(j)
         and not _superseded_by_success(j)
+        and not _duplicate_provider_effect_lost_to_success(j)
         for j in jobs
     )
     _needs_photo_resync = bool(
@@ -7873,6 +7904,7 @@ def _render_item_detail_html(
             if j.get("state") == "dead_letter"
             and _after_baseline(j)
             and not _superseded_by_success(j)
+            and not _duplicate_provider_effect_lost_to_success(j)
             and j.get("job_id")
             and j.get("retry_allowed", True)
         ), None)
@@ -8563,7 +8595,7 @@ def _render_item_detail_html(
         f"}}"
         f"function listOnEbay(){{"
         f"  if(!confirm('List this item on eBay?\\nSaves the draft, runs every needed step, and publishes.'))return;"
-        f"  saveEbayDraft(function(){{triggerAction('ebay_publish');}});"
+        f"  saveEbayDraft(function(){{triggerAction('ebay_publish');}},'publish');"
         f"}}"
         f"function updateItem(){{"
         f"  if(!confirm('Push draft changes to the live listing?\\nUpdates in place without ending the listing.'))return;"
@@ -8571,7 +8603,7 @@ def _render_item_detail_html(
         f"}}"
         f"function relistItem(){{"
         f"  if(!confirm('Relist this item on eBay?\\nCheck quantity in the Inventory Record first.'))return;"
-        f"  saveEbayDraft(function(){{triggerAction('ebay_publish');}});"
+        f"  saveEbayDraft(function(){{triggerAction('ebay_publish');}},'publish');"
         f"}}"
         f"function resetDraft(){{"
         f"  if(!confirm('Reset the draft?\\nDiscards draft edits and regenerates from the catalog record.'))return;"
@@ -8822,7 +8854,7 @@ def _render_item_detail_html(
         f"  }}).catch(function(e){{if(msg){{msg.textContent='Network error';msg.style.color='#c44';}}}});"
         f"}}"
         # ── saveEbayDraft ─────────────────────────────────────────────────────
-        f"function saveEbayDraft(done){{"
+        f"function saveEbayDraft(done,intent){{"
         f"  var dl={{}};"
         f"  var t=document.getElementById('dl-title-input');"
         f"  if(t)dl.title=t.value;"
@@ -8899,7 +8931,7 @@ def _render_item_detail_html(
         f"  if(msg)msg.textContent='Saving…';"
         f"  fetch('/api/items/'+_SKU,{{"
         f"    method:'PATCH',"
-        f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"    headers:authHeaders({{'Content-Type':'application/json','X-TGW-Draft-Intent':intent||''}}),"
         f"    body:JSON.stringify({{fields:patch}})"
         f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
         f"    if(!d.ok){{"

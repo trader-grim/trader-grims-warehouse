@@ -6693,6 +6693,34 @@ def test_item_detail_photo_sync_warning_keeps_list_action_not_stale_retry():
     assert '>Needs attention</button>' not in action_line.group(1)
 
 
+def test_item_detail_hides_duplicate_stage_loser_after_same_generation_success():
+    item = {
+        "sku": "tgw-duplicate-stage",
+        "title": "Duplicate stage",
+        "draft_listing": {"title": "Duplicate stage", "price": 19.99},
+    }
+    jobs = [
+        {
+            "queue_name": "ebay_stage",
+            "state": "succeeded",
+            "payload_json": {"object_generation": "generation-1"},
+        },
+        {
+            "queue_name": "ebay_stage",
+            "state": "dead_letter",
+            "error_detail": "provider effect binding mismatch",
+            "payload_json": {"object_generation": "generation-1"},
+        },
+    ]
+
+    html = http_server._render_item_detail_html(item["sku"], item, [], [], jobs)
+    action_line = re.search(r'<div class="act-row" id="action-line">(.*?)</div>', html)
+
+    assert action_line is not None
+    assert '>List on eBay</button>' in action_line.group(1)
+    assert '>Needs attention</button>' not in action_line.group(1)
+
+
 def test_item_detail_uses_ai_category_before_draft_exists(env):
     _login(env["client"])
     sku = "tgw-ai-category-fallback"
