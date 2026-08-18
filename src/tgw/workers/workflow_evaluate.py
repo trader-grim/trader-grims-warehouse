@@ -39,15 +39,19 @@ _LISTING_CONTINUATION_QUEUES = {
 _LISTING_CONTINUATION_SCOPES = frozenset(("upload", "stage", "publish"))
 
 
-def _listing_continuation_requested(payload: Mapping[str, Any], treatment_id: Any) -> bool:
-    """Only an explicit List Item action may continue toward publish.
+def _listing_continuation_requested(treatment_id: Any, authority: Any) -> bool:
+    """Return whether the persisted grant permits publish-chain continuation.
 
-    Update Item/force-restage refreshes an unpublished offer.  Its successful
-    terminal state is staged, not an implicit publish authorization.
+    The evaluator must make the same decision for an initial event and its
+    retry.  UI surface is audit provenance, not workflow control: clicking
+    ``List Item`` issues a grant with ``publish`` scope, while ``Update Item``
+    issues a refresh/stage grant without that scope.  The current graph then
+    determines the actual next treatment.
     """
     return (
         treatment_id in _LISTING_CONTINUATION_QUEUES
-        and payload.get("operator_surface") == "http:item-action:ebay-publish"
+        and authority is not None
+        and "publish" in set(getattr(authority, "scopes", ()))
     )
 
 
@@ -318,7 +322,12 @@ def evaluate_event(
     # revalidated before the next generation is authorized and dispatched.
     authority_id = payload.get("operator_authority_id")
     treatment_id = origin.get("treatment_id")
-    if (not isolated and _listing_continuation_requested(payload, treatment_id)
+    persisted_authority = (
+        get_authority(authority_id)
+        if not isolated and isinstance(authority_id, str) and authority_id
+        else None
+    )
+    if (not isolated and _listing_continuation_requested(treatment_id, persisted_authority)
             and isinstance(authority_id, str) and authority_id):
         current_item = json.loads(item_path.read_text(encoding="utf-8"))
         provider_identity = _provider_identity(config)

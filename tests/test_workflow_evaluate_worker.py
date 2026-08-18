@@ -459,11 +459,14 @@ def test_listing_continuation_succeeds_when_no_further_dispatch_is_needed(tmp_pa
     authority = SimpleNamespace(
         operator_identity="operator:authenticated",
         surface="http:item-action:ebay-publish", provider_identity="ebay:account",
+        scopes=("upload", "stage", "publish"),
     )
     continued = SimpleNamespace(
         graph=SimpleNamespace(object_generation=resulting_generation, graph_id="new-graph"),
     )
     with patch(
+        "tgw.workers.workflow_evaluate.get_authority", return_value=authority,
+    ), patch(
         "tgw.workers.workflow_evaluate._validate_listing_continuation",
         return_value=authority,
     ), patch(
@@ -478,16 +481,13 @@ def test_listing_continuation_succeeds_when_no_further_dispatch_is_needed(tmp_pa
     assert receipt["evidence"]["successor_authority_id"] == "authority-2"
 
 
-def test_update_item_stage_is_not_a_publish_continuation():
-    assert not _listing_continuation_requested(
-        {"operator_surface": "http:item-action:ebay-update"}, "ebay-stage"
-    )
-    assert not _listing_continuation_requested(
-        {"operator_surface": "http:item-action:ebay-stage"}, "ebay-stage"
-    )
-    assert _listing_continuation_requested(
-        {"operator_surface": "http:item-action:ebay-publish"}, "ebay-stage"
-    )
+def test_listing_continuation_is_decided_by_persisted_scope_not_button_name():
+    update_grant = SimpleNamespace(scopes=("force-restage", "stage"))
+    list_grant = SimpleNamespace(scopes=("upload", "stage", "publish"))
+
+    assert not _listing_continuation_requested("ebay-stage", update_grant)
+    assert _listing_continuation_requested("ebay-stage", list_grant)
+    assert not _listing_continuation_requested("not-a-listing-treatment", list_grant)
 
 
 def test_governed_stage_continuation_rejects_non_durable_origin(tmp_path):
@@ -504,11 +504,13 @@ def test_governed_stage_continuation_rejects_non_durable_origin(tmp_path):
         pre_authority_condition_hash="pre-condition",
     )
     config["workflow_migration"] = {"ebay_provider_identity": "ebay:account"}
-    with pytest.raises(TreatmentFailure) as caught:
-        evaluate_event(
-            job, config, enqueue_fn=MagicMock(),
-            origin_lookup=lambda _job_id: {"state": "failed"},
-        )
+    publish_authority = SimpleNamespace(scopes=("upload", "stage", "publish"))
+    with patch("tgw.workers.workflow_evaluate.get_authority", return_value=publish_authority):
+        with pytest.raises(TreatmentFailure) as caught:
+            evaluate_event(
+                job, config, enqueue_fn=MagicMock(),
+                origin_lookup=lambda _job_id: {"state": "failed"},
+            )
     assert caught.value.result["evidence"]["reason_code"] == (
         "UNTRUSTED_OPERATOR_CONTINUATION"
     )
