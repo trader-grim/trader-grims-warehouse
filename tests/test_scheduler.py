@@ -470,6 +470,36 @@ def test_item_dispatch_binds_legacy_sku_to_entity_id():
     assert enqueue.call_args.kwargs["payload"]["sku"] == "SKU-1"
 
 
+def test_item_dispatch_dedupes_same_treatment_and_generation_not_graph_hash():
+    """One click/evaluation cannot launch duplicate work for unchanged data."""
+    from tgw.workflow.scheduler import _dispatch_treatment_v4
+
+    disposition = _disposition("ai-identify", version="1", reasons=("ready",))
+    first = _graph(
+        graph_id="first-evaluation", object_id="SKU-1", object_generation="gen-7",
+        eligible=(disposition,),
+    )
+    second = _graph(
+        graph_id="second-evaluation", object_id="SKU-1", object_generation="gen-7",
+        eligible=(disposition,),
+    )
+    enqueue = MagicMock(return_value="job-1")
+
+    _dispatch_treatment_v4(
+        disposition=disposition, entity_id="SKU-1", graph=first, enqueue_fn=enqueue,
+    )
+    _dispatch_treatment_v4(
+        disposition=disposition, entity_id="SKU-1", graph=second, enqueue_fn=enqueue,
+    )
+
+    assert enqueue.call_args_list[0].kwargs["dedupe_key"] == (
+        "treatment:ai_identify:item:SKU-1:gen-7:ai-identify:1"
+    )
+    assert enqueue.call_args_list[1].kwargs["dedupe_key"] == (
+        "treatment:ai_identify:item:SKU-1:gen-7:ai-identify:1"
+    )
+
+
 def test_item_dispatch_rejects_spoofed_sku():
     from tgw.workflow.scheduler import _dispatch_treatment_v4
 

@@ -529,7 +529,9 @@ def test_dispatch_treatment_enqueues_with_correct_params():
     assert kwargs["queue_name"] == "ai_identify"
     assert kwargs["entity_type"] == "item"
     assert kwargs["entity_id"] == "SKU-999"
-    assert kwargs["dedupe_key"] == "ai_identify:SKU-999"
+    assert kwargs["dedupe_key"] == (
+        "treatment:ai_identify:item:SKU-999:manual:ai-identify:1"
+    )
 
 
 def test_dispatch_treatment_unknown_treatment_uses_id_as_queue():

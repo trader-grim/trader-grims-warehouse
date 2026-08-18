@@ -284,6 +284,19 @@ def _dispatch_treatment_v4(
             raise ValueError("item treatment sku must match entity_id")
         payload["sku"] = entity_id
 
+    # A graph hash is an explanation of this evaluation, not the identity of
+    # the external/local work.  Two evaluations of the same unchanged item
+    # can legitimately differ in their evidence/condition hash; using that
+    # graph hash as the queue key let one operator action launch duplicate
+    # ai_identify calls against the same generation.  One treatment may be
+    # active for one entity generation at a time.  A later mutation gets a
+    # new generation and therefore a new, valid job.
+    active_dedupe_key = (
+        f"treatment:{queue_name}:{entity_type}:{entity_id}:"
+        f"{graph.object_generation if graph is not None else 'manual'}:"
+        f"{disposition.treatment_id}:{disposition.treatment_version}"
+    )
+
     try:
         job_id = enqueue_fn(
             queue_name=queue_name,
@@ -291,11 +304,7 @@ def _dispatch_treatment_v4(
             payload=payload,
             entity_type=entity_type,
             entity_id=entity_id,
-            dedupe_key=(
-                graph.graph_id
-                if graph is not None
-                else f"{queue_name}:{entity_id}"
-            ),
+            dedupe_key=active_dedupe_key,
             max_attempts=3,
         )
         log.info(

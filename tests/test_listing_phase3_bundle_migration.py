@@ -83,7 +83,10 @@ def test_legacy_rollback_is_exact_and_workflow_difference_is_generation_binding(
     assert workflow['queue_name'] == workflow['handler_family'] == 'ai_identify'
     assert workflow['entity_type'] == 'item' and workflow['entity_id'] == 'A'
     assert workflow['max_attempts'] == 3
-    assert workflow['dedupe_key'] == workflow['payload']['graph_id']
+    assert workflow['dedupe_key'] == (
+        'treatment:ai_identify:item:A:'
+        f"{workflow['payload']['object_generation']}:ai-identify:1"
+    )
     assert workflow['payload']['sku'] == workflow['payload']['entity_id'] == 'A'
     assert workflow['payload']['treatment_id'] == 'ai-identify'
     assert workflow['payload']['treatment_version'] == '1'
