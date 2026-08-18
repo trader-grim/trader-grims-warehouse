@@ -6587,6 +6587,26 @@ def test_item_detail_missing_draft_price_shows_set_price_not_retry():
     assert "AI Reidentify" in html
 
 
+def test_item_detail_resolved_price_dead_letter_does_not_mask_list_action():
+    item = {
+        "sku": "tgw1", "title": "Identified item",
+        "draft_listing": {"title": "Draft title", "category_id": "177027", "price": 24.99},
+    }
+    jobs = [{
+        "queue_name": "ebay_price", "state": "dead_letter", "job_id": "old-price-job",
+        "payload_json": {"result": {"outcome": "partial", "evidence": {
+            "reason_code": "PRICE_REQUIRES_OPERATOR_INPUT",
+        }}},
+    }]
+
+    html = http_server._render_item_detail_html("tgw1", item, [], [], jobs)
+    action_line = re.search(r'<div class="act-row" id="action-line">(.*?)</div>', html)
+
+    assert action_line is not None
+    assert ">List on eBay</button>" in action_line.group(1)
+    assert ">Needs attention</button>" not in action_line.group(1)
+
+
 def test_item_detail_global_ai_action_is_always_available():
     first = http_server._render_item_detail_html(
         "tgw1", {"sku": "tgw1", "title": "New item"}, [], [], [],

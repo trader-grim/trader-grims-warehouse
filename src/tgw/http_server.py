@@ -7804,6 +7804,13 @@ def _render_item_detail_html(
     _has_error = bool(_pe_norm) or any(
         j.get("state") == "dead_letter"
         and not j.get("provider_effect_reconciled")
+        and not (
+            dl.get("price") is not None
+            and isinstance((j.get("payload_json") or {}).get("result"), dict)
+            and ((j.get("payload_json") or {}).get("result", {}).get("evidence") or {}).get(
+                "reason_code"
+            ) == "PRICE_REQUIRES_OPERATOR_INPUT"
+        )
         and _after_baseline(j)
         and not _superseded_by_success(j)
         and not _duplicate_provider_effect_lost_to_success(j)
