@@ -142,7 +142,7 @@ class TestTgwEbayListable:
             "draft_generated", "priced",
             "photos_uploaded", "staged", "staged_content_current",
             "valid_condition", "valid_category",
-            "title_ok", "published",
+            "title_ok", "listing_provider_consistent", "published",
         )
 
     def test_published_is_final_condition(self):
