@@ -39,6 +39,18 @@ _LISTING_CONTINUATION_QUEUES = {
 _LISTING_CONTINUATION_SCOPES = frozenset(("upload", "stage", "publish"))
 
 
+def _listing_continuation_requested(payload: Mapping[str, Any], treatment_id: Any) -> bool:
+    """Only an explicit List Item action may continue toward publish.
+
+    Update Item/force-restage refreshes an unpublished offer.  Its successful
+    terminal state is staged, not an implicit publish authorization.
+    """
+    return (
+        treatment_id in _LISTING_CONTINUATION_QUEUES
+        and payload.get("operator_surface") == "http:item-action:ebay-publish"
+    )
+
+
 def _receipt(outcome: str, **evidence: Any) -> dict[str, Any]:
     return {
         "event_id": "workflow-evaluate",
@@ -306,7 +318,7 @@ def evaluate_event(
     # revalidated before the next generation is authorized and dispatched.
     authority_id = payload.get("operator_authority_id")
     treatment_id = origin.get("treatment_id")
-    if (not isolated and treatment_id in _LISTING_CONTINUATION_QUEUES
+    if (not isolated and _listing_continuation_requested(payload, treatment_id)
             and isinstance(authority_id, str) and authority_id):
         current_item = json.loads(item_path.read_text(encoding="utf-8"))
         provider_identity = _provider_identity(config)

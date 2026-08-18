@@ -12,6 +12,7 @@ from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
 from tgw.workers.normalize_condition import handle_job
 from tgw.workers.workflow_evaluate import (
+    _listing_continuation_requested,
     _validate_listing_continuation,
     evaluate_event,
 )
@@ -475,6 +476,18 @@ def test_listing_continuation_succeeds_when_no_further_dispatch_is_needed(tmp_pa
     assert receipt["evidence"]["dispatch"] == "none"
     assert receipt["evidence"]["next_treatment"] is None
     assert receipt["evidence"]["successor_authority_id"] == "authority-2"
+
+
+def test_update_item_stage_is_not_a_publish_continuation():
+    assert not _listing_continuation_requested(
+        {"operator_surface": "http:item-action:ebay-update"}, "ebay-stage"
+    )
+    assert not _listing_continuation_requested(
+        {"operator_surface": "http:item-action:ebay-stage"}, "ebay-stage"
+    )
+    assert _listing_continuation_requested(
+        {"operator_surface": "http:item-action:ebay-publish"}, "ebay-stage"
+    )
 
 
 def test_governed_stage_continuation_rejects_non_durable_origin(tmp_path):
