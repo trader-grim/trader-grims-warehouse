@@ -685,11 +685,16 @@ class EbayStageWorker(QueueWorker):
                 reason_code='PROVIDER_EFFECT_SUCCEEDED', result=result,
                 resulting_generation=resulting_generation,
             )
+        # Legacy operator-dispatched jobs do not have the immutable workflow
+        # identity fields required by QueueWorker's treatment-receipt path.
+        # Returning a partial treatment-shaped value makes the queue mark an
+        # otherwise successful eBay PUT as a dead letter.  A workflow job
+        # returns the complete receipt above; the legacy path deliberately
+        # returns ordinary result data so QueueWorker records normal success.
         return {
-            "treatment_id": "ebay-stage",
-            "outcome": "satisfied",
-            "established_conditions": ("staged",),
-            "artifacts": (f"item:{sku}",),
+            "status": "staged",
+            "offer_id": result["offer_id"],
+            "entity_id": sku,
         }
 
 

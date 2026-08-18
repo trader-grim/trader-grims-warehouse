@@ -76,7 +76,12 @@ def test_fresh_stage_enqueues_post_push_sync(tmp_path, monkeypatch):
     _patch_common(monkeypatch)
 
     worker = _worker(_cfg(tmp_path))
-    worker.handle({'payload_json': {'sku': sku}})
+    result = worker.handle({'payload_json': {'sku': sku}})
+
+    # A direct operator stage is a legacy queue job, not a workflow treatment
+    # receipt.  It must finish normally rather than be dead-lettered by the
+    # queue's strict workflow-receipt validator.
+    assert result == {'status': 'staged', 'offer_id': 'off-1', 'entity_id': sku}
 
     sync_calls = [c for c in calls if c['queue_name'] == 'ebay_sync']
     assert len(sync_calls) == 1
