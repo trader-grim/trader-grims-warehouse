@@ -25,6 +25,7 @@ def build_item_action_card(
     attempts: Sequence[Mapping[str, Any]] = (),
     *,
     provider_identity: str = "",
+    reconciled_provider_effect_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Rebuild the current EBAY_LISTABLE graph and join immutable attempts.
 
@@ -48,9 +49,13 @@ def build_item_action_card(
         treatment_key = (treatment_id, treatment_version or "1")
         contract = contracts.get(treatment_key)
         outcome = result.get("outcome") if result else None
-        if contract and contract.effect_class is EffectClass.EXTERNAL and outcome in {
+        evidence = result.get("evidence") if result else None
+        effect_id = evidence.get("provider_effect_id") if isinstance(evidence, Mapping) else None
+        reconciled = isinstance(effect_id, str) and effect_id in reconciled_provider_effect_ids
+        if (contract and contract.effect_class is EffectClass.EXTERNAL and not reconciled
+                and outcome in {
             "ambiguous", "reconciliation_required",
-        }:
+        }):
             ambiguities.update(contract.ownership)
         attempt_rows.append({
             "job_id": str(row.get("job_id") or ""),
@@ -66,6 +71,7 @@ def build_item_action_card(
             "max_attempts": row.get("max_attempts"),
             "error_detail": row.get("error_detail"),
             "result": dict(result) if result else None,
+            "provider_effect_reconciled": reconciled,
             "retry_allowed": False if (
                 payload.get("graph_id") or ambiguities
                 or (result and result.get("outcome") in {

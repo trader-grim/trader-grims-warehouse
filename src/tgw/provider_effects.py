@@ -460,6 +460,25 @@ def reconcile_provider_effect(
                 if row is None:
                     raise ProviderEffectConflict("effect changed during reconciliation")
                 return _record(row)
+    if outcome == "not_applied":
+        # A read-only provider observation can conclusively establish that a
+        # timed-out request had no effect.  Preserve that observation as the
+        # terminal ledger result so a new, explicit listing request is not
+        # fenced behind an uncertainty that no longer exists.
+        with state_machine._conn() as con:
+            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """UPDATE provider_effects SET state='rejected', result_json=%s::jsonb,
+                           error_detail=%s, finished_at=NOW(), updated_at=NOW()
+                        WHERE effect_id=%s AND state IN
+                          ('dispatched','ambiguous','reconciliation_required') RETURNING *""",
+                    (json.dumps(observation), str(observation.get("detail") or "")[:2000],
+                     effect_id),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise ProviderEffectConflict("effect changed during reconciliation")
+                return _record(row)
     return finish_reconciliation_required(effect_id, observation)
 
 

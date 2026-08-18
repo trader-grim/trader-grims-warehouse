@@ -952,6 +952,27 @@ def _workflow_attempt_rows(sku: str, limit: int = 100) -> List[Dict[str, Any]]:
             return rows
 
 
+def _workflow_reconciled_provider_effect_ids(attempts: List[Dict[str, Any]]) -> frozenset[str]:
+    """Return terminally reconciled effects referenced by this item's jobs."""
+    effect_ids = {
+        result.get("evidence", {}).get("provider_effect_id")
+        for row in attempts
+        for result in [(row.get("payload_json") or {}).get("result")]
+        if isinstance(result, dict) and isinstance(result.get("evidence"), dict)
+        and isinstance(result["evidence"].get("provider_effect_id"), str)
+    }
+    if not effect_ids:
+        return frozenset()
+    with psycopg2.connect(_cfg["postgres_dsn"]) as con:
+        with con.cursor() as cur:
+            cur.execute(
+                "SELECT effect_id FROM provider_effects WHERE effect_id = ANY(%s) "
+                "AND state IN ('succeeded', 'rejected')",
+                (list(effect_ids),),
+            )
+            return frozenset(str(row[0]) for row in cur.fetchall())
+
+
 def _workflow_reconciliation_rows(sku: str, limit: int = 100) -> Dict[str, Any]:
     """Return only privacy-safe ledger columns needed to reconcile one item.
 
@@ -1013,8 +1034,10 @@ def item_workflow(sku: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
     try:
         attempts = _workflow_attempt_rows(sku)
+        reconciled_effect_ids = _workflow_reconciled_provider_effect_ids(attempts)
         card = build_item_action_card(
             json_path, attempts, provider_identity=_workflow_provider_identity(),
+            reconciled_provider_effect_ids=reconciled_effect_ids,
         )
     except HTTPException:
         raise
@@ -9206,6 +9229,7 @@ def item_detail_form(sku: str):
     workflow_card: Dict[str, Any] | None = None
     try:
         attempts = _workflow_attempt_rows(sku)
+        reconciled_effect_ids = _workflow_reconciled_provider_effect_ids(attempts)
         jobs = attempts[:10]
         for j in jobs:
             for k in ("created_at", "finished_at"):
@@ -9215,6 +9239,7 @@ def item_detail_form(sku: str):
 
         workflow_card = build_item_action_card(
             json_path, attempts, provider_identity=_workflow_provider_identity(),
+            reconciled_provider_effect_ids=reconciled_effect_ids,
         )
     except Exception as exc:
         log.warning("queue job fetch failed for %s: %s", sku, exc)
