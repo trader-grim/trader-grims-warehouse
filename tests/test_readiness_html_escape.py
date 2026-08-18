@@ -7,7 +7,7 @@ passed at each _f(...) call site in EbayReadinessChecker.check() -- never
 derived from item data -- so it is deliberately left unescaped.
 """
 
-from tgw.readiness import ReadinessField, readiness_html
+from tgw.readiness import ReadinessField, check_ebay, readiness_html
 
 
 def _field(value):
@@ -60,6 +60,22 @@ def test_none_value_still_renders_empty_val_html():
         in html_out
     )
     assert 'margin-left:8px">' not in html_out
+
+
+def test_readiness_accepts_null_price_comps_from_an_existing_offer():
+    """A partial offer projection must not turn an item detail page into 500."""
+    fields = check_ebay({
+        "draft_listing": {
+            "title": "Floppy disks",
+            "category_id": "80136",
+            "condition": "Used",
+            "price": None,
+        },
+        "ebay_offer": {"offer_id": "266759538018", "price_comps": None},
+    })
+
+    price = next(field for field in fields if field.name == "ebay_price")
+    assert price.status == "missing"
 
 
 def test_label_remains_unescaped_hardcoded_literal():

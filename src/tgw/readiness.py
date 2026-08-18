@@ -117,8 +117,10 @@ class EbayReadinessChecker(ReadinessChecker):
 
         price = dl.get("price")
         eo = item.get("ebay_offer") or {}
+        price_comps = eo.get("price_comps")
+        price_comps = price_comps if isinstance(price_comps, dict) else {}
         price_conf = (
-            eo.get("price_comps", {}).get("confidence")
+            price_comps.get("confidence")
             or eo.get("price_confidence")
             or dl.get("price_confidence")
             or ""
