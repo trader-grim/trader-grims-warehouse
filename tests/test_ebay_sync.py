@@ -205,6 +205,17 @@ class TestFindOfferNoMarketplaceFilter:
         assert calls == [{'sku': 'tgwSKU'}]  # no marketplace_id key at all
         assert result == {'offerId': 'O1', 'marketplaceId': 'EBAY_MOTORS'}
 
+    def test_find_offer_does_not_turn_a_failed_lookup_into_create_permission(
+        self, monkeypatch,
+    ):
+        """An unavailable lookup is unknown, never evidence of no offer."""
+        def _fail(cfg, path, params=None):
+            raise RuntimeError("quota lookup unavailable")
+
+        monkeypatch.setattr(sync, 'ebay_get', _fail)
+        with pytest.raises(RuntimeError, match="quota lookup unavailable"):
+            sync._find_offer({}, 'tgwSKU')
+
 
 class TestStageDraftUsesExistingOfferMarketplace:
     def test_update_path_overrides_marketplace_id_with_existing_offer_truth(self, cfg, monkeypatch):

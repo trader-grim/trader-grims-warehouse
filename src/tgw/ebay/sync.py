@@ -576,12 +576,8 @@ def _find_offer(cfg: Dict[str, Any], sku: str) -> Optional[Dict[str, Any]]:
     undocumented, order-dependent guess about which marketplace's offer is
     "the" one to update.
     """
-    try:
-        data = ebay_get(cfg, '/sell/inventory/v1/offer', params={'sku': sku})
-        offers = data.get('offers', [])
-    except Exception as exc:
-        log.debug('offer lookup for %s returned: %s', sku, exc)
-        return None
+    data = ebay_get(cfg, '/sell/inventory/v1/offer', params={'sku': sku})
+    offers = data.get('offers', [])
     if len(offers) > 1:
         marketplaces = sorted({str(o.get('marketplaceId') or '?') for o in offers})
         raise AmbiguousOfferError(
