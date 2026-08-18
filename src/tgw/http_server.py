@@ -110,6 +110,65 @@ _WORKER_TOOLTIPS: Dict[str, str] = {
     "echo": "No-op test worker — echoes payload and succeeds",
 }
 
+# A row in queue_jobs is not necessarily runnable: historically producers
+# could enqueue a queue whose systemd consumer was not installed.  Keep this
+# short cache so operator pages state that distinction without running a
+# systemctl subprocess for every item rendered.
+_QUEUE_CONSUMER_CACHE: Dict[str, Dict[str, str]] = {}
+_QUEUE_CONSUMER_CACHE_AT: float = 0.0
+_QUEUE_CONSUMER_CACHE_TTL_S = 10.0
+
+
+def _queue_consumers(queue_names: List[str]) -> Dict[str, Dict[str, str]]:
+    """Return live consumer availability for queue names.
+
+    ``queued`` is only actionable when its worker unit is active.  A missing
+    unit means the row is deliberately parked by configuration, not a worker
+    that is merely slow.  This distinction belongs in the operator surface,
+    rather than requiring a database investigation.
+    """
+    global _QUEUE_CONSUMER_CACHE_AT
+    names = sorted({str(name) for name in queue_names if name})
+    if not names:
+        return {}
+    now = time.monotonic()
+    if now - _QUEUE_CONSUMER_CACHE_AT > _QUEUE_CONSUMER_CACHE_TTL_S:
+        refreshed: Dict[str, Dict[str, str]] = {}
+        for queue_name in names:
+            unit = f"tgw-worker@{queue_name}.service"
+            try:
+                result = subprocess.run(
+                    ["systemctl", "show", unit,
+                     "--property=LoadState,ActiveState", "--value"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                load_state = values[0] if values else "not-found"
+                active_state = values[1] if len(values) > 1 else "unknown"
+            except Exception:
+                load_state, active_state = "unknown", "unknown"
+            if load_state == "not-found":
+                status, reason = "no_consumer", "No worker is configured; job is parked."
+            elif active_state == "active":
+                status, reason = "active", "Worker is active."
+            elif active_state == "unknown":
+                status, reason = "unknown", "Worker status is unavailable."
+            else:
+                status, reason = "inactive", "Worker is configured but not running."
+            refreshed[queue_name] = {
+                "unit": unit, "status": status, "reason": reason,
+            }
+        _QUEUE_CONSUMER_CACHE.clear()
+        _QUEUE_CONSUMER_CACHE.update(refreshed)
+        _QUEUE_CONSUMER_CACHE_AT = now
+    return {
+        name: _QUEUE_CONSUMER_CACHE.get(name, {
+            "unit": f"tgw-worker@{name}.service",
+            "status": "unknown", "reason": "Worker status is unavailable.",
+        })
+        for name in names
+    }
+
 # Module-level state (set during lifespan startup)
 # ---------------------------------------------------------------------------
 
@@ -937,19 +996,21 @@ def _workflow_attempt_rows(sku: str, limit: int = 100) -> List[Dict[str, Any]]:
                 (sku, sku, limit),
             )
             rows = [dict(row) for row in cur.fetchall()]
-            for row in rows:
-                payload = row.get("payload_json") or {}
-                result = payload.get("result") if isinstance(payload, dict) else None
-                governed = isinstance(payload, dict) and all(
-                    payload.get(key) for key in ("treatment_id", "graph_id", "object_generation")
-                )
-                ambiguous = isinstance(result, dict) and result.get("outcome") in {
-                    "ambiguous", "reconciliation_required",
-                }
-                row["retry_allowed"] = (
-                    row.get("state") == "dead_letter" and not governed and not ambiguous
-                )
-            return rows
+    consumers = _queue_consumers([str(row.get("queue_name") or "") for row in rows])
+    for row in rows:
+        row["consumer"] = consumers.get(str(row.get("queue_name") or ""), {})
+        payload = row.get("payload_json") or {}
+        result = payload.get("result") if isinstance(payload, dict) else None
+        governed = isinstance(payload, dict) and all(
+            payload.get(key) for key in ("treatment_id", "graph_id", "object_generation")
+        )
+        ambiguous = isinstance(result, dict) and result.get("outcome") in {
+            "ambiguous", "reconciliation_required",
+        }
+        row["retry_allowed"] = (
+            row.get("state") == "dead_letter" and not governed and not ambiguous
+        )
+    return rows
 
 
 def _workflow_reconciled_provider_effect_ids(attempts: List[Dict[str, Any]]) -> frozenset[str]:
@@ -3073,7 +3134,11 @@ def queue_status() -> Dict[str, Any]:
         s = row["state"]
         by_queue.setdefault(q, {})[s] = row["count"]
 
-    return {"ok": True, "queues": by_queue}
+    return {
+        "ok": True,
+        "queues": by_queue,
+        "consumers": _queue_consumers(list(by_queue)),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -7039,6 +7104,15 @@ def _render_item_detail_html(
             qn = j.get("queue_name", "")
             tip = _WORKER_TOOLTIPS.get(qn, "")
             tip_attr = f' title="{h(tip)}"' if tip else ""
+            consumer = j.get("consumer") if isinstance(j.get("consumer"), dict) else {}
+            consumer_status = str(consumer.get("status") or "")
+            consumer_reason = str(consumer.get("reason") or "")
+            consumer_html = ""
+            if state in ("queued", "leased", "running", "retry_wait") and consumer_status != "active":
+                consumer_html = (
+                    f' <span title="{h(consumer_reason)}" style="color:#fd8;font-size:.78em">'
+                    f'— {h(consumer_reason)}</span>'
+                )
             # PP-ACTIONCONSOLE-001: contextual repair — a Retry button appears
             # ONLY on actionable failure states (zero buttons in the happy path).
             _retry_btn = ""
@@ -7048,7 +7122,7 @@ def _render_item_detail_html(
                     f'background:#2a0d0d;border-color:#a44;color:#e88" '
                     f"onclick=\"retryJob('{h(str(j['job_id']))}')\">Retry</button>"
                 )
-            job_rows += f'<tr><td{tip_attr}>{h(qn)}</td><td class="{sc}">{h(state)}{_retry_btn}</td><td style="color:#666;font-size:.8em">{h(ts)}</td><td style="color:{_err_color};font-size:.8em">{err}</td></tr>'
+            job_rows += f'<tr><td{tip_attr}>{h(qn)}</td><td class="{sc}">{h(state)}{consumer_html}{_retry_btn}</td><td style="color:#666;font-size:.8em">{h(ts)}</td><td style="color:{_err_color};font-size:.8em">{err}</td></tr>'
         jobs_html = f'<table class="jtable"><tr><th>Queue</th><th>State</th><th>Updated</th><th>Error</th></tr>{job_rows}</table>'
 
     title = item.get("title", "")
@@ -10914,7 +10988,7 @@ function renderQueues(data, daily) {{
     return;
   }}
   var html = '<table class="pl-table"><tr>' +
-    '<th>Queue</th><th>Pending</th><th>Running</th>' +
+    '<th>Queue</th><th>Consumer</th><th>Pending</th><th>Running</th>' +
     '<th title="Succeeded today (' + (dailyOk ? escapeHtml(daily.date + ' ' + daily.tz) : 'date-scoped') +
       '), from queue_daily_stats">Done today</th>' +
     '<th title="Failed or dead-lettered today (' + (dailyOk ? escapeHtml(daily.date + ' ' + daily.tz) : 'date-scoped') +
@@ -10922,6 +10996,9 @@ function renderQueues(data, daily) {{
     '<th title="Lifetime dead-letter backlog awaiting review (queue_jobs, not date-scoped)">DL backlog</th></tr>';
   names.forEach(function(q) {{
     var s = queues[q] || {{}};
+    var consumer = (data.consumers || {{}})[q] || {{status:'unknown', reason:'Worker status unavailable.'}};
+    var consumerText = consumer.status === 'active' ? 'active' : consumer.reason;
+    var consumerClass = consumer.status === 'active' ? 'n-done' : (consumer.status === 'no_consumer' ? 'n-dead' : 'n-queued');
     var d = dailyQueues[q] || {{succeeded: 0, failed: 0, dead_letter: 0}};
     var pending = (s.queued || 0) + (s.leased || 0) + (s.retry_wait || 0);
     var running = s.running || 0;
@@ -10930,6 +11007,7 @@ function renderQueues(data, daily) {{
     var dlBacklog = s.dead_letter || 0;
     html += '<tr>' +
       '<td class="qname">' + escapeHtml(q) + '</td>' +
+      '<td class="' + consumerClass + '" title="' + escapeHtml(consumer.reason || '') + '">' + escapeHtml(consumerText) + '</td>' +
       numCell(pending || null, 'n-queued') +
       numCell(running || null, 'n-run') +
       (dailyOk ? numCell(doneToday || null, 'n-done') : '<td class="n-zero">?</td>') +
@@ -11173,6 +11251,9 @@ def pipeline_jobs() -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"postgres error: {exc}")
 
     for j in jobs:
+        j["consumer"] = _queue_consumers([str(j.get("queue_name") or "")]).get(
+            str(j.get("queue_name") or ""), {}
+        )
         for ts_field in ("started_at", "finished_at", "created_at"):
             v = j.get(ts_field)
             if v is not None and hasattr(v, "isoformat"):
