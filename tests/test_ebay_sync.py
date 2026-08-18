@@ -9,6 +9,7 @@ _get_merchant_location, which we stub so no network/token is required.
 """
 
 import pytest
+import requests
 
 import tgw.ebay.sync as sync
 
@@ -215,6 +216,13 @@ class TestFindOfferNoMarketplaceFilter:
         monkeypatch.setattr(sync, 'ebay_get', _fail)
         with pytest.raises(RuntimeError, match="quota lookup unavailable"):
             sync._find_offer({}, 'tgwSKU')
+
+    def test_find_offer_404_is_the_definitive_no_offer_result(self, monkeypatch):
+        response = type("Response", (), {"status_code": 404})()
+        error = requests.exceptions.HTTPError("not found", response=response)
+        monkeypatch.setattr(sync, "ebay_get", lambda *args, **kwargs: (_ for _ in ()).throw(error))
+
+        assert sync._find_offer({}, "tgwSKU") is None
 
 
 class TestStageDraftUsesExistingOfferMarketplace:

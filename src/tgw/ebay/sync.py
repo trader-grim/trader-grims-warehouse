@@ -576,7 +576,16 @@ def _find_offer(cfg: Dict[str, Any], sku: str) -> Optional[Dict[str, Any]]:
     undocumented, order-dependent guess about which marketplace's offer is
     "the" one to update.
     """
-    data = ebay_get(cfg, '/sell/inventory/v1/offer', params={'sku': sku})
+    try:
+        data = ebay_get(cfg, '/sell/inventory/v1/offer', params={'sku': sku})
+    except requests.exceptions.HTTPError as exc:
+        # Inventory returns 404 (rather than an empty offers array) when this
+        # SKU has no offer.  That is the one definitive create permission;
+        # timeouts, quota failures, auth errors, and 5xx responses must reach
+        # the worker and remain retryable rather than becoming duplicate POSTs.
+        if exc.response is not None and exc.response.status_code == 404:
+            return None
+        raise
     offers = data.get('offers', [])
     if len(offers) > 1:
         marketplaces = sorted({str(o.get('marketplaceId') or '?') for o in offers})
