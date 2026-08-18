@@ -46,6 +46,12 @@ def _sold_state_path(cfg: Dict[str, Any]) -> Path:
 
 
 class EbayLegacySyncWorker(QueueWorker):
+    # GetMyeBaySelling + the completed-order reconciliation scan the whole
+    # account.  The old 10-minute fleet lease expired while the process was
+    # still doing valid work, which made required sold-state reconciliation
+    # dead-letter itself.  Keep the lease longer than the bounded job window.
+    min_lease_seconds = 3600
+    job_timeout_s = 2700
 
     def run(self) -> None:
         self.install_signal_handlers()

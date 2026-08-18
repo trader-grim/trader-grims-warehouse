@@ -202,8 +202,15 @@ class QueueWorker:
         self.poll_interval = float(
             config.get('queue', {}).get('poll_interval_s', 2.0)
         )
-        self.lease_seconds = int(
+        configured_lease_seconds = int(
             config.get('queue', {}).get('lease_seconds', 300)
+        )
+        # Most jobs should use the short fleet-wide lease.  A bounded full
+        # reconciliation can legitimately outlive it; subclasses declare a
+        # minimum rather than silently losing their lease mid-run.
+        self.lease_seconds = max(
+            configured_lease_seconds,
+            int(getattr(self, "min_lease_seconds", 0) or 0),
         )
         self._stop           = False
         self._last_recover   = 0.0

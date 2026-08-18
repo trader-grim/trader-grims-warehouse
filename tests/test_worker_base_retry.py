@@ -121,3 +121,14 @@ def test_external_price_and_sync_workers_have_bounded_job_deadlines():
 
     assert EbayPriceWorker.job_timeout_s == 180
     assert EbaySyncWorker.job_timeout_s == 900
+
+
+def test_worker_honors_a_declared_minimum_lease(monkeypatch):
+    class _LongWorker(worker_base.QueueWorker):
+        min_lease_seconds = 3600
+
+    monkeypatch.setattr(worker_base.state_machine, "init", lambda *_args: None)
+    monkeypatch.setattr(worker_base.tgw_logging, "setup_logging", lambda **_kwargs: None)
+    worker = _LongWorker("long", {"queue": {"lease_seconds": 600}})
+
+    assert worker.lease_seconds == 3600
