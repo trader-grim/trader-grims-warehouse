@@ -999,6 +999,16 @@ def _workflow_attempt_rows(sku: str, limit: int = 100) -> List[Dict[str, Any]]:
     consumers = _queue_consumers([str(row.get("queue_name") or "") for row in rows])
     for row in rows:
         row["consumer"] = consumers.get(str(row.get("queue_name") or ""), {})
+        not_before = row.get("not_before")
+        if (
+            row.get("state") in {"queued", "retry_wait"}
+            and isinstance(not_before, datetime)
+            and not_before > datetime.now(timezone.utc)
+        ):
+            # A deliberate delayed/repeating job is not a stalled job.  Keep
+            # the timestamp in the row so the item view can say when it is
+            # due instead of offering an unexplained queued state.
+            row["scheduled_at"] = not_before
         payload = row.get("payload_json") or {}
         result = payload.get("result") if isinstance(payload, dict) else None
         governed = isinstance(payload, dict) and all(
@@ -3117,7 +3127,11 @@ def queue_status() -> Dict[str, Any]:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT queue_name, state, COUNT(*) AS count
+                    SELECT queue_name, state, COUNT(*) AS count,
+                           COUNT(*) FILTER (
+                               WHERE state IN ('queued', 'retry_wait')
+                                 AND not_before > NOW()
+                           ) AS scheduled_count
                       FROM queue_jobs
                      GROUP BY queue_name, state
                      ORDER BY queue_name, state
@@ -3129,14 +3143,17 @@ def queue_status() -> Dict[str, Any]:
 
     # Restructure as {queue_name: {state: count}}
     by_queue: Dict[str, Dict[str, int]] = {}
+    scheduled: Dict[str, int] = {}
     for row in rows:
         q = row["queue_name"]
         s = row["state"]
         by_queue.setdefault(q, {})[s] = row["count"]
+        scheduled[q] = scheduled.get(q, 0) + int(row.get("scheduled_count") or 0)
 
     return {
         "ok": True,
         "queues": by_queue,
+        "scheduled": scheduled,
         "consumers": _queue_consumers(list(by_queue)),
     }
 
@@ -7108,8 +7125,14 @@ def _render_item_detail_html(
             consumer_status = str(consumer.get("status") or "")
             consumer_reason = str(consumer.get("reason") or "")
             consumer_html = ""
-            if state in ("queued", "leased", "running", "retry_wait") and consumer_status != "active":
+            scheduled_at = j.get("scheduled_at")
+            if scheduled_at is not None:
                 consumer_html = (
+                    f' <span style="color:#8df;font-size:.78em">'
+                    f'— scheduled {_local_ts(scheduled_at)}</span>'
+                )
+            if state in ("queued", "leased", "running", "retry_wait") and consumer_status != "active":
+                consumer_html += (
                     f' <span title="{h(consumer_reason)}" style="color:#fd8;font-size:.78em">'
                     f'— {h(consumer_reason)}</span>'
                 )
@@ -10988,7 +11011,7 @@ function renderQueues(data, daily) {{
     return;
   }}
   var html = '<table class="pl-table"><tr>' +
-    '<th>Queue</th><th>Consumer</th><th>Pending</th><th>Running</th>' +
+    '<th>Queue</th><th>Consumer</th><th>Ready</th><th>Scheduled</th><th>Running</th>' +
     '<th title="Succeeded today (' + (dailyOk ? escapeHtml(daily.date + ' ' + daily.tz) : 'date-scoped') +
       '), from queue_daily_stats">Done today</th>' +
     '<th title="Failed or dead-lettered today (' + (dailyOk ? escapeHtml(daily.date + ' ' + daily.tz) : 'date-scoped') +
@@ -11000,7 +11023,8 @@ function renderQueues(data, daily) {{
     var consumerText = consumer.status === 'active' ? 'active' : consumer.reason;
     var consumerClass = consumer.status === 'active' ? 'n-done' : (consumer.status === 'no_consumer' ? 'n-dead' : 'n-queued');
     var d = dailyQueues[q] || {{succeeded: 0, failed: 0, dead_letter: 0}};
-    var pending = (s.queued || 0) + (s.leased || 0) + (s.retry_wait || 0);
+    var scheduled = (data.scheduled || {{}})[q] || 0;
+    var pending = (s.queued || 0) + (s.leased || 0) + (s.retry_wait || 0) - scheduled;
     var running = s.running || 0;
     var doneToday = dailyOk ? (d.succeeded || 0) : null;
     var failedToday = dailyOk ? ((d.failed || 0) + (d.dead_letter || 0)) : null;
@@ -11009,6 +11033,7 @@ function renderQueues(data, daily) {{
       '<td class="qname">' + escapeHtml(q) + '</td>' +
       '<td class="' + consumerClass + '" title="' + escapeHtml(consumer.reason || '') + '">' + escapeHtml(consumerText) + '</td>' +
       numCell(pending || null, 'n-queued') +
+      numCell(scheduled || null, 'n-queued') +
       numCell(running || null, 'n-run') +
       (dailyOk ? numCell(doneToday || null, 'n-done') : '<td class="n-zero">?</td>') +
       (dailyOk ? numCell(failedToday || null, 'n-dead') : '<td class="n-zero">?</td>') +
