@@ -88,3 +88,10 @@ def test_editor_script_exposes_category_aspect_max_length():
     script = http_server._CATEGORY_CONTEXT_IIFE
     assert "maxlength=" in script
     assert "maxHint" in script
+
+
+def test_editor_applies_persisted_error_after_aspect_form_is_rendered():
+    """Aspect controls are asynchronous, so the error is applied post-render."""
+    script = http_server._CATEGORY_CONTEXT_IIFE
+    assert "window._PE_FIELD" in script
+    assert "form.innerHTML=html;if(window._PE_FIELD)" in script

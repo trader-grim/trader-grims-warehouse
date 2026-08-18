@@ -4516,6 +4516,13 @@ _CATEGORY_CONTEXT_IIFE = (
         "var missingReq=d.aspects.filter(function(a){return a.required&&!(prefill[a.name]||'');}).length;if(missingReq>0)",
         "if(missingReq>0)",
     )
+    .replace(
+        "form.innerHTML=html;\n  }).catch(function(){",
+        "form.innerHTML=html;"
+        "if(window._PE_FIELD){form.querySelectorAll('[data-aspect]').forEach(function(el){"
+        "if(el.dataset.aspect===window._PE_FIELD){flagFieldInvalid(el,true);el.title=window._PE_DETAIL||'';}});}"
+        "\n  }).catch(function(){",
+    )
 )
 
 # ---------------------------------------------------------------------------
@@ -7658,13 +7665,12 @@ def _render_item_detail_html(
             # opens, not just after touching the field. Only fields with a
             # known rendered element are wired here; an unmapped field name
             # (or none) is a no-op, not an error.
-            f"<script>var _PE_RAW={_pe_raw_js};var _PE_FIELD={_json.dumps(_pe_norm.get('field'))};"
-            f"var _PE_DETAIL={_json.dumps(_pe_norm.get('detail') or '')};"
+            f"<script>var _PE_RAW={_pe_raw_js};window._PE_FIELD={_json.dumps(_pe_norm.get('field'))};"
+            f"window._PE_DETAIL={_json.dumps(_pe_norm.get('detail') or '')};"
             f"document.addEventListener('DOMContentLoaded',function(){{"
             f"  var _peFieldEls={{condition_enum:'dl-condition-select',title:'dl-title-input'}};"
-            f"  var _peEl=_PE_FIELD&&_peFieldEls[_PE_FIELD]?document.getElementById(_peFieldEls[_PE_FIELD]):null;"
-            f"  if(!_peEl&&_PE_FIELD){{document.querySelectorAll('#aspects-form [data-aspect]').forEach(function(el){{if(el.dataset.aspect===_PE_FIELD)_peEl=el;}});}}"
-            f"  if(_peEl){{flagFieldInvalid(_peEl,true);_peEl.title=_PE_DETAIL;}}"
+            f"  var _peEl=window._PE_FIELD&&_peFieldEls[window._PE_FIELD]?document.getElementById(_peFieldEls[window._PE_FIELD]):null;"
+            f"  if(_peEl){{flagFieldInvalid(_peEl,true);_peEl.title=window._PE_DETAIL;}}"
             f"}});</script>"
         )
     else:
