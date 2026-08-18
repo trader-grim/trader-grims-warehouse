@@ -50,6 +50,11 @@ QUEUE_NAME = 'ebay_price'
 
 
 class EbayPriceWorker(QueueWorker):
+    # Browse API calls already have a short HTTP timeout, but a provider or
+    # library can still wedge between calls.  Do not let one SKU leave the
+    # single price consumer alive yet unable to claim the remaining queue.
+    # Timeout follows QueueWorker's transient retry path.
+    job_timeout_s = 180
 
     def _receipt(
         self, payload: Dict[str, Any], sku: str, *, outcome: str,

@@ -52,6 +52,10 @@ SYNC_INTERVAL_S = 6 * 3600  # check eBay every 6 hours
 
 
 class EbaySyncWorker(QueueWorker):
+    # A full offer reconciliation may legitimately take longer than a single
+    # price lookup, but it must still yield instead of wedging the recurring
+    # sync consumer indefinitely.  The base worker requeues timed-out work.
+    job_timeout_s = 900
     _OBSERVATION_SCHEMA = "ebay-sync-observation/v1"
 
     @staticmethod

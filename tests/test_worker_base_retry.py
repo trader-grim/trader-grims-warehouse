@@ -112,3 +112,12 @@ def test_bounded_job_timeout_requeues_instead_of_stranding_worker(monkeypatch):
     _TimedWorker()._process(_job(attempt_count=1))
 
     assert calls["delay"] == 120
+
+
+def test_external_price_and_sync_workers_have_bounded_job_deadlines():
+    """Live consumers must not remain process-alive while a provider wedges."""
+    from tgw.workers.ebay_price import EbayPriceWorker
+    from tgw.workers.ebay_sync import EbaySyncWorker
+
+    assert EbayPriceWorker.job_timeout_s == 180
+    assert EbaySyncWorker.job_timeout_s == 900
