@@ -102,6 +102,7 @@ __all__ = [
     "get_inventory_field",
     "wrap_inventory_attributes",
     "set_inventory_fields",
+    "ensure_required_category_fields",
     "get_locked_keys",
     "is_locked",
     "set_locked",
@@ -281,3 +282,31 @@ def set_inventory_fields(
             new_fields, updated_at=ts, locked_keys=get_locked_keys(item)),
         "item_attributes_history": history,
     }
+
+
+def ensure_required_category_fields(
+    item: Dict[str, Any], aspects: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Scaffold missing required marketplace aspects as visible Set A fields.
+
+    A missing required aspect is meaningful operator work, not an absent UI
+    control.  This function adds only absent keys with an empty value; it never
+    overwrites an existing value, including an intentional existing empty value.
+    The normal Set A envelope and append-only history are used so the scaffold
+    has the same generation/CAS behavior as every other inventory change.
+    """
+    existing = get_inventory_fields(item)
+    missing = {
+        str(aspect["name"]): ""
+        for aspect in aspects
+        if aspect.get("required") and str(aspect.get("name") or "").strip()
+        and str(aspect["name"]) not in existing
+    }
+    if not missing:
+        return {}
+    return set_inventory_fields(
+        item,
+        missing,
+        source="ebay_category_schema",
+        applied_by="system",
+    )

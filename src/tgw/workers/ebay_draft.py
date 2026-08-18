@@ -608,6 +608,16 @@ class EbayDraftWorker(QueueWorker):
                 raise
             log.info('fetched %d aspects for category %s', len(aspects), category_id)
 
+        # Preserve the exact required category schema in Set A, including
+        # intentionally empty fields.  The model/draft path may not be able to
+        # ground every value, but the operator must see the real controls.
+        _required_schema_patch = inventory_record.ensure_required_category_fields(
+            item, aspects,
+        )
+        if _required_schema_patch:
+            item['item_attributes'] = _required_schema_patch['item_attributes']
+            item['item_attributes_history'] = _required_schema_patch['item_attributes_history']
+
         # Phase 2a — Browse API aspect hints (best-effort; supplements AI with market signal)
         browse_hints: Dict[str, str] = {}
         if category_id != '99' and aspects:
@@ -894,6 +904,9 @@ class EbayDraftWorker(QueueWorker):
             # the operator's existing draft before replacement is ready.
             'ai_redraft_requested': None,
         }
+        if _required_schema_patch:
+            patch_fields['item_attributes'] = _required_schema_patch['item_attributes']
+            patch_fields['item_attributes_history'] = _required_schema_patch['item_attributes_history']
         if governed and photo_findings:
             patch_fields['pipeline_error'] = photo_findings[-1]
         if category_resolved_here:

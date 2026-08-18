@@ -8459,13 +8459,12 @@ def _render_item_detail_html(
                             else (
                                 f'<button class="act-btn" style="font-size:.7em;padding:1px 6px;margin-left:8px" '
                                 f"onclick='addFromInventory({json.dumps(k)},{json.dumps(str(v))},this)'>+ Add to listing</button>"
-                                if k not in isp and k != "Title"
+                                if v and k not in isp and k != "Title"
                                 else ""
                             )
                         )
                         + "</span></div>"
                         for k, v in sorted(ia.items())
-                        if v
                     )
                     + "</div>"
                 )

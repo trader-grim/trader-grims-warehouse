@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 
 import tgw.logging as tgw_logging
 from tgw import inventory_record, quota
-from tgw.apis.ebay.specifics import get_category_group_aspects
+from tgw.apis.ebay.specifics import get_aspects, get_category_group_aspects
 from tgw.apis.fence import patch_item as fence_patch_item
 from tgw.apis.llm import CLOUD_PROVIDERS, call_model, get_task_model
 from tgw.apis.ollama import extract_json, is_available
@@ -188,6 +188,34 @@ def _prompt_for_item(
             "the photos for values visible on the item; leave genuinely unknown "
             "values absent.\n"
         )
+
+    # Once an item has an exact selected category, ask for that category's
+    # required fields as well as any broader category-group targets below.
+    # The selected schema is authoritative for required-field visibility; the
+    # group union remains useful discovery guidance and must not be replaced.
+    category_id = str(item.get("ebay_category_id") or "").strip()
+    if category_id and category_id != "99":
+        try:
+            required_names = [
+                str(aspect["name"])
+                for aspect in get_aspects(cfg, category_id)
+                if aspect.get("required") and aspect.get("name")
+            ]
+        except quota.QuotaBudgetExceeded:
+            raise
+        except Exception as exc:
+            log.warning(
+                "ai_identify: exact required aspect targets unavailable for "
+                "category %s: %s", category_id, exc,
+            )
+        else:
+            if required_names:
+                prompt += (
+                    "\nExact required eBay aspects for the selected category:\n"
+                    f"{json.dumps(required_names, ensure_ascii=False)}\n"
+                    "Include every grounded value for these names in item_specifics. "
+                    "Do not invent a value merely to fill a required field.\n"
+                )
 
     group_name = str(item.get("category_group") or "").strip()
     groups_path = cfg.get("category_groups_path")
@@ -665,6 +693,27 @@ class AIIdentifyWorker(QueueWorker):
                     item, new_only, source="ai_identify", applied_by="system")
                 item["item_attributes"] = _ia_patch["item_attributes"]
                 item["item_attributes_history"] = _ia_patch["item_attributes_history"]
+
+        # Required category fields must be present in Set A even when the
+        # model cannot ground a value.  That gives the operator the correct
+        # category-specific control rather than hiding missing requirements.
+        if ebay_category_id and ebay_category_id != "99":
+            try:
+                _required_schema_patch = inventory_record.ensure_required_category_fields(
+                    item, get_aspects(self.config, ebay_category_id),
+                )
+            except quota.QuotaBudgetExceeded:
+                raise
+            except Exception as exc:
+                log.warning(
+                    "%s: required category field schema unavailable for %s: %s",
+                    sku, ebay_category_id, exc,
+                )
+            else:
+                if _required_schema_patch:
+                    _ia_patch = _required_schema_patch
+                    item["item_attributes"] = _ia_patch["item_attributes"]
+                    item["item_attributes_history"] = _ia_patch["item_attributes_history"]
 
         # product_lookup already written above if lookup succeeded
 
