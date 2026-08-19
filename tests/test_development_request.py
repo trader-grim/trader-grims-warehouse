@@ -46,6 +46,20 @@ def test_each_launch_card_owns_its_allocation_snapshot():
     assert result["allocation"]["worktree"] != "/mutated"
 
 
+def test_lifecycle_receipt_does_not_alias_caller_request_or_resolution():
+    raw_request, raw_resolution = request(), resolved()
+    result = compile_request_lifecycle(request=raw_request, resolution=raw_resolution, allocation=allocation())
+    raw_request["constraints"].append("mutated")
+    raw_resolution["alternatives"].append("mutated")
+    raw_resolution["plan"]["commit"] = "c" * 40
+    assert result["request"]["constraints"] == ["no live changes"]
+    assert result["resolution"]["alternatives"] == ["Todo"]
+    assert result["resolution"]["plan"]["commit"] == COMMIT
+    assert result["lifecycle_hash"] == compile_request_lifecycle(
+        request=request(), resolution=resolved(), allocation=allocation()
+    )["lifecycle_hash"]
+
+
 @pytest.mark.parametrize("status", ["CLARIFICATION_REQUIRED", "HELD"])
 def test_ambiguous_or_held_resolution_emits_no_launch_cards(status):
     value = {"status": status, "alternatives": ["Plan", "Todo"], "confidence": 0.2, "explanation": "ambiguous", "clarification": "select a root"}
@@ -134,3 +148,11 @@ def test_request_shape_and_identity_are_validated_directly(change):
     change(value)
     with pytest.raises(DevelopmentRequestError):
         compile_request_lifecycle(request=value, resolution=resolved(), allocation=allocation())
+
+
+@pytest.mark.parametrize("alternatives", [[1], [{}], ["Todo", "Todo"]])
+def test_resolution_alternatives_must_be_unique_strings(alternatives):
+    value = resolved()
+    value["alternatives"] = alternatives
+    with pytest.raises(DevelopmentRequestError, match="resolution summary"):
+        compile_request_lifecycle(request=request(), resolution=value, allocation=allocation())

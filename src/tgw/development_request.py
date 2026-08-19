@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import re
+from copy import deepcopy
 from pathlib import PurePosixPath
 from typing import Any, Mapping
 
@@ -47,7 +48,7 @@ def _hash_value(value: Any, label: str) -> str:
 
 
 def _request(raw: Mapping[str, Any]) -> dict[str, Any]:
-    value = dict(raw)
+    value = deepcopy(dict(raw))
     if set(value) != {"request_id", "original_request", "scope", "constraints", "effect_limits"}:
         raise DevelopmentRequestError("request fields are not exact")
     if not _IDENTITY.fullmatch(_string(value["request_id"], "request id")):
@@ -92,7 +93,7 @@ def compile_request_lifecycle(*, request: Mapping[str, Any], resolution: Mapping
     """Return deterministic prepared role cards, or a zero-launch held outcome."""
     requested = _request(request)
     allocated = _allocation(allocation, requested["request_id"])
-    result = dict(resolution)
+    result = deepcopy(dict(resolution))
     status = result.get("status")
     if status not in {"RESOLVED", "CLARIFICATION_REQUIRED", "HELD"}:
         raise DevelopmentRequestError("resolution status is invalid")
@@ -101,6 +102,8 @@ def compile_request_lifecycle(*, request: Mapping[str, Any], resolution: Mapping
     if (
         not required.issubset(result)
         or not isinstance(result["alternatives"], list)
+        or not all(isinstance(item, str) and item for item in result["alternatives"])
+        or len(result["alternatives"]) != len(set(result["alternatives"]))
         or isinstance(confidence, bool)
         or not isinstance(confidence, (int, float))
         or not math.isfinite(confidence)
