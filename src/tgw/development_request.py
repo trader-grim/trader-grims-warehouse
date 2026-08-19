@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+from pathlib import PurePosixPath
 from typing import Any, Mapping
 
 SCHEMA = "tgw-development-request-lifecycle/v1"
@@ -67,7 +69,19 @@ def _allocation(raw: Mapping[str, Any], request_id: str) -> dict[str, str]:
         raise DevelopmentRequestError("attempt id is invalid")
     for field in ("worktree", "attempt_root"):
         path = _string(value[field], field)
-        if not path.startswith("/") or "/home/" in path or "/../" in path or f"/{request_id}/" not in path or f"/{attempt_id}" not in path:
+        parts = PurePosixPath(path).parts
+        try:
+            request_index = parts.index(request_id)
+        except ValueError:
+            request_index = -1
+        if (
+            not path.startswith("/")
+            or "/home/" in path
+            or ".." in parts
+            or request_index < 0
+            or request_index + 1 >= len(parts)
+            or parts[request_index + 1] != attempt_id
+        ):
             raise DevelopmentRequestError(f"{field} is not an isolated request-bound path")
     return value
 
@@ -81,7 +95,15 @@ def compile_request_lifecycle(*, request: Mapping[str, Any], resolution: Mapping
     if status not in {"RESOLVED", "CLARIFICATION_REQUIRED", "HELD"}:
         raise DevelopmentRequestError("resolution status is invalid")
     required = {"status", "alternatives", "confidence", "explanation"}
-    if not required.issubset(result) or not isinstance(result["alternatives"], list) or not isinstance(result["confidence"], (int, float)):
+    confidence = result.get("confidence")
+    if (
+        not required.issubset(result)
+        or not isinstance(result["alternatives"], list)
+        or isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not math.isfinite(confidence)
+        or not 0 <= confidence <= 1
+    ):
         raise DevelopmentRequestError("resolution summary is invalid")
     _string(result["explanation"], "resolution explanation")
     request_hash = _hash(requested)
@@ -118,6 +140,8 @@ def compile_request_lifecycle(*, request: Mapping[str, Any], resolution: Mapping
         seen.add(unit_id)
         if not isinstance(unit["roles"], list) or not unit["roles"]:
             raise DevelopmentRequestError("closure unit roles are invalid")
+        if len(unit["roles"]) != len(set(unit["roles"])):
+            raise DevelopmentRequestError("closure unit roles contain duplicates")
         for role in unit["roles"]:
             if not _IDENTITY.fullmatch(_string(role, "role")):
                 raise DevelopmentRequestError("role is invalid")

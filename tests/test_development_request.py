@@ -52,3 +52,22 @@ def test_out_of_order_dependency_or_actor_home_allocation_is_refused():
     unsafe["worktree"] = "/home/codex/w14-request/attempt-1"
     with pytest.raises(DevelopmentRequestError, match="isolated request-bound"):
         compile_request_lifecycle(request=request(), resolution=resolved(), allocation=unsafe)
+
+
+def test_attempt_path_component_and_duplicate_role_are_refused():
+    unsafe = allocation()
+    unsafe["worktree"] = "/opt/TGW/w/attempts/w14-request/attempt-1x/worktree"
+    with pytest.raises(DevelopmentRequestError, match="isolated request-bound"):
+        compile_request_lifecycle(request=request(), resolution=resolved(), allocation=unsafe)
+    value = resolved()
+    value["closure"][1]["roles"] = ["implementation", "implementation"]
+    with pytest.raises(DevelopmentRequestError, match="roles contain duplicates"):
+        compile_request_lifecycle(request=request(), resolution=value, allocation=allocation())
+
+
+@pytest.mark.parametrize("confidence", [True, False, float("nan"), float("inf"), -0.1, 1.1])
+def test_non_numeric_or_out_of_range_confidence_is_refused(confidence):
+    value = resolved()
+    value["confidence"] = confidence
+    with pytest.raises(DevelopmentRequestError, match="resolution summary"):
+        compile_request_lifecycle(request=request(), resolution=value, allocation=allocation())
