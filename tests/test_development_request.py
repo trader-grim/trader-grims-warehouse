@@ -65,6 +65,7 @@ def test_ambiguous_or_held_resolution_emits_no_launch_cards(status):
     value = {"status": status, "alternatives": ["Plan", "Todo"], "confidence": 0.2, "explanation": "ambiguous", "clarification": "select a root"}
     result = compile_request_lifecycle(request=request(), resolution=value, allocation=allocation())
     assert result["launch_cards"] == []
+    assert result["timeline"] == ["request-submitted", "resolution-" + status.lower().replace("_", "-")]
 
 
 def test_out_of_order_dependency_or_actor_home_allocation_is_refused():

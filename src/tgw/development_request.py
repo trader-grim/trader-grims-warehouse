@@ -119,7 +119,7 @@ def compile_request_lifecycle(*, request: Mapping[str, Any], resolution: Mapping
         if set(result) != required | {"clarification"}:
             raise DevelopmentRequestError("non-resolved request requires a typed clarification")
         _string(result["clarification"], "resolution clarification")
-        body["timeline"] = ["request-submitted", "resolution-" + status.lower()]
+        body["timeline"] = ["request-submitted", "resolution-" + status.lower().replace("_", "-")]
         return {**body, "lifecycle_hash": _hash(body)}
     expected = required | {"plan", "root", "closure"}
     if set(result) != expected:
