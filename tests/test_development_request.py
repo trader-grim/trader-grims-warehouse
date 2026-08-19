@@ -36,6 +36,16 @@ def test_resolved_lifecycle_is_deterministic_dependency_ordered_and_non_activati
     assert "operator-acceptance" in first["timeline"]
 
 
+def test_each_launch_card_owns_its_allocation_snapshot():
+    result = compile_request_lifecycle(request=request(), resolution=resolved(), allocation=allocation())
+    first, second = result["launch_cards"][:2]
+    assert first["allocation"] is not second["allocation"]
+    assert first["allocation"] is not result["allocation"]
+    first["allocation"]["worktree"] = "/mutated"
+    assert second["allocation"]["worktree"] != "/mutated"
+    assert result["allocation"]["worktree"] != "/mutated"
+
+
 @pytest.mark.parametrize("status", ["CLARIFICATION_REQUIRED", "HELD"])
 def test_ambiguous_or_held_resolution_emits_no_launch_cards(status):
     value = {"status": status, "alternatives": ["Plan", "Todo"], "confidence": 0.2, "explanation": "ambiguous", "clarification": "select a root"}
@@ -108,3 +118,19 @@ def test_non_string_clarification_is_refused(clarification):
     value = {"status": "HELD", "alternatives": ["Todo"], "confidence": 0.2, "explanation": "ambiguous", "clarification": clarification}
     with pytest.raises(DevelopmentRequestError, match="clarification"):
         compile_request_lifecycle(request=request(), resolution=value, allocation=allocation())
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda value: value.update({"request_id": "W14"}),
+        lambda value: value.update({"unexpected": "field"}),
+        lambda value: value.update({"constraints": ["no live changes", "no live changes"]}),
+        lambda value: value.update({"effect_limits": ["local-reversible", "local-reversible"]}),
+    ],
+)
+def test_request_shape_and_identity_are_validated_directly(change):
+    value = request()
+    change(value)
+    with pytest.raises(DevelopmentRequestError):
+        compile_request_lifecycle(request=value, resolution=resolved(), allocation=allocation())

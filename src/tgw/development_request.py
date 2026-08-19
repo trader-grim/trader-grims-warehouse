@@ -110,7 +110,7 @@ def compile_request_lifecycle(*, request: Mapping[str, Any], resolution: Mapping
     _string(result["explanation"], "resolution explanation")
     request_hash = _hash(requested)
     body: dict[str, Any] = {"schema": SCHEMA, "request": requested, "request_hash": request_hash,
-                            "resolution": result, "allocation": allocated, "launch_cards": [],
+                            "resolution": result, "allocation": dict(allocated), "launch_cards": [],
                             "activation": "declarative-only"}
     if status != "RESOLVED":
         if set(result) != required | {"clarification"}:
@@ -163,7 +163,7 @@ def compile_request_lifecycle(*, request: Mapping[str, Any], resolution: Mapping
             if not _IDENTITY.fullmatch(role):
                 raise DevelopmentRequestError("role is invalid")
             card = {"request_hash": request_hash, "plan": dict(plan), "root": dict(root), "unit": unit_id,
-                    "role": role, "allocation": allocated, "idempotency_key": _hash([request_hash, unit_id, role, allocated["attempt_id"]]),
+                    "role": role, "allocation": dict(allocated), "idempotency_key": _hash([request_hash, unit_id, role, allocated["attempt_id"]]),
                     "state": "PREPARED", "activation": "declarative-only"}
             cards.append(card)
     body["launch_cards"] = cards
