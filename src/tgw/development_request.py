@@ -18,6 +18,8 @@ SCHEMA = "tgw-development-request-lifecycle/v1"
 _HASH = re.compile(r"sha256:[0-9a-f]{64}$")
 _COMMIT = re.compile(r"[0-9a-f]{40}$")
 _IDENTITY = re.compile(r"[a-z][a-z0-9-]{0,63}$")
+_WORKTREE_ROOT = PurePosixPath("/opt/TGW/w/attempts")
+_ATTEMPT_ROOT = PurePosixPath("/var/cache/tgw/attempts")
 
 
 class DevelopmentRequestError(ValueError):
@@ -60,6 +62,20 @@ def _request(raw: Mapping[str, Any]) -> dict[str, Any]:
     return value
 
 
+def _request_bound_path(value: Any, label: str, root: PurePosixPath, request_id: str, attempt_id: str) -> str:
+    path = _string(value, label)
+    parsed = PurePosixPath(path)
+    if not parsed.is_absolute() or ".." in parsed.parts:
+        raise DevelopmentRequestError(f"{label} is not an isolated request-bound path")
+    try:
+        relative = parsed.relative_to(root)
+    except ValueError as exc:
+        raise DevelopmentRequestError(f"{label} is not an isolated request-bound path") from exc
+    if len(relative.parts) < 2 or relative.parts[:2] != (request_id, attempt_id):
+        raise DevelopmentRequestError(f"{label} is not an isolated request-bound path")
+    return path
+
+
 def _allocation(raw: Mapping[str, Any], request_id: str) -> dict[str, str]:
     value = dict(raw)
     if set(value) != {"attempt_id", "worktree", "attempt_root"}:
@@ -67,22 +83,8 @@ def _allocation(raw: Mapping[str, Any], request_id: str) -> dict[str, str]:
     attempt_id = _string(value["attempt_id"], "attempt id")
     if not _IDENTITY.fullmatch(attempt_id):
         raise DevelopmentRequestError("attempt id is invalid")
-    for field in ("worktree", "attempt_root"):
-        path = _string(value[field], field)
-        parts = PurePosixPath(path).parts
-        try:
-            request_index = parts.index(request_id)
-        except ValueError:
-            request_index = -1
-        if (
-            not path.startswith("/")
-            or "/home/" in path
-            or ".." in parts
-            or request_index < 0
-            or request_index + 1 >= len(parts)
-            or parts[request_index + 1] != attempt_id
-        ):
-            raise DevelopmentRequestError(f"{field} is not an isolated request-bound path")
+    value["worktree"] = _request_bound_path(value["worktree"], "worktree", _WORKTREE_ROOT, request_id, attempt_id)
+    value["attempt_root"] = _request_bound_path(value["attempt_root"], "attempt root", _ATTEMPT_ROOT, request_id, attempt_id)
     return value
 
 
@@ -111,19 +113,30 @@ def compile_request_lifecycle(*, request: Mapping[str, Any], resolution: Mapping
                             "resolution": result, "allocation": allocated, "launch_cards": [],
                             "activation": "declarative-only"}
     if status != "RESOLVED":
-        if set(result) != required | {"clarification"} or not result["clarification"]:
+        if set(result) != required | {"clarification"}:
             raise DevelopmentRequestError("non-resolved request requires a typed clarification")
+        _string(result["clarification"], "resolution clarification")
         body["timeline"] = ["request-submitted", "resolution-" + status.lower()]
         return {**body, "lifecycle_hash": _hash(body)}
     expected = required | {"plan", "root", "closure"}
     if set(result) != expected:
         raise DevelopmentRequestError("resolved request fields are not exact")
     plan = result["plan"]
-    if not isinstance(plan, Mapping) or set(plan) != {"commit", "solution_hash"} or not _COMMIT.fullmatch(plan["commit"]):
+    if (
+        not isinstance(plan, Mapping)
+        or set(plan) != {"commit", "solution_hash"}
+        or not isinstance(plan["commit"], str)
+        or not _COMMIT.fullmatch(plan["commit"])
+    ):
         raise DevelopmentRequestError("resolved Plan binding is invalid")
     _hash_value(plan["solution_hash"], "resolved Plan solution")
     root = result["root"]
-    if not isinstance(root, Mapping) or set(root) != {"kind", "id"} or root["kind"] not in {"Plan", "PP", "Todo"}:
+    if (
+        not isinstance(root, Mapping)
+        or set(root) != {"kind", "id"}
+        or not isinstance(root["kind"], str)
+        or root["kind"] not in {"Plan", "PP", "Todo"}
+    ):
         raise DevelopmentRequestError("resolved root is invalid")
     _string(root["id"], "resolved root id")
     closure = result["closure"]
@@ -135,15 +148,19 @@ def compile_request_lifecycle(*, request: Mapping[str, Any], resolution: Mapping
         if not isinstance(unit, Mapping) or set(unit) != {"id", "depends_on", "roles"}:
             raise DevelopmentRequestError("closure unit fields are invalid")
         unit_id = _string(unit["id"], "closure unit id")
-        if unit_id in seen or not isinstance(unit["depends_on"], list) or any(dep not in seen for dep in unit["depends_on"]):
+        if unit_id in seen or not isinstance(unit["depends_on"], list):
+            raise DevelopmentRequestError("closure is not dependency ordered")
+        dependencies = [_string(dep, "closure dependency") for dep in unit["depends_on"]]
+        if any(dep not in seen for dep in dependencies):
             raise DevelopmentRequestError("closure is not dependency ordered")
         seen.add(unit_id)
         if not isinstance(unit["roles"], list) or not unit["roles"]:
             raise DevelopmentRequestError("closure unit roles are invalid")
-        if len(unit["roles"]) != len(set(unit["roles"])):
+        roles = [_string(role, "role") for role in unit["roles"]]
+        if len(roles) != len(set(roles)):
             raise DevelopmentRequestError("closure unit roles contain duplicates")
-        for role in unit["roles"]:
-            if not _IDENTITY.fullmatch(_string(role, "role")):
+        for role in roles:
+            if not _IDENTITY.fullmatch(role):
                 raise DevelopmentRequestError("role is invalid")
             card = {"request_hash": request_hash, "plan": dict(plan), "root": dict(root), "unit": unit_id,
                     "role": role, "allocation": allocated, "idempotency_key": _hash([request_hash, unit_id, role, allocated["attempt_id"]]),

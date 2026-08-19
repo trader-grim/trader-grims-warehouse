@@ -89,3 +89,19 @@ def test_malformed_binding_is_refused_not_quarantined_as_usable():
             code_graph={"commit": COMMIT, "tree": COMMIT, "freshness_hash": HASH},
             local=_local(),
         )
+
+
+@pytest.mark.parametrize(
+    ("plan_commit", "code_graph"),
+    [
+        (1, {"commit": COMMIT, "tree": COMMIT, "freshness_hash": HASH}),
+        (COMMIT, {"commit": 1, "tree": COMMIT, "freshness_hash": HASH}),
+        (COMMIT, {"commit": COMMIT, "tree": [], "freshness_hash": HASH}),
+    ],
+)
+def test_non_string_commit_or_tree_is_refused_with_typed_error(plan_commit, code_graph):
+    with pytest.raises(ActorContractError):
+        compile_actor_contract(
+            catalog=_catalog(), actor="codex", profile="development", plan_commit=plan_commit,
+            plan_solution_hash=HASH, code_graph=code_graph, local=_local(),
+        )

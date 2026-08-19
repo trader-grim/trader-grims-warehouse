@@ -65,9 +65,46 @@ def test_attempt_path_component_and_duplicate_role_are_refused():
         compile_request_lifecycle(request=request(), resolution=value, allocation=allocation())
 
 
+@pytest.mark.parametrize(
+    ("field", "unsafe_path"),
+    [
+        ("worktree", "/opt/TGW/secrets/w14-request/attempt-1/worktree"),
+        ("attempt_root", "/etc/w14-request/attempt-1"),
+    ],
+)
+def test_unallowlisted_allocation_roots_are_refused(field, unsafe_path):
+    unsafe = allocation()
+    unsafe[field] = unsafe_path
+    with pytest.raises(DevelopmentRequestError, match="isolated request-bound"):
+        compile_request_lifecycle(request=request(), resolution=resolved(), allocation=unsafe)
+
+
 @pytest.mark.parametrize("confidence", [True, False, float("nan"), float("inf"), -0.1, 1.1])
 def test_non_numeric_or_out_of_range_confidence_is_refused(confidence):
     value = resolved()
     value["confidence"] = confidence
     with pytest.raises(DevelopmentRequestError, match="resolution summary"):
+        compile_request_lifecycle(request=request(), resolution=value, allocation=allocation())
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda value: value["plan"].update({"commit": 1}),
+        lambda value: value["root"].update({"kind": []}),
+        lambda value: value["closure"][1].update({"depends_on": [{}]}),
+        lambda value: value["closure"][1].update({"roles": [{}]}),
+    ],
+)
+def test_resolved_type_confusion_is_refused_with_typed_error(change):
+    value = resolved()
+    change(value)
+    with pytest.raises(DevelopmentRequestError):
+        compile_request_lifecycle(request=request(), resolution=value, allocation=allocation())
+
+
+@pytest.mark.parametrize("clarification", [0, [], {}])
+def test_non_string_clarification_is_refused(clarification):
+    value = {"status": "HELD", "alternatives": ["Todo"], "confidence": 0.2, "explanation": "ambiguous", "clarification": clarification}
+    with pytest.raises(DevelopmentRequestError, match="clarification"):
         compile_request_lifecycle(request=request(), resolution=value, allocation=allocation())

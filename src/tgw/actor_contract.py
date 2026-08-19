@@ -68,13 +68,15 @@ def compile_actor_contract(
         raise ActorContractError("actor is absent from the catalog")
     if not isinstance(profile, str) or profile not in verified["profiles"]:
         raise ActorContractError("profile is absent from the catalog")
-    if not _COMMIT.fullmatch(plan_commit):
+    if not isinstance(plan_commit, str) or not _COMMIT.fullmatch(plan_commit):
         raise ActorContractError("Plan commit must be exact")
     _require_hash(plan_solution_hash, "Plan solution")
     graph = dict(code_graph)
     if (
         set(graph) != {"commit", "tree", "freshness_hash"}
+        or not isinstance(graph["commit"], str)
         or not _COMMIT.fullmatch(graph["commit"])
+        or not isinstance(graph["tree"], str)
         or not _COMMIT.fullmatch(graph["tree"])
     ):
         raise ActorContractError("CodeGraph binding is invalid")
