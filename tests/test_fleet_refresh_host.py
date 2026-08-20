@@ -10,7 +10,12 @@ def _request():
         "schema": "tgw-w18-fleet-refresh-request/v1", "transaction_id": "refresh-one",
         "idempotency_key": "refresh-one-key", "predecessor_generation": "sha256:" + "a" * 64,
         "successor_generation": "sha256:" + "b" * 64,
-        "revisions": {"plan": "f" * 40, "source": "e" * 40}, "actors": ["codex", "claude"],
+        "revisions": {
+            "plan": "f" * 40, "solution": "sha256:" + "1" * 64,
+            "source": "e" * 40, "catalog": "sha256:" + "2" * 64,
+            "bootstrap": "sha256:" + "3" * 64, "broker_policy": "sha256:" + "4" * 64,
+            "admission": "sha256:" + "5" * 64,
+        }, "actors": ["codex", "claude"],
     }
 
 

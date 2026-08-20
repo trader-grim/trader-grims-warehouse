@@ -266,6 +266,17 @@ def run_fleet_refresh_transaction(
         raise FleetActivationError("fleet refresh does not change generation")
     if not isinstance(value["revisions"], Mapping) or not value["revisions"]:
         raise FleetActivationError("fleet revisions are invalid")
+    required_revisions = {"plan", "solution", "source", "catalog", "bootstrap", "broker_policy", "admission"}
+    if set(value["revisions"]) != required_revisions:
+        raise FleetActivationError("fleet revisions are incomplete")
+    for field in ("plan", "source"):
+        revision = value["revisions"][field]
+        if not isinstance(revision, str) or len(revision) != 40 or any(character not in "0123456789abcdef" for character in revision):
+            raise FleetActivationError(f"fleet {field} revision is invalid")
+    for field in required_revisions - {"plan", "source"}:
+        revision = value["revisions"][field]
+        if not isinstance(revision, str) or not revision.startswith("sha256:") or len(revision) != 71:
+            raise FleetActivationError(f"fleet {field} revision is invalid")
     actors = value["actors"]
     if not isinstance(actors, list) or not actors or not all(isinstance(actor, str) and actor for actor in actors) or len(actors) != len(set(actors)):
         raise FleetActivationError("fleet actors are invalid")

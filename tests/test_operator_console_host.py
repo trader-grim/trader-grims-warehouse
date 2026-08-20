@@ -150,6 +150,12 @@ def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_pat
     plan, plan_commit = _plan(tmp_path)
     receipt_root = tmp_path / "surface-receipts"
     receipt_root.mkdir()
+    transition_gate = tmp_path / "fleet-transition-gate.json"
+    transition_gate.write_text(json.dumps({
+        "schema": "tgw-w18-fleet-transition-gate/v1", "status": "ACTIVE",
+        "transaction_id": "bootstrap", "predecessor_generation": "sha256:" + "0" * 64,
+        "successor_generation": "sha256:" + "0" * 64,
+    }))
     renderer_hash = "sha256:" + hashlib.sha256(Path(boundary.__file__).read_bytes()).hexdigest()
     config = {
         "standalone_plan_root": plan,
@@ -158,6 +164,7 @@ def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_pat
         "dynamic_surfaces": {
             "renderer_sha256": renderer_hash,
             "receipt_root": str(receipt_root),
+            "transition_gate_path": str(transition_gate),
         },
     }
     store = ConfiguredAuthorityStore(lambda: config)
@@ -198,6 +205,13 @@ def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_pat
 
     row["plan_commit"] = "f" * 40
     with pytest.raises(ValueError, match="stale Plan solution"):
+        load(row["request_id"])
+
+    row["plan_commit"] = plan_commit
+    transition_gate.write_text(json.dumps({
+        "schema": "tgw-w18-fleet-transition-gate/v1", "status": "QUIESCED",
+    }))
+    with pytest.raises(ValueError, match="suspended for a fleet transition"):
         load(row["request_id"])
 
 

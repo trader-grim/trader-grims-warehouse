@@ -288,7 +288,7 @@ def _dynamic_surface_bindings(
 
     def configuration() -> tuple[str, Path]:
         raw = config_provider().get("dynamic_surfaces")
-        if not isinstance(raw, Mapping) or set(raw) != {"renderer_sha256", "receipt_root"}:
+        if not isinstance(raw, Mapping) or set(raw) != {"renderer_sha256", "receipt_root", "transition_gate_path"}:
             raise ValueError("dynamic surface configuration is unavailable")
         expected = raw["renderer_sha256"]
         source = Path(__file__).with_name("dynamic_surface.py")
@@ -301,6 +301,22 @@ def _dynamic_surface_bindings(
             or not root.is_dir() or root.is_symlink()
         ):
             raise ValueError("dynamic surface receipt root is not a durable directory")
+        gate = Path(raw["transition_gate_path"])
+        if (
+            not gate.is_absolute() or gate == Path("/tmp") or Path("/tmp") in gate.parents
+            or not gate.is_file() or gate.is_symlink()
+        ):
+            raise ValueError("dynamic surface transition gate is unavailable")
+        try:
+            gate_value = json.loads(gate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("dynamic surface transition gate is invalid") from exc
+        if (
+            not isinstance(gate_value, Mapping)
+            or gate_value.get("schema") != "tgw-w18-fleet-transition-gate/v1"
+            or gate_value.get("status") != "ACTIVE"
+        ):
+            raise ValueError("dynamic surfaces are suspended for a fleet transition")
         return actual, root
 
     def proposal(request_id: str) -> tuple[dict[str, Any], str, str]:

@@ -415,6 +415,42 @@ def test_complete_actor_contract_materializes_every_declared_boundary(tmp_path):
     assert applied["activation"] == "required-in-current-quiet-refresh-transaction"
 
 
+def test_complete_actor_contract_resolves_tracked_sources_inside_exact_release(tmp_path):
+    source_root, _home, bundle, contracts = _complete_bundle(tmp_path)
+    for actor in bundle["actors"].values():
+        for binding in actor["bindings"]:
+            binding["source"] = str(Path(binding["source"]).relative_to(source_root))
+    prepared = materialize_complete_actor_contracts(
+        bundle, source_root=source_root, contracts=contracts,
+        trusted_contract_public_key=SIGNER_PUBLIC_KEY,
+    )
+    assert prepared["status"] == "PREPARED"
+    assert all(Path(item["source"]).is_absolute() for item in prepared["bindings"])
+
+
+def test_complete_actor_contract_accepts_only_explicit_external_generation_artifacts(tmp_path):
+    source_root, _home, bundle, contracts = _complete_bundle(tmp_path)
+    generation_root = tmp_path / "generation-artifacts"
+    generation_root.mkdir()
+    external = generation_root / "environment.json"
+    catalog_binding = next(
+        item for item in bundle["actors"]["codex"]["bindings"] if item["kind"] == "environment"
+    )
+    external.write_bytes(Path(catalog_binding["source"]).read_bytes())
+    catalog_binding["source"] = str(external)
+    prepared = materialize_complete_actor_contracts(
+        bundle, source_root=source_root, contracts=contracts,
+        trusted_contract_public_key=SIGNER_PUBLIC_KEY,
+        additional_source_roots=(generation_root,),
+    )
+    assert prepared["status"] == "PREPARED"
+    with pytest.raises(InstallError, match="escapes the candidate"):
+        materialize_complete_actor_contracts(
+            bundle, source_root=source_root, contracts=contracts,
+            trusted_contract_public_key=SIGNER_PUBLIC_KEY,
+        )
+
+
 def test_complete_actor_contract_refuses_source_drift_before_writes(tmp_path):
     source, home, bundle, contracts = _complete_bundle(tmp_path)
     (source / "mcp").write_text('{"endpoint":"forged"}\n')

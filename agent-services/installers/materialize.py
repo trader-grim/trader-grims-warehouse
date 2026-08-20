@@ -355,6 +355,7 @@ def materialize_complete_actor_contracts(
     bundle: dict[str, Any], *, source_root: str | Path,
     contracts: dict[str, dict[str, Any]], trusted_contract_public_key: str,
     apply: bool = False, replace_existing: bool = False,
+    additional_source_roots: tuple[str | Path, ...] = (),
 ) -> dict[str, Any]:
     """Materialize skills, hooks, MCP, launcher and bootstrap as one journal.
 
@@ -376,6 +377,10 @@ def materialize_complete_actor_contracts(
     if not isinstance(trusted_contract_public_key, str):
         raise InstallError("fleet contract signer is invalid")
     root = Path(source_root).resolve(strict=True)
+    raw_additional_roots = tuple(Path(path) for path in additional_source_roots)
+    if any(path.is_symlink() or not path.is_dir() for path in raw_additional_roots):
+        raise InstallError("complete actor source root is invalid")
+    trusted_roots = (root, *(path.resolve(strict=True) for path in raw_additional_roots))
     plans: list[dict[str, Any]] = []
     for actor in sorted(bundle["actors"]):
         contract = contracts[actor]
@@ -407,9 +412,13 @@ def materialize_complete_actor_contracts(
             kind, name = raw["kind"], raw["name"]
             if kind not in observed or not isinstance(name, str) or not name:
                 raise InstallError(f"actor binding kind or name is invalid: {actor}")
-            source = Path(str(raw["source"])).resolve(strict=True)
+            source_value = Path(str(raw["source"]))
+            source = (
+                source_value.resolve(strict=True) if source_value.is_absolute()
+                else (root / source_value).resolve(strict=True)
+            )
             destination = Path(str(raw["destination"])).absolute()
-            if root != source and root not in source.parents:
+            if not any(base == source or base in source.parents for base in trusted_roots):
                 raise InstallError(f"actor binding source escapes the candidate: {actor}:{name}")
             if not destination.is_absolute() or not any(base == destination or base in destination.parents for base in (home, project)):
                 raise InstallError(f"actor binding destination escapes its account roots: {actor}:{name}")
