@@ -12,19 +12,24 @@ final apiClientProvider = Provider((ref) => ApiClient());
 final offlineDbProvider = Provider((ref) => OfflineDb());
 final outboxDbProvider = Provider((ref) => OutboxDb());
 
-final catalogSyncProvider = Provider((ref) => CatalogSyncService(
-  ref.watch(apiClientProvider),
-  ref.watch(offlineDbProvider),
-));
+final catalogSyncProvider = Provider(
+  (ref) => CatalogSyncService(
+    ref.watch(apiClientProvider),
+    ref.watch(offlineDbProvider),
+  ),
+);
 
-final repositoryProvider = Provider((ref) => TgwRepository(
-  apiClient: ref.watch(apiClientProvider),
-  offlineDb: ref.watch(offlineDbProvider),
-  outboxDb: ref.watch(outboxDbProvider),
-  ref: ref,
-));
+final repositoryProvider = Provider(
+  (ref) => TgwRepository(
+    apiClient: ref.watch(apiClientProvider),
+    offlineDb: ref.watch(offlineDbProvider),
+    outboxDb: ref.watch(outboxDbProvider),
+    ref: ref,
+  ),
+);
 
-final connectionStatusProvider = StateNotifierProvider<ConnectionStatusNotifier, ConnectionStatus>((ref) {
+final connectionStatusProvider =
+    StateNotifierProvider<ConnectionStatusNotifier, ConnectionStatus>((ref) {
   return ConnectionStatusNotifier(ref.watch(apiClientProvider), ref);
 });
 
@@ -32,7 +37,8 @@ class ConnectionStatusNotifier extends StateNotifier<ConnectionStatus> {
   final ApiClient _apiClient;
   final Ref _ref;
 
-  ConnectionStatusNotifier(this._apiClient, this._ref) : super(ConnectionStatus.offline) {
+  ConnectionStatusNotifier(this._apiClient, this._ref)
+      : super(ConnectionStatus.offline) {
     checkConnection();
   }
 
@@ -62,14 +68,28 @@ final queueStatusProvider = FutureProvider<QueueStatus?>((ref) async {
   return response.data;
 });
 
-final categoryGroupsProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
+final categoryGroupsProvider = FutureProvider<List<Map<String, dynamic>>>((
+  ref,
+) async {
   final api = ref.watch(apiClientProvider);
   final response = await api.getCategoryGroups();
   return response.data ?? [];
 });
 
-final itemDetailProvider = FutureProvider.family<ItemDetail?, String>((ref, sku) async {
+final itemDetailProvider = FutureProvider.family<ItemDetail?, String>((
+  ref,
+  sku,
+) async {
   return await ref.watch(repositoryProvider).getItem(sku);
+});
+
+final operatorObjectProvider =
+    FutureProvider.family<OperatorObjectView?, String>((ref, sku) async {
+  final response = await ref.watch(apiClientProvider).getOperatorObject(sku);
+  if (!response.ok) {
+    throw StateError(response.error ?? 'Operator object unavailable');
+  }
+  return response.data;
 });
 
 final pipelineJobsProvider = FutureProvider<List<PipelineJob>>((ref) async {

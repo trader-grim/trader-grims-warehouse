@@ -1,4 +1,4 @@
-"""Read-only published operator objects and deliberately thin client views.
+"""Published operator objects and deliberately thin client views.
 
 This is a transport seam, not a workflow evaluator or command dispatcher.
 Callers must pass the current server-owned item, listing, workflow, and field
@@ -111,6 +111,7 @@ def publish_operator_object(
             "reasons": _string_list(workflow.get("reasons", ()), "workflow.reasons"),
             "evidence": evidence,
             "graph_id": workflow.get("graph_id"),
+            "details": deepcopy(dict(_mapping(workflow.get("details", {}), "workflow.details"))),
         },
         "field_schema": deepcopy(dict(field_schema)),
         "commands": descriptors,
@@ -137,9 +138,198 @@ def adapter_view(published: Mapping[str, Any]) -> dict[str, Any]:
         "state": workflow.get("state"),
         "reasons": deepcopy(workflow.get("reasons", [])),
         "evidence": deepcopy(workflow.get("evidence", [])),
+        "item": deepcopy(published.get("item", {})),
+        "listing": deepcopy(published.get("listing", {})),
+        "workflow": deepcopy(dict(workflow)),
         "field_schema": deepcopy(published.get("field_schema", {})),
         "commands": descriptors,
     }
+
+
+def build_item_operator_object(
+    *,
+    item: Mapping[str, Any],
+    workflow_card: Mapping[str, Any],
+    category_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the canonical item/listing/workflow view from server projections.
+
+    This function is deliberately pure.  The HTTP host owns all reads and
+    passes the current item, evaluator Action Card, and category projection.
+    Clients receive the resulting policy; they never recreate it.
+    """
+    item = _mapping(item, "item")
+    workflow_card = _mapping(workflow_card, "workflow_card")
+    context = _mapping(category_context or {}, "category_context")
+    entity_id = workflow_card.get("entity_id")
+    generation = workflow_card.get("object_generation")
+    if not isinstance(entity_id, str) or not entity_id:
+        raise OperatorObjectBindingError("workflow_card.entity_id is required")
+    if not isinstance(generation, str) or not generation:
+        raise OperatorObjectBindingError("workflow_card.object_generation is required")
+    if item.get("sku") != entity_id:
+        raise OperatorObjectBindingError("item and workflow identities must match")
+
+    offer = item.get("ebay_offer") if isinstance(item.get("ebay_offer"), Mapping) else {}
+    provider_listing = item.get("ebay_listing") if isinstance(item.get("ebay_listing"), Mapping) else {}
+    draft = item.get("draft_listing") if isinstance(item.get("draft_listing"), Mapping) else {}
+    listing_status = str(provider_listing.get("status") or "")
+    offer_status = str(offer.get("status") or "")
+    is_published = listing_status.lower() == "active" or offer_status.upper() == "PUBLISHED"
+
+    conditions = []
+    for condition in context.get("conditions", ()):
+        if not isinstance(condition, Mapping):
+            continue
+        value = condition.get("enum") or condition.get("condition_enum")
+        label = condition.get("label") or condition.get("condition_label")
+        if isinstance(value, str) and value and isinstance(label, str) and label:
+            conditions.append({"value": value, "label": label})
+    current_condition = str(draft.get("condition_enum") or draft.get("condition") or "")
+    valid_condition = not conditions or any(option["value"] == current_condition for option in conditions)
+
+    aspects = []
+    missing_aspects = []
+    specifics = draft.get("item_specifics") if isinstance(draft.get("item_specifics"), Mapping) else {}
+    for aspect in context.get("aspects", ()):
+        if not isinstance(aspect, Mapping) or not isinstance(aspect.get("name"), str):
+            continue
+        descriptor = {
+            "name": aspect["name"],
+            "required": bool(aspect.get("required")),
+            "mode": aspect.get("mode"),
+            "allowed_values": list(aspect.get("allowed_values") or ()),
+            "value": specifics.get(aspect["name"]),
+        }
+        aspects.append(descriptor)
+        if descriptor["required"] and not descriptor["value"]:
+            missing_aspects.append(descriptor["name"])
+
+    validation_messages = []
+    category_id = str(draft.get("category_id") or item.get("ebay_category_id") or "").strip()
+    if not category_id or category_id == "99":
+        validation_messages.append("A valid eBay category is required.")
+    if current_condition and not valid_condition:
+        validation_messages.append("The selected condition is not valid for this category.")
+    if not current_condition:
+        validation_messages.append("A category-valid displayed condition is required.")
+    if missing_aspects:
+        validation_messages.append("Required aspects are missing: " + ", ".join(sorted(missing_aspects)))
+
+    reconciliation = list(workflow_card.get("reconciliation_gates") or ())
+    conflicts = list(workflow_card.get("ownership_conflicts") or ())
+    active = list(workflow_card.get("active_attempts") or ())
+    blockers = [str(value) for value in reconciliation]
+    blockers.extend("ownership conflict: " + ", ".join(map(str, value)) for value in conflicts)
+    blockers.extend(validation_messages)
+
+    if reconciliation or conflicts:
+        state = "reconciliation_required"
+    elif active:
+        state = "in_progress"
+    elif is_published:
+        state = "published"
+    elif offer.get("offer_id"):
+        state = "staged"
+    elif validation_messages:
+        state = "held"
+    else:
+        state = "ready"
+
+    list_enabled = not blockers and not active and not is_published
+    update_enabled = bool(draft and (offer.get("offer_id") or provider_listing.get("listing_id"))) and not blockers and not active
+    list_reason = None
+    if is_published:
+        list_reason = "The provider already reports this item as published."
+    elif active:
+        list_reason = "The authoritative workflow is already running."
+    elif blockers:
+        list_reason = blockers[0]
+    update_reason = None
+    if active:
+        update_reason = "The authoritative workflow is already running."
+    elif blockers:
+        update_reason = blockers[0]
+    elif not draft:
+        update_reason = "No listing draft exists."
+    elif not (offer.get("offer_id") or provider_listing.get("listing_id")):
+        update_reason = "The item has not been staged at the provider."
+
+    evidence = []
+    for fingerprint in workflow_card.get("fingerprints", ()):
+        if isinstance(fingerprint, Mapping):
+            evidence.append(
+                f"condition:{fingerprint.get('condition_id')}:{fingerprint.get('result')}"
+            )
+    for attempt in workflow_card.get("attempts", ()):
+        if isinstance(attempt, Mapping) and attempt.get("job_id"):
+            evidence.append(f"attempt:{attempt['job_id']}:{attempt.get('state')}")
+    if provider_listing.get("listing_id"):
+        evidence.append(f"provider-listing:{provider_listing['listing_id']}:{listing_status}")
+
+    item_view = {
+        "entity_id": entity_id,
+        "object_generation": generation,
+        "record": deepcopy(dict(item)),
+    }
+    listing_view = {
+        "entity_id": entity_id,
+        "object_generation": generation,
+        "provider_state": listing_status or offer_status or "not-staged",
+        "offer": deepcopy(dict(offer)),
+        "listing": deepcopy(dict(provider_listing)),
+    }
+    workflow_view = {
+        "entity_id": entity_id,
+        "object_generation": generation,
+        "state": state,
+        "reasons": blockers,
+        "evidence": sorted(set(evidence)),
+        "graph_id": workflow_card.get("graph_id"),
+        "details": deepcopy(dict(workflow_card)),
+    }
+    field_schema = {
+        "category": {
+            "value": category_id,
+            "label": context.get("category_name") or draft.get("category_name") or item.get("ebay_category_name"),
+            "required": True,
+        },
+        "condition": {
+            "value": current_condition,
+            "label": draft.get("condition_label") or draft.get("condition_description"),
+            "required": True,
+            "valid": valid_condition and bool(current_condition),
+            "options": conditions,
+        },
+        "aspects": aspects,
+        "defaults": {
+            "fulfillment_policy_id": context.get("fulfillment_policy_id"),
+            "store_category": deepcopy(context.get("store_category")),
+        },
+        "validation_messages": validation_messages,
+    }
+    return publish_operator_object(
+        item=item_view,
+        listing=listing_view,
+        workflow=workflow_view,
+        field_schema=field_schema,
+        commands=(
+            {
+                "id": "list-item",
+                "enabled": list_enabled,
+                "reason": list_reason,
+                "authority_scope": "publication",
+                "input_schema": {"type": "object", "additionalProperties": False},
+            },
+            {
+                "id": "update-item",
+                "enabled": update_enabled,
+                "reason": update_reason,
+                "authority_scope": "update-restage",
+                "input_schema": {"type": "object", "additionalProperties": False},
+            },
+        ),
+    )
 
 
 def web_adapter_view(published: Mapping[str, Any]) -> dict[str, Any]:

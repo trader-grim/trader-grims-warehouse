@@ -40,6 +40,7 @@ class _ItemDetailView extends ConsumerWidget {
       child: Column(
         children: [
           _buildHeader(context, ref),
+          _OperatorWorkflowPanel(sku: item.sku),
           const TabBar(
             tabs: [
               Tab(text: 'Fields'),
@@ -62,9 +63,12 @@ class _ItemDetailView extends ConsumerWidget {
   }
 
   Widget _buildHeader(BuildContext context, WidgetRef ref) {
-    final isOnline = ref.watch(connectionStatusProvider) == ConnectionStatus.online;
+    final isOnline =
+        ref.watch(connectionStatusProvider) == ConnectionStatus.online;
     final api = ref.read(apiClientProvider);
-    final localPath = ref.read(offlineDbProvider).getLocalThumbnailPath(item.sku);
+    final localPath = ref
+        .read(offlineDbProvider)
+        .getLocalThumbnailPath(item.sku);
 
     Widget image;
     if (isOnline && item.images.isNotEmpty) {
@@ -75,7 +79,10 @@ class _ItemDetailView extends ConsumerWidget {
     } else if (!isOnline && localPath != null && File(localPath).existsSync()) {
       image = Image.file(File(localPath), fit: BoxFit.cover);
     } else {
-      image = Container(color: Colors.grey[200], child: const Icon(Icons.image_not_supported));
+      image = Container(
+        color: Colors.grey[200],
+        child: const Icon(Icons.image_not_supported),
+      );
     }
 
     return Padding(
@@ -92,11 +99,18 @@ class _ItemDetailView extends ConsumerWidget {
                   children: [
                     Text(
                       item.sku,
-                      style: const TextStyle(fontSize: 12, color: Colors.grey, fontFamily: 'monospace'),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey,
+                        fontFamily: 'monospace',
+                      ),
                     ),
                     Text(
                       item.data['title'] ?? 'No Title',
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ],
                 ),
@@ -106,15 +120,13 @@ class _ItemDetailView extends ConsumerWidget {
                 icon: const Icon(Icons.edit, color: Colors.blue),
                 onPressed: () => Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (context) => EditItemScreen(item: item)),
+                  MaterialPageRoute(
+                    builder: (context) => EditItemScreen(item: item),
+                  ),
                 ),
               ),
               const SizedBox(width: 8),
-              SizedBox(
-                width: 80,
-                height: 80,
-                child: image,
-              ),
+              SizedBox(width: 80, height: 80, child: image),
             ],
           ),
           const SizedBox(height: 8),
@@ -122,8 +134,14 @@ class _ItemDetailView extends ConsumerWidget {
             spacing: 8,
             children: [
               Chip(label: Text(item.data['location'] ?? 'Unknown')),
-              Chip(label: Text(item.data['status'] ?? 'Unknown'), backgroundColor: Colors.blue[50]),
-              Chip(label: Text('\$${item.data['price'] ?? '0.00'}'), backgroundColor: Colors.green[50]),
+              Chip(
+                label: Text(item.data['status'] ?? 'Unknown'),
+                backgroundColor: Colors.blue[50],
+              ),
+              Chip(
+                label: Text('\$${item.data['price'] ?? '0.00'}'),
+                backgroundColor: Colors.green[50],
+              ),
             ],
           ),
         ],
@@ -133,7 +151,8 @@ class _ItemDetailView extends ConsumerWidget {
 
   Widget _buildFieldsTab(WidgetRef ref) {
     final fields = item.data;
-    final isOnline = ref.watch(connectionStatusProvider) == ConnectionStatus.online;
+    final isOnline =
+        ref.watch(connectionStatusProvider) == ConnectionStatus.online;
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -143,9 +162,15 @@ class _ItemDetailView extends ConsumerWidget {
         _infoRow('Weight', fields['weight']?.toString() ?? '-'),
         _infoRow('Size Class', fields['size_class'] ?? '-'),
         _infoRow('Category Group', fields['category_group'] ?? '-'),
-        _infoRow('eBay Category', fields['ebay_category_id']?.toString() ?? '-'),
+        _infoRow(
+          'eBay Category',
+          fields['ebay_category_id']?.toString() ?? '-',
+        ),
         const Divider(),
-        const Text('AI Identification Hint', style: TextStyle(fontWeight: FontWeight.bold)),
+        const Text(
+          'AI Identification Hint',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
         const SizedBox(height: 4),
         Text(fields['ai_hint'] ?? 'None'),
         const SizedBox(height: 16),
@@ -173,7 +198,10 @@ class _ItemDetailView extends ConsumerWidget {
             ),
           )
         else
-          const Text('Photos only available online', style: TextStyle(fontStyle: FontStyle.italic, color: Colors.grey)),
+          const Text(
+            'Photos only available online',
+            style: TextStyle(fontStyle: FontStyle.italic, color: Colors.grey),
+          ),
       ],
     );
   }
@@ -188,7 +216,7 @@ class _ItemDetailView extends ConsumerWidget {
     final displayPrice = offerPrice ?? draftPrice;
     final priceStr = displayPrice != null
         ? '\$${(displayPrice as num).toStringAsFixed(2)}'
-            '${offerPrice != null ? ' (offer)' : ''}'
+              '${offerPrice != null ? ' (offer)' : ''}'
         : '-';
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -196,11 +224,16 @@ class _ItemDetailView extends ConsumerWidget {
         _infoRow('Draft Title', draft['title'] ?? '-'),
         _infoRow('Price', priceStr),
         const SizedBox(height: 8),
-        const Text('Description', style: TextStyle(fontWeight: FontWeight.bold)),
+        const Text(
+          'Description',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
         Text(draft['description'] ?? '-'),
         const Divider(),
         const Text('Aspects', style: TextStyle(fontWeight: FontWeight.bold)),
-        ...?(draft['aspects'] as Map?)?.entries.map((e) => _infoRow(e.key, e.value.toString())),
+        ...?(draft['aspects'] as Map?)?.entries.map(
+          (e) => _infoRow(e.key, e.value.toString()),
+        ),
       ],
     );
   }
@@ -215,7 +248,12 @@ class _ItemDetailView extends ConsumerWidget {
       children: [
         _infoRow('Offer ID', offer['offer_id'] ?? '-'),
         _infoRow('Listing ID', offer['listing_id'] ?? '-'),
-        _infoRow('Price', offer['price'] != null ? '\$${(offer['price'] as num).toStringAsFixed(2)}' : '-'),
+        _infoRow(
+          'Price',
+          offer['price'] != null
+              ? '\$${(offer['price'] as num).toStringAsFixed(2)}'
+              : '-',
+        ),
         _infoRow('Available', offer['available_quantity']?.toString() ?? '-'),
         const Divider(),
         const ListTile(
@@ -233,10 +271,137 @@ class _ItemDetailView extends ConsumerWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(width: 120, child: Text(label, style: const TextStyle(color: Colors.grey))),
-          Expanded(child: Text(value, style: const TextStyle(fontWeight: FontWeight.w500))),
+          SizedBox(
+            width: 120,
+            child: Text(label, style: const TextStyle(color: Colors.grey)),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(fontWeight: FontWeight.w500),
+            ),
+          ),
         ],
       ),
+    );
+  }
+}
+
+class _OperatorWorkflowPanel extends ConsumerStatefulWidget {
+  final String sku;
+  const _OperatorWorkflowPanel({required this.sku});
+
+  @override
+  ConsumerState<_OperatorWorkflowPanel> createState() =>
+      _OperatorWorkflowPanelState();
+}
+
+class _OperatorWorkflowPanelState
+    extends ConsumerState<_OperatorWorkflowPanel> {
+  bool _submitting = false;
+
+  Future<void> _execute(
+    OperatorObjectView object,
+    OperatorCommandDescriptor command,
+  ) async {
+    setState(() => _submitting = true);
+    final response = await ref
+        .read(apiClientProvider)
+        .executeOperatorCommand(widget.sku, command, object.objectGeneration);
+    if (!mounted) return;
+    setState(() => _submitting = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          response.ok
+              ? '${command.label} accepted by the workflow.'
+              : '${command.label} held: ${response.error ?? 'unknown error'}',
+        ),
+        backgroundColor: response.ok ? null : Colors.red[700],
+      ),
+    );
+    ref.invalidate(operatorObjectProvider(widget.sku));
+    ref.invalidate(itemDetailProvider(widget.sku));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final objectAsync = ref.watch(operatorObjectProvider(widget.sku));
+    return objectAsync.when(
+      loading: () => const LinearProgressIndicator(),
+      error: (error, _) => ListTile(
+        leading: const Icon(Icons.error_outline, color: Colors.red),
+        title: const Text('Workflow unavailable'),
+        subtitle: Text(error.toString()),
+        trailing: IconButton(
+          icon: const Icon(Icons.refresh),
+          onPressed: () => ref.invalidate(operatorObjectProvider(widget.sku)),
+        ),
+      ),
+      data: (object) {
+        if (object == null) return const SizedBox.shrink();
+        final condition = Map<String, dynamic>.from(
+          object.fieldSchema['condition'] as Map? ?? const {},
+        );
+        return Card(
+          margin: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Text(
+                      'Workflow',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(width: 8),
+                    Chip(label: Text(object.state)),
+                    const Spacer(),
+                    Text(
+                      object.objectGeneration.length > 12
+                          ? object.objectGeneration.substring(0, 12)
+                          : object.objectGeneration,
+                      style: const TextStyle(fontSize: 10, color: Colors.grey),
+                    ),
+                  ],
+                ),
+                Text(
+                  'Condition: ${condition['label'] ?? condition['value'] ?? 'not set'}',
+                ),
+                if (object.reasons.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  ...object.reasons.map(
+                    (reason) => Text(
+                      reason,
+                      style: TextStyle(fontSize: 12, color: Colors.orange[800]),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  children: object.commands
+                      .map(
+                        (command) => Tooltip(
+                          message: command.reason ?? command.authorityScope,
+                          child: FilledButton.tonal(
+                            onPressed: command.enabled && !_submitting
+                                ? () => _execute(object, command)
+                                : null,
+                            child: Text(command.label),
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }

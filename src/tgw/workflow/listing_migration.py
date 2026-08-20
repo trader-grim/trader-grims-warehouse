@@ -36,7 +36,7 @@ from .treatments import (
 EVALUATOR_VERSION = "pp-workflow-phase3-bundle/v1"
 _GOAL_SCOPE_CEILINGS = {
     "tgw.ebay_identified": (),
-    "tgw.ebay_staged": ("upload", "stage"),
+    "tgw.ebay_staged": ("upload", "stage", "force-restage"),
     "tgw.ebay_listable": ("upload", "stage", "publish", "force-restage"),
 }
 _GOAL_SCOPE_DEFAULTS = {
@@ -379,6 +379,78 @@ def authorize_and_dispatch_next_listing_effect(
     if not dispatched.enqueued and dispatched.outcome != "already_dispatched":
         raise RuntimeError(
             f"failed to dispatch governed listing treatment {disposition.treatment_id}"
+        )
+    return result, dispatched, authority_id, created
+
+
+def authorize_and_dispatch_update_item(
+    item_path: str | Path, *, operator_identity: str, surface: str,
+    provider_identity: str, ttl_seconds: int = 300, enqueue_fn=None,
+    issuer=issue_or_reuse_authority, authority_lookup=get_authority,
+) -> tuple[GoalRequestResult, DispatchResult | None, str, bool]:
+    """Upload/restage current content without ever granting publication.
+
+    This is the server implementation of the W13 ``Update Item`` command.
+    It uses the same evaluator and provider-effect dispatcher as listing, but
+    its authority ceiling deliberately excludes ``publish``.
+    """
+    from .profiles import TGW_EBAY_STAGED
+
+    result, authority_id, created = authorize_and_request_item_goal(
+        item_path, TGW_EBAY_STAGED, operator_identity=operator_identity,
+        surface=surface, provider_identity=provider_identity,
+        scopes=("upload", "stage", "force-restage"),
+        ttl_seconds=ttl_seconds, enqueue_fn=enqueue_fn,
+        issuer=issuer, authority_lookup=authority_lookup,
+    )
+    if result.dispatched is not None:
+        return result, result.dispatched, authority_id, created
+    if result.graph.ownership_conflicts or result.graph.reconciliation_gates:
+        raise RuntimeError("update admission is blocked by reconciliation")
+
+    allowed = {
+        (EBAY_UPLOAD.identity, EBAY_UPLOAD.version): "upload",
+        (EBAY_STAGE.identity, EBAY_STAGE.version): "stage",
+    }
+    dispositions = [
+        disposition for disposition in result.graph.eligible_treatments
+        if (disposition.treatment_id, disposition.treatment_version) in allowed
+    ]
+    if not dispositions:
+        return result, None, authority_id, created
+    if len(dispositions) != 1:
+        names = ", ".join(item.treatment_id for item in dispositions)
+        raise RuntimeError(f"update admission selected multiple external treatments: {names}")
+
+    disposition = dispositions[0]
+    scope = allowed[(disposition.treatment_id, disposition.treatment_version)]
+    authority = authority_lookup(authority_id)
+    if (authority is None or scope not in authority.scopes
+            or "publish" in authority.scopes
+            or authority.entity_id != result.graph.object_id
+            or authority.object_generation != result.graph.object_generation):
+        raise RuntimeError("update authority binding changed before dispatch")
+    item = json.loads(Path(item_path).read_text(encoding="utf-8"))
+    force = bool(
+        disposition.treatment_id == EBAY_STAGE.identity
+        and (item.get("ebay_offer") or {}).get("offer_id")
+    )
+    dispatched = dispatch_treatment(
+        disposition=disposition, entity_id=result.graph.object_id,
+        graph=result.graph,
+        payload_extra={
+            "origin": "operator",
+            **({"force": True} if force else {}),
+            "operator_identity": operator_identity,
+            "operator_surface": surface,
+            "operator_authority_id": authority_id,
+            "pre_authority_condition_hash": authority.pre_authority_condition_hash,
+        },
+        enqueue_fn=enqueue_fn,
+    )
+    if not dispatched.enqueued and dispatched.outcome != "already_dispatched":
+        raise RuntimeError(
+            f"failed to dispatch governed update treatment {disposition.treatment_id}"
         )
     return result, dispatched, authority_id, created
 

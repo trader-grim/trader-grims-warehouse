@@ -60,14 +60,18 @@ class ApiClient {
   }) async {
     await ensureInitialized();
     try {
-      final response = await _dio.get('/api/items', queryParameters: {
-        if (search != null && search.isNotEmpty) 'search': search,
-        if (location != null && location.isNotEmpty) 'location': location,
-        if (statusFilter != null && statusFilter.isNotEmpty) 'status_filter': statusFilter,
-        'limit': limit,
-        'offset': offset,
-      });
-      
+      final response = await _dio.get(
+        '/api/items',
+        queryParameters: {
+          if (search != null && search.isNotEmpty) 'search': search,
+          if (location != null && location.isNotEmpty) 'location': location,
+          if (statusFilter != null && statusFilter.isNotEmpty)
+            'status_filter': statusFilter,
+          'limit': limit,
+          'offset': offset,
+        },
+      );
+
       if (response.statusCode == 200) {
         final List<dynamic> itemsJson = response.data['items'] ?? [];
         final items = itemsJson.map((j) => ItemSummary.fromJson(j)).toList();
@@ -92,6 +96,56 @@ class ApiClient {
     }
   }
 
+  Future<ApiResponse<OperatorObjectView>> getOperatorObject(String sku) async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.get('/api/operator/items/$sku');
+      if (response.statusCode == 200) {
+        return ApiResponse(
+          ok: true,
+          data: OperatorObjectView.fromJson(
+            Map<String, dynamic>.from(response.data as Map),
+          ),
+        );
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
+  Future<ApiResponse<Map<String, dynamic>>> executeOperatorCommand(
+    String sku,
+    OperatorCommandDescriptor command,
+    String objectGeneration,
+  ) async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.post(
+        '/api/operator/items/$sku/commands',
+        data: {
+          'command_id': command.id,
+          'object_generation': objectGeneration,
+          'values': <String, dynamic>{},
+        },
+      );
+      if (response.statusCode == 200) {
+        return ApiResponse(
+          ok: true,
+          data: Map<String, dynamic>.from(response.data as Map),
+        );
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } on DioException catch (e) {
+      final detail = e.response?.data is Map
+          ? e.response?.data['detail']
+          : null;
+      return ApiResponse(ok: false, error: detail?.toString() ?? e.toString());
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
   Future<ApiResponse<QueueStatus>> getQueueStatus() async {
     await ensureInitialized();
     try {
@@ -110,7 +164,10 @@ class ApiClient {
     try {
       final response = await _dio.get('/api/locations');
       if (response.statusCode == 200) {
-        return ApiResponse(ok: true, data: List<String>.from(response.data['locations'] ?? []));
+        return ApiResponse(
+          ok: true,
+          data: List<String>.from(response.data['locations'] ?? []),
+        );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } catch (e) {
@@ -124,7 +181,10 @@ class ApiClient {
       final response = await _dio.get('/api/category-groups');
       if (response.statusCode == 200) {
         final List<dynamic> groups = response.data['groups'] ?? [];
-        return ApiResponse(ok: true, data: List<Map<String, dynamic>>.from(groups));
+        return ApiResponse(
+          ok: true,
+          data: List<Map<String, dynamic>>.from(groups),
+        );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } catch (e) {
@@ -132,10 +192,16 @@ class ApiClient {
     }
   }
 
-  Future<ApiResponse<void>> patchItem(String sku, Map<String, dynamic> fields) async {
+  Future<ApiResponse<void>> patchItem(
+    String sku,
+    Map<String, dynamic> fields,
+  ) async {
     await ensureInitialized();
     try {
-      final response = await _dio.patch('/api/items/$sku', data: {'fields': fields});
+      final response = await _dio.patch(
+        '/api/items/$sku',
+        data: {'fields': fields},
+      );
       if (response.statusCode == 200) {
         return ApiResponse(ok: true);
       }
@@ -145,13 +211,17 @@ class ApiClient {
     }
   }
 
-  Future<ApiResponse<String>> performAction(String sku, String action, {Map<String, dynamic>? options}) async {
+  Future<ApiResponse<String>> performAction(
+    String sku,
+    String action, {
+    Map<String, dynamic>? options,
+  }) async {
     await ensureInitialized();
     try {
-      final response = await _dio.post('/api/items/$sku/action', data: {
-        'action': action,
-        if (options != null) 'options': options,
-      });
+      final response = await _dio.post(
+        '/api/items/$sku/action',
+        data: {'action': action, if (options != null) 'options': options},
+      );
       if (response.statusCode == 200) {
         return ApiResponse(ok: true, data: response.data['job_id']);
       }
@@ -161,13 +231,18 @@ class ApiClient {
     }
   }
 
-  Future<ApiResponse<List<Map<String, dynamic>>>> getEbayAspects(String categoryId) async {
+  Future<ApiResponse<List<Map<String, dynamic>>>> getEbayAspects(
+    String categoryId,
+  ) async {
     await ensureInitialized();
     try {
       final response = await _dio.get('/api/ebay/aspects/$categoryId');
       if (response.statusCode == 200) {
         final List<dynamic> aspects = response.data['aspects'] ?? [];
-        return ApiResponse(ok: true, data: List<Map<String, dynamic>>.from(aspects));
+        return ApiResponse(
+          ok: true,
+          data: List<Map<String, dynamic>>.from(aspects),
+        );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } catch (e) {
@@ -175,12 +250,16 @@ class ApiClient {
     }
   }
 
-  Future<ApiResponse<void>> setItemTemplate(String sku, String templateKey) async {
+  Future<ApiResponse<void>> setItemTemplate(
+    String sku,
+    String templateKey,
+  ) async {
     await ensureInitialized();
     try {
-      final response = await _dio.post('/api/items/$sku/set-template', data: {
-        'template_key': templateKey,
-      });
+      final response = await _dio.post(
+        '/api/items/$sku/set-template',
+        data: {'template_key': templateKey},
+      );
       if (response.statusCode == 200) {
         return ApiResponse(ok: true);
       }
@@ -198,7 +277,9 @@ class ApiClient {
         final List<dynamic> items = response.data['items'] ?? [];
         return ApiResponse(
           ok: true,
-          data: items.map((j) => ReviewQueueItem.fromJson(j as Map<String, dynamic>)).toList(),
+          data: items
+              .map((j) => ReviewQueueItem.fromJson(j as Map<String, dynamic>))
+              .toList(),
         );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
@@ -219,15 +300,22 @@ class ApiClient {
       return ApiResponse(ok: false, error: e.toString());
     }
   }
+
   Future<ApiResponse<String>> uploadToInbox(File file) async {
     await ensureInitialized();
     try {
       final formData = FormData.fromMap({
-        'file': await MultipartFile.fromFile(file.path, filename: file.uri.pathSegments.last),
+        'file': await MultipartFile.fromFile(
+          file.path,
+          filename: file.uri.pathSegments.last,
+        ),
       });
       final response = await _dio.post('/api/inbox/upload', data: formData);
       if (response.statusCode == 200) {
-        return ApiResponse(ok: true, data: response.data['filename'] as String?);
+        return ApiResponse(
+          ok: true,
+          data: response.data['filename'] as String?,
+        );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } catch (e) {
@@ -235,12 +323,21 @@ class ApiClient {
     }
   }
 
-  Future<ApiResponse<Map<String, dynamic>>> bulkAction(List<String> skus, String action) async {
+  Future<ApiResponse<Map<String, dynamic>>> bulkAction(
+    List<String> skus,
+    String action,
+  ) async {
     await ensureInitialized();
     try {
-      final response = await _dio.post('/api/bulk/action', data: {'skus': skus, 'action': action});
+      final response = await _dio.post(
+        '/api/bulk/action',
+        data: {'skus': skus, 'action': action},
+      );
       if (response.statusCode == 200) {
-        return ApiResponse(ok: true, data: Map<String, dynamic>.from(response.data));
+        return ApiResponse(
+          ok: true,
+          data: Map<String, dynamic>.from(response.data),
+        );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } catch (e) {
@@ -254,7 +351,12 @@ class ApiClient {
       final response = await _dio.get('/api/pipeline/jobs');
       if (response.statusCode == 200) {
         final List<dynamic> jobs = response.data['jobs'] ?? [];
-        return ApiResponse(ok: true, data: jobs.map((j) => PipelineJob.fromJson(j as Map<String, dynamic>)).toList());
+        return ApiResponse(
+          ok: true,
+          data: jobs
+              .map((j) => PipelineJob.fromJson(j as Map<String, dynamic>))
+              .toList(),
+        );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } catch (e) {
@@ -267,7 +369,10 @@ class ApiClient {
     try {
       final response = await _dio.post('/api/jobs/$jobId/requeue');
       if (response.statusCode == 200) {
-        return ApiResponse(ok: true, data: response.data['new_job_id'] as String?);
+        return ApiResponse(
+          ok: true,
+          data: response.data['new_job_id'] as String?,
+        );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } catch (e) {
@@ -288,10 +393,15 @@ class ApiClient {
     }
   }
 
-  Future<ApiResponse<void>> reportJobToAdmin(String jobId, String queueName, String? errorDetail) async {
+  Future<ApiResponse<void>> reportJobToAdmin(
+    String jobId,
+    String queueName,
+    String? errorDetail,
+  ) async {
     await ensureInitialized();
     try {
-      final msg = 'ADMIN-REPORT: dead_letter job $jobId in queue $queueName — ${errorDetail ?? "no error detail"}';
+      final msg =
+          'ADMIN-REPORT: dead_letter job $jobId in queue $queueName — ${errorDetail ?? "no error detail"}';
       final response = await _dio.post('/api/suggest', data: {'text': msg});
       if (response.statusCode == 200) {
         return ApiResponse(ok: true);
@@ -318,13 +428,23 @@ class ApiClient {
   // The Flutter surface projects the same HTTP-backed PlanAuthority records
   // as web and CLI clients. It deliberately has no `/consume` method: only a
   // separately authenticated registered executor can redeem an approval.
-  Future<ApiResponse<List<Map<String, dynamic>>>> getPlanAuthorityRequests({int limit = 100}) async {
+  Future<ApiResponse<List<Map<String, dynamic>>>> getPlanAuthorityRequests({
+    int limit = 100,
+  }) async {
     await ensureInitialized();
     try {
-      final response = await _dio.get('/api/operator-console/requests', queryParameters: {'limit': limit});
+      final response = await _dio.get(
+        '/api/operator-console/requests',
+        queryParameters: {'limit': limit},
+      );
       if (response.statusCode == 200) {
         final List<dynamic> requests = response.data['requests'] ?? [];
-        return ApiResponse(ok: true, data: requests.map((value) => Map<String, dynamic>.from(value as Map)).toList());
+        return ApiResponse(
+          ok: true,
+          data: requests
+              .map((value) => Map<String, dynamic>.from(value as Map))
+              .toList(),
+        );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } catch (e) {
@@ -332,12 +452,19 @@ class ApiClient {
     }
   }
 
-  Future<ApiResponse<Map<String, dynamic>>> getPlanAuthorityRequest(String requestId) async {
+  Future<ApiResponse<Map<String, dynamic>>> getPlanAuthorityRequest(
+    String requestId,
+  ) async {
     await ensureInitialized();
     try {
-      final response = await _dio.get('/api/operator-console/requests/$requestId');
+      final response = await _dio.get(
+        '/api/operator-console/requests/$requestId',
+      );
       if (response.statusCode == 200) {
-        return ApiResponse(ok: true, data: Map<String, dynamic>.from(response.data));
+        return ApiResponse(
+          ok: true,
+          data: Map<String, dynamic>.from(response.data),
+        );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } catch (e) {
@@ -345,12 +472,20 @@ class ApiClient {
     }
   }
 
-  Future<ApiResponse<Map<String, dynamic>>> createPlanAuthorityRequest(Map<String, dynamic> request) async {
+  Future<ApiResponse<Map<String, dynamic>>> createPlanAuthorityRequest(
+    Map<String, dynamic> request,
+  ) async {
     await ensureInitialized();
     try {
-      final response = await _dio.post('/api/plan-authority/requests', data: request);
+      final response = await _dio.post(
+        '/api/plan-authority/requests',
+        data: request,
+      );
       if (response.statusCode == 201) {
-        return ApiResponse(ok: true, data: Map<String, dynamic>.from(response.data));
+        return ApiResponse(
+          ok: true,
+          data: Map<String, dynamic>.from(response.data),
+        );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } catch (e) {
@@ -365,8 +500,12 @@ class ApiClient {
     List<String> reconciliationEvidence = const [],
   }) async {
     await ensureInitialized();
-    if (!{'approve', 'hold', 'reconcile'}.contains(kind) || reason.trim().isEmpty) {
-      return ApiResponse(ok: false, error: 'A valid authority decision and reason are required');
+    if (!{'approve', 'hold', 'reconcile'}.contains(kind) ||
+        reason.trim().isEmpty) {
+      return ApiResponse(
+        ok: false,
+        error: 'A valid authority decision and reason are required',
+      );
     }
     try {
       final response = await _dio.post(
@@ -379,7 +518,10 @@ class ApiClient {
         },
       );
       if (response.statusCode == 200) {
-        return ApiResponse(ok: true, data: Map<String, dynamic>.from(response.data));
+        return ApiResponse(
+          ok: true,
+          data: Map<String, dynamic>.from(response.data),
+        );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } catch (e) {

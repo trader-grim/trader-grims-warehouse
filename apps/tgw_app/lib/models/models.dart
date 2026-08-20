@@ -5,7 +5,10 @@ class ApiResponse<T> {
 
   ApiResponse({required this.ok, this.error, this.data});
 
-  factory ApiResponse.fromJson(Map<String, dynamic> json, T Function(Map<String, dynamic>) fromJsonT) {
+  factory ApiResponse.fromJson(
+    Map<String, dynamic> json,
+    T Function(Map<String, dynamic>) fromJsonT,
+  ) {
     return ApiResponse(
       ok: json['ok'] ?? false,
       error: json['error'],
@@ -102,6 +105,80 @@ class ItemDetail {
   }
 }
 
+class OperatorCommandDescriptor {
+  final String id;
+  final String label;
+  final bool enabled;
+  final String? reason;
+  final String authorityScope;
+
+  OperatorCommandDescriptor({
+    required this.id,
+    required this.label,
+    required this.enabled,
+    required this.reason,
+    required this.authorityScope,
+  });
+
+  factory OperatorCommandDescriptor.fromJson(Map<String, dynamic> json) {
+    return OperatorCommandDescriptor(
+      id: json['id'] as String? ?? '',
+      label: json['label'] as String? ?? '',
+      enabled: json['enabled'] == true,
+      reason: json['reason'] as String?,
+      authorityScope: json['authority_scope'] as String? ?? '',
+    );
+  }
+}
+
+class OperatorObjectView {
+  final String entityId;
+  final String objectGeneration;
+  final String state;
+  final List<String> reasons;
+  final Map<String, dynamic> item;
+  final Map<String, dynamic> listing;
+  final Map<String, dynamic> fieldSchema;
+  final List<OperatorCommandDescriptor> commands;
+
+  OperatorObjectView({
+    required this.entityId,
+    required this.objectGeneration,
+    required this.state,
+    required this.reasons,
+    required this.item,
+    required this.listing,
+    required this.fieldSchema,
+    required this.commands,
+  });
+
+  factory OperatorObjectView.fromJson(Map<String, dynamic> json) {
+    final object = Map<String, dynamic>.from(json['object'] as Map? ?? json);
+    final workflow = Map<String, dynamic>.from(
+      object['workflow'] as Map? ?? const {},
+    );
+    final rawCommands = object['commands'] as List? ?? const [];
+    return OperatorObjectView(
+      entityId: object['entity_id'] as String? ?? '',
+      objectGeneration: object['object_generation'] as String? ?? '',
+      state: workflow['state'] as String? ?? 'unknown',
+      reasons: List<String>.from(workflow['reasons'] as List? ?? const []),
+      item: Map<String, dynamic>.from(object['item'] as Map? ?? const {}),
+      listing: Map<String, dynamic>.from(object['listing'] as Map? ?? const {}),
+      fieldSchema: Map<String, dynamic>.from(
+        object['field_schema'] as Map? ?? const {},
+      ),
+      commands: rawCommands
+          .map(
+            (value) => OperatorCommandDescriptor.fromJson(
+              Map<String, dynamic>.from(value as Map),
+            ),
+          )
+          .toList(),
+    );
+  }
+}
+
 class QueueStatus {
   final Map<String, Map<String, int>> queues;
 
@@ -112,7 +189,9 @@ class QueueStatus {
     final Map<String, Map<String, int>> parsed = {};
     qJson.forEach((key, value) {
       if (value is Map) {
-        parsed[key] = Map<String, int>.from(value.map((k, v) => MapEntry(k, v as int)));
+        parsed[key] = Map<String, int>.from(
+          value.map((k, v) => MapEntry(k, v as int)),
+        );
       }
     });
     return QueueStatus(queues: parsed);
@@ -171,7 +250,9 @@ class PipelineJob {
         e.contains('too many') ||
         e.contains('temporarily') ||
         e.contains('econnrefused') ||
-        e.contains('network')) { return 'transient'; }
+        e.contains('network')) {
+      return 'transient';
+    }
     if (e.contains('not found') ||
         e.contains('invalid') ||
         e.contains('forbidden') ||
@@ -182,7 +263,9 @@ class PipelineJob {
         e.contains('unauthorized') ||
         e.contains('does not exist') ||
         e.contains('no such') ||
-        e.contains('missing')) { return 'permanent'; }
+        e.contains('missing')) {
+      return 'permanent';
+    }
     return 'unknown';
   }
 

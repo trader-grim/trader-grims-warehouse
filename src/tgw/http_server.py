@@ -688,6 +688,13 @@ class WorkflowGoalBody(BaseModel):
     authority_ttl_seconds: int = 300
 
 
+class OperatorCommandBody(BaseModel):
+    command_id: str
+    object_generation: str
+    values: Dict[str, Any] = Field(default_factory=dict)
+    authority_ttl_seconds: int = Field(300, ge=30, le=900)
+
+
 class SetTemplateBody(BaseModel):
     template_key: str
 
@@ -1093,6 +1100,150 @@ def _workflow_provider_identity() -> str:
         migration = _cfg["raw"].get("workflow_migration")
     value = migration.get("ebay_provider_identity") if isinstance(migration, dict) else None
     return value if isinstance(value, str) else ""
+
+
+def _current_item_operator_object(sku: str) -> Dict[str, Any]:
+    """Read and publish one exact current server-owned item object."""
+    from .operator_objects import build_item_operator_object
+    from .workflow.action_cards import build_item_action_card
+
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+    try:
+        item = load_item_doc(json_path)
+        attempts = _workflow_attempt_rows(sku)
+        reconciled_effect_ids = _workflow_reconciled_provider_effect_ids(attempts)
+        workflow_card = build_item_action_card(
+            json_path,
+            attempts,
+            provider_identity=_workflow_provider_identity(),
+            reconciled_provider_effect_ids=reconciled_effect_ids,
+        )
+        draft = item.get("draft_listing") if isinstance(item.get("draft_listing"), dict) else {}
+        category_id = str(draft.get("category_id") or item.get("ebay_category_id") or "")
+        current_condition = str(draft.get("condition_enum") or draft.get("condition") or "")
+        category_context = (
+            ebay_category_context(category_id, current_condition=current_condition)
+            if category_id and category_id != "99"
+            else {}
+        )
+        return build_item_operator_object(
+            item=item,
+            workflow_card=workflow_card,
+            category_context=category_context,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"operator object unavailable: {exc}"
+        ) from exc
+
+
+@app.get("/api/operator/items", dependencies=[AUTH])
+def operator_item_catalog(
+    search: str = "", status_filter: str = "", limit: int = 200, offset: int = 0,
+) -> Dict[str, Any]:
+    """Publish catalog navigation without inventing item workflow state."""
+    catalog = list_items(
+        search=search, status_filter=status_filter, limit=limit, offset=offset,
+    )
+    return {
+        "ok": True,
+        "schema": "tgw-operator-catalog/v1",
+        "count": catalog["count"],
+        "items": [
+            {
+                **item,
+                "object_url": f"/api/operator/items/{item['sku']}",
+                "web_url": f"/form/items/{item['sku']}",
+            }
+            for item in catalog["items"]
+        ],
+    }
+
+
+@app.get("/api/operator/items/{sku}", dependencies=[AUTH])
+def get_item_operator_object(sku: str) -> Dict[str, Any]:
+    return {"ok": True, "object": _current_item_operator_object(sku)}
+
+
+@app.post("/api/operator/items/{sku}/commands")
+def execute_item_operator_command(
+    sku: str,
+    body: OperatorCommandBody,
+    operator_identity: str = Depends(_require_auth),
+) -> Dict[str, Any]:
+    """Execute only a command supplied by the current published object."""
+    if body.values:
+        raise HTTPException(status_code=422, detail="this command accepts no client policy values")
+    published = _current_item_operator_object(sku)
+    current_generation = published["object_generation"]
+    if body.object_generation != current_generation:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "generation_conflict",
+                "expected": current_generation,
+                "received": body.object_generation,
+                "refresh": f"/api/operator/items/{sku}",
+            },
+        )
+    commands = {command["id"]: command for command in published["commands"]}
+    command = commands.get(body.command_id)
+    if command is None:
+        raise HTTPException(status_code=400, detail="command is not published for this object")
+    if not command["enabled"]:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "command_held", "reason": command.get("reason")},
+        )
+
+    provider_identity = _workflow_provider_identity()
+    if not provider_identity:
+        raise HTTPException(status_code=503, detail="provider identity is not configured")
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    try:
+        if body.command_id == "list-item":
+            from .workflow.listing_migration import authorize_and_dispatch_next_listing_effect
+
+            result, dispatched, authority_id, authority_created = (
+                authorize_and_dispatch_next_listing_effect(
+                    json_path,
+                    operator_identity=operator_identity,
+                    surface="http:operator-object:list-item",
+                    provider_identity=provider_identity,
+                    ttl_seconds=body.authority_ttl_seconds,
+                )
+            )
+        else:
+            from .workflow.listing_migration import authorize_and_dispatch_update_item
+
+            result, dispatched, authority_id, authority_created = authorize_and_dispatch_update_item(
+                json_path,
+                operator_identity=operator_identity,
+                surface="http:operator-object:update-item",
+                provider_identity=provider_identity,
+                ttl_seconds=body.authority_ttl_seconds,
+            )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "command_id": body.command_id,
+        "authority_scope": command["authority_scope"],
+        "authority_id": authority_id,
+        "authority_created": authority_created,
+        "graph_id": result.graph.graph_id,
+        "object_generation": result.graph.object_generation,
+        "dispatched": bool(dispatched and dispatched.enqueued),
+        "job_id": dispatched.job_id if dispatched else "",
+        "held_external": list(result.held_external),
+        "operator_gates": list(result.operator_gates),
+        "refresh": f"/api/operator/items/{sku}",
+    }
 
 
 @app.get("/api/items/{sku}/workflow", dependencies=[AUTH])
@@ -6683,10 +6834,53 @@ def _render_item_detail_html(
     jobs: List[Dict[str, Any]],
     api_key: str = "",
     workflow_card: Dict[str, Any] | None = None,
+    operator_object: Dict[str, Any] | None = None,
 ) -> str:
     import html as _html
 
     h = _html.escape
+
+    operator_object_html = ""
+    if operator_object:
+        operator_workflow = operator_object.get("workflow") or {}
+        field_schema = operator_object.get("field_schema") or {}
+        condition = field_schema.get("condition") or {}
+        command_buttons = "".join(
+            _abtn_html
+            for command in operator_object.get("commands") or []
+            for _abtn_html in [
+                (
+                    '<button class="act-btn" '
+                    + ("" if command.get("enabled") else "disabled ")
+                    + f'title="{h(str(command.get("reason") or ""))}" '
+                    + 'style="background:#102a18;border-color:#4a4;color:#8e8" '
+                    + f'onclick="executePublishedCommand({json.dumps(command.get("id"))})">'
+                    + h(str(command.get("label") or command.get("id") or "Command"))
+                    + "</button>"
+                )
+            ]
+        )
+        reasons = operator_workflow.get("reasons") or []
+        reason_html = (
+            '<ul style="margin:6px 0 0">'
+            + "".join(f"<li>{h(str(reason))}</li>" for reason in reasons)
+            + "</ul>"
+            if reasons else ""
+        )
+        operator_object_html = (
+            '<section id="published-operator-object" style="border:1px solid #4a6;'
+            'background:#101b16;border-radius:8px;padding:10px 14px;margin:10px 0">'
+            '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+            '<strong>Current item workflow</strong>'
+            f'<span style="color:#9bd">{h(str(operator_workflow.get("state") or "unknown"))}</span>'
+            f'<span style="font-size:.76em;color:#789">generation '
+            f'{h(str(operator_object.get("object_generation") or ""))[:12]}</span>'
+            f'<span style="margin-left:auto;display:flex;gap:7px">{command_buttons}</span>'
+            "</div>"
+            f'<div style="font-size:.8em;color:#9a9;margin-top:5px">Condition: '
+            f'{h(str(condition.get("label") or condition.get("value") or "not set"))}</div>'
+            f"{reason_html}</section>"
+        )
 
     workflow_card_html = ""
     photo_fingerprint: Dict[str, Any] | None = None
@@ -8744,11 +8938,25 @@ def _render_item_detail_html(
         f"}}"
         f"function listOnEbay(){{"
         f"  if(!confirm('List this item on eBay?\\nSaves the draft, runs every needed step, and publishes.'))return;"
-        f"  saveEbayDraft(function(){{triggerAction('ebay_publish');}},'publish');"
+        f"  saveEbayDraft(function(){{executePublishedCommand('list-item');}},'publish');"
         f"}}"
         f"function updateItem(){{"
         f"  if(!confirm('Push draft changes to the live listing?\\nUpdates in place without ending the listing.'))return;"
-        f"  saveEbayDraft(function(){{triggerAction('ebay_update');}});"
+        f"  saveEbayDraft(function(){{executePublishedCommand('update-item');}});"
+        f"}}"
+        f"function executePublishedCommand(commandId){{"
+        f"  fetch('/api/operator/items/'+_SKU,{{headers:authHeaders()}})"
+        f"  .then(function(r){{return r.json();}}).then(function(view){{"
+        f"    var obj=view&&view.object;"
+        f"    var command=obj&&(obj.commands||[]).find(function(c){{return c.id===commandId;}});"
+        f"    if(!command)throw new Error('Command is not published for this item.');"
+        f"    if(!command.enabled)throw new Error(command.reason||'Command is held by the server.');"
+        f"    return fetch('/api/operator/items/'+_SKU+'/commands',{{method:'POST',"
+        f"      headers:authHeaders({{'Content-Type':'application/json'}}),"
+        f"      body:JSON.stringify({{command_id:command.id,object_generation:obj.object_generation,values:{{}}}})}});"
+        f"  }}).then(function(r){{return r.json().then(function(d){{return [r,d];}});}})"
+        f"  .then(function(pair){{if(!pair[0].ok)throw new Error(JSON.stringify(pair[1].detail||pair[1]));location.reload();}})"
+        f"  .catch(function(e){{alert('Command held: '+e.message);}});"
         f"}}"
         f"function relistItem(){{"
         f"  if(!confirm('Relist this item on eBay?\\nCheck quantity in the Inventory Record first.'))return;"
@@ -9287,6 +9495,7 @@ def _render_item_detail_html(
         f'<span class="slabel">{h(sku)}</span>'
         f'<span class="stitle">{h(title)}</span>'
         f"</div>\n"
+        f"{operator_object_html}"
         f"{workflow_card_html}"
         f"{review_block_html}"
         f'<div class="detail-layout">'
@@ -9332,6 +9541,7 @@ def item_detail_form(sku: str):
 
     jobs: List[Dict[str, Any]] = []
     workflow_card: Dict[str, Any] | None = None
+    operator_object: Dict[str, Any] | None = None
     try:
         attempts = _workflow_attempt_rows(sku)
         reconciled_effect_ids = _workflow_reconciled_provider_effect_ids(attempts)
@@ -9353,12 +9563,26 @@ def item_detail_form(sku: str):
         }
         for job in jobs:
             job["provider_effect_reconciled"] = str(job.get("job_id")) in reconciled_jobs
+        from .operator_objects import build_item_operator_object
+
+        draft = item.get("draft_listing") if isinstance(item.get("draft_listing"), dict) else {}
+        category_id = str(draft.get("category_id") or item.get("ebay_category_id") or "")
+        current_condition = str(draft.get("condition_enum") or draft.get("condition") or "")
+        category_context = (
+            ebay_category_context(category_id, current_condition=current_condition)
+            if category_id and category_id != "99"
+            else {}
+        )
+        operator_object = build_item_operator_object(
+            item=item, workflow_card=workflow_card, category_context=category_context,
+        )
     except Exception as exc:
         log.warning("queue job fetch failed for %s: %s", sku, exc)
 
     return HTMLResponse(
         _render_item_detail_html(
             sku, item, images, videos, jobs, "", workflow_card=workflow_card,
+            operator_object=operator_object,
         ),
         headers={"Cache-Control": "no-store, no-cache"},
     )

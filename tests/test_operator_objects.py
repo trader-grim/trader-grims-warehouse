@@ -8,6 +8,7 @@ from tgw.operator_objects import (
     ADAPTER_VIEW_SCHEMA,
     OPERATOR_OBJECT_SCHEMA,
     OperatorObjectBindingError,
+    build_item_operator_object,
     flutter_adapter_view,
     publish_operator_object,
     web_adapter_view,
@@ -78,3 +79,86 @@ def test_adapter_view_is_detached_from_caller_mutation():
     before = copy.deepcopy(rendered)
     published["field_schema"]["condition"]["options"][0]["label"] = "forged"
     assert rendered == before
+
+
+def _workflow_card(*, reconciliation=(), active=()):
+    return {
+        "entity_id": "sku-1",
+        "object_generation": "gen-1",
+        "graph_id": "graph-1",
+        "fingerprints": [
+            {"condition_id": "valid_category", "result": "true", "reasons": [], "evidence": []},
+        ],
+        "attempts": [],
+        "active_attempts": list(active),
+        "reconciliation_gates": list(reconciliation),
+        "ownership_conflicts": [],
+        "operator_gates": [],
+    }
+
+
+def _item(*, published=False):
+    return {
+        "sku": "sku-1",
+        "title": "Thing",
+        "draft_listing": {
+            "category_id": "123",
+            "condition_enum": "USED_GOOD",
+            "condition_label": "Used - Good",
+            "item_specifics": {"Brand": "TGW"},
+        },
+        "ebay_offer": {"offer_id": "offer-1", "status": "PUBLISHED" if published else "UNPUBLISHED"},
+        "ebay_listing": {"listing_id": "listing-1", "status": "Active"} if published else {},
+    }
+
+
+def _category_context():
+    return {
+        "conditions": [{"enum": "USED_GOOD", "label": "Used - Good"}],
+        "aspects": [{"name": "Brand", "required": True, "allowed_values": []}],
+    }
+
+
+def test_server_builder_publishes_complete_thin_client_contract():
+    published = build_item_operator_object(
+        item=_item(), workflow_card=_workflow_card(), category_context=_category_context(),
+    )
+    view = flutter_adapter_view(published)
+
+    assert view["item"]["record"]["title"] == "Thing"
+    assert view["listing"]["offer"]["offer_id"] == "offer-1"
+    assert view["field_schema"]["condition"] == {
+        "value": "USED_GOOD",
+        "label": "Used - Good",
+        "required": True,
+        "valid": True,
+        "options": [{"value": "USED_GOOD", "label": "Used - Good"}],
+    }
+    assert {command["id"]: command["enabled"] for command in view["commands"]} == {
+        "list-item": True,
+        "update-item": True,
+    }
+
+
+def test_published_provider_state_disables_list_but_keeps_update_nonpublishing():
+    published = build_item_operator_object(
+        item=_item(published=True), workflow_card=_workflow_card(),
+        category_context=_category_context(),
+    )
+    commands = {command["id"]: command for command in published["commands"]}
+
+    assert published["workflow"]["state"] == "published"
+    assert commands["list-item"]["enabled"] is False
+    assert commands["list-item"]["authority_scope"] == "publication"
+    assert commands["update-item"]["enabled"] is True
+    assert commands["update-item"]["authority_scope"] == "update-restage"
+
+
+def test_reconciliation_gate_holds_every_mutating_command():
+    published = build_item_operator_object(
+        item=_item(), workflow_card=_workflow_card(reconciliation=("listing.stage",)),
+        category_context=_category_context(),
+    )
+
+    assert published["workflow"]["state"] == "reconciliation_required"
+    assert all(command["enabled"] is False for command in published["commands"])
