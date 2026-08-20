@@ -21,6 +21,20 @@ def catalog(executable: Path):
     }
 
 
+def v2_catalog(executable: Path):
+    value = catalog(executable)
+    value["schema"] = "tgw-execution-environment-catalog/v2"
+    value["actors"]["codex"].update({
+        "role": "execution-provider",
+        "qualified_roles": ["implementation", "controller-verification", "independent-review"],
+    })
+    value["profiles"]["development"].update({
+        "workspace_root_template": "/opt/TGW/w/attempts/{attempt_id}/development/worktree",
+        "cache_root_template": "/var/cache/tgw/attempts/{attempt_id}/development",
+    })
+    return value
+
+
 def test_preflight_is_deterministic_and_observes_declared_binary(tmp_path: Path):
     executable = tmp_path / ("a" * 32 + "-store") / "tool"
     executable.parent.mkdir()
@@ -36,9 +50,74 @@ def test_preflight_accepts_the_extended_v2_catalog(tmp_path: Path):
     executable.parent.mkdir()
     executable.write_text("#!/bin/sh\n")
     os.chmod(executable, 0o555)
-    value = catalog(executable)
-    value["schema"] = "tgw-execution-environment-catalog/v2"
-    assert preflight(catalog=value, actor="codex", profile="development", attempt_id="attempt-1")["result"] == "PASS"
+    receipt = preflight(catalog=v2_catalog(executable), actor="codex", profile="development", attempt_id="attempt-1")
+    assert receipt["result"] == "PASS"
+    assert receipt["workspace_root"] == "/opt/TGW/w/attempts/attempt-1/development/worktree"
+    assert receipt["cache_roots"] == {"default": "/var/cache/tgw/attempts/attempt-1/development"}
+
+
+def test_v2_preflight_refuses_fixed_harness_roles_and_volatile_attempt_roots(tmp_path: Path):
+    executable = tmp_path / ("a" * 32 + "-store") / "tool"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n")
+    os.chmod(executable, 0o555)
+    value = v2_catalog(executable)
+    value["actors"]["codex"]["role"] = "implementer"
+    with pytest.raises(EnvironmentPreflightError, match="role qualification"):
+        preflight(catalog=value, actor="codex", profile="development", attempt_id="attempt-1")
+    value = v2_catalog(executable)
+    value["profiles"]["development"]["cache_root_template"] = "/tmp/{attempt_id}"
+    with pytest.raises(EnvironmentPreflightError, match="durable attempt root"):
+        preflight(catalog=value, actor="codex", profile="development", attempt_id="attempt-1")
+
+
+def test_mobile_v2_preflight_binds_artifacts_caches_environment_and_commands(tmp_path: Path):
+    executable = tmp_path / ("a" * 32 + "-store") / "tool"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n")
+    os.chmod(executable, 0o555)
+    digest = "sha256:" + hashlib.sha256(executable.read_bytes()).hexdigest()
+    value = v2_catalog(executable)
+    value["actors"]["codex"]["permitted_profiles"].append("mobile")
+    tool_names = ["flutter", "dart", "java", "gradle", "android-sdkmanager", "android-adb"]
+    artifact_names = [
+        "flutter-sdk", "dart-sdk", "android-sdk-platform", "android-build-tools", "android-ndk", "android-license",
+    ]
+    value["profiles"]["mobile"] = {
+        "state": "ready-for-preflight",
+        "workspace_root_template": "/opt/TGW/w/attempts/{attempt_id}/mobile/worktree",
+        "cache_roots": {
+            "home": "/var/cache/tgw/attempts/{attempt_id}/mobile/home",
+            "pub": "/var/cache/tgw/attempts/{attempt_id}/mobile/pub",
+            "gradle": "/var/cache/tgw/attempts/{attempt_id}/mobile/gradle",
+            "android_user": "/var/cache/tgw/attempts/{attempt_id}/mobile/android-user",
+        },
+        "environment": {
+            "HOME": "/var/cache/tgw/attempts/{attempt_id}/mobile/home",
+            "PUB_CACHE": "/var/cache/tgw/attempts/{attempt_id}/mobile/pub",
+            "GRADLE_USER_HOME": "/var/cache/tgw/attempts/{attempt_id}/mobile/gradle",
+            "ANDROID_USER_HOME": "/var/cache/tgw/attempts/{attempt_id}/mobile/android-user",
+            "ANDROID_HOME": "/nix/store/android-sdk",
+            "ANDROID_SDK_ROOT": "/nix/store/android-sdk",
+            "JAVA_HOME": "/nix/store/jdk",
+        },
+        "tools": [{
+            "name": name, "store_path": str(executable.parent), "store_path_hash": "a" * 32,
+            "executable_path": str(executable), "executable_sha256": digest,
+        } for name in tool_names],
+        "artifacts": [{
+            "name": name, "version": "1", "store_path": str(executable.parent), "store_path_hash": "a" * 32,
+            "content_path": str(executable), "content_sha256": digest,
+        } for name in artifact_names],
+        "verification_commands": [["flutter", "doctor", "--verbose"], ["flutter", "test"]],
+    }
+    receipt = preflight(catalog=value, actor="codex", profile="mobile", attempt_id="attempt-1")
+    assert len(receipt["artifacts"]) == 6
+    assert receipt["environment"]["HOME"].endswith("/attempt-1/mobile/home")
+    assert receipt["verification_commands"][0] == ["flutter", "doctor", "--verbose"]
+    value["profiles"]["mobile"]["artifacts"].pop()
+    with pytest.raises(EnvironmentPreflightError, match="artifact set"):
+        preflight(catalog=value, actor="codex", profile="mobile", attempt_id="attempt-1")
 
 
 @pytest.mark.parametrize("mutation", ["disabled", "missing", "symlink"])

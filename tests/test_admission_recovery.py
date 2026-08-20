@@ -69,6 +69,22 @@ def test_environment_preflight_is_exactly_bound_to_admission_hashes():
         validate_environment_preflight_for_admission(receipt, catalog_hash=HASH, receipt_hash=receipt_hash)
 
 
+def test_v2_environment_preflight_evidence_remains_admissible():
+    receipt = {
+        "schema": "tgw-environment-preflight-receipt/v1", "result": "PASS", "catalog_sha256": HASH,
+        "actor": "codex", "profile": "mobile", "attempt_id": "attempt-1", "tools": [],
+        "workspace_root": "/opt/TGW/w/attempts/attempt-1/mobile/worktree",
+        "cache_roots": {"home": "/var/cache/tgw/attempts/attempt-1/mobile/home"},
+        "environment": {"HOME": "/var/cache/tgw/attempts/attempt-1/mobile/home"},
+        "artifacts": [], "verification_commands": [["flutter", "test"]],
+    }
+    canonical = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    receipt_hash = "sha256:" + hashlib.sha256(canonical).hexdigest()
+    assert validate_environment_preflight_for_admission(
+        receipt, catalog_hash=HASH, receipt_hash=receipt_hash,
+    ) == receipt
+
+
 @pytest.mark.parametrize(
     "field,value,reason",
     [("status", "FAIL", "review-not-passed"), ("candidate_commit", "c" * 40, "review-candidate-mismatch"), ("solution_hash", "sha256:" + "c" * 64, "review-solution-mismatch")],

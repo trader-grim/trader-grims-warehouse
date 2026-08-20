@@ -149,11 +149,13 @@ def validate_environment_preflight_for_admission(
     receipt: Mapping[str, Any], *, catalog_hash: str, receipt_hash: str,
 ) -> dict[str, Any]:
     """Re-hash the W15 observation before a W16 boundary relies on it."""
-    value = _mapping(
-        receipt,
-        {"schema", "result", "catalog_sha256", "actor", "profile", "attempt_id", "tools"},
-        "environment preflight receipt",
-    )
+    base_fields = {"schema", "result", "catalog_sha256", "actor", "profile", "attempt_id", "tools"}
+    v2_fields = base_fields | {
+        "workspace_root", "cache_roots", "environment", "artifacts", "verification_commands",
+    }
+    if not isinstance(receipt, Mapping) or frozenset(receipt) not in {frozenset(base_fields), frozenset(v2_fields)}:
+        raise AdmissionRecoveryError("environment preflight receipt fields are not exact")
+    value = dict(receipt)
     if value["schema"] != "tgw-environment-preflight-receipt/v1" or value["result"] != "PASS":
         raise AdmissionRecoveryError("environment preflight did not pass")
     if value["catalog_sha256"] != _exact_hash(catalog_hash, "admission environment catalog"):
