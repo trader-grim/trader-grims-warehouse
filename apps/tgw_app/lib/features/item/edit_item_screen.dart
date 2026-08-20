@@ -246,12 +246,11 @@ class _EditItemScreenState extends ConsumerState<EditItemScreen> {
   }
 
   Future<void> _uploadToInbox() async {
-    final result = await FilePicker.pickFiles(
+    final result = await FilePicker.pickFile(
       dialogTitle: 'Upload to inbox',
-      allowMultiple: false,
     );
-    if (result == null || result.files.isEmpty) return;
-    final path = result.files.single.path;
+    if (result == null) return;
+    final path = result.path;
     if (path == null) return;
 
     final filename =
