@@ -38,5 +38,9 @@ def test_materialization_failure_restores_configurations(tmp_path):
     config = tmp_path / "config"
     config.write_bytes(b"old")
     with pytest.raises(RuntimeError, match="stop"):
-        apply_fleet_configuration({config: {"expected_sha256": _hash(b"old"), "desired": b"new"}}, materialize=lambda: (_ for _ in ()).throw(RuntimeError("stop")), rollback_materialization=lambda _: None)
+        apply_fleet_configuration(
+            {config: {"expected_sha256": _hash(b"old"), "desired": b"new"}},
+            materialize=lambda: (_ for _ in ()).throw(RuntimeError("stop")),
+            rollback_materialization=lambda _: None,
+        )
     assert config.read_bytes() == b"old"
