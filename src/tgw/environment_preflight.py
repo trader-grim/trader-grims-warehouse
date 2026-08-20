@@ -68,16 +68,32 @@ def preflight(*, catalog: Mapping[str, Any], actor: str, profile: str, attempt_i
     observed: list[dict[str, str]] = []
     names: set[str] = set()
     for tool in tools:
-        if not isinstance(tool, Mapping) or set(tool) != {"name", "store_path", "store_path_hash", "executable_path"}:
+        if not isinstance(tool, Mapping) or set(tool) != {"name", "store_path", "store_path_hash", "executable_path", "executable_sha256"}:
             raise EnvironmentPreflightError("catalog tool declaration is invalid")
         name, executable = tool["name"], tool["executable_path"]
         if not isinstance(name, str) or name in names or not isinstance(executable, str) or not executable.startswith("/"):
             raise EnvironmentPreflightError("catalog tool identity is invalid")
         names.add(name)
         path = Path(executable)
-        if path.is_symlink() or not path.is_file() or not os.access(path, os.X_OK):
+        store_path = tool["store_path"]
+        if not isinstance(store_path, str) or not store_path.startswith("/"):
+            raise EnvironmentPreflightError("catalog tool store path is invalid")
+        if not isinstance(tool["executable_sha256"], str) or _HASH.fullmatch(tool["executable_sha256"]) is None:
+            raise EnvironmentPreflightError("catalog executable hash is invalid")
+        # Nix package bin entries commonly symlink to an immutable store file.
+        # Accept that indirection only when the resolved executable remains in
+        # the exact declared package closure and its bytes match the catalog.
+        resolved = path.resolve(strict=False)
+        try:
+            resolved.relative_to(Path(store_path).resolve())
+        except ValueError:
+            raise EnvironmentPreflightError(f"declared executable unavailable: {executable}") from None
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
             raise EnvironmentPreflightError(f"declared executable unavailable: {executable}")
-        observed.append({"name": name, "executable_path": executable, "observed_sha256": _file_hash(path)})
+        observed_hash = _file_hash(resolved)
+        if observed_hash != tool["executable_sha256"]:
+            raise EnvironmentPreflightError(f"declared executable hash mismatch: {executable}")
+        observed.append({"name": name, "executable_path": executable, "observed_sha256": observed_hash})
     unsigned = {
         "schema": RECEIPT_SCHEMA,
         "result": "PASS",
