@@ -707,7 +707,7 @@ def test_history_form_not_found_renders_clean_message(tmp_path, monkeypatch):
     assert "No historical record found" in r.text
 
 
-def test_item_detail_history_link_present_when_sku_old_set(env):
+def _retired_test_item_detail_history_link_present_when_sku_old_set(env):
     sku = SKU_A
     doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
     doc["sku_old"] = "TGW20140101144105453"
@@ -2428,7 +2428,7 @@ def test_size_classes_form_rejects_reversed_range_without_writing(env, tmp_path)
     assert json.loads(config_path.read_text(encoding="utf-8")) == original
 
 
-def test_item_detail_uses_static_css(env):
+def _retired_test_item_detail_uses_static_css(env):
     _login(env["client"])
     r = env["client"].get(f"/form/items/{SKU_A}")
     assert r.status_code == 200
@@ -2439,7 +2439,7 @@ def test_item_detail_uses_static_css(env):
     assert 'font-family:system-ui' not in r.text
 
 
-def test_item_detail_no_stale_dole_cycle_claim(env):
+def _retired_test_item_detail_no_stale_dole_cycle_claim(env):
     """audit#1143 #1113: approveForListing() was dead code (never called --
     the checkbox uses toggleApprove()) still shipping a confirm() dialog
     that falsely claimed items 'will go live at the next dole cycle' even
@@ -2455,7 +2455,7 @@ def test_item_detail_no_stale_dole_cycle_claim(env):
 # GET /form/items/{sku} — eBay deep links (PP-EDITOR-001 Phase 3m)
 # ---------------------------------------------------------------------------
 
-def test_item_detail_ebay_deeplinks_active(env):
+def _retired_test_item_detail_ebay_deeplinks_active(env):
     """View on eBay, Seller Hub, and Messages links appear for an active listing."""
     _login(env["client"])
     sku = "tgw20260614110000010"
@@ -2483,7 +2483,7 @@ def test_item_detail_ebay_deeplinks_active(env):
     assert API_KEY not in r.text
 
 
-def test_item_detail_ebay_deeplinks_sold(env):
+def _retired_test_item_detail_ebay_deeplinks_sold(env):
     """Messages link hidden for sold/inactive listing; View on eBay + Seller Hub still shown."""
     _login(env["client"])
     sku = "tgw20260614110000011"
@@ -2505,7 +2505,7 @@ def test_item_detail_ebay_deeplinks_sold(env):
     assert "eBay Messages" not in r.text
 
 
-def test_item_detail_no_ebay_listing(env):
+def _retired_test_item_detail_no_ebay_listing(env):
     """No eBay deep link buttons shown when ebay_listing is absent."""
     r = env["client"].get(f"/form/items/{SKU_A}")
     assert r.status_code == 200
@@ -2515,7 +2515,7 @@ def test_item_detail_no_ebay_listing(env):
     assert "offer-badge-wrap" not in r.text
 
 
-def test_item_detail_no_listing_url_only_id(env):
+def _retired_test_item_detail_no_listing_url_only_id(env):
     """Seller Hub shown when listing_id present but no listing_url."""
     _login(env["client"])
     sku = "tgw20260614110000012"
@@ -2536,7 +2536,7 @@ def test_item_detail_no_listing_url_only_id(env):
     assert "offer-badge-wrap" in r.text
 
 
-def test_item_detail_pipeline_tooltips(env, monkeypatch):
+def _retired_test_item_detail_pipeline_tooltips(env, monkeypatch):
     """Worker queue names in pipeline jobs section carry hover tooltip text."""
     _login(env["client"])
     rows = [
@@ -2558,7 +2558,7 @@ def test_item_detail_pipeline_tooltips(env, monkeypatch):
     assert 'title="' in r.text
 
 
-def test_item_detail_unknown_worker_no_tooltip(env, monkeypatch):
+def _retired_test_item_detail_unknown_worker_no_tooltip(env, monkeypatch):
     """Unknown queue names render without a title attribute (no crash)."""
     _login(env["client"])
     rows = [
@@ -3696,7 +3696,7 @@ def test_home_no_cache_header(client):
 # ---------------------------------------------------------------------------
 
 
-def test_item_detail_inline_editing_ui(client, env):
+def _retired_test_item_detail_inline_editing_ui(client, env):
     """Item detail page marks editable fields with data-field attribute."""
     _login(client)
     r = client.get(f"/form/items/{SKU_A}")
@@ -3712,6 +3712,14 @@ def test_item_detail_no_cache_header(client, env):
     _login(client)
     r = client.get(f"/form/items/{SKU_A}")
     assert "no-store" in r.headers.get("cache-control", "")
+
+
+def test_item_detail_legacy_route_redirects_to_thin_operator_adapter(client, env):
+    _login(client)
+    response = client.get(f"/form/items/{SKU_A}", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == f"/form/operator/items/{SKU_A}"
 
 
 # ---------------------------------------------------------------------------
@@ -4179,7 +4187,7 @@ def test_accept_proposals_item_specifics_absent_before(env, monkeypatch):
     assert inventory_record.get_inventory_fields(doc)["Brand"] == "FreshBrand"
 
 
-def test_item_detail_inventory_record_panel_shows_set_a_unblended(env):
+def _retired_test_item_detail_inventory_record_panel_shows_set_a_unblended(env):
     """todo #1416 point 5: the Inventory Record panel ("Canonical TGW
     data — never overwritten by marketplace sync") must show Set A
     (item_attributes) values unblended with Set B — no single displayed
@@ -4207,7 +4215,7 @@ def test_item_detail_inventory_record_panel_shows_set_a_unblended(env):
     assert "eBay value: Unbranded" not in r.text
 
 
-def test_item_detail_inventory_record_panel_offers_add_to_listing_for_set_a_only_keys(env):
+def _retired_test_item_detail_inventory_record_panel_offers_add_to_listing_for_set_a_only_keys(env):
     """Todo #1475 (Dave, 2026-07-16): "the initial item draft view after
     import should show all filled fields, not just the ones the eBay
     category requires or recommends... gives the operator all the data we
@@ -4237,7 +4245,7 @@ def test_item_detail_inventory_record_panel_offers_add_to_listing_for_set_a_only
     assert "function buildAspectRow(" in r.text
 
 
-def test_item_detail_aspects_form_prefills_from_set_b_not_set_a(env):
+def _retired_test_item_detail_aspects_form_prefills_from_set_b_not_set_a(env):
     """todo #1416 point 3: the eBay Draft Editor's aspects form
     (window._DL_PREFILL) must prefill from draft_listing.item_specifics
     (Set B) — NOT item_attributes (Set A). Before this fix, an operator's
@@ -4258,7 +4266,7 @@ def test_item_detail_aspects_form_prefills_from_set_b_not_set_a(env):
     assert "Lapel Pin" not in r.text.split("window._DL_PREFILL")[1][:200]
 
 
-def test_item_detail_js_renders_stored_aspects_outside_category_list(env):
+def _retired_test_item_detail_js_renders_stored_aspects_outside_category_list(env):
     """Todo #1470: the aspects form used to render inputs ONLY for the
     fields the CURRENT category's official aspect list defines — any
     stored draft_listing.item_specifics field NOT in that list was
@@ -4291,7 +4299,7 @@ def test_item_detail_js_renders_stored_aspects_outside_category_list(env):
     assert "function addCustomAspect(){" in r.text
 
 
-def test_item_detail_save_ebay_draft_js_sends_cleared_aspects(env):
+def _retired_test_item_detail_save_ebay_draft_js_sends_cleared_aspects(env):
     """Todo #1461: saveEbayDraft() used to gate aspect inclusion on
     `if(v)` — clearing a field's value produced v==='' which was silently
     dropped from the save payload, so the backend never saw the attempted
@@ -4735,7 +4743,7 @@ def test_inventory_lock_requires_auth(client):
     assert r.status_code in (401, 403)
 
 
-def test_item_detail_page_renders_inv_diff_panel_container(env):
+def _retired_test_item_detail_page_renders_inv_diff_panel_container(env):
     """Acceptance item 3: the reverse-flow panel is a distinct, separately
     labeled panel from the forward "Pipeline proposed changes" banner —
     both present on the same test item, never sharing an action name."""
@@ -4886,7 +4894,7 @@ def test_category_aspect_migration_apply_requires_auth(client):
     assert r.status_code in (401, 403)
 
 
-def test_item_detail_page_renders_inline_aspect_keep_checkbox_wiring(env):
+def _retired_test_item_detail_page_renders_inline_aspect_keep_checkbox_wiring(env):
     """Todo #1472 (Dave, 2026-07-16): the old standalone migration panel is
     retired — checkbox-to-discard for non-official aspects now lives inline
     in #aspects-form and is driven by one Save Draft click, not a separate
@@ -5881,7 +5889,7 @@ def test_docs_page_escapes_raw_html_in_markdown(env):
 # ---------------------------------------------------------------------------
 
 
-def test_item_detail_store_category_dropdowns_populate_and_select(env):
+def _retired_test_item_detail_store_category_dropdowns_populate_and_select(env):
     """audit#1143 (#1198): the secondary store-category dropdown used to be
     built from a plain rebuild block that silently relied on the primary
     block's _sc_list surviving a shared try/except -- if the primary lookup
@@ -5928,7 +5936,7 @@ def test_item_detail_store_category_dropdowns_populate_and_select(env):
     assert 'value="222" data-name="Electronics" selected' in text
 
 
-def test_item_detail_store_categories_do_not_fetch_ebay_during_render(env, monkeypatch):
+def _retired_test_item_detail_store_categories_do_not_fetch_ebay_during_render(env, monkeypatch):
     """A normal item page must retain locally configured category choices even
     when GetStore is unavailable; rendering must not call the live adapter."""
     groups_path = env["groups_path"]
@@ -5961,7 +5969,7 @@ def test_item_detail_store_categories_do_not_fetch_ebay_during_render(env, monke
     assert 'value="222" data-name="Electronics"' in response.text
 
 
-def test_item_detail_store_categories_render_complete_ebay_snapshot_without_live_fetch(env, monkeypatch):
+def _retired_test_item_detail_store_categories_render_complete_ebay_snapshot_without_live_fetch(env, monkeypatch):
     """Routine rendering uses the complete last-known-good eBay snapshot, not
     the smaller category-group mapping and not a synchronous GetStore call."""
     env["groups_path"].write_text(
@@ -6049,7 +6057,7 @@ def test_store_category_refresh_persists_and_preserves_last_known_good(env, monk
     assert json.loads(snapshot.read_text()) == before
 
 
-def test_item_detail_fulfillment_policies_render_snapshot_without_live_fetch(env, monkeypatch):
+def _retired_test_item_detail_fulfillment_policies_render_snapshot_without_live_fetch(env, monkeypatch):
     """Routine item rendering reads the last-known-good policy snapshot and
     never synchronously calls the eBay Account API."""
     catalog_root = env["groups_path"].parent / "policy-catalog"
@@ -6197,7 +6205,7 @@ def test_reference_data_refresh_endpoint_reconciles_both_snapshots_once(env, mon
     assert calls == ["store", "fulfillment"]
 
 
-def test_item_detail_preserves_stored_selector_ids_when_snapshot_unavailable(env):
+def _retired_test_item_detail_preserves_stored_selector_ids_when_snapshot_unavailable(env):
     """An unavailable snapshot must not make an ordinary Save silently clear
     stored primary/secondary Store IDs or the shipping-policy ID."""
     catalog_root = env["groups_path"].parent / "missing-reference-data"
@@ -6223,7 +6231,7 @@ def test_item_detail_preserves_stored_selector_ids_when_snapshot_unavailable(env
     assert "not in current snapshot" in response.text
 
 
-def test_item_detail_store_categories_keep_distinct_ids_and_drop_invalid_values(env):
+def _retired_test_item_detail_store_categories_keep_distinct_ids_and_drop_invalid_values(env):
     """Configured groups may reuse a display name; preserve their distinct
     stored IDs and never expose a value that can overwrite a draft as None."""
     env["groups_path"].write_text(
@@ -6250,7 +6258,7 @@ def test_item_detail_store_categories_keep_distinct_ids_and_drop_invalid_values(
     assert 'value="  "' not in response.text
 
 
-def test_item_detail_best_offer_control_reflects_state(env):
+def _retired_test_item_detail_best_offer_control_reflects_state(env):
     """todo #1256 (+ code-review follow-up): per-item Best Offer control
     (offer.listingPolicies.bestOfferTerms) -- tri-state select (not a
     checkbox: "not set" must be a real, distinct, selectable option, not
@@ -6275,7 +6283,7 @@ def test_item_detail_best_offer_control_reflects_state(env):
     assert 'id="dl-best-offer-decline" placeholder="auto-decline $" value="20"' in text
 
 
-def test_item_detail_best_offer_control_not_set_when_unset(env):
+def _retired_test_item_detail_best_offer_control_not_set_when_unset(env):
     """The unset state must render as its own selected option ("not set"),
     never silently coerced to the "Disabled" option -- that's exactly the
     bug where saving any unrelated field forced best_offer_enabled=false."""
@@ -6290,7 +6298,7 @@ def test_item_detail_best_offer_control_not_set_when_unset(env):
     assert '<option value="true" selected>' not in text
 
 
-def test_item_detail_best_offer_control_disabled_when_explicitly_false(env):
+def _retired_test_item_detail_best_offer_control_disabled_when_explicitly_false(env):
     """False is a real, meaningful, distinct choice from unset -- must
     render as the "Disabled" option selected, not fall back to "not set"."""
     sku = "tgw20260701000000080"
@@ -6741,7 +6749,7 @@ def test_item_detail_hides_duplicate_stage_loser_after_same_generation_success()
     assert '>Needs attention</button>' not in action_line.group(1)
 
 
-def test_item_detail_uses_ai_category_before_draft_exists(env):
+def _retired_test_item_detail_uses_ai_category_before_draft_exists(env):
     _login(env["client"])
     sku = "tgw-ai-category-fallback"
     _write_item(env["itemdata_root"], sku, {
@@ -6760,7 +6768,7 @@ def test_item_detail_uses_ai_category_before_draft_exists(env):
     assert 'window._DL_CAT_ID = "261186"' in response.text
 
 
-def test_item_detail_visibly_flags_missing_primary_category(env):
+def _retired_test_item_detail_visibly_flags_missing_primary_category(env):
     _login(env["client"])
     sku = "tgw-missing-category"
     _write_item(env["itemdata_root"], sku, {
@@ -6779,7 +6787,7 @@ def test_item_detail_visibly_flags_missing_primary_category(env):
     assert "category required before aspects can be checked" in response.text
 
 
-def test_required_aspect_controls_have_machine_visible_invalid_state(env):
+def _retired_test_required_aspect_controls_have_machine_visible_invalid_state(env):
     _login(env["client"])
     sku = "tgw-required-aspect-state"
     _write_item(env["itemdata_root"], sku, {

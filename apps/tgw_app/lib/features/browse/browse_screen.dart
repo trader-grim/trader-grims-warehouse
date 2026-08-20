@@ -36,7 +36,8 @@ class _BrowseScreenState extends ConsumerState<BrowseScreen> {
     super.initState();
     _loadMore();
     _scrollController.addListener(() {
-      if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 200) {
+      if (_scrollController.position.pixels >=
+          _scrollController.position.maxScrollExtent - 200) {
         _loadMore();
       }
     });
@@ -109,7 +110,9 @@ class _BrowseScreenState extends ConsumerState<BrowseScreen> {
           title: const Text('Confirm'),
           content: Text(confirmMessage.replaceAll('{n}', '${skus.length}')),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel')),
             FilledButton(
               onPressed: () => Navigator.pop(ctx, true),
               child: const Text('Confirm'),
@@ -131,14 +134,16 @@ class _BrowseScreenState extends ConsumerState<BrowseScreen> {
       if (!mounted) return;
 
       final ok = result != null && (result['ok'] == true);
-      final count = result?['count'] ?? result?['marked']?.length ?? skus.length;
+      final count =
+          result?['count'] ?? result?['marked']?.length ?? skus.length;
       final errors = (result?['errors'] as List?)?.cast<String>() ?? [];
 
       String msg;
       if (ok || errors.isEmpty) {
         msg = '$action: $count item(s) done.';
       } else {
-        msg = '$action: $count done, ${errors.length} error(s): ${errors.take(3).join('; ')}';
+        msg =
+            '$action: $count done, ${errors.length} error(s): ${errors.take(3).join('; ')}';
       }
 
       ScaffoldMessenger.of(context)
@@ -158,7 +163,8 @@ class _BrowseScreenState extends ConsumerState<BrowseScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
-        ..showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red[700]));
+        ..showSnackBar(SnackBar(
+            content: Text('Error: $e'), backgroundColor: Colors.red[700]));
     }
   }
 
@@ -175,7 +181,8 @@ class _BrowseScreenState extends ConsumerState<BrowseScreen> {
                 : GridView.builder(
                     controller: _scrollController,
                     padding: const EdgeInsets.all(8.0),
-                    gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                    gridDelegate:
+                        const SliverGridDelegateWithMaxCrossAxisExtent(
                       maxCrossAxisExtent: 250,
                       mainAxisSpacing: 8,
                       crossAxisSpacing: 8,
@@ -195,25 +202,32 @@ class _BrowseScreenState extends ConsumerState<BrowseScreen> {
                             : () => widget.onItemTap(item.sku),
                         onLongPress: () => _toggleSelection(item.sku),
                         isSelected: isSelected,
-                        thumbnailUrl: ref.read(apiClientProvider).getThumbnailUrl(item.sku),
-                        isOnline: ref.watch(connectionStatusProvider) == ConnectionStatus.online,
-                        localPath: ref.read(offlineDbProvider).getLocalThumbnailPath(item.sku),
+                        thumbnailUrl: ref
+                            .read(apiClientProvider)
+                            .getThumbnailUrl(item.sku),
+                        isOnline: ref.watch(connectionStatusProvider) ==
+                            ConnectionStatus.online,
+                        localPath: ref
+                            .read(offlineDbProvider)
+                            .getLocalThumbnailPath(item.sku),
                       );
                     },
                   ),
           ),
         ),
-        if (_selectionMode) _BulkToolbar(
-          selectedCount: _selectedSkus.length,
-          onClear: _clearSelection,
-          onAction: _runBulkAction,
-        ),
+        if (_selectionMode)
+          _BulkToolbar(
+            selectedCount: _selectedSkus.length,
+            onClear: _clearSelection,
+            onAction: _runBulkAction,
+          ),
       ],
     );
   }
 
   Widget _buildFilters() {
-    final allSelected = _items.isNotEmpty && _selectedSkus.length == _items.length;
+    final allSelected =
+        _items.isNotEmpty && _selectedSkus.length == _items.length;
     return Padding(
       padding: const EdgeInsets.all(8.0),
       child: Column(
@@ -236,7 +250,9 @@ class _BrowseScreenState extends ConsumerState<BrowseScreen> {
               ),
               const SizedBox(width: 8),
               Tooltip(
-                message: allSelected ? 'Deselect all' : 'Select all (${_items.length})',
+                message: allSelected
+                    ? 'Deselect all'
+                    : 'Select all (${_items.length})',
                 child: OutlinedButton.icon(
                   onPressed: _items.isEmpty ? null : _selectAll,
                   icon: Icon(
@@ -244,11 +260,14 @@ class _BrowseScreenState extends ConsumerState<BrowseScreen> {
                     size: 18,
                   ),
                   label: Text(
-                    _selectedSkus.isEmpty ? 'Select' : '${_selectedSkus.length}/${_items.length}',
+                    _selectedSkus.isEmpty
+                        ? 'Select'
+                        : '${_selectedSkus.length}/${_items.length}',
                     style: const TextStyle(fontSize: 12),
                   ),
                   style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
                     minimumSize: const Size(0, 36),
                   ),
                 ),
@@ -265,13 +284,15 @@ class _BrowseScreenState extends ConsumerState<BrowseScreen> {
                     return DropdownButtonFormField<String>(
                       decoration: const InputDecoration(
                         labelText: 'Location',
-                        contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                        contentPadding:
+                            EdgeInsets.symmetric(horizontal: 10, vertical: 0),
                         border: OutlineInputBorder(),
                       ),
-                      value: _selectedLocation,
+                      initialValue: _selectedLocation,
                       items: [
                         const DropdownMenuItem(value: null, child: Text('All')),
-                        ...?(snapshot.data?.map((l) => DropdownMenuItem(value: l, child: Text(l)))),
+                        ...?(snapshot.data?.map(
+                            (l) => DropdownMenuItem(value: l, child: Text(l)))),
                       ],
                       onChanged: (val) {
                         setState(() => _selectedLocation = val);
@@ -286,13 +307,15 @@ class _BrowseScreenState extends ConsumerState<BrowseScreen> {
                 child: DropdownButtonFormField<String>(
                   decoration: const InputDecoration(
                     labelText: 'Status',
-                    contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 10, vertical: 0),
                     border: OutlineInputBorder(),
                   ),
-                  value: _selectedStatus,
+                  initialValue: _selectedStatus,
                   items: const [
                     DropdownMenuItem(value: null, child: Text('All')),
-                    DropdownMenuItem(value: 'In Stock', child: Text('In Stock')),
+                    DropdownMenuItem(
+                        value: 'In Stock', child: Text('In Stock')),
                     DropdownMenuItem(value: 'Draft', child: Text('Draft')),
                     DropdownMenuItem(value: 'Staged', child: Text('Staged')),
                     DropdownMenuItem(value: 'Active', child: Text('Active')),
@@ -396,7 +419,8 @@ class _BulkToolbar extends StatelessWidget {
                       color: Colors.red,
                       onTap: () => onAction(
                         'delete',
-                        confirmMessage: 'Delete {n} item(s) locally? This does not end eBay listings.',
+                        confirmMessage:
+                            'Delete {n} item(s) locally? This does not end eBay listings.',
                       ),
                     ),
                     const SizedBox(width: 6),
@@ -485,10 +509,12 @@ class _ItemCard extends StatelessWidget {
         File(localPath!),
         fit: BoxFit.cover,
         width: double.infinity,
-        errorBuilder: (context, error, stackTrace) => const Icon(Icons.broken_image),
+        errorBuilder: (context, error, stackTrace) =>
+            const Icon(Icons.broken_image),
       );
     } else {
-      imageWidget = const Center(child: Icon(Icons.offline_pin, color: Colors.grey));
+      imageWidget =
+          const Center(child: Icon(Icons.offline_pin, color: Colors.grey));
     }
 
     final String priceText = item.price.isNotEmpty ? '\$${item.price}' : '—';
@@ -518,7 +544,8 @@ class _ItemCard extends StatelessWidget {
                       color: cs.primary.withAlpha(40),
                       alignment: Alignment.topLeft,
                       padding: const EdgeInsets.all(4),
-                      child: Icon(Icons.check_circle, color: cs.primary, size: 22),
+                      child:
+                          Icon(Icons.check_circle, color: cs.primary, size: 22),
                     )
                   else
                     Positioned(
@@ -531,7 +558,8 @@ class _ItemCard extends StatelessWidget {
                           color: Colors.black38,
                           shape: BoxShape.circle,
                         ),
-                        child: const Icon(Icons.circle_outlined, size: 16, color: Colors.white70),
+                        child: const Icon(Icons.circle_outlined,
+                            size: 16, color: Colors.white70),
                       ),
                     ),
                   if (_missingPhoto)
@@ -544,7 +572,8 @@ class _ItemCard extends StatelessWidget {
                           color: Colors.black54,
                           borderRadius: BorderRadius.circular(4),
                         ),
-                        child: const Icon(Icons.photo_camera_outlined, size: 14, color: Colors.amber),
+                        child: const Icon(Icons.photo_camera_outlined,
+                            size: 14, color: Colors.amber),
                       ),
                     ),
                 ],
@@ -559,7 +588,8 @@ class _ItemCard extends StatelessWidget {
                     item.title,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                    style: const TextStyle(
+                        fontWeight: FontWeight.bold, fontSize: 12),
                   ),
                   const SizedBox(height: 4),
                   Row(
@@ -567,12 +597,18 @@ class _ItemCard extends StatelessWidget {
                     children: [
                       Flexible(
                         child: Chip(
-                          label: Text(item.location, style: const TextStyle(fontSize: 10)),
+                          label: Text(item.location,
+                              style: const TextStyle(fontSize: 10)),
                           padding: EdgeInsets.zero,
-                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          materialTapTargetSize:
+                              MaterialTapTargetSize.shrinkWrap,
                         ),
                       ),
-                      Text(priceText, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue, fontSize: 12)),
+                      Text(priceText,
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.blue,
+                              fontSize: 12)),
                     ],
                   ),
                   const SizedBox(height: 4),
@@ -600,7 +636,9 @@ class _EbayStatusBadge extends StatelessWidget {
     final oid = item.ebayOfferId;
     if (oid != null && oid.isNotEmpty) {
       final rat = item.ebayReadyAt;
-      return (rat != null && rat.isNotEmpty) ? _EbayState.ready : _EbayState.staged;
+      return (rat != null && rat.isNotEmpty)
+          ? _EbayState.ready
+          : _EbayState.staged;
     }
     if (item.hasDraft) return _EbayState.needsReview;
     return _EbayState.notListed;
@@ -641,7 +679,8 @@ class _EbayStatusBadge extends StatelessWidget {
         label,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold),
+        style:
+            TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold),
       ),
     );
 
@@ -649,8 +688,11 @@ class _EbayStatusBadge extends StatelessWidget {
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: () async {
-          final url = Uri.parse('https://www.ebay.com/itm/${item.ebayListingId}');
-          if (await canLaunchUrl(url)) await launchUrl(url, mode: LaunchMode.externalApplication);
+          final url =
+              Uri.parse('https://www.ebay.com/itm/${item.ebayListingId}');
+          if (await canLaunchUrl(url)) {
+            await launchUrl(url, mode: LaunchMode.externalApplication);
+          }
         },
         child: badge,
       );

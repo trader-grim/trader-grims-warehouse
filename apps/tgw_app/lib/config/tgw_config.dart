@@ -11,16 +11,21 @@ class TgwConfig {
 
   static String _file(String key) {
     switch (key) {
-      case 'bearer_token': return 'api-key';
-      case 'base_url':     return 'base-url';
-      case 'db_path':      return 'db-path';
-      case 'thumbnail_dir':return 'thumbnail-dir';
-      default:             return '$key.cfg';
+      case 'bearer_token':
+        return 'api-key';
+      case 'base_url':
+        return 'base-url';
+      case 'db_path':
+        return 'db-path';
+      case 'thumbnail_dir':
+        return 'thumbnail-dir';
+      default:
+        return '$key.cfg';
     }
   }
 
   static Future<String?> read(String key) async {
-    final f = File('${_dir}/${_file(key)}');
+    final f = File('$_dir/${_file(key)}');
     if (await f.exists()) return (await f.readAsString()).trim();
     return null;
   }
@@ -28,6 +33,6 @@ class TgwConfig {
   static Future<void> write(String key, String value) async {
     final dir = Directory(_dir);
     if (!await dir.exists()) await dir.create(recursive: true);
-    await File('${_dir}/${_file(key)}').writeAsString(value);
+    await File('$_dir/${_file(key)}').writeAsString(value);
   }
 }
