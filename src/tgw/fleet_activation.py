@@ -77,17 +77,24 @@ def apply_fleet_configuration(
         materialization = materialize()
         if materialization.get("status") != "MATERIALIZED_NOT_ACTIVATED":
             raise FleetActivationError("adapter materialization was not applied")
-    except Exception:
-        if materialization is not None:
-            rollback_materialization(materialization)
-        for path, backup in reversed(backups):
-            if path.exists() and not path.is_symlink():
-                path.unlink()
-            if backup.exists() and not backup.is_symlink():
-                os.replace(backup, path)
-        for staged in staged_paths:
-            if staged.exists() and not staged.is_symlink():
-                staged.unlink()
+    except Exception as original:
+        rollback_error = None
+        try:
+            if materialization is not None:
+                rollback_materialization(materialization)
+        except Exception as exc:  # preserve original while always restoring configs
+            rollback_error = exc
+        finally:
+            for path, backup in reversed(backups):
+                if path.exists() and not path.is_symlink():
+                    path.unlink()
+                if backup.exists() and not backup.is_symlink():
+                    os.replace(backup, path)
+            for staged in staged_paths:
+                if staged.exists() and not staged.is_symlink():
+                    staged.unlink()
+        if rollback_error is not None:
+            raise FleetActivationError(f"materialization rollback failed: {rollback_error}") from original
         raise
     return {
         "schema": "tgw-w18-fleet-configuration-transaction/v1",
@@ -109,7 +116,11 @@ def rollback_fleet_configuration(receipt: Mapping[str, Any], *, rollback_materia
         if not isinstance(entry, dict) or set(entry) != {"path", "previous_sha256", "current_sha256", "rollback"}:
             raise FleetActivationError("fleet configuration rollback entry is invalid")
         path, backup = Path(entry["path"]), Path(entry["rollback"])
-        if _sha256(path.read_bytes()) != entry["current_sha256"] or _sha256(backup.read_bytes()) != entry["previous_sha256"]:
+        try:
+            matches = _sha256(path.read_bytes()) == entry["current_sha256"] and _sha256(backup.read_bytes()) == entry["previous_sha256"]
+        except OSError as exc:
+            raise FleetActivationError(f"fleet configuration rollback is unavailable: {path}") from exc
+        if not matches:
             raise FleetActivationError(f"fleet configuration rollback binding changed: {path}")
         os.replace(path, path.with_name(f".{path.name}.tgw-w18-rolled-back"))
         os.replace(backup, path)

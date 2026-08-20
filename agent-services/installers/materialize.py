@@ -239,7 +239,7 @@ def materialize_fleet(
             raise InstallError(f"actor adapter conflict: {actor}")
         plans[actor] = states
 
-    created: list[Path] = []
+    created: list[tuple[Path, Path]] = []
     backups: list[tuple[Path, Path]] = []
     staged: list[tuple[Adapter, Path, str]] = []
     try:
@@ -264,9 +264,9 @@ def materialize_fleet(
                     os.replace(adapter.destination, backup)
                     backups.append((adapter.destination, backup))
                 os.replace(staged_path, adapter.destination)
-                created.append(adapter.destination)
+                created.append((adapter.destination, adapter.source))
     except Exception:
-        for destination in reversed(created):
+        for destination, _source in reversed(created):
             if destination.is_symlink():
                 destination.unlink()
         for destination, backup in reversed(backups):
@@ -303,10 +303,10 @@ def materialize_fleet(
         "actors": actor_actions,
         "rollback_journal": [
             {
-                "destination": str(destination),
+                "destination": str(destination), "materialized_source": str(source),
                 "previous": next((str(backup) for replaced, backup in backups if replaced == destination), None),
             }
-            for destination in created
+            for destination, source in created
         ],
         "activation": "declarative-only",
     }
@@ -320,11 +320,14 @@ def rollback_fleet(materialization: dict[str, Any]) -> None:
     if not isinstance(journal, list):
         raise InstallError("fleet rollback journal is invalid")
     for entry in reversed(journal):
-        if not isinstance(entry, dict) or set(entry) != {"destination", "previous"}:
+        if not isinstance(entry, dict) or set(entry) != {"destination", "materialized_source", "previous"}:
             raise InstallError("fleet rollback journal entry is invalid")
         destination = Path(entry["destination"])
         if entry["previous"] is not None and not isinstance(entry["previous"], str):
             raise InstallError("fleet rollback journal entry is invalid")
+        source = Path(entry["materialized_source"])
+        if not isinstance(entry["materialized_source"], str) or not destination.is_symlink() or destination.resolve(strict=False) != source:
+            raise InstallError("fleet rollback target changed")
         if destination.is_symlink():
             destination.unlink()
         if entry["previous"] is not None:

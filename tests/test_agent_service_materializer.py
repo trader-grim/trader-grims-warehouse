@@ -250,6 +250,21 @@ def test_fleet_replaces_old_generation_and_retains_exact_rollback_links(tmp_path
     assert destination.resolve() == old_skill
 
 
+def test_fleet_rollback_refuses_a_newer_link_generation(tmp_path):
+    home, project = tmp_path / "home", tmp_path / "project"
+    result = materialize_fleet(
+        {"codex": {"home": home, "project": project}}, source_root=ROOT,
+        contracts={"codex": _ready_contract("codex")}, trusted_contract_public_key=SIGNER_PUBLIC_KEY, apply=True,
+    )
+    destination = home / ".codex/skills/tgw-plan"
+    destination.unlink()
+    newer = tmp_path / "newer"
+    newer.mkdir()
+    destination.symlink_to(newer, target_is_directory=True)
+    with pytest.raises(InstallError, match="target changed"):
+        rollback_fleet(result)
+
+
 def test_fleet_replacement_failure_restores_old_generation(tmp_path, monkeypatch):
     home, project = tmp_path / "home", tmp_path / "project"
     old_root = tmp_path / "old"

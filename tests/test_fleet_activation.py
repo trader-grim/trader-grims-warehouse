@@ -45,3 +45,15 @@ def test_materialization_failure_restores_configurations(tmp_path):
             rollback_materialization=lambda _: None,
         )
     assert config.read_bytes() == b"old"
+
+
+def test_rollback_callback_failure_still_restores_configurations(tmp_path):
+    config = tmp_path / "config"
+    config.write_bytes(b"old")
+    with pytest.raises(FleetActivationError, match="rollback failed"):
+        apply_fleet_configuration(
+            {config: {"expected_sha256": _hash(b"old"), "desired": b"new"}},
+            materialize=lambda: {"status": "wrong"},
+            rollback_materialization=lambda _: (_ for _ in ()).throw(RuntimeError("rollback")),
+        )
+    assert config.read_bytes() == b"old"
