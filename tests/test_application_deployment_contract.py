@@ -13,6 +13,7 @@ from tgw.application_deployment_contract import (
     PLAN_COMMIT,
     PROJECTION_PATH,
     SCHEMA,
+    SUCCESSOR_SCHEMA,
     SOLUTION_HASH,
     STAGES,
     ApplicationDeploymentContractError,
@@ -176,6 +177,35 @@ def test_contract_binds_application_not_nix_masquerade_and_exact_stage_order():
         mutate(bad)
         with pytest.raises(ApplicationDeploymentContractError):
             validate_application_deployment_contract(bad)
+
+
+def test_successor_contract_uses_approved_w13_w18_plan_without_f0_constants():
+    value = _contract()
+    value["schema"] = SUCCESSOR_SCHEMA
+    value["authorization"].update({
+        "phases": ["W13", "W14", "W15", "W16", "W17", "W18"],
+        "retirement_condition": "W18:verified-and-resumed",
+    })
+    value["authorization"]["operator_instruction"]["ref"] = "instruction:w13-w18"
+    value["plan"].update({
+        "commit": "1" * 40, "solution_hash": "sha256:" + "2" * 64,
+        "closure_hash": "sha256:" + "3" * 64, "work_unit": "W13-W18",
+        "authorization_ref": "instruction:w13-w18",
+        "projection": {
+            "release_path": "agent-services/plan-runtime/GOVERNED-EXECUTION-PLATFORM-111111111111.json",
+            "content_sha256": "sha256:" + "4" * 64,
+        },
+    })
+    value["contract_hash"] = _hash({key: item for key, item in value.items() if key != "contract_hash"})
+    validated = validate_application_deployment_contract(value)
+    assert validated["plan"]["commit"] == "1" * 40
+    config = _runtime_config(value)
+    config.update({
+        "plan_approved_commit": value["plan"]["commit"],
+        "plan_approved_solution_hash": value["plan"]["solution_hash"],
+        "plan_projection_path": value["deployment"]["immutable_generation_path"] + "/" + value["plan"]["projection"]["release_path"],
+    })
+    _validate_runtime_config(json.dumps(config).encode(), value)
 
 
 def test_projection_binds_semantic_solution_separately_from_canonical_content_digest():

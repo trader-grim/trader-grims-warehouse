@@ -39,6 +39,7 @@ from tgw.plan_runtime_projection import validate_projection
 from tgw.release_installer import ReleaseError, runtime_manifest_identity
 
 SCHEMA = "tgw-governed-application-bootstrap-contract/v2"
+SUCCESSOR_SCHEMA = "tgw-governed-application-bootstrap-contract/v3"
 EFFECT_SCHEMA = "tgw-approval-application-bootstrap/v1"
 PLAN_COMMIT = "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99"
 SOLUTION_HASH = "sha256:1c3684135769e5dcabcaf130c55df160a4cecc0d3ebcee6ccd129ab97cdd709b"
@@ -142,8 +143,9 @@ def validate_application_deployment_contract(value: Mapping[str, Any]) -> dict[s
         },
         "application deployment contract",
     )
-    if contract["schema"] != SCHEMA:
+    if contract["schema"] not in {SCHEMA, SUCCESSOR_SCHEMA}:
         raise ApplicationDeploymentContractError("application deployment contract schema is invalid")
+    successor = contract["schema"] == SUCCESSOR_SCHEMA
 
     authorization = _exact(
         contract["authorization"],
@@ -173,11 +175,13 @@ def validate_application_deployment_contract(value: Mapping[str, Any]) -> dict[s
         raise ApplicationDeploymentContractError("application authorization time is invalid") from exc
     if observed.tzinfo is None or expires.tzinfo is None or expires <= observed:
         raise ApplicationDeploymentContractError("application authorization observation/expiry is invalid")
+    expected_phases = ["W13", "W14", "W15", "W16", "W17", "W18"] if successor else ["W09"]
+    expected_retirement = "W18:verified-and-resumed" if successor else "W10:canonical-gate-operational"
     if (
         authorization["capabilities"] != ["coding.governed-execution@1"]
-        or authorization["phases"] != ["W09"]
+        or authorization["phases"] != expected_phases
         or authorization["effect_set"] != ["approval-platform-bootstrap-deployment"]
-        or authorization["retirement_condition"] != "W10:canonical-gate-operational"
+        or authorization["retirement_condition"] != expected_retirement
         or authorization["deployment_uses"] != 1
     ):
         raise ApplicationDeploymentContractError("application authorization scope is invalid")
@@ -255,16 +259,26 @@ def validate_application_deployment_contract(value: Mapping[str, Any]) -> dict[s
         },
         "application Plan",
     )
-    if (plan["commit"], plan["solution_hash"], plan["closure_hash"]) != (PLAN_COMMIT, SOLUTION_HASH, CLOSURE_HASH):
+    if not successor and (plan["commit"], plan["solution_hash"], plan["closure_hash"]) != (PLAN_COMMIT, SOLUTION_HASH, CLOSURE_HASH):
         raise ApplicationDeploymentContractError("application Plan does not match approved f0 solution")
-    if _GIT.fullmatch(str(plan["tree"])) is None or plan["work_unit"] != "W09":
+    for field in ("commit", "tree"):
+        if _GIT.fullmatch(str(plan[field])) is None:
+            raise ApplicationDeploymentContractError("application Plan Git identity is invalid")
+    for field in ("solution_hash", "closure_hash"):
+        _sha(plan[field], f"application Plan {field}")
+    if plan["work_unit"] != ("W13-W18" if successor else "W09"):
         raise ApplicationDeploymentContractError("application Plan tree/work unit is invalid")
     _sha(plan["graph_hash"], "application Plan graph hash")
     _identity(plan["authorization_ref"], "Plan authorization reference")
     if plan["authorization_ref"] != instruction["ref"]:
         raise ApplicationDeploymentContractError("Plan authorization and protected operator instruction differ")
     projection = _exact(plan["projection"], {"release_path", "content_sha256"}, "runtime projection")
-    _contained_path(projection["release_path"], PROJECTION_PATH, "runtime projection")
+    projection_path = str(projection["release_path"])
+    if successor:
+        expected_projection = f"agent-services/plan-runtime/GOVERNED-EXECUTION-PLATFORM-{str(plan['commit'])[:12]}.json"
+        _contained_path(projection_path, expected_projection, "runtime projection")
+    else:
+        _contained_path(projection_path, PROJECTION_PATH, "runtime projection")
     _sha(projection["content_sha256"], "runtime projection hash")
 
     runtime = _exact(
@@ -631,17 +645,20 @@ def _artifact(sink: PinnedGitReceiptSink, pointer: Mapping[str, str]) -> dict[st
     return value
 
 
-def _validate_projection(raw: bytes) -> None:
+def _validate_projection(
+    raw: bytes, *, plan_commit: str = PLAN_COMMIT,
+    solution_hash: str = SOLUTION_HASH, closure_hash: str = CLOSURE_HASH,
+) -> None:
     try:
         projection = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ApplicationDeploymentContractError("runtime projection is invalid JSON") from exc
     try:
-        projection = validate_projection(projection, expected_plan_commit=PLAN_COMMIT)
+        projection = validate_projection(projection, expected_plan_commit=plan_commit)
     except ValueError as exc:
         raise ApplicationDeploymentContractError("runtime projection canonical binding is invalid") from exc
     solution = projection["solution"]
-    if solution.get("solution_hash") != SOLUTION_HASH or solution.get("closure_hash") != CLOSURE_HASH:
+    if solution.get("solution_hash") != solution_hash or solution.get("closure_hash") != closure_hash:
         raise ApplicationDeploymentContractError("runtime projection differs from retained Plan solution")
 
 
@@ -654,11 +671,13 @@ def _validate_runtime_config(raw: bytes, contract: Mapping[str, Any]) -> None:
         raise ApplicationDeploymentContractError("operational config is invalid")
     runtime = contract["runtime_config"]
     deployment = contract["deployment"]
+    plan = contract["plan"]
+    projection_path = plan["projection"]["release_path"]
     exact = {
         "schema": runtime["config_schema"],
-        "plan_approved_commit": PLAN_COMMIT,
-        "plan_approved_solution_hash": SOLUTION_HASH,
-        "plan_projection_path": deployment["immutable_generation_path"] + "/" + PROJECTION_PATH,
+        "plan_approved_commit": plan["commit"],
+        "plan_approved_solution_hash": plan["solution_hash"],
+        "plan_projection_path": deployment["immutable_generation_path"] + "/" + projection_path,
         "plan_projection_root": deployment["immutable_generation_path"],
         "plan_authority_executor_principal": runtime["executor_principal"],
         "plan_authority_executor_credential_env": runtime["executor_credential_env"],
@@ -1005,9 +1024,15 @@ class PinnedApplicationDeploymentContractResolver:
                 embedded_commit = archive_file.pax_headers.get("comment")
         except tarfile.TarError as exc:
             raise ApplicationDeploymentContractError("candidate archive is not a readable release archive") from exc
-        plan_commit, plan_tree = self._plan_objects.identity(PLAN_COMMIT)
-        projection_bytes = self._candidate_objects.show(commit, PROJECTION_PATH)
-        _validate_projection(projection_bytes)
+        expected_plan_commit = contract["plan"]["commit"]
+        projection_path = contract["plan"]["projection"]["release_path"]
+        plan_commit, plan_tree = self._plan_objects.identity(expected_plan_commit)
+        projection_bytes = self._candidate_objects.show(commit, projection_path)
+        _validate_projection(
+            projection_bytes, plan_commit=expected_plan_commit,
+            solution_hash=contract["plan"]["solution_hash"],
+            closure_hash=contract["plan"]["closure_hash"],
+        )
         _validate_runtime_config(config_bytes, contract)
         predecessor_unsigned = dict(predecessor)
         predecessor_receipt_hash = predecessor_unsigned.pop("receipt_hash", None)
@@ -1051,8 +1076,8 @@ class PinnedApplicationDeploymentContractResolver:
             raise ApplicationDeploymentContractError("W09 operator authorization is not current at dispatch")
         if (
             contract["contract_hash"] != contract_hash
-            or authority["approved_commit"] != PLAN_COMMIT
-            or plan_commit != PLAN_COMMIT
+            or authority["approved_commit"] != expected_plan_commit
+            or plan_commit != expected_plan_commit
             or contract["plan"]["tree"] != plan_tree
             or contract["plan"]["graph_hash"] != evidence["plan_graph_hash"]
             or admission.get("allowed") is not True
