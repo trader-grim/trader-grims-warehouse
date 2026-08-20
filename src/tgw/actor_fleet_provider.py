@@ -401,13 +401,31 @@ class ActorFleetProvider:
                     "destination": binding["destination"],
                 } for name, binding in sorted(by_kind.get("mcp", {}).items())]
                 environment_binding = by_kind.get("environment", {}).get("environment-catalog")
-                if environment_binding is None:
-                    raise ActorFleetError("actor environment catalog binding is missing")
+                bootstrap_binding = by_kind.get("bootstrap", {}).get("bootstrap-receipt")
+                if environment_binding is None or bootstrap_binding is None:
+                    raise ActorFleetError("actor environment or bootstrap binding is missing")
                 environment = _read_json(Path(environment_binding["source"]), "actor environment catalog")
+                bootstrap = _read_json(Path(bootstrap_binding["source"]), "actor bootstrap receipt")
+                unsigned_bootstrap = dict(bootstrap)
+                claimed_bootstrap = unsigned_bootstrap.pop("receipt_hash", None)
                 profile = environment.get("profiles", {}).get(contract.get("profile"), {})
                 actor_declaration = environment.get("actors", {}).get(actor, {})
                 if (
                     _hash(environment) != contract.get("catalog_hash")
+                    or claimed_bootstrap != _hash(unsigned_bootstrap)
+                    or bootstrap.get("status") != "READY"
+                    or bootstrap.get("actor") != actor
+                    or bootstrap.get("generation") != value["successor_generation"]
+                    or bootstrap.get("catalog_hash") != value["revisions"]["catalog"]
+                    or bootstrap.get("plan") != {
+                        "commit": value["revisions"]["plan"],
+                        "solution_hash": value["revisions"]["solution"],
+                    }
+                    or bootstrap.get("code_graph", {}).get("commit") != value["revisions"]["source"]
+                    or bootstrap.get("launcher") != local.get("launcher")
+                    or bootstrap.get("skills") != local.get("skills")
+                    or bootstrap.get("hooks") != local.get("hooks")
+                    or bootstrap.get("mcp") != local.get("mcp")
                     or contract.get("plan") != {
                         "commit": value["revisions"]["plan"],
                         "solution_hash": value["revisions"]["solution"],

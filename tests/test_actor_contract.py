@@ -5,7 +5,13 @@ from copy import deepcopy
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from tgw.actor_contract import ActorContractError, actor_contract_public_key, compile_actor_contract, sign_actor_contract
+from tgw.actor_contract import (
+    ActorContractError,
+    actor_contract_public_key,
+    compile_actor_contract,
+    sign_actor_contract,
+    verify_signed_actor_contract,
+)
 
 HASH = "sha256:" + "a" * 64
 COMMIT = "b" * 40
@@ -62,6 +68,12 @@ def test_contract_signature_binds_the_exact_compiled_receipt():
     signed = sign_actor_contract(_compile(), signing_private_key=signer)
     assert signed["issuer_public_key"] == actor_contract_public_key(signer)
     assert isinstance(signed["signature"], str)
+    assert verify_signed_actor_contract(
+        signed, trusted_public_key=actor_contract_public_key(signer),
+    )["receipt_hash"] == signed["receipt_hash"]
+    signed["plan"]["commit"] = "c" * 40
+    with pytest.raises(ActorContractError, match="hash differs"):
+        verify_signed_actor_contract(signed, trusted_public_key=actor_contract_public_key(signer))
 
 
 def test_contract_accepts_nix_sri_flake_lock_hash():

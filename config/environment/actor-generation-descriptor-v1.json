@@ -1,0 +1,41 @@
+{
+  "schema": "tgw-actor-generation-descriptor/v1",
+  "actors": {
+    "claude": {
+      "profile": "development",
+      "home": "/home/claude",
+      "project": "/home/claude/tgw-project",
+      "bindings": [
+        {"kind": "skill", "name": "tgw-plan", "source": "agent-services/skills/tgw-plan", "destination": "/home/claude/.claude/skills/tgw-plan"},
+        {"kind": "skill", "name": "tgw-review", "source": "agent-services/skills/tgw-review", "destination": "/home/claude/.claude/skills/tgw-review"},
+        {"kind": "mcp", "name": "tgw-context", "source": "agent-services/harnesses/claude/tgw-context-policy.json", "destination": "/home/claude/.claude/.mcp.json"},
+        {"kind": "launcher", "name": "launcher", "source": "scripts/tgw_actor_startup.py", "destination": "/home/claude/.local/bin/tgw-actor"},
+        {"kind": "bootstrap", "name": "bootstrap-receipt", "source": "agent-services/actor-bootstrap/bootstrap-policy-v1.json", "destination": "/home/claude/.tgw/bootstrap.json"}
+      ]
+    },
+    "codex": {
+      "profile": "development",
+      "home": "/home/codex",
+      "project": "/home/codex/tgw-project",
+      "bindings": [
+        {"kind": "skill", "name": "tgw-plan", "source": "agent-services/skills/tgw-plan", "destination": "/home/codex/.tgw/codex-home/skills/tgw-plan"},
+        {"kind": "skill", "name": "tgw-review", "source": "agent-services/skills/tgw-review", "destination": "/home/codex/.tgw/codex-home/skills/tgw-review"},
+        {"kind": "mcp", "name": "tgw-context", "source": "agent-services/harnesses/codex/tgw-context-policy.json", "destination": "/home/codex/.tgw/codex-home/config.toml"},
+        {"kind": "launcher", "name": "launcher", "source": "scripts/tgw_actor_startup.py", "destination": "/home/codex/.local/bin/tgw-actor"},
+        {"kind": "bootstrap", "name": "bootstrap-receipt", "source": "agent-services/actor-bootstrap/bootstrap-policy-v1.json", "destination": "/home/codex/.tgw/bootstrap.json"}
+      ]
+    },
+    "deepseek": {
+      "profile": "development",
+      "home": "/home/deepseek",
+      "project": "/home/deepseek/tgw-project",
+      "bindings": [
+        {"kind": "skill", "name": "tgw-plan", "source": "agent-services/skills/tgw-plan", "destination": "/home/deepseek/.dsh/skills/tgw-plan"},
+        {"kind": "skill", "name": "tgw-review", "source": "agent-services/skills/tgw-review", "destination": "/home/deepseek/.dsh/skills/tgw-review"},
+        {"kind": "mcp", "name": "tgw-context", "source": "agent-services/harnesses/deepseek/tgw-context-policy.json", "destination": "/home/deepseek/.dsh/mcp.json"},
+        {"kind": "launcher", "name": "launcher", "source": "scripts/tgw_actor_startup.py", "destination": "/home/deepseek/.local/bin/tgw-actor"},
+        {"kind": "bootstrap", "name": "bootstrap-receipt", "source": "agent-services/actor-bootstrap/bootstrap-policy-v1.json", "destination": "/home/deepseek/.tgw/bootstrap.json"}
+      ]
+    }
+  }
+}

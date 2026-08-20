@@ -387,6 +387,13 @@ def _complete_bundle(tmp_path):
         {**body, "receipt_hash": "sha256:" + hashlib.sha256(encoded).hexdigest()},
         signing_private_key=SIGNER,
     )
+    contract_path = source / "actor-contract.json"
+    contract_path.write_text(json.dumps(contract, sort_keys=True, separators=(",", ":")) + "\n")
+    bindings.append({
+        "kind": "contract", "name": "actor-contract", "source": str(contract_path),
+        "destination": str(home / ".tgw/actor-contract.json"),
+        "sha256": file_hash(contract_path),
+    })
     bundle = {
         "schema": "tgw-complete-actor-contract-bundle/v1",
         "generation": "sha256:" + "b" * 64,
@@ -409,7 +416,7 @@ def test_complete_actor_contract_materializes_every_declared_boundary(tmp_path):
     )
     assert applied["status"] == "COMPLETE_MATERIALIZED_NOT_SERVICE_ACTIVATED"
     assert {item["kind"] for item in applied["bindings"]} == {
-        "skill", "mcp", "launcher", "bootstrap", "environment",
+        "skill", "mcp", "launcher", "bootstrap", "environment", "contract",
     }
     assert all(Path(item["destination"]).is_symlink() for item in applied["bindings"])
     assert applied["activation"] == "required-in-current-quiet-refresh-transaction"

@@ -1,0 +1,6 @@
+{
+  "schema": "tgw-mcp-registration-policy/v1",
+  "harness": "deepseek",
+  "endpoint": "tgw-context",
+  "fallback": "forbidden"
+}

@@ -107,25 +107,38 @@ def _fixture(tmp_path):
     environment_path.write_text(json.dumps(environment))
     catalog = _hash(environment)
     launcher_hash = _file_hash(release / "launcher")
-    bootstrap_hash = _file_hash(release / "bootstrap.json")
     skill_hash = _tree_hash(release / "skill")
     mcp_hash = _file_hash(release / "mcp.json")
     mcp_destination = home / ".mcp/tgw-context.json"
+    launcher_local = {"path": str(destination), "sha256": launcher_hash}
+    mcp_local = {
+        "endpoints": ["tgw-context"],
+        "binding_hash": _hash([{
+            "endpoint": "tgw-context", "source_sha256": mcp_hash,
+            "destination": str(mcp_destination),
+        }]),
+    }
+    bootstrap_body = {
+        "schema": "tgw-actor-bootstrap-receipt/v1", "status": "READY",
+        "actor": actor, "profile": "development", "generation": generation_hash,
+        "catalog_hash": catalog,
+        "plan": {"commit": plan_commit, "solution_hash": solution},
+        "code_graph": {"commit": source_commit, "tree": "d" * 40, "freshness_hash": "sha256:" + "3" * 64},
+        "declared_policy_hash": "sha256:" + "4" * 64,
+        "launcher": launcher_local, "skills": {"tgw-plan": skill_hash}, "hooks": {},
+        "mcp": mcp_local,
+    }
+    (release / "bootstrap.json").write_text(json.dumps({**bootstrap_body, "receipt_hash": _hash(bootstrap_body)}))
+    bootstrap_hash = _file_hash(release / "bootstrap.json")
     contract = {
         "actor": actor, "catalog_hash": catalog,
         "plan": {"commit": plan_commit, "solution_hash": solution},
         "code_graph": {"commit": source_commit}, "profile": "development",
         "local": {
             "bootstrap_receipt_hash": bootstrap_hash,
-            "launcher": {"path": str(destination), "sha256": launcher_hash},
+            "launcher": launcher_local,
             "skills": {"tgw-plan": skill_hash}, "hooks": {},
-            "mcp": {
-                "endpoints": ["tgw-context"],
-                "binding_hash": _hash([{
-                    "endpoint": "tgw-context", "source_sha256": mcp_hash,
-                    "destination": str(mcp_destination),
-                }]),
-            },
+            "mcp": mcp_local,
         },
     }
     bindings = [

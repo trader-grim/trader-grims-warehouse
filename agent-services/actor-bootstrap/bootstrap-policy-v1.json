@@ -1,0 +1,6 @@
+{
+  "schema": "tgw-actor-bootstrap-policy/v1",
+  "fallback": "forbidden",
+  "authority": "exact-signed-actor-contract",
+  "on_mismatch": "quarantine"
+}

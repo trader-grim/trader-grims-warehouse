@@ -74,6 +74,48 @@ def _binding_hash(bindings: list[dict[str, str]]) -> str:
     return _hash(sorted(bindings, key=lambda item: item["endpoint"]))
 
 
+def _mcp_registration(
+    *, policy_path: Path, actor: str, endpoint: str, launcher: str,
+    generation: str, plan_commit: str, solution_hash: str,
+    source_commit: str, catalog_hash: str, trusted_public_key: str,
+) -> bytes:
+    policy = _read_json(policy_path, f"MCP registration policy {actor}:{endpoint}")
+    if (
+        set(policy) != {"schema", "harness", "endpoint", "fallback"}
+        or policy.get("schema") != "tgw-mcp-registration-policy/v1"
+        or policy.get("harness") not in {"codex", "claude", "deepseek", "generic"}
+        or policy.get("endpoint") != endpoint
+        or policy.get("fallback") != "forbidden"
+    ):
+        raise ActorGenerationError(f"MCP registration policy is invalid: {actor}:{endpoint}")
+    environment = {
+        "TGW_ACTOR_CONTRACT_PUBLIC_KEY": trusted_public_key,
+        "TGW_ACTOR_EXPECTED_CATALOG_HASH": catalog_hash,
+        "TGW_ACTOR_EXPECTED_GENERATION": generation,
+        "TGW_ACTOR_EXPECTED_PLAN_COMMIT": plan_commit,
+        "TGW_ACTOR_EXPECTED_PLAN_SOLUTION": solution_hash,
+        "TGW_ACTOR_EXPECTED_SOURCE_COMMIT": source_commit,
+        "TGW_ACTOR_MCP_POLICY_HASH": _file_hash(policy_path),
+    }
+    if policy["harness"] == "codex":
+        lines = [
+            f"[mcp_servers.{json.dumps(endpoint)}]",
+            f"command = {json.dumps(launcher)}",
+            'args = ["--context-mcp"]',
+            "",
+            f"[mcp_servers.{json.dumps(endpoint)}.env]",
+        ]
+        lines.extend(f"{name} = {json.dumps(value)}" for name, value in sorted(environment.items()))
+        return ("\n".join(lines) + "\n").encode()
+    value = {
+        "mcpServers": {endpoint: {
+            "command": launcher, "args": ["--context-mcp"], "env": environment,
+        }},
+        "tgw": {"schema": "tgw-generated-mcp-registration/v1", "fallback": "forbidden"},
+    }
+    return _canonical(value) + b"\n"
+
+
 def build_actor_generation(
     *, catalog_path: str | Path, descriptor_path: str | Path, source_root: str | Path,
     output_root: str | Path, signing_key_path: str | Path, plan_commit: str,
@@ -120,6 +162,10 @@ def build_actor_generation(
     try:
         contracts_root = stage / "contracts"
         contracts_root.mkdir(mode=0o750)
+        bootstrap_root = stage / "bootstrap"
+        bootstrap_root.mkdir(mode=0o750)
+        mcp_root = stage / "mcp"
+        mcp_root.mkdir(mode=0o750)
         (stage / "environment-catalog.json").write_bytes(catalog_bytes)
         bundle_actors: dict[str, Any] = {}
         contract_hashes: dict[str, str] = {}
@@ -161,10 +207,55 @@ def build_actor_generation(
             if set(observed["launcher"]) != {"launcher"} or set(observed["bootstrap"]) != {"bootstrap-receipt"}:
                 raise ActorGenerationError(f"actor generation launcher or bootstrap is incomplete: {actor}")
             launcher = next(item for item in compiled_bindings if item["kind"] == "launcher")
+            for registration in [item for item in compiled_bindings if item["kind"] == "mcp"]:
+                policy_path = (source / registration["source"]).resolve(strict=True)
+                generated = _mcp_registration(
+                    policy_path=policy_path, actor=actor, endpoint=registration["name"],
+                    launcher=launcher["destination"], generation=generation,
+                    plan_commit=plan_commit, solution_hash=solution_hash,
+                    source_commit=source_commit, catalog_hash=_hash(catalog),
+                    trusted_public_key=actor_contract_public_key(key),
+                )
+                suffix = ".toml" if _read_json(policy_path, "MCP registration policy").get("harness") == "codex" else ".json"
+                generated_path = mcp_root / f"{actor}-{registration['name']}{suffix}"
+                generated_path.write_bytes(generated)
+                registration.update({
+                    "source": str(final / "mcp" / generated_path.name),
+                    "sha256": "sha256:" + hashlib.sha256(generated).hexdigest(),
+                })
+                observed["mcp"][registration["name"]] = registration["sha256"]
             mcp_bindings = [{
                 "endpoint": item["name"], "source_sha256": item["sha256"], "destination": item["destination"],
             } for item in compiled_bindings if item["kind"] == "mcp"]
-            bootstrap = next(item for item in compiled_bindings if item["kind"] == "bootstrap")
+            declared_bootstrap = next(item for item in compiled_bindings if item["kind"] == "bootstrap")
+            compiled_bindings.remove(declared_bootstrap)
+            bootstrap_body = {
+                "schema": "tgw-actor-bootstrap-receipt/v1", "status": "READY",
+                "actor": actor, "profile": str(specification["profile"]),
+                "generation": generation, "catalog_hash": _hash(catalog),
+                "plan": {"commit": plan_commit, "solution_hash": solution_hash},
+                "code_graph": {
+                    "commit": source_commit, "tree": source_tree,
+                    "freshness_hash": freshness_hash,
+                },
+                "declared_policy_hash": declared_bootstrap["sha256"],
+                "launcher": {"path": launcher["destination"], "sha256": launcher["sha256"]},
+                "skills": observed["skill"], "hooks": observed["hook"],
+                "mcp": {
+                    "endpoints": sorted(observed["mcp"]),
+                    "binding_hash": _binding_hash(mcp_bindings),
+                },
+            }
+            bootstrap_receipt = {**bootstrap_body, "receipt_hash": _hash(bootstrap_body)}
+            bootstrap_bytes = _canonical(bootstrap_receipt) + b"\n"
+            (bootstrap_root / f"{actor}.json").write_bytes(bootstrap_bytes)
+            bootstrap = {
+                "kind": "bootstrap", "name": "bootstrap-receipt",
+                "source": str(final / "bootstrap" / f"{actor}.json"),
+                "destination": declared_bootstrap["destination"],
+                "sha256": "sha256:" + hashlib.sha256(bootstrap_bytes).hexdigest(),
+            }
+            compiled_bindings.append(bootstrap)
             local = {
                 "bootstrap_receipt_hash": bootstrap["sha256"],
                 "launcher": {"path": launcher["destination"], "sha256": launcher["sha256"]},

@@ -58,6 +58,35 @@ def sign_actor_contract(receipt: Mapping[str, Any], *, signing_private_key: Ed25
     }
 
 
+def verify_signed_actor_contract(
+    receipt: Mapping[str, Any], *, trusted_public_key: str,
+) -> dict[str, Any]:
+    """Verify the exact receipt body and trusted bootstrap signature."""
+    value = dict(receipt)
+    if set(value) != {
+        "schema", "status", "catalog_hash", "actor", "profile", "plan",
+        "code_graph", "local", "diagnostics", "activation", "receipt_hash",
+        "issuer_public_key", "signature",
+    } or value.get("issuer_public_key") != trusted_public_key:
+        raise ActorContractError("signed actor contract is invalid")
+    signature = value.pop("signature")
+    issuer = value.pop("issuer_public_key")
+    if not isinstance(signature, str) or not isinstance(issuer, str):
+        raise ActorContractError("signed actor contract is invalid")
+    body = {key: item for key, item in value.items() if key != "receipt_hash"}
+    if value.get("receipt_hash") != _hash(body):
+        raise ActorContractError("signed actor contract receipt hash differs")
+    try:
+        key = Ed25519PublicKey.from_public_bytes(base64.b64decode(trusted_public_key, validate=True))
+        raw_signature = base64.b64decode(signature, validate=True)
+        if len(raw_signature) != 64:
+            raise ValueError("signature length")
+        key.verify(raw_signature, _canonical(value))
+    except Exception as exc:
+        raise ActorContractError("signed actor contract signature differs") from exc
+    return value
+
+
 def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
