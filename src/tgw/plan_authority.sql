@@ -120,6 +120,7 @@ ALTER TABLE plan_authority_requests
     DROP CONSTRAINT IF EXISTS plan_authority_requests_effect_kind_check;
 ALTER TABLE plan_authority_requests
     ADD CONSTRAINT plan_authority_requests_effect_kind_check CHECK (effect_kind IN (
+        'development-launch',
         'coding-release',
         'bounded-flake-push',
         'flake-switch-record-only',

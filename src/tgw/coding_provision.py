@@ -68,7 +68,7 @@ def _hash(value: dict[str, Any]) -> str:
 
 def _document(job: dict[str, Any]) -> dict[str, Any]:
     payload = job.get("payload_json")
-    if not isinstance(payload, dict) or payload.get("kind") != "coding-provision/v1":
+    if not isinstance(payload, dict) or payload.get("kind") not in {"coding-provision/v1", "coding-provision/v2"}:
         raise HardFailure("coding provision job payload is invalid")
     document = dict(payload)
     document["request_id"] = str(job["job_id"])
@@ -217,6 +217,44 @@ def create_request(
         entity_id=str(todo_id),
         handler_family=QUEUE_NAME,
         dedupe_key=f"coding-provision:{todo_id}:{source_commit or 'current'}:{generation_key}",
+        max_attempts=1,
+        idempotent=True,
+    )
+    return get_request(config, job_id)
+
+
+def create_development_request(config: dict[str, Any], *, launch: dict[str, Any]) -> dict[str, Any]:
+    """Enqueue one exact harness-neutral lifecycle for launch-time selection.
+
+    The service stores the closed card sequence and source revision.  It does
+    not choose a vendor/model or inspect a remote worktree; those observations
+    occur at the registered worker immediately before the first role launch.
+    """
+    from tgw.development_launch import validate_development_launch
+
+    coding = _coding(config)
+    validate_service_request_config(coding)
+    validated = validate_development_launch(launch)
+    lifecycle = validated["lifecycle"]
+    request_hash = lifecycle["lifecycle_hash"]
+    payload = {
+        "kind": "coding-provision/v2",
+        "development_request_hash": request_hash,
+        "source_commit": validated["source_commit"],
+        "provider_registry_hash": validated["provider_registry_hash"],
+        "freshness_receipt_hash": validated["freshness"]["receipt_hash"],
+        "launch_cards": lifecycle["launch_cards"],
+        "timeline": lifecycle["timeline"],
+        "host": coding["host"],
+        "worker_identity": coding["worker_identity"],
+    }
+    job_id = state_machine.enqueue_job(
+        QUEUE_NAME,
+        payload,
+        entity_type="development_request",
+        entity_id=request_hash,
+        handler_family=QUEUE_NAME,
+        dedupe_key=f"development-launch:{request_hash}:{validated['source_commit']}",
         max_attempts=1,
         idempotent=True,
     )

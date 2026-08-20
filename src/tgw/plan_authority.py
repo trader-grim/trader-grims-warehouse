@@ -75,6 +75,7 @@ def require_authenticated_principal(value: Any, role: PrincipalRole) -> Authorit
 
 
 class EffectKind(str, Enum):
+    DEVELOPMENT_LAUNCH = "development-launch"
     CODING_RELEASE = "coding-release"
     BOUNDED_FLAKE_PUSH = "bounded-flake-push"
     FLAKE_SWITCH_RECORD_ONLY = "flake-switch-record-only"

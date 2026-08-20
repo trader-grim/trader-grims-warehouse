@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse
 
 from tgw.plan_authority import (
     AUTHORITY_SCHEMA,
+    AuthorityRequest,
     AuthorityStore,
     PrincipalRole,
     create_authority_router,
@@ -73,6 +74,15 @@ def _status(row: Mapping[str, Any], now: datetime) -> str:
 def project_request(row: Mapping[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
     """Produce the shared web/Flutter representation and its legal actions."""
     status = _status(row, now or datetime.now(timezone.utc))
+    effect_parameters = row.get("effect_parameters")
+    held_development_resolution = (
+        row.get("effect_kind") == "development-launch"
+        and isinstance(effect_parameters, Mapping)
+        and isinstance(effect_parameters.get("lifecycle"), Mapping)
+        and effect_parameters["lifecycle"].get("resolution", {}).get("status") != "RESOLVED"
+    )
+    if held_development_resolution:
+        status = "clarification_required"
     actions = ["view-evidence"]
     if status == "pending":
         actions.extend(("approve", "hold", "reconcile"))
@@ -120,6 +130,11 @@ def project_request(row: Mapping[str, Any], *, now: datetime | None = None) -> d
         "reconciliation_required": status in {"reconciliation_required", "ambiguous"},
         "legal_actions": actions,
         "authority": AUTHORITY_SCHEMA,
+        "development": dict(effect_parameters["lifecycle"]) if (
+            row.get("effect_kind") == "development-launch"
+            and isinstance(effect_parameters, Mapping)
+            and isinstance(effect_parameters.get("lifecycle"), Mapping)
+        ) else None,
     }
 
 
@@ -131,6 +146,7 @@ def create_operator_console_router(
     require_operator: Callable[[], Any],
     require_executor: Callable[[], Any],
     execute_effect: Callable[..., Any] | None = None,
+    resolve_development: Callable[[Mapping[str, Any], str], tuple[Mapping[str, Any], AuthorityRequest]] | None = None,
 ) -> APIRouter:
     """Return one mountable router for UI, shared API, and authority writes."""
     router = APIRouter()
@@ -173,6 +189,22 @@ def create_operator_console_router(
             "request": project_request(row),
             "events": store.events(request_id),
         }
+
+    @router.post("/api/operator-console/development-requests", status_code=201)
+    def create_development_request(body: dict[str, Any], operator_identity: Any = Depends(require_operator)):
+        principal = require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR)
+        if resolve_development is None:
+            raise HTTPException(503, "development request resolver is not mounted")
+        try:
+            lifecycle, authority = resolve_development(body, principal.identity)
+            row = store.create_request(authority)
+            return {
+                "schema": CONSOLE_SCHEMA,
+                "request": project_request(row),
+                "development": dict(lifecycle),
+            }
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @router.get("/form/plan-authority", response_class=HTMLResponse)
     def site(operator_identity: Any = Depends(require_operator)):

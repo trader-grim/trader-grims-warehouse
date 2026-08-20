@@ -28,6 +28,7 @@ _ROUTES = {
     ("/api/operator-console/discovery", ("GET",)),
     ("/api/operator-console/requests", ("GET",)),
     ("/api/operator-console/requests/{request_id}", ("GET",)),
+    ("/api/operator-console/development-requests", ("POST",)),
     ("/form/plan-authority", ("GET",)),
 }
 
@@ -42,6 +43,7 @@ class OperatorConsoleMount:
     # Only a registered AuthorityEffectController (or equivalent closed
     # dispatcher) may be mounted here.  ``None`` leaves /consume fail-closed.
     execute_effect: Callable[..., Any] | None = None
+    resolve_development: Callable[..., Any] | None = None
 
 
 def mount_operator_console(app: FastAPI, config: OperatorConsoleMount) -> None:
@@ -57,6 +59,7 @@ def mount_operator_console(app: FastAPI, config: OperatorConsoleMount) -> None:
         require_operator=config.require_operator,
         require_executor=config.require_executor,
         execute_effect=config.execute_effect,
+        resolve_development=config.resolve_development,
     )
     existing = {
         (route.path, tuple(sorted(getattr(route, "methods", None) or ())))

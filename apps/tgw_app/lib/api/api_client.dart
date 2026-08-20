@@ -137,9 +137,8 @@ class ApiClient {
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } on DioException catch (e) {
-      final detail = e.response?.data is Map
-          ? e.response?.data['detail']
-          : null;
+      final detail =
+          e.response?.data is Map ? e.response?.data['detail'] : null;
       return ApiResponse(ok: false, error: detail?.toString() ?? e.toString());
     } catch (e) {
       return ApiResponse(ok: false, error: e.toString());
@@ -493,6 +492,27 @@ class ApiClient {
     }
   }
 
+  Future<ApiResponse<Map<String, dynamic>>> createDevelopmentRequest(
+    Map<String, dynamic> request,
+  ) async {
+    await ensureInitialized();
+    try {
+      final response = await _dio.post(
+        '/api/operator-console/development-requests',
+        data: request,
+      );
+      if (response.statusCode == 201) {
+        return ApiResponse(
+          ok: true,
+          data: Map<String, dynamic>.from(response.data),
+        );
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
   Future<ApiResponse<Map<String, dynamic>>> decidePlanAuthorityRequest(
     String requestId, {
     required String kind,
@@ -552,6 +572,7 @@ class ApiClient {
   }
 
   Map<String, String> get authHeaders => {
-    if (_token != null && _token!.isNotEmpty) 'Authorization': 'Bearer $_token',
-  };
+        if (_token != null && _token!.isNotEmpty)
+          'Authorization': 'Bearer $_token',
+      };
 }

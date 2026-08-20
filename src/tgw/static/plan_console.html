@@ -5,9 +5,20 @@
 body{font:16px system-ui,sans-serif;background:#101216;color:#e5e7eb;margin:0;padding:2rem}main{max-width:70rem;margin:auto}
 .notice,.card{border:1px solid #46505f;border-radius:.6rem;padding:1rem;margin:1rem 0;background:#181c22}.notice{border-color:#8a6d2f;color:#f2d68a}
 .meta{font:13px ui-monospace,monospace;color:#aab2bf;overflow-wrap:anywhere}.actions{color:#9fd3ad}.error{color:#ff9b9b}.details{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem}.details dt{color:#aab2bf}.details dd{margin:0;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#11151a;padding:.7rem;border-radius:.35rem}button{margin:.25rem}
+label{display:block;margin:.75rem 0 .25rem;color:#cbd5e1}input,textarea,select{box-sizing:border-box;width:100%;padding:.65rem;border:1px solid #46505f;border-radius:.35rem;background:#101216;color:#e5e7eb}textarea{min-height:6rem}.grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}.launch-card{border-left:3px solid #5f8fc9;padding:.35rem .75rem;margin:.5rem 0}.held{color:#f2d68a}@media(max-width:700px){.grid{grid-template-columns:1fr}}
 </style></head><body><main><h1>Operator Authority</h1>
-<p>The exact scope, evidence, decisions, execution provenance, and legal actions for Plan-bound effects.</p>
+<p>Plan-bound development requests, decisions, launches, evidence, and legal actions.</p>
 <div class="notice">Only records from PlanAuthority grant authority. Agent Runs, Todos, PP-CLIP, listing state, notifications, and visiting this page do not approve an effect.</div>
+<section class="card"><h2>Start development work</h2>
+<p>State the outcome in ordinary language. The server retains these exact words, resolves only against the approved Plan solution, and keeps harness selection separate from the implementation/review/controller roles.</p>
+<form id="development-form">
+ <label for="original-request">What should be built?</label><textarea id="original-request" required placeholder="Build …"></textarea>
+ <label for="scope">Scope</label><input id="scope" required placeholder="Site, app, workflow, or named component">
+ <div class="grid"><div><label for="constraints">Constraints (one per line)</label><textarea id="constraints" placeholder="Preserve existing data"></textarea></div>
+ <div><label for="effect-limits">Allowed effects (one per line)</label><textarea id="effect-limits" placeholder="source changes&#10;tests&#10;candidate installation"></textarea></div></div>
+ <details><summary>Use a narrower approved root</summary><div class="grid"><div><label for="root-kind">Root kind</label><select id="root-kind"><option value="">Approved Plan (default)</option><option>PP</option><option>Todo</option></select></div><div><label for="root-id">Exact root ID</label><input id="root-id" placeholder="PP-… or Todo ID"></div></div></details>
+ <p><button type="submit">Resolve request</button> <span id="development-result" class="meta"></span></p>
+</form></section>
 <section id="requests">Loading authority records…</section>
 <script>
 const esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -29,9 +40,15 @@ function controls(x){
  const allowed=new Set(x.legal_actions||[]); const buttons=['approve','hold','reconcile'].filter(kind=>allowed.has(kind));
  return buttons.map(kind=>`<button type="button" data-request="${esc(x.request_id)}" data-decision="${kind}">${esc(kind)}</button>`).join('')||'No operator decision is currently legal.';
 }
+function development(x){
+ const d=x.development;if(!d)return '';
+ const r=d.resolution||{},cards=d.launch_cards||[];
+ const rendered=cards.map(card=>{const provider=card.provider_selection||{};return `<div class="launch-card"><b>${esc(card.unit)}</b> — ${esc(card.role)}<br><span class="meta">provider: ${esc(provider.mode||'—')} · registry ${esc(provider.registry_hash||'—')} · selected at launch: ${esc(provider.selected_provider)}</span><br><span class="meta">worktree: ${esc((card.allocation||{}).worktree)}</span></div>`}).join('');
+ return `<h3>Development resolution</h3><p class="${r.status==='RESOLVED'?'actions':'held'}"><b>${esc(r.status)}</b> · confidence ${esc(r.confidence)}</p><p>${esc(r.explanation)}</p>${r.clarification?`<p class="held">${esc(r.clarification)}</p>`:''}<dl class="details"><dt>Original request</dt><dd>${esc((d.request||{}).original_request)}</dd><dt>Scope</dt><dd>${esc((d.request||{}).scope)}</dd><dt>Selected root</dt><dd>${esc(r.root?`${r.root.kind}:${r.root.id}`:'—')}</dd><dt>Lifecycle</dt><dd class="meta">${esc(d.lifecycle_hash)}</dd></dl><h4>Dependency-ordered role cards</h4>${rendered||'<p>No role was launched; clarification is required.</p>'}`;
+}
 function card(x){
  const effect=x.effect||{},decision=x.decision||{},execution=x.execution||{};
- return `<article class="card"><h2>${esc(x.summary)}</h2><p><b>Status:</b> ${esc(x.status)}</p>
+ return `<article class="card"><h2>${esc(x.summary)}</h2><p><b>Status:</b> ${esc(x.status)}</p>${development(x)}
  <p class="actions">Legal actions: ${list(x.legal_actions)}</p><h3>Exact effect scope</h3><dl class="details">
  <dt>Kind</dt><dd>${esc(effect.kind)}</dd><dt>Generation</dt><dd>${esc(effect.generation)}</dd><dt>Effect hash</dt><dd class="meta">${esc(effect.hash)}</dd><dt>Parameters</dt><dd><pre>${json(effect.parameters)}</pre></dd></dl>
  <h3>Bound Plan solution</h3><dl class="details"><dt>Request</dt><dd class="meta">${esc(x.request_id)}</dd><dt>Requested by</dt><dd>${esc(x.requested_by)}</dd><dt>Plan commit</dt><dd class="meta">${esc(x.plan_commit)}</dd><dt>Solution hash</dt><dd class="meta">${esc(x.solution_hash)}</dd><dt>Closure hash</dt><dd class="meta">${esc(x.closure_hash)}</dd><dt>Graph</dt><dd>${esc(x.graph_id)}</dd><dt>Object generation</dt><dd>${esc(x.object_generation)}</dd><dt>Expires</dt><dd>${esc(x.expires_at)}</dd></dl>
@@ -40,6 +57,14 @@ function card(x){
  <h3>Execution / receipt provenance</h3><dl class="details"><dt>Receipt</dt><dd class="meta">${esc(execution.receipt_id||x.receipt_id)}</dd><dt>Executor principal</dt><dd>${esc(execution.executor_principal)}</dd><dt>Handler</dt><dd>${esc(execution.handler_id)}</dd><dt>Started</dt><dd>${esc(execution.started_at)}</dd><dt>Completed</dt><dd>${esc(execution.completed_at)}</dd><dt>Outcome</dt><dd>${esc(execution.outcome)}</dd><dt>Evidence</dt><dd class="meta">${list(execution.evidence)}</dd><dt>Rollback receipt</dt><dd class="meta">${esc(execution.rollback_receipt)}</dd><dt>Detail</dt><dd>${esc(execution.detail)}</dd></dl>
  <h3>Authenticated operator decision</h3><div class="decision-controls">${controls(x)}</div></article>`;
 }
+const lines=id=>document.getElementById(id).value.split(/\r?\n/).map(value=>value.trim()).filter(Boolean);
+document.getElementById('development-form').addEventListener('submit',async event=>{
+ event.preventDefault();const result=document.getElementById('development-result');result.textContent='Resolving…';
+ const kind=document.getElementById('root-kind').value,id=document.getElementById('root-id').value.trim();
+ const body={schema:'tgw-development-console-request/v1',original_request:document.getElementById('original-request').value.trim(),scope:document.getElementById('scope').value.trim(),constraints:lines('constraints'),effect_limits:lines('effect-limits')};
+ if(kind||id){if(!kind||!id){result.textContent='Both root kind and exact ID are required.';return}body.root={kind,id}}
+ try{const response=await fetch('/api/operator-console/development-requests',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw Error(data.detail||response.statusText);result.textContent=`Retained as ${data.request.request_id}`;await load()}catch(error){result.textContent=`Held: ${error.message}`}
+});
 async function load(){
  const root=document.getElementById('requests');
  try { const response=await fetch('/api/operator-console/requests'); const data=await response.json(); if(!response.ok)throw Error(data.detail||response.statusText);

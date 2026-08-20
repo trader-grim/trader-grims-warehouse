@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -12,6 +13,8 @@ from tgw.bootstrap_host_integration import (
     TypedBootstrapDeploymentProvider,
     mount_pinned_bootstrap_host_integration,
 )
+from tgw.development_console import resolve_request as resolve_development_request
+from tgw.development_launch import enqueue_development_launch
 from tgw.effect_handlers import AuthorityEffectController, EffectHandlerError, TypedEffectHandlerRegistry
 from tgw.operator_console_plugin import OperatorConsoleMount
 from tgw.plan_authority import AuthorityPrincipal, PostgresAuthorityStore, PrincipalRole
@@ -19,6 +22,7 @@ from tgw.plan_authority import AuthorityPrincipal, PostgresAuthorityStore, Princ
 DEFAULT_PLAN_ROOT = Path("/opt/TGW/library/plans")
 _IDENTITY = re.compile(r"^[A-Za-z0-9:._-]+$")
 _SOLUTION_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
 def configured_authority_principal(
@@ -133,6 +137,43 @@ def load_solution(config_provider: Callable[[], Mapping[str, Any]], solution_has
     return matches[0]
 
 
+def _canonical_hash(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _development_artifacts(config: Mapping[str, Any]) -> tuple[str, Mapping[str, Any], Mapping[str, Any]]:
+    raw = config.get("development")
+    if not isinstance(raw, Mapping):
+        raise ValueError("development console configuration is required")
+    source_commit = raw.get("source_commit")
+    if not isinstance(source_commit, str) or _COMMIT.fullmatch(source_commit) is None:
+        raise ValueError("development console source commit is not exact")
+    artifacts: list[Mapping[str, Any]] = []
+    for name in ("provider_registry", "freshness_receipt"):
+        path_value, expected = raw.get(name + "_path"), raw.get(name + "_hash")
+        if not isinstance(path_value, str) or not path_value.startswith("/") or not isinstance(expected, str) or _SOLUTION_HASH.fullmatch(expected) is None:
+            raise ValueError(f"development console {name} binding is invalid")
+        path = Path(path_value)
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"development console {name} is unavailable")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"development console {name} is invalid") from exc
+        if not isinstance(value, Mapping) or _canonical_hash(value) != expected:
+            raise ValueError(f"development console {name} hash mismatch")
+        artifacts.append(value)
+    registry, freshness = artifacts
+    if registry.get("schema") != "tgw-harness-provider-registry/v1":
+        raise ValueError("development console provider registry schema is invalid")
+    unsigned = dict(freshness)
+    claimed = unsigned.pop("receipt_hash", None)
+    if freshness.get("schema") != "tgw-w18-projection-refresh-receipt/v1" or claimed != _canonical_hash(unsigned):
+        raise ValueError("development console freshness receipt is invalid")
+    return source_commit, registry, freshness
+
+
 class ConfiguredAuthorityStore:
     """Late-bound DSN proxy so FastAPI import does not open or configure DB state."""
 
@@ -220,6 +261,7 @@ def configured_execution_controller(
         flake_push=_unmounted_provider("bounded-flake-push"),
         flake_switch_record=_unmounted_provider("flake-switch-record-only"),
         dependency_resubmit=_unmounted_provider("dependency-resubmit"),
+        development_launch=lambda parameters: enqueue_development_launch(config_provider(), parameters),
         bootstrap_install=(integration.install if integration else _unmounted_provider("approval-platform-bootstrap-deployment")),
         bootstrap_rollback=(integration.rollback if integration else _unmounted_provider("approval-platform-bootstrap-deployment rollback")),
         bootstrap_contract_resolver=(integration.resolver if integration else None),
@@ -258,6 +300,21 @@ def configured_console_mount(
             except RuntimeError as exc:
                 raise ValueError("bootstrap deployment provider cannot be mounted") from exc
             return controller.execute(*args, **kwargs)
+    def resolve_development(body: Mapping[str, Any], requested_by: str):
+        config = config_provider()
+        binding = _approved_plan_identity(config)
+        solution = load_solution(config_provider, binding["solution_hash"])
+        source_commit, provider_registry, freshness = _development_artifacts(config)
+        return resolve_development_request(
+            body=body,
+            solution=solution,
+            plan_commit=binding["plan_commit"],
+            requested_by=requested_by,
+            source_commit=source_commit,
+            freshness=freshness,
+            provider_registry=provider_registry,
+        )
+
     return OperatorConsoleMount(
         store=store,
         current_plan_commit=lambda: current_plan_commit(config_provider),
@@ -265,4 +322,5 @@ def configured_console_mount(
         require_operator=require_operator,
         require_executor=require_executor,
         execute_effect=execute_effect,
+        resolve_development=resolve_development,
     )

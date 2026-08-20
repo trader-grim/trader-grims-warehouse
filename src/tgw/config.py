@@ -400,6 +400,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         # ``raw`` below for compatibility with callers needing other custom
         # configuration.
         "coding": raw.get("coding", {}),
+        "development": raw.get("development", {}),
         "raw": raw,
     }
 

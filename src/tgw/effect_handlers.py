@@ -26,6 +26,7 @@ from tgw.bootstrap_deployment_contract import (
     BootstrapDeploymentContractResolver,
     VerifiedBootstrapDeploymentContract,
 )
+from tgw.development_launch import validate_development_launch
 from tgw.nix_observer_render_evaluation import validate_request as validate_render_request
 from tgw.nixos_a3_successor_evaluation import (
     EFFECT_KIND as A3_SUCCESSOR_EFFECT_KIND,
@@ -226,6 +227,7 @@ class TypedEffectHandlerRegistry:
         nixos_reviewed_evaluation: Callable[[Mapping[str, str]], Mapping[str, Any]] | None = None,
         nixos_observer_render_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         nixos_a3_successor_evaluation: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        development_launch: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> None:
         if application_bootstrap_contract_resolver is not None and any(value is not None for value in (bootstrap_contract_resolver, bootstrap_validate)):
             raise ValueError("application and legacy Nix bootstrap providers cannot share one controller")
@@ -240,6 +242,11 @@ class TypedEffectHandlerRegistry:
             raise ValueError("application bootstrap resolver requires exact install and rollback providers")
         app_bootstrap = application_bootstrap_contract_resolver is not None
         self._providers = {
+            EffectKind.DEVELOPMENT_LAUNCH: (
+                "harness-neutral-development-launch@1",
+                development_launch or self._unavailable_development_launch,
+                None,
+            ),
             EffectKind.CODING_RELEASE: ("immutable-release-installer@1", release_install, release_rollback),
             EffectKind.BOUNDED_FLAKE_PUSH: ("bounded-flake-push@1", flake_push, None),
             EffectKind.FLAKE_SWITCH_RECORD_ONLY: ("flake-switch-record-only@1", flake_switch_record, None),
@@ -272,6 +279,10 @@ class TypedEffectHandlerRegistry:
         self._application_bootstrap_validate = application_bootstrap_validate
         self._a3_successor_binding = nixos_a3_successor_evaluation
         self._a3_successor_allow_fixture = bool(getattr(getattr(nixos_a3_successor_evaluation, "composition", None), "allow_fixture", False))
+
+    @staticmethod
+    def _unavailable_development_launch(parameters: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise HeldEffect("development launch provider is not mounted")
 
     @staticmethod
     def _unavailable_bootstrap(parameters: Mapping[str, str]) -> Mapping[str, Any]:
@@ -519,7 +530,11 @@ class TypedEffectHandlerRegistry:
         return invoke
 
     def prepare(self, effect: TypedEffect) -> tuple[str, dict[str, Any], Callable[..., Mapping[str, Any]], Callable[..., Mapping[str, Any]] | None]:
-        if effect.kind is EffectKind.CODING_RELEASE:
+        if effect.kind is EffectKind.DEVELOPMENT_LAUNCH:
+            parameters = validate_development_launch(effect.parameters)
+            if effect.generation != parameters["lifecycle"]["lifecycle_hash"]:
+                raise ValueError("development launch generation differs from lifecycle hash")
+        elif effect.kind is EffectKind.CODING_RELEASE:
             raw_migrations = effect.parameters.get("migration_receipts")
             parameters = _required(
                 {key: value for key, value in effect.parameters.items() if key != "migration_receipts"},
