@@ -5,44 +5,37 @@ import copy
 import pytest
 
 from tgw.operator_objects import (
-    ADAPTER_VIEW_SCHEMA,
-    OPERATOR_OBJECT_SCHEMA,
     OperatorObjectBindingError,
     build_item_operator_object,
-    flutter_adapter_view,
     publish_operator_object,
     validate_operator_command_values,
     web_adapter_view,
 )
 
 
+def test_shared_state_matrix_matches_web_adapter_contract():
+    import json
+    from pathlib import Path
+
+    matrix = json.loads((Path(__file__).parent / "fixtures/operator_object_state_matrix.json").read_text())
+    for row in matrix:
+        view = web_adapter_view(row["object"])
+        assert view["state"] == row["expected"]["state"]
+        assert view["reasons"] == row["expected"]["reasons"]
+        assert [command["id"] for command in view["commands"] if command["enabled"]] == row["expected"]["enabled_commands"]
+
+
 def _published(*, state: str = "ready", generation: str = "gen-1"):
     return publish_operator_object(
         item={"entity_id": "sku-1", "object_generation": generation, "title": "Thing"},
         listing={"entity_id": "sku-1", "object_generation": generation, "provider_state": "draft"},
-        workflow={"entity_id": "sku-1", "object_generation": generation, "state": state,
-                  "reasons": ["server evaluated"], "evidence": ["receipt-1"], "graph_id": "graph-1"},
+        workflow={"entity_id": "sku-1", "object_generation": generation, "state": state, "reasons": ["server evaluated"], "evidence": ["receipt-1"], "graph_id": "graph-1"},
         field_schema={"condition": {"options": [{"value": "used_good", "label": "Used - Good"}]}},
         commands=[
             {"id": "list-item", "enabled": state == "ready", "reason": None, "authority_scope": "publication"},
             {"id": "update-item", "enabled": state == "ready", "reason": None, "authority_scope": "update-restage"},
         ],
     )
-
-
-@pytest.mark.parametrize("state", ["ready", "reconciliation_required", "generation_conflict"])
-def test_state_matrix_parity_across_web_and_flutter(state):
-    published = _published(state=state)
-
-    web = web_adapter_view(published)
-    flutter = flutter_adapter_view(published)
-
-    assert published["schema"] == OPERATOR_OBJECT_SCHEMA
-    assert web == flutter
-    assert web["schema"] == ADAPTER_VIEW_SCHEMA
-    assert web["state"] == state
-    assert web["commands"] == published["commands"]
-    assert web["field_schema"] == published["field_schema"]
 
 
 def test_only_list_item_carries_publication_scope():
@@ -122,9 +115,11 @@ def _category_context():
 
 def test_server_builder_publishes_complete_thin_client_contract():
     published = build_item_operator_object(
-        item=_item(), workflow_card=_workflow_card(), category_context=_category_context(),
+        item=_item(),
+        workflow_card=_workflow_card(),
+        category_context=_category_context(),
     )
-    view = flutter_adapter_view(published)
+    view = web_adapter_view(published)
 
     assert view["item"]["record"]["title"] == "Thing"
     assert view["listing"]["offer"]["offer_id"] == "offer-1"
@@ -144,7 +139,8 @@ def test_server_builder_publishes_complete_thin_client_contract():
 
 def test_published_provider_state_disables_list_but_keeps_update_nonpublishing():
     published = build_item_operator_object(
-        item=_item(published=True), workflow_card=_workflow_card(),
+        item=_item(published=True),
+        workflow_card=_workflow_card(),
         category_context=_category_context(),
     )
     commands = {command["id"]: command for command in published["commands"]}
@@ -159,7 +155,8 @@ def test_published_provider_state_disables_list_but_keeps_update_nonpublishing()
 
 def test_reconciliation_gate_holds_provider_commands_but_preserves_local_repair():
     published = build_item_operator_object(
-        item=_item(), workflow_card=_workflow_card(reconciliation=("listing.stage",)),
+        item=_item(),
+        workflow_card=_workflow_card(reconciliation=("listing.stage",)),
         category_context=_category_context(),
     )
 
@@ -172,10 +169,14 @@ def test_reconciliation_gate_holds_provider_commands_but_preserves_local_repair(
 
 def test_command_values_are_validated_from_published_condition_and_aspect_schema():
     published = build_item_operator_object(
-        item=_item(), workflow_card=_workflow_card(), category_context=_category_context(),
+        item=_item(),
+        workflow_card=_workflow_card(),
+        category_context=_category_context(),
     )
     assert validate_operator_command_values(
-        published, "update-item", {"condition_enum": "USED_GOOD", "item_specifics": {"Brand": "TGW"}},
+        published,
+        "update-item",
+        {"condition_enum": "USED_GOOD", "item_specifics": {"Brand": "TGW"}},
     ) == {"condition_enum": "USED_GOOD", "item_specifics": {"Brand": "TGW"}}
     with pytest.raises(OperatorObjectBindingError, match="unpublished"):
         validate_operator_command_values(published, "update-item", {"price": "1.00"})

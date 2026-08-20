@@ -32,7 +32,10 @@ TREE = "c" * 40
 
 
 def _archive(
-    path: Path, files: dict[str, bytes], *, commit: str = COMMIT_A,
+    path: Path,
+    files: dict[str, bytes],
+    *,
+    commit: str = COMMIT_A,
     link: tuple[str, str] | None = None,
 ) -> str:
     with tarfile.open(path, "w:gz", pax_headers={"comment": commit}) as archive:
@@ -52,11 +55,16 @@ def _archive(
 def _release(root: Path, tmp_path: Path, generation: str, commit: str, body: bytes) -> None:
     archive = tmp_path / f"{generation}.tar.gz"
     digest = _archive(
-        archive, {"src/tgw/example.py": body, "bin/run.sh": b"#!/bin/sh\n"},
+        archive,
+        {"src/tgw/example.py": body, "bin/run.sh": b"#!/bin/sh\n"},
         commit=commit,
     )
     materialize(
-        root, archive, generation=generation, commit=commit, tree=TREE,
+        root,
+        archive,
+        generation=generation,
+        commit=commit,
+        tree=TREE,
         archive_sha256=digest,
     )
 
@@ -64,21 +72,32 @@ def _release(root: Path, tmp_path: Path, generation: str, commit: str, body: byt
 def _selection_evidence(commit: str, tree: str) -> tuple[dict[str, object], dict[str, object]]:
     digest = "sha256:" + "d" * 64
     preflight: dict[str, object] = {
-        "schema": "tgw-environment-preflight-receipt/v1", "result": "PASS",
-        "catalog_sha256": digest, "actor": "codex", "profile": "development",
-        "attempt_id": "test-attempt", "tools": [],
+        "schema": "tgw-environment-preflight-receipt/v1",
+        "result": "PASS",
+        "catalog_sha256": digest,
+        "actor": "codex",
+        "profile": "development",
+        "attempt_id": "test-attempt",
+        "tools": [],
     }
-    preflight_hash = "sha256:" + hashlib.sha256(
-        json.dumps(preflight, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(),
-    ).hexdigest()
+    preflight_hash = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(preflight, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(),
+        ).hexdigest()
+    )
     evidence = {"status": "PASS", "candidate_commit": commit, "solution_hash": digest, "receipt_hash": digest}
-    admission = compile_release_admission(request={
-        "schema": "tgw-w16-release-admission-request/v1", "request_id": "test-admission",
-        "candidate": {"commit": commit, "tree": tree},
-        "plan": {"commit": commit, "solution_hash": digest},
-        "environment": {"catalog_hash": digest, "receipt_hash": preflight_hash},
-        "review": dict(evidence), "admission": dict(evidence),
-    })
+    admission = compile_release_admission(
+        request={
+            "schema": "tgw-w16-release-admission-request/v1",
+            "request_id": "test-admission",
+            "candidate": {"commit": commit, "tree": tree},
+            "plan": {"commit": commit, "solution_hash": digest},
+            "environment": {"catalog_hash": digest, "receipt_hash": preflight_hash},
+            "review": dict(evidence),
+            "admission": dict(evidence),
+        }
+    )
     return admission, preflight
 
 
@@ -102,8 +121,10 @@ def test_materialize_verify_select_replay_and_rollback(tmp_path: Path) -> None:
     assert select(root, "release-b", expected_current="release-a", operation_id="deploy-b", admission_receipt=admission, environment_preflight_receipt=preflight) == receipt
 
     rolled_back = rollback(
-        root, root / "receipts" / "deploy-b.json",
-        expected_current="release-b", operation_id="rollback-b",
+        root,
+        root / "receipts" / "deploy-b.json",
+        expected_current="release-b",
+        operation_id="rollback-b",
     )
     assert rolled_back["rollback_of"] == "deploy-b"
     assert current_generation(root) == "release-a"
@@ -116,8 +137,12 @@ def test_selection_is_compare_and_swap(tmp_path: Path) -> None:
     admission, preflight = _selection_evidence(COMMIT_B, TREE)
     with pytest.raises(ReleaseError, match="current generation changed"):
         select(
-            root, "release-b", expected_current="wrong", operation_id="deploy-b",
-            admission_receipt=admission, environment_preflight_receipt=preflight,
+            root,
+            "release-b",
+            expected_current="wrong",
+            operation_id="deploy-b",
+            admission_receipt=admission,
+            environment_preflight_receipt=preflight,
         )
     assert current_generation(root) == "release-a"
     assert not (root / "operations" / "deploy-b.json").exists()
@@ -140,15 +165,35 @@ def test_direct_select_refuses_without_exact_admission_evidence(tmp_path: Path) 
     with pytest.raises(ReleaseError, match="requires admission"):
         select(root, "release-b", expected_current="release-a", operation_id="direct")
     assert current_generation(root) == "release-a"
+    refusal = json.loads((root / "refusals/direct.json").read_text())
+    assert refusal["state"] == "REFUSED"
+    assert refusal["reasons"] == ["missing-admission-evidence"]
 
 
 def test_public_installer_refuses_missing_or_mismatched_admission(tmp_path: Path) -> None:
     archive = tmp_path / "candidate.tar.gz"
     digest = _archive(archive, {"src/tgw/example.py": b"candidate\n"}, commit=COMMIT_A)
     command = [
-        sys.executable, "-m", "tgw.release_installer", "--root", str(tmp_path / "root"), "install",
-        "--archive", str(archive), "--generation", "candidate", "--commit", COMMIT_A, "--tree", TREE,
-        "--archive-sha256", digest, "--expected-current", "none", "--operation-id", "candidate",
+        sys.executable,
+        "-m",
+        "tgw.release_installer",
+        "--root",
+        str(tmp_path / "root"),
+        "install",
+        "--archive",
+        str(archive),
+        "--generation",
+        "candidate",
+        "--commit",
+        COMMIT_A,
+        "--tree",
+        TREE,
+        "--archive-sha256",
+        digest,
+        "--expected-current",
+        "none",
+        "--operation-id",
+        "candidate",
     ]
     result = subprocess.run(command, text=True, capture_output=True, env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")})
     assert result.returncode != 0
@@ -162,7 +207,11 @@ def test_materialize_rejects_traversal(tmp_path: Path, unsafe: str) -> None:
     digest = _archive(archive, {unsafe: b"bad"})
     with pytest.raises(ReleaseError, match="unsafe archive member"):
         materialize(
-            root, archive, generation="bad", commit=COMMIT_A, tree=TREE,
+            root,
+            archive,
+            generation="bad",
+            commit=COMMIT_A,
+            tree=TREE,
             archive_sha256=digest,
         )
     assert not (tmp_path / "escape").exists()
@@ -173,13 +222,21 @@ def test_materialize_rejects_links_and_digest_mismatch(tmp_path: Path) -> None:
     digest = _archive(archive, {"safe": b"ok"}, link=("linked", "safe"))
     with pytest.raises(ReleaseError, match="unsafe archive member"):
         materialize(
-            tmp_path / "root", archive, generation="linked", commit=COMMIT_A,
-            tree=TREE, archive_sha256=digest,
+            tmp_path / "root",
+            archive,
+            generation="linked",
+            commit=COMMIT_A,
+            tree=TREE,
+            archive_sha256=digest,
         )
     with pytest.raises(ReleaseError, match="archive digest mismatch"):
         materialize(
-            tmp_path / "other", archive, generation="bad-digest", commit=COMMIT_A,
-            tree=TREE, archive_sha256="0" * 64,
+            tmp_path / "other",
+            archive,
+            generation="bad-digest",
+            commit=COMMIT_A,
+            tree=TREE,
+            archive_sha256="0" * 64,
         )
 
 
@@ -188,8 +245,12 @@ def test_materialize_rejects_claimed_commit_not_embedded_by_git_archive(tmp_path
     digest = _archive(archive, {"safe": b"ok"}, commit=COMMIT_A)
     with pytest.raises(ReleaseError, match="Git commit identity mismatch"):
         materialize(
-            tmp_path / "root", archive, generation="wrong-commit", commit=COMMIT_B,
-            tree=TREE, archive_sha256=digest,
+            tmp_path / "root",
+            archive,
+            generation="wrong-commit",
+            commit=COMMIT_B,
+            tree=TREE,
+            archive_sha256=digest,
         )
 
 
@@ -215,11 +276,17 @@ def test_runtime_overlay_restores_preexisting_config_directory_and_rejects_colli
         commit=COMMIT_B,
     )
     materialize(
-        root, archive, generation="release-b", commit=COMMIT_B, tree=TREE,
+        root,
+        archive,
+        generation="release-b",
+        commit=COMMIT_B,
+        tree=TREE,
         archive_sha256=digest,
     )
     result = install_runtime_files(
-        root, "release-b", {"config/tgw-api-config.json": b'{"schema":"runtime"}\n'},
+        root,
+        "release-b",
+        {"config/tgw-api-config.json": b'{"schema":"runtime"}\n'},
     )
     assert result["status"] == "installed"
     assert stat.S_IMODE((root / "releases/release-b/config").stat().st_mode) == 0o555
@@ -228,15 +295,23 @@ def test_runtime_overlay_restores_preexisting_config_directory_and_rejects_colli
     root2 = tmp_path / "collision"
     collision_archive = tmp_path / "collision.tar.gz"
     collision_digest = _archive(
-        collision_archive, {"config/tgw-api-config.json": b"source-owned\n"}, commit=COMMIT_B,
+        collision_archive,
+        {"config/tgw-api-config.json": b"source-owned\n"},
+        commit=COMMIT_B,
     )
     materialize(
-        root2, collision_archive, generation="release-b", commit=COMMIT_B, tree=TREE,
+        root2,
+        collision_archive,
+        generation="release-b",
+        commit=COMMIT_B,
+        tree=TREE,
         archive_sha256=collision_digest,
     )
     with pytest.raises(FileExistsError):
         install_runtime_files(
-            root2, "release-b", {"config/tgw-api-config.json": b"host-owned\n"},
+            root2,
+            "release-b",
+            {"config/tgw-api-config.json": b"host-owned\n"},
         )
     assert stat.S_IMODE((root2 / "releases/release-b/config").stat().st_mode) == 0o555
     assert verify(root2, "release-b")["status"] == "PASS"

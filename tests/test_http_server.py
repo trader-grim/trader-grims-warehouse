@@ -32,9 +32,7 @@ import pytest
 # TestClient (starlette) requires httpx at import/use time. If httpx is not
 # importable in the venv we skip the entire module with a clear reason rather
 # than producing a misleading collection error.
-httpx = pytest.importorskip(
-    "httpx", reason="httpx is required by fastapi.testclient.TestClient"
-)
+httpx = pytest.importorskip("httpx", reason="httpx is required by fastapi.testclient.TestClient")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -65,6 +63,7 @@ def _login(client):
 # ---------------------------------------------------------------------------
 # Fakes / stubs
 # ---------------------------------------------------------------------------
+
 
 class _FakeCursor:
     """Minimal psycopg2-ish cursor that returns canned queue-job rows."""
@@ -112,14 +111,9 @@ def _make_catalog(db_path: Path, rows):
     we seed it with a minimal ``{}`` payload unless the caller passes extra.
     """
     con = sqlite3.connect(str(db_path))
-    con.execute(
-        "CREATE TABLE catalog ("
-        "sku TEXT, title TEXT, location TEXT, status TEXT, "
-        "price REAL, qty INTEGER, image TEXT, attribute_set TEXT, data TEXT)"
-    )
+    con.execute("CREATE TABLE catalog (sku TEXT, title TEXT, location TEXT, status TEXT, price REAL, qty INTEGER, image TEXT, attribute_set TEXT, data TEXT)")
     con.executemany(
-        "INSERT INTO catalog (sku, title, location, status, price, qty, image, data) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, '{}')",
+        "INSERT INTO catalog (sku, title, location, status, price, qty, image, data) VALUES (?, ?, ?, ?, ?, ?, ?, '{}')",
         rows,
     )
     con.commit()
@@ -142,6 +136,7 @@ SKU_B = "tgw20260315090000002"
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def enqueue_calls(monkeypatch):
@@ -183,31 +178,32 @@ def env(tmp_path, monkeypatch, queue_rows):
         [
             (SKU_A, "Red Widget", "A1", "In Stock", 9.99, 1, "a.jpg"),
             (SKU_B, "Blue Gadget", "B2", "Staged", 19.99, 2, "b.jpg"),
-            ("tgw20260201000000003", "Empty Loc Item", "", "In Stock",
-             None, 1, ""),
+            ("tgw20260201000000003", "Empty Loc Item", "", "In Stock", None, 1, ""),
         ],
     )
 
     # Category-groups template table.
     groups_path.write_text(
-        json.dumps({
-            "groups": {
-                "books": {
-                    "name": "Books",
-                    "size_class": "small",
-                    "ai_hint": "printed book",
-                    "ebay_categories": ["261186"],
-                    "pricing": {"floor": 3.0, "typical_used": 8.0},
-                },
-                "vinyl": {
-                    "name": "Vinyl Records",
-                    "size_class": "medium",
-                    "ai_hint": "12 inch record",
-                    "ebay_categories": [],
-                    "pricing": {},
-                },
+        json.dumps(
+            {
+                "groups": {
+                    "books": {
+                        "name": "Books",
+                        "size_class": "small",
+                        "ai_hint": "printed book",
+                        "ebay_categories": ["261186"],
+                        "pricing": {"floor": 3.0, "typical_used": 8.0},
+                    },
+                    "vinyl": {
+                        "name": "Vinyl Records",
+                        "size_class": "medium",
+                        "ai_hint": "12 inch record",
+                        "ebay_categories": [],
+                        "pricing": {},
+                    },
+                }
             }
-        }),
+        ),
         encoding="utf-8",
     )
 
@@ -230,24 +226,33 @@ def env(tmp_path, monkeypatch, queue_rows):
 
     # No real PostgreSQL: psycopg2.connect returns our fake connection.
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn(queue_rows),
     )
 
     # Seed two item JSON docs (one with media files).
-    _write_item(itemdata_root, SKU_A, {
-        "sku": SKU_A,
-        "title": "Red Widget",
-        "location": "A1",
-        "condition": "Good",
-        "catalog_verified": True,
-    })
+    _write_item(
+        itemdata_root,
+        SKU_A,
+        {
+            "sku": SKU_A,
+            "title": "Red Widget",
+            "location": "A1",
+            "condition": "Good",
+            "catalog_verified": True,
+        },
+    )
     item_b_dir = itemdata_root / SKU_B
-    _write_item(itemdata_root, SKU_B, {
-        "sku": SKU_B,
-        "title": "Blue Gadget",
-        "location": "B2",
-    })
+    _write_item(
+        itemdata_root,
+        SKU_B,
+        {
+            "sku": SKU_B,
+            "title": "Blue Gadget",
+            "location": "B2",
+        },
+    )
     # Media files for SKU_B for the media-list assembly in get_item.
     (item_b_dir / "front.jpg").write_bytes(b"fake")
     (item_b_dir / "back.PNG").write_bytes(b"fake")
@@ -282,8 +287,7 @@ def test_queue_daily_stats_requires_auth(client):
 
 
 def test_queue_daily_stats_rejects_bad_date(client):
-    r = client.get("/api/queue/daily_stats", params={"date": "not-a-date"},
-                    headers=AUTH_HEADERS)
+    r = client.get("/api/queue/daily_stats", params={"date": "not-a-date"}, headers=AUTH_HEADERS)
     assert r.status_code == 400
 
 
@@ -291,14 +295,15 @@ def test_queue_daily_stats_returns_date_scoped_per_queue_counts(client, queue_ro
     import datetime as _dt
 
     hour = _dt.datetime(2026, 7, 17, 9, 0, 0)
-    queue_rows.extend([
-        {"queue_name": "ebay_upload", "stat_hour": hour, "state": "succeeded", "job_count": 12},
-        {"queue_name": "ebay_upload", "stat_hour": hour, "state": "failed", "job_count": 1},
-        {"queue_name": "ebay_upload", "stat_hour": hour, "state": "dead_letter", "job_count": 2},
-        {"queue_name": "ebay_draft", "stat_hour": hour, "state": "succeeded", "job_count": 5},
-    ])
-    r = client.get("/api/queue/daily_stats", params={"date": "2026-07-17"},
-                    headers=AUTH_HEADERS)
+    queue_rows.extend(
+        [
+            {"queue_name": "ebay_upload", "stat_hour": hour, "state": "succeeded", "job_count": 12},
+            {"queue_name": "ebay_upload", "stat_hour": hour, "state": "failed", "job_count": 1},
+            {"queue_name": "ebay_upload", "stat_hour": hour, "state": "dead_letter", "job_count": 2},
+            {"queue_name": "ebay_draft", "stat_hour": hour, "state": "succeeded", "job_count": 5},
+        ]
+    )
+    r = client.get("/api/queue/daily_stats", params={"date": "2026-07-17"}, headers=AUTH_HEADERS)
     assert r.status_code == 200
     data = r.json()
     assert data["ok"] is True
@@ -363,6 +368,7 @@ def test_pipeline_page_shows_date_scoped_column_labels(client):
 # Auth (HTTPBearer) — bad/missing token
 # ---------------------------------------------------------------------------
 
+
 def test_bad_token_rejected_401(client):
     r = client.get("/api/items", headers={"Authorization": "Bearer wrong"})
     assert r.status_code == 401
@@ -404,6 +410,7 @@ def test_bearer_auth_uses_constant_time_compare(client, monkeypatch):
 # GET /api/items — search / location / status filters + limit/offset
 # ---------------------------------------------------------------------------
 
+
 def test_list_items_all(client):
     r = client.get("/api/items", headers=AUTH_HEADERS)
     assert r.status_code == 200
@@ -415,8 +422,18 @@ def test_list_items_all(client):
     assert skus == sorted(skus, reverse=True)
     # Column set matches the SELECT in http_server.py list_items.
     assert set(body["items"][0]) == {
-        "sku", "title", "location", "status", "price", "qty", "image", "attribute_set",
-        "ebay_listing_id", "ebay_offer_id", "ebay_ready_at", "has_draft",
+        "sku",
+        "title",
+        "location",
+        "status",
+        "price",
+        "qty",
+        "image",
+        "attribute_set",
+        "ebay_listing_id",
+        "ebay_offer_id",
+        "ebay_ready_at",
+        "has_draft",
         "ebay_listing_status",
     }
 
@@ -445,9 +462,7 @@ def test_list_items_location_filter(client):
 
 
 def test_list_items_status_filter(client):
-    r = client.get(
-        "/api/items", params={"status_filter": "Staged"}, headers=AUTH_HEADERS
-    )
+    r = client.get("/api/items", params={"status_filter": "Staged"}, headers=AUTH_HEADERS)
     body = r.json()
     assert body["count"] == 1
     assert body["items"][0]["status"] == "Staged"
@@ -457,24 +472,20 @@ def test_list_items_limit_and_offset(client):
     # count is the TOTAL matching rows; items is the page slice.
     r1 = client.get("/api/items", params={"limit": 1}, headers=AUTH_HEADERS)
     b1 = r1.json()
-    assert b1["count"] == 3        # 3 catalog rows total
-    assert len(b1["items"]) == 1   # only 1 returned (limit=1)
+    assert b1["count"] == 3  # 3 catalog rows total
+    assert len(b1["items"]) == 1  # only 1 returned (limit=1)
     first_sku = b1["items"][0]["sku"]
 
-    r2 = client.get(
-        "/api/items", params={"limit": 1, "offset": 1}, headers=AUTH_HEADERS
-    )
+    r2 = client.get("/api/items", params={"limit": 1, "offset": 1}, headers=AUTH_HEADERS)
     b2 = r2.json()
-    assert b2["count"] == 3        # total unchanged
+    assert b2["count"] == 3  # total unchanged
     assert len(b2["items"]) == 1
     assert b2["items"][0]["sku"] != first_sku
 
 
 def test_list_items_date_from_filter(client):
     # date_from compares substr(sku,4,8) >= prefix; SKU_B is 2026-03-15.
-    r = client.get(
-        "/api/items", params={"date_from": "20260301"}, headers=AUTH_HEADERS
-    )
+    r = client.get("/api/items", params={"date_from": "20260301"}, headers=AUTH_HEADERS)
     skus = {it["sku"] for it in r.json()["items"]}
     assert SKU_B in skus
     assert SKU_A not in skus  # 2026-01-01 is before the lower bound
@@ -499,24 +510,33 @@ def test_list_items_ebay_fields(tmp_path, monkeypatch):
     sku_draft = "tgw20260103000000003"
     sku_plain = "tgw20260104000000004"
 
-    data_listed = json.dumps({
-        "ebay_listing": {"listing_id": "123456789"},
-        "ebay_offer": {"offer_id": "OFF1", "ready_at": None},
-    })
-    data_staged = json.dumps({
-        "ebay_offer": {"offer_id": "OFF2"},
-    })
-    data_draft = json.dumps({
-        "draft_listing": {"category_id": "261186", "title": "Widget"},
-    })
+    data_listed = json.dumps(
+        {
+            "ebay_listing": {"listing_id": "123456789"},
+            "ebay_offer": {"offer_id": "OFF1", "ready_at": None},
+        }
+    )
+    data_staged = json.dumps(
+        {
+            "ebay_offer": {"offer_id": "OFF2"},
+        }
+    )
+    data_draft = json.dumps(
+        {
+            "draft_listing": {"category_id": "261186", "title": "Widget"},
+        }
+    )
     data_plain = json.dumps({})
 
-    _make_catalog_with_data(catalog_path, [
-        (sku_listed, "Listed Item", "A1", "Active", 19.99, 1, "a.jpg", data_listed),
-        (sku_staged, "Staged Item", "B2", "Staged", 12.00, 1, "b.jpg", data_staged),
-        (sku_draft, "Draft Item", "C3", "In Stock", 9.99, 1, "", data_draft),
-        (sku_plain, "Plain Item", "D4", "In Stock", 5.00, 1, "d.jpg", data_plain),
-    ])
+    _make_catalog_with_data(
+        catalog_path,
+        [
+            (sku_listed, "Listed Item", "A1", "Active", 19.99, 1, "a.jpg", data_listed),
+            (sku_staged, "Staged Item", "B2", "Staged", 12.00, 1, "b.jpg", data_staged),
+            (sku_draft, "Draft Item", "C3", "In Stock", 9.99, 1, "", data_draft),
+            (sku_plain, "Plain Item", "D4", "In Stock", 5.00, 1, "d.jpg", data_plain),
+        ],
+    )
 
     cfg = {
         "sqlite_catalog_path": catalog_path,
@@ -534,7 +554,8 @@ def test_list_items_ebay_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(http_server, "_api_key", API_KEY)
     monkeypatch.setattr(http_server, "_web_password", WEB_KEY)
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn([]),
     )
 
@@ -565,6 +586,7 @@ def test_list_items_ebay_fields(tmp_path, monkeypatch):
 # allow-list itself (they're never 'new'/'in stock').
 # ---------------------------------------------------------------------------
 
+
 def test_eligible_filter_status_and_ebay_state(tmp_path, monkeypatch):
     catalog_path = tmp_path / "catalog.sqlite"
     itemdata_root = tmp_path / "ItemData"
@@ -579,25 +601,24 @@ def test_eligible_filter_status_and_ebay_state(tmp_path, monkeypatch):
     sku_blank_never_listed = "tgw20260201000000007"
     sku_blank_active = "tgw20260201000000008"
 
-    _make_catalog_with_data(catalog_path, [
-        (sku_new_never_listed, "A", "A1", "new", 9.99, 1, "", "{}"),
-        (sku_new_active, "B", "A2", "New", 9.99, 1, "",
-         json.dumps({"ebay_listing": {"status": "Active"}})),
-        (sku_instock_published_offer, "C", "A3", "In Stock", 9.99, 1, "",
-         json.dumps({"ebay_offer": {"status": "PUBLISHED"}})),
-        (sku_instock_ended_relistable, "D", "A4", "In Stock", 9.99, 1, "",
-         json.dumps({"ebay_listing": {"status": "Ended"}})),
-        (sku_sold, "E", "A5", "Sold", 9.99, 1, "", "{}"),
-        (sku_staged_not_eligible_status, "F", "A6", "Staged", 9.99, 1, "", "{}"),
-        # todo #1377: items the intake pipeline never stamped with a status
-        # at all (blank/NULL) are a real, common case — not a data error —
-        # and must count as eligible when not listed/published, matching
-        # how the default "All" view already treats blank status as
-        # active/non-terminal.
-        (sku_blank_never_listed, "G", "A7", "", 9.99, 1, "", "{}"),
-        (sku_blank_active, "H", "A8", "", 9.99, 1, "",
-         json.dumps({"ebay_listing": {"status": "Active"}})),
-    ])
+    _make_catalog_with_data(
+        catalog_path,
+        [
+            (sku_new_never_listed, "A", "A1", "new", 9.99, 1, "", "{}"),
+            (sku_new_active, "B", "A2", "New", 9.99, 1, "", json.dumps({"ebay_listing": {"status": "Active"}})),
+            (sku_instock_published_offer, "C", "A3", "In Stock", 9.99, 1, "", json.dumps({"ebay_offer": {"status": "PUBLISHED"}})),
+            (sku_instock_ended_relistable, "D", "A4", "In Stock", 9.99, 1, "", json.dumps({"ebay_listing": {"status": "Ended"}})),
+            (sku_sold, "E", "A5", "Sold", 9.99, 1, "", "{}"),
+            (sku_staged_not_eligible_status, "F", "A6", "Staged", 9.99, 1, "", "{}"),
+            # todo #1377: items the intake pipeline never stamped with a status
+            # at all (blank/NULL) are a real, common case — not a data error —
+            # and must count as eligible when not listed/published, matching
+            # how the default "All" view already treats blank status as
+            # active/non-terminal.
+            (sku_blank_never_listed, "G", "A7", "", 9.99, 1, "", "{}"),
+            (sku_blank_active, "H", "A8", "", 9.99, 1, "", json.dumps({"ebay_listing": {"status": "Active"}})),
+        ],
+    )
 
     cfg = {
         "sqlite_catalog_path": catalog_path,
@@ -617,34 +638,32 @@ def test_eligible_filter_status_and_ebay_state(tmp_path, monkeypatch):
     monkeypatch.setattr(http_server.psycopg2, "connect", lambda *a, **k: _FakeConn([]))
 
     client = TestClient(http_server.app)
-    r = client.get("/api/items", params={"status_filter": "__eligible__"},
-                   headers=AUTH_HEADERS)
+    r = client.get("/api/items", params={"status_filter": "__eligible__"}, headers=AUTH_HEADERS)
     assert r.status_code == 200
     skus = {it["sku"] for it in r.json()["items"]}
 
     assert sku_new_never_listed in skus
     assert sku_instock_ended_relistable in skus  # ended listings are relistable
-    assert sku_new_active not in skus            # already Active on eBay
+    assert sku_new_active not in skus  # already Active on eBay
     assert sku_instock_published_offer not in skus  # PUBLISHED offer blocks it
-    assert sku_sold not in skus                  # status excluded outright
+    assert sku_sold not in skus  # status excluded outright
     assert sku_staged_not_eligible_status not in skus  # not new/In Stock
-    assert sku_blank_never_listed in skus        # blank status = never stamped, still eligible (#1377)
-    assert sku_blank_active not in skus          # blank status but already Active still excluded
+    assert sku_blank_never_listed in skus  # blank status = never stamped, still eligible (#1377)
+    assert sku_blank_active not in skus  # blank status but already Active still excluded
 
 
 # ---------------------------------------------------------------------------
 # GET /form/history/{sku_old} — historical-catalog lookup (todo #1054)
 # ---------------------------------------------------------------------------
 
+
 def _write_historical_catalogs(tmp_path, tgwcat_records=None, mastercat_records=None):
     catalog_root = tmp_path / "ItemCatalog"
     catalog_root.mkdir(exist_ok=True)
     if tgwcat_records is not None:
-        (catalog_root / "historical-tgwcatalog.json").write_text(
-            json.dumps(tgwcat_records), encoding="utf-8")
+        (catalog_root / "historical-tgwcatalog.json").write_text(json.dumps(tgwcat_records), encoding="utf-8")
     if mastercat_records is not None:
-        (catalog_root / "historical-master-catalog.json").write_text(
-            json.dumps(mastercat_records), encoding="utf-8")
+        (catalog_root / "historical-master-catalog.json").write_text(json.dumps(mastercat_records), encoding="utf-8")
     return catalog_root
 
 
@@ -669,14 +688,17 @@ def _history_client(tmp_path, monkeypatch, catalog_root):
 
 
 def test_history_form_found_in_tgwcatalog(tmp_path, monkeypatch):
-    catalog_root = _write_historical_catalogs(tmp_path, tgwcat_records={
-        "tgw20140101144105453": {
-            "sku": "tgw20140101144105453",
-            "sku_old": "TGW20140101144105453",
-            "tgw_name": "Mumm Champagne Bottle Stopper",
-            "price": "4.99",
+    catalog_root = _write_historical_catalogs(
+        tmp_path,
+        tgwcat_records={
+            "tgw20140101144105453": {
+                "sku": "tgw20140101144105453",
+                "sku_old": "TGW20140101144105453",
+                "tgw_name": "Mumm Champagne Bottle Stopper",
+                "price": "4.99",
+            },
         },
-    })
+    )
     client = _history_client(tmp_path, monkeypatch, catalog_root)
     r = client.get("/form/history/TGW20140101144105453")
     assert r.status_code == 200
@@ -689,8 +711,7 @@ def test_history_form_found_in_mastercatalog_when_absent_from_tgwcatalog(tmp_pat
         tmp_path,
         tgwcat_records={},
         mastercat_records=[
-            {"sku": "tgw20140101144105453", "sku_old": "TGW20140101144105453",
-             "title": "Mumm Champagne Bottle Stopper (master)"},
+            {"sku": "tgw20140101144105453", "sku_old": "TGW20140101144105453", "title": "Mumm Champagne Bottle Stopper (master)"},
         ],
     )
     client = _history_client(tmp_path, monkeypatch, catalog_root)
@@ -722,6 +743,7 @@ def _retired_test_item_detail_history_link_present_when_sku_old_set(env):
 # GET /api/items/{sku} — 404, media-list assembly, queue-jobs fetch
 # ---------------------------------------------------------------------------
 
+
 def test_get_item_404(client):
     r = client.get("/api/items/tgw99999999999999999", headers=AUTH_HEADERS)
     assert r.status_code == 404
@@ -743,17 +765,19 @@ def test_get_item_queue_jobs_serialized(env):
     import datetime as _dt
 
     created = _dt.datetime(2026, 6, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
-    env["queue_rows"].append({
-        "job_id": "job-ai-1",
-        "queue_name": "ai_identify",
-        "state": "done",
-        "attempt_count": 1,
-        "created_at": created,
-        "updated_at": created,
-        "finished_at": None,
-        "error_code": None,
-        "error_detail": None,
-    })
+    env["queue_rows"].append(
+        {
+            "job_id": "job-ai-1",
+            "queue_name": "ai_identify",
+            "state": "done",
+            "attempt_count": 1,
+            "created_at": created,
+            "updated_at": created,
+            "finished_at": None,
+            "error_code": None,
+            "error_detail": None,
+        }
+    )
     r = env["client"].get(f"/api/items/{SKU_A}", headers=AUTH_HEADERS)
     assert r.status_code == 200
     jobs = r.json()["item"]["_queue_jobs"]
@@ -781,6 +805,7 @@ def test_get_item_queue_fetch_failure_is_swallowed(env, monkeypatch):
 # PATCH /api/items/{sku} — validation + merge (the prioritized core)
 # ---------------------------------------------------------------------------
 
+
 def test_patch_sku_immutable_400(client):
     r = client.patch(
         f"/api/items/{SKU_A}",
@@ -792,9 +817,7 @@ def test_patch_sku_immutable_400(client):
 
 
 def test_patch_empty_fields_400(client):
-    r = client.patch(
-        f"/api/items/{SKU_A}", json={"fields": {}}, headers=AUTH_HEADERS
-    )
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {}}, headers=AUTH_HEADERS)
     assert r.status_code == 400
     assert r.json()["detail"] == "no fields provided"
 
@@ -826,9 +849,7 @@ def test_patch_rejects_invalid_condition_enum(env, enqueue_calls):
     assert body["field"] == "condition_enum"
 
     # The bad value must never have reached disk.
-    doc = json.loads(
-        (env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text(encoding="utf-8")
-    )
+    doc = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text(encoding="utf-8"))
     assert (doc.get("draft_listing") or {}).get("condition_enum") != "Very Good"
 
 
@@ -839,9 +860,7 @@ def test_patch_accepts_valid_condition_enum(env, enqueue_calls):
         headers=AUTH_HEADERS,
     )
     assert r.status_code == 200
-    doc = json.loads(
-        (env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text(encoding="utf-8")
-    )
+    doc = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text(encoding="utf-8"))
     assert doc["draft_listing"]["condition_enum"] == "USED_VERY_GOOD"
 
 
@@ -858,9 +877,7 @@ def test_patch_multi_field_merge(env, enqueue_calls):
     assert set(body["updated"]) == {"title", "weight_oz"}
 
     # Disk reflects the merge; pre-existing condition field is preserved.
-    doc = json.loads(
-        (env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text(encoding="utf-8")
-    )
+    doc = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text(encoding="utf-8"))
     assert doc["title"] == "Merged Title"
     assert doc["weight_oz"] == 4.5
     assert doc["condition"] == "Good"
@@ -906,9 +923,7 @@ def test_patch_location_syncs_tree(env, enqueue_calls):
     assert "location" in body["updated"]
 
     # JSON now records the new location.
-    doc = json.loads(
-        (env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text(encoding="utf-8")
-    )
+    doc = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text(encoding="utf-8"))
     assert doc["location"] == "C9"
 
     # Location tree got a symlink for the SKU under the new location dir.
@@ -950,9 +965,12 @@ def test_patch_succeeds_even_if_enqueue_raises(env, monkeypatch):
 # PATCH auto-enqueue on draft_listing edit (todo #1114) — push, never regen
 # ---------------------------------------------------------------------------
 
+
 def _seed_live_item(env, sku, extra_fields=None):
     doc = {
-        "sku": sku, "title": "Live Widget", "location": "A1",
+        "sku": sku,
+        "title": "Live Widget",
+        "location": "A1",
         "condition": "Good",
         "draft_listing": {"title": "Live Widget", "price": "9.99"},
         "ebay_offer": {"offer_id": "OFF-LIVE-1", "status": "PUBLISHED"},
@@ -961,9 +979,19 @@ def _seed_live_item(env, sku, extra_fields=None):
     _write_item(env["itemdata_root"], sku, doc)
 
 
-def test_operator_edit_to_live_draft_pushes_not_regenerates(env, enqueue_calls):
+def test_operator_edit_to_live_draft_uses_canonical_update_command(
+    env,
+    enqueue_calls,
+    monkeypatch,
+):
     sku = "tgw20260401000000009"
     _seed_live_item(env, sku)
+    commands = []
+    monkeypatch.setattr(
+        http_server,
+        "execute_item_operator_command",
+        lambda called_sku, body, operator_identity: commands.append((called_sku, body.command_id, operator_identity)) or {"ok": True},
+    )
 
     r = env["client"].patch(
         f"/api/items/{sku}",
@@ -972,12 +1000,8 @@ def test_operator_edit_to_live_draft_pushes_not_regenerates(env, enqueue_calls):
     )
     assert r.status_code == 200
 
-    queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
-    assert "ebay_stage" in queue_names
-    assert "ebay_draft" not in queue_names
-    stage_call = next(c for c in enqueue_calls if c["kwargs"].get("queue_name") == "ebay_stage")
-    assert stage_call["kwargs"]["payload"]["force"] is True
-    assert stage_call["kwargs"]["payload"]["origin"] == "operator"
+    assert commands == [(sku, "update-item", "operator:api-key")]
+    assert not any(call["kwargs"].get("queue_name") in {"ebay_stage", "ebay_draft"} for call in enqueue_calls)
 
     # The operator's edit itself must survive on disk — the whole point.
     doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
@@ -1002,42 +1026,21 @@ def test_worker_write_to_live_draft_does_not_auto_enqueue(env, enqueue_calls):
     assert "ebay_draft" not in queue_names
 
 
-def test_ebay_update_action_uses_same_dedupe_key_as_patch_auto_push(env, enqueue_calls):
-    """Todo #1469 (live incident, 2026-07-16, Dave: 'why is every item
-    staging twice... not even close to the same as ui'): the 'Update
-    Listing' button calls saveEbayDraft() (PATCH draft_listing, which
-    auto-enqueues ebay_stage under dedupe_key f"ebay_stage:{sku}") and then
-    fires the ebay_update action as its own success callback — which used
-    to enqueue a SECOND, unguarded ebay_stage job with no dedupe_key,
-    racing the first. Both enqueue call sites must now share the exact
-    same dedupe_key so the redundant attempt coalesces."""
+def test_legacy_ebay_update_action_is_rejected(env, enqueue_calls):
+    """The former direct update action cannot bypass the operator object."""
     sku = "tgw20260401000000012"
     _seed_live_item(env, sku)
-
-    patch_r = env["client"].patch(
-        f"/api/items/{sku}",
-        json={"fields": {"draft_listing": {"title": "Operator edit"}}},
-        headers=AUTH_HEADERS,
-    )
-    assert patch_r.status_code == 200
 
     action_r = env["client"].post(
         f"/api/items/{sku}/action",
         json={"action": "ebay_update"},
         headers=AUTH_HEADERS,
     )
-    assert action_r.status_code == 200
-
-    stage_calls = [c for c in enqueue_calls if c["kwargs"].get("queue_name") == "ebay_stage"]
-    assert len(stage_calls) == 2  # one from the PATCH auto-push, one from the action
-    dedupe_keys = {c["kwargs"].get("dedupe_key") for c in stage_calls}
-    assert dedupe_keys == {f"ebay_stage:{sku}"}  # both share the SAME key — real Postgres would coalesce these
+    assert action_r.status_code == 400
+    assert not any(call["kwargs"].get("queue_name") == "ebay_stage" for call in enqueue_calls)
 
 
-def test_ebay_update_action_survives_dedupe_collision(env, monkeypatch):
-    """If the auto-push's job is still active when this action's own
-    enqueue attempt hits the shared dedupe_key, Postgres raises
-    UniqueViolation — the action must degrade to job_id=None, not a 500."""
+def test_legacy_ebay_update_action_never_reaches_queue(env, monkeypatch):
     sku = "tgw20260401000000013"
     _seed_live_item(env, sku)
 
@@ -1051,12 +1054,12 @@ def test_ebay_update_action_survives_dedupe_collision(env, monkeypatch):
         json={"action": "ebay_update"},
         headers=AUTH_HEADERS,
     )
-    assert r.status_code == 200
-    assert r.json() == {"ok": True, "sku": sku, "action": "ebay_update", "job_id": None}
+    assert r.status_code == 400
 
 
 def test_resync_photos_queues_upload_for_same_count_but_wrong_photo_set(
-    env, enqueue_calls,
+    env,
+    enqueue_calls,
 ):
     """Count equality must not bypass upload when the identities differ.
 
@@ -1071,21 +1074,24 @@ def test_resync_photos_queues_upload_for_same_count_but_wrong_photo_set(
     second = item_dir / "002.jpg"
     first.write_bytes(b"one")
     second.write_bytes(b"two")
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "photo_order": ["001.jpg", "002.jpg"],
-        "ebay_photos": [
-            {"local": str(first), "url": "https://i.ebayimg.com/001.jpg"},
-            {"local": str(item_dir / "removed.jpg"),
-             "url": "https://i.ebayimg.com/removed.jpg"},
-        ],
-        "draft_listing": {
-            "imageUrls": [
-                "https://i.ebayimg.com/001.jpg",
-                "https://i.ebayimg.com/removed.jpg",
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "photo_order": ["001.jpg", "002.jpg"],
+            "ebay_photos": [
+                {"local": str(first), "url": "https://i.ebayimg.com/001.jpg"},
+                {"local": str(item_dir / "removed.jpg"), "url": "https://i.ebayimg.com/removed.jpg"},
             ],
+            "draft_listing": {
+                "imageUrls": [
+                    "https://i.ebayimg.com/001.jpg",
+                    "https://i.ebayimg.com/removed.jpg",
+                ],
+            },
         },
-    })
+    )
 
     response = env["client"].post(
         f"/api/items/{sku}/action",
@@ -1100,10 +1106,7 @@ def test_resync_photos_queues_upload_for_same_count_but_wrong_photo_set(
     assert len(body["photo_fingerprint"]) == 64
     assert "1 missing EPS URL" in body["detail"]
     assert "1 stale hosted photo" in body["detail"]
-    upload = next(
-        call["kwargs"] for call in enqueue_calls
-        if call["kwargs"].get("queue_name") == "ebay_upload"
-    )
+    upload = next(call["kwargs"] for call in enqueue_calls if call["kwargs"].get("queue_name") == "ebay_upload")
     assert upload["payload"]["sku"] == sku
     assert upload["dedupe_key"] == f"ebay_upload:{sku}"
 
@@ -1112,10 +1115,16 @@ def test_operator_edit_to_not_yet_live_draft_does_not_auto_enqueue(env, enqueue_
     """No offer_id yet — nothing to push to, so no auto-enqueue at all
     (unchanged pre-#1114 behavior for pre-publish items)."""
     sku = "tgw20260401000000011"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Draft Widget", "location": "A1",
-        "draft_listing": {"title": "Draft Widget"},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Draft Widget",
+            "location": "A1",
+            "draft_listing": {"title": "Draft Widget"},
+        },
+    )
     r = env["client"].patch(
         f"/api/items/{sku}",
         json={"fields": {"draft_listing": {"title": "Draft Widget v2"}}},
@@ -1147,7 +1156,11 @@ def test_bare_top_level_title_edit_does_not_auto_enqueue(env, enqueue_calls):
     assert "ebay_draft" not in queue_names
 
 
-def test_saveebaydraft_shaped_patch_routes_item_specifics_through_accessor(env, enqueue_calls):
+def test_saveebaydraft_shaped_patch_routes_item_specifics_through_accessor(
+    env,
+    enqueue_calls,
+    monkeypatch,
+):
     """todo #1416 point 3: saveEbayDraft() now nests aspect edits inside
     draft_listing.item_specifics (matching every other Draft Editor
     field), matching the PATCH shape at http_server.py's saveEbayDraft().
@@ -1157,12 +1170,23 @@ def test_saveebaydraft_shaped_patch_routes_item_specifics_through_accessor(env, 
     the existing auto-push-on-draft_listing-change behavior must still
     fire (no new trigger-set change needed, per the packet spec)."""
     sku = "tgw20260401000000014"
-    _seed_live_item(env, sku, extra_fields={
-        "draft_listing": {
-            "title": "Live Widget", "price": "9.99",
-            "item_specifics": {"Type": "Lapel Pin"},
+    commands = []
+    monkeypatch.setattr(
+        http_server,
+        "execute_item_operator_command",
+        lambda called_sku, body, operator_identity: commands.append(body.command_id) or {"ok": True},
+    )
+    _seed_live_item(
+        env,
+        sku,
+        extra_fields={
+            "draft_listing": {
+                "title": "Live Widget",
+                "price": "9.99",
+                "item_specifics": {"Type": "Lapel Pin"},
+            },
         },
-    })
+    )
 
     r = env["client"].patch(
         f"/api/items/{sku}",
@@ -1179,30 +1203,34 @@ def test_saveebaydraft_shaped_patch_routes_item_specifics_through_accessor(env, 
     # Sibling draft_listing fields (title, price) must survive the merge.
     assert doc["draft_listing"]["title"] == "Live Widget"
     assert doc["draft_listing"]["price"] == "9.99"
-    # Auto-push must still fire — this is just a normal draft_listing edit.
-    queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
-    assert "ebay_stage" in queue_names
+    # Auto-push re-enters the current bounded command; it cannot enqueue here.
+    assert commands == ["update-item"]
+    assert not any(c["kwargs"].get("queue_name") == "ebay_stage" for c in enqueue_calls)
 
 
-def test_operator_edit_to_live_draft_uses_dedupe_key(env, enqueue_calls):
-    """Code-review fix: the auto-push must dedupe by SKU like the other
-    ebay_stage enqueue call sites, so rapid successive edits collapse
-    into one queued push instead of piling up duplicate live PUTs."""
+def test_operator_edit_to_live_draft_never_directly_enqueues(env, enqueue_calls, monkeypatch):
     sku = "tgw20260401000000013"
     _seed_live_item(env, sku)
+    commands = []
+    monkeypatch.setattr(
+        http_server,
+        "execute_item_operator_command",
+        lambda called_sku, body, operator_identity: commands.append(body.command_id) or {"ok": True},
+    )
 
     env["client"].patch(
         f"/api/items/{sku}",
         json={"fields": {"draft_listing": {"title": "Edit one"}}},
         headers=AUTH_HEADERS,
     )
-    stage_call = next(c for c in enqueue_calls if c["kwargs"].get("queue_name") == "ebay_stage")
-    assert stage_call["kwargs"]["dedupe_key"] == f"ebay_stage:{sku}"
+    assert commands == ["update-item"]
+    assert not any(c["kwargs"].get("queue_name") == "ebay_stage" for c in enqueue_calls)
 
 
 # ---------------------------------------------------------------------------
 # GET /api/locations
 # ---------------------------------------------------------------------------
+
 
 def test_list_locations(client):
     r = client.get("/api/locations", headers=AUTH_HEADERS)
@@ -1224,6 +1252,7 @@ def test_list_locations_503_when_catalog_missing(env, monkeypatch):
 # ---------------------------------------------------------------------------
 # GET /api/category-groups
 # ---------------------------------------------------------------------------
+
 
 def test_list_category_groups(client):
     r = client.get("/api/category-groups", headers=AUTH_HEADERS)
@@ -1267,7 +1296,8 @@ NEW_SKU = "tgw20260401000000009"
 def test_create_item_endpoint_writes_via_fence(env, enqueue_calls):
     client = env["client"]
     r = client.post(
-        "/api/items", headers=AUTH_HEADERS,
+        "/api/items",
+        headers=AUTH_HEADERS,
         json={"sku": NEW_SKU, "data": {"title": "Fence-Created Item"}},
     )
     assert r.status_code == 200
@@ -1286,12 +1316,14 @@ def test_create_item_endpoint_writes_via_fence(env, enqueue_calls):
 def test_create_item_endpoint_duplicate_sku_409(env):
     client = env["client"]
     r1 = client.post(
-        "/api/items", headers=AUTH_HEADERS,
+        "/api/items",
+        headers=AUTH_HEADERS,
         json={"sku": NEW_SKU, "data": {"title": "First"}},
     )
     assert r1.status_code == 200
     r2 = client.post(
-        "/api/items", headers=AUTH_HEADERS,
+        "/api/items",
+        headers=AUTH_HEADERS,
         json={"sku": NEW_SKU, "data": {"title": "Second"}},
     )
     assert r2.status_code == 409
@@ -1303,7 +1335,8 @@ def test_create_item_endpoint_duplicate_sku_409(env):
 
 def test_create_item_endpoint_bad_sku_format_400(client):
     r = client.post(
-        "/api/items", headers=AUTH_HEADERS,
+        "/api/items",
+        headers=AUTH_HEADERS,
         json={"sku": "not-a-sku", "data": {"title": "x"}},
     )
     assert r.status_code == 400
@@ -1312,6 +1345,7 @@ def test_create_item_endpoint_bad_sku_format_400(client):
 # ---------------------------------------------------------------------------
 # PP-BULKEDIT-001 — /form/bulk + /api/bulk/preview + /api/bulk/apply
 # ---------------------------------------------------------------------------
+
 
 def test_bulk_form_html(client):
     _login(client)
@@ -1322,16 +1356,14 @@ def test_bulk_form_html(client):
 
 
 def test_bulk_preview_requires_auth(client):
-    r = client.post("/api/bulk/preview",
-                    json={"field": "title", "value": "X", "location": "A1"})
+    r = client.post("/api/bulk/preview", json={"field": "title", "value": "X", "location": "A1"})
     assert r.status_code in (401, 403)
 
 
 def test_bulk_preview_by_search(client):
     # The shared fixture has a real (empty) location tree, so filter by search
     # (JSON scan) which matches only SKU_A's "Red Widget".
-    r = client.post("/api/bulk/preview", headers=AUTH_HEADERS,
-                    json={"field": "title", "value": "Renamed", "search": "Red"})
+    r = client.post("/api/bulk/preview", headers=AUTH_HEADERS, json={"field": "title", "value": "Renamed", "search": "Red"})
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
@@ -1342,15 +1374,13 @@ def test_bulk_preview_by_search(client):
 
 
 def test_bulk_preview_no_selector_400(client):
-    r = client.post("/api/bulk/preview", headers=AUTH_HEADERS,
-                    json={"field": "title", "value": "X"})
+    r = client.post("/api/bulk/preview", headers=AUTH_HEADERS, json={"field": "title", "value": "X"})
     assert r.status_code == 400
 
 
 def test_bulk_apply_writes_and_enqueues(env, enqueue_calls):
     client = env["client"]
-    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS,
-                    json={"field": "title", "value": "Bulk Renamed", "skus": [SKU_A]})
+    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS, json={"field": "title", "value": "Bulk Renamed", "skus": [SKU_A]})
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
@@ -1366,8 +1396,7 @@ def test_bulk_apply_writes_and_enqueues(env, enqueue_calls):
 
 
 def test_bulk_apply_invalid_field(client):
-    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS,
-                    json={"field": "price", "value": "9.99", "skus": [SKU_A]})
+    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS, json={"field": "price", "value": "9.99", "skus": [SKU_A]})
     # bulk_edit returns ok:False for a non-editable field (200 envelope)
     assert r.status_code == 200
     assert r.json()["ok"] is False
@@ -1377,27 +1406,25 @@ def test_bulk_apply_invalid_field(client):
 # POST /api/bulk/action — bulk selection actions (todo #881)
 # ---------------------------------------------------------------------------
 
+
 def test_bulk_action_requires_auth(client):
     r = client.post("/api/bulk/action", json={"skus": [SKU_A], "action": "ai_identify"})
     assert r.status_code in (401, 403)
 
 
 def test_bulk_action_unknown_action_400(client):
-    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
-                    json={"skus": [SKU_A], "action": "bogus"})
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS, json={"skus": [SKU_A], "action": "bogus"})
     assert r.status_code == 400
 
 
 def test_bulk_action_no_skus_400(client):
-    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
-                    json={"skus": [], "action": "ai_identify"})
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS, json={"skus": [], "action": "ai_identify"})
     assert r.status_code == 400
 
 
 def test_bulk_action_ai_identify_enqueues(env, enqueue_calls):
     client = env["client"]
-    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
-                    json={"skus": [SKU_A, SKU_B], "action": "ai_identify"})
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS, json={"skus": [SKU_A, SKU_B], "action": "ai_identify"})
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
@@ -1417,9 +1444,11 @@ def test_bulk_action_ai_identify_enqueues(env, enqueue_calls):
 # POST /api/items/{sku}/append — PP-INTAKE-004 Phase 1a incremental-ID trigger
 # ---------------------------------------------------------------------------
 
+
 def _append_photo(client, sku, name):
     return client.post(
-        f"/api/items/{sku}/append", headers=AUTH_HEADERS,
+        f"/api/items/{sku}/append",
+        headers=AUTH_HEADERS,
         json={"op": "photo", "data": {"filename": name}},
     )
 
@@ -1469,7 +1498,8 @@ def test_session_complete_sets_ai_reidentify_when_already_identified(env, enqueu
     doc_path.write_text(json.dumps(doc))
 
     r = client.post(
-        f"/api/items/{SKU_A}/append", headers=AUTH_HEADERS,
+        f"/api/items/{SKU_A}/append",
+        headers=AUTH_HEADERS,
         json={"op": "photo", "data": {"filename": "last.jpg"}, "session_complete": True},
     )
     assert r.status_code == 200
@@ -1490,7 +1520,8 @@ def test_session_complete_fallback_enqueues_ai_identify_when_never_run(env, enqu
     assert "ai_identify" not in queued_names
 
     r = client.post(
-        f"/api/items/{SKU_A}/append", headers=AUTH_HEADERS,
+        f"/api/items/{SKU_A}/append",
+        headers=AUTH_HEADERS,
         json={"op": "photo", "data": {"filename": "last.jpg"}, "session_complete": True},
     )
     assert r.status_code == 200
@@ -1501,32 +1532,23 @@ def test_session_complete_fallback_enqueues_ai_identify_when_never_run(env, enqu
     assert doc.get("ai_reidentify") is not True  # fallback path is enqueue, not the reidentify flag
 
 
-def test_bulk_action_ebay_price_enqueues(env, enqueue_calls):
+def test_bulk_action_ebay_price_is_rejected(env, enqueue_calls):
     client = env["client"]
-    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
-                    json={"skus": [SKU_A], "action": "ebay_price"})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert body["count"] == 1
-    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
-    assert "ebay_price" in queued_names
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS, json={"skus": [SKU_A], "action": "ebay_price"})
+    assert r.status_code == 400
+    assert enqueue_calls == []
 
 
-def test_bulk_action_ebay_draft_enqueues(env, enqueue_calls):
+def test_bulk_action_ebay_draft_is_rejected(env, enqueue_calls):
     client = env["client"]
-    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
-                    json={"skus": [SKU_A, SKU_B], "action": "ebay_draft"})
-    assert r.status_code == 200
-    assert r.json()["count"] == 2
-    queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
-    assert queued_names.count("ebay_draft") == 2
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS, json={"skus": [SKU_A, SKU_B], "action": "ebay_draft"})
+    assert r.status_code == 400
+    assert enqueue_calls == []
 
 
 def test_bulk_action_mark_sold_writes_status(env, enqueue_calls):
     client = env["client"]
-    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
-                    json={"skus": [SKU_A], "action": "mark_sold"})
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS, json={"skus": [SKU_A], "action": "mark_sold"})
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
@@ -1547,8 +1569,7 @@ def test_bulk_action_mark_sold_decrements_multi_qty_instead_of_sold(env, enqueue
     doc["draft_listing"] = {"quantity": 3}
     doc_path.write_text(json.dumps(doc))
 
-    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
-                    json={"skus": [SKU_A], "action": "mark_sold"})
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS, json={"skus": [SKU_A], "action": "mark_sold"})
     assert r.status_code == 200
     doc = json.loads(doc_path.read_text())
     assert doc.get("status") != "Sold"
@@ -1576,8 +1597,7 @@ def test_bulk_action_mark_sold_reads_item_doc_exactly_once(env, enqueue_calls, m
 
     monkeypatch.setattr(http_server, "load_item_doc", _counting_load)
 
-    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
-                    json={"skus": [SKU_A], "action": "mark_sold"})
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS, json={"skus": [SKU_A], "action": "mark_sold"})
     assert r.status_code == 200
     assert len(calls) == 1
 
@@ -1631,8 +1651,7 @@ def test_ebay_sold_webhook_marks_item_sold(env, enqueue_calls, monkeypatch):
 </soap:Envelope>"""
 
     client = env["client"]
-    r = client.post("/webhooks/ebay/notification", headers=AUTH_HEADERS,
-                    content=xml.encode("utf-8"))
+    r = client.post("/webhooks/ebay/notification", headers=AUTH_HEADERS, content=xml.encode("utf-8"))
     assert r.status_code == 200
     assert r.json() == {"ack": "Success"}
 
@@ -1645,8 +1664,7 @@ def test_ebay_sold_webhook_marks_item_sold(env, enqueue_calls, monkeypatch):
 
 def test_bulk_action_delete_writes_status(env, enqueue_calls):
     client = env["client"]
-    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
-                    json={"skus": [SKU_A], "action": "delete"})
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS, json={"skus": [SKU_A], "action": "delete"})
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
@@ -1657,8 +1675,7 @@ def test_bulk_action_delete_writes_status(env, enqueue_calls):
 
 def test_bulk_action_missing_sku_reported_in_errors(env, enqueue_calls):
     client = env["client"]
-    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
-                    json={"skus": ["tgw_no_such_sku"], "action": "ebay_price"})
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS, json={"skus": ["tgw_no_such_sku"], "action": "ai_identify"})
     assert r.status_code == 200
     body = r.json()
     assert body["count"] == 0
@@ -1677,8 +1694,7 @@ def test_ebay_write_protects_price_comps_from_worker_overwrite(env):
     doc["ebay_offer"] = {"offer_id": "o1", "price_comps": {"median": 12.5}}
     doc_path.write_text(json.dumps(doc))
 
-    r = client.post(f"/api/items/{SKU_A}/ebay-write", headers=AUTH_HEADERS,
-                     json={"ebay_offer": {"offer_id": "o1", "price_comps": {"median": 999}}})
+    r = client.post(f"/api/items/{SKU_A}/ebay-write", headers=AUTH_HEADERS, json={"ebay_offer": {"offer_id": "o1", "price_comps": {"median": 999}}})
     assert r.status_code == 200
     doc = json.loads(doc_path.read_text())
     assert doc["ebay_offer"]["price_comps"]["median"] == 12.5
@@ -1694,9 +1710,7 @@ def test_ebay_write_allow_protected_lets_owner_refresh_price_comps(env):
     doc["ebay_offer"] = {"offer_id": "o1", "price_comps": {"median": 12.5}}
     doc_path.write_text(json.dumps(doc))
 
-    r = client.post(f"/api/items/{SKU_A}/ebay-write", headers=AUTH_HEADERS,
-                     json={"ebay_offer": {"offer_id": "o1", "price_comps": {"median": 999}},
-                           "allow_protected": ["price_comps"]})
+    r = client.post(f"/api/items/{SKU_A}/ebay-write", headers=AUTH_HEADERS, json={"ebay_offer": {"offer_id": "o1", "price_comps": {"median": 999}}, "allow_protected": ["price_comps"]})
     assert r.status_code == 200
     doc = json.loads(doc_path.read_text())
     assert doc["ebay_offer"]["price_comps"]["median"] == 999
@@ -1713,13 +1727,17 @@ def test_remove_comp_uses_same_stats_formula_as_pricing_module(env):
     prices = [10.0, 12.0, 15.0, 20.0, 25.0]
     items = [{"url": f"http://x/{i}", "price": p} for i, p in enumerate(prices)]
     doc = json.loads(doc_path.read_text())
-    doc["ebay_offer"] = {"price_comps": {"items": items + [
-        {"url": "http://x/drop", "price": 1000.0},
-    ]}}
+    doc["ebay_offer"] = {
+        "price_comps": {
+            "items": items
+            + [
+                {"url": "http://x/drop", "price": 1000.0},
+            ]
+        }
+    }
     doc_path.write_text(json.dumps(doc))
 
-    r = client.post(f"/api/items/{SKU_A}/remove-comp", headers=AUTH_HEADERS,
-                     json={"url": "http://x/drop"})
+    r = client.post(f"/api/items/{SKU_A}/remove-comp", headers=AUTH_HEADERS, json={"url": "http://x/drop"})
     assert r.status_code == 200
     doc = json.loads(doc_path.read_text())
     comps = doc["ebay_offer"]["price_comps"]
@@ -1732,8 +1750,7 @@ def test_remove_comp_uses_same_stats_formula_as_pricing_module(env):
 def test_bulk_action_set_ready_missing_offer(env):
     """set_ready returns ok:False when items lack an offer_id."""
     client = env["client"]
-    r = client.post("/api/bulk/action", headers=AUTH_HEADERS,
-                    json={"skus": [SKU_A], "action": "set_ready"})
+    r = client.post("/api/bulk/action", headers=AUTH_HEADERS, json={"skus": [SKU_A], "action": "set_ready"})
     assert r.status_code == 200
     body = r.json()
     # set_ready errors because SKU_A has no offer_id
@@ -1745,32 +1762,31 @@ def test_bulk_action_set_ready_missing_offer(env):
 # ---------------------------------------------------------------------------
 
 _TODO_ROWS = [
-    {"id": 29, "agent": "claude", "priority": 10, "body": "Dead_letter triage flag",
-     "source": "round4", "added_at": "2026-06-08", "done_at": None},
-    {"id": 31, "agent": "claude", "priority": 30, "body": "Fingerprint index + tgw locate",
-     "source": "round4", "added_at": "2026-06-08", "done_at": None},
-    {"id": 12, "agent": "admin", "priority": 45, "body": "Fix 9 wrong-shipping listings",
-     "source": "plan", "added_at": "2026-06-07", "done_at": None},
+    {"id": 29, "agent": "claude", "priority": 10, "body": "Dead_letter triage flag", "source": "round4", "added_at": "2026-06-08", "done_at": None},
+    {"id": 31, "agent": "claude", "priority": 30, "body": "Fingerprint index + tgw locate", "source": "round4", "added_at": "2026-06-08", "done_at": None},
+    {"id": 12, "agent": "admin", "priority": 45, "body": "Fix 9 wrong-shipping listings", "source": "plan", "added_at": "2026-06-07", "done_at": None},
 ]
 
 
 def test_todos_form_renders_grouped(client, monkeypatch):
     _login(client)
     import tgw.todo as todo
+
     monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS))
     r = client.get("/form/todos")  # no auth header — network trust
     assert r.status_code == 200
     text = r.text
     assert "Open Todos" in text
     assert "claude" in text and "admin" in text
-    assert "Fingerprint index" in text          # a task body
-    assert "#29" in text                          # id shown
-    assert "3 open item(s)" in text               # total count
+    assert "Fingerprint index" in text  # a task body
+    assert "#29" in text  # id shown
+    assert "3 open item(s)" in text  # total count
 
 
 def test_todos_form_empty_all_clear(client, monkeypatch):
     _login(client)
     import tgw.todo as todo
+
     monkeypatch.setattr(todo, "todo_list", lambda *a, **k: [])
     r = client.get("/form/todos")
     assert r.status_code == 200
@@ -1793,13 +1809,13 @@ def test_todos_form_db_error_still_200(client, monkeypatch):
 def test_todos_form_escapes_html(client, monkeypatch):
     _login(client)
     import tgw.todo as todo
-    rows = [{"id": 1, "agent": "claude", "priority": 50,
-             "body": "<script>alert('x')</script>", "source": "s", "done_at": None}]
+
+    rows = [{"id": 1, "agent": "claude", "priority": 50, "body": "<script>alert('x')</script>", "source": "s", "done_at": None}]
     monkeypatch.setattr(todo, "todo_list", lambda *a, **k: rows)
     r = client.get("/form/todos")
     assert r.status_code == 200
-    assert "<script>alert" not in r.text          # raw tag must not appear
-    assert "&lt;script&gt;" in r.text             # escaped form present
+    assert "<script>alert" not in r.text  # raw tag must not appear
+    assert "&lt;script&gt;" in r.text  # escaped form present
 
 
 # ---------------------------------------------------------------------------
@@ -1855,6 +1871,7 @@ _RUN_ROWS = [
 def test_runs_form_renders_rows(client, monkeypatch):
     _login(client)
     from tgw.queue import state_machine
+
     monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
     r = client.get("/form/runs")  # no auth header — network trust
     assert r.status_code == 200
@@ -1869,6 +1886,7 @@ def test_runs_form_renders_rows(client, monkeypatch):
 def test_runs_form_empty_all_clear(client, monkeypatch):
     _login(client)
     from tgw.queue import state_machine
+
     monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: [])
     r = client.get("/form/runs")
     assert r.status_code == 200
@@ -1897,6 +1915,7 @@ def test_runs_form_requires_session(client):
 def test_runs_form_escapes_html(client, monkeypatch):
     _login(client)
     from tgw.queue import state_machine
+
     rows = [dict(_RUN_ROWS[2])]
     monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: rows)
     r = client.get("/form/runs")
@@ -1908,6 +1927,7 @@ def test_runs_form_escapes_html(client, monkeypatch):
 def test_runs_form_status_color_coding(client, monkeypatch):
     _login(client)
     from tgw.queue import state_machine
+
     monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
     r = client.get("/form/runs")
     assert 'st-completed">completed' in r.text
@@ -1918,6 +1938,7 @@ def test_runs_form_status_color_coding(client, monkeypatch):
 def test_runs_form_has_filter_controls(client, monkeypatch):
     _login(client)
     from tgw.queue import state_machine
+
     monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
     r = client.get("/form/runs")
     assert 'id="runs-agent-sel"' in r.text
@@ -1931,6 +1952,7 @@ def test_runs_form_transcript_path_shown_as_text(client, monkeypatch):
     item 4, flagged limitation)."""
     _login(client)
     from tgw.queue import state_machine
+
     monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
     r = client.get("/form/runs")
     assert "/opt/TGW/var/agent-traces/2026-07-20/abcdef0123456789.jsonl" in r.text
@@ -1940,12 +1962,13 @@ def test_runs_form_transcript_path_shown_as_text(client, monkeypatch):
 def test_runs_form_uses_static_css(client, monkeypatch):
     _login(client)
     from tgw.queue import state_machine
+
     monkeypatch.setattr(state_machine, "list_agent_runs", lambda *a, **k: list(_RUN_ROWS))
     r = client.get("/form/runs")
-    assert '/static/tgw.css' in r.text
-    assert '/static/nav.css' in r.text
-    assert '/static/tgw.js' in r.text
-    assert '/static/nav.js' in r.text
+    assert "/static/tgw.css" in r.text
+    assert "/static/nav.css" in r.text
+    assert "/static/tgw.js" in r.text
+    assert "/static/nav.js" in r.text
 
 
 def test_render_runs_html_pure():
@@ -1957,8 +1980,8 @@ def test_render_runs_html_pure():
     assert "Agent Runs" in html_out
     assert "3 run(s)" in html_out
     assert "abcdef012345" in html_out  # truncated run id (12 chars)
-    assert '<b>bad</b>' not in html_out
-    assert '&lt;b&gt;bad&lt;/b&gt;' in html_out
+    assert "<b>bad</b>" not in html_out
+    assert "&lt;b&gt;bad&lt;/b&gt;" in html_out
 
 
 def test_render_runs_html_empty():
@@ -1971,6 +1994,7 @@ def test_render_runs_html_empty():
 # ---------------------------------------------------------------------------
 # PP-CAPTURE-001 — GET/POST /form/suggest (Round 5 #44) — no Bearer (network trust)
 # ---------------------------------------------------------------------------
+
 
 def _suggestions_file(env):
     return env["cfg"]["plan_vault_path"] / "suggestions" / "SUGGESTIONS.md"
@@ -1986,24 +2010,22 @@ def test_suggest_form_html(client):
 
 def test_suggest_post_appends_with_punctuation(env):
     _login(env["client"])
-    tricky = 'add "quotes" & $(subshell) `backticks` | pipes; --flags \'single\''
+    tricky = "add \"quotes\" & $(subshell) `backticks` | pipes; --flags 'single'"
     r = env["client"].post("/form/suggest", data={"text": tricky})
     assert r.status_code == 200
     assert "added:" in r.text
     content = _suggestions_file(env).read_text(encoding="utf-8")
-    assert tricky in content                       # written verbatim
-    assert content.startswith("- [ ] ")            # checklist format intact
+    assert tricky in content  # written verbatim
+    assert content.startswith("- [ ] ")  # checklist format intact
 
 
 def test_suggest_post_collapses_newlines_to_one_line(env):
     _login(env["client"])
-    r = env["client"].post(
-        "/form/suggest", data={"text": "line one\r\nline two\n\nline three"}
-    )
+    r = env["client"].post("/form/suggest", data={"text": "line one\r\nline two\n\nline three"})
     assert r.status_code == 200
     content = _suggestions_file(env).read_text(encoding="utf-8")
     lines = [ln for ln in content.splitlines() if ln.strip()]
-    assert len(lines) == 1                         # one checklist line, not four
+    assert len(lines) == 1  # one checklist line, not four
     assert "line one line two line three" in lines[0]
 
 
@@ -2020,7 +2042,7 @@ def test_suggest_post_escapes_echo_but_writes_raw(env):
     payload = "<script>alert(1)</script>"
     r = env["client"].post("/form/suggest", data={"text": payload})
     assert r.status_code == 200
-    assert payload not in r.text                   # echo is HTML-escaped
+    assert payload not in r.text  # echo is HTML-escaped
     assert "&lt;script&gt;" in r.text
     assert payload in _suggestions_file(env).read_text(encoding="utf-8")
 
@@ -2028,6 +2050,7 @@ def test_suggest_post_escapes_echo_but_writes_raw(env):
 # ---------------------------------------------------------------------------
 # POST /api/suggest — JSON suggest endpoint for nav popup (PP-CAPTURE-001 3n)
 # ---------------------------------------------------------------------------
+
 
 def test_api_suggest_json_writes_suggestion(env):
     """POST /api/suggest with JSON body appends to SUGGESTIONS.md, returns {ok}."""
@@ -2055,8 +2078,7 @@ def test_api_suggest_json_empty_returns_400(env):
 
 
 def test_api_suggest_json_invalid_body_returns_400(env):
-    r = env["client"].post("/api/suggest", content=b"not json",
-                           headers={"Content-Type": "application/json"})
+    r = env["client"].post("/api/suggest", content=b"not json", headers={"Content-Type": "application/json"})
     assert r.status_code == 400
 
 
@@ -2071,12 +2093,9 @@ def test_api_suggest_no_auth_required(env):
 # ---------------------------------------------------------------------------
 
 _TODO_ROWS_WITH_PPREF = [
-    {"id": 55, "agent": "claude", "priority": 10,
-     "body": "[PP-EDITOR-001] Fix the browse page", "source": "session", "done_at": None},
-    {"id": 56, "agent": "claude", "priority": 20,
-     "body": "PP-TODO-001/PP-CAPTURE-001: add filter", "source": "session", "done_at": None},
-    {"id": 57, "agent": "admin", "priority": 30,
-     "body": "Manual warehouse check", "source": "plan", "done_at": None},
+    {"id": 55, "agent": "claude", "priority": 10, "body": "[PP-EDITOR-001] Fix the browse page", "source": "session", "done_at": None},
+    {"id": 56, "agent": "claude", "priority": 20, "body": "PP-TODO-001/PP-CAPTURE-001: add filter", "source": "session", "done_at": None},
+    {"id": 57, "agent": "admin", "priority": 30, "body": "Manual warehouse check", "source": "plan", "done_at": None},
 ]
 
 
@@ -2084,6 +2103,7 @@ def test_todos_form_has_agent_filter(client, monkeypatch):
     """Agent filter dropdown is present with each unique agent as an option."""
     _login(client)
     import tgw.todo as todo
+
     monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS_WITH_PPREF))
     r = client.get("/form/todos")
     assert r.status_code == 200
@@ -2096,6 +2116,7 @@ def test_todos_form_pp_refs_extracted(client, monkeypatch):
     """PP-XXX-NNN references in task bodies render as pp-badge links."""
     _login(client)
     import tgw.todo as todo
+
     monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS_WITH_PPREF))
     r = client.get("/form/todos")
     assert r.status_code == 200
@@ -2108,6 +2129,7 @@ def test_todos_form_copy_btn_present(client, monkeypatch):
     """Each task row has a copy button with data-body attribute."""
     _login(client)
     import tgw.todo as todo
+
     monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS_WITH_PPREF))
     r = client.get("/form/todos")
     assert r.status_code == 200
@@ -2119,6 +2141,7 @@ def test_todos_form_data_agent_attrs(client, monkeypatch):
     """Rows and groups have data-agent attributes for client-side filtering."""
     _login(client)
     import tgw.todo as todo
+
     monkeypatch.setattr(todo, "todo_list", lambda *a, **k: list(_TODO_ROWS_WITH_PPREF))
     r = client.get("/form/todos")
     assert r.status_code == 200
@@ -2130,6 +2153,7 @@ def test_todos_form_data_agent_attrs(client, monkeypatch):
 # /form/items browse — load-more and action buttons (PP-EDITOR-001 3n)
 # ---------------------------------------------------------------------------
 
+
 def test_browse_has_load_more_js(client):
     """Browse page includes loadMore() function and card action controls."""
     _login(client)
@@ -2137,8 +2161,8 @@ def test_browse_has_load_more_js(client):
     assert r.status_code == 200
     assert "loadMore" in r.text
     assert "card-btns" in r.text
-    assert "csel" in r.text   # action dropdown class
-    assert "crun" in r.text   # run button class
+    assert "csel" in r.text  # action dropdown class
+    assert "crun" in r.text  # run button class
 
 
 def test_browse_uses_card_inner_link(client):
@@ -2148,7 +2172,7 @@ def test_browse_uses_card_inner_link(client):
     assert r.status_code == 200
     assert "card-inner" in r.text
     # The old pattern (whole card = link) should not appear
-    assert 'class="card"' not in r.text or 'card-inner' in r.text
+    assert 'class="card"' not in r.text or "card-inner" in r.text
 
 
 # ---------------------------------------------------------------------------
@@ -2172,6 +2196,7 @@ _HEALTH_FAIL = {
 
 def test_health_ok_200(client, monkeypatch):
     import tgw.health as health
+
     monkeypatch.setattr(health, "check_all", lambda cfg, **kw: dict(_HEALTH_OK))
     r = client.get("/api/health", headers=AUTH_HEADERS)
     assert r.status_code == 200
@@ -2183,6 +2208,7 @@ def test_health_ok_200(client, monkeypatch):
 
 def test_health_fail_503(client, monkeypatch):
     import tgw.health as health
+
     monkeypatch.setattr(health, "check_all", lambda cfg, **kw: dict(_HEALTH_FAIL))
     r = client.get("/api/health", headers=AUTH_HEADERS)
     assert r.status_code == 503
@@ -2193,8 +2219,9 @@ def test_health_fail_503(client, monkeypatch):
 
 def test_health_dead_letter_count_in_response(client, monkeypatch, queue_rows):
     import tgw.health as health
+
     monkeypatch.setattr(health, "check_all", lambda cfg, **kw: dict(_HEALTH_OK))
-    queue_rows.append((7,))   # fetchone() returns (7,) → dead_letter_count = 7
+    queue_rows.append((7,))  # fetchone() returns (7,) → dead_letter_count = 7
     r = client.get("/api/health", headers=AUTH_HEADERS)
     assert r.status_code == 200
     assert r.json()["dead_letter_count"] == 7
@@ -2202,9 +2229,11 @@ def test_health_dead_letter_count_in_response(client, monkeypatch, queue_rows):
 
 def test_health_dead_letter_zero_on_postgres_error(client, monkeypatch):
     import tgw.health as health
+
     monkeypatch.setattr(health, "check_all", lambda cfg, **kw: dict(_HEALTH_OK))
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: (_ for _ in ()).throw(Exception("pg down")),
     )
     r = client.get("/api/health", headers=AUTH_HEADERS)
@@ -2226,6 +2255,7 @@ def test_health_rejects_bad_token(client):
 # GET /api/catalog/snapshot — PP-PORTABLE-CATALOG-001 Phase 2
 # ---------------------------------------------------------------------------
 
+
 def test_catalog_snapshot_returns_sqlite_bytes(client):
     r = client.get("/api/catalog/snapshot", headers=AUTH_HEADERS)
     assert r.status_code == 200
@@ -2241,7 +2271,8 @@ def test_catalog_snapshot_requires_auth(client):
 
 def test_catalog_snapshot_503_when_catalog_missing(env, monkeypatch):
     monkeypatch.setattr(
-        http_server, "_cfg",
+        http_server,
+        "_cfg",
         {**env["cfg"], "sqlite_catalog_path": env["cfg"]["sqlite_catalog_path"].parent / "missing.db"},
     )
     r = env["client"].get("/api/catalog/snapshot", headers=AUTH_HEADERS)
@@ -2251,6 +2282,7 @@ def test_catalog_snapshot_503_when_catalog_missing(env, monkeypatch):
 # ---------------------------------------------------------------------------
 # PP-EDITOR-001 Phase 3a — static files + refactored /form/ pages
 # ---------------------------------------------------------------------------
+
 
 def test_static_tgw_css(client):
     r = client.get("/static/tgw.css")
@@ -2286,47 +2318,48 @@ def test_intake_form_uses_static_css(env):
     _login(env["client"])
     r = env["client"].get(f"/form/intake/{SKU_A}")
     assert r.status_code == 200
-    assert '/static/tgw.css' in r.text
-    assert '/static/nav.css' in r.text
-    assert '/static/tgw.js' in r.text
-    assert '/static/nav.js' in r.text
+    assert "/static/tgw.css" in r.text
+    assert "/static/nav.css" in r.text
+    assert "/static/tgw.js" in r.text
+    assert "/static/nav.js" in r.text
     # Base CSS must not be embedded inline
-    assert 'font-family:system-ui' not in r.text
+    assert "font-family:system-ui" not in r.text
     # Page-specific JS still works (initChips call present)
-    assert 'initChips' in r.text
+    assert "initChips" in r.text
 
 
 def test_bulk_form_uses_static_css(client):
     _login(client)
     r = client.get("/form/bulk")
     assert r.status_code == 200
-    assert '/static/tgw.css' in r.text
-    assert '/static/nav.css' in r.text
-    assert '/static/tgw.js' in r.text
-    assert '/static/nav.js' in r.text
-    assert 'font-family:system-ui' not in r.text
+    assert "/static/tgw.css" in r.text
+    assert "/static/nav.css" in r.text
+    assert "/static/tgw.js" in r.text
+    assert "/static/nav.js" in r.text
+    assert "font-family:system-ui" not in r.text
     # escapeHtml no longer defined inline — comes from tgw.js
-    assert 'function escapeHtml' not in r.text
+    assert "function escapeHtml" not in r.text
     # initChips used for field chip selector
-    assert 'initChips' in r.text
+    assert "initChips" in r.text
 
 
 def test_items_browse_uses_static_css(client):
     _login(client)
     r = client.get("/form/items")
     assert r.status_code == 200
-    assert '/static/tgw.css' in r.text
-    assert '/static/nav.css' in r.text
-    assert '/static/tgw.js' in r.text
-    assert '/static/nav.js' in r.text
-    assert 'font-family:system-ui' not in r.text
+    assert "/static/tgw.css" in r.text
+    assert "/static/nav.css" in r.text
+    assert "/static/tgw.js" in r.text
+    assert "/static/nav.js" in r.text
+    assert "font-family:system-ui" not in r.text
     # esc is now an alias for the shared escapeHtml
-    assert 'const esc=escapeHtml' in r.text
+    assert "const esc=escapeHtml" in r.text
 
 
 def test_items_browse_price_handles_empty_and_null():
     """ISS-011: _cardHtml price must not produce $NaN for null/empty/non-numeric price."""
     import pathlib
+
     src = (pathlib.Path(__file__).parent.parent / "src/tgw/http_server.py").read_text()
     # isNaN guard replaces null-check so empty strings don't produce NaN
     assert "isNaN(pf)" in src
@@ -2338,48 +2371,55 @@ def test_items_browse_price_handles_empty_and_null():
 def test_todos_form_uses_static_css(client, monkeypatch):
     _login(client)
     import tgw.todo as todo
+
     monkeypatch.setattr(todo, "todo_list", lambda *a, **k: [])
     r = client.get("/form/todos")
     assert r.status_code == 200
-    assert '/static/tgw.css' in r.text
-    assert '/static/nav.css' in r.text
-    assert '/static/tgw.js' in r.text
-    assert '/static/nav.js' in r.text
-    assert 'font-family:system-ui' not in r.text
+    assert "/static/tgw.css" in r.text
+    assert "/static/nav.css" in r.text
+    assert "/static/tgw.js" in r.text
+    assert "/static/nav.js" in r.text
+    assert "font-family:system-ui" not in r.text
 
 
 def test_todos_form_error_uses_static_css(client, monkeypatch):
     _login(client)
     import tgw.todo as todo
+
     monkeypatch.setattr(todo, "todo_list", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
     r = client.get("/form/todos")
     assert r.status_code == 200
-    assert '/static/tgw.css' in r.text
-    assert 'font-family:system-ui' not in r.text
+    assert "/static/tgw.css" in r.text
+    assert "font-family:system-ui" not in r.text
 
 
 def test_suggest_form_uses_static_css(client):
     _login(client)
     r = client.get("/form/suggest")
     assert r.status_code == 200
-    assert '/static/tgw.css' in r.text
-    assert '/static/nav.css' in r.text
-    assert '/static/tgw.js' in r.text
-    assert '/static/nav.js' in r.text
-    assert 'font-family:system-ui' not in r.text
+    assert "/static/tgw.css" in r.text
+    assert "/static/nav.css" in r.text
+    assert "/static/tgw.js" in r.text
+    assert "/static/nav.js" in r.text
+    assert "font-family:system-ui" not in r.text
 
 
 def test_size_classes_form_lists_configured_ranges(env, tmp_path):
     config_path = tmp_path / "tgw-api-config.json"
-    config_path.write_text(json.dumps({
-        "unrelated": {"preserve": True},
-        "size_class_ranges": {
-            "packet": {
-                "weight_oz": [2, 8],
-                "dims_in": {"l": [4, 12], "w": [3, 9], "h": [None, 2]},
+    config_path.write_text(
+        json.dumps(
+            {
+                "unrelated": {"preserve": True},
+                "size_class_ranges": {
+                    "packet": {
+                        "weight_oz": [2, 8],
+                        "dims_in": {"l": [4, 12], "w": [3, 9], "h": [None, 2]},
+                    }
+                },
             }
-        },
-    }), encoding="utf-8")
+        ),
+        encoding="utf-8",
+    )
     env["cfg"]["config_path"] = config_path
     _login(env["client"])
 
@@ -2388,7 +2428,7 @@ def test_size_classes_form_lists_configured_ranges(env, tmp_path):
     assert r.status_code == 200
     assert "packet" in r.text
     assert "Weight min" in r.text
-    assert '/static/tgw.css' in r.text
+    assert "/static/tgw.css" in r.text
 
 
 def test_size_classes_form_adds_class_and_preserves_other_config(env, tmp_path):
@@ -2397,11 +2437,20 @@ def test_size_classes_form_adds_class_and_preserves_other_config(env, tmp_path):
     env["cfg"]["config_path"] = config_path
     _login(env["client"])
 
-    r = env["client"].post("/form/size-classes", data={
-        "name": "medium_box", "weight_min": "4", "weight_max": "16.5",
-        "length_min": "", "length_max": "14", "width_min": "3",
-        "width_max": "10", "height_min": "2", "height_max": "8",
-    })
+    r = env["client"].post(
+        "/form/size-classes",
+        data={
+            "name": "medium_box",
+            "weight_min": "4",
+            "weight_max": "16.5",
+            "length_min": "",
+            "length_max": "14",
+            "width_min": "3",
+            "width_max": "10",
+            "height_min": "2",
+            "height_max": "8",
+        },
+    )
 
     assert r.status_code == 200
     saved = json.loads(config_path.read_text(encoding="utf-8"))
@@ -2419,9 +2468,14 @@ def test_size_classes_form_rejects_reversed_range_without_writing(env, tmp_path)
     env["cfg"]["config_path"] = config_path
     _login(env["client"])
 
-    r = env["client"].post("/form/size-classes", data={
-        "name": "flat", "weight_min": "9", "weight_max": "2",
-    })
+    r = env["client"].post(
+        "/form/size-classes",
+        data={
+            "name": "flat",
+            "weight_min": "9",
+            "weight_max": "2",
+        },
+    )
 
     assert r.status_code == 400
     assert "minimum cannot exceed maximum" in r.text
@@ -2432,11 +2486,11 @@ def _retired_test_item_detail_uses_static_css(env):
     _login(env["client"])
     r = env["client"].get(f"/form/items/{SKU_A}")
     assert r.status_code == 200
-    assert '/static/tgw.css' in r.text
-    assert '/static/nav.css' in r.text
-    assert '/static/tgw.js' in r.text
-    assert '/static/nav.js' in r.text
-    assert 'font-family:system-ui' not in r.text
+    assert "/static/tgw.css" in r.text
+    assert "/static/nav.css" in r.text
+    assert "/static/tgw.js" in r.text
+    assert "/static/nav.js" in r.text
+    assert "font-family:system-ui" not in r.text
 
 
 def _retired_test_item_detail_no_stale_dole_cycle_claim(env):
@@ -2455,21 +2509,26 @@ def _retired_test_item_detail_no_stale_dole_cycle_claim(env):
 # GET /form/items/{sku} — eBay deep links (PP-EDITOR-001 Phase 3m)
 # ---------------------------------------------------------------------------
 
+
 def _retired_test_item_detail_ebay_deeplinks_active(env):
     """View on eBay, Seller Hub, and Messages links appear for an active listing."""
     _login(env["client"])
     sku = "tgw20260614110000010"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Deep Link Test Widget",
-        "location": "X9",
-        "ebay_listing": {
-            "listing_id": "987654321",
-            "listing_url": "https://www.ebay.com/itm/987654321",
-            "status": "Active",
-            "live_price": 24.99,
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Deep Link Test Widget",
+            "location": "X9",
+            "ebay_listing": {
+                "listing_id": "987654321",
+                "listing_url": "https://www.ebay.com/itm/987654321",
+                "status": "Active",
+                "live_price": 24.99,
+            },
         },
-    })
+    )
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
     assert "View on eBay" in r.text
@@ -2487,17 +2546,21 @@ def _retired_test_item_detail_ebay_deeplinks_sold(env):
     """Messages link hidden for sold/inactive listing; View on eBay + Seller Hub still shown."""
     _login(env["client"])
     sku = "tgw20260614110000011"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Sold Widget",
-        "location": "X9",
-        "ebay_listing": {
-            "listing_id": "111222333",
-            "listing_url": "https://www.ebay.com/itm/111222333",
-            "status": "Sold",
-            "live_price": 15.00,
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Sold Widget",
+            "location": "X9",
+            "ebay_listing": {
+                "listing_id": "111222333",
+                "listing_url": "https://www.ebay.com/itm/111222333",
+                "status": "Sold",
+                "live_price": 15.00,
+            },
         },
-    })
+    )
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
     assert "View on eBay" in r.text
@@ -2519,15 +2582,19 @@ def _retired_test_item_detail_no_listing_url_only_id(env):
     """Seller Hub shown when listing_id present but no listing_url."""
     _login(env["client"])
     sku = "tgw20260614110000012"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "ID Only Widget",
-        "location": "X9",
-        "ebay_listing": {
-            "listing_id": "444555666",
-            "status": "Active",
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "ID Only Widget",
+            "location": "X9",
+            "ebay_listing": {
+                "listing_id": "444555666",
+                "status": "Active",
+            },
         },
-    })
+    )
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
     assert "View on eBay" not in r.text
@@ -2598,17 +2665,13 @@ def test_offers_form_sku_filter(env):
 # GET /api/dashboard — PP-EDITOR-001 Phase 3b
 # ---------------------------------------------------------------------------
 
+
 def _make_catalog_with_data(db_path: Path, rows_with_data):
     """Create a SQLite catalog including the full-JSON 'data' column."""
     con = sqlite3.connect(str(db_path))
-    con.execute(
-        "CREATE TABLE catalog ("
-        "sku TEXT PRIMARY KEY, title TEXT, location TEXT, status TEXT, "
-        "price REAL, qty INTEGER, image TEXT, attribute_set TEXT, data TEXT NOT NULL DEFAULT '{}')"
-    )
+    con.execute("CREATE TABLE catalog (sku TEXT PRIMARY KEY, title TEXT, location TEXT, status TEXT, price REAL, qty INTEGER, image TEXT, attribute_set TEXT, data TEXT NOT NULL DEFAULT '{}')")
     con.executemany(
-        "INSERT INTO catalog (sku, title, location, status, price, qty, image, data) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO catalog (sku, title, location, status, price, qty, image, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         rows_with_data,
     )
     con.commit()
@@ -2633,23 +2696,28 @@ def dashboard_env(tmp_path, monkeypatch):
     sku_d = "tgw20260401120000004"
 
     data_a = json.dumps({"draft_listing": {"title": "Foo"}, "ebay_offer": {}})
-    data_b = json.dumps({
-        "draft_listing": {"title": "Bar"},
-        "ebay_offer": {
-            "offer_id": "OFF1",
-            "status": "UNPUBLISHED",
-            "ready_at": "2026-06-01T00:00:00+00:00",
-        },
-    })
+    data_b = json.dumps(
+        {
+            "draft_listing": {"title": "Bar"},
+            "ebay_offer": {
+                "offer_id": "OFF1",
+                "status": "UNPUBLISHED",
+                "ready_at": "2026-06-01T00:00:00+00:00",
+            },
+        }
+    )
     data_c = json.dumps({"revision_draft": {"delta": {"title": "New"}}})
     data_d = json.dumps({})
 
-    _make_catalog_with_data(catalog_path, [
-        (sku_a, "Widget A", "A1", "In Stock", 9.99,  1, "",      data_a),
-        (sku_b, "Gadget B", "B2", "Staged",  19.99,  1, "b.jpg", data_b),
-        (sku_c, "Part C",   "C3", "In Stock",  5.00,  1, "",      data_c),
-        (sku_d, "Box D",    "D4", "In Stock",  7.50,  1, "d.jpg", data_d),
-    ])
+    _make_catalog_with_data(
+        catalog_path,
+        [
+            (sku_a, "Widget A", "A1", "In Stock", 9.99, 1, "", data_a),
+            (sku_b, "Gadget B", "B2", "Staged", 19.99, 1, "b.jpg", data_b),
+            (sku_c, "Part C", "C3", "In Stock", 5.00, 1, "", data_c),
+            (sku_d, "Box D", "D4", "In Stock", 7.50, 1, "d.jpg", data_d),
+        ],
+    )
 
     cfg = {
         "sqlite_catalog_path": catalog_path,
@@ -2668,7 +2736,8 @@ def dashboard_env(tmp_path, monkeypatch):
 
     # Postgres stub: fetchone returns (0,) → dead_letter_count = 0
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn([]),
     )
 
@@ -2683,10 +2752,12 @@ def test_dashboard_returns_counts(dashboard_env, monkeypatch):
     """Dashboard returns correct counts from SQLite and stubs."""
     # Mock eBay get_best_offers to return 2 pending offers
     import tgw.apis.ebay.trading as _trading
+
     monkeypatch.setattr(_trading, "get_best_offers", lambda cfg, status="All": [{"offer_id": "1"}, {"offer_id": "2"}])
 
     # Mock systemctl: 18 of 20 queues active
     from tgw.queue import WORKER_QUEUES
+
     total_q = len(WORKER_QUEUES)
     active_lines = "\n".join(["active"] * (total_q - 2) + ["inactive", "failed"])
 
@@ -2694,6 +2765,7 @@ def test_dashboard_returns_counts(dashboard_env, monkeypatch):
         class _R:
             stdout = active_lines
             returncode = 1
+
         return _R()
 
     monkeypatch.setattr(http_server.subprocess, "run", _fake_run)
@@ -2703,11 +2775,11 @@ def test_dashboard_returns_counts(dashboard_env, monkeypatch):
     body = r.json()
 
     assert body["ok"] is True
-    assert body["needs_review"] == 1        # only SKU_A (draft_listing + no offer_id)
-    assert body["needs_photos"] == 2        # SKU_A and SKU_C have no image
+    assert body["needs_review"] == 1  # only SKU_A (draft_listing + no offer_id)
+    assert body["needs_photos"] == 2  # SKU_A and SKU_C have no image
     assert body["has_revision_draft"] == 1  # only SKU_C
-    assert body["ready_count"] == 1         # only SKU_B (offer_id + UNPUBLISHED + ready_at)
-    assert body["dead_letter_count"] == 0   # postgres stub returns 0
+    assert body["ready_count"] == 1  # only SKU_B (offer_id + UNPUBLISHED + ready_at)
+    assert body["dead_letter_count"] == 0  # postgres stub returns 0
     assert body["pending_offers"] == 2
     assert body["worker_health"]["total"] == total_q
     assert body["worker_health"]["up"] == total_q - 2
@@ -2721,14 +2793,16 @@ def test_dashboard_requires_auth(dashboard_env):
 def test_dashboard_ebay_failure_returns_none(dashboard_env, monkeypatch):
     """When eBay API fails, pending_offers is None (not an error)."""
     import tgw.apis.ebay.trading as _trading
-    monkeypatch.setattr(_trading, "get_best_offers",
-                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("timeout")))
+
+    monkeypatch.setattr(_trading, "get_best_offers", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("timeout")))
 
     def _fake_run(cmd, **kwargs):
         class _R:
             stdout = ""
             returncode = 0
+
         return _R()
+
     monkeypatch.setattr(http_server.subprocess, "run", _fake_run)
 
     r = dashboard_env["client"].get("/api/dashboard", headers=AUTH_HEADERS)
@@ -2741,17 +2815,12 @@ def test_dashboard_fallback_without_data_column(tmp_path, monkeypatch):
     catalog_path = tmp_path / "catalog.sqlite"
     # Deliberately build a catalog WITHOUT the data column to test dashboard fallback.
     _con = sqlite3.connect(str(catalog_path))
-    _con.execute(
-        "CREATE TABLE catalog ("
-        "sku TEXT, title TEXT, location TEXT, status TEXT, "
-        "price REAL, qty INTEGER, image TEXT)"
-    )
+    _con.execute("CREATE TABLE catalog (sku TEXT, title TEXT, location TEXT, status TEXT, price REAL, qty INTEGER, image TEXT)")
     _con.executemany(
-        "INSERT INTO catalog (sku, title, location, status, price, qty, image) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO catalog (sku, title, location, status, price, qty, image) VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
             (SKU_A, "Widget", "A1", "In Stock", 9.99, 1, ""),
-            (SKU_B, "Gadget", "B2", "Staged",  19.99, 1, "b.jpg"),
+            (SKU_B, "Gadget", "B2", "Staged", 19.99, 1, "b.jpg"),
         ],
     )
     _con.commit()
@@ -2771,18 +2840,22 @@ def test_dashboard_fallback_without_data_column(tmp_path, monkeypatch):
     monkeypatch.setattr(http_server, "_pending_offers_cache", None)
     monkeypatch.setattr(http_server, "_pending_offers_cache_at", 0.0)
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn([]),
     )
 
     import tgw.apis.ebay.trading as _trading
+
     monkeypatch.setattr(_trading, "get_best_offers", lambda *a, **k: [])
 
     def _fake_run(cmd, **kwargs):
         class _R:
             stdout = ""
             returncode = 0
+
         return _R()
+
     monkeypatch.setattr(http_server.subprocess, "run", _fake_run)
 
     client = TestClient(http_server.app)
@@ -2792,13 +2865,14 @@ def test_dashboard_fallback_without_data_column(tmp_path, monkeypatch):
     assert body["needs_review"] is None
     assert body["has_revision_draft"] is None
     assert body["ready_count"] is None
-    assert body["needs_photos"] == 1   # SKU_A has empty image
+    assert body["needs_photos"] == 1  # SKU_A has empty image
     assert body["ok"] is True
 
 
 # ---------------------------------------------------------------------------
 # GET /api/activity — recent queue job completions
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def activity_env(tmp_path, monkeypatch):
@@ -2848,7 +2922,8 @@ def activity_env(tmp_path, monkeypatch):
     monkeypatch.setattr(http_server, "_api_key", API_KEY)
     monkeypatch.setattr(http_server, "_web_password", WEB_KEY)
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn(rows),
     )
     return {"client": TestClient(http_server.app), "rows": rows}
@@ -2888,7 +2963,8 @@ def test_activity_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(http_server, "_api_key", API_KEY)
     monkeypatch.setattr(http_server, "_web_password", WEB_KEY)
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn([]),
     )
     client = TestClient(http_server.app)
@@ -2904,16 +2980,17 @@ def test_activity_empty(tmp_path, monkeypatch):
 # GET /form/home — home dashboard page
 # ---------------------------------------------------------------------------
 
+
 def test_home_form_ok(client):
     """Home page returns 200 with all section anchors present."""
     _login(client)
     r = client.get("/form/home")
     assert r.status_code == 200
-    assert "id=\"health-strip\"" in r.text
-    assert "id=\"action-cards\"" in r.text
-    assert "id=\"intake-sku\"" in r.text
-    assert "id=\"activity\"" in r.text
-    assert "id=\"pm-chat\"" in r.text
+    assert 'id="health-strip"' in r.text
+    assert 'id="action-cards"' in r.text
+    assert 'id="intake-sku"' in r.text
+    assert 'id="activity"' in r.text
+    assert 'id="pm-chat"' in r.text
 
 
 def test_home_form_no_auth_required(client):
@@ -2955,10 +3032,7 @@ def test_home_form_has_start_links(client):
 
 def test_nav_has_home_link():
     """nav.js updated to include a Home link."""
-    nav_src = (
-        __import__("pathlib").Path(__file__).parent.parent
-        / "src/tgw/static/nav.js"
-    ).read_text()
+    nav_src = (__import__("pathlib").Path(__file__).parent.parent / "src/tgw/static/nav.js").read_text()
     assert "/form/home" in nav_src
 
 
@@ -2986,6 +3060,7 @@ def test_nav_css_has_pm_overlay_styles():
 def test_nav_pm_storage_key_distinct_from_home():
     """nav.js uses a different sessionStorage key than the home page widget."""
     import pathlib
+
     root = pathlib.Path(__file__).parent.parent
     nav_src = (root / "src/tgw/static/nav.js").read_text()
     home_src = (root / "src/tgw/http_server.py").read_text()
@@ -3010,6 +3085,7 @@ def test_nav_pm_chat_intercepts_link():
 # POST /api/pm/chat — PM chat (PP-EDITOR-001 Phase 3d)
 # ---------------------------------------------------------------------------
 
+
 def test_pm_chat_no_auth_rejected(client):
     r = client.post("/api/pm/chat", json={"message": "hi"})
     assert r.status_code in (401, 403)
@@ -3019,10 +3095,7 @@ def test_pm_chat_openrouter_called(env, monkeypatch):
     """pm_chat calls OpenRouter and returns {ok, message, actions}."""
     client = env["client"]
 
-    fake_response_text = (
-        "There are 2 open todos and the queue is idle.\n"
-        "ACTIONS: [{\"type\": \"none\"}]"
-    )
+    fake_response_text = 'There are 2 open todos and the queue is idle.\nACTIONS: [{"type": "none"}]'
 
     captured = {}
 
@@ -3038,14 +3111,13 @@ def test_pm_chat_openrouter_called(env, monkeypatch):
                 pass
 
             def json(self_inner):
-                return {
-                    "choices": [{"message": {"content": fake_response_text}}]
-                }
+                return {"choices": [{"message": {"content": fake_response_text}}]}
 
         return _FakeResp()
 
     import tgw.http_server as _hs
     from tgw.apis import llm as _llm
+
     monkeypatch.setattr(_hs, "_build_pm_context", lambda: "todos: 2")
     monkeypatch.setattr(_llm.requests, "post", fake_post)
     monkeypatch.setattr(_llm, "get_task_model", lambda cfg, task: ("openrouter", "test/model"))
@@ -3080,6 +3152,7 @@ def test_pm_chat_history_threaded(env, monkeypatch):
 
     import tgw.http_server as _hs
     from tgw.apis import llm as _llm
+
     monkeypatch.setattr(_hs, "_build_pm_context", lambda: "idle")
 
     captured_msgs = []
@@ -3089,9 +3162,12 @@ def test_pm_chat_history_threaded(env, monkeypatch):
 
         class _R:
             status_code = 200
-            def raise_for_status(self): pass
+
+            def raise_for_status(self):
+                pass
+
             def json(self_inner):
-                return {"choices": [{"message": {"content": "ok\nACTIONS: [{\"type\":\"none\"}]"}}]}
+                return {"choices": [{"message": {"content": 'ok\nACTIONS: [{"type":"none"}]'}}]}
 
         return _R()
 
@@ -3118,6 +3194,7 @@ def test_pm_chat_actions_parsed(env, monkeypatch):
 
     import tgw.http_server as _hs
     from tgw.apis import llm as _llm
+
     monkeypatch.setattr(_hs, "_build_pm_context", lambda: "idle")
 
     action_payload = [{"type": "add_todo", "agent": "claude", "body": "Fix it", "priority": 30}]
@@ -3126,9 +3203,13 @@ def test_pm_chat_actions_parsed(env, monkeypatch):
     def fake_post(url, headers, json, timeout):
         class _R:
             status_code = 200
-            def raise_for_status(self): pass
+
+            def raise_for_status(self):
+                pass
+
             def json(self_inner):
                 return {"choices": [{"message": {"content": resp_text}}]}
+
         return _R()
 
     monkeypatch.setattr(_llm.requests, "post", fake_post)
@@ -3146,6 +3227,7 @@ def test_pm_chat_actions_parsed(env, monkeypatch):
 # POST /api/pm/action — execute a PM-proposed action
 # ---------------------------------------------------------------------------
 
+
 def test_pm_action_add_todo(env, monkeypatch):
     """add_todo action calls todo_add and returns ok."""
     client = env["client"]
@@ -3154,10 +3236,10 @@ def test_pm_action_add_todo(env, monkeypatch):
 
     def fake_todo_add(agent, body, priority, source):
         added.update({"agent": agent, "body": body, "priority": priority})
-        return {"ok": True, "id": 999, "agent": agent, "body": body, "priority": priority,
-                "pp_ref": None, "depends_on": [], "plan_anchor": None}
+        return {"ok": True, "id": 999, "agent": agent, "body": body, "priority": priority, "pp_ref": None, "depends_on": [], "plan_anchor": None}
 
     import tgw.todo as _todo
+
     monkeypatch.setattr(_todo, "todo_add", fake_todo_add)
 
     r = client.post(
@@ -3184,6 +3266,7 @@ def test_pm_action_add_suggestion(env, monkeypatch):
         return {"ok": True, "written": f"- [ ] 2026-06-14T00:00 :: {text}"}
 
     from tgw import api as _api
+
     monkeypatch.setattr(_api, "cmd_suggest", fake_suggest)
 
     # monkey-patch _cfg to have a plan_vault_path (already set in env)
@@ -3233,22 +3316,15 @@ def test_home_has_pm_chat_widget(client):
 # GET /docs  /docs/{path}  (PP-EDITOR-001 Phase 3f)
 # ---------------------------------------------------------------------------
 
+
 def _seed_vault(vault_root: Path) -> None:
     """Write a minimal approved standalone Plan materialization for docs tests."""
     (vault_root / "reference" / "runbooks").mkdir(parents=True)
     (vault_root / "plan").mkdir(parents=True)
-    (vault_root / "reference" / "runbooks" / "INDEX.md").write_text(
-        "# Runbooks Index\n\nList of runbooks.\n", encoding="utf-8"
-    )
-    (vault_root / "reference" / "runbooks" / "dead-letter-triage.md").write_text(
-        "# Dead Letter Triage\n\nSteps to handle dead letters.\n", encoding="utf-8"
-    )
-    (vault_root / "reference" / "ISSUES.md").write_text(
-        "# Issues\n\nKnown issues go here.\n", encoding="utf-8"
-    )
-    (vault_root / "plan" / "handoff.md").write_text(
-        "# Handoff\n\nSession handoff notes.\n", encoding="utf-8"
-    )
+    (vault_root / "reference" / "runbooks" / "INDEX.md").write_text("# Runbooks Index\n\nList of runbooks.\n", encoding="utf-8")
+    (vault_root / "reference" / "runbooks" / "dead-letter-triage.md").write_text("# Dead Letter Triage\n\nSteps to handle dead letters.\n", encoding="utf-8")
+    (vault_root / "reference" / "ISSUES.md").write_text("# Issues\n\nKnown issues go here.\n", encoding="utf-8")
+    (vault_root / "plan" / "handoff.md").write_text("# Handoff\n\nSession handoff notes.\n", encoding="utf-8")
 
 
 def _seed_approved_docs(env) -> Path:
@@ -3395,6 +3471,7 @@ def test_nav_includes_docs_link(client):
 # GET /form/offers
 # ---------------------------------------------------------------------------
 
+
 def test_get_offers_requires_auth(client):
     r = client.get("/api/offers")
     assert r.status_code in (401, 403)
@@ -3422,7 +3499,8 @@ def test_get_offers_returns_pending(env, monkeypatch):
 
     monkeypatch.setattr(hmod, "_offer_location", lambda sku: "A1" if sku == SKU_A else "")
     monkeypatch.setattr(
-        offers_mod, "cmd_offers_list",
+        offers_mod,
+        "cmd_offers_list",
         lambda cfg, **kw: {"ok": True, "offers": list(fake_offers), "auto_accepted": [], "count": 1},
     )
 
@@ -3442,8 +3520,7 @@ def test_get_offers_error_propagated(env, monkeypatch):
     """If cmd_offers_list returns ok=False, the API mirrors it."""
     import tgw.offers as offers_mod
 
-    monkeypatch.setattr(offers_mod, "cmd_offers_list",
-                        lambda cfg, **kw: {"ok": False, "error": "token expired"})
+    monkeypatch.setattr(offers_mod, "cmd_offers_list", lambda cfg, **kw: {"ok": False, "error": "token expired"})
 
     client = env["client"]
     r = client.get("/api/offers", headers=AUTH_HEADERS)
@@ -3461,9 +3538,14 @@ def test_respond_offer_dry_run(env, monkeypatch):
 
     def fake_respond(cfg, offer_id, listing_id, action, counter_price=None, *, dry_run=True, by="claude"):
         return {
-            "ok": True, "dry_run": dry_run, "offer_id": offer_id,
-            "listing_id": listing_id, "action": action,
-            "counter_price": counter_price, "by": by, "at": "2026-06-14T12:00:00Z",
+            "ok": True,
+            "dry_run": dry_run,
+            "offer_id": offer_id,
+            "listing_id": listing_id,
+            "action": action,
+            "counter_price": counter_price,
+            "by": by,
+            "at": "2026-06-14T12:00:00Z",
             "note": "dry-run: no eBay API call made; add --live to submit",
         }
 
@@ -3490,9 +3572,7 @@ def test_respond_offer_counter_price(env, monkeypatch):
 
     def fake_respond(cfg, offer_id, listing_id, action, counter_price=None, *, dry_run=True, by="claude"):
         received.update(action=action, counter_price=counter_price, dry_run=dry_run)
-        return {"ok": True, "dry_run": dry_run, "offer_id": offer_id,
-                "listing_id": listing_id, "action": action,
-                "counter_price": counter_price, "by": by, "at": "2026-06-14T12:00:00Z"}
+        return {"ok": True, "dry_run": dry_run, "offer_id": offer_id, "listing_id": listing_id, "action": action, "counter_price": counter_price, "by": by, "at": "2026-06-14T12:00:00Z"}
 
     monkeypatch.setattr(offers_mod, "cmd_offers_respond", fake_respond)
 
@@ -3544,12 +3624,9 @@ def test_offers_pct_none_when_prices_missing(env, monkeypatch):
     """pct_of_ask is None when listing_price is absent."""
     import tgw.offers as offers_mod
 
-    offers = [{"offer_id": "1", "listing_id": "x", "title": "t", "sku": SKU_A,
-               "buyer": "b", "offer_price": 10.0, "listing_price": None,
-               "status": "Pending", "expiry": ""}]
+    offers = [{"offer_id": "1", "listing_id": "x", "title": "t", "sku": SKU_A, "buyer": "b", "offer_price": 10.0, "listing_price": None, "status": "Pending", "expiry": ""}]
 
-    monkeypatch.setattr(offers_mod, "cmd_offers_list",
-                        lambda cfg, **kw: {"ok": True, "offers": offers, "auto_accepted": [], "count": 1})
+    monkeypatch.setattr(offers_mod, "cmd_offers_list", lambda cfg, **kw: {"ok": True, "offers": offers, "auto_accepted": [], "count": 1})
 
     client = env["client"]
     r = client.get("/api/offers", headers=AUTH_HEADERS)
@@ -3575,6 +3652,7 @@ def test_delete_item_sets_status(client, env):
 
     item_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
     import json as _json
+
     doc = _json.loads(item_path.read_text())
     assert doc["status"] == "deleted"
     assert "deleted_at" in doc
@@ -3609,6 +3687,7 @@ def test_photo_order_saves_to_json(client, env):
     assert d["order"] == order
 
     import json as _json
+
     doc = _json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text())
     assert doc["photo_order"] == order
 
@@ -3750,6 +3829,7 @@ def _write_item_with_revision(itemdata_root, sku, draft=None):
 
 def _seed_catalog_with_revision(db_path, sku, doc):
     import sqlite3
+
     with sqlite3.connect(str(db_path)) as con:
         # Ensure catalog table has data column (may differ from http_server fixture)
         try:
@@ -3801,10 +3881,20 @@ def test_apply_revision_dry_run(env, monkeypatch):
     _write_item_with_revision(env["itemdata_root"], SKU_A, _REVISION_DRAFT)
 
     def fake_apply(cfg, sku, *, dry_run=True, by="claude"):
-        return {"ok": True, "sku": sku, "dry_run": dry_run, "applied": False,
-                "delta": {}, "diff_lines": ["=== apply diff ==="],
-                "blocking_drift": [], "non_blocking_drift": [],
-                "composed": {}, "baseline_hash": "x", "current_hash": "x", "hash_match": True}
+        return {
+            "ok": True,
+            "sku": sku,
+            "dry_run": dry_run,
+            "applied": False,
+            "delta": {},
+            "diff_lines": ["=== apply diff ==="],
+            "blocking_drift": [],
+            "non_blocking_drift": [],
+            "composed": {},
+            "baseline_hash": "x",
+            "current_hash": "x",
+            "hash_match": True,
+        }
 
     monkeypatch.setattr(rev_mod, "cmd_revise_apply", fake_apply)
 
@@ -3822,8 +3912,7 @@ def test_apply_revision_dry_run(env, monkeypatch):
 
 
 def test_apply_revision_requires_auth(client):
-    r = client.post(f"/api/items/{SKU_A}/revision/apply",
-                    json={"dry_run": True})
+    r = client.post(f"/api/items/{SKU_A}/revision/apply", json={"dry_run": True})
     assert r.status_code in (401, 403)
 
 
@@ -3930,6 +4019,7 @@ def _write_item_with_draft(itemdata_root, sku, draft_listing, extra=None):
 
 def _seed_catalog_with_data(db_path, sku, doc):
     import sqlite3
+
     with sqlite3.connect(str(db_path)) as con:
         try:
             con.execute("ALTER TABLE catalog ADD COLUMN data TEXT")
@@ -3980,7 +4070,9 @@ def test_review_queue_returns_items_with_draft_listing(env):
 def test_review_queue_excludes_staged_items(env):
     """Items that already have an offer_id are not in the review queue."""
     doc = _write_item_with_draft(
-        env["itemdata_root"], SKU_A, _DRAFT_LISTING,
+        env["itemdata_root"],
+        SKU_A,
+        _DRAFT_LISTING,
         extra={"ebay_offer": {"offer_id": "offer-abc-123", "status": "UNPUBLISHED"}},
     )
     _seed_catalog_with_data(env["cfg"]["sqlite_catalog_path"], SKU_A, doc)
@@ -4030,9 +4122,10 @@ def test_approve_action_requires_auth(client):
     assert r.status_code in (401, 403)
 
 
-def test_ebay_price_action_enqueues_canonical_item_job(env, enqueue_calls):
+def test_legacy_ebay_price_action_is_rejected(env, enqueue_calls):
     _write_item_with_draft(
-        env["itemdata_root"], SKU_A,
+        env["itemdata_root"],
+        SKU_A,
         {**_DRAFT_LISTING, "price": 14.99, "price_confidence": "old"},
         extra={"ebay_offer": {"price": 14.99, "target_price": 12.99}},
     )
@@ -4043,22 +4136,8 @@ def test_ebay_price_action_enqueues_canonical_item_job(env, enqueue_calls):
         headers=AUTH_HEADERS,
     )
 
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-    price_call = next(
-        call["kwargs"] for call in reversed(enqueue_calls)
-        if call["kwargs"].get("queue_name") == "ebay_price"
-    )
-    assert price_call["entity_type"] == "item"
-    assert price_call["entity_id"] == SKU_A
-    assert price_call["payload"] == {"sku": SKU_A, "origin": "operator"}
-    doc = json.loads(
-        (env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text()
-    )
-    assert doc["draft_listing"]["price"] is None
-    assert doc["draft_listing"]["price_confidence"] is None
-    assert doc["ebay_offer"]["price"] is None
-    assert doc["ebay_offer"]["target_price"] is None
+    assert response.status_code == 400
+    assert enqueue_calls == []
 
 
 def test_accept_proposals_persists_item_specifics_edit(env, monkeypatch):
@@ -4077,11 +4156,11 @@ def test_accept_proposals_persists_item_specifics_edit(env, monkeypatch):
     draft = dict(_DRAFT_LISTING)
     draft["item_specifics"] = {"Brand": "OldBrand", "Color": "Red"}
     _write_item_with_draft(
-        env["itemdata_root"], SKU_A, draft,
+        env["itemdata_root"],
+        SKU_A,
+        draft,
         extra={
-            "revision_draft": {
-                "delta": {"item_specifics": {"Brand": "NewBrand", "Size": "Large"}}
-            },
+            "revision_draft": {"delta": {"item_specifics": {"Brand": "NewBrand", "Size": "Large"}}},
         },
     )
 
@@ -4120,7 +4199,9 @@ def test_accept_proposals_persists_draft_listing_title_description(env, monkeypa
     monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
 
     _write_item_with_draft(
-        env["itemdata_root"], SKU_A, dict(_DRAFT_LISTING),
+        env["itemdata_root"],
+        SKU_A,
+        dict(_DRAFT_LISTING),
         extra={
             "revision_draft": {
                 "delta": {
@@ -4161,11 +4242,11 @@ def test_accept_proposals_item_specifics_absent_before(env, monkeypatch):
     monkeypatch.setattr(http_server.state_machine, "enqueue_job", lambda *a, **k: "job-fake")
 
     _write_item_with_draft(
-        env["itemdata_root"], SKU_A, _DRAFT_LISTING,
+        env["itemdata_root"],
+        SKU_A,
+        _DRAFT_LISTING,
         extra={
-            "revision_draft": {
-                "delta": {"item_specifics": {"Brand": "FreshBrand"}}
-            },
+            "revision_draft": {"delta": {"item_specifics": {"Brand": "FreshBrand"}}},
         },
     )
 
@@ -4194,15 +4275,19 @@ def _retired_test_item_detail_inventory_record_panel_shows_set_a_unblended(env):
     value may be ambiguous about which set it came from."""
     _login(env["client"])
     sku = "tgw20260615110000020"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Drift Test Widget",
-        "location": "X9",
-        "item_attributes": {"Type": "Lapel Pin", "Brand": "Unbranded"},
-        "draft_listing": {
-            "item_specifics": {"Type": "Brooch", "Brand": "Unbranded"},
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Drift Test Widget",
+            "location": "X9",
+            "item_attributes": {"Type": "Lapel Pin", "Brand": "Unbranded"},
+            "draft_listing": {
+                "item_specifics": {"Type": "Brooch", "Brand": "Unbranded"},
+            },
         },
-    })
+    )
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
     # Set A's own value ("Lapel Pin") is shown as the primary value.
@@ -4224,15 +4309,19 @@ def _retired_test_item_detail_inventory_record_panel_offers_add_to_listing_for_s
     present in Set B (whether it agrees or differs) does not."""
     _login(env["client"])
     sku = "tgw20260615110000057"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Add To Listing Button Test",
-        "location": "X9",
-        "item_attributes": {"Type": "Lapel Pin", "Brand": "Unbranded", "Era": "1980s"},
-        "draft_listing": {
-            "item_specifics": {"Type": "Brooch", "Brand": "Unbranded"},
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Add To Listing Button Test",
+            "location": "X9",
+            "item_attributes": {"Type": "Lapel Pin", "Brand": "Unbranded", "Era": "1980s"},
+            "draft_listing": {
+                "item_specifics": {"Type": "Brooch", "Brand": "Unbranded"},
+            },
         },
-    })
+    )
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
     # "Era" has no Set B counterpart -> gets the add-to-listing button.
@@ -4253,13 +4342,17 @@ def _retired_test_item_detail_aspects_form_prefills_from_set_b_not_set_a(env):
     reached the eBay push path."""
     _login(env["client"])
     sku = "tgw20260615110000021"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Prefill Test Widget",
-        "location": "X9",
-        "item_attributes": {"Type": "Lapel Pin"},
-        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Prefill Test Widget",
+            "location": "X9",
+            "item_attributes": {"Type": "Lapel Pin"},
+            "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+        },
+    )
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
     assert 'window._DL_PREFILL = {"Type": "Brooch"}' in r.text
@@ -4284,10 +4377,16 @@ def _retired_test_item_detail_js_renders_stored_aspects_outside_category_list(en
     on purpose going forward, not just inherit stray ones by accident."""
     _login(env["client"])
     sku = "tgw20260615110000044"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Extra Aspects Widget", "location": "X9",
-        "draft_listing": {"item_specifics": {"Material": "Porcelain", "Color": "Orange"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Extra Aspects Widget",
+            "location": "X9",
+            "draft_listing": {"item_specifics": {"Material": "Porcelain", "Color": "Orange"}},
+        },
+    )
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
     assert "CUSTOM ASPECT" in r.text
@@ -4311,10 +4410,16 @@ def _retired_test_item_detail_save_ebay_draft_js_sends_cleared_aspects(env):
     pattern and does contain the fixed comparison."""
     _login(env["client"])
     sku = "tgw20260615110000032"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Aspect Clear Test Widget", "location": "X9",
-        "draft_listing": {"item_specifics": {"Material": "Silver"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Aspect Clear Test Widget",
+            "location": "X9",
+            "draft_listing": {"item_specifics": {"Material": "Silver"}},
+        },
+    )
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
     assert "if(v!==init)attrs[k]=v;" in r.text
@@ -4359,12 +4464,19 @@ def test_category_context_js_shows_off_list_selection_value():
 
 def test_patch_rejects_bare_envelope_item_attributes_from_operator(env):
     sku = "tgw20260615110000040"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Envelope Guard Widget", "location": "X9",
-        "item_attributes": {"Type": "Brooch"},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Envelope Guard Widget",
+            "location": "X9",
+            "item_attributes": {"Type": "Brooch"},
+        },
+    )
     forged_envelope = {
-        "_set": "inventory_record", "version": 1,
+        "_set": "inventory_record",
+        "version": 1,
         "updated_at": "2026-01-01T00:00:00+00:00",
         "fields": {"Type": "SOMETHING ELSE ENTIRELY"},
     }
@@ -4380,12 +4492,19 @@ def test_patch_rejects_bare_envelope_item_attributes_from_operator(env):
 
 def test_patch_rejects_bare_envelope_item_specifics_from_operator(env):
     sku = "tgw20260615110000041"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Envelope Guard Widget B", "location": "X9",
-        "draft_listing": {"item_specifics": {"Material": "Silver"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Envelope Guard Widget B",
+            "location": "X9",
+            "draft_listing": {"item_specifics": {"Material": "Silver"}},
+        },
+    )
     forged_envelope = {
-        "_set": "ebay_draft", "version": 1,
+        "_set": "ebay_draft",
+        "version": 1,
         "updated_at": "2026-01-01T00:00:00+00:00",
         "fields": {"Material": "SOMETHING ELSE ENTIRELY"},
     }
@@ -4404,12 +4523,19 @@ def test_patch_allows_envelope_item_attributes_from_machine_caller(env):
     before ever reaching HTTP — the fence PATCH is just transport for an
     already-sanctioned write. Must keep working."""
     sku = "tgw20260615110000042"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Machine Envelope Widget", "location": "X9",
-        "item_attributes": {"Type": "Lapel Pin"},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Machine Envelope Widget",
+            "location": "X9",
+            "item_attributes": {"Type": "Lapel Pin"},
+        },
+    )
     real_envelope = {
-        "_set": "inventory_record", "version": 1,
+        "_set": "inventory_record",
+        "version": 1,
         "updated_at": "2026-07-16T00:00:00+00:00",
         "updated_at_backfilled": False,
         "fields": {"Type": "Brooch"},
@@ -4429,10 +4555,16 @@ def test_patch_still_allows_bare_partial_item_specifics_from_operator(env):
     partial dict, not an envelope — must be completely unaffected by the
     new envelope gate."""
     sku = "tgw20260615110000043"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Bare Dict Still Works Widget", "location": "X9",
-        "draft_listing": {"item_specifics": {"Material": "Silver"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Bare Dict Still Works Widget",
+            "location": "X9",
+            "draft_listing": {"item_specifics": {"Material": "Silver"}},
+        },
+    )
     r = env["client"].patch(
         f"/api/items/{sku}",
         json={"fields": {"draft_listing": {"item_specifics": {"Material": ""}}}},
@@ -4451,15 +4583,22 @@ def test_patch_still_allows_bare_partial_item_specifics_from_operator(env):
 # unit test of internal functions in isolation.
 # ---------------------------------------------------------------------------
 
+
 def test_inventory_diff_get_surfaces_mismatch(env):
     sku = "tgw20260615110000030"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Diff Test Widget", "location": "X9",
-        "item_attributes": {"Type": "Lapel Pin", "Brand": "Unbranded"},
-        "draft_listing": {
-            "item_specifics": {"Type": "Brooch", "Brand": "Unbranded", "Metal": "Silver"},
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Diff Test Widget",
+            "location": "X9",
+            "item_attributes": {"Type": "Lapel Pin", "Brand": "Unbranded"},
+            "draft_listing": {
+                "item_specifics": {"Type": "Brooch", "Brand": "Unbranded", "Metal": "Silver"},
+            },
         },
-    })
+    )
     r = env["client"].get(f"/api/items/{sku}/inventory-diff", headers=AUTH_HEADERS)
     assert r.status_code == 200
     body = r.json()
@@ -4488,11 +4627,17 @@ def test_inventory_diff_get_read_only_no_mutation(env):
     """Spec point 2: the GET endpoint never mutates anything, callable any
     time."""
     sku = "tgw20260615110000032"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Read Only Test", "location": "X9",
-        "item_attributes": {"Type": "Lapel Pin"},
-        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Read Only Test",
+            "location": "X9",
+            "item_attributes": {"Type": "Lapel Pin"},
+            "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+        },
+    )
     json_path = env["itemdata_root"] / sku / f"{sku}.json"
     before = json_path.read_text(encoding="utf-8")
     r = env["client"].get(f"/api/items/{sku}/inventory-diff", headers=AUTH_HEADERS)
@@ -4507,21 +4652,23 @@ def test_inventory_diff_apply_writes_only_checked_keys(env, monkeypatch):
     unchecked one still shows as an open diff afterward."""
     monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
     sku = "tgw20260615110000033"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Apply Test Widget", "location": "X9",
-        "item_attributes": {"Type": "Lapel Pin"},
-        "draft_listing": {
-            "item_specifics": {"Type": "Brooch", "Metal": "Silver"},
-            "item_specifics_history": [
-                {"ts": "2026-07-01T00:00:00+00:00", "key": "Type",
-                 "value": "Brooch", "previous_value": "Lapel Pin",
-                 "source": "ebay_draft", "applied_by": "system"},
-                {"ts": "2026-07-01T00:00:00+00:00", "key": "Metal",
-                 "value": "Silver", "previous_value": None,
-                 "source": "ebay_draft", "applied_by": "system"},
-            ],
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Apply Test Widget",
+            "location": "X9",
+            "item_attributes": {"Type": "Lapel Pin"},
+            "draft_listing": {
+                "item_specifics": {"Type": "Brooch", "Metal": "Silver"},
+                "item_specifics_history": [
+                    {"ts": "2026-07-01T00:00:00+00:00", "key": "Type", "value": "Brooch", "previous_value": "Lapel Pin", "source": "ebay_draft", "applied_by": "system"},
+                    {"ts": "2026-07-01T00:00:00+00:00", "key": "Metal", "value": "Silver", "previous_value": None, "source": "ebay_draft", "applied_by": "system"},
+                ],
+            },
         },
-    })
+    )
 
     client = env["client"]
     # Operator unchecked "Metal" in the UI — only "Type" submitted.
@@ -4558,12 +4705,18 @@ def test_inventory_diff_apply_does_not_touch_draft_listing_or_revision_draft(env
     accept_proposals/revision_draft — draft_listing must be untouched."""
     monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
     sku = "tgw20260615110000034"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Isolation Test Widget", "location": "X9",
-        "item_attributes": {"Type": "Lapel Pin"},
-        "draft_listing": {"item_specifics": {"Type": "Brooch"}, "price": 14.99},
-        "revision_draft": {"delta": {"title": "Unrelated pipeline proposal"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Isolation Test Widget",
+            "location": "X9",
+            "item_attributes": {"Type": "Lapel Pin"},
+            "draft_listing": {"item_specifics": {"Type": "Brooch"}, "price": 14.99},
+            "revision_draft": {"delta": {"title": "Unrelated pipeline proposal"}},
+        },
+    )
     client = env["client"]
     r = client.post(
         f"/api/items/{sku}/inventory-diff/apply",
@@ -4584,11 +4737,17 @@ def test_inventory_diff_apply_idempotent_no_op_when_stale(env, monkeypatch):
     error — re-diffing live, never trusting caller-supplied values."""
     monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
     sku = "tgw20260615110000035"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Stale Apply Test", "location": "X9",
-        "item_attributes": {"Type": "Brooch"},
-        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Stale Apply Test",
+            "location": "X9",
+            "item_attributes": {"Type": "Brooch"},
+            "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+        },
+    )
     client = env["client"]
     r = client.post(
         f"/api/items/{sku}/inventory-diff/apply",
@@ -4612,15 +4771,17 @@ def test_draft_save_auto_syncs_unlocked_key_to_inventory_record(env, enqueue_cal
     pushes unlocked keys into item_attributes automatically — no separate
     diff-review step needed for the common case."""
     sku = "tgw20260615110000040"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Elephant Widget", "location": "X9",
-        "item_attributes": {"_set": "inventory_record", "version": 1,
-                             "updated_at": "2026-07-01T00:00:00+00:00",
-                             "updated_at_backfilled": False,
-                             "fields": {"Type": "Elephant Figurine"}},
-        "draft_listing": {"title": "Elephant Widget",
-                           "item_specifics": {"Type": "Elephant Figurine"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Elephant Widget",
+            "location": "X9",
+            "item_attributes": {"_set": "inventory_record", "version": 1, "updated_at": "2026-07-01T00:00:00+00:00", "updated_at_backfilled": False, "fields": {"Type": "Elephant Figurine"}},
+            "draft_listing": {"title": "Elephant Widget", "item_specifics": {"Type": "Elephant Figurine"}},
+        },
+    )
     r = env["client"].patch(
         f"/api/items/{sku}",
         json={"fields": {"draft_listing": {"item_specifics": {"Type": "Mouse Figurine"}}}},
@@ -4638,16 +4799,27 @@ def test_draft_save_auto_syncs_title_and_description_top_level(env, enqueue_call
     the page header and fields panel actually display. Both now sync the
     same way, keyed by "title"/"description" in the shared locked_keys list."""
     sku = "tgw20260615110000044"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Elephant Thimble", "description": "An elephant.",
-        "location": "X9",
-        "draft_listing": {"title": "Elephant Thimble", "description": "An elephant."},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Elephant Thimble",
+            "description": "An elephant.",
+            "location": "X9",
+            "draft_listing": {"title": "Elephant Thimble", "description": "An elephant."},
+        },
+    )
     r = env["client"].patch(
         f"/api/items/{sku}",
-        json={"fields": {"draft_listing": {
-            "title": "Mouse Thimble", "description": "A mouse.",
-        }}},
+        json={
+            "fields": {
+                "draft_listing": {
+                    "title": "Mouse Thimble",
+                    "description": "A mouse.",
+                }
+            }
+        },
         headers=AUTH_HEADERS,
     )
     assert r.status_code == 200
@@ -4660,14 +4832,17 @@ def test_locked_title_does_not_auto_sync_from_draft_save(env, enqueue_calls):
     """Locking "title" freezes the top-level field even though it isn't
     an item_attributes aspect — same shared locked_keys mechanism."""
     sku = "tgw20260615110000045"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Elephant Thimble", "location": "X9",
-        "item_attributes": {"_set": "inventory_record", "version": 1,
-                             "updated_at": "2026-07-01T00:00:00+00:00",
-                             "updated_at_backfilled": False,
-                             "fields": {}, "locked_keys": ["title"]},
-        "draft_listing": {"title": "Elephant Thimble"},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Elephant Thimble",
+            "location": "X9",
+            "item_attributes": {"_set": "inventory_record", "version": 1, "updated_at": "2026-07-01T00:00:00+00:00", "updated_at_backfilled": False, "fields": {}, "locked_keys": ["title"]},
+            "draft_listing": {"title": "Elephant Thimble"},
+        },
+    )
     r = env["client"].patch(
         f"/api/items/{sku}",
         json={"fields": {"draft_listing": {"title": "Mouse Thimble"}}},
@@ -4683,15 +4858,24 @@ def test_locked_key_does_not_auto_sync_from_draft_save(env, enqueue_calls):
     """A locked key stays frozen at its current value even when the draft
     changes — the padlock is the only way a key stops following eBay."""
     sku = "tgw20260615110000041"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Widget", "location": "X9",
-        "item_attributes": {"_set": "inventory_record", "version": 1,
-                             "updated_at": "2026-07-01T00:00:00+00:00",
-                             "updated_at_backfilled": False,
-                             "fields": {"Type": "Brooch"},
-                             "locked_keys": ["Type"]},
-        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Widget",
+            "location": "X9",
+            "item_attributes": {
+                "_set": "inventory_record",
+                "version": 1,
+                "updated_at": "2026-07-01T00:00:00+00:00",
+                "updated_at_backfilled": False,
+                "fields": {"Type": "Brooch"},
+                "locked_keys": ["Type"],
+            },
+            "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+        },
+    )
     r = env["client"].patch(
         f"/api/items/{sku}",
         json={"fields": {"draft_listing": {"item_specifics": {"Type": "Pendant"}}}},
@@ -4707,13 +4891,16 @@ def test_locked_key_does_not_auto_sync_from_draft_save(env, enqueue_calls):
 
 def test_inventory_lock_toggle_endpoint(env):
     sku = "tgw20260615110000042"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Widget", "location": "X9",
-        "item_attributes": {"_set": "inventory_record", "version": 1,
-                             "updated_at": "2026-07-01T00:00:00+00:00",
-                             "updated_at_backfilled": False,
-                             "fields": {"Type": "Brooch"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Widget",
+            "location": "X9",
+            "item_attributes": {"_set": "inventory_record", "version": 1, "updated_at": "2026-07-01T00:00:00+00:00", "updated_at_backfilled": False, "fields": {"Type": "Brooch"}},
+        },
+    )
     r = env["client"].post(
         f"/api/items/{sku}/inventory-lock",
         json={"key": "Type", "locked": True},
@@ -4749,12 +4936,18 @@ def _retired_test_item_detail_page_renders_inv_diff_panel_container(env):
     both present on the same test item, never sharing an action name."""
     _login(env["client"])
     sku = "tgw20260615110000037"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Both Panels Test Widget", "location": "X9",
-        "item_attributes": {"Type": "Lapel Pin"},
-        "draft_listing": {"item_specifics": {"Type": "Brooch"}},
-        "revision_draft": {"delta": {"title": "Some pipeline title proposal"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Both Panels Test Widget",
+            "location": "X9",
+            "item_attributes": {"Type": "Lapel Pin"},
+            "draft_listing": {"item_specifics": {"Type": "Brooch"}},
+            "revision_draft": {"delta": {"title": "Some pipeline title proposal"}},
+        },
+    )
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
     # The reverse-flow panel container + its own distinct button/label.
@@ -4779,22 +4972,29 @@ def _retired_test_item_detail_page_renders_inv_diff_panel_container(env):
 # Deliberately its own code path from inventory-diff above (spec point 6).
 # ---------------------------------------------------------------------------
 
+
 def _mock_category_aspects(monkeypatch, names):
     import tgw.ebay.category_aspect_migration as cam_mod
-    monkeypatch.setattr(cam_mod, "get_aspects",
-                        lambda cfg, category_id: [{"name": n} for n in names])
+
+    monkeypatch.setattr(cam_mod, "get_aspects", lambda cfg, category_id: [{"name": n} for n in names])
 
 
 def test_category_aspect_migration_get_surfaces_orphans(env, monkeypatch):
     _mock_category_aspects(monkeypatch, ["Material"])
     sku = "tgw20260615110000050"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Orphan Test Widget", "location": "X9",
-        "draft_listing": {
-            "category_id": "38064",
-            "item_specifics": {"Material": "Porcelain", "Color": "Orange", "Type": "Figurine"},
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Orphan Test Widget",
+            "location": "X9",
+            "draft_listing": {
+                "category_id": "38064",
+                "item_specifics": {"Material": "Porcelain", "Color": "Orange", "Type": "Figurine"},
+            },
         },
-    })
+    )
     r = env["client"].get(f"/api/items/{sku}/category-aspect-migration", headers=AUTH_HEADERS)
     assert r.status_code == 200
     body = r.json()
@@ -4809,18 +5009,23 @@ def test_category_aspect_migration_get_requires_auth(client):
 
 
 def test_category_aspect_migration_get_404_unknown_sku(env):
-    r = env["client"].get(
-        "/api/items/tgw99999999999999999/category-aspect-migration", headers=AUTH_HEADERS)
+    r = env["client"].get("/api/items/tgw99999999999999999/category-aspect-migration", headers=AUTH_HEADERS)
     assert r.status_code == 404
 
 
 def test_category_aspect_migration_get_read_only_no_mutation(env, monkeypatch):
     _mock_category_aspects(monkeypatch, ["Material"])
     sku = "tgw20260615110000052"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Read Only Migration Test", "location": "X9",
-        "draft_listing": {"category_id": "38064", "item_specifics": {"Color": "Orange"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Read Only Migration Test",
+            "location": "X9",
+            "draft_listing": {"category_id": "38064", "item_specifics": {"Color": "Orange"}},
+        },
+    )
     json_path = env["itemdata_root"] / sku / f"{sku}.json"
     before = json_path.read_text(encoding="utf-8")
     r = env["client"].get(f"/api/items/{sku}/category-aspect-migration", headers=AUTH_HEADERS)
@@ -4834,13 +5039,19 @@ def test_category_aspect_migration_apply_moves_checked_keys(env, monkeypatch):
     monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
     _mock_category_aspects(monkeypatch, ["Material"])
     sku = "tgw20260615110000053"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Apply Migration Test Widget", "location": "X9",
-        "draft_listing": {
-            "category_id": "38064",
-            "item_specifics": {"Material": "Porcelain", "Color": "Orange", "Type": "Figurine"},
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Apply Migration Test Widget",
+            "location": "X9",
+            "draft_listing": {
+                "category_id": "38064",
+                "item_specifics": {"Material": "Porcelain", "Color": "Orange", "Type": "Figurine"},
+            },
         },
-    })
+    )
     client = env["client"]
     r = client.post(
         f"/api/items/{sku}/category-aspect-migration/apply",
@@ -4870,13 +5081,19 @@ def test_category_aspect_migration_apply_idempotent_no_op_when_stale(env, monkey
     monkeypatch.setattr(http_server, "_enqueue_catalog_rebuild", lambda *a, **k: None)
     _mock_category_aspects(monkeypatch, ["Material", "Color"])
     sku = "tgw20260615110000054"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Stale Migration Test", "location": "X9",
-        "draft_listing": {
-            "category_id": "38064",
-            "item_specifics": {"Material": "Porcelain", "Color": "Orange"},
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Stale Migration Test",
+            "location": "X9",
+            "draft_listing": {
+                "category_id": "38064",
+                "item_specifics": {"Material": "Porcelain", "Color": "Orange"},
+            },
         },
-    })
+    )
     r = env["client"].post(
         f"/api/items/{sku}/category-aspect-migration/apply",
         json={"keys": ["Color"]},  # Color is NOT actually orphaned (in the mocked list)
@@ -4901,10 +5118,16 @@ def _retired_test_item_detail_page_renders_inline_aspect_keep_checkbox_wiring(en
     always-checked confirm()+immediate-apply panel."""
     _login(env["client"])
     sku = "tgw20260615110000056"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku, "title": "Migration Panel Container Test", "location": "X9",
-        "draft_listing": {"category_id": "38064", "item_specifics": {"Color": "Orange"}},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Migration Panel Container Test",
+            "location": "X9",
+            "draft_listing": {"category_id": "38064", "item_specifics": {"Color": "Orange"}},
+        },
+    )
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
     assert 'id="cat-aspect-migration-panel"' not in r.text
@@ -4915,17 +5138,16 @@ def _retired_test_item_detail_page_renders_inline_aspect_keep_checkbox_wiring(en
 
 
 def test_form_review_renders(client):
-    """/form/drafts returns HTML with expected structure; /form/review redirects."""
+    """Legacy review URLs resolve into canonical read-only item browse."""
     _login(client)
     r = client.get("/form/drafts")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
-    assert "Review Queue" in r.text
-    assert "/api/items/review-queue" in r.text
-    assert "Approve All" in r.text
+    assert "Review Queue" not in r.text
+    assert "/api/items/review-queue" not in r.text
     # Old URL redirects
     r2 = client.get("/form/review", follow_redirects=False)
-    assert r2.status_code == 301
+    assert r2.status_code == 307
 
 
 def test_form_review_no_auth_required(client):
@@ -4987,8 +5209,7 @@ def test_bulk_approve_sets_status_ready(env, monkeypatch):
         assert doc["status"] == "Ready"
 
 
-def test_bulk_list_now_sets_ready_and_enqueues_stage(env, monkeypatch):
-    """POST /api/bulk/action list_now sets status=Ready and enqueues ebay_stage."""
+def test_bulk_list_now_is_rejected_without_mutation(env, monkeypatch):
     enqueued = []
     monkeypatch.setattr(
         http_server.state_machine,
@@ -5004,20 +5225,18 @@ def test_bulk_list_now_sets_ready_and_enqueues_stage(env, monkeypatch):
         json={"skus": [SKU_A], "action": "list_now"},
         headers=AUTH_HEADERS,
     )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert body["count"] == 1
+    assert r.status_code == 400
 
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
     doc = json.loads(json_path.read_text(encoding="utf-8"))
-    assert doc["status"] == "Ready"
-    assert "ebay_stage" in enqueued
+    assert doc.get("status") != "Ready"
+    assert enqueued == []
 
 
 # ---------------------------------------------------------------------------
 # PP-EDITOR-001 Phase 3j — pipeline monitor + dead-letter manager
 # ---------------------------------------------------------------------------
+
 
 def _fake_systemctl_output(units):
     """Build fake `systemctl show --property=Id,ActiveState,SubState,MainPID` output."""
@@ -5045,6 +5264,7 @@ def test_system_workers_returns_unit_list(env, monkeypatch):
         class _R:
             stdout = _fake_systemctl_output(all_units)
             returncode = 0
+
         return _R()
 
     monkeypatch.setattr(http_server.subprocess, "run", _fake_run)
@@ -5065,6 +5285,7 @@ def test_system_workers_returns_unit_list(env, monkeypatch):
 
 def test_system_workers_fallback_on_subprocess_failure(env, monkeypatch):
     """When systemctl fails, workers are returned as 'unknown'."""
+
     def _fail(*a, **k):
         raise OSError("systemctl not found")
 
@@ -5114,7 +5335,8 @@ def test_pipeline_jobs_returns_active_and_dead(env, monkeypatch):
     ]
 
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn(rows),
     )
 
@@ -5135,7 +5357,8 @@ def test_pipeline_jobs_returns_active_and_dead(env, monkeypatch):
 def test_pipeline_jobs_empty(env, monkeypatch):
     """No active/dead jobs → ok=True, count=0."""
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn([]),
     )
     r = env["client"].get("/api/pipeline/jobs", headers=AUTH_HEADERS)
@@ -5154,7 +5377,8 @@ def test_requeue_job_requires_auth(client):
 def test_requeue_job_not_found(env, monkeypatch):
     """Requeue returns 404 when job_id does not exist."""
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn([]),
     )
     r = env["client"].post("/api/jobs/nonexistent-job/requeue", headers=AUTH_HEADERS)
@@ -5163,15 +5387,18 @@ def test_requeue_job_not_found(env, monkeypatch):
 
 def test_requeue_job_wrong_state(env, monkeypatch):
     """Requeue returns 400 when job is not in dead_letter state."""
-    rows = [{
-        "job_id": "aaa",
-        "queue_name": "ebay_draft",
-        "payload_json": {"sku": SKU_A},
-        "state": "succeeded",
-        "max_attempts": 3,
-    }]
+    rows = [
+        {
+            "job_id": "aaa",
+            "queue_name": "ebay_draft",
+            "payload_json": {"sku": SKU_A},
+            "state": "succeeded",
+            "max_attempts": 3,
+        }
+    ]
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn(rows),
     )
     r = env["client"].post("/api/jobs/aaa/requeue", headers=AUTH_HEADERS)
@@ -5180,21 +5407,24 @@ def test_requeue_job_wrong_state(env, monkeypatch):
 
 
 def test_requeue_job_success(env, monkeypatch):
-    """Requeue re-enters the current item dispatcher, never a stale envelope."""
-    rows = [{
-        "job_id": "dead-job-id-001",
-        "queue_name": "ebay_draft",
-        "payload_json": {"sku": SKU_A},
-        "state": "dead_letter",
-        "max_attempts": 3,
-        "entity_type": "generic",
-        "entity_id": "ebay_draft",
-        "operation": "run",
-        "handler_family": "ebay_draft",
-        "priority": 30,
-    }]
+    """A retired direct listing job cannot be replayed through the old action."""
+    rows = [
+        {
+            "job_id": "dead-job-id-001",
+            "queue_name": "ebay_draft",
+            "payload_json": {"sku": SKU_A},
+            "state": "dead_letter",
+            "max_attempts": 3,
+            "entity_type": "generic",
+            "entity_id": "ebay_draft",
+            "operation": "run",
+            "handler_family": "ebay_draft",
+            "priority": 30,
+        }
+    ]
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn(rows),
     )
     enqueued = {}
@@ -5206,20 +5436,8 @@ def test_requeue_job_success(env, monkeypatch):
     monkeypatch.setattr(http_server.state_machine, "enqueue_job", _enqueue)
 
     r = env["client"].post("/api/jobs/dead-job-id-001/requeue", headers=AUTH_HEADERS)
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert body["new_job_id"] == "new-job-id-999"
-    assert body["queue"] == "ebay_draft"
-    assert body["retry_mode"] == "current_item_action"
-    assert enqueued["entity_type"] == "item"
-    assert enqueued["entity_id"] == SKU_A
-    assert enqueued["queue_name"] == "ebay_draft"
-    assert enqueued["payload"] == {"sku": SKU_A, "origin": "operator"}
-    doc = json.loads(
-        (env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text()
-    )
-    assert doc["ai_redraft_requested"] is True
+    assert r.status_code == 400
+    assert enqueued == {}
 
 
 def test_every_http_sku_enqueue_uses_canonical_item_identity():
@@ -5236,10 +5454,7 @@ def test_every_http_sku_enqueue_uses_canonical_item_identity():
         payload = keywords.get("payload")
         if not isinstance(payload, ast.Dict):
             continue
-        payload_keys = {
-            key.value for key in payload.keys
-            if isinstance(key, ast.Constant) and isinstance(key.value, str)
-        }
+        payload_keys = {key.value for key in payload.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)}
         if "sku" not in payload_keys:
             continue
         if "entity_type" not in keywords or "entity_id" not in keywords:
@@ -5247,12 +5462,7 @@ def test_every_http_sku_enqueue_uses_canonical_item_identity():
             continue
         entity_type = keywords["entity_type"]
         entity_id = keywords["entity_id"]
-        if not (
-            isinstance(entity_type, ast.Constant)
-            and entity_type.value == "item"
-            and isinstance(entity_id, ast.Name)
-            and entity_id.id == "sku"
-        ):
+        if not (isinstance(entity_type, ast.Constant) and entity_type.value == "item" and isinstance(entity_id, ast.Name) and entity_id.id == "sku"):
             missing.append(call.lineno)
     assert missing == []
 
@@ -5277,7 +5487,8 @@ def test_provider_effect_item_queues_have_one_http_dispatch_authority():
                 keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
                 queue = keywords.get("queue_name")
                 if isinstance(queue, ast.Constant) and queue.value in {
-                    "ebay_stage", "ebay_publish",
+                    "ebay_stage",
+                    "ebay_publish",
                 }:
                     direct.append((self.function, queue.value, node.lineno))
             self.generic_visit(node)
@@ -5295,7 +5506,8 @@ def test_cancel_job_requires_auth(client):
 def test_cancel_job_not_found(env, monkeypatch):
     """Cancel returns 404 when job_id does not exist."""
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn([]),
     )
     r = env["client"].post("/api/jobs/nonexistent/cancel", headers=AUTH_HEADERS)
@@ -5306,7 +5518,8 @@ def test_cancel_job_wrong_state(env, monkeypatch):
     """Cancel returns 400 when job is running (not cancellable via this endpoint)."""
     rows = [{"state": "running"}]
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn(rows),
     )
     r = env["client"].post("/api/jobs/aaa/cancel", headers=AUTH_HEADERS)
@@ -5317,6 +5530,7 @@ def test_cancel_job_success(env, monkeypatch):
     """Cancel a dead-letter job — returns ok=True."""
     # First call (SELECT) returns dead_letter row; second call (UPDATE) is a no-op fake.
     call_count = [0]
+
     def _connect(*a, **k):
         call_count[0] += 1
         rows = [{"state": "dead_letter"}] if call_count[0] == 1 else []
@@ -5336,6 +5550,7 @@ def test_cancel_job_race_with_worker_lease_returns_409(env, monkeypatch):
     before the UPDATE runs (WHERE state=ANY(...) matches zero rows) -- this
     must surface as a 409, not a silent 200 'cancelled'."""
     call_count = [0]
+
     def _connect(*a, **k):
         call_count[0] += 1
         if call_count[0] == 1:
@@ -5378,6 +5593,7 @@ def test_nav_includes_pipeline_link(client):
 # PP-EDITOR-001 Phase 3k — /form/system + supporting API endpoints
 # ---------------------------------------------------------------------------
 
+
 def test_system_info_requires_auth(client):
     r = client.get("/api/system/info")
     assert r.status_code in (401, 403)
@@ -5393,7 +5609,8 @@ def test_system_info_returns_disk_token_sync_states(env, monkeypatch):
 
     # Stub psycopg2 for job state counts
     monkeypatch.setattr(
-        http_server.psycopg2, "connect",
+        http_server.psycopg2,
+        "connect",
         lambda *a, **k: _FakeConn([("succeeded", 42), ("dead_letter", 3)]),
     )
 
@@ -5425,6 +5642,7 @@ def test_system_info_returns_disk_token_sync_states(env, monkeypatch):
 def test_system_info_token_missing(env, monkeypatch):
     """system_info handles missing token file gracefully."""
     import shutil
+
     FakeUsage = type("FakeUsage", (), {"total": 1_000_000, "used": 100_000, "free": 900_000})()
     monkeypatch.setattr(shutil, "disk_usage", lambda *a, **k: FakeUsage)
     monkeypatch.setattr(http_server.psycopg2, "connect", lambda *a, **k: _FakeConn([]))
@@ -5456,9 +5674,11 @@ def test_restart_worker_invalid_unit(env):
 
 def test_restart_worker_success(env, monkeypatch):
     """Restart calls systemctl and returns ok=True on zero exit."""
+
     class _R:
         returncode = 0
         stderr = ""
+
     monkeypatch.setattr(http_server.subprocess, "run", lambda *a, **k: _R())
     r = env["client"].post(
         "/api/system/workers/tgw-http.service/restart",
@@ -5472,9 +5692,11 @@ def test_restart_worker_success(env, monkeypatch):
 
 def test_restart_worker_failure(env, monkeypatch):
     """Restart returns ok=False when systemctl exits non-zero."""
+
     class _R:
         returncode = 1
         stderr = "Access denied"
+
     monkeypatch.setattr(http_server.subprocess, "run", lambda *a, **k: _R())
     r = env["client"].post(
         "/api/system/workers/tgw-http.service/restart",
@@ -5488,8 +5710,10 @@ def test_restart_worker_failure(env, monkeypatch):
 
 def test_restart_worker_subprocess_error(env, monkeypatch):
     """Restart returns ok=False when subprocess.run raises."""
+
     def _fail(*a, **k):
         raise OSError("sudo not found")
+
     monkeypatch.setattr(http_server.subprocess, "run", _fail)
     r = env["client"].post(
         "/api/system/workers/tgw-http.service/restart",
@@ -5533,6 +5757,7 @@ def test_nav_includes_system_link(client):
 # GET /form/intake — intake landing page (PP-EDITOR-001 Phase 3l)
 # ---------------------------------------------------------------------------
 
+
 def test_intake_landing_returns_200(client):
     r = client.get("/form/intake")
     assert r.status_code == 200
@@ -5575,6 +5800,7 @@ def test_intake_landing_scan_hint(client):
 # GET /form/intake/{sku} — enhanced intake form (PP-EDITOR-001 Phase 3l)
 # ---------------------------------------------------------------------------
 
+
 def test_intake_form_has_photo_badge(env):
     """Intake form shows photo count badge; 0-photo badge has warning class."""
     _login(env["client"])
@@ -5601,17 +5827,17 @@ def test_intake_form_has_status_badge(env):
     r = env["client"].get(f"/form/intake/{SKU_A}")
     assert r.status_code == 200
     assert 'id="status-badge"' in r.text
-    assert 'badge-status' in r.text
+    assert "badge-status" in r.text
 
 
 def test_intake_form_has_action_buttons(env):
-    """Intake form shows identify and re-draft action buttons."""
+    """Intake keeps bounded identify but does not publish a direct re-draft."""
     _login(env["client"])
     r = env["client"].get(f"/form/intake/{SKU_A}")
     assert r.status_code == 200
     assert "triggerAction" in r.text
     assert "btn-identify" in r.text
-    assert "Re-draft" in r.text
+    assert "Re-draft" not in r.text
 
 
 def test_intake_form_start_identify_label(env):
@@ -5624,10 +5850,14 @@ def test_intake_form_start_identify_label(env):
 def test_intake_form_reidentify_label(env):
     """Intake form shows 'Re-identify' when ai_identified is True."""
     _login(env["client"])
-    _write_item(env["itemdata_root"], "tgw20260401000000010", {
-        "sku": "tgw20260401000000010",
-        "ai_identified": True,
-    })
+    _write_item(
+        env["itemdata_root"],
+        "tgw20260401000000010",
+        {
+            "sku": "tgw20260401000000010",
+            "ai_identified": True,
+        },
+    )
     r = env["client"].get("/form/intake/tgw20260401000000010")
     assert r.status_code == 200
     assert "Re-identify" in r.text
@@ -5676,6 +5906,7 @@ def test_nav_includes_intake_link(client):
 # ---------------------------------------------------------------------------
 # POST /api/inbox/upload — Flutter app inbox file upload (PP-EDITOR-001 3o)
 # ---------------------------------------------------------------------------
+
 
 def test_inbox_upload_md_file_saved_with_timestamp(env, tmp_path):
     """Uploading a .md file saves it under plan_inbox_path with a timestamp prefix."""
@@ -5766,7 +5997,7 @@ def test_inbox_upload_creates_inbox_dir_if_missing(env, monkeypatch):
 
 def test_login_get_escapes_next_param(client):
     """/login reflects `next` into a hidden input; must escape HTML metachars."""
-    r = client.get('/login', params={"next": '"><script>alert(1)</script>'})
+    r = client.get("/login", params={"next": '"><script>alert(1)</script>'})
     assert r.status_code == 200
     assert "<script>alert(1)</script>" not in r.text
     assert "&lt;script&gt;" in r.text
@@ -5820,12 +6051,16 @@ def test_intake_form_escapes_stored_fields(env):
     """weight_oz/barcode/ai_hint render into value=\"...\" attrs; must escape quotes/tags."""
     _login(env["client"])
     sku = "tgw20260401000000099"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "barcode": '"><script>alert(1)</script>',
-        "ai_hint": '" onmouseover="alert(2)',
-        "weight_oz": '4.5"><b>x</b>',
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "barcode": '"><script>alert(1)</script>',
+            "ai_hint": '" onmouseover="alert(2)',
+            "weight_oz": '4.5"><b>x</b>',
+        },
+    )
     r = env["client"].get(f"/form/intake/{sku}")
     assert r.status_code == 200
     assert "<script>alert(1)</script>" not in r.text
@@ -5850,10 +6085,14 @@ def test_intake_form_rejects_path_traversal_sku(env):
 
 
 def test_hint_trail_returns_history(client, env):
-    _write_item(env["itemdata_root"], SKU_A, {
-        "sku": SKU_A,
-        "identification_history": [{"round": 1, "at": "2026-07-01T00:00:00Z"}],
-    })
+    _write_item(
+        env["itemdata_root"],
+        SKU_A,
+        {
+            "sku": SKU_A,
+            "identification_history": [{"round": 1, "at": "2026-07-01T00:00:00Z"}],
+        },
+    )
     r = client.get(f"/api/items/{SKU_A}/hint-trail", headers=AUTH_HEADERS)
     assert r.status_code == 200
     d = r.json()
@@ -5871,12 +6110,14 @@ def test_docs_page_escapes_raw_html_in_markdown(env):
     """/docs renders pinned Plan Markdown; raw HTML/script must not execute."""
     vault = _seed_approved_docs(env)
     (vault / "evil.md").write_text(
-        "# Title\n\n<script>alert(1)</script>\n", encoding="utf-8",
+        "# Title\n\n<script>alert(1)</script>\n",
+        encoding="utf-8",
     )
     subprocess.run(["git", "-C", str(vault), "add", "evil.md"], check=True)
     subprocess.run(["git", "-C", str(vault), "commit", "-qm", "evil approved"], check=True)
     env["cfg"]["plan_approved_commit"] = subprocess.check_output(
-        ["git", "-C", str(vault), "rev-parse", "HEAD"], text=True,
+        ["git", "-C", str(vault), "rev-parse", "HEAD"],
+        text=True,
     ).strip()
     r = env["client"].get("/docs/evil.md")
     assert r.status_code == 200
@@ -5899,31 +6140,37 @@ def _retired_test_item_detail_store_category_dropdowns_populate_and_select(env):
     selected."""
     groups_path = env["groups_path"]
     groups_path.write_text(
-        json.dumps({
-            "groups": {
-                "books": {
-                    "name": "Books",
-                    "store_category": "Books & Media",
-                    "store_category_id": "111",
-                },
-                "electronics": {
-                    "name": "Electronics",
-                    "store_category": "Electronics",
-                    "store_category_id": "222",
-                },
+        json.dumps(
+            {
+                "groups": {
+                    "books": {
+                        "name": "Books",
+                        "store_category": "Books & Media",
+                        "store_category_id": "111",
+                    },
+                    "electronics": {
+                        "name": "Electronics",
+                        "store_category": "Electronics",
+                        "store_category_id": "222",
+                    },
+                }
             }
-        }),
+        ),
         encoding="utf-8",
     )
     sku = "tgw20260701000000077"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Store Cat Test Item",
-        "draft_listing": {
-            "store_category_id": "111",
-            "secondary_store_category_id": "222",
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Store Cat Test Item",
+            "draft_listing": {
+                "store_category_id": "111",
+                "secondary_store_category_id": "222",
+            },
         },
-    })
+    )
     _login(env["client"])
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
@@ -5941,18 +6188,22 @@ def _retired_test_item_detail_store_categories_do_not_fetch_ebay_during_render(e
     when GetStore is unavailable; rendering must not call the live adapter."""
     groups_path = env["groups_path"]
     groups_path.write_text(
-        json.dumps({"groups": {
-            "books": {
-                "name": "Books",
-                "store_category": "Books & Media",
-                "store_category_id": "111",
-            },
-            "electronics": {
-                "name": "Electronics",
-                "store_category": "Electronics",
-                "store_category_id": "222",
-            },
-        }}),
+        json.dumps(
+            {
+                "groups": {
+                    "books": {
+                        "name": "Books",
+                        "store_category": "Books & Media",
+                        "store_category_id": "111",
+                    },
+                    "electronics": {
+                        "name": "Electronics",
+                        "store_category": "Electronics",
+                        "store_category_id": "222",
+                    },
+                }
+            }
+        ),
         encoding="utf-8",
     )
     sku = "tgw20260701000000079"
@@ -5973,30 +6224,43 @@ def _retired_test_item_detail_store_categories_render_complete_ebay_snapshot_wit
     """Routine rendering uses the complete last-known-good eBay snapshot, not
     the smaller category-group mapping and not a synchronous GetStore call."""
     env["groups_path"].write_text(
-        json.dumps({"groups": {
-            "mapped": {"store_category": "Mapped only", "store_category_id": "111"},
-        }}),
+        json.dumps(
+            {
+                "groups": {
+                    "mapped": {"store_category": "Mapped only", "store_category_id": "111"},
+                }
+            }
+        ),
         encoding="utf-8",
     )
     catalog_root = env["groups_path"].parent / "catalog"
     catalog_root.mkdir()
     env["cfg"]["catalog_root"] = catalog_root
     snapshot = catalog_root / "ebay-store-categories.json"
-    snapshot.write_text(json.dumps({
-        "source": "ebay_get_store",
-        "refreshed_at": "2026-07-28T12:00:00Z",
-        "results": [
-            {"id": "111", "name": "Books"},
-            {"id": "222", "name": "Electronics"},
-            {"id": "333", "name": "Unmapped but real"},
-        ],
-    }), encoding="utf-8")
+    snapshot.write_text(
+        json.dumps(
+            {
+                "source": "ebay_get_store",
+                "refreshed_at": "2026-07-28T12:00:00Z",
+                "results": [
+                    {"id": "111", "name": "Books"},
+                    {"id": "222", "name": "Electronics"},
+                    {"id": "333", "name": "Unmapped but real"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     sku = "tgw20260701000000081"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Snapshot-backed categories",
-        "draft_listing": {"store_category_id": "333"},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Snapshot-backed categories",
+            "draft_listing": {"store_category_id": "333"},
+        },
+    )
     monkeypatch.setattr(
         http_server,
         "_live_store_categories",
@@ -6063,18 +6327,27 @@ def _retired_test_item_detail_fulfillment_policies_render_snapshot_without_live_
     catalog_root = env["groups_path"].parent / "policy-catalog"
     catalog_root.mkdir()
     env["cfg"]["catalog_root"] = catalog_root
-    (catalog_root / "ebay-fulfillment-policies.json").write_text(json.dumps({
-        "source": "ebay_account_api",
-        "refreshed_at": "2026-07-28T12:00:00Z",
-        "fulfillment": {"POLICY-1": "Small parcel", "POLICY-2": "Large parcel"},
-        "return": {},
-    }), encoding="utf-8")
+    (catalog_root / "ebay-fulfillment-policies.json").write_text(
+        json.dumps(
+            {
+                "source": "ebay_account_api",
+                "refreshed_at": "2026-07-28T12:00:00Z",
+                "fulfillment": {"POLICY-1": "Small parcel", "POLICY-2": "Large parcel"},
+                "return": {},
+            }
+        ),
+        encoding="utf-8",
+    )
     sku = "tgw20260701000000082"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Snapshot-backed shipping",
-        "draft_listing": {"shipping_profile": "POLICY-2"},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Snapshot-backed shipping",
+            "draft_listing": {"shipping_profile": "POLICY-2"},
+        },
+    )
     monkeypatch.setattr(
         http_server,
         "_live_fulfillment_policies",
@@ -6087,11 +6360,16 @@ def _retired_test_item_detail_fulfillment_policies_render_snapshot_without_live_
     assert 'value="POLICY-2" selected' in response.text
     assert "eBay snapshot: 2 fulfillment policies" in response.text
 
-    (catalog_root / "ebay-fulfillment-policies.json").write_text(json.dumps({
-        "source": "ebay_account_api",
-        "refreshed_at": "2026-07-28T12:00:00Z",
-        "fulfillment": {"POLICY-1": ["not", "a", "name"]},
-    }), encoding="utf-8")
+    (catalog_root / "ebay-fulfillment-policies.json").write_text(
+        json.dumps(
+            {
+                "source": "ebay_account_api",
+                "refreshed_at": "2026-07-28T12:00:00Z",
+                "fulfillment": {"POLICY-1": ["not", "a", "name"]},
+            }
+        ),
+        encoding="utf-8",
+    )
     policies, refreshed_at, error = http_server._fulfillment_policies_snapshot(env["cfg"])
     assert policies == {}
     assert refreshed_at is None
@@ -6149,11 +6427,16 @@ def test_store_categories_get_reads_snapshot_without_live_fetch(env, monkeypatch
     catalog_root = env["groups_path"].parent / "store-get-catalog"
     catalog_root.mkdir()
     env["cfg"]["catalog_root"] = catalog_root
-    (catalog_root / "ebay-store-categories.json").write_text(json.dumps({
-        "source": "ebay_get_store",
-        "refreshed_at": "2026-07-28T12:00:00Z",
-        "results": [{"id": "111", "name": "Books"}],
-    }), encoding="utf-8")
+    (catalog_root / "ebay-store-categories.json").write_text(
+        json.dumps(
+            {
+                "source": "ebay_get_store",
+                "refreshed_at": "2026-07-28T12:00:00Z",
+                "results": [{"id": "111", "name": "Books"}],
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         http_server,
         "_live_store_categories",
@@ -6170,11 +6453,16 @@ def test_store_categories_get_reads_snapshot_without_live_fetch(env, monkeypatch
         "error": None,
     }
 
-    (catalog_root / "ebay-store-categories.json").write_text(json.dumps({
-        "source": "ebay_get_store",
-        "refreshed_at": "2026-07-28T12:00:00Z",
-        "results": [{"id": 111, "name": "Books"}],
-    }), encoding="utf-8")
+    (catalog_root / "ebay-store-categories.json").write_text(
+        json.dumps(
+            {
+                "source": "ebay_get_store",
+                "refreshed_at": "2026-07-28T12:00:00Z",
+                "results": [{"id": 111, "name": "Books"}],
+            }
+        ),
+        encoding="utf-8",
+    )
     response = env["client"].get("/api/ebay/store-categories")
     assert response.status_code == 200
     assert response.json()["ok"] is False
@@ -6187,12 +6475,12 @@ def test_reference_data_refresh_endpoint_reconciles_both_snapshots_once(env, mon
     monkeypatch.setattr(
         http_server,
         "_live_store_categories",
-        lambda _cfg: (calls.append("store") or ([{"id": "111", "name": "Books"}], False)),
+        lambda _cfg: calls.append("store") or ([{"id": "111", "name": "Books"}], False),
     )
     monkeypatch.setattr(
         http_server,
         "_live_fulfillment_policies",
-        lambda _cfg: (calls.append("fulfillment") or ({"POLICY-1": "Small parcel"}, False)),
+        lambda _cfg: calls.append("fulfillment") or ({"POLICY-1": "Small parcel"}, False),
     )
     _login(env["client"])
     response = env["client"].post("/api/ebay/reference-data/refresh")
@@ -6213,15 +6501,19 @@ def _retired_test_item_detail_preserves_stored_selector_ids_when_snapshot_unavai
     env["cfg"]["catalog_root"] = catalog_root
     env["groups_path"].write_text(json.dumps({"groups": {}}), encoding="utf-8")
     sku = "tgw20260701000000083"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Preserve stored IDs",
-        "draft_listing": {
-            "store_category_id": "STORE-1",
-            "secondary_store_category_id": "STORE-2",
-            "shipping_profile": "POLICY-9",
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Preserve stored IDs",
+            "draft_listing": {
+                "store_category_id": "STORE-1",
+                "secondary_store_category_id": "STORE-2",
+                "shipping_profile": "POLICY-9",
+            },
         },
-    })
+    )
     _login(env["client"])
     response = env["client"].get(f"/form/items/{sku}")
     assert response.status_code == 200
@@ -6235,20 +6527,28 @@ def _retired_test_item_detail_store_categories_keep_distinct_ids_and_drop_invali
     """Configured groups may reuse a display name; preserve their distinct
     stored IDs and never expose a value that can overwrite a draft as None."""
     env["groups_path"].write_text(
-        json.dumps({"groups": {
-            "first": {"store_category": "Books", "store_category_id": "111"},
-            "second": {"store_category": "Books", "store_category_id": "222"},
-            "missing": {"store_category": "Broken", "store_category_id": None},
-            "blank": {"store_category": "Also Broken", "store_category_id": "  "},
-        }}),
+        json.dumps(
+            {
+                "groups": {
+                    "first": {"store_category": "Books", "store_category_id": "111"},
+                    "second": {"store_category": "Books", "store_category_id": "222"},
+                    "missing": {"store_category": "Broken", "store_category_id": None},
+                    "blank": {"store_category": "Also Broken", "store_category_id": "  "},
+                }
+            }
+        ),
         encoding="utf-8",
     )
     sku = "tgw20260701000000080"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Keep Stored Category IDs",
-        "draft_listing": {"store_category_id": "222", "secondary_store_category_id": "111"},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Keep Stored Category IDs",
+            "draft_listing": {"store_category_id": "222", "secondary_store_category_id": "111"},
+        },
+    )
     _login(env["client"])
     response = env["client"].get(f"/form/items/{sku}")
     assert response.status_code == 200
@@ -6265,15 +6565,19 @@ def _retired_test_item_detail_best_offer_control_reflects_state(env):
     conflated with "disabled") reflects draft_listing.best_offer_enabled;
     auto-accept/decline prices prefill from draft_listing."""
     sku = "tgw20260701000000078"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Best Offer Test Item",
-        "draft_listing": {
-            "best_offer_enabled": True,
-            "best_offer_auto_accept_price": 45.0,
-            "best_offer_auto_decline_price": 20,
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Best Offer Test Item",
+            "draft_listing": {
+                "best_offer_enabled": True,
+                "best_offer_auto_accept_price": 45.0,
+                "best_offer_auto_decline_price": 20,
+            },
         },
-    })
+    )
     _login(env["client"])
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
@@ -6302,11 +6606,15 @@ def _retired_test_item_detail_best_offer_control_disabled_when_explicitly_false(
     """False is a real, meaningful, distinct choice from unset -- must
     render as the "Disabled" option selected, not fall back to "not set"."""
     sku = "tgw20260701000000080"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Best Offer Disabled Item",
-        "draft_listing": {"best_offer_enabled": False},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Best Offer Disabled Item",
+            "draft_listing": {"best_offer_enabled": False},
+        },
+    )
     _login(env["client"])
     r = env["client"].get(f"/form/items/{sku}")
     assert r.status_code == 200
@@ -6319,6 +6627,7 @@ def _retired_test_item_detail_best_offer_control_disabled_when_explicitly_false(
 # DELETE /api/items/{sku}/assets/{filename} — archive-before-delete (#1310,
 # invariant E5, PP-COHESION-001)
 # ---------------------------------------------------------------------------
+
 
 def test_delete_asset_archives_before_unlink(env):
     """When archive_root is configured, deleting a photo must zip its bytes
@@ -6421,13 +6730,15 @@ def test_item_detail_pipeline_log_distinguishes_retry_wait_from_dead_letter():
 
 def test_item_detail_top_retry_requeues_exact_retryable_dead_letter():
     item = {"sku": "tgw1", "title": "Failed item", "status": "In Stock"}
-    jobs = [{
-        "queue_name": "ebay_publish",
-        "state": "dead_letter",
-        "job_id": "failed-publish-job",
-        "retry_allowed": True,
-        "error_detail": "provider rejected request",
-    }]
+    jobs = [
+        {
+            "queue_name": "ebay_publish",
+            "state": "dead_letter",
+            "job_id": "failed-publish-job",
+            "retry_allowed": True,
+            "error_detail": "provider rejected request",
+        }
+    ]
 
     html = http_server._render_item_detail_html("tgw1", item, [], [], jobs)
 
@@ -6448,34 +6759,41 @@ def test_item_detail_receipt_identity_dead_letter_offers_new_current_graph_attem
         "status": "In Stock",
         "draft_listing": {"title": "Roland R-MIX", "price": 19.99},
     }
-    jobs = [{
-        "queue_name": "ebay_upload",
-        "state": "dead_letter",
-        "job_id": "stale-receipt-job",
-        "retry_allowed": False,
-        "error_detail": "receipt binding rejected: INVALID_RECEIPT_IDENTITY",
-        # Production queue rows retain worker results inside payload_json.
-        "payload_json": {
-            "sku": "tgw202510161310076",
-            "result": {
-                "outcome": "failed",
-                "evidence": {"reason_code": "INVALID_RECEIPT_IDENTITY"},
+    jobs = [
+        {
+            "queue_name": "ebay_upload",
+            "state": "dead_letter",
+            "job_id": "stale-receipt-job",
+            "retry_allowed": False,
+            "error_detail": "receipt binding rejected: INVALID_RECEIPT_IDENTITY",
+            # Production queue rows retain worker results inside payload_json.
+            "payload_json": {
+                "sku": "tgw202510161310076",
+                "result": {
+                    "outcome": "failed",
+                    "evidence": {"reason_code": "INVALID_RECEIPT_IDENTITY"},
+                },
             },
-        },
-    }]
+        }
+    ]
 
     html = http_server._render_item_detail_html(
-        "tgw202510161310076", item, [], [], jobs,
+        "tgw202510161310076",
+        item,
+        [],
+        [],
+        jobs,
     )
     action_line = re.search(
-        r'<div class="act-row" id="action-line">(.*?)</div>', html,
+        r'<div class="act-row" id="action-line">(.*?)</div>',
+        html,
     )
 
     assert action_line is not None
-    assert '>List on eBay</button>' in action_line.group(1)
+    assert ">List on eBay</button>" in action_line.group(1)
     assert 'onclick="listOnEbay()"' in action_line.group(1)
-    assert '>Retry</button>' not in action_line.group(1)
-    assert '>Needs attention</button>' not in action_line.group(1)
+    assert ">Retry</button>" not in action_line.group(1)
+    assert ">Needs attention</button>" not in action_line.group(1)
 
 
 def test_item_detail_other_nonretryable_dead_letter_still_needs_attention():
@@ -6485,25 +6803,28 @@ def test_item_detail_other_nonretryable_dead_letter_still_needs_attention():
         "status": "In Stock",
         "draft_listing": {"title": "Hard failure", "price": 19.99},
     }
-    jobs = [{
-        "queue_name": "ebay_upload",
-        "state": "dead_letter",
-        "job_id": "hard-failure-job",
-        "retry_allowed": False,
-        "result": {
-            "outcome": "failed",
-            "evidence": {"reason_code": "PROVIDER_REJECTED"},
-        },
-    }]
+    jobs = [
+        {
+            "queue_name": "ebay_upload",
+            "state": "dead_letter",
+            "job_id": "hard-failure-job",
+            "retry_allowed": False,
+            "result": {
+                "outcome": "failed",
+                "evidence": {"reason_code": "PROVIDER_REJECTED"},
+            },
+        }
+    ]
 
     html = http_server._render_item_detail_html("tgw1", item, [], [], jobs)
     action_line = re.search(
-        r'<div class="act-row" id="action-line">(.*?)</div>', html,
+        r'<div class="act-row" id="action-line">(.*?)</div>',
+        html,
     )
 
     assert action_line is not None
-    assert '>Needs attention</button>' in action_line.group(1)
-    assert '>List on eBay</button>' not in action_line.group(1)
+    assert ">Needs attention</button>" in action_line.group(1)
+    assert ">List on eBay</button>" not in action_line.group(1)
 
 
 def test_item_detail_sold_out_item_has_no_relist_action():
@@ -6528,14 +6849,15 @@ def test_item_detail_sold_out_item_has_no_relist_action():
 
     html = http_server._render_item_detail_html("tgw-sold", item, [], [], [])
     action_line = re.search(
-        r'<div class="act-row" id="action-line">(.*?)</div>', html,
+        r'<div class="act-row" id="action-line">(.*?)</div>',
+        html,
     )
 
     assert action_line is not None
-    assert '>Sold</button>' in action_line.group(1)
-    assert ' disabled' in action_line.group(1)
-    assert '>Relist</button>' not in action_line.group(1)
-    assert '>List on eBay</button>' not in action_line.group(1)
+    assert ">Sold</button>" in action_line.group(1)
+    assert " disabled" in action_line.group(1)
+    assert ">Relist</button>" not in action_line.group(1)
+    assert ">List on eBay</button>" not in action_line.group(1)
 
 
 def test_item_detail_positive_stale_quantity_does_not_override_sold_status():
@@ -6551,17 +6873,22 @@ def test_item_detail_positive_stale_quantity_does_not_override_sold_status():
     }
 
     html = http_server._render_item_detail_html(
-        "tgw-restocked", item, [], [], [],
+        "tgw-restocked",
+        item,
+        [],
+        [],
+        [],
     )
     action_line = re.search(
-        r'<div class="act-row" id="action-line">(.*?)</div>', html,
+        r'<div class="act-row" id="action-line">(.*?)</div>',
+        html,
     )
 
     assert action_line is not None
-    assert '>Sold</button>' in action_line.group(1)
-    assert ' disabled' in action_line.group(1)
-    assert '>Relist</button>' not in action_line.group(1)
-    assert '>List on eBay</button>' not in action_line.group(1)
+    assert ">Sold</button>" in action_line.group(1)
+    assert " disabled" in action_line.group(1)
+    assert ">Relist</button>" not in action_line.group(1)
+    assert ">List on eBay</button>" not in action_line.group(1)
 
 
 def test_item_detail_missing_draft_price_shows_set_price_not_retry():
@@ -6575,18 +6902,21 @@ def test_item_detail_missing_draft_price_shows_set_price_not_retry():
         "ai_identified": True,
         "draft_listing": {"title": "Draft title", "category_id": "177027", "price": None},
     }
-    jobs = [{
-        "queue_name": "ebay_price",
-        "state": "dead_letter",
-        "job_id": "failed-price-job",
-        "retry_allowed": True,
-        "error_detail": "ebay-price produced no positive price",
-    }]
+    jobs = [
+        {
+            "queue_name": "ebay_price",
+            "state": "dead_letter",
+            "job_id": "failed-price-job",
+            "retry_allowed": True,
+            "error_detail": "ebay-price produced no positive price",
+        }
+    ]
 
     html = http_server._render_item_detail_html("tgw1", item, [], [], jobs)
 
     action_line = re.search(
-        r'<div class="act-row" id="action-line">(.*?)</div>', html,
+        r'<div class="act-row" id="action-line">(.*?)</div>',
+        html,
     )
     assert action_line is not None
     assert ">Set Price</button>" in action_line.group(1)
@@ -6597,15 +6927,25 @@ def test_item_detail_missing_draft_price_shows_set_price_not_retry():
 
 def test_item_detail_resolved_price_dead_letter_does_not_mask_list_action():
     item = {
-        "sku": "tgw1", "title": "Identified item",
+        "sku": "tgw1",
+        "title": "Identified item",
         "draft_listing": {"title": "Draft title", "category_id": "177027", "price": 24.99},
     }
-    jobs = [{
-        "queue_name": "ebay_price", "state": "dead_letter", "job_id": "old-price-job",
-        "payload_json": {"result": {"outcome": "partial", "evidence": {
-            "reason_code": "PRICE_REQUIRES_OPERATOR_INPUT",
-        }}},
-    }]
+    jobs = [
+        {
+            "queue_name": "ebay_price",
+            "state": "dead_letter",
+            "job_id": "old-price-job",
+            "payload_json": {
+                "result": {
+                    "outcome": "partial",
+                    "evidence": {
+                        "reason_code": "PRICE_REQUIRES_OPERATOR_INPUT",
+                    },
+                }
+            },
+        }
+    ]
 
     html = http_server._render_item_detail_html("tgw1", item, [], [], jobs)
     action_line = re.search(r'<div class="act-row" id="action-line">(.*?)</div>', html)
@@ -6617,11 +6957,18 @@ def test_item_detail_resolved_price_dead_letter_does_not_mask_list_action():
 
 def test_item_detail_global_ai_action_is_always_available():
     first = http_server._render_item_detail_html(
-        "tgw1", {"sku": "tgw1", "title": "New item"}, [], [], [],
+        "tgw1",
+        {"sku": "tgw1", "title": "New item"},
+        [],
+        [],
+        [],
     )
     identified = http_server._render_item_detail_html(
-        "tgw2", {"sku": "tgw2", "title": "Known item", "ai_identified": True},
-        [], [], [],
+        "tgw2",
+        {"sku": "tgw2", "title": "Known item", "ai_identified": True},
+        [],
+        [],
+        [],
     )
 
     assert "AI Identify" in first
@@ -6638,20 +6985,28 @@ def test_item_detail_global_ai_action_is_always_available():
     ),
 )
 def test_item_detail_workflow_card_shows_photo_sync_fingerprint(
-    result, reason, expected,
+    result,
+    reason,
+    expected,
 ):
     html = http_server._render_item_detail_html(
-        "tgw1", {"sku": "tgw1", "title": "Photo item"}, [], [], [],
+        "tgw1",
+        {"sku": "tgw1", "title": "Photo item"},
+        [],
+        [],
+        [],
         workflow_card={
             "goal": {"id": "tgw.ebay_listable", "version": "1"},
             "object_generation": "generation-1",
             "graph_id": "graph-1",
-            "fingerprints": [{
-                "condition_id": "photos_uploaded",
-                "result": result,
-                "reasons": [reason],
-                "evidence": [{"identity": "photo-sync:abc"}],
-            }],
+            "fingerprints": [
+                {
+                    "condition_id": "photos_uploaded",
+                    "result": result,
+                    "reasons": [reason],
+                    "evidence": [{"identity": "photo-sync:abc"}],
+                }
+            ],
         },
     )
 
@@ -6679,46 +7034,56 @@ def test_item_detail_photo_sync_warning_keeps_list_action_not_stale_retry():
             "price": 11.99,
         },
     }
-    jobs = [{
-        "queue_name": "ebay_stage",
-        "state": "dead_letter",
-        "job_id": "historical-stage-failure",
-        "retry_allowed": True,
-        "error_detail": "eBay rejected staging",
-    }]
+    jobs = [
+        {
+            "queue_name": "ebay_stage",
+            "state": "dead_letter",
+            "job_id": "historical-stage-failure",
+            "retry_allowed": True,
+            "error_detail": "eBay rejected staging",
+        }
+    ]
     workflow_card = {
         "goal": {"id": "tgw.ebay_listable", "version": "1"},
         "object_generation": "generation-current",
         "graph_id": "graph-current",
-        "fingerprints": [{
-            "condition_id": "photos_uploaded",
-            "result": "false",
-            "reasons": [
-                "photo sync waiting: 7/7 local photos; "
-                "draft image order is not synchronized",
-            ],
-            "evidence": [{"identity": "photo-sync:current"}],
-        }, {
-            "condition_id": "item_has_photos",
-            "result": "true",
-            "reasons": ["photos present"],
-            "evidence": [{"identity": "item-data:current"}],
-        }],
+        "fingerprints": [
+            {
+                "condition_id": "photos_uploaded",
+                "result": "false",
+                "reasons": [
+                    "photo sync waiting: 7/7 local photos; draft image order is not synchronized",
+                ],
+                "evidence": [{"identity": "photo-sync:current"}],
+            },
+            {
+                "condition_id": "item_has_photos",
+                "result": "true",
+                "reasons": ["photos present"],
+                "evidence": [{"identity": "item-data:current"}],
+            },
+        ],
     }
 
     html = http_server._render_item_detail_html(
-        item["sku"], item, [], [], jobs, workflow_card=workflow_card,
+        item["sku"],
+        item,
+        [],
+        [],
+        jobs,
+        workflow_card=workflow_card,
     )
     action_line = re.search(
-        r'<div class="act-row" id="action-line">(.*?)</div>', html,
+        r'<div class="act-row" id="action-line">(.*?)</div>',
+        html,
     )
 
     assert action_line is not None
-    assert '>List on eBay</button>' in action_line.group(1)
+    assert ">List on eBay</button>" in action_line.group(1)
     assert 'onclick="listOnEbay()"' in action_line.group(1)
-    assert '>Resync Photos</button>' not in action_line.group(1)
-    assert '>Retry</button>' not in action_line.group(1)
-    assert '>Needs attention</button>' not in action_line.group(1)
+    assert ">Resync Photos</button>" not in action_line.group(1)
+    assert ">Retry</button>" not in action_line.group(1)
+    assert ">Needs attention</button>" not in action_line.group(1)
 
 
 def test_item_detail_hides_duplicate_stage_loser_after_same_generation_success():
@@ -6745,20 +7110,24 @@ def test_item_detail_hides_duplicate_stage_loser_after_same_generation_success()
     action_line = re.search(r'<div class="act-row" id="action-line">(.*?)</div>', html)
 
     assert action_line is not None
-    assert '>List on eBay</button>' in action_line.group(1)
-    assert '>Needs attention</button>' not in action_line.group(1)
+    assert ">List on eBay</button>" in action_line.group(1)
+    assert ">Needs attention</button>" not in action_line.group(1)
 
 
 def _retired_test_item_detail_uses_ai_category_before_draft_exists(env):
     _login(env["client"])
     sku = "tgw-ai-category-fallback"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Identified Book",
-        "ai_identified": True,
-        "ebay_category_id": "261186",
-        "ebay_category_name": "Books",
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Identified Book",
+            "ai_identified": True,
+            "ebay_category_id": "261186",
+            "ebay_category_name": "Books",
+        },
+    )
 
     response = env["client"].get(f"/form/items/{sku}")
 
@@ -6771,12 +7140,16 @@ def _retired_test_item_detail_uses_ai_category_before_draft_exists(env):
 def _retired_test_item_detail_visibly_flags_missing_primary_category(env):
     _login(env["client"])
     sku = "tgw-missing-category"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Uncategorized Item",
-        "ai_identified": True,
-        "draft_listing": {"title": "Uncategorized Item"},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Uncategorized Item",
+            "ai_identified": True,
+            "draft_listing": {"title": "Uncategorized Item"},
+        },
+    )
 
     response = env["client"].get(f"/form/items/{sku}")
 
@@ -6790,11 +7163,15 @@ def _retired_test_item_detail_visibly_flags_missing_primary_category(env):
 def _retired_test_required_aspect_controls_have_machine_visible_invalid_state(env):
     _login(env["client"])
     sku = "tgw-required-aspect-state"
-    _write_item(env["itemdata_root"], sku, {
-        "sku": sku,
-        "title": "Book",
-        "draft_listing": {"title": "Book", "category_id": "261186"},
-    })
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "title": "Book",
+            "draft_listing": {"title": "Book", "category_id": "261186"},
+        },
+    )
 
     response = env["client"].get(f"/form/items/{sku}")
 
@@ -6810,11 +7187,15 @@ def _retired_test_required_aspect_controls_have_machine_visible_invalid_state(en
         {"sku": "tgw1", "title": "New"},
         {"sku": "tgw1", "title": "Known", "ai_identified": True},
         {
-            "sku": "tgw1", "title": "Draft", "ai_identified": True,
+            "sku": "tgw1",
+            "title": "Draft",
+            "ai_identified": True,
             "draft_listing": {"title": "Draft", "category_id": "123"},
         },
         {
-            "sku": "tgw1", "title": "Live", "ai_identified": True,
+            "sku": "tgw1",
+            "title": "Live",
+            "ai_identified": True,
             "draft_listing": {"title": "Draft", "category_id": "123"},
             "ebay_offer": {"offer_id": "offer-1"},
             "ebay_listing": {"listing_id": "listing-1", "status": "Active"},
@@ -6832,7 +7213,9 @@ def test_async_item_actions_wait_for_terminal_state_before_reload():
     html = http_server._render_item_detail_html(
         "tgw1",
         {"sku": "tgw1", "title": "Known", "ai_identified": True},
-        [], [], [],
+        [],
+        [],
+        [],
     )
 
     assert "function waitForAction(action,jobId)" in html
@@ -6857,6 +7240,7 @@ def test_async_item_actions_wait_for_terminal_state_before_reload():
 # manifest for the full path inventory and why each one is or isn't covered.
 # ---------------------------------------------------------------------------
 
+
 def test_c14_patch_item_top_level_field_clear_roundtrip(env):
     """Item-detail direct-edit path (the dblclick-to-edit fields panel,
     saveInlineField's commit()) — PATCHes {fields: {field: newVal}}
@@ -6865,21 +7249,15 @@ def test_c14_patch_item_top_level_field_clear_roundtrip(env):
     client = env["client"]
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
 
-    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"brand": "Acme"}},
-                     headers=AUTH_HEADERS)
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"brand": "Acme"}}, headers=AUTH_HEADERS)
     assert r.status_code == 200
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     assert doc["brand"] == "Acme"
 
-    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"brand": ""}},
-                     headers=AUTH_HEADERS)
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"brand": ""}}, headers=AUTH_HEADERS)
     assert r.status_code == 200
     doc = json.loads(json_path.read_text(encoding="utf-8"))
-    assert doc["brand"] == "", (
-        "operator cleared 'brand' via the item-detail field editor and the "
-        "save reported ok, but the cleared value was not actually persisted "
-        "— invariant C14"
-    )
+    assert doc["brand"] == "", "operator cleared 'brand' via the item-detail field editor and the save reported ok, but the cleared value was not actually persisted — invariant C14"
 
 
 def test_c14_patch_item_aspects_form_clear_roundtrip(env):
@@ -6909,9 +7287,7 @@ def test_c14_patch_item_aspects_form_clear_roundtrip(env):
     assert r.status_code == 200
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     assert draft_specifics.get_ebay_aspects(doc)["Material"] == "", (
-        "operator cleared the Material aspect via the aspects form and the "
-        "save reported ok, but the cleared value was not actually persisted "
-        "— the exact 2026-07-16 live incident, invariant C14"
+        "operator cleared the Material aspect via the aspects form and the save reported ok, but the cleared value was not actually persisted — the exact 2026-07-16 live incident, invariant C14"
     )
 
 
@@ -6923,22 +7299,17 @@ def test_c14_bulk_apply_title_clear_roundtrip(env, enqueue_calls):
     client = env["client"]
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
 
-    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS,
-                    json={"field": "ai_hint", "value": "vintage brooch", "skus": [SKU_A]})
+    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS, json={"field": "ai_hint", "value": "vintage brooch", "skus": [SKU_A]})
     assert r.status_code == 200
     assert r.json()["ok"] is True
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     assert doc["ai_hint"] == "vintage brooch"
 
-    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS,
-                    json={"field": "ai_hint", "value": "", "skus": [SKU_A]})
+    r = client.post("/api/bulk/apply", headers=AUTH_HEADERS, json={"field": "ai_hint", "value": "", "skus": [SKU_A]})
     assert r.status_code == 200
     assert r.json()["ok"] is True
     doc = json.loads(json_path.read_text(encoding="utf-8"))
-    assert doc["ai_hint"] == "", (
-        "bulk-apply cleared 'ai_hint' to '' and reported ok, but the "
-        "cleared value was not actually persisted — invariant C14"
-    )
+    assert doc["ai_hint"] == "", "bulk-apply cleared 'ai_hint' to '' and reported ok, but the cleared value was not actually persisted — invariant C14"
 
 
 def test_c14_accept_proposals_clear_roundtrip(env, monkeypatch):
@@ -6953,22 +7324,21 @@ def test_c14_accept_proposals_clear_roundtrip(env, monkeypatch):
     draft = dict(_DRAFT_LISTING)
     draft["item_specifics"] = {"Material": "Silver"}
     _write_item_with_draft(
-        env["itemdata_root"], SKU_A, draft,
+        env["itemdata_root"],
+        SKU_A,
+        draft,
         extra={"revision_draft": {"delta": {"item_specifics": {"Material": ""}}}},
     )
 
     client = env["client"]
-    r = client.post(f"/api/items/{SKU_A}/action", json={"action": "accept_proposals"},
-                    headers=AUTH_HEADERS)
+    r = client.post(f"/api/items/{SKU_A}/action", json={"action": "accept_proposals"}, headers=AUTH_HEADERS)
     assert r.status_code == 200
     assert r.json()["ok"] is True
 
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     assert draft_specifics.get_ebay_aspects(doc)["Material"] == "", (
-        "an accepted revision proposal cleared 'Material' but the cleared "
-        "value was not actually persisted into draft_listing.item_specifics "
-        "— invariant C14"
+        "an accepted revision proposal cleared 'Material' but the cleared value was not actually persisted into draft_listing.item_specifics — invariant C14"
     )
 
 
@@ -6981,64 +7351,62 @@ def test_c14_locked_top_level_field_clear_survives_unrelated_draft_save(env):
     client = env["client"]
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
 
-    _write_item(env["itemdata_root"], SKU_A, {
-        "sku": SKU_A, "title": "Widget", "location": "A1",
-        "description": "Old description text",
-        "draft_listing": {"description": "Old description text"},
-    })
+    _write_item(
+        env["itemdata_root"],
+        SKU_A,
+        {
+            "sku": SKU_A,
+            "title": "Widget",
+            "location": "A1",
+            "description": "Old description text",
+            "draft_listing": {"description": "Old description text"},
+        },
+    )
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     lock_patch = inventory_record.set_locked(doc, "description", True)
     http_server._apply_patch(json_path, lock_patch)
 
-    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"description": ""}},
-                     headers=AUTH_HEADERS)
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"description": ""}}, headers=AUTH_HEADERS)
     assert r.status_code == 200
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     assert doc["description"] == ""
 
     # Unrelated draft_listing save (e.g. a price edit via the aspects form).
-    r = client.patch(f"/api/items/{SKU_A}",
-                     json={"fields": {"draft_listing": {"price": 12.34}}},
-                     headers=AUTH_HEADERS)
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"draft_listing": {"price": 12.34}}}, headers=AUTH_HEADERS)
     assert r.status_code == 200
     doc = json.loads(json_path.read_text(encoding="utf-8"))
-    assert doc["description"] == "", (
-        "a LOCKED top-level field's clear should survive an unrelated "
-        "draft_listing save — if this fails, the padlock mitigation itself "
-        "has regressed"
-    )
+    assert doc["description"] == "", "a LOCKED top-level field's clear should survive an unrelated draft_listing save — if this fails, the padlock mitigation itself has regressed"
 
 
 def test_c14_unlocked_description_clear_reverted_by_unrelated_draft_save(env):
     client = env["client"]
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
 
-    _write_item(env["itemdata_root"], SKU_A, {
-        "sku": SKU_A, "title": "Widget", "location": "A1",
-        "description": "Old description text",
-        "draft_listing": {"description": "Old description text"},
-    })
+    _write_item(
+        env["itemdata_root"],
+        SKU_A,
+        {
+            "sku": SKU_A,
+            "title": "Widget",
+            "location": "A1",
+            "description": "Old description text",
+            "draft_listing": {"description": "Old description text"},
+        },
+    )
 
     # Operator clears the top-level description via the item-detail
     # dblclick-to-edit field (unlocked — the default state).
-    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"description": ""}},
-                     headers=AUTH_HEADERS)
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"description": ""}}, headers=AUTH_HEADERS)
     assert r.status_code == 200
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     assert doc["description"] == ""
 
     # Later, the operator saves an unrelated field on the aspects form
     # (e.g. price) — any draft_listing PATCH triggers the padlock sync.
-    r = client.patch(f"/api/items/{SKU_A}",
-                     json={"fields": {"draft_listing": {"price": 12.34}}},
-                     headers=AUTH_HEADERS)
+    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"draft_listing": {"price": 12.34}}}, headers=AUTH_HEADERS)
     assert r.status_code == 200
     doc = json.loads(json_path.read_text(encoding="utf-8"))
-    assert doc["description"] == "", (
-        "operator's cleared 'description' was silently restored to the "
-        "stale draft_listing.description value by the next unrelated "
-        "draft_listing save — invariant C14"
-    )
+    assert doc["description"] == "", "operator's cleared 'description' was silently restored to the stale draft_listing.description value by the next unrelated draft_listing save — invariant C14"
 
 
 def test_item_detail_shows_list_action_after_successful_stage_supersedes_dead_letter():

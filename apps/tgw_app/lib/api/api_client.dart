@@ -138,8 +138,9 @@ class ApiClient {
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } on DioException catch (e) {
-      final detail =
-          e.response?.data is Map ? e.response?.data['detail'] : null;
+      final detail = e.response?.data is Map
+          ? e.response?.data['detail']
+          : null;
       return ApiResponse(ok: false, error: detail?.toString() ?? e.toString());
     } catch (e) {
       return ApiResponse(ok: false, error: e.toString());
@@ -184,64 +185,6 @@ class ApiClient {
         return ApiResponse(
           ok: true,
           data: List<Map<String, dynamic>>.from(groups),
-        );
-      }
-      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
-    } catch (e) {
-      return ApiResponse(ok: false, error: e.toString());
-    }
-  }
-
-  Future<ApiResponse<void>> patchItem(
-    String sku,
-    Map<String, dynamic> fields,
-  ) async {
-    await ensureInitialized();
-    try {
-      final response = await _dio.patch(
-        '/api/items/$sku',
-        data: {'fields': fields},
-      );
-      if (response.statusCode == 200) {
-        return ApiResponse(ok: true);
-      }
-      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
-    } catch (e) {
-      return ApiResponse(ok: false, error: e.toString());
-    }
-  }
-
-  Future<ApiResponse<String>> performAction(
-    String sku,
-    String action, {
-    Map<String, dynamic>? options,
-  }) async {
-    await ensureInitialized();
-    try {
-      final response = await _dio.post(
-        '/api/items/$sku/action',
-        data: {'action': action, if (options != null) 'options': options},
-      );
-      if (response.statusCode == 200) {
-        return ApiResponse(ok: true, data: response.data['job_id']);
-      }
-      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
-    } catch (e) {
-      return ApiResponse(ok: false, error: e.toString());
-    }
-  }
-
-  Future<ApiResponse<List<Map<String, dynamic>>>> getEbayAspects(
-    String categoryId,
-  ) async {
-    await ensureInitialized();
-    try {
-      final response = await _dio.get('/api/ebay/aspects/$categoryId');
-      if (response.statusCode == 200) {
-        final List<dynamic> aspects = response.data['aspects'] ?? [];
-        return ApiResponse(
-          ok: true,
-          data: List<Map<String, dynamic>>.from(aspects),
         );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
@@ -315,28 +258,6 @@ class ApiClient {
         return ApiResponse(
           ok: true,
           data: response.data['filename'] as String?,
-        );
-      }
-      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
-    } catch (e) {
-      return ApiResponse(ok: false, error: e.toString());
-    }
-  }
-
-  Future<ApiResponse<Map<String, dynamic>>> bulkAction(
-    List<String> skus,
-    String action,
-  ) async {
-    await ensureInitialized();
-    try {
-      final response = await _dio.post(
-        '/api/bulk/action',
-        data: {'skus': skus, 'action': action},
-      );
-      if (response.statusCode == 200) {
-        return ApiResponse(
-          ok: true,
-          data: Map<String, dynamic>.from(response.data),
         );
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
@@ -573,7 +494,6 @@ class ApiClient {
   }
 
   Map<String, String> get authHeaders => {
-        if (_token != null && _token!.isNotEmpty)
-          'Authorization': 'Bearer $_token',
-      };
+    if (_token != null && _token!.isNotEmpty) 'Authorization': 'Bearer $_token',
+  };
 }

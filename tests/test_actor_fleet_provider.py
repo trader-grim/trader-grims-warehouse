@@ -1,3 +1,4 @@
+import grp
 import hashlib
 import json
 import os
@@ -59,7 +60,8 @@ class _Materializer:
         return {
             "schema": "tgw-w18-complete-actor-materialization/v1",
             "status": "COMPLETE_MATERIALIZED_NOT_SERVICE_ACTIVATED" if apply else "PREPARED",
-            "bindings": bindings, "rollback_journal": [],
+            "bindings": bindings,
+            "rollback_journal": [],
         }
 
     def rollback_complete_actor_contracts(self, receipt):
@@ -70,9 +72,15 @@ class _Materializer:
 
 
 def _fixture(tmp_path):
-    state, releases, admissions, generations = (tmp_path / name for name in ("state", "releases", "admissions", "generations"))
-    for path in (state, releases, admissions, generations):
+    state, releases, admissions, generations, workspaces, caches, startup_bindings = (
+        tmp_path / name for name in ("state", "releases", "admissions", "generations", "workspaces", "caches", "startup-bindings")
+    )
+    for path in (state, releases, admissions, generations, workspaces, caches, startup_bindings):
         path.mkdir()
+    startup_bindings.chmod(0o755)
+    workspaces.chmod(0o2770)
+    caches.chmod(0o2770)
+    actor_group = grp.getgrgid(workspaces.stat().st_gid).gr_name
     actor = pwd.getpwuid(os.getuid()).pw_name
     source_commit, plan_commit = "e" * 40, "f" * 40
     solution = "sha256:" + "1" * 64
@@ -80,8 +88,10 @@ def _fixture(tmp_path):
     release.mkdir()
     (release / ".release-manifest.json").write_text(json.dumps({"commit": source_commit}))
     for name, content in {
-        "launcher": "actor launcher\n", "bootstrap.json": '{"status":"PASS"}\n',
-        "mcp.json": '{"endpoint":"tgw-context"}\n', "skill/SKILL.md": "bounded plan\n",
+        "launcher": "actor launcher\n",
+        "bootstrap.json": '{"status":"PASS"}\n',
+        "mcp.json": '{"endpoint":"tgw-context"}\n',
+        "skill/SKILL.md": "bounded plan\n",
     }.items():
         path = release / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,15 +103,24 @@ def _fixture(tmp_path):
     (generation / "contracts").mkdir(parents=True)
     environment = {
         "schema": "tgw-execution-environment-catalog/v3",
+        "bootstrap_revision": {"content_sha256": "sha256:" + "3" * 64},
+        "broker_policy_revision": {"content_sha256": "sha256:" + "4" * 64},
         "flake_lock": {"path": "flake.lock", "sha256": "1" * 64},
-        "actors": {actor: {
-            "enabled": True, "permitted_profiles": ["development"],
-            "required_skills": ["tgw-plan"], "required_hooks": [],
-            "required_mcp_endpoints": ["tgw-context"],
-        }},
-        "profiles": {"development": {
-            "state": "ready-for-preflight", "broker_capabilities": ["plan-read", "source-read"],
-        }},
+        "actors": {
+            actor: {
+                "enabled": True,
+                "permitted_profiles": ["development"],
+                "required_skills": ["tgw-plan"],
+                "required_hooks": [],
+                "required_mcp_endpoints": ["tgw-context"],
+            }
+        },
+        "profiles": {
+            "development": {
+                "state": "ready-for-preflight",
+                "broker_capabilities": ["plan-read", "source-read"],
+            }
+        },
     }
     environment_path = generation / "environment-catalog.json"
     environment_path.write_text(json.dumps(environment))
@@ -113,31 +132,44 @@ def _fixture(tmp_path):
     launcher_local = {"path": str(destination), "sha256": launcher_hash}
     mcp_local = {
         "endpoints": ["tgw-context"],
-        "binding_hash": _hash([{
-            "endpoint": "tgw-context", "source_sha256": mcp_hash,
-            "destination": str(mcp_destination),
-        }]),
+        "binding_hash": _hash(
+            [
+                {
+                    "endpoint": "tgw-context",
+                    "source_sha256": mcp_hash,
+                    "destination": str(mcp_destination),
+                }
+            ]
+        ),
     }
     bootstrap_body = {
-        "schema": "tgw-actor-bootstrap-receipt/v1", "status": "READY",
-        "actor": actor, "profile": "development", "generation": generation_hash,
+        "schema": "tgw-actor-bootstrap-receipt/v1",
+        "status": "READY",
+        "actor": actor,
+        "profile": "development",
+        "generation": generation_hash,
         "catalog_hash": catalog,
         "plan": {"commit": plan_commit, "solution_hash": solution},
         "code_graph": {"commit": source_commit, "tree": "d" * 40, "freshness_hash": "sha256:" + "3" * 64},
         "declared_policy_hash": "sha256:" + "4" * 64,
-        "launcher": launcher_local, "skills": {"tgw-plan": skill_hash}, "hooks": {},
+        "launcher": launcher_local,
+        "skills": {"tgw-plan": skill_hash},
+        "hooks": {},
         "mcp": mcp_local,
     }
     (release / "bootstrap.json").write_text(json.dumps({**bootstrap_body, "receipt_hash": _hash(bootstrap_body)}))
     bootstrap_hash = _file_hash(release / "bootstrap.json")
     contract = {
-        "actor": actor, "catalog_hash": catalog,
+        "actor": actor,
+        "catalog_hash": catalog,
         "plan": {"commit": plan_commit, "solution_hash": solution},
-        "code_graph": {"commit": source_commit}, "profile": "development",
+        "code_graph": {"commit": source_commit},
+        "profile": "development",
         "local": {
             "bootstrap_receipt_hash": bootstrap_hash,
             "launcher": launcher_local,
-            "skills": {"tgw-plan": skill_hash}, "hooks": {},
+            "skills": {"tgw-plan": skill_hash},
+            "hooks": {},
             "mcp": mcp_local,
         },
     }
@@ -146,49 +178,87 @@ def _fixture(tmp_path):
         {"kind": "mcp", "name": "tgw-context", "source": "mcp.json", "destination": str(mcp_destination), "sha256": mcp_hash},
         {"kind": "launcher", "name": "launcher", "source": "launcher", "destination": str(destination), "sha256": launcher_hash},
         {"kind": "bootstrap", "name": "bootstrap-receipt", "source": "bootstrap.json", "destination": str(home / ".tgw/bootstrap.json"), "sha256": bootstrap_hash},
-        {"kind": "environment", "name": "environment-catalog", "source": str(environment_path), "destination": str(home / ".tgw/execution-environment-catalog.json"), "sha256": _file_hash(environment_path)},
+        {
+            "kind": "environment",
+            "name": "environment-catalog",
+            "source": str(environment_path),
+            "destination": str(home / ".tgw/execution-environment-catalog.json"),
+            "sha256": _file_hash(environment_path),
+        },
     ]
     bundle = {
-        "schema": "tgw-complete-actor-contract-bundle/v1", "generation": generation_hash,
+        "schema": "tgw-complete-actor-contract-bundle/v1",
+        "generation": generation_hash,
         "actors": {actor: {"home": str(home), "project": str(project), "bindings": bindings}},
     }
     (generation / "bundle.json").write_text(json.dumps(bundle))
     (generation / "contracts" / f"{actor}.json").write_text(json.dumps(contract))
     receipt_unsigned = {
-        "schema": "tgw-w18-actor-generation-receipt/v1", "status": "PREPARED",
-        "generation": generation_hash, "actors": [actor], "bundle_hash": _hash(bundle),
+        "schema": "tgw-w18-actor-generation-receipt/v1",
+        "status": "PREPARED",
+        "generation": generation_hash,
+        "actors": [actor],
+        "bundle_hash": _hash(bundle),
         "signer_public_key": "fixture-key",
         "generation_identity": {
-            "catalog_hash": catalog, "plan_commit": plan_commit,
-            "solution_hash": solution, "source_commit": source_commit,
+            "catalog_hash": catalog,
+            "plan_commit": plan_commit,
+            "solution_hash": solution,
+            "source_commit": source_commit,
         },
     }
     (generation / "generation-receipt.json").write_text(json.dumps({**receipt_unsigned, "receipt_hash": _hash(receipt_unsigned)}))
     admission_unsigned = {
-        "schema": "tgw-w16-release-admission-receipt/v1", "status": "ADMITTED",
-        "candidate": {"commit": source_commit}, "plan": {"commit": plan_commit, "solution_hash": solution},
+        "schema": "tgw-w16-release-admission-receipt/v1",
+        "status": "ADMITTED",
+        "candidate": {"commit": source_commit},
+        "plan": {"commit": plan_commit, "solution_hash": solution},
     }
     admission = {**admission_unsigned, "receipt_hash": _hash(admission_unsigned)}
     (admissions / (admission["receipt_hash"].removeprefix("sha256:") + ".json")).write_text(json.dumps(admission))
     systemctl = tmp_path / "systemctl"
     systemctl.write_text("fixture\n")
     config = {
-        "schema": "tgw-actor-fleet-provider/v1", "token_sha256": "sha256:" + hashlib.sha256(b"secret").hexdigest(),
-        "state_root": str(state), "release_root": str(releases), "admission_root": str(admissions),
-        "actor_generation_root": str(generations), "contract_public_key": "fixture-key",
-        "systemctl_path": str(systemctl), "managed_services": ["tgw-coding-provision-pull.timer"],
+        "schema": "tgw-actor-fleet-provider/v1",
+        "token_sha256": "sha256:" + hashlib.sha256(b"secret").hexdigest(),
+        "state_root": str(state),
+        "release_root": str(releases),
+        "admission_root": str(admissions),
+        "actor_generation_root": str(generations),
+        "contract_public_key": "fixture-key",
+        "startup_binding_root": str(startup_bindings),
+        "actor_group": actor_group,
+        "attempt_workspace_root": str(workspaces),
+        "attempt_cache_root": str(caches),
+        "systemctl_path": str(systemctl),
+        "managed_services": ["tgw-coding-provision-pull.timer"],
         "quiescence_units": ["tgw-coding-provision-pull.service"],
     }
     request = {
-        "schema": "tgw-w18-fleet-refresh-request/v1", "transaction_id": "refresh-one", "idempotency_key": "refresh-one",
-        "predecessor_generation": "sha256:" + "a" * 64, "successor_generation": generation_hash,
+        "schema": "tgw-w18-fleet-refresh-request/v1",
+        "transaction_id": "refresh-one",
+        "idempotency_key": "refresh-one",
+        "predecessor_generation": "sha256:" + "a" * 64,
+        "successor_generation": generation_hash,
         "revisions": {
-            "plan": plan_commit, "solution": solution, "source": source_commit, "catalog": catalog,
-            "bootstrap": "sha256:" + "3" * 64, "broker_policy": "sha256:" + "4" * 64,
+            "plan": plan_commit,
+            "solution": solution,
+            "source": source_commit,
+            "catalog": catalog,
+            "bootstrap": "sha256:" + "3" * 64,
+            "broker_policy": "sha256:" + "4" * 64,
             "admission": admission["receipt_hash"],
-        }, "actors": [actor],
+        },
+        "actors": [actor],
     }
     return config, request, destination
+
+
+def test_actor_provider_holds_on_drifted_attempt_root(durable_path):
+    config, _request, _destination = _fixture(durable_path)
+    Path(config["attempt_cache_root"]).chmod(0o750)
+    with pytest.raises(ValueError, match="mode 2770"):
+        ActorFleetProvider(config)
 
 
 def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_path):
@@ -211,21 +281,30 @@ def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_pat
     assert provider.verify_actor(request["actors"][0], request)["status"] == "VERIFIED"
     assert provider.repair(request)["status"] == "REPAIRED"
     assert destination.is_symlink()
+    startup = Path(config["startup_binding_root"]) / f"{request['actors'][0]}-startup.json"
+    assert json.loads(startup.read_text())["expected_generation"] == request["successor_generation"]
+    assert startup.stat().st_mode & 0o022 == 0
     assert provider.rollback(request)["status"] == "ROLLED_BACK"
     assert not destination.exists()
+    assert not startup.exists()
 
 
 def test_actor_provider_http_rejects_auth_and_unbound_invocation(durable_path):
     config, request, _destination = _fixture(durable_path)
     app = create_actor_fleet_app(
-        {"actor_fleet_provider": config}, materializer_loader=lambda _: _Materializer(),
+        {"actor_fleet_provider": config},
+        materializer_loader=lambda _: _Materializer(),
         service_runner=lambda args: subprocess.CompletedProcess(args, 0, "inactive\n", ""),
     )
     client = TestClient(app)
     invocation = {"schema": "tgw-actor-fleet-provider-invocation/v1", "step": "quiesce", "arguments": [request]}
     body = {**invocation, "invocation_hash": _hash(invocation)}
     assert client.post("/v1/actor-fleet/quiesce", json=body).status_code == 401
-    assert client.post(
-        "/v1/actor-fleet/quiesce", json={**body, "invocation_hash": "sha256:" + "0" * 64},
-        headers={"Authorization": "Bearer secret"},
-    ).status_code == 409
+    assert (
+        client.post(
+            "/v1/actor-fleet/quiesce",
+            json={**body, "invocation_hash": "sha256:" + "0" * 64},
+            headers={"Authorization": "Bearer secret"},
+        ).status_code
+        == 409
+    )

@@ -19,9 +19,6 @@ class _ReviewQueueScreenState extends ConsumerState<ReviewQueueScreen> {
   String _search = '';
   String? _selectedCategory;
 
-  final Set<String> _selectedSkus = {};
-  bool get _selectionMode => _selectedSkus.isNotEmpty;
-
   @override
   void initState() {
     super.initState();
@@ -32,7 +29,6 @@ class _ReviewQueueScreenState extends ConsumerState<ReviewQueueScreen> {
     setState(() {
       _isLoading = true;
       _error = null;
-      _selectedSkus.clear();
     });
     try {
       final items = await ref.read(repositoryProvider).getReviewQueue();
@@ -55,155 +51,84 @@ class _ReviewQueueScreenState extends ConsumerState<ReviewQueueScreen> {
     }
     if (_search.isNotEmpty) {
       final q = _search.toLowerCase();
-      items = items.where((i) =>
-        i.title.toLowerCase().contains(q) || i.sku.toLowerCase().contains(q)).toList();
+      items = items
+          .where(
+            (i) =>
+                i.title.toLowerCase().contains(q) ||
+                i.sku.toLowerCase().contains(q),
+          )
+          .toList();
     }
     return items;
   }
 
   List<String> get _categories {
-    final cats = _allItems.map((i) => i.categoryName).where((c) => c.isNotEmpty).toSet().toList();
+    final cats = _allItems
+        .map((i) => i.categoryName)
+        .where((c) => c.isNotEmpty)
+        .toSet()
+        .toList();
     cats.sort();
     return cats;
-  }
-
-  void _toggleSelection(String sku) {
-    setState(() {
-      if (_selectedSkus.contains(sku)) {
-        _selectedSkus.remove(sku);
-      } else {
-        _selectedSkus.add(sku);
-      }
-    });
-  }
-
-  void _selectAll() {
-    final visible = _filtered.map((i) => i.sku).toSet();
-    setState(() {
-      if (_selectedSkus.containsAll(visible) && _selectedSkus.length == visible.length) {
-        _selectedSkus.clear();
-      } else {
-        _selectedSkus.addAll(visible);
-      }
-    });
-  }
-
-  Future<void> _runBulkAction(String action, {String? confirmMessage}) async {
-    final skus = _selectedSkus.toList();
-    if (skus.isEmpty) return;
-
-    if (confirmMessage != null) {
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Confirm'),
-          content: Text(confirmMessage.replaceAll('{n}', '${skus.length}')),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Confirm')),
-          ],
-        ),
-      );
-      if (confirmed != true) return;
-    }
-
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Running $action on ${skus.length} item(s)…')),
-    );
-
-    try {
-      final repo = ref.read(repositoryProvider);
-      final result = await repo.bulkAction(skus, action);
-      if (!mounted) return;
-
-      final ok = result != null && result['ok'] == true;
-      final count = result?['count'] ?? skus.length;
-      final errors = (result?['errors'] as List?)?.cast<String>() ?? [];
-      final msg = ok
-          ? '$action: $count item(s) done.'
-          : '$action: $count done, ${errors.length} error(s): ${errors.take(3).join('; ')}';
-
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(SnackBar(
-          content: Text(msg),
-          backgroundColor: ok ? null : Colors.red[700],
-          duration: const Duration(seconds: 4),
-        ));
-
-      await _load();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-        ..clearSnackBars()
-        ..showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red[700]));
-    }
   }
 
   @override
   Widget build(BuildContext context) {
     final filtered = _filtered;
-    final allVisibleSelected = filtered.isNotEmpty &&
-        filtered.every((i) => _selectedSkus.contains(i.sku));
-
     return Column(
       children: [
         const _PurposeBanner(),
-        _buildFilterBar(allVisibleSelected, filtered.length),
+        _buildFilterBar(),
         Expanded(
           child: _isLoading
               ? const Center(child: CircularProgressIndicator())
               : _error != null
-                  ? Center(child: Text('Error: $_error', style: TextStyle(color: Colors.red[400])))
-                  : filtered.isEmpty
-                      ? _allItems.isEmpty
-                          ? const _WorkflowGuideEmptyState()
-                          : Center(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.search_off, size: 48, color: Colors.grey),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    'No items match filter',
-                                    style: Theme.of(context).textTheme.bodyLarge,
-                                  ),
-                                ],
-                              ),
-                            )
-                      : RefreshIndicator(
-                          onRefresh: _load,
-                          child: ListView.builder(
-                            padding: const EdgeInsets.all(8),
-                            itemCount: filtered.length,
-                            itemBuilder: (context, index) {
-                              final item = filtered[index];
-                              final selected = _selectedSkus.contains(item.sku);
-                              return _ReviewCard(
-                                item: item,
-                                isSelected: selected,
-                                onTap: _selectionMode
-                                    ? () => _toggleSelection(item.sku)
-                                    : () => widget.onItemTap(item.sku),
-                                onLongPress: () => _toggleSelection(item.sku),
-                                onCheckChanged: (_) => _toggleSelection(item.sku),
-                              );
-                            },
-                          ),
+              ? Center(
+                  child: Text(
+                    'Error: $_error',
+                    style: TextStyle(color: Colors.red[400]),
+                  ),
+                )
+              : filtered.isEmpty
+              ? _allItems.isEmpty
+                    ? const _WorkflowGuideEmptyState()
+                    : Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.search_off,
+                              size: 48,
+                              color: Colors.grey,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'No items match filter',
+                              style: Theme.of(context).textTheme.bodyLarge,
+                            ),
+                          ],
                         ),
+                      )
+              : RefreshIndicator(
+                  onRefresh: _load,
+                  child: ListView.builder(
+                    padding: const EdgeInsets.all(8),
+                    itemCount: filtered.length,
+                    itemBuilder: (context, index) {
+                      final item = filtered[index];
+                      return _ReviewCard(
+                        item: item,
+                        onTap: () => widget.onItemTap(item.sku),
+                      );
+                    },
+                  ),
+                ),
         ),
-        if (_selectionMode)
-          _BulkReviewToolbar(
-            selectedCount: _selectedSkus.length,
-            onClear: () => setState(() => _selectedSkus.clear()),
-            onAction: _runBulkAction,
-          ),
       ],
     );
   }
 
-  Widget _buildFilterBar(bool allSelected, int visibleCount) {
+  Widget _buildFilterBar() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
       child: Column(
@@ -222,25 +147,6 @@ class _ReviewQueueScreenState extends ConsumerState<ReviewQueueScreen> {
                   onChanged: (v) => setState(() => _search = v),
                 ),
               ),
-              const SizedBox(width: 8),
-              Tooltip(
-                message: allSelected ? 'Deselect all' : 'Select all ($visibleCount)',
-                child: OutlinedButton.icon(
-                  onPressed: _filtered.isEmpty ? null : _selectAll,
-                  icon: Icon(
-                    allSelected ? Icons.deselect : Icons.select_all,
-                    size: 18,
-                  ),
-                  label: Text(
-                    _selectedSkus.isEmpty ? 'Select' : '${_selectedSkus.length}/$visibleCount',
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
-                    minimumSize: const Size(0, 36),
-                  ),
-                ),
-              ),
             ],
           ),
           if (_categories.length > 1) ...[
@@ -257,14 +163,19 @@ class _ReviewQueueScreenState extends ConsumerState<ReviewQueueScreen> {
                   ),
                   const SizedBox(width: 6),
                   ..._categories.map((cat) {
-                    final count = _allItems.where((i) => i.categoryName == cat).length;
+                    final count = _allItems
+                        .where((i) => i.categoryName == cat)
+                        .length;
                     return Padding(
                       padding: const EdgeInsets.only(right: 6),
                       child: _FilterChip(
                         label: '$cat ($count)',
                         selected: _selectedCategory == cat,
-                        onTap: () => setState(() =>
-                            _selectedCategory = _selectedCategory == cat ? null : cat),
+                        onTap: () => setState(
+                          () => _selectedCategory = _selectedCategory == cat
+                              ? null
+                              : cat,
+                        ),
                       ),
                     );
                   }),
@@ -284,18 +195,9 @@ class _ReviewQueueScreenState extends ConsumerState<ReviewQueueScreen> {
 
 class _ReviewCard extends StatelessWidget {
   final ReviewQueueItem item;
-  final bool isSelected;
   final VoidCallback onTap;
-  final VoidCallback onLongPress;
-  final ValueChanged<bool?> onCheckChanged;
 
-  const _ReviewCard({
-    required this.item,
-    required this.isSelected,
-    required this.onTap,
-    required this.onLongPress,
-    required this.onCheckChanged,
-  });
+  const _ReviewCard({required this.item, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -304,27 +206,14 @@ class _ReviewCard extends StatelessWidget {
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
-      shape: isSelected
-          ? RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-              side: BorderSide(color: cs.primary, width: 2),
-            )
-          : null,
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
         onTap: onTap,
-        onLongPress: onLongPress,
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Checkbox(
-                value: isSelected,
-                onChanged: onCheckChanged,
-                visualDensity: VisualDensity.compact,
-              ),
-              const SizedBox(width: 4),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -336,7 +225,10 @@ class _ReviewCard extends StatelessWidget {
                         Expanded(
                           child: Text(
                             item.title,
-                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                            ),
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -417,12 +309,18 @@ class _ReviewCard extends StatelessWidget {
                           if (item.aspectsSummary.isNotEmpty)
                             Text(
                               item.aspectsSummary,
-                              style: TextStyle(fontSize: 11, color: cs.onSurface.withAlpha(140)),
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: cs.onSurface.withAlpha(140),
+                              ),
                             ),
                           const Spacer(),
                           Text(
                             item.sku,
-                            style: TextStyle(fontSize: 10, color: cs.onSurface.withAlpha(100)),
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: cs.onSurface.withAlpha(100),
+                            ),
                           ),
                         ],
                       ),
@@ -440,7 +338,8 @@ class _ReviewCard extends StatelessWidget {
   Color _conditionColor(String condition) {
     final c = condition.toLowerCase();
     if (c.contains('new') || c.contains('brand')) return Colors.green;
-    if (c.contains('excellent') || c.contains('like new')) return Colors.lightGreen;
+    if (c.contains('excellent') || c.contains('like new'))
+      return Colors.lightGreen;
     if (c.contains('good')) return Colors.blue;
     if (c.contains('acceptable') || c.contains('fair')) return Colors.orange;
     if (c.contains('poor') || c.contains('damaged')) return Colors.red;
@@ -453,7 +352,11 @@ class _InfoChip extends StatelessWidget {
   final String label;
   final Color color;
 
-  const _InfoChip({required this.icon, required this.label, required this.color});
+  const _InfoChip({
+    required this.icon,
+    required this.label,
+    required this.color,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -497,7 +400,11 @@ class _QualityBadge extends StatelessWidget {
       ),
       child: Text(
         'Q$score',
-        style: TextStyle(fontSize: 11, color: _color, fontWeight: FontWeight.bold),
+        style: TextStyle(
+          fontSize: 11,
+          color: _color,
+          fontWeight: FontWeight.bold,
+        ),
       ),
     );
   }
@@ -508,7 +415,11 @@ class _FilterChip extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
 
-  const _FilterChip({required this.label, required this.selected, required this.onTap});
+  const _FilterChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -518,7 +429,9 @@ class _FilterChip extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
-          color: selected ? cs.primary.withAlpha(30) : cs.surfaceContainerHighest,
+          color: selected
+              ? cs.primary.withAlpha(30)
+              : cs.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(color: selected ? cs.primary : Colors.transparent),
         ),
@@ -587,14 +500,17 @@ class _WorkflowGuideEmptyState extends StatelessWidget {
           const SizedBox(height: 24),
           Text(
             'How revisions work',
-            style: textTheme.labelLarge?.copyWith(color: cs.onSurface.withAlpha(160)),
+            style: textTheme.labelLarge?.copyWith(
+              color: cs.onSurface.withAlpha(160),
+            ),
           ),
           const SizedBox(height: 16),
           const _WorkflowStep(
             step: 1,
             icon: Icons.smart_toy_outlined,
             title: 'AI proposes changes',
-            description: 'The ai_identify or ebay_draft worker analyses the item and proposes field updates (title, condition, aspects, price).',
+            description:
+                'The ai_identify or ebay_draft worker analyses the item and proposes field updates (title, condition, aspects, price).',
             color: Colors.indigo,
           ),
           const SizedBox(height: 12),
@@ -602,7 +518,8 @@ class _WorkflowGuideEmptyState extends StatelessWidget {
             step: 2,
             icon: Icons.difference_outlined,
             title: 'Review the diff',
-            description: 'Items with pending proposals appear here. Inspect the suggested changes, approve or reject them.',
+            description:
+                'Items with pending proposals appear here. Inspect the suggested changes, approve or reject them.',
             color: Colors.orange,
           ),
           const SizedBox(height: 12),
@@ -610,7 +527,8 @@ class _WorkflowGuideEmptyState extends StatelessWidget {
             step: 3,
             icon: Icons.cloud_upload_outlined,
             title: 'Apply pushes to eBay',
-            description: 'Approved changes are applied to the item record and queued for the ebay_upload / ebay_price workers.',
+            description:
+                'Approved changes are applied to the item record and queued for the ebay_upload / ebay_price workers.',
             color: Colors.teal,
           ),
         ],
@@ -651,7 +569,11 @@ class _WorkflowStep extends StatelessWidget {
           alignment: Alignment.center,
           child: Text(
             '$step',
-            style: TextStyle(fontWeight: FontWeight.bold, color: color, fontSize: 14),
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              color: color,
+              fontSize: 14,
+            ),
           ),
         ),
         const SizedBox(width: 12),
@@ -665,131 +587,26 @@ class _WorkflowStep extends StatelessWidget {
                   const SizedBox(width: 6),
                   Text(
                     title,
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: cs.onSurface),
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                      color: cs.onSurface,
+                    ),
                   ),
                 ],
               ),
               const SizedBox(height: 4),
               Text(
                 description,
-                style: TextStyle(fontSize: 12, color: cs.onSurface.withAlpha(160)),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Bulk action toolbar for review queue
-// ---------------------------------------------------------------------------
-
-class _BulkReviewToolbar extends StatelessWidget {
-  final int selectedCount;
-  final VoidCallback onClear;
-  final Future<void> Function(String action, {String? confirmMessage}) onAction;
-
-  const _BulkReviewToolbar({
-    required this.selectedCount,
-    required this.onClear,
-    required this.onAction,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Material(
-      elevation: 8,
-      color: cs.surfaceContainerHighest,
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                children: [
-                  IconButton(
-                    onPressed: onClear,
-                    icon: const Icon(Icons.close),
-                    tooltip: 'Clear selection',
-                    iconSize: 20,
-                  ),
-                  Text('$selectedCount selected',
-                      style: Theme.of(context).textTheme.labelLarge),
-                  const Spacer(),
-                ],
-              ),
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    _ActionChip(
-                      icon: Icons.check_circle_outline,
-                      label: 'Approve',
-                      color: Colors.green,
-                      onTap: () => onAction(
-                        'approve',
-                        confirmMessage: 'Approve {n} item(s) for listing?',
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    _ActionChip(
-                      icon: Icons.rocket_launch_outlined,
-                      label: 'List Now',
-                      color: Colors.blue,
-                      onTap: () => onAction(
-                        'list_now',
-                        confirmMessage: 'Immediately stage & queue {n} item(s) for listing?',
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    _ActionChip(
-                      icon: Icons.playlist_add_check,
-                      label: 'Mark Ready',
-                      color: Colors.teal,
-                      onTap: () => onAction(
-                        'approve',
-                        confirmMessage: 'Mark {n} item(s) as Ready?',
-                      ),
-                    ),
-                  ],
+                style: TextStyle(
+                  fontSize: 12,
+                  color: cs.onSurface.withAlpha(160),
                 ),
               ),
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _ActionChip extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final Color color;
-  final VoidCallback onTap;
-
-  const _ActionChip({
-    required this.icon,
-    required this.label,
-    required this.color,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return ActionChip(
-      avatar: Icon(icon, size: 16, color: color),
-      label: Text(label, style: TextStyle(color: color, fontSize: 12)),
-      side: BorderSide(color: color.withAlpha(100)),
-      backgroundColor: color.withAlpha(20),
-      onPressed: onTap,
-      padding: const EdgeInsets.symmetric(horizontal: 4),
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ],
     );
   }
 }

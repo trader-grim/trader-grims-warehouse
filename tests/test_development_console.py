@@ -20,9 +20,7 @@ CLOSURE_HASH = "sha256:" + "d" * 64
 
 
 def digest(value):
-    return "sha256:" + hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def passing_role_receipt(card):
@@ -30,28 +28,38 @@ def passing_role_receipt(card):
     resource_hash = "sha256:" + "3" * 64
     card_hash = "sha256:" + hashlib.sha256(card["idempotency_key"].encode()).hexdigest()
     handoff_hash = "sha256:" + "4" * 64
-    resources = {
-        name: {"ref": f"resource:{name}", "hash": "sha256:" + format(index, "064x")}
-        for index, name in enumerate(sorted(CARD_RESOURCE_NAMES), start=1)
-    }
-    attestation = issue_harness_retrieval_attestation({
-        "schema": "tgw-registered-resource-retrieval-attestation/v3",
-        "service_id": "test-development-service", "client_id": "test-development-client",
-        "run_id": "test-development-run", "card_hash": card_hash, "role": role,
-        "execution_identity": card["execution_identity"], "handoff_hash": handoff_hash,
-        "resource_receipt_hash": resource_hash, "resources": resources,
-        "attestation_key_id": "test-development-key",
-    }, signing_private_key=Ed25519PrivateKey.generate())
+    resources = {name: {"ref": f"resource:{name}", "hash": "sha256:" + format(index, "064x")} for index, name in enumerate(sorted(CARD_RESOURCE_NAMES), start=1)}
+    attestation = issue_harness_retrieval_attestation(
+        {
+            "schema": "tgw-registered-resource-retrieval-attestation/v3",
+            "service_id": "test-development-service",
+            "client_id": "test-development-client",
+            "run_id": "test-development-run",
+            "card_hash": card_hash,
+            "role": role,
+            "execution_identity": card["execution_identity"],
+            "handoff_hash": handoff_hash,
+            "resource_receipt_hash": resource_hash,
+            "resources": resources,
+            "attestation_key_id": "test-development-key",
+        },
+        signing_private_key=Ed25519PrivateKey.generate(),
+    )
     established = {
         "implementation": ["implemented"],
         "controller-verification": ["controller_verified"],
         "independent-review": ["reviewed"],
     }[role]
     unsigned = {
-        "schema": "tgw-governed-coding-receipt/v1", "status": "PASS", "role": role,
-        "selected_provider": "replaceable-runner", "execution_identity": card["execution_identity"],
-        "card_hash": card_hash, "promptcraft_receipt_hash": "sha256:" + "5" * 64,
-        "handoff_hash": handoff_hash, "resource_receipt_hash": resource_hash,
+        "schema": "tgw-governed-coding-receipt/v1",
+        "status": "PASS",
+        "role": role,
+        "selected_provider": "replaceable-runner",
+        "execution_identity": card["execution_identity"],
+        "card_hash": card_hash,
+        "promptcraft_receipt_hash": "sha256:" + "5" * 64,
+        "handoff_hash": handoff_hash,
+        "resource_receipt_hash": resource_hash,
         "harness_resource_receipt_hash": resource_hash,
         "harness_retrieval_attestation_hash": attestation["attestation_hash"],
         "harness_retrieval_attestation": attestation,
@@ -59,7 +67,9 @@ def passing_role_receipt(card):
         "resource_service_client_id": "test-development-client",
         "resource_service_catalog_ref": "catalog:test-development@1",
         "resource_service_catalog_hash": "sha256:" + "7" * 64,
-        "outcome": "satisfied", "established_conditions": established, "artifacts": [],
+        "outcome": "satisfied",
+        "established_conditions": established,
+        "artifacts": [],
     }
     return {**unsigned, "receipt_hash": digest(unsigned)}
 
@@ -99,10 +109,12 @@ def registry():
     return {
         "schema": "tgw-harness-provider-registry/v1",
         "id": "providers@1",
-        "providers": [{
-            "id": "replaceable-runner",
-            "qualified_roles": ["implementation", "independent-review", "controller-verification"],
-        }],
+        "providers": [
+            {
+                "id": "replaceable-runner",
+                "qualified_roles": ["implementation", "independent-review", "controller-verification"],
+            }
+        ],
     }
 
 
@@ -121,10 +133,22 @@ def card_contract():
         }
     resources = {
         name: {"ref": f"resource:{name}", "hash": "sha256:" + format(index, "064x")}
-        for index, name in enumerate(sorted({
-            "plan_input", "plan_commit", "plan_graph", "codegraph_snapshot", "source_tree",
-            "execution_environment", "authority_conditions", "candidate_evidence", "receipt_sink",
-        }), start=1)
+        for index, name in enumerate(
+            sorted(
+                {
+                    "plan_input",
+                    "plan_commit",
+                    "plan_graph",
+                    "codegraph_snapshot",
+                    "source_tree",
+                    "execution_environment",
+                    "authority_conditions",
+                    "candidate_evidence",
+                    "receipt_sink",
+                }
+            ),
+            start=1,
+        )
     }
     return {
         "schema": "tgw-development-card-contract/v1",
@@ -150,9 +174,13 @@ def body(**extra):
 
 def resolved(**extra):
     return resolve_request(
-        body=body(**extra), solution=solution(), plan_commit=PLAN,
-        requested_by="operator:dave", source_commit=SOURCE,
-        freshness=freshness(), provider_registry=registry(),
+        body=body(**extra),
+        solution=solution(),
+        plan_commit=PLAN,
+        requested_by="operator:dave",
+        source_commit=SOURCE,
+        freshness=freshness(),
+        provider_registry=registry(),
         card_contract=card_contract(),
     )
 
@@ -162,7 +190,10 @@ def test_resolved_cards_are_dependency_ordered_and_harness_neutral():
     assert authority.effect.kind.value == "development-launch"
     assert lifecycle["resolution"]["root"] == {"kind": "Plan", "id": "PLAN-SITE"}
     assert [card["unit"] for card in lifecycle["launch_cards"][:4]] == [
-        "foundation", "foundation", "foundation", "site",
+        "foundation",
+        "foundation",
+        "foundation",
+        "site",
     ]
     roles = {card["role"] for card in lifecycle["launch_cards"]}
     assert roles == {"implementation", "independent-review", "controller-verification"}
@@ -172,16 +203,28 @@ def test_resolved_cards_are_dependency_ordered_and_harness_neutral():
     validate_development_launch(authority.effect.parameters)
 
 
+def test_submission_id_makes_replay_idempotent_and_retry_allocations_unique():
+    first, _ = resolved(submission_id="submission-20270101t120000z-0000000000000001")
+    replay, _ = resolved(submission_id="submission-20270101t120000z-0000000000000001")
+    retry, _ = resolved(submission_id="submission-20270101t120001z-0000000000000002")
+    assert first["lifecycle_hash"] == replay["lifecycle_hash"]
+    assert first["allocation"] == replay["allocation"]
+    assert first["allocation"] != retry["allocation"]
+    assert {card["allocation"]["worktree"] for card in first["launch_cards"]}.isdisjoint({card["allocation"]["worktree"] for card in retry["launch_cards"]})
+
+
 def test_narrow_root_without_an_exact_solution_is_retained_but_not_approvable():
     lifecycle, authority = resolved(root={"kind": "PP", "id": "PP-OTHER"})
     assert lifecycle["resolution"]["status"] == "CLARIFICATION_REQUIRED"
     assert lifecycle["launch_cards"] == []
-    projected = project_request({
-        "request_id": authority.request_id,
-        "effect_kind": "development-launch",
-        "effect_parameters": authority.effect.parameters,
-        "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
-    })
+    projected = project_request(
+        {
+            "request_id": authority.request_id,
+            "effect_kind": "development-launch",
+            "effect_parameters": authority.effect.parameters,
+            "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
+        }
+    )
     assert projected["status"] == "clarification_required"
     assert projected["legal_actions"] == ["view-evidence"]
     with pytest.raises(DevelopmentLaunchError, match="no resolved launch closure"):
@@ -223,6 +266,7 @@ class Store:
 
 def test_http_creation_uses_the_same_authority_store_and_projection():
     store = Store()
+
     def operator():
         return AuthorityPrincipal("operator:dave", PrincipalRole.OPERATOR, "test")
 
@@ -230,19 +274,25 @@ def test_http_creation_uses_the_same_authority_store_and_projection():
         return AuthorityPrincipal("executor:worker", PrincipalRole.EXECUTOR, "test")
 
     app = FastAPI()
-    app.include_router(create_operator_console_router(
-        store,
-        current_plan_commit=lambda: PLAN,
-        load_solution=lambda _: solution(),
-        require_operator=operator,
-        require_executor=executor,
-        resolve_development=lambda request, principal: resolve_request(
-            body=request, solution=solution(), plan_commit=PLAN,
-            requested_by=principal, source_commit=SOURCE,
-            freshness=freshness(), provider_registry=registry(),
-            card_contract=card_contract(),
-        ),
-    ))
+    app.include_router(
+        create_operator_console_router(
+            store,
+            current_plan_commit=lambda: PLAN,
+            load_solution=lambda _: solution(),
+            require_operator=operator,
+            require_executor=executor,
+            resolve_development=lambda request, principal: resolve_request(
+                body=request,
+                solution=solution(),
+                plan_commit=PLAN,
+                requested_by=principal,
+                source_commit=SOURCE,
+                freshness=freshness(),
+                provider_registry=registry(),
+                card_contract=card_contract(),
+            ),
+        )
+    )
     response = TestClient(app).post("/api/operator-console/development-requests", json=body())
     assert response.status_code == 201
     value = response.json()
@@ -253,6 +303,7 @@ def test_http_creation_uses_the_same_authority_store_and_projection():
 
 def test_v2_queue_claim_and_completion_are_bound_to_the_harness_neutral_cards(monkeypatch):
     """The service must authorize the Plan lifecycle, not reinterpret it as a Todo."""
+
     class Queue:
         def __init__(self):
             self.job = None
@@ -266,7 +317,9 @@ def test_v2_queue_claim_and_completion_are_bound_to_the_harness_neutral_cards(mo
 
         def claim_job_with_envelope(self, _job_id, owner, envelope, **_kwargs):
             self.job.update(
-                state="leased", lease_owner=owner, lease_token="development-lease",
+                state="leased",
+                lease_owner=owner,
+                lease_token="development-lease",
                 payload_json={**self.job["payload_json"], **envelope},
             )
             return dict(self.job)
@@ -280,12 +333,17 @@ def test_v2_queue_claim_and_completion_are_bound_to_the_harness_neutral_cards(mo
     queue = Queue()
     monkeypatch.setattr(coding_provision, "state_machine", queue)
     _, authority = resolved()
-    config = {"coding": {
-        "host": "tgw-lib-local", "worker_identity": "development-worker",
-        "api_endpoint": "https://tgw.example", "role": "coding-requester",
-    }}
+    config = {
+        "coding": {
+            "host": "tgw-lib-local",
+            "worker_identity": "development-worker",
+            "api_endpoint": "https://tgw.example",
+            "role": "coding-requester",
+        }
+    }
     request = coding_provision.create_development_request(
-        config, launch=authority.effect.parameters,
+        config,
+        launch=authority.effect.parameters,
     )
     first = request["lifecycle"]["launch_cards"][0]
     location = {
@@ -297,13 +355,19 @@ def test_v2_queue_claim_and_completion_are_bound_to_the_harness_neutral_cards(mo
         "worker_identity": "development-worker",
     }
     claimed = coding_provision.claim_request(
-        config, request_id="development-job", local_host="tgw-lib-local",
-        worker_identity="development-worker", envelope_hash=coding_provision._hash(location),
-        location=location, snapshot=None,
+        config,
+        request_id="development-job",
+        local_host="tgw-lib-local",
+        worker_identity="development-worker",
+        envelope_hash=coding_provision._hash(location),
+        location=location,
+        snapshot=None,
     )
     assert claimed["request"]["execution"]["schema"] == "tgw-development-execution/v1"
     coding_provision.start_request(
-        config, request_id="development-job", worker_identity="development-worker",
+        config,
+        request_id="development-job",
+        worker_identity="development-worker",
         lease_token="development-lease",
     )
     unsigned = {
@@ -311,16 +375,25 @@ def test_v2_queue_claim_and_completion_are_bound_to_the_harness_neutral_cards(mo
         "development_request_hash": request["development_request_hash"],
         "source_commit": SOURCE,
         "outcome": "satisfied",
-        "role_receipts": [{
-            "idempotency_key": card["idempotency_key"], "unit": card["unit"],
-            "role": card["role"], "status": "PASS", "receipt": passing_role_receipt(card),
-        } for card in request["lifecycle"]["launch_cards"]],
+        "role_receipts": [
+            {
+                "idempotency_key": card["idempotency_key"],
+                "unit": card["unit"],
+                "role": card["role"],
+                "status": "PASS",
+                "receipt": passing_role_receipt(card),
+            }
+            for card in request["lifecycle"]["launch_cards"]
+        ],
         "candidate": {"commit": "c" * 40, "tree": "d" * 40},
     }
     result = {**unsigned, "result_hash": "sha256:" + coding_provision._hash(unsigned)}
     completed = coding_provision.complete_request(
-        config, request_id="development-job", worker_identity="development-worker",
-        lease_token="development-lease", result=result,
+        config,
+        request_id="development-job",
+        worker_identity="development-worker",
+        lease_token="development-lease",
+        result=result,
     )
     assert completed["state"] == "succeeded"
     assert completed["receipt"]["execution"]["development_request_hash"] == request["development_request_hash"]

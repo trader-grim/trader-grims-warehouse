@@ -1,0 +1,36 @@
+[
+  {
+    "object": {
+      "schema": "tgw-operator-object/v1",
+      "entity_id": "sku-ready",
+      "object_generation": "generation-ready",
+      "item": {"record": {"sku": "sku-ready", "title": "Ready item"}},
+      "listing": {"provider_state": "not-staged"},
+      "workflow": {"state": "ready", "reasons": [], "evidence": ["condition:ready:TRUE"], "details": {}},
+      "field_schema": {"condition": {"options": [{"value": "USED_GOOD", "label": "Used - Good"}]}},
+      "commands": [
+        {"id": "save-draft", "enabled": true, "reason": null, "authority_scope": "local-item-mutation", "input_schema": {}},
+        {"id": "list-item", "enabled": true, "reason": null, "authority_scope": "publication", "input_schema": {}},
+        {"id": "update-item", "enabled": false, "reason": "Not staged", "authority_scope": "update-restage", "input_schema": {}}
+      ]
+    },
+    "expected": {"state": "ready", "reasons": [], "enabled_commands": ["save-draft", "list-item"]}
+  },
+  {
+    "object": {
+      "schema": "tgw-operator-object/v1",
+      "entity_id": "sku-held",
+      "object_generation": "generation-held",
+      "item": {"record": {"sku": "sku-held", "title": "Held item"}},
+      "listing": {"provider_state": "UNPUBLISHED"},
+      "workflow": {"state": "reconciliation_required", "reasons": ["provider evidence is stale"], "evidence": ["attempt:job-1:held"], "details": {}},
+      "field_schema": {"condition": {"options": []}},
+      "commands": [
+        {"id": "save-draft", "enabled": true, "reason": null, "authority_scope": "local-item-mutation", "input_schema": {}},
+        {"id": "list-item", "enabled": false, "reason": "provider evidence is stale", "authority_scope": "publication", "input_schema": {}},
+        {"id": "update-item", "enabled": false, "reason": "provider evidence is stale", "authority_scope": "update-restage", "input_schema": {}}
+      ]
+    },
+    "expected": {"state": "reconciliation_required", "reasons": ["provider evidence is stale"], "enabled_commands": ["save-draft"]}
+  }
+]

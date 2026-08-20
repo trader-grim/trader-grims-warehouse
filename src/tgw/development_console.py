@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
@@ -50,12 +51,22 @@ def _strings(value: Any, label: str) -> list[str]:
     return normalized
 
 
-def _request_id(original_request: str, requested_by: str, plan_commit: str) -> str:
-    digest = hashlib.sha256(_canonical({
-        "original_request": original_request,
-        "requested_by": requested_by,
-        "plan_commit": plan_commit,
-    })).hexdigest()[:20]
+def _request_id(
+    original_request: str,
+    requested_by: str,
+    plan_commit: str,
+    submission_id: str,
+) -> str:
+    digest = hashlib.sha256(
+        _canonical(
+            {
+                "original_request": original_request,
+                "requested_by": requested_by,
+                "plan_commit": plan_commit,
+                "submission_id": submission_id,
+            }
+        )
+    ).hexdigest()[:20]
     return f"development-{digest}"
 
 
@@ -145,7 +156,15 @@ def resolve_request(
         ):
             raise DevelopmentConsoleError(f"development execution-card resource is invalid: {name}")
 
-    allowed = {"schema", "original_request", "scope", "constraints", "effect_limits", "root"}
+    allowed = {
+        "schema",
+        "submission_id",
+        "original_request",
+        "scope",
+        "constraints",
+        "effect_limits",
+        "root",
+    }
     if set(body) - allowed or body.get("schema") not in {None, SCHEMA}:
         raise DevelopmentConsoleError("development request fields are not exact")
     original = body.get("original_request")
@@ -168,9 +187,28 @@ def resolve_request(
             raise DevelopmentConsoleError("requested root is invalid")
         alternatives.append(f"{requested_root['kind']}:{requested_root['id']}")
 
-    request_id = _request_id(original.strip(), requested_by, plan_commit)
+    submission_id = body.get("submission_id")
+    if submission_id is None:
+        submitted = datetime.now(timezone.utc)
+        submission_id = "submission-" + submitted.strftime("%Y%m%dt%H%M%Sz-").lower() + uuid.uuid4().hex[:16]
+    if (
+        not isinstance(submission_id, str)
+        or re.fullmatch(
+            r"submission-[0-9]{8}t[0-9]{6}z-[a-f0-9]{16}",
+            submission_id,
+        )
+        is None
+    ):
+        raise DevelopmentConsoleError("submission_id is invalid")
+    request_id = _request_id(
+        original.strip(),
+        requested_by,
+        plan_commit,
+        submission_id,
+    )
     request = {
         "request_id": request_id,
+        "submission_id": submission_id,
         "original_request": original.strip(),
         "scope": scope.strip(),
         "constraints": constraints,
@@ -199,10 +237,14 @@ def resolve_request(
     allocation = {
         "attempt_id": attempt_id,
         "worktree": f"/opt/TGW/w/attempts/{request_id}/{attempt_id}/worktree",
-        "attempt_root": f"/var/cache/tgw/attempts/{request_id}/{attempt_id}",
+        "attempt_root": f"/opt/TGW/var/cache/tgw/attempts/{request_id}/{attempt_id}",
     }
     lifecycle = compile_request_lifecycle(request=request, resolution=resolution, allocation=allocation)
-    expires = datetime.now(timezone.utc) + timedelta(hours=24)
+    submitted_at = datetime.strptime(
+        submission_id.removeprefix("submission-").split("-", 1)[0],
+        "%Y%m%dt%H%M%Sz",
+    ).replace(tzinfo=timezone.utc)
+    expires = submitted_at + timedelta(hours=24)
     if lifecycle["launch_cards"]:
         for card in lifecycle["launch_cards"]:
             role_contract = roles.get(card["role"])
@@ -220,9 +262,7 @@ def resolve_request(
                 "registry_hash": provider_registry_hash,
                 "selected_provider": None,
             }
-            card["execution_identity"] = (
-                role_contract["execution_identity"] + ":" + card["idempotency_key"].removeprefix("sha256:")[:16]
-            )
+            card["execution_identity"] = role_contract["execution_identity"] + ":" + card["idempotency_key"].removeprefix("sha256:")[:16]
             card["execution_card_template"] = {
                 "card_id": card["idempotency_key"],
                 "solution_id": solution_hash,
@@ -304,5 +344,7 @@ def project_development_request(row: Mapping[str, Any]) -> dict[str, Any] | None
             "outcome": row.get("outcome"),
             "evidence": list(row.get("execution_evidence") or ()),
             "detail": row.get("detail") or "",
-        } if row.get("receipt_id") else None,
+        }
+        if row.get("receipt_id")
+        else None,
     }

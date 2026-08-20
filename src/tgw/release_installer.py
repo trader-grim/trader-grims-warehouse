@@ -4,6 +4,7 @@ All state changes are confined beneath an explicit TGW root.  Selection is a
 compare-and-swap against the exact current generation and is recorded by a
 durable intent before the atomic symlink replacement.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -28,6 +29,7 @@ from tgw.admission_recovery import (
 
 SCHEMA = "tgw-release-manifest-v1"
 RECEIPT_SCHEMA = "tgw-immutable-release-selection-v1"
+REFUSAL_SCHEMA = "tgw-immutable-release-refusal-v1"
 RUNTIME_SCHEMA = "tgw-release-runtime-files-v1"
 _HEX = re.compile(r"^[0-9a-f]+$")
 _GENERATION = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
@@ -119,18 +121,15 @@ def _generation(value: str) -> str:
 
 
 def runtime_manifest_identity(
-    generation: str, files: Mapping[str, str],
+    generation: str,
+    files: Mapping[str, str],
 ) -> dict[str, Any]:
     """Return the exact composite overlay manifest bound to one generation."""
     generation = _generation(generation)
     normalized: dict[str, str] = {}
     for relative, digest in files.items():
         path = PurePosixPath(str(relative))
-        if (
-            path.is_absolute() or ".." in path.parts or not path.parts
-            or path.parts[0] != "config" or len(str(digest)) != 64
-            or not _HEX.fullmatch(str(digest))
-        ):
+        if path.is_absolute() or ".." in path.parts or not path.parts or path.parts[0] != "config" or len(str(digest)) != 64 or not _HEX.fullmatch(str(digest)):
             raise ReleaseError("runtime manifest input is invalid")
         normalized[path.as_posix()] = str(digest)
     if not normalized:
@@ -150,7 +149,7 @@ def _layout(root: Path) -> None:
     if root.is_symlink():
         raise ReleaseError("TGW root must not be a symlink")
     root.mkdir(parents=True, exist_ok=True)
-    for name in ("releases", "operations", "receipts"):
+    for name in ("releases", "operations", "receipts", "refusals"):
         path = root / name
         path.mkdir(exist_ok=True)
         if path.is_symlink() or not path.is_dir():
@@ -194,10 +193,7 @@ def _safe_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
     seen: set[str] = set()
     for member in archive:
         path = PurePosixPath(member.name)
-        if (not member.name or path.is_absolute()
-                or any(part in ("", ".", "..") for part in path.parts)
-                or member.name in seen
-                or not (member.isdir() or member.isreg())):
+        if not member.name or path.is_absolute() or any(part in ("", ".", "..") for part in path.parts) or member.name in seen or not (member.isdir() or member.isreg()):
             raise ReleaseError(f"unsafe archive member: {member.name!r}")
         seen.add(member.name)
         result.append(member)
@@ -207,7 +203,12 @@ def _safe_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
 
 
 def materialize(
-    root: Path, archive_path: Path, *, generation: str, commit: str, tree: str,
+    root: Path,
+    archive_path: Path,
+    *,
+    generation: str,
+    commit: str,
+    tree: str,
     archive_sha256: str,
 ) -> dict[str, Any]:
     """Materialize one exact archive as an immutable, unselected release."""
@@ -223,11 +224,7 @@ def materialize(
         if final.is_symlink() or not final.is_dir():
             raise ReleaseError("unsafe existing release path")
         manifest = _read_json(final / ".release-manifest.json")
-        if (
-            manifest.get("commit") != commit
-            or manifest.get("git_tree") != tree
-            or manifest.get("archive_sha256") != archive_sha256
-        ):
+        if manifest.get("commit") != commit or manifest.get("git_tree") != tree or manifest.get("archive_sha256") != archive_sha256:
             raise ReleaseError("generation identity collision")
         verify(root, generation)
         return manifest
@@ -248,7 +245,9 @@ def materialize(
                 if source is None:
                     raise ReleaseError(f"missing archive body: {member.name}")
                 descriptor = os.open(
-                    target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                    target,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
                 )
                 try:
                     for chunk in iter(lambda: source.read(1024 * 1024), b""):
@@ -257,19 +256,21 @@ def materialize(
                 finally:
                     os.close(descriptor)
                 os.chmod(target, 0o555 if member.mode & 0o111 else 0o444)
-        files = {
-            path.relative_to(stage).as_posix(): _digest(path)
-            for path in sorted(stage.rglob("*")) if path.is_file()
-        }
+        files = {path.relative_to(stage).as_posix(): _digest(path) for path in sorted(stage.rglob("*")) if path.is_file()}
         if not files:
             raise ReleaseError("release archive contains no files")
         content_hash = hashlib.sha256(_canonical(dict(sorted(files.items())))).hexdigest()
         manifest = {
-            "schema": SCHEMA, "generation": generation, "commit": commit,
-            "tree": f"exact-git-archive:{commit}", "git_tree": tree,
-            "src_root": "src", "archive_sha256": archive_sha256,
+            "schema": SCHEMA,
+            "generation": generation,
+            "commit": commit,
+            "tree": f"exact-git-archive:{commit}",
+            "git_tree": tree,
+            "src_root": "src",
+            "archive_sha256": archive_sha256,
             "content_manifest_sha256": content_hash,
-            "file_count": len(files), "files": files,
+            "file_count": len(files),
+            "files": files,
         }
         _atomic_json(stage / ".release-manifest.json", manifest)
         _fsync_tree(stage)
@@ -346,7 +347,9 @@ def verify(root: Path, generation: str) -> dict[str, Any]:
     if actual_runtime != runtime_files:
         raise ReleaseError("release runtime content does not match manifest")
     return {
-        "generation": generation, "file_count": len(actual), "status": "PASS",
+        "generation": generation,
+        "file_count": len(actual),
+        "status": "PASS",
         "runtime_manifest_sha256": runtime_manifest_hash,
     }
 
@@ -359,10 +362,7 @@ def install_runtime_files(root: Path, generation: str, files: Mapping[str, bytes
     normalized: dict[str, bytes] = {}
     for relative, content in files.items():
         path = PurePosixPath(str(relative))
-        if (
-            path.is_absolute() or ".." in path.parts or not path.parts or path.parts[0] != "config"
-            or not isinstance(content, bytes) or not content or len(content) > 1024 * 1024
-        ):
+        if path.is_absolute() or ".." in path.parts or not path.parts or path.parts[0] != "config" or not isinstance(content, bytes) or not content or len(content) > 1024 * 1024:
             raise ReleaseError("runtime file is outside the exact config namespace")
         normalized[path.as_posix()] = content
     with _lock(root):
@@ -396,7 +396,8 @@ def install_runtime_files(root: Path, generation: str, files: Mapping[str, bytes
                         raise ReleaseError("runtime file parent is unsafe")
                     else:
                         original_directory_modes.setdefault(
-                            current, stat.S_IMODE(current.stat().st_mode),
+                            current,
+                            stat.S_IMODE(current.stat().st_mode),
                         )
                     os.chmod(current, 0o700)
                 descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
@@ -441,7 +442,11 @@ def install_runtime_files(root: Path, generation: str, files: Mapping[str, bytes
 
 
 def _select(
-    root: Path, generation: str, *, expected_current: str | None, operation_id: str,
+    root: Path,
+    generation: str,
+    *,
+    expected_current: str | None,
+    operation_id: str,
     rollback_of: str | None = None,
 ) -> dict[str, Any]:
     """CAS-select an already materialized release and durably receipt it."""
@@ -451,6 +456,8 @@ def _select(
     if not _GENERATION.fullmatch(operation_id):
         raise ReleaseError("unsafe operation id")
     with _lock(root):
+        if (root / "refusals" / f"{operation_id}.json").exists():
+            raise ReleaseError("operation id was previously refused")
         operation_path = root / "operations" / f"{operation_id}.json"
         receipt_path = root / "receipts" / f"{operation_id}.json"
         if operation_path.exists():
@@ -472,8 +479,11 @@ def _select(
         verify(root, generation)
         manifest = _read_json(root / "releases" / generation / ".release-manifest.json")
         intent = {
-            "schema": RECEIPT_SCHEMA, "state": "prepared", "operation_id": operation_id,
-            "previous_generation": expected_current, "selected_generation": generation,
+            "schema": RECEIPT_SCHEMA,
+            "state": "prepared",
+            "operation_id": operation_id,
+            "previous_generation": expected_current,
+            "selected_generation": generation,
             "selected_commit": manifest.get("commit"),
             "selected_archive_sha256": manifest.get("archive_sha256"),
             "selected_content_manifest_sha256": manifest.get("content_manifest_sha256"),
@@ -496,18 +506,55 @@ def _select(
     return receipt
 
 
+def record_refusal(
+    root: Path,
+    generation: str,
+    operation_id: str,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """Durably bind a failed selection attempt to its exact operation id."""
+    generation = _generation(generation)
+    if not _GENERATION.fullmatch(operation_id) or not _GENERATION.fullmatch(reason):
+        raise ReleaseError("unsafe refusal identity")
+    with _lock(root):
+        path = root / "refusals" / f"{operation_id}.json"
+        unsigned = {
+            "schema": REFUSAL_SCHEMA,
+            "state": "REFUSED",
+            "operation_id": operation_id,
+            "generation": generation,
+            "observed_current": current_generation(root),
+            "reasons": [reason],
+        }
+        receipt = {**unsigned, "refusal_hash": "sha256:" + hashlib.sha256(_canonical(unsigned)[:-1]).hexdigest()}
+        if path.exists():
+            if _read_json(path) != receipt:
+                raise ReleaseError("refusal operation id collision")
+            return receipt
+        _atomic_json(path, receipt)
+        return receipt
+
+
 def select(
-    root: Path, generation: str, *, expected_current: str | None, operation_id: str,
+    root: Path,
+    generation: str,
+    *,
+    expected_current: str | None,
+    operation_id: str,
     admission_receipt: Mapping[str, Any] | None = None,
     environment_preflight_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Select only after revalidating exact W15/W16 evidence at this boundary."""
     if admission_receipt is None or environment_preflight_receipt is None:
+        record_refusal(root, generation, operation_id, reason="missing-admission-evidence")
         raise ReleaseError("release selection requires admission and environment-preflight receipts")
     try:
         manifest = _read_json(root / "releases" / _generation(generation) / ".release-manifest.json")
         admission = validate_release_admission(
-            admission_receipt, candidate_commit=manifest["commit"], candidate_tree=manifest["git_tree"],
+            admission_receipt,
+            candidate_commit=manifest["commit"],
+            candidate_tree=manifest["git_tree"],
         )
         validate_environment_preflight_for_admission(
             environment_preflight_receipt,
@@ -515,12 +562,17 @@ def select(
             receipt_hash=admission["environment"]["receipt_hash"],
         )
     except (AdmissionRecoveryError, KeyError) as exc:
+        record_refusal(root, generation, operation_id, reason="invalid-admission-evidence")
         raise ReleaseError(f"release admission refused: {exc}") from exc
     return _select(root, generation, expected_current=expected_current, operation_id=operation_id)
 
 
 def rollback(
-    root: Path, receipt_path: Path, *, expected_current: str, operation_id: str,
+    root: Path,
+    receipt_path: Path,
+    *,
+    expected_current: str,
+    operation_id: str,
 ) -> dict[str, Any]:
     """Select the previous generation recorded by a completed receipt."""
     receipt_root = (root / "receipts").resolve(strict=True)
@@ -541,7 +593,10 @@ def rollback(
         raise ReleaseError("rollback receipt has no previous generation")
     _generation(source_operation)
     return _select(
-        root, previous, expected_current=expected_current, operation_id=operation_id,
+        root,
+        previous,
+        expected_current=expected_current,
+        operation_id=operation_id,
         rollback_of=source_operation,
     )
 
@@ -559,16 +614,20 @@ def recover(root: Path) -> list[dict[str, Any]]:
                 raise ReleaseError(f"invalid prepared selection: {path.name}")
             selected = operation.get("selected_generation")
             previous = operation.get("previous_generation")
-            if not isinstance(selected, str) or not isinstance(previous, str):
+            if not isinstance(selected, str) or (previous is not None and not isinstance(previous, str)):
                 raise ReleaseError(f"invalid selection generations: {path.name}")
             _generation(selected)
-            _generation(previous)
+            if previous is not None:
+                _generation(previous)
             if current == operation.get("selected_generation"):
                 verify(root, selected)
                 manifest = _read_json(root / "releases" / selected / ".release-manifest.json")
-                if operation.get("selected_manifest_sha256") != hashlib.sha256(
-                    _canonical(manifest),
-                ).hexdigest():
+                if (
+                    operation.get("selected_manifest_sha256")
+                    != hashlib.sha256(
+                        _canonical(manifest),
+                    ).hexdigest()
+                ):
                     raise ReleaseError(f"selected manifest changed during recovery: {path.name}")
                 receipt = {**operation, "state": "completed"}
                 _atomic_json(root / "receipts" / path.name, receipt)
@@ -581,14 +640,14 @@ def recover(root: Path) -> list[dict[str, Any]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="tgw-release-install")
-    parser.add_argument("--root", type=Path, default=Path("/opt/TGW"))
+    parser.add_argument("--root", type=Path, default=Path("/opt/tgw-releases"))
     commands = parser.add_subparsers(dest="command", required=True)
     install = commands.add_parser("install")
     install.add_argument("--archive", type=Path, required=True)
     for name in ("generation", "commit", "tree", "archive-sha256", "expected-current", "operation-id"):
         install.add_argument(f"--{name}", required=True)
-    install.add_argument("--admission-receipt", type=Path, required=True)
-    install.add_argument("--environment-preflight-receipt", type=Path, required=True)
+    install.add_argument("--admission-receipt", type=Path)
+    install.add_argument("--environment-preflight-receipt", type=Path)
     check = commands.add_parser("verify")
     check.add_argument("generation")
     commands.add_parser("recover")
@@ -599,13 +658,23 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "install":
+            if args.admission_receipt is None or args.environment_preflight_receipt is None:
+                record_refusal(
+                    args.root,
+                    args.generation,
+                    args.operation_id,
+                    reason="missing-admission-evidence",
+                )
+                raise ReleaseError("release selection requires admission and environment-preflight receipts")
             try:
                 admission = json.loads(args.admission_receipt.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 raise ReleaseError("admission receipt is unavailable or invalid") from exc
             try:
                 validate_release_admission(
-                    admission, candidate_commit=args.commit, candidate_tree=args.tree,
+                    admission,
+                    candidate_commit=args.commit,
+                    candidate_tree=args.tree,
                 )
                 preflight = json.loads(args.environment_preflight_receipt.read_text(encoding="utf-8"))
                 validate_environment_preflight_for_admission(
@@ -618,13 +687,20 @@ def main() -> int:
             except (OSError, json.JSONDecodeError) as exc:
                 raise ReleaseError("environment preflight receipt is unavailable or invalid") from exc
             manifest = materialize(
-                args.root, args.archive, generation=args.generation, commit=args.commit,
-                tree=args.tree, archive_sha256=args.archive_sha256,
+                args.root,
+                args.archive,
+                generation=args.generation,
+                commit=args.commit,
+                tree=args.tree,
+                archive_sha256=args.archive_sha256,
             )
             expected_current = None if args.expected_current == "none" else args.expected_current
             receipt = select(
-                args.root, args.generation, expected_current=expected_current,
-                operation_id=args.operation_id, admission_receipt=admission,
+                args.root,
+                args.generation,
+                expected_current=expected_current,
+                operation_id=args.operation_id,
+                admission_receipt=admission,
                 environment_preflight_receipt=preflight,
             )
             result = {"manifest": manifest, "receipt": receipt}
@@ -632,7 +708,9 @@ def main() -> int:
             result = verify(args.root, args.generation)
         elif args.command == "rollback":
             result = rollback(
-                args.root, args.receipt, expected_current=args.expected_current,
+                args.root,
+                args.receipt,
+                expected_current=args.expected_current,
                 operation_id=args.operation_id,
             )
         else:

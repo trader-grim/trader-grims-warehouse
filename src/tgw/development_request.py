@@ -20,7 +20,7 @@ _HASH = re.compile(r"sha256:[0-9a-f]{64}$")
 _COMMIT = re.compile(r"[0-9a-f]{40}$")
 _IDENTITY = re.compile(r"[a-z][a-z0-9-]{0,63}$")
 _WORKTREE_ROOT = PurePosixPath("/opt/TGW/w/attempts")
-_ATTEMPT_ROOT = PurePosixPath("/var/cache/tgw/attempts")
+_ATTEMPT_ROOT = PurePosixPath("/opt/TGW/var/cache/tgw/attempts")
 
 
 class DevelopmentRequestError(ValueError):
@@ -49,10 +49,22 @@ def _hash_value(value: Any, label: str) -> str:
 
 def _request(raw: Mapping[str, Any]) -> dict[str, Any]:
     value = deepcopy(dict(raw))
-    if set(value) != {"request_id", "original_request", "scope", "constraints", "effect_limits"}:
+    if set(value) != {
+        "request_id",
+        "submission_id",
+        "original_request",
+        "scope",
+        "constraints",
+        "effect_limits",
+    }:
         raise DevelopmentRequestError("request fields are not exact")
     if not _IDENTITY.fullmatch(_string(value["request_id"], "request id")):
         raise DevelopmentRequestError("request id is invalid")
+    if not re.fullmatch(
+        r"submission-[0-9]{8}t[0-9]{6}z-[a-f0-9]{16}",
+        _string(value["submission_id"], "submission id"),
+    ):
+        raise DevelopmentRequestError("submission id is invalid")
     for field in ("original_request", "scope"):
         _string(value[field], field)
     for field in ("constraints", "effect_limits"):
@@ -112,9 +124,15 @@ def compile_request_lifecycle(*, request: Mapping[str, Any], resolution: Mapping
         raise DevelopmentRequestError("resolution summary is invalid")
     _string(result["explanation"], "resolution explanation")
     request_hash = _hash(requested)
-    body: dict[str, Any] = {"schema": SCHEMA, "request": requested, "request_hash": request_hash,
-                            "resolution": result, "allocation": dict(allocated), "launch_cards": [],
-                            "activation": "declarative-only"}
+    body: dict[str, Any] = {
+        "schema": SCHEMA,
+        "request": requested,
+        "request_hash": request_hash,
+        "resolution": result,
+        "allocation": dict(allocated),
+        "launch_cards": [],
+        "activation": "declarative-only",
+    }
     if status != "RESOLVED":
         if set(result) != required | {"clarification"}:
             raise DevelopmentRequestError("non-resolved request requires a typed clarification")
@@ -125,21 +143,11 @@ def compile_request_lifecycle(*, request: Mapping[str, Any], resolution: Mapping
     if set(result) != expected:
         raise DevelopmentRequestError("resolved request fields are not exact")
     plan = result["plan"]
-    if (
-        not isinstance(plan, Mapping)
-        or set(plan) != {"commit", "solution_hash"}
-        or not isinstance(plan["commit"], str)
-        or not _COMMIT.fullmatch(plan["commit"])
-    ):
+    if not isinstance(plan, Mapping) or set(plan) != {"commit", "solution_hash"} or not isinstance(plan["commit"], str) or not _COMMIT.fullmatch(plan["commit"]):
         raise DevelopmentRequestError("resolved Plan binding is invalid")
     _hash_value(plan["solution_hash"], "resolved Plan solution")
     root = result["root"]
-    if (
-        not isinstance(root, Mapping)
-        or set(root) != {"kind", "id"}
-        or not isinstance(root["kind"], str)
-        or root["kind"] not in {"Plan", "PP", "Todo"}
-    ):
+    if not isinstance(root, Mapping) or set(root) != {"kind", "id"} or not isinstance(root["kind"], str) or root["kind"] not in {"Plan", "PP", "Todo"}:
         raise DevelopmentRequestError("resolved root is invalid")
     _string(root["id"], "resolved root id")
     closure = result["closure"]
@@ -171,14 +179,30 @@ def compile_request_lifecycle(*, request: Mapping[str, Any], resolution: Mapping
                 "worktree": str(_WORKTREE_ROOT / requested["request_id"] / card_attempt / "worktree"),
                 "attempt_root": str(_ATTEMPT_ROOT / requested["request_id"] / card_attempt),
             }
-            card = {"request_hash": request_hash, "plan": dict(plan), "root": dict(root), "unit": unit_id,
-                    "role": role, "allocation": card_allocation, "idempotency_key": _hash([request_hash, unit_id, role, card_attempt]),
-                    "state": "PREPARED", "activation": "declarative-only"}
+            card = {
+                "request_hash": request_hash,
+                "plan": dict(plan),
+                "root": dict(root),
+                "unit": unit_id,
+                "role": role,
+                "allocation": card_allocation,
+                "idempotency_key": _hash([request_hash, unit_id, role, card_attempt]),
+                "state": "PREPARED",
+                "activation": "declarative-only",
+            }
             cards.append(card)
     body["launch_cards"] = cards
     body["timeline"] = [
-        "request-submitted", "resolution-resolved", "launch-prepared", "implementation", "test",
-        "independent-review", "admission", "candidate-installation", "live-verification", "rollback",
+        "request-submitted",
+        "resolution-resolved",
+        "launch-prepared",
+        "implementation",
+        "test",
+        "independent-review",
+        "admission",
+        "candidate-installation",
+        "live-verification",
+        "rollback",
         "operator-acceptance",
     ]
     return {**body, "lifecycle_hash": _hash(body)}

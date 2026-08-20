@@ -67,7 +67,10 @@ def _git_head(repository: Path) -> str:
     try:
         probe = subprocess.run(
             ["git", "rev-parse", "--show-toplevel", "--verify", "HEAD"],
-            cwd=repository, check=False, text=True, capture_output=True,
+            cwd=repository,
+            check=False,
+            text=True,
+            capture_output=True,
         )
     except OSError as exc:
         raise HardFailure("coding repository Git identity is invalid") from exc
@@ -86,7 +89,10 @@ def _verified_source_commit(repository: Path, requested: object) -> str:
         raise HardFailure("coding request source_commit is invalid")
     probe = subprocess.run(
         ["git", "cat-file", "-e", f"{requested}^{{commit}}"],
-        cwd=repository, check=False, text=True, capture_output=True,
+        cwd=repository,
+        check=False,
+        text=True,
+        capture_output=True,
     )
     if probe.returncode:
         raise HardFailure("coding request source_commit is absent from the registered repository")
@@ -134,11 +140,7 @@ def _prepare_request_worktree(document: dict[str, Any], coding: dict[str, Any], 
     repository = Path(repository_value).resolve()
     worktree, branch = _request_worktree(todo_id, request_id, root)
     requested_source = document.get("source_commit")
-    source_head = (
-        None
-        if (worktree.exists() and requested_source is None)
-        else _verified_source_commit(repository, requested_source)
-    )
+    source_head = None if (worktree.exists() and requested_source is None) else _verified_source_commit(repository, requested_source)
     created = False
     try:
         if worktree.exists() or worktree.is_symlink():
@@ -147,7 +149,10 @@ def _prepare_request_worktree(document: dict[str, Any], coding: dict[str, Any], 
         else:
             added = subprocess.run(
                 ["git", "worktree", "add", "-b", branch, str(worktree), source_head],
-                cwd=repository, check=False, text=True, capture_output=True,
+                cwd=repository,
+                check=False,
+                text=True,
+                capture_output=True,
             )
             if added.returncode:
                 raise HardFailure(f"failed to create request-bound coding worktree: {added.stderr.strip()}")
@@ -178,30 +183,60 @@ def _prepare_request_worktree(document: dict[str, Any], coding: dict[str, Any], 
         raise
 
 
-def _development_worktree(document: dict[str, Any], coding: dict[str, Any]) -> tuple[Path, str]:
+def _development_allocations(
+    document: dict[str, Any],
+    coding: dict[str, Any],
+) -> list[tuple[dict[str, Any], Path]]:
     lifecycle = document.get("lifecycle")
     cards = lifecycle.get("launch_cards") if isinstance(lifecycle, dict) else None
-    first = cards[0] if isinstance(cards, list) and cards and isinstance(cards[0], dict) else None
-    allocation = first.get("allocation") if isinstance(first, dict) else None
-    raw = allocation.get("worktree") if isinstance(allocation, dict) else None
+    if not isinstance(cards, list) or not cards:
+        raise HardFailure("development request has no exact card allocations")
     root = PurePosixPath(str(coding.get("development_worktree_root", "/opt/TGW/w/attempts")))
-    if not isinstance(raw, str):
-        raise HardFailure("development request has no exact worktree allocation")
-    parsed = PurePosixPath(raw)
-    try:
-        relative = parsed.relative_to(root)
-    except ValueError as exc:
-        raise HardFailure("development worktree is outside the configured allocation root") from exc
-    if not parsed.is_absolute() or ".." in parsed.parts or len(relative.parts) < 3 or relative.parts[-1] != "worktree":
-        raise HardFailure("development worktree allocation is unsafe")
+    observed: list[tuple[dict[str, Any], Path]] = []
+    identities: set[tuple[str, str, str]] = set()
+    for card in cards:
+        allocation = card.get("allocation") if isinstance(card, dict) else None
+        raw = allocation.get("worktree") if isinstance(allocation, dict) else None
+        attempt_id = allocation.get("attempt_id") if isinstance(allocation, dict) else None
+        attempt_root = allocation.get("attempt_root") if isinstance(allocation, dict) else None
+        if not all(isinstance(value, str) and value for value in (raw, attempt_id, attempt_root)):
+            raise HardFailure("development request has an incomplete card allocation")
+        parsed = PurePosixPath(raw)
+        try:
+            relative = parsed.relative_to(root)
+        except ValueError as exc:
+            raise HardFailure("development worktree is outside the configured allocation root") from exc
+        if (
+            not parsed.is_absolute()
+            or ".." in parsed.parts
+            or len(relative.parts) != 3
+            or relative.parts[-1] != "worktree"
+            or relative.parts[-2] != attempt_id
+            or not PurePosixPath(attempt_root).is_absolute()
+            or PurePosixPath(attempt_root).name != attempt_id
+        ):
+            raise HardFailure("development worktree allocation is unsafe")
+        identity = (attempt_id, raw, attempt_root)
+        if identity in identities:
+            raise HardFailure("development card allocations are not unique")
+        identities.add(identity)
+        observed.append((card, Path(raw)))
+    return observed
+
+
+def _development_worktree(document: dict[str, Any], coding: dict[str, Any]) -> tuple[Path, str]:
+    allocations = _development_allocations(document, coding)
+    raw = allocations[0][1]
     request_hash = document.get("development_request_hash")
     if not isinstance(request_hash, str) or not request_hash.startswith("sha256:"):
         raise HardFailure("development request hash is invalid")
-    return Path(raw), "development/" + request_hash.removeprefix("sha256:")[:20] + "-001"
+    return raw, "development/" + request_hash.removeprefix("sha256:")[:20] + "-001"
 
 
 def _prepare_development_worktree(
-    document: dict[str, Any], coding: dict[str, Any], worker_identity: str,
+    document: dict[str, Any],
+    coding: dict[str, Any],
+    worker_identity: str,
 ) -> dict[str, Any]:
     repository = Path(str(coding.get("repository_root", DEFAULT_REPOSITORY_ROOT))).resolve()
     worktree, branch = _development_worktree(document, coding)
@@ -216,34 +251,44 @@ def _prepare_development_worktree(
             worktree.parent.mkdir(parents=True, exist_ok=True)
             added = subprocess.run(
                 ["git", "worktree", "add", "-b", branch, str(worktree), source],
-                cwd=repository, check=False, text=True, capture_output=True,
+                cwd=repository,
+                check=False,
+                text=True,
+                capture_output=True,
             )
             if added.returncode:
                 raise HardFailure(f"failed to create development worktree: {added.stderr.strip()}")
             created = True
         top = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"], cwd=worktree,
-            check=False, text=True, capture_output=True,
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=worktree,
+            check=False,
+            text=True,
+            capture_output=True,
         )
         current_branch = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree,
-            check=False, text=True, capture_output=True,
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=worktree,
+            check=False,
+            text=True,
+            capture_output=True,
         )
         head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=worktree,
-            check=False, text=True, capture_output=True,
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree,
+            check=False,
+            text=True,
+            capture_output=True,
         )
-        if (
-            top.returncode or current_branch.returncode or head.returncode
-            or top.stdout.strip() != str(worktree)
-            or current_branch.stdout.strip() != branch
-            or head.stdout.strip() != source
-        ):
+        if top.returncode or current_branch.returncode or head.returncode or top.stdout.strip() != str(worktree) or current_branch.stdout.strip() != branch or head.stdout.strip() != source:
             raise HardFailure("development worktree Git identity is invalid")
         return {
-            "repository_root": str(repository), "worktree": str(worktree),
-            "request_hash": document["development_request_hash"], "branch": branch,
-            "head": source, "worker_identity": worker_identity,
+            "repository_root": str(repository),
+            "worktree": str(worktree),
+            "request_hash": document["development_request_hash"],
+            "branch": branch,
+            "head": source,
+            "worker_identity": worker_identity,
         }
     except Exception:
         if created:
@@ -292,9 +337,7 @@ class CodingProvisionClient:
                 value = json.loads(response.read().decode())
         except HTTPError as exc:
             if method == "POST" and path.endswith("/claim") and exc.code == 409:
-                raise DefinitiveClaimRejected(
-                    f"canonical coding service rejected claim: {exc}"
-                ) from exc
+                raise DefinitiveClaimRejected(f"canonical coding service rejected claim: {exc}") from exc
             raise HardFailure(f"canonical coding service request failed: {exc}") from exc
         except (URLError, json.JSONDecodeError) as exc:
             raise HardFailure(f"canonical coding service request failed: {exc}") from exc
@@ -318,7 +361,11 @@ class CodingProvisionClient:
         return self._call(f"/api/coding/worker/requests/{quote(request_id, safe='')}/complete", "POST", {"lease_token": lease_token, "result": result})
 
     def fail(
-        self, request_id: str, lease_token: str, error: str, result: dict[str, Any] | None = None,
+        self,
+        request_id: str,
+        lease_token: str,
+        error: str,
+        result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"lease_token": lease_token, "error": error[:2000]}
         if result is not None:
@@ -336,7 +383,9 @@ def configured_client(config: dict[str, Any]) -> CodingProvisionClient:
 
 
 def local_snapshot_claim(
-    config: dict[str, Any], worktree: str, source_commit: str | None = None,
+    config: dict[str, Any],
+    worktree: str,
+    source_commit: str | None = None,
 ) -> dict[str, Any]:
     """Create the portable observation which tgw-prod will evaluate."""
     snapshot = build_coding_snapshot(
@@ -353,14 +402,14 @@ class DefinitiveClaimRejected(HardFailure):
 
 
 def _discard_definitively_rejected_attempt(
-    document: dict[str, Any], envelope: dict[str, Any], coding: dict[str, Any],
+    document: dict[str, Any],
+    envelope: dict[str, Any],
+    coding: dict[str, Any],
 ) -> None:
     """Remove only this invocation's exact attempt after a completed 409."""
     if not envelope.get("attempt_created"):
         return
-    repository = Path(
-        str(coding.get("repository_root", DEFAULT_REPOSITORY_ROOT))
-    ).resolve()
+    repository = Path(str(coding.get("repository_root", DEFAULT_REPOSITORY_ROOT))).resolve()
     if document.get("kind") == "coding-provision/v2":
         expected, branch = _development_worktree(document, coding)
         actual = Path(str(envelope.get("location", {}).get("worktree", "")))
@@ -369,7 +418,9 @@ def _discard_definitively_rejected_attempt(
         return
     root = Path(str(coding.get("worktree_root", ""))).resolve()
     expected, branch = _request_worktree(
-        int(document.get("todo_id", 0)), document.get("request_id"), root,
+        int(document.get("todo_id", 0)),
+        document.get("request_id"),
+        root,
     )
     actual = Path(str(envelope.get("location", {}).get("worktree", ""))).resolve()
     if actual == expected:
@@ -387,8 +438,14 @@ def claim_and_run(
         raise HardFailure("coding provision request is not claimable")
     envelope = _validate_before_claim(document, coding, local_host, worker_identity)
     development = document.get("kind") == "coding-provision/v2"
-    snapshot = None if development else local_snapshot_claim(
-        config, envelope["location"]["worktree"], document.get("source_commit"),
+    snapshot = (
+        None
+        if development
+        else local_snapshot_claim(
+            config,
+            envelope["location"]["worktree"],
+            document.get("source_commit"),
+        )
     )
     try:
         claimed = service.claim(request_id, local_host, envelope["envelope_hash"], envelope["location"], snapshot)
@@ -408,10 +465,7 @@ def claim_and_run(
         if not isinstance(authorized, dict):
             raise HardFailure("canonical coding service returned no execution envelope")
         execution = authorized.get("execution") if development else execution_envelope(authorized)
-        if development and (
-            not isinstance(execution, dict)
-            or execution.get("schema") != "tgw-development-execution/v1"
-        ):
+        if development and (not isinstance(execution, dict) or execution.get("schema") != "tgw-development-execution/v1"):
             raise HardFailure("canonical coding service returned no development execution envelope")
         service.start(request_id, lease_token)
         # Re-attest at the last possible point before any treatment launcher.
@@ -420,7 +474,10 @@ def claim_and_run(
             _prepare_development_worktree(authorized, coding, worker_identity)
             if development
             else local_location_identity(
-                execution["todo_id"], envelope["location"]["worktree"], coding, worker_identity,
+                execution["todo_id"],
+                envelope["location"]["worktree"],
+                coding,
+                worker_identity,
             )
         )
         if current != envelope["location"]:

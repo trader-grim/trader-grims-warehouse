@@ -1,6 +1,6 @@
 {
   "schema": "tgw-procedure-registry/v1",
-  "revision": "sha256:6118a4a51581b6dde3755cd931a61ab197bf2e00b6473ff5a90a21a0ce41e5dd",
+  "revision": "sha256:1697b1aad7f73e188fd87f331532360f4f571dc0dd53729ddba8c390d2c86faa",
   "procedures": {
     "app-release-install/v1": {
       "status": "active",
@@ -9,7 +9,7 @@
       "repository_id": "application",
       "working_directory": "/opt/TGW",
       "run_as": "root",
-      "argv": ["/opt/tgw-installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "install", "--archive", ":archive", "--generation", ":generation", "--commit", ":commit", "--tree", ":tree", "--archive-sha256", ":archive_sha256", "--expected-current", ":expected_current", "--operation-id", ":operation_id", "--admission-receipt", ":admission_receipt", "--environment-preflight-receipt", ":environment_preflight_receipt"],
+      "argv": ["/opt/tgw-installer/current/bin/tgw-release-install", "--root", "/opt/tgw-releases", "install", "--archive", ":archive", "--generation", ":generation", "--commit", ":commit", "--tree", ":tree", "--archive-sha256", ":archive_sha256", "--expected-current", ":expected_current", "--operation-id", ":operation_id", "--admission-receipt", ":admission_receipt", "--environment-preflight-receipt", ":environment_preflight_receipt"],
       "authority_gate": "explicit-deployment-approval",
       "execution_policy": "registered-runner-only",
       "direct_invocation_allowed": false,
@@ -25,7 +25,7 @@
       "repository_id": "application",
       "working_directory": "/opt/TGW",
       "run_as": "root",
-      "argv": ["/opt/tgw-installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "rollback", "--receipt", ":receipt", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
+      "argv": ["/opt/tgw-installer/current/bin/tgw-release-install", "--root", "/opt/tgw-releases", "rollback", "--receipt", ":receipt", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
       "authority_gate": "explicit-deployment-approval",
       "execution_policy": "registered-runner-only",
       "direct_invocation_allowed": false,

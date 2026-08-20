@@ -50,13 +50,7 @@ class NativeQueue:
         assert kwargs["dedupe_key"].startswith(("coding-provision:", "development-launch:"))
         if kwargs.get("idempotent"):
             for job_id, job in self.jobs.items():
-                prior = next(
-                    item for item in self.enqueues
-                    if item["dedupe_key"] == kwargs["dedupe_key"]
-                ) if any(
-                    item["dedupe_key"] == kwargs["dedupe_key"]
-                    for item in self.enqueues
-                ) else None
+                prior = next(item for item in self.enqueues if item["dedupe_key"] == kwargs["dedupe_key"]) if any(item["dedupe_key"] == kwargs["dedupe_key"] for item in self.enqueues) else None
                 if prior is None or job["state"] not in {"queued", "retry_wait", "leased", "running"}:
                     continue
                 expected = {"queue_name": queue_name, "payload": payload, **kwargs}
@@ -225,8 +219,10 @@ def _execution_envelope() -> dict:
     """A service-issued, bounded authorization for one registered treatment."""
     treatment = next(item for item in CODING_TREATMENTS if item.identity == "claude-review")
     task_spec = {
-        "schema": "coding-task/v1", "todo_id": 1738,
-        "agent": "codex", "body": "coding todo",
+        "schema": "coding-task/v1",
+        "todo_id": 1738,
+        "agent": "codex",
+        "body": "coding todo",
     }
     return {
         "todo_id": 1738,
@@ -286,7 +282,10 @@ def _failed_receipt(execution: dict | None = None) -> dict:
 
 
 def test_structured_unsatisfied_treatment_result_becomes_canonical_failed_receipt(
-    tmp_path, monkeypatch, native, envelope,
+    tmp_path,
+    monkeypatch,
+    native,
+    envelope,
 ):
     """A launcher-declared failure keeps its evidence through /fail and into
     the service-authored terminal receipt, under the claimed lease."""
@@ -442,20 +441,41 @@ def test_worker_creates_fresh_request_bound_worktree_from_repository_head(tmp_pa
 def test_worker_creates_the_exact_v2_card_allocation(tmp_path):
     repository = _init_coding_repository(tmp_path)
     source = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repository, check=True, text=True, capture_output=True,
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        text=True,
+        capture_output=True,
     ).stdout.strip()
     root = tmp_path / "development-worktrees"
     allocated = root / "development-request" / "attempt-001" / "worktree"
     document = {
-        "kind": "coding-provision/v2", "development_request_hash": "sha256:" + "1" * 64,
-        "source_commit": source, "host": "tgw-lib-local", "worker_identity": "tgw-coding-worker",
-        "lifecycle": {"launch_cards": [{"allocation": {"worktree": str(allocated)}}]},
+        "kind": "coding-provision/v2",
+        "development_request_hash": "sha256:" + "1" * 64,
+        "source_commit": source,
+        "host": "tgw-lib-local",
+        "worker_identity": "tgw-coding-worker",
+        "lifecycle": {
+            "launch_cards": [
+                {
+                    "allocation": {
+                        "attempt_id": "attempt-001",
+                        "worktree": str(allocated),
+                        "attempt_root": str(tmp_path / "attempts" / "attempt-001"),
+                    }
+                }
+            ]
+        },
     }
     coding = {
-        **_config(tmp_path)["coding"], "development_worktree_root": str(root),
+        **_config(tmp_path)["coding"],
+        "development_worktree_root": str(root),
     }
     result = coding_provision_worker._validate_before_claim(
-        document, coding, "tgw-lib-local", "tgw-coding-worker",
+        document,
+        coding,
+        "tgw-lib-local",
+        "tgw-coding-worker",
     )
     assert result["location"]["worktree"] == str(allocated)
     assert result["location"]["request_hash"] == document["development_request_hash"]
@@ -463,25 +483,63 @@ def test_worker_creates_the_exact_v2_card_allocation(tmp_path):
     assert result["location"]["branch"].startswith("development/")
 
 
+def test_worker_refuses_duplicate_or_unchecked_later_card_allocation(tmp_path):
+    root = tmp_path / "development-worktrees"
+    first = root / "development-request" / "attempt-001" / "worktree"
+    card = {
+        "allocation": {
+            "attempt_id": "attempt-001",
+            "worktree": str(first),
+            "attempt_root": str(tmp_path / "attempts" / "attempt-001"),
+        },
+    }
+    document = {
+        "lifecycle": {"launch_cards": [card, dict(card)]},
+        "development_request_hash": "sha256:" + "1" * 64,
+    }
+    coding = {"development_worktree_root": str(root)}
+    with pytest.raises(HardFailure, match="not unique"):
+        coding_provision_worker._development_allocations(document, coding)
+
+    document["lifecycle"]["launch_cards"][1] = {
+        "allocation": {
+            "attempt_id": "attempt-002",
+            "worktree": "/tmp/escaped/worktree",
+            "attempt_root": str(tmp_path / "attempts" / "attempt-002"),
+        },
+    }
+    with pytest.raises(HardFailure, match="outside"):
+        coding_provision_worker._development_allocations(document, coding)
+
+
 def test_worker_runs_v2_without_reinterpreting_it_as_a_todo(tmp_path, monkeypatch):
     location = {
-        "repository_root": str(tmp_path / "repo"), "worktree": str(tmp_path / "worktree"),
-        "request_hash": "sha256:" + "2" * 64, "branch": "development/request",
-        "head": "a" * 40, "worker_identity": "tgw-coding-worker",
+        "repository_root": str(tmp_path / "repo"),
+        "worktree": str(tmp_path / "worktree"),
+        "request_hash": "sha256:" + "2" * 64,
+        "branch": "development/request",
+        "head": "a" * 40,
+        "worker_identity": "tgw-coding-worker",
     }
     execution = {
         "schema": "tgw-development-execution/v1",
-        "development_request_hash": location["request_hash"], "source_commit": "a" * 40,
-        "provider_registry_hash": "sha256:" + "3" * 64, "card_idempotency_keys": [],
+        "development_request_hash": location["request_hash"],
+        "source_commit": "a" * 40,
+        "provider_registry_hash": "sha256:" + "3" * 64,
+        "card_idempotency_keys": [],
         "location": location,
     }
     queued = {
-        "kind": "coding-provision/v2", "request_id": "v2-request", "state": "queued",
-        "host": "tgw-lib-local", "worker_identity": "tgw-coding-worker",
+        "kind": "coding-provision/v2",
+        "request_id": "v2-request",
+        "state": "queued",
+        "host": "tgw-lib-local",
+        "worker_identity": "tgw-coding-worker",
     }
     authorized = {**queued, "state": "leased", "execution": execution}
     envelope = {
-        "location": location, "envelope_hash": coding_provision_worker._hash(location),
+        "location": location,
+        "envelope_hash": coding_provision_worker._hash(location),
         "attempt_created": False,
     }
     monkeypatch.setattr(coding_provision_worker, "_validate_before_claim", lambda *_args: envelope)
@@ -501,10 +559,15 @@ def test_worker_runs_v2_without_reinterpreting_it_as_a_todo(tmp_path, monkeypatc
 
         def complete(self, _request_id, _lease, result):
             self.completed = result
-            return {"receipt": {
-                "worker_identity": "tgw-coding-worker", "envelope_hash": envelope["envelope_hash"],
-                "location": location, "execution": execution, "receipt_source": "queue-job:v2-request",
-            }}
+            return {
+                "receipt": {
+                    "worker_identity": "tgw-coding-worker",
+                    "envelope_hash": envelope["envelope_hash"],
+                    "location": location,
+                    "execution": execution,
+                    "receipt_source": "queue-job:v2-request",
+                }
+            }
 
         def fail(self, *_args):
             raise AssertionError("v2 execution unexpectedly failed")
@@ -512,8 +575,11 @@ def test_worker_runs_v2_without_reinterpreting_it_as_a_todo(tmp_path, monkeypatc
     service = Service()
     result = {"schema": "test-v2-result", "outcome": "satisfied"}
     coding_provision_worker.claim_and_run(
-        _config(tmp_path), request_id="v2-request", local_host="tgw-lib-local",
-        worker_identity="tgw-coding-worker", provision=lambda document: result,
+        _config(tmp_path),
+        request_id="v2-request",
+        local_host="tgw-lib-local",
+        worker_identity="tgw-coding-worker",
+        provision=lambda document: result,
         client=service,
     )
     assert service.completed == result
@@ -537,7 +603,10 @@ def test_worker_resumes_only_the_exact_request_bound_worktree(tmp_path, monkeypa
     subprocess.run(["git", "-C", str(repository), "worktree", "add", "-b", "coding/todo-1706-request-1706", str(expected), "HEAD"], check=True, capture_output=True, text=True)
     monkeypatch.setattr(coding_provision_worker, "local_snapshot_claim", lambda *_args: {"generation": "gen-a"})
     result = coding_provision_worker._validate_before_claim(
-        {**_queued_document(), "object_generation": "gen-a"}, cfg["coding"], "tgw-lib-local", "tgw-coding-worker",
+        {**_queued_document(), "object_generation": "gen-a"},
+        cfg["coding"],
+        "tgw-lib-local",
+        "tgw-coding-worker",
     )
     assert result["location"]["worktree"] == str(expected)
 
@@ -548,19 +617,31 @@ def test_worker_resumes_clean_unbound_worktree_after_preclaim_crash(tmp_path):
     document = _queued_document()
 
     first = coding_provision_worker._validate_before_claim(
-        document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker",
+        document,
+        cfg["coding"],
+        "tgw-lib-local",
+        "tgw-coding-worker",
     )
     second = coding_provision_worker._validate_before_claim(
-        document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker",
+        document,
+        cfg["coding"],
+        "tgw-lib-local",
+        "tgw-coding-worker",
     )
 
     assert first["attempt_created"] is True
     assert second["attempt_created"] is False
     assert second["location"] == first["location"]
-    assert second["location"]["head"] == subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repository, check=True,
-        text=True, capture_output=True,
-    ).stdout.strip()
+    assert (
+        second["location"]["head"]
+        == subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+    )
 
 
 def test_worker_resumes_clean_unbound_worktree_after_repository_head_advances(tmp_path):
@@ -568,25 +649,40 @@ def test_worker_resumes_clean_unbound_worktree_after_repository_head_advances(tm
     cfg = _config(tmp_path)
     document = _queued_document()
     first = coding_provision_worker._validate_before_claim(
-        document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker",
+        document,
+        cfg["coding"],
+        "tgw-lib-local",
+        "tgw-coding-worker",
     )
     (repository / "NEXT").write_text("new repository head\n")
     subprocess.run(["git", "add", "NEXT"], cwd=repository, check=True)
     subprocess.run(
-        ["git", "commit", "-m", "advance canonical head"], cwd=repository,
-        check=True, text=True, capture_output=True,
+        ["git", "commit", "-m", "advance canonical head"],
+        cwd=repository,
+        check=True,
+        text=True,
+        capture_output=True,
     )
 
     second = coding_provision_worker._validate_before_claim(
-        document, cfg["coding"], "tgw-lib-local", "tgw-coding-worker",
+        document,
+        cfg["coding"],
+        "tgw-lib-local",
+        "tgw-coding-worker",
     )
 
     assert second["attempt_created"] is False
     assert second["location"] == first["location"]
-    assert second["location"]["head"] != subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repository, check=True,
-        text=True, capture_output=True,
-    ).stdout.strip()
+    assert (
+        second["location"]["head"]
+        != subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+    )
 
 
 def test_existing_unbound_request_worktree_must_still_be_clean(tmp_path):
@@ -594,20 +690,25 @@ def test_existing_unbound_request_worktree_must_still_be_clean(tmp_path):
     cfg = _config(tmp_path)
     expected = tmp_path / "worktrees" / "todo-1706-request-1706"
     subprocess.run(
-        ["git", "-C", str(repository), "worktree", "add", "-b",
-         "coding/todo-1706-request-1706", str(expected), "HEAD"],
-        check=True, capture_output=True, text=True,
+        ["git", "-C", str(repository), "worktree", "add", "-b", "coding/todo-1706-request-1706", str(expected), "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
     )
     (expected / "untrusted").write_text("changed\n")
 
     with pytest.raises(HardFailure, match="not clean"):
         coding_provision_worker._validate_before_claim(
-            _queued_document(), cfg["coding"], "tgw-lib-local", "tgw-coding-worker",
+            _queued_document(),
+            cfg["coding"],
+            "tgw-lib-local",
+            "tgw-coding-worker",
         )
 
 
 def test_existing_request_worktree_without_matching_generation_cannot_claim(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     repository = _init_coding_repository(tmp_path)
     cfg = _config(tmp_path)
@@ -629,7 +730,11 @@ def test_existing_request_worktree_without_matching_generation_cannot_claim(
 
     with pytest.raises(HardFailure, match="generation does not match"):
         coding_provision_worker.claim_and_run(
-            cfg, request_id="request-1706", local_host="tgw-lib-local", worker_identity="tgw-coding-worker", client=Service(),
+            cfg,
+            request_id="request-1706",
+            local_host="tgw-lib-local",
+            worker_identity="tgw-coding-worker",
+            client=Service(),
         )
     assert not claimed
 
@@ -718,12 +823,11 @@ def test_definitive_claim_rejection_removes_only_new_exact_attempt(tmp_path):
             return {**_queued_document(), "state": "queued"}
 
         def claim(self, *_args):
-            raise coding_provision_worker.DefinitiveClaimRejected(
-                "canonical service completed a 409 rejection"
-            )
+            raise coding_provision_worker.DefinitiveClaimRejected("canonical service completed a 409 rejection")
 
     with pytest.raises(
-        coding_provision_worker.DefinitiveClaimRejected, match="409 rejection",
+        coding_provision_worker.DefinitiveClaimRejected,
+        match="409 rejection",
     ):
         coding_provision_worker.claim_and_run(
             cfg,
@@ -744,11 +848,14 @@ def test_client_classifies_completed_claim_409_as_definitive(monkeypatch):
         io.BytesIO(b'{"detail":"rejected"}'),
     )
     monkeypatch.setattr(
-        coding_provision_worker, "urlopen",
+        coding_provision_worker,
+        "urlopen",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
     )
     client = coding_provision_worker.CodingProvisionClient(
-        "https://tgw.example", "secret", "worker",
+        "https://tgw.example",
+        "secret",
+        "worker",
     )
 
     with pytest.raises(coding_provision_worker.DefinitiveClaimRejected):
@@ -756,7 +863,8 @@ def test_client_classifies_completed_claim_409_as_definitive(monkeypatch):
 
 
 def test_failed_claim_preserves_generation_bound_attempt_and_retry_reaches_claim(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """A request generation is not evidence that the service committed a claim."""
     _init_coding_repository(tmp_path)
@@ -769,7 +877,8 @@ def test_failed_claim_preserves_generation_bound_attempt_and_retry_reaches_claim
 
         def get(self, _request_id):
             return {
-                **_queued_document(), "state": "queued",
+                **_queued_document(),
+                "state": "queued",
                 "object_generation": "prebound-generation",
             }
 
@@ -1065,9 +1174,18 @@ def test_failed_result_rejections_leave_claim_running_without_receipt(tmp_path, 
     ("launcher", "match"),
     [
         (
-            lambda command: subprocess.CompletedProcess(command, 0, stdout=json.dumps({
-                "outcome": "failed", "established_conditions": [], "artifacts": [{"kind": "check", "status": "failed"}],
-            }), stderr=""),
+            lambda command: subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    {
+                        "outcome": "failed",
+                        "established_conditions": [],
+                        "artifacts": [{"kind": "check", "status": "failed"}],
+                    }
+                ),
+                stderr="",
+            ),
             "reported failed",
         ),
         (lambda command: subprocess.CompletedProcess(command, 1, stdout="", stderr="boom"), "mechanical failure"),
@@ -1079,10 +1197,13 @@ def test_execute_authorized_treatment_raises_treatment_failure_with_result(tmp_p
     monkeypatch.setattr(coding_execution, "_git_identity", lambda path: (path.resolve(), (path / ".git").resolve()))
     monkeypatch.setattr(coding_execution.subprocess, "run", lambda command, **_kwargs: launcher(command))
     payload = {**execution, "worktree": str(tmp_path), "object_id": str(tmp_path)}
-    config = {"coding": {
-        "worktree_root": str(tmp_path.parent), "repository_root": str(tmp_path),
-        "commands": {execution["treatment_id"]: ["local-runner"]},
-    }}
+    config = {
+        "coding": {
+            "worktree_root": str(tmp_path.parent),
+            "repository_root": str(tmp_path),
+            "commands": {execution["treatment_id"]: ["local-runner"]},
+        }
+    }
 
     with pytest.raises(TreatmentFailure, match=match) as raised:
         coding_execution.execute_authorized_treatment(config, payload)
@@ -1099,18 +1220,28 @@ def test_authorized_treatment_runner_keeps_trusted_imports_and_names_claimed_sou
 
     def launch(command, **kwargs):
         observed.update(kwargs)
-        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
-            "outcome": "satisfied",
-            "established_conditions": ["reviewed"],
-            "artifacts": [],
-        }), stderr="")
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "outcome": "satisfied",
+                    "established_conditions": ["reviewed"],
+                    "artifacts": [],
+                }
+            ),
+            stderr="",
+        )
 
     monkeypatch.setattr(coding_execution.subprocess, "run", launch)
     payload = {**execution, "worktree": str(tmp_path), "object_id": str(tmp_path)}
-    config = {"coding": {
-        "worktree_root": str(tmp_path.parent), "repository_root": str(tmp_path),
-        "commands": {execution["treatment_id"]: ["local-runner"]},
-    }}
+    config = {
+        "coding": {
+            "worktree_root": str(tmp_path.parent),
+            "repository_root": str(tmp_path),
+            "commands": {execution["treatment_id"]: ["local-runner"]},
+        }
+    }
 
     coding_execution.execute_authorized_treatment(config, payload)
 
@@ -1143,22 +1274,20 @@ def test_canonical_claim_looks_up_todo_and_derives_contract_bound_envelope(tmp_p
     assert execution["evidence_set_hash"]
     assert execution["treatment_registry_hash"]
     assert execution["task_spec"] == {
-        "schema": "coding-task/v1", "todo_id": 1738,
-        "agent": "codex", "body": "coding todo",
+        "schema": "coding-task/v1",
+        "todo_id": 1738,
+        "agent": "codex",
+        "body": "coding todo",
     }
     assert execution["task_spec_hash"] == coding_provision._hash(execution["task_spec"])
     assert native.jobs[request["request_id"]]["payload_json"]["snapshot"] == _snapshot_claim(envelope)
     assert native.claim_lease_seconds == [2100]
 
 
-def test_canonical_claim_lease_exceeds_configured_execution_timeout(
-    tmp_path, native, envelope
-):
+def test_canonical_claim_lease_exceeds_configured_execution_timeout(tmp_path, native, envelope):
     cfg = _config(tmp_path)
     cfg["coding"]["timeout_s"] = 2400
-    request = coding_provision.create_request(
-        cfg, todo_id=1738, object_generation="gen-a"
-    )
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
 
     coding_provision.claim_request(
         cfg,
@@ -1174,14 +1303,10 @@ def test_canonical_claim_lease_exceeds_configured_execution_timeout(
 
 
 @pytest.mark.parametrize("timeout", [True, 0, "invalid"])
-def test_canonical_claim_rejects_invalid_execution_timeout(
-    tmp_path, native, envelope, timeout
-):
+def test_canonical_claim_rejects_invalid_execution_timeout(tmp_path, native, envelope, timeout):
     cfg = _config(tmp_path)
     cfg["coding"]["timeout_s"] = timeout
-    request = coding_provision.create_request(
-        cfg, todo_id=1738, object_generation="gen-a"
-    )
+    request = coding_provision.create_request(cfg, todo_id=1738, object_generation="gen-a")
 
     with pytest.raises(HardFailure, match="timeout_s"):
         coding_provision.claim_request(
@@ -1622,7 +1747,8 @@ def test_worker_rejects_insecure_credential_endpoint(tmp_path, monkeypatch, endp
 
 
 @pytest.mark.parametrize(
-    "endpoint", ["http://127.0.0.1:7373", "http://localhost:7373", "http://[::1]:7373"],
+    "endpoint",
+    ["http://127.0.0.1:7373", "http://localhost:7373", "http://[::1]:7373"],
 )
 def test_worker_allows_explicit_loopback_http_endpoint(tmp_path, monkeypatch, endpoint):
     cfg = _config(tmp_path)
@@ -1637,7 +1763,9 @@ def test_worker_allows_explicit_loopback_http_endpoint(tmp_path, monkeypatch, en
 def test_client_constructor_rejects_insecure_nonloopback_http():
     with pytest.raises(HardFailure, match="HTTPS"):
         coding_provision_worker.CodingProvisionClient(
-            "http://tgw-prod:7373", "secret", "worker",
+            "http://tgw-prod:7373",
+            "secret",
+            "worker",
         )
 
 
@@ -1655,10 +1783,16 @@ def test_create_request_accepts_config_without_tgw_lib_local_paths(tmp_path, nat
 def test_create_request_retry_returns_exact_active_request(tmp_path, native):
     cfg = _config(tmp_path)
     first = coding_provision.create_request(
-        cfg, todo_id=1738, object_generation="gen-a", source_commit="a" * 40,
+        cfg,
+        todo_id=1738,
+        object_generation="gen-a",
+        source_commit="a" * 40,
     )
     second = coding_provision.create_request(
-        cfg, todo_id=1738, object_generation="gen-a", source_commit="a" * 40,
+        cfg,
+        todo_id=1738,
+        object_generation="gen-a",
+        source_commit="a" * 40,
     )
 
     assert second == first
@@ -1678,7 +1812,10 @@ def test_request_binds_exact_source_commit_through_native_payload(tmp_path, nati
     cfg = _config(tmp_path)
     commit = "a" * 40
     coding_provision.create_request(
-        cfg, todo_id=1738, object_generation=None, source_commit=commit,
+        cfg,
+        todo_id=1738,
+        object_generation=None,
+        source_commit=commit,
     )
     assert native.enqueues[0]["payload"]["source_commit"] == commit
     assert commit in native.enqueues[0]["dedupe_key"]
@@ -1688,15 +1825,20 @@ def test_request_binds_exact_source_commit_through_native_payload(tmp_path, nati
 def test_request_rejects_noncanonical_source_commit(tmp_path, native, value):
     with pytest.raises(HardFailure, match="source_commit"):
         coding_provision.create_request(
-            _config(tmp_path), todo_id=1738, source_commit=value,
+            _config(tmp_path),
+            todo_id=1738,
+            source_commit=value,
         )
 
 
 def test_worker_resolves_only_commit_present_in_registered_repository(tmp_path):
     repository = _init_coding_repository(tmp_path)
     commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repository, check=True,
-        text=True, capture_output=True,
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        text=True,
+        capture_output=True,
     ).stdout.strip()
     assert coding_provision_worker._verified_source_commit(repository, commit) == commit
     with pytest.raises(HardFailure, match="absent"):
@@ -1706,7 +1848,9 @@ def test_worker_resolves_only_commit_present_in_registered_repository(tmp_path):
 def test_service_rejects_worker_head_not_matching_requested_source(tmp_path, native, envelope):
     cfg = _config(tmp_path)
     request = coding_provision.create_request(
-        cfg, todo_id=1738, source_commit="b" * 40,
+        cfg,
+        todo_id=1738,
+        source_commit="b" * 40,
     )
     with pytest.raises(HardFailure, match="requested source commit"):
         coding_provision.claim_request(

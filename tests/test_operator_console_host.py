@@ -38,7 +38,10 @@ def _plan(tmp_path: Path) -> tuple[Path, str]:
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
     subprocess.run(["git", "-C", str(root), "commit", "-qm", "plan"], check=True)
     commit = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"], check=True, text=True, capture_output=True,
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
     ).stdout.strip()
     return root, commit
 
@@ -48,31 +51,45 @@ def test_standalone_plan_default_and_exact_commit(tmp_path: Path):
     root, commit = _plan(tmp_path)
     with pytest.raises(RuntimeError, match="approved_plan_commit_required"):
         current_plan_commit(lambda: {"standalone_plan_root": root})
-    assert current_plan_commit(lambda: {
-        "standalone_plan_root": root, "plan_approved_commit": commit,
-        "plan_approved_solution_hash": "sha256:" + "a" * 64,
-    }) == commit
+    assert (
+        current_plan_commit(
+            lambda: {
+                "standalone_plan_root": root,
+                "plan_approved_commit": commit,
+                "plan_approved_solution_hash": "sha256:" + "a" * 64,
+            }
+        )
+        == commit
+    )
 
     (root / "README.md").write_text("later Plan state\n")
     subprocess.run(["git", "-C", str(root), "commit", "-qam", "later"], check=True)
     with pytest.raises(RuntimeError, match="approved_plan_mismatch"):
-        current_plan_commit(lambda: {
-            "standalone_plan_root": root, "plan_approved_commit": commit,
-            "plan_approved_solution_hash": "sha256:" + "a" * 64,
-        })
+        current_plan_commit(
+            lambda: {
+                "standalone_plan_root": root,
+                "plan_approved_commit": commit,
+                "plan_approved_solution_hash": "sha256:" + "a" * 64,
+            }
+        )
 
 
 def test_current_plan_commit_uses_configured_git_executable(tmp_path: Path):
     root, commit = _plan(tmp_path)
     wrapper = tmp_path / "held-git"
-    wrapper.write_text("#!/bin/sh\nexec git \"$@\"\n")
+    wrapper.write_text('#!/bin/sh\nexec git "$@"\n')
     wrapper.chmod(0o755)
-    assert current_plan_commit(lambda: {
-        "standalone_plan_root": root,
-        "plan_approved_commit": commit,
-        "plan_approved_solution_hash": "sha256:" + "a" * 64,
-        "plan_git_path": wrapper,
-    }) == commit
+    assert (
+        current_plan_commit(
+            lambda: {
+                "standalone_plan_root": root,
+                "plan_approved_commit": commit,
+                "plan_approved_solution_hash": "sha256:" + "a" * 64,
+                "plan_git_path": wrapper,
+            }
+        )
+        == commit
+    )
 
 
 def test_solution_loader_fails_closed_and_checks_identity(tmp_path: Path):
@@ -89,6 +106,7 @@ def test_solution_loader_fails_closed_and_checks_identity(tmp_path: Path):
 
     def provider():
         return config
+
     with pytest.raises(ValueError, match="unavailable"):
         load_solution(provider, identity)
     with pytest.raises(ValueError, match="invalid"):
@@ -96,14 +114,24 @@ def test_solution_loader_fails_closed_and_checks_identity(tmp_path: Path):
     with pytest.raises(ValueError, match="not the approved"):
         load_solution(provider, "sha256:" + "b" * 64)
     directory.mkdir(parents=True)
-    (directory / "governed-platform-solution.json").write_text(json.dumps({
-        "solution_hash": identity, "plan_commit": commit,
-    }))
+    (directory / "governed-platform-solution.json").write_text(
+        json.dumps(
+            {
+                "solution_hash": identity,
+                "plan_commit": commit,
+            }
+        )
+    )
     assert load_solution(provider, identity)["solution_hash"] == identity
 
-    (directory / "duplicate.json").write_text(json.dumps({
-        "solution_hash": identity, "plan_commit": commit,
-    }))
+    (directory / "duplicate.json").write_text(
+        json.dumps(
+            {
+                "solution_hash": identity,
+                "plan_commit": commit,
+            }
+        )
+    )
     with pytest.raises(ValueError, match="ambiguous"):
         load_solution(provider, identity)
 
@@ -113,16 +141,24 @@ def test_solution_loader_rejects_an_exact_hash_bound_to_an_unapproved_plan_commi
     identity = "sha256:" + "c" * 64
     directory = tmp_path / "approved-solutions"
     directory.mkdir(parents=True)
-    (directory / "solution.json").write_text(json.dumps({
-        "solution_hash": identity, "plan_commit": "d" * 40,
-    }))
+    (directory / "solution.json").write_text(
+        json.dumps(
+            {
+                "solution_hash": identity,
+                "plan_commit": "d" * 40,
+            }
+        )
+    )
     with pytest.raises(ValueError, match="not bound"):
-        load_solution(lambda: {
-            "standalone_plan_root": root,
-            "plan_approved_commit": approved,
-            "plan_approved_solution_hash": identity,
-            "plan_solution_root": directory,
-        }, identity)
+        load_solution(
+            lambda: {
+                "standalone_plan_root": root,
+                "plan_approved_commit": approved,
+                "plan_approved_solution_hash": identity,
+                "plan_solution_root": directory,
+            },
+            identity,
+        )
 
 
 def test_configured_mount_is_late_bound_and_reuses_auth_functions():
@@ -133,8 +169,11 @@ def test_configured_mount_is_late_bound_and_reuses_auth_functions():
 
     def executor():
         return AuthorityPrincipal("executor:fixture-runner", PrincipalRole.EXECUTOR, "test-credential")
+
     mount = configured_console_mount(
-        lambda: config, require_operator=operator, require_executor=executor,
+        lambda: config,
+        require_operator=operator,
+        require_executor=executor,
     )
     assert isinstance(mount.store, ConfiguredAuthorityStore)
     assert mount.require_operator is operator
@@ -144,25 +183,48 @@ def test_configured_mount_is_late_bound_and_reuses_auth_functions():
         mount.store.list()
 
 
-def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_path: Path):
-    import tgw.dynamic_surface as boundary
-
+def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_path: Path, request):
     plan, plan_commit = _plan(tmp_path)
-    receipt_root = tmp_path / "surface-receipts"
+    durable_test_root = Path("/opt/TGW/w/attempts/codex-tests") / tmp_path.name
+    durable_test_root.mkdir(parents=True, exist_ok=False)
+    request.addfinalizer(lambda: __import__("shutil").rmtree(durable_test_root))
+    receipt_root = durable_test_root / "surface-receipts"
     receipt_root.mkdir()
-    transition_gate = tmp_path / "fleet-transition-gate.json"
-    transition_gate.write_text(json.dumps({
-        "schema": "tgw-w18-fleet-transition-gate/v1", "status": "ACTIVE",
-        "transaction_id": "bootstrap", "predecessor_generation": "sha256:" + "0" * 64,
-        "successor_generation": "sha256:" + "0" * 64,
-    }))
-    renderer_hash = "sha256:" + hashlib.sha256(Path(boundary.__file__).read_bytes()).hexdigest()
+    transition_gate = durable_test_root / "fleet-transition-gate.json"
+    transition_gate.write_text(
+        json.dumps(
+            {
+                "schema": "tgw-w18-fleet-transition-gate/v1",
+                "status": "ACTIVE",
+                "transaction_id": "bootstrap",
+                "predecessor_generation": "sha256:" + "0" * 64,
+                "successor_generation": "sha256:" + "0" * 64,
+            }
+        )
+    )
+    source_root = Path(__file__).resolve().parents[1]
+    component_paths = [
+        "src/tgw/dynamic_surface.py",
+        "src/tgw/operator_console.py",
+        "src/tgw/operator_console_host.py",
+        "src/tgw/static/plan_console.html",
+    ]
     config = {
         "standalone_plan_root": plan,
         "plan_approved_commit": plan_commit,
         "plan_approved_solution_hash": "sha256:" + "a" * 64,
         "dynamic_surfaces": {
-            "renderer_sha256": renderer_hash,
+            "enforcement_boundary": {
+                "root": str(source_root),
+                "version": "fixture-candidate",
+                "components": [
+                    {
+                        "relative_path": relative,
+                        "content_sha256": "sha256:" + hashlib.sha256((source_root / relative).read_bytes()).hexdigest(),
+                    }
+                    for relative in component_paths
+                ],
+            },
             "receipt_root": str(receipt_root),
             "transition_gate_path": str(transition_gate),
         },
@@ -170,12 +232,17 @@ def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_pat
     store = ConfiguredAuthorityStore(lambda: config)
     row = {
         "request_id": "request:sha256:" + "1" * 64,
-        "plan_commit": plan_commit, "solution_hash": "sha256:" + "a" * 64,
-        "closure_hash": "sha256:" + "b" * 64, "effect_hash": "effect:sha256:value",
-        "effect_generation": "generation-one", "object_generation": "object-one",
-        "effect_kind": "development-launch", "summary": "Review exact launch",
+        "plan_commit": plan_commit,
+        "solution_hash": "sha256:" + "a" * 64,
+        "closure_hash": "sha256:" + "b" * 64,
+        "effect_hash": "effect:sha256:value",
+        "effect_generation": "generation-one",
+        "object_generation": "object-one",
+        "effect_kind": "development-launch",
+        "summary": "Review exact launch",
         "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
-        "decision_kind": None, "receipt_id": None,
+        "decision_kind": None,
+        "receipt_id": None,
     }
     recorded = []
     store.get = lambda request_id: row if request_id == row["request_id"] else None
@@ -185,22 +252,32 @@ def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_pat
     assert Path(surface["retention"]["path"]).name.endswith(".surface.json")
     retained = json.loads(Path(surface["retention"]["path"]).read_text())
     assert retained["surface_hash"] == surface["surface_hash"]
-    receipt = submit(row["request_id"], {
-        "schema": "tgw-dynamic-surface-submission/v1",
-        "surface_hash": surface["surface_hash"], "action_id": "approve",
-        "values": {"reason": "exact scope reviewed"},
-        "submitted_at": datetime.now(timezone.utc).isoformat(),
-    }, "operator:fixture")
+    receipt = submit(
+        row["request_id"],
+        {
+            "schema": "tgw-dynamic-surface-submission/v1",
+            "surface_hash": surface["surface_hash"],
+            "action_id": "approve",
+            "values": {"reason": "exact scope reviewed"},
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "operator:fixture",
+    )
     assert recorded[0].kind.value == "approve"
     assert receipt["outcome"]["decision_id"] == recorded[0].decision_id
     assert len(list(receipt_root.glob("*.json"))) == 3
     with pytest.raises(ValueError, match="replayed or is already in progress"):
-        submit(row["request_id"], {
-            "schema": "tgw-dynamic-surface-submission/v1",
-            "surface_hash": surface["surface_hash"], "action_id": "approve",
-            "values": {"reason": "exact scope reviewed"},
-            "submitted_at": datetime.now(timezone.utc).isoformat(),
-        }, "operator:fixture")
+        submit(
+            row["request_id"],
+            {
+                "schema": "tgw-dynamic-surface-submission/v1",
+                "surface_hash": surface["surface_hash"],
+                "action_id": "approve",
+                "values": {"reason": "exact scope reviewed"},
+                "submitted_at": datetime.now(timezone.utc).isoformat(),
+            },
+            "operator:fixture",
+        )
     assert len(recorded) == 1
 
     row["plan_commit"] = "f" * 40
@@ -208,9 +285,14 @@ def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_pat
         load(row["request_id"])
 
     row["plan_commit"] = plan_commit
-    transition_gate.write_text(json.dumps({
-        "schema": "tgw-w18-fleet-transition-gate/v1", "status": "QUIESCED",
-    }))
+    transition_gate.write_text(
+        json.dumps(
+            {
+                "schema": "tgw-w18-fleet-transition-gate/v1",
+                "status": "QUIESCED",
+            }
+        )
+    )
     with pytest.raises(ValueError, match="suspended for a fleet transition"):
         load(row["request_id"])
 
@@ -223,26 +305,30 @@ def test_standard_http_mount_resolves_bootstrap_provider_after_config_load_and_b
     populated but before the store can begin an authority execution attempt.
     """
     config: dict[str, object] = {}
-    effect = TypedEffect.parse({
-        "kind": "approval-platform-bootstrap-deployment",
-        "generation": "candidate-release",
-        "parameters": {
-            "bootstrap_contract_ref": "candidate:" + "a" * 40 + ":bootstrap-deployment:v2",
-            "bootstrap_contract_hash": "sha256:" + "b" * 64,
-        },
-    })
+    effect = TypedEffect.parse(
+        {
+            "kind": "approval-platform-bootstrap-deployment",
+            "generation": "candidate-release",
+            "parameters": {
+                "bootstrap_contract_ref": "candidate:" + "a" * 40 + ":bootstrap-deployment:v2",
+                "bootstrap_contract_hash": "sha256:" + "b" * 64,
+            },
+        }
+    )
     mount = configured_console_mount(
         lambda: config,
         require_operator=lambda: AuthorityPrincipal("operator:fixture", PrincipalRole.OPERATOR, "test"),
         require_executor=lambda: AuthorityPrincipal("executor:fixture", PrincipalRole.EXECUTOR, "test"),
         bootstrap_provider_factory=configured_bootstrap_deployment_provider,
     )
-    mount.store.get = Mock(return_value={
-        "effect_kind": effect.kind,
-        "effect_generation": effect.generation,
-        "effect_parameters": effect.parameters,
-        "effect_hash": effect.effect_hash,
-    })
+    mount.store.get = Mock(
+        return_value={
+            "effect_kind": effect.kind,
+            "effect_generation": effect.generation,
+            "effect_parameters": effect.parameters,
+            "effect_hash": effect.effect_hash,
+        }
+    )
     mount.store.begin_execution = Mock()
     app = FastAPI()
     mount_operator_console(app, mount)
@@ -267,9 +353,12 @@ def test_allowlisted_bootstrap_provider_sends_only_contract_binding(monkeypatch)
     }
     private = Ed25519PrivateKey.generate()
     signing_key = [private]
-    public = base64.b64encode(private.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw,
-    )).decode("ascii")
+    public = base64.b64encode(
+        private.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    ).decode("ascii")
 
     class _Response:
         status = 200
@@ -284,12 +373,27 @@ def test_allowlisted_bootstrap_provider_sends_only_contract_binding(monkeypatch)
                 "binding": binding,
                 "result": {"generation": "before", "closure": "/nix/store/fixture"},
             }
-            response_hash = "sha256:" + hashlib.sha256(json.dumps(
-                signed, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-            ).encode()).hexdigest()
-            signature = base64.b64encode(signing_key[0].sign(json.dumps(
-                {**signed, "response_hash": response_hash}, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-            ).encode())).decode("ascii")
+            response_hash = (
+                "sha256:"
+                + hashlib.sha256(
+                    json.dumps(
+                        signed,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode()
+                ).hexdigest()
+            )
+            signature = base64.b64encode(
+                signing_key[0].sign(
+                    json.dumps(
+                        {**signed, "response_hash": response_hash},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode()
+                )
+            ).decode("ascii")
             return json.dumps({**signed, "response_hash": response_hash, "signature": signature}).encode()
 
         def __enter__(self):
@@ -317,18 +421,20 @@ def test_allowlisted_bootstrap_provider_sends_only_contract_binding(monkeypatch)
         return _Opener()
 
     monkeypatch.setattr(host, "build_opener", no_proxy_opener)
-    provider = configured_bootstrap_deployment_provider({
-        "bootstrap_provider_binding": {
-            "schema": "tgw-bootstrap-provider-binding/v1",
-            "provider_id": "tgw-bootstrap-deployment-provider@1",
-            "endpoint": "https://bootstrap-provider.example.invalid",
-            "credential_env": "TGW_BOOTSTRAP_PROVIDER_TOKEN",
-            "timeout_seconds": 9,
-            "provider_identity": "provider:tgw-prod-bootstrap",
-            "provider_key_id": "bootstrap-provider-key-1",
-            "provider_public_key": public,
-        },
-    })
+    provider = configured_bootstrap_deployment_provider(
+        {
+            "bootstrap_provider_binding": {
+                "schema": "tgw-bootstrap-provider-binding/v1",
+                "provider_id": "tgw-bootstrap-deployment-provider@1",
+                "endpoint": "https://bootstrap-provider.example.invalid",
+                "credential_env": "TGW_BOOTSTRAP_PROVIDER_TOKEN",
+                "timeout_seconds": 9,
+                "provider_identity": "provider:tgw-prod-bootstrap",
+                "provider_key_id": "bootstrap-provider-key-1",
+                "provider_public_key": public,
+            },
+        }
+    )
     assert provider is not None
     assert provider.observe(binding) == {"generation": "before", "closure": "/nix/store/fixture"}
     assert captured == {
@@ -356,21 +462,25 @@ def test_configured_host_principals_are_named_role_bound_and_fail_closed():
     assert operator.authentication_binding == "web-session"
     with pytest.raises(RuntimeError, match="not configured"):
         configured_authority_principal(
-            {}, field="plan_authority_executor_principal",
-            role=PrincipalRole.EXECUTOR, authentication_binding="credential-env:TEST",
+            {},
+            field="plan_authority_executor_principal",
+            role=PrincipalRole.EXECUTOR,
+            authentication_binding="credential-env:TEST",
         )
 
 
 def test_bootstrap_host_is_unmounted_or_pin_mismatched_before_authority_execution():
     store = Mock()
-    effect = TypedEffect.parse({
-        "kind": "approval-platform-bootstrap-deployment",
-        "generation": "candidate-release",
-        "parameters": {
-            "bootstrap_contract_ref": "candidate:" + "a" * 40 + ":bootstrap-deployment:v2",
-            "bootstrap_contract_hash": "sha256:" + "b" * 64,
-        },
-    })
+    effect = TypedEffect.parse(
+        {
+            "kind": "approval-platform-bootstrap-deployment",
+            "generation": "candidate-release",
+            "parameters": {
+                "bootstrap_contract_ref": "candidate:" + "a" * 40 + ":bootstrap-deployment:v2",
+                "bootstrap_contract_hash": "sha256:" + "b" * 64,
+            },
+        }
+    )
     controller = configured_execution_controller(store, lambda: {})
     with pytest.raises(ValueError, match="resolver is not mounted"):
         controller.execute(request_id="request:bootstrap", effect=effect, executor_principal="executor:fixture")

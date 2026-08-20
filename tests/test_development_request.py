@@ -9,17 +9,27 @@ COMMIT = "b" * 40
 
 
 def request():
-    return {"request_id": "w14-request", "original_request": "Build the bounded W14 seam", "scope": "W14 only", "constraints": ["no live changes"], "effect_limits": ["local-reversible"]}
+    return {
+        "request_id": "w14-request",
+        "submission_id": "submission-20270101t120000z-0000000000000001",
+        "original_request": "Build the bounded W14 seam",
+        "scope": "W14 only",
+        "constraints": ["no live changes"],
+        "effect_limits": ["local-reversible"],
+    }
 
 
 def allocation():
-    return {"attempt_id": "attempt-1", "worktree": "/opt/TGW/w/attempts/w14-request/attempt-1/worktree", "attempt_root": "/var/cache/tgw/attempts/w14-request/attempt-1"}
+    return {"attempt_id": "attempt-1", "worktree": "/opt/TGW/w/attempts/w14-request/attempt-1/worktree", "attempt_root": "/opt/TGW/var/cache/tgw/attempts/w14-request/attempt-1"}
 
 
 def resolved():
     return {
-        "status": "RESOLVED", "alternatives": ["Todo"], "confidence": 0.9,
-        "explanation": "explicit selection", "plan": {"commit": COMMIT, "solution_hash": HASH},
+        "status": "RESOLVED",
+        "alternatives": ["Todo"],
+        "confidence": 0.9,
+        "explanation": "explicit selection",
+        "plan": {"commit": COMMIT, "solution_hash": HASH},
         "root": {"kind": "Todo", "id": "W14"},
         "closure": [
             {"id": "W12", "depends_on": [], "roles": ["implementation"]},
@@ -56,9 +66,7 @@ def test_lifecycle_receipt_does_not_alias_caller_request_or_resolution():
     assert result["request"]["constraints"] == ["no live changes"]
     assert result["resolution"]["alternatives"] == ["Todo"]
     assert result["resolution"]["plan"]["commit"] == COMMIT
-    assert result["lifecycle_hash"] == compile_request_lifecycle(
-        request=request(), resolution=resolved(), allocation=allocation()
-    )["lifecycle_hash"]
+    assert result["lifecycle_hash"] == compile_request_lifecycle(request=request(), resolution=resolved(), allocation=allocation())["lifecycle_hash"]
 
 
 @pytest.mark.parametrize("status", ["CLARIFICATION_REQUIRED", "HELD"])

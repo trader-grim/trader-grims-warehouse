@@ -1,7 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/api_client.dart';
 import '../db/offline_db.dart';
-import '../db/outbox_db.dart';
 import '../models/models.dart';
 import '../repository/repository.dart';
 import '../services/catalog_sync_service.dart';
@@ -10,7 +9,6 @@ enum ConnectionStatus { online, offline, error }
 
 final apiClientProvider = Provider((ref) => ApiClient());
 final offlineDbProvider = Provider((ref) => OfflineDb());
-final outboxDbProvider = Provider((ref) => OutboxDb());
 
 final catalogSyncProvider = Provider(
   (ref) => CatalogSyncService(
@@ -23,44 +21,36 @@ final repositoryProvider = Provider(
   (ref) => TgwRepository(
     apiClient: ref.watch(apiClientProvider),
     offlineDb: ref.watch(offlineDbProvider),
-    outboxDb: ref.watch(outboxDbProvider),
     ref: ref,
   ),
 );
 
 final connectionStatusProvider =
     StateNotifierProvider<ConnectionStatusNotifier, ConnectionStatus>((ref) {
-  return ConnectionStatusNotifier(ref.watch(apiClientProvider), ref);
-});
+      return ConnectionStatusNotifier(ref.watch(apiClientProvider), ref);
+    });
 
 class ConnectionStatusNotifier extends StateNotifier<ConnectionStatus> {
   final ApiClient _apiClient;
   final Ref _ref;
 
   ConnectionStatusNotifier(this._apiClient, this._ref)
-      : super(ConnectionStatus.offline) {
+    : super(ConnectionStatus.offline) {
     checkConnection();
   }
 
   Future<void> checkConnection() async {
-    final wasOffline = state != ConnectionStatus.online;
     final isOnline = await _apiClient.checkConnection();
     state = isOnline ? ConnectionStatus.online : ConnectionStatus.offline;
 
     if (isOnline) {
       // Sync catalog snapshot on every transition to online.
       _ref.read(catalogSyncProvider).sync();
-      // Flush any pending offline mutations.
-      if (wasOffline) {
-        _ref.read(repositoryProvider).flushOutbox();
-      }
+      // Operator-object mutations require a fresh online generation and are
+      // never replayed from an offline client outbox.
     }
   }
 }
-
-final pendingMutationsProvider = FutureProvider<int>((ref) async {
-  return ref.watch(repositoryProvider).pendingMutations();
-});
 
 final queueStatusProvider = FutureProvider<QueueStatus?>((ref) async {
   final api = ref.watch(apiClientProvider);
@@ -85,12 +75,14 @@ final itemDetailProvider = FutureProvider.family<ItemDetail?, String>((
 
 final operatorObjectProvider =
     FutureProvider.family<OperatorObjectView?, String>((ref, sku) async {
-  final response = await ref.watch(apiClientProvider).getOperatorObject(sku);
-  if (!response.ok) {
-    throw StateError(response.error ?? 'Operator object unavailable');
-  }
-  return response.data;
-});
+      final response = await ref
+          .watch(apiClientProvider)
+          .getOperatorObject(sku);
+      if (!response.ok) {
+        throw StateError(response.error ?? 'Operator object unavailable');
+      }
+      return response.data;
+    });
 
 final pipelineJobsProvider = FutureProvider<List<PipelineJob>>((ref) async {
   final api = ref.watch(apiClientProvider);

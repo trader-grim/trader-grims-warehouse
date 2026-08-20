@@ -4,6 +4,7 @@ The preflight has no launcher, broker, service, account-management, or source
 write capability.  It turns one catalog-declared actor/profile observation into
 a deterministic receipt that later boundaries can bind and revalidate.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -112,14 +113,15 @@ def _observe_store_file(declaration: Mapping[str, Any], *, path_key: str, hash_k
 def _observe_enforcement_boundary(catalog: Mapping[str, Any], boundary_root: str | Path | None) -> dict[str, Any]:
     declaration = catalog.get("enforcement_boundary")
     if not isinstance(declaration, Mapping) or set(declaration) != {
-        "schema", "version", "remote_inputs", "executable_renderer_inputs", "components", "assets",
+        "schema",
+        "version",
+        "remote_inputs",
+        "executable_renderer_inputs",
+        "components",
+        "assets",
     }:
         raise EnvironmentPreflightError("dynamic-surface enforcement boundary is invalid")
-    if (
-        declaration.get("schema") != "tgw-dynamic-surface-enforcement-boundary/v1"
-        or declaration.get("remote_inputs") is not False
-        or declaration.get("executable_renderer_inputs") is not False
-    ):
+    if declaration.get("schema") != "tgw-dynamic-surface-enforcement-boundary/v1" or declaration.get("remote_inputs") is not False or declaration.get("executable_renderer_inputs") is not False:
         raise EnvironmentPreflightError("dynamic-surface enforcement boundary is unsafe")
     version = declaration.get("version")
     components, assets = declaration.get("components"), declaration.get("assets")
@@ -136,13 +138,23 @@ def _observe_enforcement_boundary(catalog: Mapping[str, Any], boundary_root: str
         if not isinstance(entry, Mapping) or set(entry) != {"name", "relative_path", "content_sha256", "purpose"}:
             raise EnvironmentPreflightError("dynamic-surface enforcement component is invalid")
         name, relative, expected, purpose = (
-            entry.get("name"), entry.get("relative_path"), entry.get("content_sha256"), entry.get("purpose"),
+            entry.get("name"),
+            entry.get("relative_path"),
+            entry.get("content_sha256"),
+            entry.get("purpose"),
         )
         if (
-            not isinstance(name, str) or not name or name in names
-            or not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts
-            or not isinstance(expected, str) or _HASH.fullmatch(expected) is None
-            or not isinstance(purpose, str) or not purpose
+            not isinstance(name, str)
+            or not name
+            or name in names
+            or not isinstance(relative, str)
+            or not relative
+            or Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+            or not isinstance(expected, str)
+            or _HASH.fullmatch(expected) is None
+            or not isinstance(purpose, str)
+            or not purpose
         ):
             raise EnvironmentPreflightError("dynamic-surface enforcement component is invalid")
         names.add(name)
@@ -151,14 +163,21 @@ def _observe_enforcement_boundary(catalog: Mapping[str, Any], boundary_root: str
             raise EnvironmentPreflightError(f"dynamic-surface enforcement component mismatch: {name}")
         observed.append({"name": name, "relative_path": relative, "observed_sha256": expected})
     return {
-        "schema": declaration["schema"], "version": version,
-        "root": str(root), "remote_inputs": False, "executable_renderer_inputs": False,
+        "schema": declaration["schema"],
+        "version": version,
+        "root": str(root),
+        "remote_inputs": False,
+        "executable_renderer_inputs": False,
         "components": sorted(observed, key=lambda item: item["name"]),
     }
 
 
 def preflight(
-    *, catalog: Mapping[str, Any], actor: str, profile: str, attempt_id: str,
+    *,
+    catalog: Mapping[str, Any],
+    actor: str,
+    profile: str,
+    attempt_id: str,
     boundary_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Verify one catalog-defined environment without executing role work."""
@@ -176,7 +195,8 @@ def preflight(
     if declared_profile.get("state") != "ready-for-preflight":
         raise EnvironmentPreflightError("profile is not ready for preflight")
     is_extended = catalog.get("schema") in {
-        "tgw-execution-environment-catalog/v2", "tgw-execution-environment-catalog/v3",
+        "tgw-execution-environment-catalog/v2",
+        "tgw-execution-environment-catalog/v3",
     }
     if is_extended:
         qualified_roles = declared_actor.get("qualified_roles")
@@ -199,19 +219,26 @@ def preflight(
             if not isinstance(raw_cache_roots, Mapping) or not raw_cache_roots:
                 raise EnvironmentPreflightError("profile cache roots are invalid")
             cache_roots = {
-                str(name): _attempt_path(value, f"profile cache root {name}", attempt_id, root="/var/cache/tgw/attempts")
+                str(name): _attempt_path(
+                    value,
+                    f"profile cache root {name}",
+                    attempt_id,
+                    root="/opt/TGW/var/cache/tgw/attempts",
+                )
                 for name, value in raw_cache_roots.items()
                 if isinstance(name, str) and name
             }
             if len(cache_roots) != len(raw_cache_roots):
                 raise EnvironmentPreflightError("profile cache roots are invalid")
         else:
-            cache_roots = {"default": _attempt_path(
-                declared_profile.get("cache_root_template"),
-                "profile cache root",
-                attempt_id,
-                root="/var/cache/tgw/attempts",
-            )}
+            cache_roots = {
+                "default": _attempt_path(
+                    declared_profile.get("cache_root_template"),
+                    "profile cache root",
+                    attempt_id,
+                    root="/opt/TGW/var/cache/tgw/attempts",
+                )
+            }
     else:
         workspace_root, cache_roots = None, {}
     tools = declared_profile.get("tools")
@@ -227,7 +254,10 @@ def preflight(
             raise EnvironmentPreflightError("catalog tool identity is invalid")
         names.add(name)
         _, observed_hash = _observe_store_file(
-            tool, path_key="executable_path", hash_key="executable_sha256", label="executable",
+            tool,
+            path_key="executable_path",
+            hash_key="executable_sha256",
+            label="executable",
         )
         resolved = Path(executable).resolve(strict=False)
         if not resolved.is_file() or not os.access(resolved, os.X_OK):
@@ -236,8 +266,40 @@ def preflight(
     observed_artifacts: list[dict[str, str]] = []
     verification_commands: list[list[str]] = []
     environment: dict[str, str] = {}
+    if catalog.get("schema") == "tgw-execution-environment-catalog/v3" or (is_extended and profile == "mobile"):
+        raw_commands = declared_profile.get("verification_commands")
+        if (
+            not isinstance(raw_commands, list)
+            or not raw_commands
+            or any(not isinstance(command, list) or not command or not all(isinstance(arg, str) and arg for arg in command) for command in raw_commands)
+        ):
+            raise EnvironmentPreflightError("profile verification commands are invalid")
+        verification_commands = [list(command) for command in raw_commands]
+        if any(command[0] not in names for command in verification_commands):
+            raise EnvironmentPreflightError("profile verification command uses an undeclared tool")
+    if catalog.get("schema") == "tgw-execution-environment-catalog/v3":
+        bootstrap_revision = catalog.get("bootstrap_revision")
+        broker_policy_revision = catalog.get("broker_policy_revision")
+        if (
+            not isinstance(bootstrap_revision, Mapping)
+            or set(bootstrap_revision) != {"source_relative_path", "content_sha256"}
+            or not isinstance(bootstrap_revision.get("source_relative_path"), str)
+            or Path(bootstrap_revision["source_relative_path"]).is_absolute()
+            or ".." in Path(bootstrap_revision["source_relative_path"]).parts
+            or _HASH.fullmatch(str(bootstrap_revision.get("content_sha256"))) is None
+            or not isinstance(broker_policy_revision, Mapping)
+            or set(broker_policy_revision) != {"schema", "content_sha256", "members"}
+            or broker_policy_revision.get("schema") != "tgw-harness-broker-policy-set/v1"
+            or _HASH.fullmatch(str(broker_policy_revision.get("content_sha256"))) is None
+            or not isinstance(broker_policy_revision.get("members"), Mapping)
+            or not broker_policy_revision["members"]
+            or any(_HASH.fullmatch(str(value)) is None for value in broker_policy_revision["members"].values())
+        ):
+            raise EnvironmentPreflightError("catalog bootstrap or broker-policy revision is invalid")
     if is_extended and profile == "mobile":
         required_tools = {"flutter", "dart", "java", "gradle", "android-sdkmanager", "android-adb"}
+        if catalog.get("schema") == "tgw-execution-environment-catalog/v3":
+            required_tools.add("android-cmake")
         if names != required_tools:
             raise EnvironmentPreflightError("mobile profile tool set is incomplete")
         artifacts = declared_profile.get("artifacts")
@@ -246,7 +308,12 @@ def preflight(
         artifact_names: set[str] = set()
         for artifact in artifacts:
             if not isinstance(artifact, Mapping) or set(artifact) != {
-                "name", "version", "store_path", "store_path_hash", "content_path", "content_sha256",
+                "name",
+                "version",
+                "store_path",
+                "store_path_hash",
+                "content_path",
+                "content_sha256",
             }:
                 raise EnvironmentPreflightError("catalog artifact declaration is invalid")
             name, version = artifact["name"], artifact["version"]
@@ -254,22 +321,40 @@ def preflight(
                 raise EnvironmentPreflightError("catalog artifact identity is invalid")
             artifact_names.add(name)
             content_path, observed_hash = _observe_store_file(
-                artifact, path_key="content_path", hash_key="content_sha256", label="artifact",
+                artifact,
+                path_key="content_path",
+                hash_key="content_sha256",
+                label="artifact",
             )
-            observed_artifacts.append({
-                "name": name, "version": version, "content_path": content_path, "observed_sha256": observed_hash,
-            })
+            observed_artifacts.append(
+                {
+                    "name": name,
+                    "version": version,
+                    "content_path": content_path,
+                    "observed_sha256": observed_hash,
+                }
+            )
         required_artifacts = {
-            "flutter-sdk", "dart-sdk", "android-sdk-platform",
-            "android-build-tools", "android-ndk", "android-license",
+            "flutter-sdk",
+            "dart-sdk",
+            "android-sdk-platform",
+            "android-build-tools",
+            "android-ndk",
+            "android-license",
         }
         if catalog.get("schema") == "tgw-execution-environment-catalog/v3":
-            required_artifacts.add("android-sdk-platform-35")
+            required_artifacts.update({"android-sdk-platform-35", "android-cmake"})
         if artifact_names != required_artifacts:
             raise EnvironmentPreflightError("mobile profile artifact set is incomplete")
         raw_environment = declared_profile.get("environment")
         required_environment = {
-            "HOME", "PUB_CACHE", "GRADLE_USER_HOME", "ANDROID_USER_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "JAVA_HOME",
+            "HOME",
+            "PUB_CACHE",
+            "GRADLE_USER_HOME",
+            "ANDROID_USER_HOME",
+            "ANDROID_HOME",
+            "ANDROID_SDK_ROOT",
+            "JAVA_HOME",
         }
         if not isinstance(raw_environment, Mapping) or set(raw_environment) != required_environment:
             raise EnvironmentPreflightError("mobile profile environment is invalid")
@@ -287,16 +372,6 @@ def preflight(
             raise EnvironmentPreflightError("mobile profile cache environment is inconsistent")
         if environment["ANDROID_HOME"] != environment["ANDROID_SDK_ROOT"]:
             raise EnvironmentPreflightError("mobile profile Android SDK roots disagree")
-        raw_commands = declared_profile.get("verification_commands")
-        if (
-            not isinstance(raw_commands, list)
-            or not raw_commands
-            or any(not isinstance(command, list) or not command or not all(isinstance(arg, str) and arg for arg in command) for command in raw_commands)
-        ):
-            raise EnvironmentPreflightError("mobile verification commands are invalid")
-        verification_commands = [list(command) for command in raw_commands]
-        if any(command[0] not in names for command in verification_commands):
-            raise EnvironmentPreflightError("mobile verification command uses an undeclared tool")
     unsigned = {
         "schema": RECEIPT_SCHEMA,
         "result": "PASS",
@@ -307,14 +382,18 @@ def preflight(
         "tools": sorted(observed, key=lambda item: item["name"]),
     }
     if is_extended:
-        unsigned.update({
-            "workspace_root": workspace_root,
-            "cache_roots": cache_roots,
-            "environment": environment,
-            "artifacts": sorted(observed_artifacts, key=lambda item: item["name"]),
-            "verification_commands": verification_commands,
-        })
+        unsigned.update(
+            {
+                "workspace_root": workspace_root,
+                "cache_roots": cache_roots,
+                "environment": environment,
+                "artifacts": sorted(observed_artifacts, key=lambda item: item["name"]),
+                "verification_commands": verification_commands,
+            }
+        )
     if catalog.get("schema") == "tgw-execution-environment-catalog/v3":
+        unsigned["bootstrap_revision"] = dict(catalog["bootstrap_revision"])
+        unsigned["broker_policy_revision"] = dict(catalog["broker_policy_revision"])
         unsigned["enforcement_boundary"] = _observe_enforcement_boundary(catalog, boundary_root)
     return unsigned
 
@@ -329,10 +408,18 @@ def main() -> int:
     args = parser.parse_args()
     try:
         raw = json.loads(args.catalog.read_text(encoding="utf-8"))
-        print(json.dumps(preflight(
-            catalog=raw, actor=args.actor, profile=args.profile,
-            attempt_id=args.attempt_id, boundary_root=args.boundary_root,
-        ), sort_keys=True))
+        print(
+            json.dumps(
+                preflight(
+                    catalog=raw,
+                    actor=args.actor,
+                    profile=args.profile,
+                    attempt_id=args.attempt_id,
+                    boundary_root=args.boundary_root,
+                ),
+                sort_keys=True,
+            )
+        )
         return 0
     except (OSError, json.JSONDecodeError, EnvironmentPreflightError) as exc:
         print(json.dumps({"result": "HOLD", "error": str(exc)}, sort_keys=True), file=sys.stderr)

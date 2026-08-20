@@ -111,7 +111,10 @@ def compile_release_admission(*, request: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def validate_release_admission(
-    receipt: Mapping[str, Any], *, candidate_commit: str, candidate_tree: str,
+    receipt: Mapping[str, Any],
+    *,
+    candidate_commit: str,
+    candidate_tree: str,
 ) -> dict[str, Any]:
     """Verify the one immutable W16 receipt that may select a release.
 
@@ -146,16 +149,29 @@ def validate_release_admission(
 
 
 def validate_environment_preflight_for_admission(
-    receipt: Mapping[str, Any], *, catalog_hash: str, receipt_hash: str,
+    receipt: Mapping[str, Any],
+    *,
+    catalog_hash: str,
+    receipt_hash: str,
 ) -> dict[str, Any]:
     """Re-hash the W15 observation before a W16 boundary relies on it."""
     base_fields = {"schema", "result", "catalog_sha256", "actor", "profile", "attempt_id", "tools"}
     v2_fields = base_fields | {
-        "workspace_root", "cache_roots", "environment", "artifacts", "verification_commands",
+        "workspace_root",
+        "cache_roots",
+        "environment",
+        "artifacts",
+        "verification_commands",
     }
-    v3_fields = v2_fields | {"enforcement_boundary"}
+    v3_fields = v2_fields | {
+        "enforcement_boundary",
+        "bootstrap_revision",
+        "broker_policy_revision",
+    }
     if not isinstance(receipt, Mapping) or frozenset(receipt) not in {
-        frozenset(base_fields), frozenset(v2_fields), frozenset(v3_fields),
+        frozenset(base_fields),
+        frozenset(v2_fields),
+        frozenset(v3_fields),
     }:
         raise AdmissionRecoveryError("environment preflight receipt fields are not exact")
     value = dict(receipt)

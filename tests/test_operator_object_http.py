@@ -31,8 +31,10 @@ def _published():
         item={
             "sku": "sku-1",
             "draft_listing": {
-                "category_id": "123", "condition_enum": "USED_GOOD",
-                "condition_label": "Used - Good", "item_specifics": {},
+                "category_id": "123",
+                "condition_enum": "USED_GOOD",
+                "condition_label": "Used - Good",
+                "item_specifics": {},
             },
             "ebay_offer": {"offer_id": "offer-1", "status": "UNPUBLISHED"},
         },
@@ -47,22 +49,34 @@ def _published():
 def test_get_operator_object_mounts_real_http_contract(tmp_path, monkeypatch):
     item_dir = tmp_path / "sku-1"
     item_dir.mkdir()
-    (item_dir / "sku-1.json").write_text(json.dumps({
-        "sku": "sku-1",
-        "draft_listing": {
-            "category_id": "123", "condition_enum": "USED_GOOD",
-            "condition_label": "Used - Good", "item_specifics": {},
-        },
-        "ebay_offer": {"offer_id": "offer-1", "status": "UNPUBLISHED"},
-    }), encoding="utf-8")
+    (item_dir / "sku-1.json").write_text(
+        json.dumps(
+            {
+                "sku": "sku-1",
+                "draft_listing": {
+                    "category_id": "123",
+                    "condition_enum": "USED_GOOD",
+                    "condition_label": "Used - Good",
+                    "item_specifics": {},
+                },
+                "ebay_offer": {"offer_id": "offer-1", "status": "UNPUBLISHED"},
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(http_server, "_cfg", {"itemdata_root": tmp_path})
     monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
     monkeypatch.setattr(http_server, "_workflow_attempt_rows", lambda sku: [])
     monkeypatch.setattr(http_server, "_workflow_reconciled_provider_effect_ids", lambda rows: frozenset())
     monkeypatch.setattr(action_cards, "build_item_action_card", lambda *args, **kwargs: _card())
-    monkeypatch.setattr(http_server, "ebay_category_context", lambda *args, **kwargs: {
-        "conditions": [{"enum": "USED_GOOD", "label": "Used - Good"}], "aspects": [],
-    })
+    monkeypatch.setattr(
+        http_server,
+        "ebay_category_context",
+        lambda *args, **kwargs: {
+            "conditions": [{"enum": "USED_GOOD", "label": "Used - Good"}],
+            "aspects": [],
+        },
+    )
 
     response = TestClient(http_server.app).get("/api/operator/items/sku-1", headers=AUTH)
 
@@ -71,7 +85,9 @@ def test_get_operator_object_mounts_real_http_contract(tmp_path, monkeypatch):
     assert payload["schema"] == "tgw-operator-object/v1"
     assert payload["object_generation"] == "gen-1"
     assert [command["id"] for command in payload["commands"]] == [
-        "save-draft", "list-item", "update-item",
+        "save-draft",
+        "list-item",
+        "update-item",
     ]
 
 
@@ -93,12 +109,32 @@ def test_command_rejects_stale_generation_before_dispatch(monkeypatch):
     monkeypatch.setattr(http_server, "_current_item_operator_object", lambda sku: _published())
 
     response = TestClient(http_server.app).post(
-        "/api/operator/items/sku-1/commands", headers=AUTH,
+        "/api/operator/items/sku-1/commands",
+        headers=AUTH,
         json={"command_id": "list-item", "object_generation": "stale", "values": {}},
     )
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "generation_conflict"
+
+
+def test_legacy_publication_and_bulk_list_paths_are_not_registered(monkeypatch):
+    monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
+    client = TestClient(http_server.app)
+    direct = client.post(
+        "/api/items/sku-1/action",
+        headers=AUTH,
+        json={"action": "ebay_publish"},
+    )
+    bulk = client.post(
+        "/api/bulk/action",
+        headers=AUTH,
+        json={"action": "list_now", "skus": ["sku-1"]},
+    )
+    assert direct.status_code == 400
+    assert bulk.status_code == 400
+    assert "ebay_publish" not in http_server.PIPELINE_ACTIONS
+    assert "list_now" not in http_server._BULK_VALID_ACTIONS
 
 
 def test_update_command_uses_nonpublication_dispatcher(monkeypatch, tmp_path):
@@ -112,7 +148,8 @@ def test_update_command_uses_nonpublication_dispatcher(monkeypatch, tmp_path):
         seen.update(kwargs)
         result = SimpleNamespace(
             graph=SimpleNamespace(graph_id="graph-2", object_generation="gen-1"),
-            held_external=(), operator_gates=(),
+            held_external=(),
+            operator_gates=(),
         )
         dispatched = SimpleNamespace(enqueued=True, job_id="job-1")
         return result, dispatched, "authority-1", True
@@ -125,7 +162,8 @@ def test_update_command_uses_nonpublication_dispatcher(monkeypatch, tmp_path):
     )
 
     response = TestClient(http_server.app).post(
-        "/api/operator/items/sku-1/commands", headers=AUTH,
+        "/api/operator/items/sku-1/commands",
+        headers=AUTH,
         json={"command_id": "update-item", "object_generation": "gen-1", "values": {}},
     )
 
@@ -138,34 +176,46 @@ def test_save_draft_uses_published_schema_and_never_calls_provider(monkeypatch, 
     monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
     monkeypatch.setattr(http_server, "_cfg", {"itemdata_root": tmp_path})
     published = _published()
-    published["commands"].insert(0, {
-        "id": "save-draft", "label": "Save Draft", "enabled": True, "reason": None,
-        "authority_scope": "local-item-mutation", "refresh_target": "current-object",
-        "input_schema": {
-            "type": "object", "additionalProperties": False,
-            "properties": {
-                "item_fields": {"type": "object", "additionalProperties": False, "properties": {"title": {"type": "string"}}},
-                "draft_listing": {"type": "object", "additionalProperties": False, "properties": {"price": {"type": "number", "nullable": True}}},
+    published["commands"].insert(
+        0,
+        {
+            "id": "save-draft",
+            "label": "Save Draft",
+            "enabled": True,
+            "reason": None,
+            "authority_scope": "local-item-mutation",
+            "refresh_target": "current-object",
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "item_fields": {"type": "object", "additionalProperties": False, "properties": {"title": {"type": "string"}}},
+                    "draft_listing": {"type": "object", "additionalProperties": False, "properties": {"price": {"type": "number", "nullable": True}}},
+                },
             },
         },
-    })
+    )
     after = json.loads(json.dumps(published))
     after["object_generation"] = "gen-2"
     seen = []
     monkeypatch.setattr(http_server, "_current_item_operator_object", lambda sku: after if seen else published)
     monkeypatch.setattr(
-        http_server, "patch_item",
+        http_server,
+        "patch_item",
         lambda sku, body, request, operator: seen.append(dict(body.fields)) or {"ok": True},
     )
     monkeypatch.setattr(
-        listing_migration, "authorize_and_dispatch_next_listing_effect",
+        listing_migration,
+        "authorize_and_dispatch_next_listing_effect",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("publication dispatcher called")),
     )
 
     response = TestClient(http_server.app).post(
-        "/api/operator/items/sku-1/commands", headers=AUTH,
+        "/api/operator/items/sku-1/commands",
+        headers=AUTH,
         json={
-            "command_id": "save-draft", "object_generation": "gen-1",
+            "command_id": "save-draft",
+            "object_generation": "gen-1",
             "values": {"item_fields": {"title": "Revised"}, "draft_listing": {"price": 12.5}},
         },
     )

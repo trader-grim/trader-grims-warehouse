@@ -5,7 +5,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../../providers/providers.dart';
 import '../../models/models.dart';
-import 'edit_item_screen.dart';
 
 class ItemScreen extends ConsumerWidget {
   final String? sku;
@@ -67,8 +66,9 @@ class _ItemDetailView extends ConsumerWidget {
     final isOnline =
         ref.watch(connectionStatusProvider) == ConnectionStatus.online;
     final api = ref.read(apiClientProvider);
-    final localPath =
-        ref.read(offlineDbProvider).getLocalThumbnailPath(item.sku);
+    final localPath = ref
+        .read(offlineDbProvider)
+        .getLocalThumbnailPath(item.sku);
 
     Widget image;
     if (isOnline && item.images.isNotEmpty) {
@@ -113,16 +113,6 @@ class _ItemDetailView extends ConsumerWidget {
                       ),
                     ),
                   ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              IconButton(
-                icon: const Icon(Icons.edit, color: Colors.blue),
-                onPressed: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => EditItemScreen(item: item),
-                  ),
                 ),
               ),
               const SizedBox(width: 8),
@@ -216,7 +206,7 @@ class _ItemDetailView extends ConsumerWidget {
     final displayPrice = offerPrice ?? draftPrice;
     final priceStr = displayPrice != null
         ? '\$${(displayPrice as num).toStringAsFixed(2)}'
-            '${offerPrice != null ? ' (offer)' : ''}'
+              '${offerPrice != null ? ' (offer)' : ''}'
         : '-';
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -232,8 +222,8 @@ class _ItemDetailView extends ConsumerWidget {
         const Divider(),
         const Text('Aspects', style: TextStyle(fontWeight: FontWeight.bold)),
         ...?(draft['aspects'] as Map?)?.entries.map(
-              (e) => _infoRow(e.key, e.value.toString()),
-            ),
+          (e) => _infoRow(e.key, e.value.toString()),
+        ),
       ],
     );
   }
@@ -403,7 +393,9 @@ class _OperatorWorkflowPanelState
         : <String, dynamic>{};
     if (values == null) return;
     setState(() => _submitting = true);
-    final response = await ref.read(apiClientProvider).executeOperatorCommand(
+    final response = await ref
+        .read(apiClientProvider)
+        .executeOperatorCommand(
           widget.sku,
           command,
           object.objectGeneration,

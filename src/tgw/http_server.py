@@ -138,9 +138,10 @@ def _queue_consumers(queue_names: List[str]) -> Dict[str, Dict[str, str]]:
             unit = f"tgw-worker@{queue_name}.service"
             try:
                 result = subprocess.run(
-                    ["systemctl", "show", unit,
-                     "--property=LoadState,ActiveState", "--value"],
-                    capture_output=True, text=True, timeout=3,
+                    ["systemctl", "show", unit, "--property=LoadState,ActiveState", "--value"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
                 )
                 values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
                 load_state = values[0] if values else "not-found"
@@ -156,18 +157,25 @@ def _queue_consumers(queue_names: List[str]) -> Dict[str, Dict[str, str]]:
             else:
                 status, reason = "inactive", "Worker is configured but not running."
             refreshed[queue_name] = {
-                "unit": unit, "status": status, "reason": reason,
+                "unit": unit,
+                "status": status,
+                "reason": reason,
             }
         _QUEUE_CONSUMER_CACHE.clear()
         _QUEUE_CONSUMER_CACHE.update(refreshed)
         _QUEUE_CONSUMER_CACHE_AT = now
     return {
-        name: _QUEUE_CONSUMER_CACHE.get(name, {
-            "unit": f"tgw-worker@{name}.service",
-            "status": "unknown", "reason": "Worker status is unavailable.",
-        })
+        name: _QUEUE_CONSUMER_CACHE.get(
+            name,
+            {
+                "unit": f"tgw-worker@{name}.service",
+                "status": "unknown",
+                "reason": "Worker status is unavailable.",
+            },
+        )
         for name in names
     }
+
 
 # Module-level state (set during lifespan startup)
 # ---------------------------------------------------------------------------
@@ -234,13 +242,7 @@ def _listing_index_built_at_reset() -> None:
 
 PIPELINE_ACTIONS = {
     "ai_identify",
-    "ebay_draft",
-    "ebay_upload",
-    "ebay_price",
-    "ebay_stage",
-    "ebay_publish",
     "ebay_end_listing",
-    "ebay_update",
     "resync_photos",
     "accept_proposals",
     "dismiss_proposals",
@@ -266,6 +268,7 @@ PIPELINE_ACTIONS = {
 async def lifespan(app: FastAPI):
     global _cfg, _api_key, _web_password
     from tgw.config import load_operational_config
+
     _cfg = load_operational_config(DEFAULT_CONFIG)
     state_machine.init(_cfg["postgres_dsn"])
 
@@ -290,6 +293,7 @@ async def lifespan(app: FastAPI):
     # (never budget-halted, only counted)
     try:
         from tgw import quota
+
         quota.set_context("interactive", "tgw-http")
     except Exception as exc:
         log.debug("quota context skipped: %s", exc)
@@ -307,6 +311,7 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
 
 class _NoCacheStaticFiles(StaticFiles):
     """Force revalidation on every request (Dave, 2026-07-17): a plain
@@ -402,7 +407,10 @@ def _configured_authority_principal(field: str, role: PrincipalRole, binding: st
     """Construct an authority principal from server configuration only."""
     try:
         return configured_authority_principal(
-            _cfg, field=field, role=role, authentication_binding=binding,
+            _cfg,
+            field=field,
+            role=role,
+            authentication_binding=binding,
         )
     except RuntimeError as exc:
         raise HTTPException(
@@ -424,11 +432,15 @@ def _require_plan_operator(
     mechanism = _require_auth(credentials, request)
     if mechanism == "operator:api-key":
         return _configured_authority_principal(
-            "plan_authority_operator_api_principal", PrincipalRole.OPERATOR, "api-key",
+            "plan_authority_operator_api_principal",
+            PrincipalRole.OPERATOR,
+            "api-key",
         )
     if mechanism == "operator:web-session":
         return _configured_authority_principal(
-            "plan_authority_operator_session_principal", PrincipalRole.OPERATOR, "web-session",
+            "plan_authority_operator_session_principal",
+            PrincipalRole.OPERATOR,
+            "web-session",
         )
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid Plan authority operator")
 
@@ -444,17 +456,16 @@ def _require_plan_executor(request: Request) -> AuthorityPrincipal:
     reference = _cfg.get("plan_authority_executor_credential_env")
     supplied = request.headers.get("X-TGW-Executor-Authorization", "")
     expected = os.environ.get(reference) if isinstance(reference, str) else None
-    if (
-        not expected
-        or not supplied.startswith("Bearer ")
-    ):
+    if not expected or not supplied.startswith("Bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid Plan authority executor")
     if not secrets.compare_digest(supplied.removeprefix("Bearer ").encode(), expected.encode()):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid Plan authority executor")
     if request.headers.get("X-TGW-Executor-Identity"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="client-supplied executor identity is forbidden")
     return _configured_authority_principal(
-        "plan_authority_executor_principal", PrincipalRole.EXECUTOR, f"credential-env:{reference}",
+        "plan_authority_executor_principal",
+        PrincipalRole.EXECUTOR,
+        f"credential-env:{reference}",
     )
 
 
@@ -512,7 +523,8 @@ def coding_provision_start(body: CodingProvisionStart):
 
     try:
         return create_request(
-            _cfg, todo_id=body.todo_id,
+            _cfg,
+            todo_id=body.todo_id,
             object_generation=body.object_generation,
             source_commit=body.source_commit,
         )
@@ -570,9 +582,7 @@ def coding_worker_claim(request_id: str, body: CodingWorkerClaim, worker_identit
     from .coding_provision import claim_request
 
     try:
-        return claim_request(_cfg, request_id=request_id, local_host=body.host,
-                             worker_identity=worker_identity, envelope_hash=body.envelope_hash,
-                             location=body.location, snapshot=body.snapshot)
+        return claim_request(_cfg, request_id=request_id, local_host=body.host, worker_identity=worker_identity, envelope_hash=body.envelope_hash, location=body.location, snapshot=body.snapshot)
     except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -582,8 +592,7 @@ def coding_worker_start(request_id: str, body: CodingWorkerLease, worker_identit
     from .coding_provision import start_request
 
     try:
-        return start_request(_cfg, request_id=request_id, worker_identity=worker_identity,
-                             lease_token=body.lease_token)
+        return start_request(_cfg, request_id=request_id, worker_identity=worker_identity, lease_token=body.lease_token)
     except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -593,8 +602,7 @@ def coding_worker_complete(request_id: str, body: CodingWorkerComplete, worker_i
     from .coding_provision import complete_request
 
     try:
-        return complete_request(_cfg, request_id=request_id, worker_identity=worker_identity,
-                                lease_token=body.lease_token, result=body.result)
+        return complete_request(_cfg, request_id=request_id, worker_identity=worker_identity, lease_token=body.lease_token, result=body.result)
     except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -604,8 +612,7 @@ def coding_worker_fail(request_id: str, body: CodingWorkerFail, worker_identity:
     from .coding_provision import fail_request
 
     try:
-        return fail_request(_cfg, request_id=request_id, worker_identity=worker_identity,
-                            lease_token=body.lease_token, error=body.error, result=body.result)
+        return fail_request(_cfg, request_id=request_id, worker_identity=worker_identity, lease_token=body.lease_token, error=body.error, result=body.result)
     except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -617,6 +624,7 @@ async def _session_guard(request: Request, call_next):
         tok = request.cookies.get(_SESSION_COOKIE)
         if not (tok and _sessions.get(tok, 0) > time.time()):
             from urllib.parse import quote
+
             dest = request.url.path
             if request.url.query:
                 dest += "?" + request.url.query
@@ -649,8 +657,11 @@ async def login_post(
         dest = _safe_next_path(next)
         resp = RedirectResponse(dest, status_code=303)
         resp.set_cookie(
-            _SESSION_COOKIE, tok,
-            httponly=True, samesite="strict", max_age=_SESSION_MAX_AGE,
+            _SESSION_COOKIE,
+            tok,
+            httponly=True,
+            samesite="strict",
+            max_age=_SESSION_MAX_AGE,
         )
         return resp
     html = _LOGIN_HTML.format(next=_html.escape(next), error='<p class="err">Invalid key.</p>')
@@ -837,10 +848,8 @@ def list_items(
         # `if not status_filter` clause above). This is the feed for
         # one-at-a-time listing runs.
         clauses.append("(status IS NULL OR status = '' OR LOWER(status) IN ('new', 'in stock'))")
-        clauses.append("(json_extract(data, '$.ebay_listing.status') IS NULL"
-                       " OR json_extract(data, '$.ebay_listing.status') NOT IN ('Active', 'PUBLISHED'))")
-        clauses.append("(json_extract(data, '$.ebay_offer.status') IS NULL"
-                       " OR json_extract(data, '$.ebay_offer.status') != 'PUBLISHED')")
+        clauses.append("(json_extract(data, '$.ebay_listing.status') IS NULL OR json_extract(data, '$.ebay_listing.status') NOT IN ('Active', 'PUBLISHED'))")
+        clauses.append("(json_extract(data, '$.ebay_offer.status') IS NULL OR json_extract(data, '$.ebay_offer.status') != 'PUBLISHED')")
     elif status_filter:
         clauses.append("status = ?")
         params.append(status_filter)
@@ -1007,26 +1016,19 @@ def _workflow_attempt_rows(sku: str, limit: int = 100) -> List[Dict[str, Any]]:
     for row in rows:
         row["consumer"] = consumers.get(str(row.get("queue_name") or ""), {})
         not_before = row.get("not_before")
-        if (
-            row.get("state") in {"queued", "retry_wait"}
-            and isinstance(not_before, datetime)
-            and not_before > datetime.now(timezone.utc)
-        ):
+        if row.get("state") in {"queued", "retry_wait"} and isinstance(not_before, datetime) and not_before > datetime.now(timezone.utc):
             # A deliberate delayed/repeating job is not a stalled job.  Keep
             # the timestamp in the row so the item view can say when it is
             # due instead of offering an unexplained queued state.
             row["scheduled_at"] = not_before
         payload = row.get("payload_json") or {}
         result = payload.get("result") if isinstance(payload, dict) else None
-        governed = isinstance(payload, dict) and all(
-            payload.get(key) for key in ("treatment_id", "graph_id", "object_generation")
-        )
+        governed = isinstance(payload, dict) and all(payload.get(key) for key in ("treatment_id", "graph_id", "object_generation"))
         ambiguous = isinstance(result, dict) and result.get("outcome") in {
-            "ambiguous", "reconciliation_required",
+            "ambiguous",
+            "reconciliation_required",
         }
-        row["retry_allowed"] = (
-            row.get("state") == "dead_letter" and not governed and not ambiguous
-        )
+        row["retry_allowed"] = row.get("state") == "dead_letter" and not governed and not ambiguous
     return rows
 
 
@@ -1036,16 +1038,14 @@ def _workflow_reconciled_provider_effect_ids(attempts: List[Dict[str, Any]]) -> 
         result.get("evidence", {}).get("provider_effect_id")
         for row in attempts
         for result in [(row.get("payload_json") or {}).get("result")]
-        if isinstance(result, dict) and isinstance(result.get("evidence"), dict)
-        and isinstance(result["evidence"].get("provider_effect_id"), str)
+        if isinstance(result, dict) and isinstance(result.get("evidence"), dict) and isinstance(result["evidence"].get("provider_effect_id"), str)
     }
     if not effect_ids:
         return frozenset()
     with psycopg2.connect(_cfg["postgres_dsn"]) as con:
         with con.cursor() as cur:
             cur.execute(
-                "SELECT effect_id FROM provider_effects WHERE effect_id = ANY(%s) "
-                "AND state IN ('succeeded', 'rejected')",
+                "SELECT effect_id FROM provider_effects WHERE effect_id = ANY(%s) AND state IN ('succeeded', 'rejected')",
                 (list(effect_ids),),
             )
             return frozenset(str(row[0]) for row in cur.fetchall())
@@ -1123,11 +1123,7 @@ def _current_item_operator_object(sku: str) -> Dict[str, Any]:
         draft = item.get("draft_listing") if isinstance(item.get("draft_listing"), dict) else {}
         category_id = str(draft.get("category_id") or item.get("ebay_category_id") or "")
         current_condition = str(draft.get("condition_enum") or draft.get("condition") or "")
-        category_context = (
-            ebay_category_context(category_id, current_condition=current_condition)
-            if category_id and category_id != "99"
-            else {}
-        )
+        category_context = ebay_category_context(category_id, current_condition=current_condition) if category_id and category_id != "99" else {}
         category_context = dict(category_context)
         try:
             store_categories, _store_refreshed, _store_error = _store_categories_snapshot(_cfg)
@@ -1137,15 +1133,8 @@ def _current_item_operator_object(sku: str) -> Dict[str, Any]:
             fulfillment, _fulfillment_refreshed, _fulfillment_error = _fulfillment_policies_snapshot(_cfg)
         except (KeyError, OSError, ValueError):
             fulfillment = {}
-        category_context["store_categories"] = [
-            {"value": entry["id"], "label": entry["name"]}
-            for entry in store_categories
-            if isinstance(entry.get("id"), str) and isinstance(entry.get("name"), str)
-        ]
-        category_context["fulfillment_policies"] = [
-            {"value": policy_id, "label": label}
-            for policy_id, label in sorted(fulfillment.items(), key=lambda item: (item[1].casefold(), item[0]))
-        ]
+        category_context["store_categories"] = [{"value": entry["id"], "label": entry["name"]} for entry in store_categories if isinstance(entry.get("id"), str) and isinstance(entry.get("name"), str)]
+        category_context["fulfillment_policies"] = [{"value": policy_id, "label": label} for policy_id, label in sorted(fulfillment.items(), key=lambda item: (item[1].casefold(), item[0]))]
         return build_item_operator_object(
             item=item,
             workflow_card=workflow_card,
@@ -1154,18 +1143,22 @@ def _current_item_operator_object(sku: str) -> Dict[str, Any]:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(
-            status_code=503, detail=f"operator object unavailable: {exc}"
-        ) from exc
+        raise HTTPException(status_code=503, detail=f"operator object unavailable: {exc}") from exc
 
 
 @app.get("/api/operator/items", dependencies=[AUTH])
 def operator_item_catalog(
-    search: str = "", status_filter: str = "", limit: int = 200, offset: int = 0,
+    search: str = "",
+    status_filter: str = "",
+    limit: int = 200,
+    offset: int = 0,
 ) -> Dict[str, Any]:
     """Publish catalog navigation without inventing item workflow state."""
     catalog = list_items(
-        search=search, status_filter=status_filter, limit=limit, offset=offset,
+        search=search,
+        status_filter=status_filter,
+        limit=limit,
+        offset=offset,
     )
     return {
         "ok": True,
@@ -1224,7 +1217,9 @@ def execute_item_operator_command(
 
         try:
             checked_values = validate_operator_command_values(
-                published, body.command_id, body.values,
+                published,
+                body.command_id,
+                body.values,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1234,11 +1229,14 @@ def execute_item_operator_command(
             patch_fields = {**item_fields, "draft_listing": draft_fields}
         else:
             patch_fields = {"draft_listing": checked_values}
-        patch_item(sku, PatchBody(fields=patch_fields), Request({"type": "http", "headers": []}), operator_identity)
-        published = _current_item_operator_object(sku)
-        command = next(
-            item for item in published["commands"] if item["id"] == body.command_id
+        patch_item(
+            sku,
+            PatchBody(fields=patch_fields),
+            Request({"type": "http", "headers": [], "state": {"tgw_operator_object": True}}),
+            operator_identity,
         )
+        published = _current_item_operator_object(sku)
+        command = next(item for item in published["commands"] if item["id"] == body.command_id)
         if not command["enabled"]:
             raise HTTPException(
                 status_code=409,
@@ -1247,7 +1245,8 @@ def execute_item_operator_command(
 
     if body.command_id == "save-draft":
         return {
-            "ok": True, "command_id": body.command_id,
+            "ok": True,
+            "command_id": body.command_id,
             "authority_scope": command["authority_scope"],
             "object_generation": published["object_generation"],
             "refresh": f"/api/operator/items/{sku}",
@@ -1261,14 +1260,12 @@ def execute_item_operator_command(
         if body.command_id == "list-item":
             from .workflow.listing_migration import authorize_and_dispatch_next_listing_effect
 
-            result, dispatched, authority_id, authority_created = (
-                authorize_and_dispatch_next_listing_effect(
-                    json_path,
-                    operator_identity=operator_identity,
-                    surface="http:operator-object:list-item",
-                    provider_identity=provider_identity,
-                    ttl_seconds=body.authority_ttl_seconds,
-                )
+            result, dispatched, authority_id, authority_created = authorize_and_dispatch_next_listing_effect(
+                json_path,
+                operator_identity=operator_identity,
+                surface="http:operator-object:list-item",
+                provider_identity=provider_identity,
+                ttl_seconds=body.authority_ttl_seconds,
             )
         else:
             from .workflow.listing_migration import authorize_and_dispatch_update_item
@@ -1311,7 +1308,9 @@ def item_workflow(sku: str) -> Dict[str, Any]:
         attempts = _workflow_attempt_rows(sku)
         reconciled_effect_ids = _workflow_reconciled_provider_effect_ids(attempts)
         card = build_item_action_card(
-            json_path, attempts, provider_identity=_workflow_provider_identity(),
+            json_path,
+            attempts,
+            provider_identity=_workflow_provider_identity(),
             reconciled_provider_effect_ids=reconciled_effect_ids,
         )
     except HTTPException:
@@ -1333,9 +1332,7 @@ def item_workflow_reconciliation(sku: str) -> Dict[str, Any]:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(
-            status_code=503, detail=f"workflow reconciliation unavailable: {exc}"
-        ) from exc
+        raise HTTPException(status_code=503, detail=f"workflow reconciliation unavailable: {exc}") from exc
     offer = item.get("ebay_offer") if isinstance(item.get("ebay_offer"), dict) else {}
     listing = item.get("ebay_listing") if isinstance(item.get("ebay_listing"), dict) else {}
     return {
@@ -1344,14 +1341,8 @@ def item_workflow_reconciliation(sku: str) -> Dict[str, Any]:
         "entity_id": sku,
         "provider_identity": _workflow_provider_identity(),
         "canonical_markers": {
-            "stage": {
-                key: offer.get(key)
-                for key in ("provider_effect_id", "offer_id", "stage_content_identity")
-            },
-            "publish": {
-                key: listing.get(key)
-                for key in ("provider_effect_id", "listing_id", "offer_id", "published_at")
-            },
+            "stage": {key: offer.get(key) for key in ("provider_effect_id", "offer_id", "stage_content_identity")},
+            "publish": {key: listing.get(key) for key in ("provider_effect_id", "listing_id", "offer_id", "published_at")},
         },
         **ledgers,
     }
@@ -1359,7 +1350,8 @@ def item_workflow_reconciliation(sku: str) -> Dict[str, Any]:
 
 @app.post("/api/items/{sku}/workflow-goal")
 def request_workflow_goal(
-    sku: str, body: WorkflowGoalBody,
+    sku: str,
+    body: WorkflowGoalBody,
     operator_identity: str = Depends(_require_auth),
 ) -> Dict[str, Any]:
     """Evaluate an operator goal; dispatch at most one local treatment."""
@@ -1384,9 +1376,13 @@ def request_workflow_goal(
         raise HTTPException(status_code=503, detail="provider identity is not configured")
     try:
         result, authority_id, authority_created = authorize_and_request_item_goal(
-            json_path, goal, operator_identity=operator_identity,
-            surface="http:item-workflow-goal", provider_identity=provider_identity,
-            scopes=tuple(body.scopes), ttl_seconds=body.authority_ttl_seconds,
+            json_path,
+            goal,
+            operator_identity=operator_identity,
+            surface="http:item-workflow-goal",
+            provider_identity=provider_identity,
+            scopes=tuple(body.scopes),
+            ttl_seconds=body.authority_ttl_seconds,
         )
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -1476,13 +1472,17 @@ def get_item(sku: str) -> Dict[str, Any]:
 
 @app.patch("/api/items/{sku}")
 def patch_item(
-    sku: str, body: PatchBody, request: Request,
+    sku: str,
+    body: PatchBody,
+    request: Request,
     operator_identity: str = Depends(_require_auth),
 ) -> Dict[str, Any]:
     if "sku" in body.fields:
         raise HTTPException(status_code=400, detail="sku field is immutable")
     if not body.fields:
         raise HTTPException(status_code=400, detail="no fields provided")
+
+    operator_object_write = bool(getattr(getattr(request, "state", None), "tgw_operator_object", False))
 
     # Todo #1464 (Tigwa's field-set-boundary audit, invariant C12/C14): a
     # caller-supplied FULL Set A/Set B envelope bypasses the sanctioned
@@ -1504,25 +1504,20 @@ def patch_item(
     # value here; any operator/browser-originated request must send bare
     # field updates and let the accessor build the envelope.
     _caller_for_envelope_gate = request.headers.get("X-TGW-Caller", "")
-    _is_machine_caller = (_caller_for_envelope_gate.startswith("background:")
-                          or "worker:" in _caller_for_envelope_gate)
+    _is_machine_caller = _caller_for_envelope_gate.startswith("background:") or "worker:" in _caller_for_envelope_gate
     if not _is_machine_caller:
         _ia = body.fields.get("item_attributes")
         if isinstance(_ia, dict) and inventory_record.is_envelope(_ia):
             raise HTTPException(
                 status_code=422,
-                detail=("item_attributes must be a bare field-update dict, not a "
-                        "full Set A envelope, from a non-machine caller — invariant "
-                        "C12/C14, todo #1464"),
+                detail=("item_attributes must be a bare field-update dict, not a full Set A envelope, from a non-machine caller — invariant C12/C14, todo #1464"),
             )
         _dl_for_gate = body.fields.get("draft_listing")
         _isp = _dl_for_gate.get("item_specifics") if isinstance(_dl_for_gate, dict) else None
         if isinstance(_isp, dict) and _is_ebay_draft_envelope(_isp):
             raise HTTPException(
                 status_code=422,
-                detail=("draft_listing.item_specifics must be a bare field-update "
-                        "dict, not a full Set B envelope, from a non-machine caller "
-                        "— invariant C12/C14, todo #1464"),
+                detail=("draft_listing.item_specifics must be a bare field-update dict, not a full Set B envelope, from a non-machine caller — invariant C12/C14, todo #1464"),
             )
 
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
@@ -1551,8 +1546,7 @@ def patch_item(
     _new_dl_fields = body.fields.get("draft_listing")
     if isinstance(_new_dl_fields, dict) and doc_before.get("pipeline_error"):
         _merged_dl = {**(doc_before.get("draft_listing") or {}), **_new_dl_fields}
-        _resolved = draft_sync.resolve_pipeline_error(
-            doc_before["pipeline_error"], _merged_dl, clear_rejections=False)
+        _resolved = draft_sync.resolve_pipeline_error(doc_before["pipeline_error"], _merged_dl, clear_rejections=False)
         if _resolved is None:
             body.fields["pipeline_error"] = None
 
@@ -1565,8 +1559,7 @@ def patch_item(
     # tgw202605040949058, where 9 ebay_stage jobs "succeeded" while pushing
     # stale AI text over the operator's edits. Regenerate it here so the
     # cache can never outlive the field it's derived from.
-    if isinstance(_new_dl_fields, dict) and "description" in _new_dl_fields \
-            and "listing_description" not in _new_dl_fields:
+    if isinstance(_new_dl_fields, dict) and "description" in _new_dl_fields and "listing_description" not in _new_dl_fields:
         _merged_dl_for_desc = {**(doc_before.get("draft_listing") or {}), **_new_dl_fields}
         _item_for_desc = {**doc_before, "draft_listing": _merged_dl_for_desc}
         _new_dl_fields["listing_description"] = build_listing_description(_item_for_desc, _cfg)
@@ -1585,14 +1578,18 @@ def patch_item(
     if isinstance(_new_dl_fields, dict) and "condition_enum" in _new_dl_fields:
         _ce = _new_dl_fields.get("condition_enum")
         from .apis.ebay.conditions import is_known_condition_enum
+
         if _ce and not is_known_condition_enum(_ce):
             from fastapi.responses import JSONResponse
-            return JSONResponse(status_code=422, content={
-                "ok": False,
-                "error": f"condition_enum {_ce!r} is not a valid eBay Inventory "
-                         f"API condition enum — rejected, not saved",
-                "field": "condition_enum",
-            })
+
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "error": f"condition_enum {_ce!r} is not a valid eBay Inventory API condition enum — rejected, not saved",
+                    "field": "condition_enum",
+                },
+            )
 
     updated_keys, resulting_generation = _apply_patch(json_path, body.fields)
 
@@ -1607,14 +1604,16 @@ def patch_item(
             _new_p = _new_dl.get("price")
             if _new_p is not None and str(_new_p) != str(_old_p):
                 _caller_id = request.headers.get("X-TGW-Caller", "operator")
-                _hist = (doc_before.get("price_history") or []) + [{
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "price": float(_new_p),
-                    "previous_price": float(_old_p) if _old_p not in (None, "") else None,
-                    "stage": None,
-                    "label": "price edited",
-                    "source": _caller_id,
-                }]
+                _hist = (doc_before.get("price_history") or []) + [
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "price": float(_new_p),
+                        "previous_price": float(_old_p) if _old_p not in (None, "") else None,
+                        "stage": None,
+                        "label": "price edited",
+                        "source": _caller_id,
+                    }
+                ]
                 _apply_patch(json_path, {"price_history": _hist})
     except (TypeError, ValueError) as _exc:
         log.warning("price_history append skipped for %s: %s", sku, _exc)
@@ -1629,8 +1628,11 @@ def patch_item(
             # ("updated": ["location"]) while the item is silently misfiled.
             log.warning("location tree update failed for %s: %s", sku, result)
             _persist_finding(
-                json_path, sku, "location_update_failed",
-                f"locationupdate() failed: {result}", "patch_item:location",
+                json_path,
+                sku,
+                "location_update_failed",
+                f"locationupdate() failed: {result}",
+                "patch_item:location",
             )
 
     _enqueue_catalog_rebuild(f"http_patch:{sku}")
@@ -1683,18 +1685,20 @@ def patch_item(
     # would create a second, force-restage authority for the same click and
     # leave a spurious provider-effect-binding dead letter behind.
     _draft_intent = request.headers.get("X-TGW-Draft-Intent", "")
-    if (not _machine_write
-            and _draft_intent != "publish"
-            and _DRAFT_LISTING_FIELDS.intersection(body.fields)):
+    if not _machine_write and not operator_object_write and _draft_intent != "publish" and _DRAFT_LISTING_FIELDS.intersection(body.fields):
         offer_id = (doc_before.get("ebay_offer") or {}).get("offer_id")
         if offer_id:
             try:
-                item_action(
-                    sku, ActionBody(action="ebay_update"),
+                current = _current_item_operator_object(sku)
+                execute_item_operator_command(
+                    sku,
+                    OperatorCommandBody(
+                        command_id="update-item",
+                        object_generation=current["object_generation"],
+                    ),
                     operator_identity=operator_identity,
                 )
-                log.info("auto-dispatched ebay_stage (push, no regen) for %s "
-                        "(draft_listing changed, offer_id present)", sku)
+                log.info("auto-dispatched ebay_stage (push, no regen) for %s (draft_listing changed, offer_id present)", sku)
             except Exception as _eq:
                 if "unique" not in str(_eq).lower() and "duplicate" not in str(_eq).lower():
                     log.warning("failed to auto-enqueue ebay_stage for %s: %s", sku, _eq)
@@ -1792,7 +1796,9 @@ def _maybe_early_identify(json_path: "Path", sku: str, photo_count: int) -> None
         )
         log.info(
             "early ai_identify enqueued for %s (%d photos >= threshold %d)",
-            sku, photo_count, _MAX_PHOTOS_CLOUD,
+            sku,
+            photo_count,
+            _MAX_PHOTOS_CLOUD,
         )
     except psycopg2.errors.UniqueViolation:
         pass  # already queued, coalescing
@@ -1907,14 +1913,14 @@ def _enqueue_thumbnail_gen(sku: str, reason: str) -> None:
     all (a real latent gap, not just an over-triggering one)."""
     try:
         state_machine.enqueue_job(
-            queue_name='thumbnail_gen',
+            queue_name="thumbnail_gen",
             # C10 stamp — this fires from the HTTP fence in response to a
             # write, same class as every other operator-adjacent enqueue in
             # this file (invariant C10, test_operator_origin_sourcescan.py).
-            payload={'sku': sku, 'origin': 'operator'},
-            entity_type='item',
+            payload={"sku": sku, "origin": "operator"},
+            entity_type="item",
             entity_id=sku,
-            dedupe_key=f'thumbnail_gen:{sku}',
+            dedupe_key=f"thumbnail_gen:{sku}",
             max_attempts=3,
         )
     except psycopg2.errors.UniqueViolation:
@@ -1938,12 +1944,18 @@ def _persist_finding(json_path: "Path", sku: str, code: str, detail: str, source
     compared to an infinite recursion if the upsert is persistently broken.
     """
     try:
-        _apply_patch(json_path, {"pipeline_error": {
-            "code": code,
-            "detail": detail,
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "source": source,
-        }}, _skip_catalog_upsert=True)
+        _apply_patch(
+            json_path,
+            {
+                "pipeline_error": {
+                    "code": code,
+                    "detail": detail,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "source": source,
+                }
+            },
+            _skip_catalog_upsert=True,
+        )
     except Exception:
         log.exception("failed to persist %s finding for %s", code, sku)
 
@@ -1998,8 +2010,7 @@ def _apply_patch(
             # scalar keys) — route it through the accessor instead so the
             # envelope shape is always preserved.
             if dmk == "item_attributes" and not inventory_record.is_envelope(incoming):
-                patch = inventory_record.set_inventory_fields(
-                    doc, incoming, source="http_patch", applied_by="operator")
+                patch = inventory_record.set_inventory_fields(doc, incoming, source="http_patch", applied_by="operator")
                 doc["item_attributes"] = patch["item_attributes"]
                 doc["item_attributes_history"] = patch["item_attributes_history"]
             elif dmk == "draft_listing":
@@ -2014,13 +2025,11 @@ def _apply_patch(
                 # sibling scalar keys) — route it through the sanctioned Set
                 # B accessor (tgw.ebay.draft_specifics) instead, same
                 # discipline as item_attributes's accessor routing above.
-                incoming_specifics = incoming.pop("item_specifics", None) \
-                    if isinstance(incoming, dict) else None
+                incoming_specifics = incoming.pop("item_specifics", None) if isinstance(incoming, dict) else None
                 existing.update(incoming)
                 doc[dmk] = existing
                 if isinstance(incoming_specifics, dict) and not _is_ebay_draft_envelope(incoming_specifics):
-                    sp_patch = set_ebay_aspects(
-                        doc, incoming_specifics, source="http_patch", applied_by="operator")
+                    sp_patch = set_ebay_aspects(doc, incoming_specifics, source="http_patch", applied_by="operator")
                     existing["item_specifics"] = sp_patch["item_specifics"]
                     existing["item_specifics_history"] = sp_patch["item_specifics_history"]
                 elif incoming_specifics is not None:
@@ -2037,8 +2046,7 @@ def _apply_patch(
                 # stay for anything not covered by this sync.
                 _draft_fields: Dict[str, Any] = dict(get_ebay_aspects(doc))
                 if _draft_fields:
-                    _ia_sync = inventory_record.sync_from_draft(
-                        doc, _draft_fields, source="draft_sync", applied_by="operator")
+                    _ia_sync = inventory_record.sync_from_draft(doc, _draft_fields, source="draft_sync", applied_by="operator")
                     doc["item_attributes"] = _ia_sync["item_attributes"]
                     doc["item_attributes_history"] = _ia_sync["item_attributes_history"]
 
@@ -2114,7 +2122,9 @@ def _apply_patch(
         except Exception as _uc_exc:
             log.warning("sqlite catalog upsert failed for %s: %s", _sku_for_mutation, _uc_exc)
             _persist_finding(
-                json_path, _sku_for_mutation, "sqlite_catalog_upsert_failed",
+                json_path,
+                _sku_for_mutation,
+                "sqlite_catalog_upsert_failed",
                 f"SQLite catalog upsert failed after write: {_uc_exc}",
                 "apply_patch",
             )
@@ -2129,8 +2139,10 @@ def _apply_patch(
 
         for _ck in _changed_keys:
             publish_mutation(
-                sku=_sku_for_mutation, field=_ck,
-                old_value=_before_doc.get(_ck), new_value=doc.get(_ck),
+                sku=_sku_for_mutation,
+                field=_ck,
+                old_value=_before_doc.get(_ck),
+                new_value=doc.get(_ck),
                 source="http_patch",
             )
     except Exception:
@@ -2204,7 +2216,9 @@ def _apply_ebay_write(
     except Exception as _uc_exc:
         log.warning("sqlite catalog upsert failed for %s: %s", sku, _uc_exc)
         _persist_finding(
-            json_path, sku, "sqlite_catalog_upsert_failed",
+            json_path,
+            sku,
+            "sqlite_catalog_upsert_failed",
             f"SQLite catalog upsert failed after write: {_uc_exc}",
             "apply_ebay_write",
         )
@@ -2214,8 +2228,10 @@ def _apply_ebay_write(
 
         for _ck in changed:
             publish_mutation(
-                sku=sku, field=_ck,
-                old_value=_before_doc.get(_ck), new_value=doc.get(_ck),
+                sku=sku,
+                field=_ck,
+                old_value=_before_doc.get(_ck),
+                new_value=doc.get(_ck),
                 source="http_ebay_write",
             )
     except Exception:
@@ -2309,8 +2325,8 @@ def bulk_apply(body: BulkBody) -> Dict[str, Any]:
 # POST /api/bulk/action — bulk pipeline actions from Flutter browse selection
 # ---------------------------------------------------------------------------
 
-_BULK_PIPELINE_ACTIONS = {"ai_identify", "ebay_price", "ebay_draft", "ebay_stage", "ebay_upload"}
-_BULK_VALID_ACTIONS = _BULK_PIPELINE_ACTIONS | {"set_ready", "mark_sold", "delete", "approve", "list_now", "ebay_end_listing", "archive"}
+_BULK_PIPELINE_ACTIONS = {"ai_identify"}
+_BULK_VALID_ACTIONS = _BULK_PIPELINE_ACTIONS | {"set_ready", "mark_sold", "delete", "approve", "ebay_end_listing", "archive"}
 
 
 @app.post("/api/bulk/action")
@@ -2320,10 +2336,9 @@ def bulk_action(
 ) -> Dict[str, Any]:
     """Fan out an action across a list of SKUs.
 
-    Actions: ai_identify, ebay_price, ebay_draft, ebay_stage, set_ready,
-    mark_sold, delete, approve, list_now. Pipeline actions enqueue jobs;
-    set_ready / mark_sold / delete / approve write item JSON and enqueue a
-    catalog rebuild. list_now approves and immediately enqueues ebay_stage.
+    Listing-workflow actions are intentionally absent. Publication and
+    restaging are issued only by the current operator object's ``list-item``
+    and ``update-item`` commands after workflow evaluation.
     """
     if body.action not in _BULK_VALID_ACTIONS:
         raise HTTPException(
@@ -2338,7 +2353,7 @@ def bulk_action(
 
         return set_ready(_cfg, body.skus)
 
-    if body.action in ("approve", "list_now"):
+    if body.action == "approve":
         done: List[str] = []
         errors: List[str] = []
         for sku in body.skus:
@@ -2352,22 +2367,12 @@ def bulk_action(
             except Exception as exc:
                 errors.append(f"{sku}: {exc}")
                 continue
-            if body.action == "list_now":
-                try:
-                    result = item_action(
-                        sku, ActionBody(action="ebay_publish"),
-                        operator_identity=operator_identity,
-                    )
-                    if not result.get("ok"):
-                        errors.append(
-                            f"{sku} (list): {result.get('detail') or result.get('status') or 'held'}"
-                        )
-                except Exception as exc:
-                    errors.append(f"{sku} (list): {exc}")
         _enqueue_catalog_rebuild(f"bulk_{body.action}")
         return {
             "ok": bool(done) and not errors,
-            "count": len(done), "done": done, "errors": errors,
+            "count": len(done),
+            "done": done,
+            "errors": errors,
         }
 
     if body.action in ("mark_sold", "delete", "archive"):
@@ -2401,8 +2406,7 @@ def bulk_action(
                     doc["draft_listing"] = draft
                     if remaining == 0:
                         doc["status"] = new_status
-                    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True),
-                                       archive_root=_cfg.get("archive_root"))
+                    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
                 else:
                     fields = {"status": new_status}
                     if body.action == "delete":
@@ -2461,9 +2465,10 @@ def bulk_action(
             except Exception as exc:
                 errors.append(f"{sku}: ended on eBay but local write failed: {exc}")
                 _persist_finding(
-                    json_path, sku, "ebay_end_desync",
-                    f"eBay listing ended but local ebay_offer/ebay_listing "
-                    f"update failed: {exc}",
+                    json_path,
+                    sku,
+                    "ebay_end_desync",
+                    f"eBay listing ended but local ebay_offer/ebay_listing update failed: {exc}",
                     "bulk_action:ebay_end_listing",
                 )
         _enqueue_catalog_rebuild("bulk_ebay_end_listing")
@@ -2480,15 +2485,14 @@ def bulk_action(
             continue
         try:
             result = item_action(
-                sku, ActionBody(action=body.action),
+                sku,
+                ActionBody(action=body.action),
                 operator_identity=operator_identity,
             )
             if result.get("ok"):
                 queued.append(sku)
             else:
-                errors.append(
-                    f"{sku}: {result.get('detail') or result.get('status') or 'held'}"
-                )
+                errors.append(f"{sku}: {result.get('detail') or result.get('status') or 'held'}")
         except Exception as exc:
             err = str(exc)
             if "unique" in err.lower() or "duplicate" in err.lower():
@@ -2497,7 +2501,9 @@ def bulk_action(
                 errors.append(f"{sku}: {err}")
     return {
         "ok": not errors,
-        "count": len(queued), "queued": queued, "skipped": skipped,
+        "count": len(queued),
+        "queued": queued,
+        "skipped": skipped,
         "errors": errors,
     }
 
@@ -2549,22 +2555,24 @@ def _normalize_draft_condition_for_provider(json_path: "Path") -> Dict[str, str]
     if remap is None:
         raise HTTPException(
             status_code=409,
-            detail=(f"condition {current!r} is not valid for eBay category "
-                    f"{category_id}; select a category-valid condition"),
+            detail=(f"condition {current!r} is not valid for eBay category {category_id}; select a category-valid condition"),
         )
     updated = dict(draft)
-    updated.update({
-        "condition_id": remap["condition_id"],
-        "condition_label": remap["condition_label"],
-        "condition_enum": remap["condition_enum"],
-    })
+    updated.update(
+        {
+            "condition_id": remap["condition_id"],
+            "condition_label": remap["condition_label"],
+            "condition_enum": remap["condition_enum"],
+        }
+    )
     _apply_patch(json_path, {"draft_listing": updated})
     return remap
 
 
 @app.post("/api/items/{sku}/action")
 def item_action(
-    sku: str, body: ActionBody,
+    sku: str,
+    body: ActionBody,
     operator_identity: str = Depends(_require_auth),
 ) -> Dict[str, Any]:
     action = body.action
@@ -2697,9 +2705,7 @@ def item_action(
             dl_touched = False
             dl_patch: Dict[str, Any] = {}
             if "item_specifics" in delta and isinstance(delta["item_specifics"], dict):
-                dl_patch = set_ebay_aspects(
-                    doc, delta["item_specifics"], source="accept_proposals",
-                    applied_by="operator")
+                dl_patch = set_ebay_aspects(doc, delta["item_specifics"], source="accept_proposals", applied_by="operator")
                 dl_touched = True
             dl2 = doc.get("draft_listing") or {}
             if dl_touched:
@@ -2768,19 +2774,18 @@ def item_action(
                 )
 
                 provider_identity = migration.get("ebay_provider_identity", "")
-                result, dispatched, authority_id, authority_created = (
-                    authorize_and_dispatch_force_restage(
-                        json_path,
-                        operator_identity=operator_identity,
-                        surface="http:item-action:ebay-update",
-                        provider_identity=provider_identity,
-                    )
+                result, dispatched, authority_id, authority_created = authorize_and_dispatch_force_restage(
+                    json_path,
+                    operator_identity=operator_identity,
+                    surface="http:item-action:ebay-update",
+                    provider_identity=provider_identity,
                 )
                 return {
-                    "ok": True, "sku": sku, "action": action,
+                    "ok": True,
+                    "sku": sku,
+                    "action": action,
                     "job_id": dispatched.job_id,
-                    "status": ("workflow_dispatched" if dispatched.enqueued
-                               else "already_queued"),
+                    "status": ("workflow_dispatched" if dispatched.enqueued else "already_queued"),
                     "treatment_id": dispatched.treatment_id,
                     "graph_id": result.graph.graph_id,
                     "object_generation": result.graph.object_generation,
@@ -2824,14 +2829,13 @@ def item_action(
             # the same source so this check can't disagree with upload.
             from tgw.assets import ordered_photos
             from tgw.workflow.item_snapshot import _photo_sync_state
+
             doc = load_item_doc(json_path)
             local_photo_count = len(ordered_photos(doc, json_path.parent))
-            hosted_count = len([
-                entry for entry in (doc.get("ebay_photos") or [])
-                if isinstance(entry, dict) and entry.get("url")
-            ])
+            hosted_count = len([entry for entry in (doc.get("ebay_photos") or []) if isinstance(entry, dict) and entry.get("url")])
             photo_ready, photo_reason, photo_fingerprint = _photo_sync_state(
-                doc, json_path.parent,
+                doc,
+                json_path.parent,
             )
             if not photo_ready:
                 job_id = state_machine.enqueue_job(
@@ -2843,24 +2847,29 @@ def item_action(
                     max_attempts=3,
                 )
                 return {
-                    "ok": True, "sku": sku, "action": "resync_photos",
-                    "upload_queued": True, "job_id": job_id,
-                    "local_photo_count": local_photo_count, "hosted_count": hosted_count,
+                    "ok": True,
+                    "sku": sku,
+                    "action": "resync_photos",
+                    "upload_queued": True,
+                    "job_id": job_id,
+                    "local_photo_count": local_photo_count,
+                    "hosted_count": hosted_count,
                     "photo_fingerprint": photo_fingerprint,
-                    "detail": f"{photo_reason} — upload/synchronization queued; "
-                              f"the workflow will re-evaluate after it completes",
+                    "detail": f"{photo_reason} — upload/synchronization queued; the workflow will re-evaluate after it completes",
                 }
 
             # Synchronous (not queued) from here: single item, all photos
             # already EPS-hosted, operator wants the confirmed count back
             # immediately, not a "queued" toast.
             from tgw.ebay.repush import _repush_one
+
             result = _repush_one(_cfg, sku)
             if not result.get("ok"):
-                return {"ok": False, "sku": sku, "action": "resync_photos",
-                        "detail": result.get("reason", "resync failed")}
+                return {"ok": False, "sku": sku, "action": "resync_photos", "detail": result.get("reason", "resync failed")}
             return {
-                "ok": True, "sku": sku, "action": "resync_photos",
+                "ok": True,
+                "sku": sku,
+                "action": "resync_photos",
                 "submitted_count": result.get("submitted_count"),
                 "confirmed_count": result.get("confirmed_count"),
             }
@@ -2909,10 +2918,12 @@ def item_action(
                     )
                 except Exception:
                     pass
-                return {"ok": True, "sku": sku, "action": "set_ready",
-                        "note": "approved into the ready pool — NOTE: the dole worker "
-                                "is not installed yet, nothing publishes from the pool "
-                                "(todo #1113); use 'List on eBay' to publish this item now"}
+                return {
+                    "ok": True,
+                    "sku": sku,
+                    "action": "set_ready",
+                    "note": "approved into the ready pool — NOTE: the dole worker is not installed yet, nothing publishes from the pool (todo #1113); use 'List on eBay' to publish this item now",
+                }
             err = (result.get("errors") or ["unknown error"])[0]
             return {"ok": False, "sku": sku, "detail": err}
 
@@ -2942,19 +2953,27 @@ def item_action(
 
                 # Durable pending intent: the evaluator and queued treatment
                 # must bind the exact generation visible to a fresh worker.
-                _apply_patch(json_path, {
-                    "ai_reidentify": True,
-                    "ai_redraft_requested": True,
-                })
+                _apply_patch(
+                    json_path,
+                    {
+                        "ai_reidentify": True,
+                        "ai_redraft_requested": True,
+                    },
+                )
                 result = request_item_goal(
-                    json_path, TGW_EBAY_DRAFTED, origin="operator",
+                    json_path,
+                    TGW_EBAY_DRAFTED,
+                    origin="operator",
                     operator_identity=operator_identity,
                     operator_surface="http:item-action:ai-identify",
                 )
                 if result.dispatched is None:
                     return {
-                        "ok": False, "sku": sku, "action": action,
-                        "status": "held", "job_id": "",
+                        "ok": False,
+                        "sku": sku,
+                        "action": action,
+                        "status": "held",
+                        "job_id": "",
                         "held_external": list(result.held_external),
                         "operator_gates": list(result.operator_gates),
                         "ownership_conflicts": list(result.graph.ownership_conflicts),
@@ -2962,10 +2981,13 @@ def item_action(
                     }
                 job_id = result.dispatched.job_id
             else:
-                _apply_patch(json_path, {
-                    "ai_reidentify": True,
-                    "ai_redraft_requested": True,
-                })
+                _apply_patch(
+                    json_path,
+                    {
+                        "ai_reidentify": True,
+                        "ai_redraft_requested": True,
+                    },
+                )
                 job_id = state_machine.enqueue_job(
                     queue_name="ai_identify",
                     payload={"sku": sku, "origin": "operator"},
@@ -2995,14 +3017,19 @@ def item_action(
                 from .workflow.profiles import TGW_EBAY_DRAFTED
 
                 result = request_item_goal(
-                    json_path, TGW_EBAY_DRAFTED, origin="operator",
+                    json_path,
+                    TGW_EBAY_DRAFTED,
+                    origin="operator",
                     operator_identity=operator_identity,
                     operator_surface="http:item-action:ebay-draft",
                 )
                 if result.dispatched is None:
                     return {
-                        "ok": False, "sku": sku, "action": action,
-                        "status": "held", "job_id": "",
+                        "ok": False,
+                        "sku": sku,
+                        "action": action,
+                        "status": "held",
+                        "job_id": "",
                         "held_external": list(result.held_external),
                         "operator_gates": list(result.operator_gates),
                         "ownership_conflicts": list(result.graph.ownership_conflicts),
@@ -3049,14 +3076,19 @@ def item_action(
                 from .workflow.profiles import TGW_EBAY_PRICED
 
                 result = request_item_goal(
-                    json_path, TGW_EBAY_PRICED, origin="operator",
+                    json_path,
+                    TGW_EBAY_PRICED,
+                    origin="operator",
                     operator_identity=operator_identity,
                     operator_surface="http:item-action:ebay-price",
                 )
                 if result.dispatched is None:
                     return {
-                        "ok": False, "sku": sku, "action": action,
-                        "status": "held", "job_id": "",
+                        "ok": False,
+                        "sku": sku,
+                        "action": action,
+                        "status": "held",
+                        "job_id": "",
                         "held_external": list(result.held_external),
                         "operator_gates": list(result.operator_gates),
                         "ownership_conflicts": list(result.graph.ownership_conflicts),
@@ -3089,28 +3121,31 @@ def item_action(
                 from .workflow.profiles import TGW_EBAY_STAGED
 
                 provider_identity = migration.get("ebay_provider_identity", "")
-                result, authority_id, authority_created = (
-                    authorize_and_request_item_goal(
-                        json_path, TGW_EBAY_STAGED,
-                        operator_identity=operator_identity,
-                        surface="http:item-action:ebay-stage",
-                        provider_identity=provider_identity,
-                        scopes=("upload", "stage"),
-                    )
+                result, authority_id, authority_created = authorize_and_request_item_goal(
+                    json_path,
+                    TGW_EBAY_STAGED,
+                    operator_identity=operator_identity,
+                    surface="http:item-action:ebay-stage",
+                    provider_identity=provider_identity,
+                    scopes=("upload", "stage"),
                 )
                 if result.dispatched is None:
-                    already_satisfied = not any((
-                        result.graph.unmet_requirements,
-                        result.graph.explicit_requirements,
-                        result.graph.ownership_conflicts,
-                        result.graph.reconciliation_gates,
-                        result.held_external,
-                        result.operator_gates,
-                    ))
+                    already_satisfied = not any(
+                        (
+                            result.graph.unmet_requirements,
+                            result.graph.explicit_requirements,
+                            result.graph.ownership_conflicts,
+                            result.graph.reconciliation_gates,
+                            result.held_external,
+                            result.operator_gates,
+                        )
+                    )
                     return {
-                        "ok": already_satisfied, "sku": sku, "action": action,
-                        "status": ("already_satisfied" if already_satisfied
-                                   else "held"), "job_id": "",
+                        "ok": already_satisfied,
+                        "sku": sku,
+                        "action": action,
+                        "status": ("already_satisfied" if already_satisfied else "held"),
+                        "job_id": "",
                         "graph_id": result.graph.graph_id,
                         "object_generation": result.graph.object_generation,
                         "held_external": list(result.held_external),
@@ -3120,18 +3155,18 @@ def item_action(
                     }
                 job_id = result.dispatched.job_id
                 return {
-                    "ok": True, "sku": sku, "action": action,
-                    "job_id": job_id, "status": "workflow_dispatched",
+                    "ok": True,
+                    "sku": sku,
+                    "action": action,
+                    "job_id": job_id,
+                    "status": "workflow_dispatched",
                     "graph_id": result.graph.graph_id,
                     "object_generation": result.graph.object_generation,
                     "authority_id": authority_id,
                     "authority_created": authority_created,
                 }
             _doc = load_item_doc(json_path)
-            _has_photos = bool(
-                (_doc.get("draft_listing") or {}).get("imageUrls")
-                or _doc.get("ebay_photos")
-            )
+            _has_photos = bool((_doc.get("draft_listing") or {}).get("imageUrls") or _doc.get("ebay_photos"))
             if not _has_photos:
                 try:
                     state_machine.enqueue_job(
@@ -3170,27 +3205,30 @@ def item_action(
                 )
 
                 provider_identity = migration.get("ebay_provider_identity", "")
-                result, dispatched, authority_id, authority_created = (
-                    authorize_and_dispatch_next_listing_effect(
-                        json_path,
-                        operator_identity=operator_identity,
-                        surface="http:item-action:ebay-publish",
-                        provider_identity=provider_identity,
-                    )
+                result, dispatched, authority_id, authority_created = authorize_and_dispatch_next_listing_effect(
+                    json_path,
+                    operator_identity=operator_identity,
+                    surface="http:item-action:ebay-publish",
+                    provider_identity=provider_identity,
                 )
                 if dispatched is None:
-                    already_satisfied = not any((
-                        result.graph.unmet_requirements,
-                        result.graph.explicit_requirements,
-                        result.graph.ownership_conflicts,
-                        result.graph.reconciliation_gates,
-                        result.held_external,
-                        result.operator_gates,
-                    ))
+                    already_satisfied = not any(
+                        (
+                            result.graph.unmet_requirements,
+                            result.graph.explicit_requirements,
+                            result.graph.ownership_conflicts,
+                            result.graph.reconciliation_gates,
+                            result.held_external,
+                            result.operator_gates,
+                        )
+                    )
                     return {
-                        "ok": already_satisfied, "sku": sku, "action": action,
+                        "ok": already_satisfied,
+                        "sku": sku,
+                        "action": action,
                         "status": ("already_satisfied" if already_satisfied else "held"),
-                        "job_id": "", "graph_id": result.graph.graph_id,
+                        "job_id": "",
+                        "graph_id": result.graph.graph_id,
                         "object_generation": result.graph.object_generation,
                         "held_external": list(result.held_external),
                         "operator_gates": list(result.operator_gates),
@@ -3198,10 +3236,11 @@ def item_action(
                         "authority_created": authority_created,
                     }
                 return {
-                    "ok": True, "sku": sku, "action": action,
+                    "ok": True,
+                    "sku": sku,
+                    "action": action,
                     "job_id": dispatched.job_id,
-                    "status": ("workflow_dispatched" if dispatched.enqueued
-                               else "already_queued"),
+                    "status": ("workflow_dispatched" if dispatched.enqueued else "already_queued"),
                     "treatment_id": dispatched.treatment_id,
                     "graph_id": result.graph.graph_id,
                     "object_generation": result.graph.object_generation,
@@ -3210,10 +3249,7 @@ def item_action(
                 }
             _doc = load_item_doc(json_path)
             _offer_id = (_doc.get("ebay_offer") or {}).get("offer_id")
-            _has_photos = bool(
-                (_doc.get("draft_listing") or {}).get("imageUrls")
-                or _doc.get("ebay_photos")
-            )
+            _has_photos = bool((_doc.get("draft_listing") or {}).get("imageUrls") or _doc.get("ebay_photos"))
             if not _offer_id:
                 # Not yet staged — queue the full chain; each worker retries until
                 # its prerequisite completes (upload → stage → publish).
@@ -3377,29 +3413,29 @@ def api_todos(agent: str = ""):
             with con.cursor() as cur:
                 if agent:
                     cur.execute(
-                        "SELECT id, agent, priority, body, added_at "
-                        "FROM todo_items WHERE state = %s AND agent = %s "
-                        "ORDER BY priority DESC, id",
+                        "SELECT id, agent, priority, body, added_at FROM todo_items WHERE state = %s AND agent = %s ORDER BY priority DESC, id",
                         ("open", agent),
                     )
                 else:
                     cur.execute(
-                        "SELECT id, agent, priority, body, added_at "
-                        "FROM todo_items WHERE state = %s "
-                        "ORDER BY priority DESC, id",
+                        "SELECT id, agent, priority, body, added_at FROM todo_items WHERE state = %s ORDER BY priority DESC, id",
                         ("open",),
                     )
                 rows = cur.fetchall()
         items = [
             {
-                "id": r[0], "agent": r[1], "priority": r[2],
-                "title": (r[3] or "")[:200], "added": str(r[4]) if r[4] else "",
+                "id": r[0],
+                "agent": r[1],
+                "priority": r[2],
+                "title": (r[3] or "")[:200],
+                "added": str(r[4]) if r[4] else "",
             }
             for r in rows
         ]
         return {"ok": True, "count": len(items), "items": items}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
 
 # (PP-QUEUESTATS-001: queue_status() above is lifetime-cumulative and cannot
 #  answer "how many succeeded/failed TODAY" — this reads queue_daily_stats,
@@ -3677,7 +3713,8 @@ def requeue_job(
     current_action = action_by_queue.get(str(row["queue_name"])) if sku else None
     if current_action:
         result = item_action(
-            sku, ActionBody(action=current_action),
+            sku,
+            ActionBody(action=current_action),
             operator_identity=operator_identity,
         )
         result = dict(result)
@@ -3686,9 +3723,7 @@ def requeue_job(
         result["new_job_id"] = result.get("job_id") or ""
         result["queue"] = str(row["queue_name"])
         if not result.get("ok") and "detail" not in result:
-            result["detail"] = (
-                f"current {current_action} dispatch {result.get('status', 'held')}"
-            )
+            result["detail"] = f"current {current_action} dispatch {result.get('status', 'held')}"
         return result
 
     try:
@@ -3699,12 +3734,7 @@ def requeue_job(
             entity_id=entity_id,
             operation=row.get("operation") or "run",
             handler_family=row.get("handler_family") or row["queue_name"],
-            priority=(
-                row.get("priority")
-                if isinstance(row.get("priority"), int)
-                and not isinstance(row.get("priority"), bool)
-                else None
-            ),
+            priority=(row.get("priority") if isinstance(row.get("priority"), int) and not isinstance(row.get("priority"), bool) else None),
             dedupe_key=new_dedupe,
             max_attempts=row.get("max_attempts") or 3,
         )
@@ -3813,6 +3843,7 @@ def ebay_category_context(category_id: str, current_condition: str = "") -> Dict
             if _pol_file.exists():
                 try:
                     import json as _pj
+
                     _pdata = _pj.loads(_pol_file.read_text())
                     _fids = _pdata.get("fulfillment", {})
                     # prefer FC4 by name, else first entry
@@ -3965,10 +3996,7 @@ def _store_categories_snapshot(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, str]
             if sid in seen and seen[sid] != name:
                 raise ValueError(f"duplicate id {sid!r} has conflicting names")
             seen[sid] = name
-        results = [
-            {"id": sid, "name": name}
-            for sid, name in sorted(seen.items(), key=lambda item: (item[1].casefold(), item[0]))
-        ]
+        results = [{"id": sid, "name": name} for sid, name in sorted(seen.items(), key=lambda item: (item[1].casefold(), item[0]))]
         raw_refreshed_at = payload.get("refreshed_at")
         if raw_refreshed_at is not None and not isinstance(raw_refreshed_at, str):
             raise ValueError("refreshed_at must be a string or null")
@@ -4004,10 +4032,7 @@ def _live_store_categories(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], b
             if sid in seen and seen[sid] != name:
                 raise ValueError(f"duplicate Store category id {sid!r} has conflicting names")
             seen[sid] = name
-        results = [
-            {"id": sid, "name": name}
-            for sid, name in sorted(seen.items(), key=lambda item: (item[1].casefold(), item[0]))
-        ]
+        results = [{"id": sid, "name": name} for sid, name in sorted(seen.items(), key=lambda item: (item[1].casefold(), item[0]))]
         catalog_root = cfg.get("catalog_root")
         if not catalog_root:
             raise RuntimeError("catalog_root is not configured; cannot persist Store category snapshot")
@@ -4134,11 +4159,13 @@ def _live_fulfillment_policies(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], boo
                     payload = existing
             except Exception:
                 pass
-        payload.update({
-            "source": "ebay_account_api",
-            "refreshed_at": datetime.now(timezone.utc).isoformat(),
-            "fulfillment": results,
-        })
+        payload.update(
+            {
+                "source": "ebay_account_api",
+                "refreshed_at": datetime.now(timezone.utc).isoformat(),
+                "fulfillment": results,
+            }
+        )
         atomic_write_json(path, payload)
         _LIVE_FULFILLMENT_POLICIES_CACHE["data"] = results
         _LIVE_FULFILLMENT_POLICIES_CACHE["at"] = now
@@ -4403,10 +4430,13 @@ def apply_inventory_diff_endpoint(sku: str, body: InventoryDiffApplyBody) -> Dic
         # Nothing in the requested key set is still an active diff —
         # idempotent no-op, not an error (spec point 5).
         return {"ok": True, "sku": sku, "applied": [], "note": "no active diff for requested keys"}
-    _apply_patch(json_path, {
-        "item_attributes": patch["item_attributes"],
-        "item_attributes_history": patch["item_attributes_history"],
-    })
+    _apply_patch(
+        json_path,
+        {
+            "item_attributes": patch["item_attributes"],
+            "item_attributes_history": patch["item_attributes_history"],
+        },
+    )
     _enqueue_catalog_rebuild(f"inventory_diff_apply:{sku}")
     return {"ok": True, "sku": sku, "applied": patch["applied_keys"]}
 
@@ -4441,9 +4471,7 @@ def get_category_aspect_migration(sku: str) -> Dict[str, Any]:
 
 
 @app.post("/api/items/{sku}/category-aspect-migration/apply", dependencies=[AUTH])
-def apply_category_aspect_migration_endpoint(
-    sku: str, body: CategoryAspectMigrationApplyBody
-) -> Dict[str, Any]:
+def apply_category_aspect_migration_endpoint(sku: str, body: CategoryAspectMigrationApplyBody) -> Dict[str, Any]:
     """Move the checked subset of category-orphaned aspects from Set B
     into Set A, removing them from Set B — a genuinely new, explicit,
     named write path for BOTH sets, not routed through _apply_patch's
@@ -4462,11 +4490,14 @@ def apply_category_aspect_migration_endpoint(
         # Nothing in the requested key set is still an active orphan —
         # idempotent no-op, not an error (same reasoning as inventory-diff).
         return {"ok": True, "sku": sku, "migrated": [], "note": "no active orphaned aspects for requested keys"}
-    _apply_patch(json_path, {
-        "item_attributes": patch["item_attributes"],
-        "item_attributes_history": patch["item_attributes_history"],
-        "draft_listing": patch["draft_listing"],
-    })
+    _apply_patch(
+        json_path,
+        {
+            "item_attributes": patch["item_attributes"],
+            "item_attributes_history": patch["item_attributes_history"],
+            "draft_listing": patch["draft_listing"],
+        },
+    )
     _enqueue_catalog_rebuild(f"category_aspect_migration_apply:{sku}")
     return {"ok": True, "sku": sku, "migrated": patch["migrated_keys"]}
 
@@ -4579,7 +4610,6 @@ def get_hint_trail(sku: str) -> Dict[str, Any]:
 
 _STATIC_HEAD = '<link rel="stylesheet" href="/static/tgw.css"><link rel="stylesheet" href="/static/nav.css">'
 _STATIC_FOOT = '<script src="/static/tgw.js"></script><script src="/static/nav.js"></script>'
-
 
 
 # Shared multi-mode category picker: type-to-search (local cached tree, no
@@ -4791,9 +4821,7 @@ _CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_
 _CATEGORY_CONTEXT_IIFE = (
     _CATEGORY_CONTEXT_IIFE.replace(
         "if(!catId){if(loading)loading.textContent='No category.';return;}",
-        "if(!catId){flagFieldInvalid('dl-cat-search',true);"
-        "if(loading){loading.textContent='Category required before item specifics can be checked.';"
-        "loading.style.color='#e88';}return;}",
+        "if(!catId){flagFieldInvalid('dl-cat-search',true);if(loading){loading.textContent='Category required before item specifics can be checked.';loading.style.color='#e88';}return;}",
     )
     .replace(
         "var html='';\n    d.aspects.forEach",
@@ -4805,13 +4833,11 @@ _CATEGORY_CONTEXT_IIFE = (
     )
     .replace(
         "<select data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\"",
-        "<select data-aspect=\"'+asp.name+'\" data-required=\"'+(asp.required?'true':'false')+'\" "
-        "aria-invalid=\"'+(reqEmpty?'true':'false')+'\" data-initial=\"'+cur+'\"",
+        "<select data-aspect=\"'+asp.name+'\" data-required=\"'+(asp.required?'true':'false')+'\" aria-invalid=\"'+(reqEmpty?'true':'false')+'\" data-initial=\"'+cur+'\"",
     )
     .replace(
         " data-aspect=\"'+asp.name+'\" data-initial=\"'+cur+'\" value=\"'+cur+'\"",
-        " data-aspect=\"'+asp.name+'\" data-required=\"'+(asp.required?'true':'false')+'\" "
-        "aria-invalid=\"'+(reqEmpty?'true':'false')+'\" data-initial=\"'+cur+'\" value=\"'+cur+'\"",
+        " data-aspect=\"'+asp.name+'\" data-required=\"'+(asp.required?'true':'false')+'\" aria-invalid=\"'+(reqEmpty?'true':'false')+'\" data-initial=\"'+cur+'\" value=\"'+cur+'\"",
     )
     .replace(
         "inp='<input type=\"text\"'+(dlopts?' list=\"'+dlid+'\"':'')+' data-aspect=\"'+asp.name+'\"",
@@ -5058,7 +5084,6 @@ _INTAKE_FORM_HTML = """\
 <label>Pipeline Actions</label>
 <div class="action-btns">
   <button class="btn-action" id="btn-identify" onclick="triggerAction('ai_identify')">{identify_label}</button>
-  <button class="btn-action" id="btn-draft" onclick="triggerAction('ebay_draft')">Re-draft</button>
 </div>
 <div class="msg" id="action-msg"></div>
 
@@ -5129,8 +5154,7 @@ async function triggerAction(action) {{
   msg.className = 'msg';
   msg.textContent = '';
   var bi = document.getElementById('btn-identify');
-  var bd = document.getElementById('btn-draft');
-  bi.disabled = true; bd.disabled = true;
+  bi.disabled = true;
   try {{
     var r = await fetch(API + '/action', {{
       method: 'POST',
@@ -5150,7 +5174,7 @@ async function triggerAction(action) {{
     msg.className = 'msg err';
     msg.textContent = 'Network error: ' + e.message;
   }} finally {{
-    bi.disabled = false; bd.disabled = false;
+    bi.disabled = false;
   }}
 }}
 
@@ -5689,22 +5713,13 @@ def _render_runs_html(rows) -> str:
         "<h2>Agent Runs</h2>"
     )
     if not rows:
-        return (
-            head
-            + '<div class="allclear">✓ No agent runs recorded yet.</div>'
-            + _STATIC_FOOT
-            + "</body></html>"
-        )
+        return head + '<div class="allclear">✓ No agent runs recorded yet.</div>' + _STATIC_FOOT + "</body></html>"
 
     agent_types = sorted({str(r.get("agent_type", "")) for r in rows if r.get("agent_type")})
     statuses = sorted({str(r.get("status", "")) for r in rows if r.get("status")})
 
-    agent_opts = '<option value="">All agent types</option>' + "".join(
-        f'<option value="{_html.escape(a)}">{_html.escape(a)}</option>' for a in agent_types
-    )
-    status_opts = '<option value="">All statuses</option>' + "".join(
-        f'<option value="{_html.escape(s)}">{_html.escape(s)}</option>' for s in statuses
-    )
+    agent_opts = '<option value="">All agent types</option>' + "".join(f'<option value="{_html.escape(a)}">{_html.escape(a)}</option>' for a in agent_types)
+    status_opts = '<option value="">All statuses</option>' + "".join(f'<option value="{_html.escape(s)}">{_html.escape(s)}</option>' for s in statuses)
 
     now = datetime.now(tz=timezone.utc)
 
@@ -5717,10 +5732,7 @@ def _render_runs_html(rows) -> str:
         '<input type="search" id="runs-search" placeholder="pp_ref / todo_id / summary">'
         "</div>",
         f'<div class="runs-total">{len(rows)} run(s)</div>',
-        '<table class="runs"><tr>'
-        "<th>Run ID</th><th>Agent Type</th><th>PP/Todo</th><th>Host</th>"
-        "<th>Status</th><th>Started</th><th>Duration</th><th>Summary</th><th>Transcript</th>"
-        "</tr>",
+        '<table class="runs"><tr><th>Run ID</th><th>Agent Type</th><th>PP/Todo</th><th>Host</th><th>Status</th><th>Started</th><th>Duration</th><th>Summary</th><th>Transcript</th></tr>',
     ]
 
     for row in rows:
@@ -5737,16 +5749,12 @@ def _render_runs_html(rows) -> str:
 
         ref_bits = []
         if pp_ref:
-            ref_bits.append(
-                f'<a class="pp-badge" href="/docs/plan/TGW-Master-Plan.md" title="{_html.escape(pp_ref)}">{_html.escape(pp_ref)}</a>'
-            )
+            ref_bits.append(f'<a class="pp-badge" href="/docs/plan/TGW-Master-Plan.md" title="{_html.escape(pp_ref)}">{_html.escape(pp_ref)}</a>')
         if todo_id is not None:
             ref_bits.append(f"#{_html.escape(str(todo_id))}")
         ref_cell = " ".join(ref_bits)
 
-        search_blob = " ".join(
-            str(x) for x in (pp_ref, todo_id if todo_id is not None else "", summary)
-        ).lower()
+        search_blob = " ".join(str(x) for x in (pp_ref, todo_id if todo_id is not None else "", summary)).lower()
 
         status_cls = _runs_status_class(status)
 
@@ -5839,10 +5847,7 @@ def _render_search_html(query: str, result: Optional[Dict[str, Any]]) -> str:
     elif not result.get("ok"):
         parts.append(f'<div class="search-err">{_html.escape(str(result.get("error", "search failed")))}</div>')
     else:
-        parts.append(
-            f'<div class="search-meta">{result["count"]} result(s) for '
-            f'"{_html.escape(result["query"])}" — {result["elapsed_ms"]:.0f} ms</div>'
-        )
+        parts.append(f'<div class="search-meta">{result["count"]} result(s) for "{_html.escape(result["query"])}" — {result["elapsed_ms"]:.0f} ms</div>')
         if result["results"]:
             parts.append('<table class="results"><tr><th>Type</th><th>Result</th><th>Size</th></tr>')
             for row in result["results"]:
@@ -5852,12 +5857,10 @@ def _render_search_html(query: str, result: Optional[Dict[str, Any]]) -> str:
                 size = row.get("fbytes", "")
                 size_str = f"{int(size):,} B" if size.isdigit() else ""
                 parts.append(
-                    '<tr>'
+                    "<tr>"
                     f'<td class="mtype">{_html.escape(row.get("mtype", ""))}</td>'
-                    f'<td><div>{_html.escape(title)}</div>'
-                    f'<div class="rurl">{_html.escape(url)}</div>'
-                    + (f'<div class="rabs">{_html.escape(abstract.strip())}</div>' if abstract.strip() else "")
-                    + "</td>"
+                    f"<td><div>{_html.escape(title)}</div>"
+                    f'<div class="rurl">{_html.escape(url)}</div>' + (f'<div class="rabs">{_html.escape(abstract.strip())}</div>' if abstract.strip() else "") + "</td>"
                     f'<td class="rsize">{size_str}</td>'
                     "</tr>"
                 )
@@ -5948,24 +5951,14 @@ def history_form(sku_old: str):
 
     rec = _load_historical_index_by_sku_old().get(sku_old)
     if rec is None:
-        body = (
-            "<h2>History</h2>"
-            f'<p>No historical record found for <code>{_html.escape(sku_old)}</code>.</p>'
-        )
+        body = f"<h2>History</h2><p>No historical record found for <code>{_html.escape(sku_old)}</code>.</p>"
     else:
-        rows = "".join(
-            f"<tr><td>{_html.escape(str(k))}</td><td>{_html.escape(str(v))}</td></tr>"
-            for k, v in sorted(rec.items()) if v not in (None, "")
-        )
-        body = (
-            f"<h2>History — {_html.escape(sku_old)}</h2>"
-            f'<table class="dtable"><tbody>{rows}</tbody></table>'
-        )
+        rows = "".join(f"<tr><td>{_html.escape(str(k))}</td><td>{_html.escape(str(v))}</td></tr>" for k, v in sorted(rec.items()) if v not in (None, ""))
+        body = f'<h2>History — {_html.escape(sku_old)}</h2><table class="dtable"><tbody>{rows}</tbody></table>'
     page = (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        "<title>TGW History</title>" + _STATIC_HEAD + "</head><body>"
-        + body + _STATIC_FOOT + "</body></html>"
+        "<title>TGW History</title>" + _STATIC_HEAD + "</head><body>" + body + _STATIC_FOOT + "</body></html>"
     )
     return HTMLResponse(page)
 
@@ -6075,9 +6068,7 @@ def _range_value(entry: Any, key: str, index: int) -> Any:
     return pair[index] if isinstance(pair, list) and len(pair) == 2 else None
 
 
-def _render_size_classes_html(
-    ranges: Dict[str, Any], msg: str = "", ok: bool = False
-) -> str:
+def _render_size_classes_html(ranges: Dict[str, Any], msg: str = "", ok: bool = False) -> str:
     import html as _html
 
     banner = ""
@@ -6091,25 +6082,19 @@ def _render_size_classes_html(
             value = _range_value(entry, key, index)
             values.append("—" if value is None else _html.escape(str(value)))
         rows.append(
-            "<tr><td><button class=\"edit-size-class\" type=\"button\" "
-            f"data-name=\"{_html.escape(str(name), quote=True)}\">"
-            f"{_html.escape(str(name))}</button></td>"
-            + "".join(f"<td>{value}</td>" for value in values)
-            + "</tr>"
+            '<tr><td><button class="edit-size-class" type="button" '
+            f'data-name="{_html.escape(str(name), quote=True)}">'
+            f"{_html.escape(str(name))}</button></td>" + "".join(f"<td>{value}</td>" for value in values) + "</tr>"
         )
     table_rows = "".join(rows) or '<tr><td colspan="9">No size classes configured yet.</td></tr>'
-    inputs = "".join(
-        f'<label>{label}<input type="number" inputmode="decimal" min="0" step="any" '
-        f'name="{field}" id="{field}" placeholder="unset"></label>'
-        for field, label, _, _ in _SIZE_RANGE_FIELDS
-    )
+    inputs = "".join(f'<label>{label}<input type="number" inputmode="decimal" min="0" step="any" name="{field}" id="{field}" placeholder="unset"></label>' for field, label, _, _ in _SIZE_RANGE_FIELDS)
     # JSON is embedded in a script element. Escaping every '<' prevents a
     # pre-existing config string from terminating that element with </script>.
     ranges_json = json.dumps(ranges).replace("<", "\\u003c")
     return (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<title>TGW Size Classes</title>' + _STATIC_HEAD + '''<style>
+        "<title>TGW Size Classes</title>" + _STATIC_HEAD + """<style>
 .size-table{width:100%;border-collapse:collapse;margin:12px 0 24px;font-size:.85em}
 .size-table th,.size-table td{border:1px solid #333;padding:7px;text-align:right}
 .size-table th:first-child,.size-table td:first-child{text-align:left}
@@ -6117,23 +6102,20 @@ def _render_size_classes_html(
 .range-grid{display:grid;grid-template-columns:repeat(2,minmax(130px,1fr));gap:10px}
 @media(min-width:760px){.range-grid{grid-template-columns:repeat(4,minmax(130px,1fr))}}
 .range-grid label{margin:0}.range-grid input{width:100%;box-sizing:border-box}
-</style></head><body><h2>Shipping Size Classes</h2>'''
-        '<p>Blank bounds are saved as <code>null</code>. Click a class name to edit it.</p>'
-        + banner
-        + '<table class="size-table"><thead><tr><th>Class</th><th>Weight min</th><th>Weight max</th>'
-        '<th>Length min</th><th>Length max</th><th>Width min</th><th>Width max</th>'
-        '<th>Height min</th><th>Height max</th></tr></thead><tbody>' + table_rows + '</tbody></table>'
+</style></head><body><h2>Shipping Size Classes</h2>"""
+        "<p>Blank bounds are saved as <code>null</code>. Click a class name to edit it.</p>" + banner + '<table class="size-table"><thead><tr><th>Class</th><th>Weight min</th><th>Weight max</th>'
+        "<th>Length min</th><th>Length max</th><th>Width min</th><th>Width max</th>"
+        "<th>Height min</th><th>Height max</th></tr></thead><tbody>" + table_rows + "</tbody></table>"
         '<h3 id="editor-title">Add size class</h3><form method="post" action="/form/size-classes">'
         '<label>Class name<input name="name" id="class-name" required maxlength="80" '
         'pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" placeholder="e.g. medium_box"></label>'
-        '<div class="range-grid">' + inputs + '</div>'
+        '<div class="range-grid">' + inputs + "</div>"
         '<button class="btn" type="submit">Save size class</button> '
         '<button class="btn" type="button" id="clear-editor">Add another</button></form>'
-        f'<script>const sizeClassRanges={ranges_json};\n'
-        '''function clearEditor(){document.querySelector('form').reset();document.getElementById('class-name').readOnly=false;document.getElementById('editor-title').textContent='Add size class';}
+        f"<script>const sizeClassRanges={ranges_json};\n"
+        """function clearEditor(){document.querySelector('form').reset();document.getElementById('class-name').readOnly=false;document.getElementById('editor-title').textContent='Add size class';}
 document.querySelectorAll('.edit-size-class').forEach(function(btn){btn.addEventListener('click',function(){var n=btn.dataset.name,e=sizeClassRanges[n]||{},d=e.dims_in||{};document.getElementById('class-name').value=n;document.getElementById('class-name').readOnly=true;var vals={weight_min:(e.weight_oz||[])[0],weight_max:(e.weight_oz||[])[1],length_min:(d.l||[])[0],length_max:(d.l||[])[1],width_min:(d.w||[])[0],width_max:(d.w||[])[1],height_min:(d.h||[])[0],height_max:(d.h||[])[1]};Object.keys(vals).forEach(function(k){document.getElementById(k).value=vals[k]==null?'':vals[k];});document.getElementById('editor-title').textContent='Edit '+n;document.getElementById('editor-title').scrollIntoView({behavior:'smooth'});});});
-document.getElementById('clear-editor').addEventListener('click',clearEditor);</script>'''
-        + _STATIC_FOOT + '</body></html>'
+document.getElementById('clear-editor').addEventListener('click',clearEditor);</script>""" + _STATIC_FOOT + "</body></html>"
     )
 
 
@@ -6914,24 +6896,19 @@ def _render_item_detail_html(
             ]
         )
         reasons = operator_workflow.get("reasons") or []
-        reason_html = (
-            '<ul style="margin:6px 0 0">'
-            + "".join(f"<li>{h(str(reason))}</li>" for reason in reasons)
-            + "</ul>"
-            if reasons else ""
-        )
+        reason_html = '<ul style="margin:6px 0 0">' + "".join(f"<li>{h(str(reason))}</li>" for reason in reasons) + "</ul>" if reasons else ""
         operator_object_html = (
             '<section id="published-operator-object" style="border:1px solid #4a6;'
             'background:#101b16;border-radius:8px;padding:10px 14px;margin:10px 0">'
             '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
-            '<strong>Current item workflow</strong>'
+            "<strong>Current item workflow</strong>"
             f'<span style="color:#9bd">{h(str(operator_workflow.get("state") or "unknown"))}</span>'
             f'<span style="font-size:.76em;color:#789">generation '
-            f'{h(str(operator_object.get("object_generation") or ""))[:12]}</span>'
+            f"{h(str(operator_object.get('object_generation') or ''))[:12]}</span>"
             f'<span style="margin-left:auto;display:flex;gap:7px">{command_buttons}</span>'
             "</div>"
             f'<div style="font-size:.8em;color:#9a9;margin-top:5px">Condition: '
-            f'{h(str(condition.get("label") or condition.get("value") or "not set"))}</div>'
+            f"{h(str(condition.get('label') or condition.get('value') or 'not set'))}</div>"
             f"{reason_html}</section>"
         )
 
@@ -6941,74 +6918,61 @@ def _render_item_detail_html(
     if workflow_card:
         goal = workflow_card.get("goal") or {}
         fingerprints = workflow_card.get("fingerprints") or []
-        photo_fingerprint = next((
-            fp for fp in fingerprints
-            if fp.get("condition_id") == "photos_uploaded"
-        ), None)
-        item_photos_fingerprint = next((
-            fp for fp in fingerprints
-            if fp.get("condition_id") == "item_has_photos"
-        ), None)
+        photo_fingerprint = next((fp for fp in fingerprints if fp.get("condition_id") == "photos_uploaded"), None)
+        item_photos_fingerprint = next((fp for fp in fingerprints if fp.get("condition_id") == "item_has_photos"), None)
         photo_state_html = ""
         if photo_fingerprint:
             photo_ready = photo_fingerprint.get("result") == "true"
-            photo_reason = "; ".join(
-                str(reason) for reason in photo_fingerprint.get("reasons", [])
-            )
+            photo_reason = "; ".join(str(reason) for reason in photo_fingerprint.get("reasons", []))
             photo_state_html = (
                 f'<div id="photo-sync-fingerprint" style="margin:7px 0;padding:6px 9px;'
-                f'border-radius:5px;background:{"#102a18" if photo_ready else "#30220b"};'
+                f"border-radius:5px;background:{'#102a18' if photo_ready else '#30220b'};"
                 f'color:{"#8e8" if photo_ready else "#fd8"}">'
-                f'<strong>{"Photo sync ready" if photo_ready else "Waiting for photo sync"}</strong>'
-                f' — {h(photo_reason)}</div>'
+                f"<strong>{'Photo sync ready' if photo_ready else 'Waiting for photo sync'}</strong>"
+                f" — {h(photo_reason)}</div>"
             )
         fp_html = "".join(
-            f'<li><code>{h(str(fp.get("condition_id", "")))}</code>: '
-            f'{h(str(fp.get("result", "")))} — '
-            f'{h("; ".join(str(reason) for reason in fp.get("reasons", [])))} '
-            f'<small>[{h(", ".join(str(ref.get("identity", "")) for ref in fp.get("evidence", []))) }]</small></li>'
+            f"<li><code>{h(str(fp.get('condition_id', '')))}</code>: "
+            f"{h(str(fp.get('result', '')))} — "
+            f"{h('; '.join(str(reason) for reason in fp.get('reasons', [])))} "
+            f"<small>[{h(', '.join(str(ref.get('identity', '')) for ref in fp.get('evidence', [])))}]</small></li>"
             for fp in fingerprints
         )
         actions = workflow_card.get("legal_actions") or []
-        actions_html = "".join(
-            f'<li><code>{h(str(action.get("treatment_id", "")))}</code> — '
-            f'{h(str(action.get("action", "")))}</li>' for action in actions
-        ) or "<li>None — waiting for evidence, authority, or goal satisfaction.</li>"
+        actions_html = (
+            "".join(f"<li><code>{h(str(action.get('treatment_id', '')))}</code> — {h(str(action.get('action', '')))}</li>" for action in actions)
+            or "<li>None — waiting for evidence, authority, or goal satisfaction.</li>"
+        )
         gates = list(workflow_card.get("operator_gates") or [])
         waits = workflow_card.get("waiting_treatments") or []
-        waits_html = "".join(
-            f'<li><code>{h(str(wait.get("treatment_id", "")))}</code> — '
-            f'{h("; ".join(str(reason) for reason in wait.get("reasons", [])))}</li>'
-            for wait in waits
-        ) or "<li>None.</li>"
+        waits_html = "".join(f"<li><code>{h(str(wait.get('treatment_id', '')))}</code> — {h('; '.join(str(reason) for reason in wait.get('reasons', [])))}</li>" for wait in waits) or "<li>None.</li>"
         active = workflow_card.get("active_attempts") or []
-        active_html = "".join(
-            f'<li><code>{h(str(attempt.get("treatment_id") or attempt.get("queue_name") or ""))}</code> — '
-            f'{h(str(attempt.get("state", "")))}'
-            f'{" until " + h(str(attempt.get("not_before"))) if attempt.get("not_before") else ""} '
-            f'(job {h(str(attempt.get("job_id", "")))})</li>'
-            for attempt in active
-        ) or "<li>None.</li>"
-        gate_html = (
-            '<div style="color:#f99"><strong>Operator gates:</strong> '
-            + h(", ".join(str(gate) for gate in gates)) + "</div>"
-            if gates else ""
+        active_html = (
+            "".join(
+                f"<li><code>{h(str(attempt.get('treatment_id') or attempt.get('queue_name') or ''))}</code> — "
+                f"{h(str(attempt.get('state', '')))}"
+                f"{' until ' + h(str(attempt.get('not_before'))) if attempt.get('not_before') else ''} "
+                f"(job {h(str(attempt.get('job_id', '')))})</li>"
+                for attempt in active
+            )
+            or "<li>None.</li>"
         )
+        gate_html = '<div style="color:#f99"><strong>Operator gates:</strong> ' + h(", ".join(str(gate) for gate in gates)) + "</div>" if gates else ""
         workflow_card_html = (
             '<section id="workflow-action-card" style="border:1px solid #345;'
             'background:#111a22;border-radius:8px;padding:10px 14px;margin:10px 0">'
             '<h3 style="margin:0 0 6px">Workflow Action Card</h3>'
-            f'<div>Goal: <code>{h(str(goal.get("id", "")))}</code> '
-            f'v{h(str(goal.get("version", "")))}</div>'
+            f"<div>Goal: <code>{h(str(goal.get('id', '')))}</code> "
+            f"v{h(str(goal.get('version', '')))}</div>"
             f'<div style="font-size:.76em;color:#789">Generation '
-            f'{h(str(workflow_card.get("object_generation", "")))[:12]} · graph '
-            f'{h(str(workflow_card.get("graph_id", "")))[:12]}</div>'
-            f'{photo_state_html}{gate_html}<details><summary>Fingerprints ({len(fingerprints)})</summary>'
-            f'<ul>{fp_html}</ul></details><details><summary>Waits ({len(waits)})</summary>'
-            f'<ul>{waits_html}</ul></details><div><strong>Legal actions</strong><ul>{actions_html}</ul></div>'
-            f'<details><summary>Active attempts ({len(active)})</summary><ul>{active_html}</ul></details>'
+            f"{h(str(workflow_card.get('object_generation', '')))[:12]} · graph "
+            f"{h(str(workflow_card.get('graph_id', '')))[:12]}</div>"
+            f"{photo_state_html}{gate_html}<details><summary>Fingerprints ({len(fingerprints)})</summary>"
+            f"<ul>{fp_html}</ul></details><details><summary>Waits ({len(waits)})</summary>"
+            f"<ul>{waits_html}</ul></details><div><strong>Legal actions</strong><ul>{actions_html}</ul></div>"
+            f"<details><summary>Active attempts ({len(active)})</summary><ul>{active_html}</ul></details>"
             f'<div style="font-size:.8em;color:#789">Attempt history: '
-            f'{len(workflow_card.get("attempts") or [])}</div></section>'
+            f"{len(workflow_card.get('attempts') or [])}</div></section>"
         )
 
     def fv(key: str) -> str:
@@ -7032,7 +6996,9 @@ def _render_item_detail_html(
         if editable and key:
             raw = item.get(key)
             raw_str = h(str(raw)) if raw is not None else ""
-            return f'<div class="frow"><span class="fn">{label}</span><span class="fv editable" data-field="{h(key)}" data-raw="{raw_str}" title="Double-click to edit">{display}</span>{lock_html}</div>'
+            return (
+                f'<div class="frow"><span class="fn">{label}</span><span class="fv editable" data-field="{h(key)}" data-raw="{raw_str}" title="Double-click to edit">{display}</span>{lock_html}</div>'
+            )
         return f'<div class="frow"><span class="fn">{label}</span><span class="fv">{display}</span>{lock_html}</div>'
 
     # Gallery
@@ -7374,23 +7340,15 @@ def _render_item_detail_html(
             consumer_html = ""
             scheduled_at = j.get("scheduled_at")
             if scheduled_at is not None:
-                consumer_html = (
-                    f' <span style="color:#8df;font-size:.78em">'
-                    f'— scheduled {_local_ts(scheduled_at)}</span>'
-                )
+                consumer_html = f' <span style="color:#8df;font-size:.78em">— scheduled {_local_ts(scheduled_at)}</span>'
             if state in ("queued", "leased", "running", "retry_wait") and consumer_status != "active":
-                consumer_html += (
-                    f' <span title="{h(consumer_reason)}" style="color:#fd8;font-size:.78em">'
-                    f'— {h(consumer_reason)}</span>'
-                )
+                consumer_html += f' <span title="{h(consumer_reason)}" style="color:#fd8;font-size:.78em">— {h(consumer_reason)}</span>'
             # PP-ACTIONCONSOLE-001: contextual repair — a Retry button appears
             # ONLY on actionable failure states (zero buttons in the happy path).
             _retry_btn = ""
             if state == "dead_letter" and j.get("job_id") and j.get("retry_allowed", True):
                 _retry_btn = (
-                    f' <button class="act-btn" style="font-size:.72em;padding:1px 8px;'
-                    f'background:#2a0d0d;border-color:#a44;color:#e88" '
-                    f"onclick=\"retryJob('{h(str(j['job_id']))}')\">Retry</button>"
+                    f' <button class="act-btn" style="font-size:.72em;padding:1px 8px;background:#2a0d0d;border-color:#a44;color:#e88" onclick="retryJob(\'{h(str(j["job_id"]))}\')">Retry</button>'
                 )
             job_rows += f'<tr><td{tip_attr}>{h(qn)}</td><td class="{sc}">{h(state)}{consumer_html}{_retry_btn}</td><td style="color:#666;font-size:.8em">{h(ts)}</td><td style="color:{_err_color};font-size:.8em">{err}</td></tr>'
         jobs_html = f'<table class="jtable"><tr><th>Queue</th><th>State</th><th>Updated</th><th>Error</th></tr>{job_rows}</table>'
@@ -7454,18 +7412,11 @@ def _render_item_detail_html(
                 f'<td style="color:#666;font-size:.78em">{_ev_src}</td>'
                 f"</tr>"
             )
-        _phev_table = (
-            f'<table class="jtable">'
-            f"<tr><th>When</th><th>Price</th><th>Previous</th><th>Stage</th><th>Source</th></tr>"
-            f"{_phev_rows}"
-            f"</table>"
-        )
+        _phev_table = f'<table class="jtable"><tr><th>When</th><th>Price</th><th>Previous</th><th>Stage</th><th>Source</th></tr>{_phev_rows}</table>'
     if _phev_table or _ph_rows:
         price_history_html = (
             '<div class="dsec">'
-            '<h3>Pricing History'
-            + (f' <span style="font-size:.7em;color:#555;font-weight:normal">{len(_ph_events)} events</span>' if _ph_events else "")
-            + "</h3>"
+            "<h3>Pricing History" + (f' <span style="font-size:.7em;color:#555;font-weight:normal">{len(_ph_events)} events</span>' if _ph_events else "") + "</h3>"
             '<div style="font-size:.73em;color:#556;margin-bottom:6px">Every price change recorded — launch through markdowns</div>'
             + _phev_table
             + (f'<div style="margin-top:6px;border-top:1px solid #222;padding-top:6px">{_ph_rows}</div>' if _ph_rows else "")
@@ -7579,11 +7530,11 @@ def _render_item_detail_html(
         _eps_thumbs = "".join(
             f'<a href="{h(u)}" target="_blank" rel="noopener noreferrer"><img src="{h(u)}" style="height:80px;width:80px;object-fit:cover;border-radius:4px;border:1px solid #333;cursor:pointer"></a>'
             for u in _display_eps[:24]  # eBay's own per-listing max — the header count
-        )                               # already reports len(_display_eps); this cap must
-                                         # match it or the strip silently under-renders
-                                         # against its own label (Dave, 2026-07-17: an
-                                         # old [:12] slice made photos look missing that
-                                         # were actually live on eBay all along)
+        )  # already reports len(_display_eps); this cap must
+        # match it or the strip silently under-renders
+        # against its own label (Dave, 2026-07-17: an
+        # old [:12] slice made photos look missing that
+        # were actually live on eBay all along)
         _eps_strip_html = (
             f'<div id="eps-photos" class="dsec">'
             f"<h3>Photos on eBay"
@@ -7602,7 +7553,7 @@ def _render_item_detail_html(
             '<div style="color:#555;font-size:.85em">No photos on eBay yet — run ebay_upload to upload photos to EPS'
             ' <button onclick="resyncPhotos()" style="font-size:.9em;margin-left:8px;padding:2px 8px;cursor:pointer">Resync Photos</button>'
             ' <span id="resync-photos-result" style="font-size:.9em;color:#8af;margin-left:6px"></span>'
-            '</div></div>'
+            "</div></div>"
         )
 
     # ── Phase 1A: eBay live collapsible panel ──────────────────────────────────
@@ -7825,19 +7776,12 @@ def _render_item_detail_html(
     # AI Identify resolves the authoritative eBay category before ebay_draft
     # exists. The editor previously ignored that valid result until a draft was
     # generated, rendering an empty category and hiding the category aspects.
-    _dl_cat_id_raw = str(
-        (dl or {}).get("category_id") or item.get("ebay_category_id") or ""
-    ).strip()
-    _dl_cat_name_raw = str(
-        (dl or {}).get("category_name") or item.get("ebay_category_name") or ""
-    ).strip()
+    _dl_cat_id_raw = str((dl or {}).get("category_id") or item.get("ebay_category_id") or "").strip()
+    _dl_cat_name_raw = str((dl or {}).get("category_name") or item.get("ebay_category_name") or "").strip()
     _dl_cat_missing = not _dl_cat_id_raw or _dl_cat_id_raw == "99"
     _dl_cat_name = h(_dl_cat_name_raw)
     _dl_cat_id_v = h(_dl_cat_id_raw)
-    _dl_cat_warning_html = (
-        '<span style="color:#e88">Required — choose an eBay category before staging</span>'
-        if _dl_cat_missing else ""
-    )
+    _dl_cat_warning_html = '<span style="color:#e88">Required — choose an eBay category before staging</span>' if _dl_cat_missing else ""
     _dl_cat_aria_invalid = "true" if _dl_cat_missing else "false"
     _dl_cat_bg = "#1a0a0a" if _dl_cat_missing else "#1a1a1a"
     _dl_cat_border = "#c44" if _dl_cat_missing else "#444"
@@ -7868,6 +7812,7 @@ def _render_item_detail_html(
         if _cg_key:
             try:
                 import json as _jsc2
+
                 _cg2 = _jsc2.loads(Path(_cfg["category_groups_path"]).read_text())
                 _grp2 = _cg2.get("groups", _cg2).get(_cg_key, {})
                 _dl_store_cat_id = str(_grp2.get("store_category_id") or "")
@@ -7889,28 +7834,19 @@ def _render_item_detail_html(
         known_ids = {store_id for _name, store_id in _sc_list}
         if selected_id and selected_id not in known_ids:
             stored_name = f"Stored category {selected_id}"
-            opts += (
-                f'<option value="{h(selected_id)}" data-name="{h(stored_name)}" selected>'
-                f'{h(stored_name)} — not in current snapshot</option>'
-            )
-        opts += "".join(
-            f'<option value="{h(_si)}" data-name="{h(_sn)}"{" selected" if _si == selected_id else ""}>{h(_sn)} ({h(_si)})</option>'
-            for _sn, _si in _sc_list
-        )
+            opts += f'<option value="{h(selected_id)}" data-name="{h(stored_name)}" selected>{h(stored_name)} — not in current snapshot</option>'
+        opts += "".join(f'<option value="{h(_si)}" data-name="{h(_sn)}"{" selected" if _si == selected_id else ""}>{h(_sn)} ({h(_si)})</option>' for _sn, _si in _sc_list)
         return opts
 
     _store_cat_opts_html = _store_cat_options_html(_dl_store_cat_id)
     _store_cat2_opts_html = _store_cat_options_html(_dl_store_cat2_id)
     if _sc_error:
-        _store_cat_fallback_html = (
-            f'<span style="font-size:.7em;color:#c84;margin-left:6px" title="{h(_sc_error)}">'
-            f'⚠ local mapping only; eBay snapshot unavailable ({len(_sc_list)} mapped)</span>'
-        )
+        _store_cat_fallback_html = f'<span style="font-size:.7em;color:#c84;margin-left:6px" title="{h(_sc_error)}">⚠ local mapping only; eBay snapshot unavailable ({len(_sc_list)} mapped)</span>'
     else:
         _store_cat_fallback_html = (
             f'<span style="font-size:.7em;color:#585;margin-left:6px" '
             f'title="last successful GetStore refresh: {h(_sc_refreshed_at or "timestamp unavailable")}">'
-            f'eBay snapshot: {len(_sc_list)} categories</span>'
+            f"eBay snapshot: {len(_sc_list)} categories</span>"
         )
     import json as _json2
 
@@ -7930,23 +7866,18 @@ def _render_item_detail_html(
     _fulfillment_opts, _fo_refreshed_at, _fo_error = _fulfillment_policies_snapshot(_cfg)
     _ship_opts_html = ""
     if _dl_ship_val and _dl_ship_val not in _fulfillment_opts:
-        _ship_opts_html += (
-            f'<option value="{h(_dl_ship_val)}" selected>'
-            f'{h(_dl_ship_val)} — not in current snapshot</option>'
-        )
+        _ship_opts_html += f'<option value="{h(_dl_ship_val)}" selected>{h(_dl_ship_val)} — not in current snapshot</option>'
     _ship_opts_html += "".join(
-        f'<option value="{h(pid)}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({h(pid[:8])}…)</option>' for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: (kv[1].casefold(), kv[0]))
+        f'<option value="{h(pid)}"{" selected" if pid == _dl_ship_val else ""}>{h(name)} ({h(pid[:8])}…)</option>'
+        for pid, name in sorted(_fulfillment_opts.items(), key=lambda kv: (kv[1].casefold(), kv[0]))
     )
     if _fo_error:
-        _fo_fallback_html = (
-            f'<span style="font-size:.7em;color:#c84;margin-left:6px" title="{h(_fo_error)}">'
-            '⚠ eBay fulfillment-policy snapshot unavailable</span>'
-        )
+        _fo_fallback_html = f'<span style="font-size:.7em;color:#c84;margin-left:6px" title="{h(_fo_error)}">⚠ eBay fulfillment-policy snapshot unavailable</span>'
     else:
         _fo_fallback_html = (
             f'<span style="font-size:.7em;color:#585;margin-left:6px" '
             f'title="last successful Account API refresh: {h(_fo_refreshed_at or "timestamp unavailable")}">'
-            f'eBay snapshot: {len(_fulfillment_opts)} fulfillment policies</span>'
+            f"eBay snapshot: {len(_fulfillment_opts)} fulfillment policies</span>"
         )
     # Live fulfillment policy beside the selector (session 42: the selector kept
     # showing the operator's FC4 while eBay actually had FC8 — the divergence was
@@ -7959,7 +7890,7 @@ def _render_item_detail_html(
             f'<span style="font-size:.72em;margin-left:8px;'
             f'color:{"#e88" if _ls_mismatch else "#585"}" '
             f'title="fulfillment policy currently on the live eBay listing (mirrored by ebay_sync)">'
-            f'live: {h(_ls_name)}{" — differs from draft, Update Listing to apply" if _ls_mismatch else ""}</span>'
+            f"live: {h(_ls_name)}{' — differs from draft, Update Listing to apply' if _ls_mismatch else ''}</span>"
         )
     else:
         _live_ship_html = ""
@@ -7994,10 +7925,7 @@ def _render_item_detail_html(
         elif _pe.get("detail") or _pe.get("code"):
             _pe_code = _pe.get("code")
             _pe_norm = {
-                "heading": (f"eBay rejected {_pe.get('source', '?')}"
-                            if _pe_code == "ebay_rejected"
-                            else f"{_pe.get('source', 'pipeline')} stopped: "
-                                 f"{_pe_code or 'error'}"),
+                "heading": (f"eBay rejected {_pe.get('source', '?')}" if _pe_code == "ebay_rejected" else f"{_pe.get('source', 'pipeline')} stopped: {_pe_code or 'error'}"),
                 "detail": _pe.get("detail") or str(_pe_code or ""),
                 "raw": _pe.get("raw", ""),
                 "at": _pe.get("ts"),
@@ -8007,10 +7935,7 @@ def _render_item_detail_html(
     if _pe_norm:
         _pe_when = _local_ts(_pe_norm["at"])
         _pe_raw_js = _json.dumps(_pe_norm["raw"])
-        _raw_btn = (
-            '<button class="act-btn" style="font-size:.78em;padding:2px 8px" '
-            'onclick="toggleRawError()">Show raw</button>'
-        ) if _pe_norm["raw"] else ""
+        _raw_btn = ('<button class="act-btn" style="font-size:.78em;padding:2px 8px" onclick="toggleRawError()">Show raw</button>') if _pe_norm["raw"] else ""
         _pipeline_error_html = (
             f'<div id="pipeline-error-box" style="margin-bottom:12px;padding:10px 14px;'
             f'background:#1a0505;border:1px solid #844;border-radius:4px;font-size:.82em;color:#e88">'
@@ -8057,15 +7982,10 @@ def _render_item_detail_html(
     _is_sold = str(item.get("status") or "").lower() == "sold"
     _sold_quantity_raw = dl.get("quantity", item.get("quantity", 0))
     try:
-        _sold_quantity = (
-            0 if isinstance(_sold_quantity_raw, bool)
-            else int(_sold_quantity_raw or 0)
-        )
+        _sold_quantity = 0 if isinstance(_sold_quantity_raw, bool) else int(_sold_quantity_raw or 0)
     except (TypeError, ValueError):
         _sold_quantity = 0
-    _working = any(
-        j.get("state") in ("pending", "running", "claimed", "retry") for j in jobs
-    )
+    _working = any(j.get("state") in ("pending", "running", "claimed", "retry") for j in jobs)
     # A dead_letter older than the last re-baseline is superseded history:
     # the manager made draft == offer after that failure (broker B1a), so it
     # is no longer an actionable state. Newer dead_letters are live failures.
@@ -8114,13 +8034,7 @@ def _render_item_detail_html(
         queue_name = j.get("queue_name")
         if failed_at is None or not queue_name:
             return False
-        return any(
-            other.get("queue_name") == queue_name
-            and other.get("state") == "succeeded"
-            and (other_at := _job_finished_at(other)) is not None
-            and other_at > failed_at
-            for other in jobs
-        )
+        return any(other.get("queue_name") == queue_name and other.get("state") == "succeeded" and (other_at := _job_finished_at(other)) is not None and other_at > failed_at for other in jobs)
 
     def _duplicate_provider_effect_lost_to_success(j: Dict[str, Any]) -> bool:
         """Hide only the known duplicate-stage loser, never a real failure.
@@ -8131,18 +8045,20 @@ def _render_item_detail_html(
         an operator repair state when the same generation has a successful
         sibling stage receipt.
         """
-        if (j.get("state") != "dead_letter"
-                or j.get("queue_name") != "ebay_stage"
-                or "provider effect binding mismatch" not in str(j.get("error_detail") or "")):
+        if j.get("state") != "dead_letter" or j.get("queue_name") != "ebay_stage" or "provider effect binding mismatch" not in str(j.get("error_detail") or ""):
             return False
         payload = j.get("payload_json")
         generation = payload.get("object_generation") if isinstance(payload, dict) else None
-        return isinstance(generation, str) and bool(generation) and any(
-            other.get("queue_name") == "ebay_stage"
-            and other.get("state") == "succeeded"
-            and isinstance(other.get("payload_json"), dict)
-            and other["payload_json"].get("object_generation") == generation
-            for other in jobs
+        return (
+            isinstance(generation, str)
+            and bool(generation)
+            and any(
+                other.get("queue_name") == "ebay_stage"
+                and other.get("state") == "succeeded"
+                and isinstance(other.get("payload_json"), dict)
+                and other["payload_json"].get("object_generation") == generation
+                for other in jobs
+            )
         )
 
     _has_error = bool(_pe_norm) or any(
@@ -8151,42 +8067,28 @@ def _render_item_detail_html(
         and not (
             dl.get("price") is not None
             and isinstance((j.get("payload_json") or {}).get("result"), dict)
-            and ((j.get("payload_json") or {}).get("result", {}).get("evidence") or {}).get(
-                "reason_code"
-            ) == "PRICE_REQUIRES_OPERATOR_INPUT"
+            and ((j.get("payload_json") or {}).get("result", {}).get("evidence") or {}).get("reason_code") == "PRICE_REQUIRES_OPERATOR_INPUT"
         )
         and _after_baseline(j)
         and not _superseded_by_success(j)
         and not _duplicate_provider_effect_lost_to_success(j)
         for j in jobs
     )
-    _needs_photo_resync = bool(
-        photo_fingerprint
-        and photo_fingerprint.get("result") == "false"
-        and item_photos_fingerprint
-        and item_photos_fingerprint.get("result") == "true"
-    )
+    _needs_photo_resync = bool(photo_fingerprint and photo_fingerprint.get("result") == "false" and item_photos_fingerprint and item_photos_fingerprint.get("result") == "true")
     # A missing draft price is itself the actionable state.  Do not depend on
     # a worker having also persisted the newer ``no_price_set`` finding: older
     # ebay_price dead letters (and workers which correctly refuse to invent a
     # price when no positive evidence exists) may leave only the empty draft
     # field plus the queue ledger.  In that state Retry cannot help; the
     # operator needs the price editor.
-    _needs_price = bool(
-        (dl.get("title") and dl.get("price") is None)
-        or (_pe_norm and _pe_norm.get("code") == "no_price_set")
-    )
+    _needs_price = bool((dl.get("title") and dl.get("price") is None) or (_pe_norm and _pe_norm.get("code") == "no_price_set"))
     # Also catches pre-existing findings written by the OLD path (an actual
     # eBay API rejection, code='ebay_rejected', before the ebay_stage.py
     # pre-flight guard existed) whose detail is specifically the 80-char
     # title rejection — so already-dead-lettered items (e.g. tgw202605051752520)
     # get the same "Trim Title" affordance without needing to be re-staged
     # first just to get a fresh finding in the new shape.
-    _needs_title_trim = bool(_pe_norm and (
-        _pe_norm.get("code") == "title_too_long"
-        or (_pe_norm.get("code") == "ebay_rejected"
-            and "80 characters" in (_pe_norm.get("detail") or ""))
-    ))
+    _needs_title_trim = bool(_pe_norm and (_pe_norm.get("code") == "title_too_long" or (_pe_norm.get("code") == "ebay_rejected" and "80 characters" in (_pe_norm.get("detail") or ""))))
     # Draft-vs-live divergence: does the draft differ from what eBay holds?
     _live_inv = (_ebay_live_raw.get("inventory_item") or {}) if _ebay_live_raw else {}
     _live_offer_raw = (_ebay_live_raw.get("offer") or {}) if _ebay_live_raw else {}
@@ -8195,89 +8097,84 @@ def _render_item_detail_html(
         _lp = (_live_offer_raw.get("pricingSummary") or {}).get("price") or {}
         _live_product = _live_inv.get("product") or {}
         try:
-            _price_differs = (
-                dl.get("price") is not None
-                and _lp.get("value") is not None
-                and abs(float(dl["price"]) - float(_lp["value"])) > 0.01
-            )
+            _price_differs = dl.get("price") is not None and _lp.get("value") is not None and abs(float(dl["price"]) - float(_lp["value"])) > 0.01
         except (TypeError, ValueError):
             _price_differs = False
         _diverged = (
             _price_differs
             or (dl.get("title") and dl["title"] != _live_product.get("title"))
-            or (dl.get("quantity") is not None
-                and _live_offer_raw.get("availableQuantity") is not None
-                and int(dl["quantity"]) != int(_live_offer_raw["availableQuantity"]))
+            or (dl.get("quantity") is not None and _live_offer_raw.get("availableQuantity") is not None and int(dl["quantity"]) != int(_live_offer_raw["availableQuantity"]))
         )
 
-    def _abtn(label: str, onclick: str, color: str, *, disabled: bool = False,
-              title: str = "", push: bool = False) -> str:
+    def _abtn(label: str, onclick: str, color: str, *, disabled: bool = False, title: str = "", push: bool = False) -> str:
         colors = {
-            "green":  "background:#0d2a0d;border-color:#4a4;color:#8e8",
+            "green": "background:#0d2a0d;border-color:#4a4;color:#8e8",
             "yellow": "background:#2a2a0a;border-color:#aa4;color:#cc8",
-            "red":    "background:#2a0d0d;border-color:#a44;color:#e88",
-            "grey":   "background:#1a1a1a;border-color:#333;color:#667",
-            "blue":   "background:#1a2a3a;border-color:#2a4a6a;color:#cce",
+            "red": "background:#2a0d0d;border-color:#a44;color:#e88",
+            "grey": "background:#1a1a1a;border-color:#333;color:#667",
+            "blue": "background:#1a2a3a;border-color:#2a4a6a;color:#cce",
         }
         dis = " disabled" if disabled else ""
         push_s = "margin-left:auto;" if push else ""
         title_a = f' title="{h(title)}"' if title else ""
-        return (
-            f'<button class="act-btn"{dis}{title_a} style="{push_s}{colors[color]}" '
-            f'onclick="{onclick}">{label}</button>'
-        )
+        return f'<button class="act-btn"{dis}{title_a} style="{push_s}{colors[color]}" onclick="{onclick}">{label}</button>'
 
     _line: List[str] = []
     if _is_sold:
-        _line.append(_abtn(
-            "Sold", "", "grey", disabled=True,
-            title=("Sold status is authoritative — explicitly restore inventory "
-                   "and change status before relisting"),
-        ))
+        _line.append(
+            _abtn(
+                "Sold",
+                "",
+                "grey",
+                disabled=True,
+                title=("Sold status is authoritative — explicitly restore inventory and change status before relisting"),
+            )
+        )
     elif _needs_price:
         # A guard finding with a known fix gets its affordance regardless of
         # listing state — Retry cannot resolve a missing price, the editor can.
-        _line.append(_abtn(
-            "Set Price",
-            "var p=document.getElementById('dl-price-input');"
-            "if(p){p.scrollIntoView({behavior:'smooth',block:'center'});p.focus();}",
-            "red",
-            title=("Live on eBay, but the draft has no operator-set price — "
-                   "set one, then Update Item to push it live") if is_active
-                  else "The draft has no price — set one, then List on eBay"))
+        _line.append(
+            _abtn(
+                "Set Price",
+                "var p=document.getElementById('dl-price-input');if(p){p.scrollIntoView({behavior:'smooth',block:'center'});p.focus();}",
+                "red",
+                title=("Live on eBay, but the draft has no operator-set price — set one, then Update Item to push it live") if is_active else "The draft has no price — set one, then List on eBay",
+            )
+        )
         if not is_active and _has_draft:
-            _line.append(_abtn("List on eBay", "listOnEbay()", "green",
-                               title="Save draft, run every needed step, and publish"))
+            _line.append(_abtn("List on eBay", "listOnEbay()", "green", title="Save draft, run every needed step, and publish"))
     elif _needs_title_trim:
         # Same shape as _needs_price: Retry cannot fix an over-length title,
         # the editor can. The title field holds the FULL untruncated text
         # (seo/title.py deliberately doesn't auto-truncate) — this scrolls to
         # it so the operator can trim by double-click-deleting words, same
         # workflow eBay's own bulk-CSV editor uses.
-        _line.append(_abtn(
-            "Trim Title",
-            "var t=document.getElementById('dl-title-input');"
-            "if(t){t.scrollIntoView({behavior:'smooth',block:'center'});t.focus();}",
-            "red",
-            title=(f"Title is {len((dl or {}).get('title') or '')} chars — "
-                   f"eBay allows at most 80. Trim it, then Save Draft and List on eBay.")))
+        _line.append(
+            _abtn(
+                "Trim Title",
+                "var t=document.getElementById('dl-title-input');if(t){t.scrollIntoView({behavior:'smooth',block:'center'});t.focus();}",
+                "red",
+                title=(f"Title is {len((dl or {}).get('title') or '')} chars — eBay allows at most 80. Trim it, then Save Draft and List on eBay."),
+            )
+        )
         if not is_active and _has_draft:
-            _line.append(_abtn("List on eBay", "listOnEbay()", "green",
-                               title="Save draft, run every needed step, and publish"))
+            _line.append(_abtn("List on eBay", "listOnEbay()", "green", title="Save draft, run every needed step, and publish"))
     elif _needs_photo_resync:
         # Photo repair belongs beside the photo evidence, where the dedicated
         # Resync Photos control already exists.  The action line remains the
         # operator command surface: List issues the publish-capable grant and
         # the server graph runs upload, stage, and publish in order.
         if _has_draft:
-            _line.append(_abtn(
-                "List on eBay",
-                "listOnEbay()",
-                "green",
-                title=("Start the full listing workflow; it will synchronize "
-                       "photos before staging and publishing"),
-            ))
+            _line.append(
+                _abtn(
+                    "List on eBay",
+                    "listOnEbay()",
+                    "green",
+                    title=("Start the full listing workflow; it will synchronize photos before staging and publishing"),
+                )
+            )
     elif _has_error and not is_active:
+
         def _job_reason_code(job: Dict[str, Any]) -> str:
             """Read a worker reason from its persisted queue payload.
 
@@ -8295,30 +8192,40 @@ def _render_item_detail_html(
                 return ""
             return str(evidence.get("reason_code") or "")
 
-        _retryable_failure = next((
-            j for j in jobs
-            if j.get("state") == "dead_letter"
-            and _after_baseline(j)
-            and not _superseded_by_success(j)
-            and not _duplicate_provider_effect_lost_to_success(j)
-            and j.get("job_id")
-            and j.get("retry_allowed", True)
-        ), None)
-        _receipt_identity_failure = next((
-            j for j in jobs
-            if j.get("queue_name") == "ebay_upload"
-            and j.get("state") == "dead_letter"
-            and _after_baseline(j)
-            and not _superseded_by_success(j)
-            and _job_reason_code(j) == "INVALID_RECEIPT_IDENTITY"
-        ), None)
+        _retryable_failure = next(
+            (
+                j
+                for j in jobs
+                if j.get("state") == "dead_letter"
+                and _after_baseline(j)
+                and not _superseded_by_success(j)
+                and not _duplicate_provider_effect_lost_to_success(j)
+                and j.get("job_id")
+                and j.get("retry_allowed", True)
+            ),
+            None,
+        )
+        _receipt_identity_failure = next(
+            (
+                j
+                for j in jobs
+                if j.get("queue_name") == "ebay_upload"
+                and j.get("state") == "dead_letter"
+                and _after_baseline(j)
+                and not _superseded_by_success(j)
+                and _job_reason_code(j) == "INVALID_RECEIPT_IDENTITY"
+            ),
+            None,
+        )
         if _retryable_failure:
-            _line.append(_abtn(
-                "Retry",
-                f"retryJob({h(_json.dumps(str(_retryable_failure['job_id'])))})",
-                "red",
-                title=f"Retry failed {_retryable_failure.get('queue_name') or 'pipeline'} job",
-            ))
+            _line.append(
+                _abtn(
+                    "Retry",
+                    f"retryJob({h(_json.dumps(str(_retryable_failure['job_id'])))})",
+                    "red",
+                    title=f"Retry failed {_retryable_failure.get('queue_name') or 'pipeline'} job",
+                )
+            )
         elif _receipt_identity_failure and _has_draft:
             # The failed job is intentionally not blind-retryable: its graph and
             # receipt identities are stale.  Once a current draft exists, the
@@ -8328,24 +8235,25 @@ def _render_item_detail_html(
             # offered only "Needs attention", even after the receipt producer
             # was corrected, leaving no way for the operator to launch that
             # replacement attempt (live incident tgw202510161310076).
-            _line.append(_abtn(
-                "List on eBay",
-                "listOnEbay()",
-                "green",
-                title=("Start a fresh listing attempt with the current draft and "
-                       "current receipt identity; the historical failure is retained"),
-            ))
+            _line.append(
+                _abtn(
+                    "List on eBay",
+                    "listOnEbay()",
+                    "green",
+                    title=("Start a fresh listing attempt with the current draft and current receipt identity; the historical failure is retained"),
+                )
+            )
         else:
-            _line.append(_abtn(
-                "Needs attention",
-                "var j=document.getElementById('jobs-section');"
-                "if(j)j.scrollIntoView({behavior:'smooth'});",
-                "red",
-                title="This failure requires reconciliation rather than a blind retry",
-            ))
+            _line.append(
+                _abtn(
+                    "Needs attention",
+                    "var j=document.getElementById('jobs-section');if(j)j.scrollIntoView({behavior:'smooth'});",
+                    "red",
+                    title="This failure requires reconciliation rather than a blind retry",
+                )
+            )
     elif _working:
-        _line.append(_abtn("Working…", "", "yellow", disabled=True,
-                           title="Pipeline is running — refresh to update"))
+        _line.append(_abtn("Working…", "", "yellow", disabled=True, title="Pipeline is running — refresh to update"))
     elif is_active:
         # The live listing is the ground truth — a failed re-run must never
         # mask it behind a bare Retry (which would only fail the same way).
@@ -8353,30 +8261,31 @@ def _render_item_detail_html(
         if _pe_norm:
             # Keyed off the persisted finding (C11), not the job ledger — a
             # historical dead_letter whose finding was resolved is not a state.
-            _line.append(_abtn(
-                "Needs attention",
-                "var b=document.getElementById('pipeline-error-box');"
-                "if(b)b.scrollIntoView({behavior:'smooth'});",
-                "red",
-                title="Live on eBay, but the last pipeline step failed — see the error box"))
+            _line.append(
+                _abtn(
+                    "Needs attention",
+                    "var b=document.getElementById('pipeline-error-box');if(b)b.scrollIntoView({behavior:'smooth'});",
+                    "red",
+                    title="Live on eBay, but the last pipeline step failed — see the error box",
+                )
+            )
         elif _has_error:
             # Dead-letter in the ledger with no persisted finding (worker
             # crash paths write none) — quieter, but never silent.
-            _line.append(_abtn(
-                "Needs attention",
-                "var j=document.getElementById('jobs-section');"
-                "if(j)j.scrollIntoView({behavior:'smooth'});",
-                "red",
-                title="Live on eBay, but a pipeline job failed — see job history"))
+            _line.append(
+                _abtn(
+                    "Needs attention",
+                    "var j=document.getElementById('jobs-section');if(j)j.scrollIntoView({behavior:'smooth'});",
+                    "red",
+                    title="Live on eBay, but a pipeline job failed — see job history",
+                )
+            )
         if _diverged:
-            _line.append(_abtn("Update Item", "updateItem()", "yellow",
-                               title="Draft has unpushed changes — push to eBay in place"))
+            _line.append(_abtn("Update Item", "updateItem()", "yellow", title="Draft has unpushed changes — push to eBay in place"))
         else:
-            _line.append(_abtn("Update Item", "updateItem()", "grey",
-                               title="Draft matches the live listing"))
+            _line.append(_abtn("Update Item", "updateItem()", "grey", title="Draft matches the live listing"))
     elif _has_draft:
-        _line.append(_abtn("List on eBay", "listOnEbay()", "green",
-                           title="Save draft, run every needed step, and publish"))
+        _line.append(_abtn("List on eBay", "listOnEbay()", "green", title="Save draft, run every needed step, and publish"))
         if _is_unpublished_offer:
             _apv_chk = " checked" if is_ready else ""
             _line.append(
@@ -8385,44 +8294,34 @@ def _render_item_detail_html(
                 f'<input type="checkbox"{_apv_chk} onchange="toggleApprove(this)">'
                 f"queue for auto-listing "
                 f'<span style="color:#b66" title="approved items collect in the ready '
-                f'pool but the ebay_dole worker is not installed — nothing publishes '
+                f"pool but the ebay_dole worker is not installed — nothing publishes "
                 f'from the pool yet (todo #1113)">(inactive)</span></label>'
             )
-        _line.append(_abtn("Reset Draft", "resetDraft()", "blue",
-                           title="Discard edits and regenerate the draft from the catalog record"))
+        _line.append(_abtn("Reset Draft", "resetDraft()", "blue", title="Discard edits and regenerate the draft from the catalog record"))
     else:
-        _line.append(_abtn("Prepare Listing", "prepareListing()", "green",
-                           title="Run identification and draft the eBay listing"))
+        _line.append(_abtn("Prepare Listing", "prepareListing()", "green", title="Run identification and draft the eBay listing"))
 
-    _line.append(_abtn(
-        "AI Reidentify" if item.get("ai_identified") else "AI Identify",
-        "triggerAction('ai_identify')",
-        "blue",
-        title=("Run image identification again using the current photos"
-               if item.get("ai_identified")
-               else "Run image identification using the current photos"),
-    ))
+    _line.append(
+        _abtn(
+            "AI Reidentify" if item.get("ai_identified") else "AI Identify",
+            "triggerAction('ai_identify')",
+            "blue",
+            title=("Run image identification again using the current photos" if item.get("ai_identified") else "Run image identification using the current photos"),
+        )
+    )
 
     if is_active and not _is_sold:
         # Always operator-accessible on a live item (Dave, s46): this is THE
         # component that resolves the draft interface to the live data — the
         # broken-draft states (e.g. draft price empty vs live price set) are
         # exactly the ones the _diverged heuristic can't see.
-        _line.append(_abtn("Reset Draft", "resetDraftFromLive()", "blue",
-                           title="Discard local edits — re-pin the draft to what is live on eBay"))
-        _line.append(_abtn("End Listing", (
-            "triggerAction('ebay_end_listing',"
-            "'End this listing on eBay? This cannot be undone.')"), "red"))
+        _line.append(_abtn("Reset Draft", "resetDraftFromLive()", "blue", title="Discard local edits — re-pin the draft to what is live on eBay"))
+        _line.append(_abtn("End Listing", ("triggerAction('ebay_end_listing','End this listing on eBay? This cannot be undone.')"), "red"))
 
-    _line.append(_abtn("Archive", (
-        "triggerAction('archive','Archive this item? It will be hidden from the catalog.')"
-    ), "grey", push=True))
+    _line.append(_abtn("Archive", ("triggerAction('archive','Archive this item? It will be hidden from the catalog.')"), "grey", push=True))
     _line.append(_abtn("Delete", "deleteItem()", "grey"))
     if listing_url:
-        _line.append(
-            f'<a class="ebay-btn ebay-btn-primary" style="align-self:center" '
-            f'href="{h(listing_url)}" target="_blank" rel="noopener noreferrer">View on eBay ↗</a>'
-        )
+        _line.append(f'<a class="ebay-btn ebay-btn-primary" style="align-self:center" href="{h(listing_url)}" target="_blank" rel="noopener noreferrer">View on eBay ↗</a>')
 
     _gate_html = '<div class="act-row" id="action-line">' + "".join(_line) + "</div>"
     _pipeline_bar = ""  # removed — the action line and tabs carry the state
@@ -8466,8 +8365,7 @@ def _render_item_detail_html(
     # on first paint (via inline JS calling the shared flagFieldInvalid())
     # the same way loadCatCtx()'s dynamic re-render already flags it —
     # both render paths must use the one shared visual-flag mechanism.
-    _cond_opts_html, _cond_is_invalid = _build_condition_options(
-        (dl or {}).get("condition_enum") or (dl or {}).get("condition") or "", _cat_id_for_aspects)
+    _cond_opts_html, _cond_is_invalid = _build_condition_options((dl or {}).get("condition_enum") or (dl or {}).get("condition") or "", _cat_id_for_aspects)
 
     _ebay_draft_editor = (
         '<div id="dl-section" class="dsec">'
@@ -8477,7 +8375,7 @@ def _render_item_detail_html(
         f'<span class="fv" style="flex:1">'
         f'<input id="dl-title-input" type="text" maxlength="80" value="{_dl_title_val}" '
         f'style="width:100%;background:#1a1a1a;color:#eee;'
-        f'border:1px solid {"#c44" if _dl_title_len > 80 else "#444"};'
+        f"border:1px solid {'#c44' if _dl_title_len > 80 else '#444'};"
         f'border-radius:4px;padding:4px 6px;font-size:.9em" '
         f"oninput=\"updateCharCount(this,80,'dl-title-count')\">"
         f'<span id="dl-title-count" style="font-size:.75em;margin-left:4px;'
@@ -8497,7 +8395,7 @@ def _render_item_detail_html(
         f'aria-invalid="{_dl_cat_aria_invalid}" '
         f'autocomplete="off" '
         f'style="flex:1;background:{_dl_cat_bg};color:#eee;'
-        f'border:1px solid {_dl_cat_border};'
+        f"border:1px solid {_dl_cat_border};"
         f'border-radius:4px;padding:3px 6px;font-size:.88em">'
         f'<a href="#" id="dl-cat-browse-btn" onclick="return false" '
         f'style="display:inline-block;padding:3px 8px;border-radius:4px;font-size:.8em;'
@@ -8542,9 +8440,7 @@ def _render_item_detail_html(
         f'<span class="fv">'
         f'<select id="dl-store-cat-select" '
         f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.88em">' + _store_cat_opts_html + "</select>"
-        '<span id="store-cat-hint" style="font-size:.72em;color:#445;margin-left:8px"></span>'
-        + _store_cat_fallback_html +
-        "</span></div>"
+        '<span id="store-cat-hint" style="font-size:.72em;color:#445;margin-left:8px"></span>' + _store_cat_fallback_html + "</span></div>"
         # Secondary store category
         '<div class="frow" id="dl-store-category2">'
         '<span class="fn">Store cat 2</span>'
@@ -8564,7 +8460,7 @@ def _render_item_detail_html(
         f'<option value=""{" selected" if _dl_bo_select_val == "" else ""}>— not set (eBay default) —</option>'
         f'<option value="true"{" selected" if _dl_bo_select_val == "true" else ""}>Enabled</option>'
         f'<option value="false"{" selected" if _dl_bo_select_val == "false" else ""}>Disabled</option>'
-        f'</select>'
+        f"</select>"
         f'<input type="text" id="dl-best-offer-accept" placeholder="auto-accept $" value="{_dl_bo_accept_val}" '
         f'style="background:#1a1a1a;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;'
         f'font-size:.85em;width:110px;margin-left:8px">'
@@ -8578,9 +8474,7 @@ def _render_item_detail_html(
         '<span class="fv">'
         f'<select id="dl-condition-select" '
         f'style="background:#1a1a1a;color:#eee;border:1px solid '
-        f'{"#c44" if _cond_is_invalid else "#444"};border-radius:4px;padding:3px 6px">'
-        + _cond_opts_html
-        + f"</select>"
+        f'{"#c44" if _cond_is_invalid else "#444"};border-radius:4px;padding:3px 6px">' + _cond_opts_html + f"</select>"
         f'<span id="condition-policy-note" style="font-size:.72em;color:#445;margin-left:8px"></span>'
         f"</span></div>"
         f'<div class="frow" id="dl-condition-desc">'
@@ -8598,7 +8492,7 @@ def _render_item_detail_html(
         f'<span class="fv" style="flex:1">'
         f'<input id="dl-price-input" type="number" step="0.01" min="0" value="{h(_dl_price_val)}" '
         f'style="width:120px;background:#1a1a1a;color:#eee;'
-        f'border:1px solid {"#c44" if (dl or {}).get("price") is None else "#444"};'
+        f"border:1px solid {'#c44' if (dl or {}).get('price') is None else '#444'};"
         f'border-radius:4px;padding:4px 6px;font-size:.9em">'
         f"{_price_comps_bar}"
         f"</span></div>"
@@ -8734,8 +8628,7 @@ def _render_item_detail_html(
         f'<button class="act-btn" onclick="saveEbayDraft()" '
         f'style="background:#1a3a5a">Save Draft</button>'
         f'<span id="dl-save-msg" style="font-size:.82em;color:#4a4"></span>'
-        f"</div>"
-        + f"</div>"
+        f"</div>" + f"</div>"
         # hidden data for JS
         f"<script>"
         f"window._DL_CAT_ID = {_aspects_cat_json};"
@@ -8771,14 +8664,11 @@ def _render_item_detail_html(
     _default_tab = "live" if (_is_sold and _has_live_tab) else "editor"
 
     def _tab_btn(name: str, label: str) -> str:
-        active = ' dtab-active' if name == _default_tab else ""
-        return (
-            f'<button class="dtab-btn{active}" data-tab="{name}" '
-            f"onclick=\"showTab('{name}')\">{label}</button>"
-        )
+        active = " dtab-active" if name == _default_tab else ""
+        return f'<button class="dtab-btn{active}" data-tab="{name}" onclick="showTab(\'{name}\')">{label}</button>'
 
     _tab_bar = (
-        '<style>.dtab-btn{padding:6px 16px;background:#141414;color:#889;border:1px solid #2a2a2a;'
+        "<style>.dtab-btn{padding:6px 16px;background:#141414;color:#889;border:1px solid #2a2a2a;"
         "border-bottom:none;border-radius:6px 6px 0 0;cursor:pointer;font-size:.85em}"
         ".dtab-btn.dtab-active{background:#1a1a1a;color:#cce;border-color:#3a3a3a;font-weight:600}"
         "</style>"
@@ -8789,11 +8679,7 @@ def _render_item_detail_html(
         + "</div>"
     )
 
-    _editor_panel_open = (
-        '<div class="dtab-panel" data-tab="editor"'
-        + (' style="display:none"' if _default_tab != "editor" else "")
-        + ">"
-    )
+    _editor_panel_open = '<div class="dtab-panel" data-tab="editor"' + (' style="display:none"' if _default_tab != "editor" else "") + ">"
 
     fields_html = (
         '<div class="dfields">'
@@ -8823,10 +8709,11 @@ def _render_item_detail_html(
         + fr("Manufacturer", key="manufacturer", editable=True)
         + fr("Country of mfr", key="country_of_manufacture", editable=True)
         + fr("Model number", key="model_number", editable=True)
-        + (fr("SKU (old)", h(str(item.get("sku_old", "") or ""))
-                            + f' <a href="/form/history/{urllib.parse.quote(str(item.get("sku_old")))}" '
-                            'style="color:#4a8;font-size:.85em">History &rarr;</a>')
-          if item.get("sku_old") else "")
+        + (
+            fr("SKU (old)", h(str(item.get("sku_old", "") or "")) + f' <a href="/form/history/{urllib.parse.quote(str(item.get("sku_old")))}" style="color:#4a8;font-size:.85em">History &rarr;</a>')
+            if item.get("sku_old")
+            else ""
+        )
         + (fr("UPC", h(str(item.get("upc", "") or ""))) if item.get("upc") else "")
         + (fr("ISBN", h(str(item.get("isbn", "") or ""))) if item.get("isbn") else "")
         + (fr("Part number", h(str(item.get("part_number", "") or ""))) if item.get("part_number") else "")
@@ -8865,7 +8752,7 @@ def _render_item_detail_html(
                     ' <span style="font-weight:normal">— 🔓 follows the eBay draft automatically, 🔒 frozen at its current value</span></div>'
                     + "".join(
                         f'<div class="frow"><span class="fn" style="font-size:.82em">{h(k)}</span>'
-                        f'<span class="fv" style="font-size:.82em">{h(str(v))}'
+                        f'<span class="fv" style="font-size:.82em">{h(str(v))}' + f" <button onclick='toggleInventoryLock({json.dumps(k)},{json.dumps(k in locked)},this)' "
                         # Single-quoted onclick (Dave, 2026-07-18 live report:
                         # "the lock buttons have no effect, but they are
                         # there"): json.dumps() always double-quotes its
@@ -8877,9 +8764,8 @@ def _render_item_detail_html(
                         # nothing, because there was no valid handler left to
                         # run. Same latent bug existed in the pre-existing
                         # "+ Add to listing" button below — fixed here too.
-                        + f" <button onclick='toggleInventoryLock({json.dumps(k)},{json.dumps(k in locked)},this)' "
-                          f'title="{"Locked — click to let this key follow the eBay draft again" if k in locked else "Unlocked — click to freeze this key at its current value"}" '
-                          f'style="background:none;border:none;cursor:pointer;font-size:.85em;padding:0 2px">{"🔒" if k in locked else "🔓"}</button>'
+                        f'title="{"Locked — click to let this key follow the eBay draft again" if k in locked else "Unlocked — click to freeze this key at its current value"}" '
+                        f'style="background:none;border:none;cursor:pointer;font-size:.85em;padding:0 2px">{"🔒" if k in locked else "🔓"}</button>'
                         + (
                             f'<div style="font-size:.72em;color:#556;margin-top:1px">eBay value: {h(str(isp[k]))}</div>'
                             if k in isp and str(isp[k]) != str(v)
@@ -8918,20 +8804,20 @@ def _render_item_detail_html(
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
         '<strong style="font-size:.85em;color:#8cc">eBay → Inventory Record sync</strong>'
         '<span style="font-size:.72em;color:#568">values eBay/AI resolved that differ from the universal record</span>'
-        '</div>'
+        "</div>"
         '<div style="font-size:.75em;color:#568;margin-bottom:8px">'
-        'Every row is checked by default — uncheck to skip a field. Unchecked/skipped '
-        'fields simply reappear here next time (nothing is dismissed).</div>'
+        "Every row is checked by default — uncheck to skip a field. Unchecked/skipped "
+        "fields simply reappear here next time (nothing is dismissed).</div>"
         '<div id="inv-diff-rows"></div>'
         '<div style="display:flex;gap:8px;margin-top:8px">'
         '<button class="act-btn act-publish" style="font-size:.78em;padding:3px 10px;'
         'background:#0a1a1a;border-color:#366" onclick="applyInventoryDiff()">'
-        'Apply Checked to Inventory Record</button>'
-        '</div></div>'
+        "Apply Checked to Inventory Record</button>"
+        "</div></div>"
         # ── eBay Listing — the draft/live workflow section (PP-ACTIONCONSOLE-001).
         # Visually separated from the Inventory Record above: its own header,
         # action line, and Editor/Live tabs.
-        + '<div id="ebay-listing-block" style="margin-top:18px;padding-top:14px;'
+         + '<div id="ebay-listing-block" style="margin-top:18px;padding-top:14px;'
         'border-top:2px solid #2a3a4a">'
         '<h3 style="margin:0 0 10px;font-size:.78em;text-transform:uppercase;'
         'letter-spacing:.06em;color:#6a8ab5">eBay Listing</h3>'
@@ -8953,9 +8839,9 @@ def _render_item_detail_html(
                 + '<div class="dsec">'
                 + f"<h3>{_live_tab_label}{listing_badge}{offer_badge}"
                 + (
-                    '<a href="#" onclick="triggerAction(\'sync_from_ebay\');return false" '
-                    'style="float:right;color:#4a8ade;font-size:.85em;font-weight:normal">⟳ Sync from eBay</a>'
-                    if listing_id else ""
+                    '<a href="#" onclick="triggerAction(\'sync_from_ebay\');return false" style="float:right;color:#4a8ade;font-size:.85em;font-weight:normal">⟳ Sync from eBay</a>'
+                    if listing_id
+                    else ""
                 )
                 + "</h3>"
                 + listing_section
@@ -9132,10 +9018,10 @@ def _render_item_detail_html(
         f"    var html='';"
         f"    d.diffs.forEach(function(fd){{"
         f"      var invVal=(fd.inventory_value===null||fd.inventory_value===undefined)?'(none)':String(fd.inventory_value);"
-        f"      html+='<div class=\"frow\"><span class=\"fn\" style=\"font-size:.82em\">'"
-        f"        +'<label><input type=\"checkbox\" class=\"inv-diff-cb\" data-key=\"'+fd.key.replace(/\"/g,'&quot;')+'\" checked> '"
+        f'      html+=\'<div class="frow"><span class="fn" style="font-size:.82em">\''
+        f'        +\'<label><input type="checkbox" class="inv-diff-cb" data-key="\'+fd.key.replace(/"/g,\'&quot;\')+\'" checked> \''
         f"        +fd.key+'</label></span>"
-        f"        <span class=\"fv\" style=\"font-size:.82em\">'+String(fd.ebay_value)"
+        f'        <span class="fv" style="font-size:.82em">\'+String(fd.ebay_value)'
         f"        +'<div style=\"font-size:.72em;color:#568;margin-top:1px\">inventory record: '+invVal"
         f"        +' &middot; source: '+(fd.source||'?')+(fd.detected_at?(' &middot; '+fd.detected_at):'')+'</div>'"
         f"        +'</span></div>';"
@@ -9384,13 +9270,13 @@ def _render_item_detail_html(
         f"  var esc=function(s){{return (s||'').replace(/\"/g,'&quot;');}};"
         f"  var row=document.createElement('div');"
         f"  row.className='frow';"
-        f"  row.innerHTML='<span class=\"fn\" style=\"font-size:.82em\">'"
-        f"    +'<input type=\"checkbox\" class=\"aspect-keep-cb\" data-aspect-key=\"'+esc(name)+'\" checked '"
+        f'  row.innerHTML=\'<span class="fn" style="font-size:.82em">\''
+        f'    +\'<input type="checkbox" class="aspect-keep-cb" data-aspect-key="\'+esc(name)+\'" checked \''
         f"    +'title=\"Checked = keep on this eBay listing. Uncheck = discard at Save (moved to the Inventory Record as a superset, never deleted).\" '"
         f"    +'style=\"margin-right:4px;vertical-align:middle\">'+esc(name)"
         f"    +'<span style=\"font-size:.7em;background:#1a2a3a;color:#8ac;border-radius:3px;'"
-        f"    +'padding:1px 5px;margin-left:4px\" title=\"A seller-defined custom aspect\">CUSTOM ASPECT</span></span>'"
-        f"    +'<span class=\"fv\"><input type=\"text\" data-aspect=\"'+esc(name)+'\" data-initial=\"\" value=\"'+esc(val)+'\"'"
+        f'    +\'padding:1px 5px;margin-left:4px" title="A seller-defined custom aspect">CUSTOM ASPECT</span></span>\''
+        f'    +\'<span class="fv"><input type="text" data-aspect="\'+esc(name)+\'" data-initial="" value="\'+esc(val)+\'"\''
         f"    +' style=\"background:#1a1a2a;color:#eee;border:1px solid #446;border-radius:3px;'"
         f"    +'padding:2px 5px;font-size:.85em;width:200px\"></span>';"
         f"  return row;"
@@ -9464,9 +9350,11 @@ def _render_item_detail_html(
         f'  }}).catch(function(e){{if(msg){{msg.textContent="Network error";msg.style.color="#c44";}}}});'
         f"}}"
         # ── category picker (search / ID entry / tree browse, shared) ─────────
-        + _CATEGORY_PICKER_JS +
+        + _CATEGORY_PICKER_JS
+        +
         # ── category context IIFE (conditions + aspects + store cat + hints) ──────
-        _CATEGORY_CONTEXT_IIFE + "</script>\n"
+        _CATEGORY_CONTEXT_IIFE
+        + "</script>\n"
     )
 
     # Offer count badge: JS fetches /api/offers (cached), filters to this SKU.
@@ -9543,7 +9431,7 @@ def _render_item_detail_html(
         f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items?status=Listed">Listed</a>'
         f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items?status=Staged">Staged</a>'
         f'<a class="chip" style="color:#ccc;text-decoration:none" href="/form/items?status=Sold">Sold</a>'
-        f'</div>'
+        f"</div>"
         f'<div class="sku-hdr">'
         f'<span class="slabel">{h(sku)}</span>'
         f'<span class="stitle">{h(title)}</span>'
@@ -9631,14 +9519,12 @@ def _retired_item_detail_form_source(sku: str):  # pragma: no cover
         from .workflow.action_cards import build_item_action_card
 
         workflow_card = build_item_action_card(
-            json_path, attempts, provider_identity=_workflow_provider_identity(),
+            json_path,
+            attempts,
+            provider_identity=_workflow_provider_identity(),
             reconciled_provider_effect_ids=reconciled_effect_ids,
         )
-        reconciled_jobs = {
-            str(attempt["job_id"])
-            for attempt in workflow_card.get("attempts", [])
-            if attempt.get("provider_effect_reconciled") and attempt.get("job_id")
-        }
+        reconciled_jobs = {str(attempt["job_id"]) for attempt in workflow_card.get("attempts", []) if attempt.get("provider_effect_reconciled") and attempt.get("job_id")}
         for job in jobs:
             job["provider_effect_reconciled"] = str(job.get("job_id")) in reconciled_jobs
         from .operator_objects import build_item_operator_object
@@ -9646,20 +9532,24 @@ def _retired_item_detail_form_source(sku: str):  # pragma: no cover
         draft = item.get("draft_listing") if isinstance(item.get("draft_listing"), dict) else {}
         category_id = str(draft.get("category_id") or item.get("ebay_category_id") or "")
         current_condition = str(draft.get("condition_enum") or draft.get("condition") or "")
-        category_context = (
-            ebay_category_context(category_id, current_condition=current_condition)
-            if category_id and category_id != "99"
-            else {}
-        )
+        category_context = ebay_category_context(category_id, current_condition=current_condition) if category_id and category_id != "99" else {}
         operator_object = build_item_operator_object(
-            item=item, workflow_card=workflow_card, category_context=category_context,
+            item=item,
+            workflow_card=workflow_card,
+            category_context=category_context,
         )
     except Exception as exc:
         log.warning("queue job fetch failed for %s: %s", sku, exc)
 
     return HTMLResponse(
         _render_item_detail_html(
-            sku, item, images, videos, jobs, "", workflow_card=workflow_card,
+            sku,
+            item,
+            images,
+            videos,
+            jobs,
+            "",
+            workflow_card=workflow_card,
             operator_object=operator_object,
         ),
         headers={"Cache-Control": "no-store, no-cache"},
@@ -10393,9 +10283,10 @@ def apply_revision(sku: str, body: RevisionApplyBody) -> Dict[str, Any]:
             result["sync_job_id"] = None
             result["sync_enqueue_error"] = str(exc)
             _persist_finding(
-                json_path, sku, "revision_sync_not_queued",
-                f"revision applied on eBay but follow-up ebay_sync "
-                f"enqueue failed: {exc}",
+                json_path,
+                sku,
+                "revision_sync_not_queued",
+                f"revision applied on eBay but follow-up ebay_sync enqueue failed: {exc}",
                 "apply_revision",
             )
     return result
@@ -10939,25 +10830,22 @@ load();
 
 @app.get("/form/drafts")
 def drafts_form():
-    """Post-draft review queue — approve/re-draft/edit items awaiting human QA.
-    No Bearer auth (network trust); JS embeds the key for API calls."""
-    from fastapi.responses import HTMLResponse
-
-    html = _REVIEW_HTML.format(
-        static_head=_STATIC_HEAD,
-        static_foot=_STATIC_FOOT,
-        review_css=_REVIEW_EXTRA_CSS,
-        api_key_json=json.dumps(""),
+    """Retired direct-action queue; use canonical item operator objects."""
+    return RedirectResponse(
+        url="/form/items?status=Draft",
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        headers={"Cache-Control": "no-store, no-cache"},
     )
-    return HTMLResponse(html)
 
 
 @app.get("/form/review")
 def review_form_redirect():
-    """Backward-compat redirect — /form/review renamed to /form/drafts."""
-    from fastapi.responses import RedirectResponse
-
-    return RedirectResponse(url="/form/drafts", status_code=301)
+    """Backward-compatible redirect to the read-only inventory queue."""
+    return RedirectResponse(
+        url="/form/items?status=Draft",
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        headers={"Cache-Control": "no-store, no-cache"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -11578,9 +11466,7 @@ def pipeline_jobs() -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"postgres error: {exc}")
 
     for j in jobs:
-        j["consumer"] = _queue_consumers([str(j.get("queue_name") or "")]).get(
-            str(j.get("queue_name") or ""), {}
-        )
+        j["consumer"] = _queue_consumers([str(j.get("queue_name") or "")]).get(str(j.get("queue_name") or ""), {})
         for ts_field in ("started_at", "finished_at", "created_at"):
             v = j.get(ts_field)
             if v is not None and hasattr(v, "isoformat"):
@@ -11625,8 +11511,7 @@ def cancel_job(job_id: str) -> Dict[str, Any]:
                 # and this UPDATE: a worker leasing the job in between would
                 # otherwise get silently stomped either direction.
                 cur.execute(
-                    "UPDATE queue_jobs SET state = 'cancelled' "
-                    "WHERE job_id = %s AND state = ANY(%s)",
+                    "UPDATE queue_jobs SET state = 'cancelled' WHERE job_id = %s AND state = ANY(%s)",
                     (job_id, list(cancellable)),
                 )
                 cancelled = cur.rowcount > 0
@@ -11636,8 +11521,7 @@ def cancel_job(job_id: str) -> Dict[str, Any]:
     if not cancelled:
         raise HTTPException(
             status_code=409,
-            detail=f"job {job_id} changed state before it could be cancelled "
-                   f"(race with a worker lease) — refresh and retry",
+            detail=f"job {job_id} changed state before it could be cancelled (race with a worker lease) — refresh and retry",
         )
 
     return {"ok": True, "job_id": job_id, "cancelled": True}
@@ -12766,9 +12650,7 @@ def _docs_plan_binding() -> dict[str, str]:
     from tgw.plan_graph import approved_plan_binding
 
     if _cfg.get("plan_projection_path") is not None:
-        raise ValueError(
-            "CANONICAL_PLAN_CONTEXT_REQUIRED: docs are served by registered tgw-context on tgw-lib"
-        )
+        raise ValueError("CANONICAL_PLAN_CONTEXT_REQUIRED: docs are served by registered tgw-context on tgw-lib")
 
     return approved_plan_binding(
         Path(_cfg.get("standalone_plan_root") or "/opt/TGW/library/plans"),
@@ -12829,7 +12711,7 @@ def _docs_page_html(title: str, body_html: str, sidebar_html: str, plan_commit: 
         + f"<style>{_DOCS_EXTRA_CSS}</style>"
         + "</head><body>"
         + f'<div class="docs-plan-binding" data-plan-commit="{_html.escape(plan_commit)}">'
-        + f'Approved Plan: <code>{_html.escape(plan_commit)}</code></div>'
+        + f"Approved Plan: <code>{_html.escape(plan_commit)}</code></div>"
         + '<div class="docs-layout">'
         + sidebar_html
         + f'<main class="docs-content">{body_html}</main>'
@@ -12974,25 +12856,51 @@ async def ebay_notification_webhook(request: Request) -> Dict[str, Any]:
 @app.post("/api/cli", dependencies=[AUTH])
 async def api_cli(request: Request):
     import subprocess
+
     body = await request.json()
     cmd = body.get("command", "")
     args = body.get("args", [])
-    BLOCKED = {"update","update-where","update-title","update-location",
-        "update-verified","update-status","set-shipping","bulk",
-        "price-freeship","hint","data-scrub","revise","alt-text",
-        "enqueue-sku","requeue-identify","resolve-legacy","ready",
-        "publish","alt-text-batch","ebay-pull","import-sold-csv",
-        "sku-migrate","migrate-unblock","migrate-restore",
-        "restart-workers","restart-ebay-token","nix-bundle-usb",
-        "set-context","clear-context","set-template","create-item",
-        "serve","flake"}
+    BLOCKED = {
+        "update",
+        "update-where",
+        "update-title",
+        "update-location",
+        "update-verified",
+        "update-status",
+        "set-shipping",
+        "bulk",
+        "price-freeship",
+        "hint",
+        "data-scrub",
+        "revise",
+        "alt-text",
+        "enqueue-sku",
+        "requeue-identify",
+        "resolve-legacy",
+        "ready",
+        "publish",
+        "alt-text-batch",
+        "ebay-pull",
+        "import-sold-csv",
+        "sku-migrate",
+        "migrate-unblock",
+        "migrate-restore",
+        "restart-workers",
+        "restart-ebay-token",
+        "nix-bundle-usb",
+        "set-context",
+        "clear-context",
+        "set-template",
+        "create-item",
+        "serve",
+        "flake",
+    }
     if cmd in BLOCKED:
         return {"ok": False, "error": f"{cmd} is write-protected"}
     fc = ["/opt/TGW/.venvironments/tgw/bin/tgw", cmd] + [str(a) for a in args]
     try:
         p = subprocess.run(fc, capture_output=True, text=True, timeout=30)
-        return {"ok": True, "command": cmd, "exit_code": p.returncode,
-                "stdout": p.stdout[:50000], "stderr": p.stderr[:5000]}
+        return {"ok": True, "command": cmd, "exit_code": p.returncode, "stdout": p.stdout[:50000], "stderr": p.stderr[:5000]}
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "timed out"}
     except Exception as exc:

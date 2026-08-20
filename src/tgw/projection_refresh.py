@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime
 from typing import Any, Mapping
 
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
-_REVISIONS = ("plan", "code_graph", "workflow", "actor_contract")
+_REVISIONS = ("plan", "capability_graph", "code_graph", "workflow", "actor_contract")
 
 
 class ProjectionRefreshError(ValueError):
@@ -39,11 +40,17 @@ def _mapping(value: Any, fields: set[str], label: str) -> dict[str, Any]:
 
 
 def _revision(value: Any, label: str) -> dict[str, str]:
-    item = _mapping(value, {"source", "materialization", "build", "health"}, label)
+    item = _mapping(value, {"source", "materialization", "build", "built_at", "health"}, label)
     _exact_hash(item["materialization"], f"{label} materialization")
     _exact_hash(item["build"], f"{label} build")
     if not isinstance(item["source"], str) or not item["source"]:
         raise ProjectionRefreshError(f"{label} source is invalid")
+    try:
+        built_at = datetime.fromisoformat(str(item["built_at"]).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ProjectionRefreshError(f"{label} build time is invalid") from exc
+    if built_at.tzinfo is None:
+        raise ProjectionRefreshError(f"{label} build time is invalid")
     if item["health"] not in {"READY", "STALE", "FAILED"}:
         raise ProjectionRefreshError(f"{label} health is invalid")
     return item

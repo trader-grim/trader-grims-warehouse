@@ -10,12 +10,14 @@ selector from its caller.
 
 from __future__ import annotations
 
+import grp
 import hashlib
 import importlib.util
 import json
 import os
 import pwd
 import re
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -56,6 +58,23 @@ def _regular(value: Any, label: str) -> Path:
     return path
 
 
+def _shared_attempt_root(value: Any, label: str, group: grp.struct_group) -> Path:
+    """Verify one bootstrap-owned, shared actor attempt root.
+
+    The provider intentionally does not repair this layout on startup.  A
+    missing or drifted directory holds dispatch until the versioned host
+    bootstrap restores it, so a service restart cannot silently broaden
+    filesystem access.
+    """
+    path = _directory(value, label)
+    observed = path.stat(follow_symlinks=False)
+    if observed.st_gid != group.gr_gid or stat.S_IMODE(observed.st_mode) != 0o2770:
+        raise ActorFleetError(f"{label} must be group {group.gr_name} with mode 2770")
+    if os.geteuid() == 0 and observed.st_uid != 0:
+        raise ActorFleetError(f"{label} must be root-owned")
+    return path
+
+
 def _read_json(path: Path, label: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -74,10 +93,7 @@ def _binding_digest(path: Path) -> str:
     if path.is_file():
         digest.update(path.read_bytes())
     elif path.is_dir():
-        files = [
-            item for item in path.rglob("*")
-            if item.is_file() and not item.is_symlink() and "__pycache__" not in item.parts
-        ]
+        files = [item for item in path.rglob("*") if item.is_file() and not item.is_symlink() and "__pycache__" not in item.parts]
         for item in sorted(files, key=lambda value: value.relative_to(path).as_posix()):
             digest.update(item.relative_to(path).as_posix().encode())
             digest.update(b"\0")
@@ -88,7 +104,7 @@ def _binding_digest(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def _atomic(path: Path, value: Mapping[str, Any]) -> None:
+def _atomic(path: Path, value: Mapping[str, Any], *, mode: int = 0o640) -> None:
     stage = path.with_name(f".{path.name}.next")
     if stage.exists() or stage.is_symlink():
         raise ActorFleetError(f"stale actor-provider staging path exists: {stage}")
@@ -98,6 +114,7 @@ def _atomic(path: Path, value: Mapping[str, Any]) -> None:
             handle.write(_canonical(value) + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
+        os.chmod(stage, mode)
         os.replace(stage, path)
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -111,8 +128,13 @@ def _atomic(path: Path, value: Mapping[str, Any]) -> None:
 
 def _request(value: Any) -> dict[str, Any]:
     fields = {
-        "schema", "transaction_id", "idempotency_key", "predecessor_generation",
-        "successor_generation", "revisions", "actors",
+        "schema",
+        "transaction_id",
+        "idempotency_key",
+        "predecessor_generation",
+        "successor_generation",
+        "revisions",
+        "actors",
     }
     if not isinstance(value, Mapping) or set(value) != fields or value.get("schema") != "tgw-w18-fleet-refresh-request/v1":
         raise ActorFleetError("actor fleet request is invalid")
@@ -134,14 +156,27 @@ class ActorFleetProvider:
     """Materialize and verify one admitted actor generation on ``tgw-lib``."""
 
     def __init__(
-        self, value: Mapping[str, Any], *,
+        self,
+        value: Mapping[str, Any],
+        *,
         service_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
         materializer_loader: Callable[[Path], Any] | None = None,
     ):
         required = {
-            "schema", "token_sha256", "state_root", "release_root", "admission_root",
-            "actor_generation_root", "contract_public_key", "systemctl_path", "managed_services",
+            "schema",
+            "token_sha256",
+            "state_root",
+            "release_root",
+            "admission_root",
+            "actor_generation_root",
+            "contract_public_key",
+            "systemctl_path",
+            "managed_services",
             "quiescence_units",
+            "actor_group",
+            "attempt_workspace_root",
+            "attempt_cache_root",
+            "startup_binding_root",
         }
         if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != "tgw-actor-fleet-provider/v1":
             raise ActorFleetError("actor fleet provider configuration is invalid")
@@ -152,6 +187,28 @@ class ActorFleetProvider:
         self.release_root = _directory(value["release_root"], "actor release root")
         self.admission_root = _directory(value["admission_root"], "actor admission root")
         self.actor_generation_root = _directory(value["actor_generation_root"], "actor generation root")
+        self.startup_binding_root = _directory(
+            value["startup_binding_root"],
+            "actor startup binding root",
+        )
+        startup_root_state = self.startup_binding_root.stat(follow_symlinks=False)
+        if startup_root_state.st_mode & 0o022 or (os.geteuid() == 0 and startup_root_state.st_uid != 0):
+            raise ActorFleetError("actor startup binding root is not root protected")
+        try:
+            actor_group = grp.getgrnam(str(value["actor_group"]))
+        except KeyError as exc:
+            raise ActorFleetError("actor group is unavailable") from exc
+        self.actor_group = actor_group.gr_name
+        self.attempt_workspace_root = _shared_attempt_root(
+            value["attempt_workspace_root"],
+            "actor attempt workspace root",
+            actor_group,
+        )
+        self.attempt_cache_root = _shared_attempt_root(
+            value["attempt_cache_root"],
+            "actor attempt cache root",
+            actor_group,
+        )
         self.systemctl = _regular(value["systemctl_path"], "systemctl executable")
         services = value.get("managed_services")
         if not isinstance(services, list) or not services or services != sorted(set(services)) or any(not isinstance(unit, str) or _UNIT.fullmatch(unit) is None for unit in services):
@@ -192,10 +249,18 @@ class ActorFleetProvider:
 
     def _journal(self, transaction_id: str) -> dict[str, Any]:
         path = self._journal_path(transaction_id)
-        return _read_json(path, "actor provider journal") if path.is_file() and not path.is_symlink() else {
-            "schema": "tgw-actor-fleet-journal/v1", "transaction_id": transaction_id,
-            "status": "NEW", "request": None, "candidate_release": None, "materialization": None,
-        }
+        return (
+            _read_json(path, "actor provider journal")
+            if path.is_file() and not path.is_symlink()
+            else {
+                "schema": "tgw-actor-fleet-journal/v1",
+                "transaction_id": transaction_id,
+                "status": "NEW",
+                "request": None,
+                "candidate_release": None,
+                "materialization": None,
+            }
+        )
 
     def _save(self, journal: Mapping[str, Any]) -> None:
         _atomic(self._journal_path(str(journal["transaction_id"])), journal)
@@ -220,7 +285,9 @@ class ActorFleetProvider:
         candidate = admission.get("candidate") if isinstance(admission.get("candidate"), Mapping) else {}
         plan = admission.get("plan") if isinstance(admission.get("plan"), Mapping) else {}
         if (
-            claimed != admission_hash or _hash(unsigned) != admission_hash or admission.get("status") != "ADMITTED"
+            claimed != admission_hash
+            or _hash(unsigned) != admission_hash
+            or admission.get("status") != "ADMITTED"
             or candidate.get("commit") != request["revisions"]["source"]
             or plan.get("commit") != request["revisions"]["plan"]
             or plan.get("solution_hash") != request["revisions"]["solution"]
@@ -246,6 +313,17 @@ class ActorFleetProvider:
     def _actor_inputs(self, release: Path, request: Mapping[str, Any]) -> tuple[Any, dict[str, Any], dict[str, dict[str, Any]]]:
         root = self._generation_root(request)
         bundle = _read_json(root / "bundle.json", "complete actor bundle")
+        environment = _read_json(root / "environment-catalog.json", "actor environment catalog")
+        bootstrap_revision = environment.get("bootstrap_revision")
+        broker_policy_revision = environment.get("broker_policy_revision")
+        if (
+            _hash(environment) != request["revisions"]["catalog"]
+            or not isinstance(bootstrap_revision, Mapping)
+            or bootstrap_revision.get("content_sha256") != request["revisions"]["bootstrap"]
+            or not isinstance(broker_policy_revision, Mapping)
+            or broker_policy_revision.get("content_sha256") != request["revisions"]["broker_policy"]
+        ):
+            raise ActorFleetError("actor catalog bootstrap or broker-policy revision is not exact")
         receipt = _read_json(root / "generation-receipt.json", "actor generation receipt")
         unsigned_receipt = dict(receipt)
         claimed_receipt = unsigned_receipt.pop("receipt_hash", None)
@@ -278,6 +356,53 @@ class ActorFleetProvider:
             contracts[actor] = contract
         return self._load_materializer(release), bundle, contracts
 
+    def _startup_binding(self, actor: str, request: Mapping[str, Any]) -> dict[str, str]:
+        return {
+            "schema": "tgw-actor-startup-binding/v1",
+            "actor": actor,
+            "trusted_public_key": self.contract_public_key,
+            "expected_generation": str(request["successor_generation"]),
+            "expected_plan_commit": str(request["revisions"]["plan"]),
+            "expected_solution_hash": str(request["revisions"]["solution"]),
+            "expected_source_commit": str(request["revisions"]["source"]),
+            "expected_catalog_hash": str(request["revisions"]["catalog"]),
+        }
+
+    def _install_startup_bindings(
+        self,
+        request: Mapping[str, Any],
+        journal: Mapping[str, Any],
+        *,
+        repair: bool = False,
+    ) -> list[dict[str, Any]]:
+        prior = journal.get("startup_bindings")
+        if repair and not isinstance(prior, list):
+            raise ActorFleetError("actor startup rollback state is unavailable")
+        receipts: list[dict[str, Any]] = []
+        for actor in request["actors"]:
+            path = self.startup_binding_root / f"{actor}-startup.json"
+            expected = self._startup_binding(actor, request)
+            previous = None
+            if isinstance(prior, list):
+                record = next((item for item in prior if item.get("actor") == actor), None)
+                if not isinstance(record, Mapping):
+                    raise ActorFleetError("actor startup rollback state is incomplete")
+                previous = record.get("previous")
+            elif path.exists() and not path.is_symlink():
+                previous = _read_json(path, f"previous actor startup binding {actor}")
+            elif path.exists() or path.is_symlink():
+                raise ActorFleetError("actor startup binding target is unsafe")
+            _atomic(path, expected, mode=0o444)
+            receipts.append(
+                {
+                    "actor": actor,
+                    "path": str(path),
+                    "previous": previous,
+                    "installed_hash": _hash(expected),
+                }
+            )
+        return receipts
+
     def quiesce(self, request: Mapping[str, Any]) -> dict[str, Any]:
         value = _request(request)
         journal = self._journal(value["transaction_id"])
@@ -294,8 +419,10 @@ class ActorFleetProvider:
         journal.update({"request": value, "status": "QUIESCED"})
         self._save(journal)
         return {
-            "status": "QUIESCED", "transaction_id": value["transaction_id"],
-            "services": self.services, "quiescence_units": self.quiescence_units,
+            "status": "QUIESCED",
+            "transaction_id": value["transaction_id"],
+            "services": self.services,
+            "quiescence_units": self.quiescence_units,
         }
 
     def rebuild(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -306,7 +433,9 @@ class ActorFleetProvider:
         release = self._candidate(value)
         materializer, bundle, contracts = self._actor_inputs(release, value)
         prepared = materializer.materialize_complete_actor_contracts(
-            bundle, source_root=release, contracts=contracts,
+            bundle,
+            source_root=release,
+            contracts=contracts,
             trusted_contract_public_key=self.contract_public_key,
             additional_source_roots=(self._generation_root(value),),
         )
@@ -324,13 +453,24 @@ class ActorFleetProvider:
         release = Path(str(journal["candidate_release"]))
         materializer, bundle, contracts = self._actor_inputs(release, value)
         applied = materializer.materialize_complete_actor_contracts(
-            bundle, source_root=release, contracts=contracts,
-            trusted_contract_public_key=self.contract_public_key, apply=True, replace_existing=True,
+            bundle,
+            source_root=release,
+            contracts=contracts,
+            trusted_contract_public_key=self.contract_public_key,
+            apply=True,
+            replace_existing=True,
             additional_source_roots=(self._generation_root(value),),
         )
         if applied.get("status") != "COMPLETE_MATERIALIZED_NOT_SERVICE_ACTIVATED":
             raise ActorFleetError("complete actor bundle did not activate")
-        journal.update({"status": "ACTIVATED", "materialization": applied})
+        startup_bindings = self._install_startup_bindings(value, journal)
+        journal.update(
+            {
+                "status": "ACTIVATED",
+                "materialization": applied,
+                "startup_bindings": startup_bindings,
+            }
+        )
         self._save(journal)
         return {"status": "ACTIVATED", "transaction_id": value["transaction_id"], "generation": value["successor_generation"], "materialization_hash": _hash(applied)}
 
@@ -362,16 +502,18 @@ class ActorFleetProvider:
             raise ActorFleetError("actor has no materialized contract")
         _materializer, bundle, contracts = self._actor_inputs(Path(str(journal["candidate_release"])), value)
         contract = contracts[actor]
+        startup_path = self.startup_binding_root / f"{actor}-startup.json"
+        if (
+            startup_path.is_symlink()
+            or not startup_path.is_file()
+            or _read_json(startup_path, f"actor startup binding {actor}") != self._startup_binding(actor, value)
+            or startup_path.stat(follow_symlinks=False).st_mode & 0o022
+        ):
+            raise ActorFleetError("actor root-owned startup binding differs from generation")
         local = contract.get("local") if isinstance(contract.get("local"), Mapping) else {}
         specification = bundle["actors"][actor]
-        declared = {
-            (item["kind"], item["name"], item["destination"]): item["sha256"]
-            for item in specification["bindings"]
-        }
-        observed = {
-            (item.get("kind"), item.get("name"), item.get("destination")): item.get("sha256")
-            for item in bindings
-        }
+        declared = {(item["kind"], item["name"], item["destination"]): item["sha256"] for item in specification["bindings"]}
+        observed = {(item.get("kind"), item.get("name"), item.get("destination")): item.get("sha256") for item in bindings}
         if observed != declared:
             raise ActorFleetError("actor materialization differs from its complete bundle")
         account = pwd.getpwnam(actor)
@@ -395,11 +537,14 @@ class ActorFleetProvider:
                 by_kind: dict[str, dict[str, Mapping[str, Any]]] = {}
                 for binding in bindings:
                     by_kind.setdefault(binding["kind"], {})[binding["name"]] = binding
-                mcp_bindings = [{
-                    "endpoint": name,
-                    "source_sha256": binding["sha256"],
-                    "destination": binding["destination"],
-                } for name, binding in sorted(by_kind.get("mcp", {}).items())]
+                mcp_bindings = [
+                    {
+                        "endpoint": name,
+                        "source_sha256": binding["sha256"],
+                        "destination": binding["destination"],
+                    }
+                    for name, binding in sorted(by_kind.get("mcp", {}).items())
+                ]
                 environment_binding = by_kind.get("environment", {}).get("environment-catalog")
                 bootstrap_binding = by_kind.get("bootstrap", {}).get("bootstrap-receipt")
                 if environment_binding is None or bootstrap_binding is None:
@@ -417,7 +562,8 @@ class ActorFleetProvider:
                     or bootstrap.get("actor") != actor
                     or bootstrap.get("generation") != value["successor_generation"]
                     or bootstrap.get("catalog_hash") != value["revisions"]["catalog"]
-                    or bootstrap.get("plan") != {
+                    or bootstrap.get("plan")
+                    != {
                         "commit": value["revisions"]["plan"],
                         "solution_hash": value["revisions"]["solution"],
                     }
@@ -426,7 +572,8 @@ class ActorFleetProvider:
                     or bootstrap.get("skills") != local.get("skills")
                     or bootstrap.get("hooks") != local.get("hooks")
                     or bootstrap.get("mcp") != local.get("mcp")
-                    or contract.get("plan") != {
+                    or contract.get("plan")
+                    != {
                         "commit": value["revisions"]["plan"],
                         "solution_hash": value["revisions"]["solution"],
                     }
@@ -444,7 +591,8 @@ class ActorFleetProvider:
                 ):
                     raise ActorFleetError("actor startup binding is stale or mixed")
                 payload = {
-                    "status": "PASS", "uid": os.geteuid(),
+                    "status": "PASS",
+                    "uid": os.geteuid(),
                     "plan": value["revisions"]["plan"],
                     "solution": value["revisions"]["solution"],
                     "source": value["revisions"]["source"],
@@ -473,13 +621,18 @@ class ActorFleetProvider:
         journal["status"] = "VERIFYING"
         self._save(journal)
         return {
-            "status": "VERIFIED", "actor": actor, "uid": account.pw_uid,
+            "status": "VERIFIED",
+            "actor": actor,
+            "uid": account.pw_uid,
             "generation": value["successor_generation"],
-            "plan": proof["plan"], "solution": proof["solution"],
-            "source": proof["source"], "catalog": proof["catalog"],
+            "plan": proof["plan"],
+            "solution": proof["solution"],
+            "source": proof["source"],
+            "catalog": proof["catalog"],
             "profile": proof["profile"],
             "required_capabilities": proof["required_capabilities"],
-            "bindings_hash": _hash(bindings), "actor_proof_hash": _hash(proof),
+            "bindings_hash": _hash(bindings),
+            "actor_proof_hash": _hash(proof),
         }
 
     def rollback(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -489,6 +642,20 @@ class ActorFleetProvider:
         if isinstance(applied, dict):
             release = Path(str(journal.get("candidate_release")))
             self._load_materializer(release).rollback_complete_actor_contracts(applied)
+        startup_bindings = journal.get("startup_bindings")
+        if isinstance(startup_bindings, list):
+            for entry in reversed(startup_bindings):
+                path = Path(str(entry.get("path")))
+                current = _read_json(path, "current actor startup binding")
+                if _hash(current) != entry.get("installed_hash"):
+                    raise ActorFleetError("actor startup binding changed before rollback")
+                previous = entry.get("previous")
+                if previous is None:
+                    path.unlink()
+                elif isinstance(previous, Mapping):
+                    _atomic(path, previous, mode=0o444)
+                else:
+                    raise ActorFleetError("actor startup rollback value is invalid")
         self._service("restart", expected="active")
         journal["status"] = "ROLLED_BACK"
         self._save(journal)
@@ -505,25 +672,42 @@ class ActorFleetProvider:
             raise ActorFleetError("actor repair candidate changed")
         materializer, bundle, contracts = self._actor_inputs(release, value)
         repaired = materializer.materialize_complete_actor_contracts(
-            bundle, source_root=release, contracts=contracts,
-            trusted_contract_public_key=self.contract_public_key, apply=True, replace_existing=True,
+            bundle,
+            source_root=release,
+            contracts=contracts,
+            trusted_contract_public_key=self.contract_public_key,
+            apply=True,
+            replace_existing=True,
             additional_source_roots=(self._generation_root(value),),
         )
         if repaired.get("status") != "COMPLETE_MATERIALIZED_NOT_SERVICE_ACTIVATED":
             raise ActorFleetError("complete actor bundle did not repair")
-        journal.update({"status": "REPAIRED", "materialization": repaired})
+        startup_bindings = self._install_startup_bindings(value, journal, repair=True)
+        journal.update(
+            {
+                "status": "REPAIRED",
+                "materialization": repaired,
+                "startup_bindings": startup_bindings,
+            }
+        )
         self._save(journal)
         return {
-            "status": "REPAIRED", "transaction_id": value["transaction_id"],
-            "generation": value["successor_generation"], "materialization_hash": _hash(repaired),
+            "status": "REPAIRED",
+            "transaction_id": value["transaction_id"],
+            "generation": value["successor_generation"],
+            "materialization_hash": _hash(repaired),
         }
 
     def dispatch(self, step: str, arguments: list[Any]) -> Mapping[str, Any]:
         operations = {
-            "quiesce": (self.quiesce, 1), "rebuild": (self.rebuild, 1),
-            "activate": (self.activate, 2), "restart": (self.restart, 1),
-            "health": (self.health, 1), "verify-actor": (self.verify_actor, 2),
-            "rollback": (self.rollback, 1), "repair": (self.repair, 1),
+            "quiesce": (self.quiesce, 1),
+            "rebuild": (self.rebuild, 1),
+            "activate": (self.activate, 2),
+            "restart": (self.restart, 1),
+            "health": (self.health, 1),
+            "verify-actor": (self.verify_actor, 2),
+            "rollback": (self.rollback, 1),
+            "repair": (self.repair, 1),
         }
         target = operations.get(step)
         if target is None or len(arguments) != target[1]:
@@ -540,7 +724,12 @@ def create_actor_fleet_app(config: Mapping[str, Any], **provider_kwargs: Any) ->
         if not provider.authorized(authorization):
             raise HTTPException(status_code=401, detail="actor fleet authentication failed")
         invocation = {key: body[key] for key in ("schema", "step", "arguments") if key in body}
-        if set(body) != {"schema", "step", "arguments", "invocation_hash"} or body.get("schema") != "tgw-actor-fleet-provider-invocation/v1" or body.get("step") != step or body.get("invocation_hash") != _hash(invocation):
+        if (
+            set(body) != {"schema", "step", "arguments", "invocation_hash"}
+            or body.get("schema") != "tgw-actor-fleet-provider-invocation/v1"
+            or body.get("step") != step
+            or body.get("invocation_hash") != _hash(invocation)
+        ):
             raise HTTPException(status_code=409, detail="actor provider invocation binding is invalid")
         try:
             result = provider.dispatch(step, list(body["arguments"]))

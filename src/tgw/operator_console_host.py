@@ -211,8 +211,11 @@ class ConfiguredAuthorityStore:
 
     def complete_execution(self, receipt_id, *, outcome, evidence=(), rollback_receipt=None, detail=""):
         return self._store().complete_execution(
-            receipt_id, outcome=outcome, evidence=evidence,
-            rollback_receipt=rollback_receipt, detail=detail,
+            receipt_id,
+            outcome=outcome,
+            evidence=evidence,
+            rollback_receipt=rollback_receipt,
+            detail=detail,
         )
 
     def get(self, request_id):
@@ -234,8 +237,10 @@ def _unmounted_provider(name: str) -> Callable[[Mapping[str, str]], Mapping[str,
     :class:`TypedEffectHandlerRegistry` and remains executable for end-to-end
     authority health checks.
     """
+
     def unavailable(_: Mapping[str, str]) -> Mapping[str, Any]:
         raise EffectHandlerError(f"registered {name} provider is unavailable on this host")
+
     return unavailable
 
 
@@ -259,7 +264,8 @@ def configured_execution_controller(
             raise RuntimeError("pinned bootstrap host integration configuration is required")
         try:
             integration = mount_pinned_bootstrap_host_integration(
-                raw_bootstrap, provider=bootstrap_provider,
+                raw_bootstrap,
+                provider=bootstrap_provider,
             )
         except BootstrapHostIntegrationError as exc:
             raise RuntimeError("pinned bootstrap host integration cannot be mounted") from exc
@@ -288,34 +294,47 @@ def _dynamic_surface_bindings(
 
     def configuration() -> tuple[str, Path]:
         raw = config_provider().get("dynamic_surfaces")
-        if not isinstance(raw, Mapping) or set(raw) != {"renderer_sha256", "receipt_root", "transition_gate_path"}:
+        if not isinstance(raw, Mapping) or set(raw) != {"enforcement_boundary", "receipt_root", "transition_gate_path"}:
             raise ValueError("dynamic surface configuration is unavailable")
-        expected = raw["renderer_sha256"]
-        source = Path(__file__).with_name("dynamic_surface.py")
-        actual = "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest()
-        if expected != actual:
-            raise ValueError("dynamic surface renderer hash mismatch")
-        root = Path(raw["receipt_root"])
+        boundary = raw["enforcement_boundary"]
+        if not isinstance(boundary, Mapping) or set(boundary) != {"root", "version", "components"}:
+            raise ValueError("dynamic surface enforcement boundary is unavailable")
+        boundary_root = Path(str(boundary["root"]))
+        components = boundary["components"]
         if (
-            not root.is_absolute() or root == Path("/tmp") or Path("/tmp") in root.parents
-            or not root.is_dir() or root.is_symlink()
+            not boundary_root.is_absolute()
+            or not boundary_root.is_dir()
+            or boundary_root.is_symlink()
+            or not isinstance(boundary.get("version"), str)
+            or not boundary["version"]
+            or not isinstance(components, list)
+            or len(components) != 4
         ):
+            raise ValueError("dynamic surface enforcement boundary is unavailable")
+        observed = []
+        for component in components:
+            if not isinstance(component, Mapping) or set(component) != {"relative_path", "content_sha256"}:
+                raise ValueError("dynamic surface enforcement component is invalid")
+            relative = Path(str(component["relative_path"]))
+            target = boundary_root / relative
+            if relative.is_absolute() or ".." in relative.parts or target.is_symlink() or not target.is_file():
+                raise ValueError("dynamic surface enforcement component is unavailable")
+            actual = "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest()
+            if component["content_sha256"] != actual:
+                raise ValueError("dynamic surface enforcement component hash mismatch")
+            observed.append(actual)
+        actual = "sha256:" + hashlib.sha256(json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        root = Path(raw["receipt_root"])
+        if not root.is_absolute() or root == Path("/tmp") or Path("/tmp") in root.parents or not root.is_dir() or root.is_symlink():
             raise ValueError("dynamic surface receipt root is not a durable directory")
         gate = Path(raw["transition_gate_path"])
-        if (
-            not gate.is_absolute() or gate == Path("/tmp") or Path("/tmp") in gate.parents
-            or not gate.is_file() or gate.is_symlink()
-        ):
+        if not gate.is_absolute() or gate == Path("/tmp") or Path("/tmp") in gate.parents or not gate.is_file() or gate.is_symlink():
             raise ValueError("dynamic surface transition gate is unavailable")
         try:
             gate_value = json.loads(gate.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError("dynamic surface transition gate is invalid") from exc
-        if (
-            not isinstance(gate_value, Mapping)
-            or gate_value.get("schema") != "tgw-w18-fleet-transition-gate/v1"
-            or gate_value.get("status") != "ACTIVE"
-        ):
+        if not isinstance(gate_value, Mapping) or gate_value.get("schema") != "tgw-w18-fleet-transition-gate/v1" or gate_value.get("status") != "ACTIVE":
             raise ValueError("dynamic surfaces are suspended for a fleet transition")
         return actual, root
 
@@ -331,33 +350,41 @@ def _dynamic_surface_bindings(
         if not isinstance(solution_hash, str) or _SOLUTION_HASH.fullmatch(solution_hash) is None:
             raise ValueError("dynamic surface Plan solution is invalid")
         current = _approved_plan_identity(config_provider())
-        if (
-            plan_commit != current["plan_commit"]
-            or solution_hash != current["solution_hash"]
-        ):
+        if plan_commit != current["plan_commit"] or solution_hash != current["solution_hash"]:
             raise ValueError("dynamic surface request is bound to a stale Plan solution")
         expiry = row.get("expires_at")
         if isinstance(expiry, datetime):
             expiry = expiry.astimezone(timezone.utc).isoformat()
         if not isinstance(expiry, str):
             raise ValueError("dynamic surface expiry is unavailable")
-        card_hash = _canonical_hash({
-            "request_id": request_id, "effect_hash": row.get("effect_hash"),
-            "effect_generation": row.get("effect_generation"),
-            "object_generation": row.get("object_generation"),
-        })
-        authority_hash = _canonical_hash({
-            "request_id": request_id, "plan_commit": plan_commit,
-            "solution_hash": solution_hash, "closure_hash": row.get("closure_hash"),
-            "expires_at": expiry,
-        })
+        card_hash = _canonical_hash(
+            {
+                "request_id": request_id,
+                "effect_hash": row.get("effect_hash"),
+                "effect_generation": row.get("effect_generation"),
+                "object_generation": row.get("object_generation"),
+            }
+        )
+        authority_hash = _canonical_hash(
+            {
+                "request_id": request_id,
+                "plan_commit": plan_commit,
+                "solution_hash": solution_hash,
+                "closure_hash": row.get("closure_hash"),
+                "expires_at": expiry,
+            }
+        )
         value = {
             "schema": "tgw-dynamic-surface-proposal/v1",
             "surface_id": "authority-" + card_hash.removeprefix("sha256:")[:24],
-            "request_id": request_id, "plan_commit": plan_commit,
-            "solution_hash": solution_hash, "card_hash": card_hash,
-            "authority_hash": authority_hash, "expiry": expiry,
-            "audience": "operator", "title": str(row.get("summary") or "Plan authority decision"),
+            "request_id": request_id,
+            "plan_commit": plan_commit,
+            "solution_hash": solution_hash,
+            "card_hash": card_hash,
+            "authority_hash": authority_hash,
+            "expiry": expiry,
+            "audience": "operator",
+            "title": str(row.get("summary") or "Plan authority decision"),
             "state": "LIVE",
             "components": [
                 {"type": "heading", "id": "scope", "text": "Exact bound effect"},
@@ -402,7 +429,8 @@ def _dynamic_surface_bindings(
         renderer, root = configuration()
         value, _card_hash, _authority_hash = proposal(request_id)
         surface = compile_dynamic_surface(
-            proposal=value, handler_registry=contracts,
+            proposal=value,
+            handler_registry=contracts,
             renderer_version=renderer,
             observed_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -412,7 +440,8 @@ def _dynamic_surface_bindings(
         renderer, root = configuration()
         value, card_hash, authority_hash = proposal(request_id)
         surface = compile_dynamic_surface(
-            proposal=value, handler_registry=contracts,
+            proposal=value,
+            handler_registry=contracts,
             renderer_version=renderer,
             observed_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -422,14 +451,16 @@ def _dynamic_surface_bindings(
 
         def decide(invocation: Mapping[str, Any]) -> Mapping[str, Any]:
             values = invocation["values"]
-            evidence = tuple(
-                line.strip() for line in str(values.get("reconciliation-evidence") or "").splitlines()
-                if line.strip()
+            evidence = tuple(line.strip() for line in str(values.get("reconciliation-evidence") or "").splitlines() if line.strip())
+            decision = AuthorityDecision.create(
+                request_id,
+                {
+                    "kind": invocation["decision"],
+                    "decided_by": operator,
+                    "reason": values["reason"],
+                    "reconciliation_evidence": evidence,
+                },
             )
-            decision = AuthorityDecision.create(request_id, {
-                "kind": invocation["decision"], "decided_by": operator,
-                "reason": values["reason"], "reconciliation_evidence": evidence,
-            })
             recorded = store.decide(decision)
             return {"status": "RECORDED", "decision_id": str(recorded.get("decision_id") or decision.decision_id)}
 
@@ -454,8 +485,10 @@ def _dynamic_surface_bindings(
             path = root / (claim_hash.removeprefix("sha256:") + ".claim.json")
             value = {
                 "schema": "tgw-dynamic-surface-submission-claim/v1",
-                "status": "CLAIMED", "claim_hash": claim_hash,
-                "request_id": request_id, "surface_hash": invocation["surface_hash"],
+                "status": "CLAIMED",
+                "claim_hash": claim_hash,
+                "request_id": request_id,
+                "surface_hash": invocation["surface_hash"],
             }
             encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
             try:
@@ -469,9 +502,12 @@ def _dynamic_surface_bindings(
             return value
 
         return submit_dynamic_surface(
-            surface=surface, submission=submission,
-            current_card_hash=card_hash, current_authority_hash=authority_hash,
-            handlers={"plan-authority-decision": decide}, persist_receipt=persist,
+            surface=surface,
+            submission=submission,
+            current_card_hash=card_hash,
+            current_authority_hash=authority_hash,
+            handlers={"plan-authority-decision": decide},
+            persist_receipt=persist,
             claim_submission=claim,
         )
 
@@ -504,11 +540,14 @@ def configured_console_mount(
                     raise ValueError("bootstrap deployment provider cannot be mounted") from exc
             try:
                 controller = configured_execution_controller(
-                    store, config_provider, bootstrap_provider=provider,
+                    store,
+                    config_provider,
+                    bootstrap_provider=provider,
                 )
             except RuntimeError as exc:
                 raise ValueError("bootstrap deployment provider cannot be mounted") from exc
             return controller.execute(*args, **kwargs)
+
     def resolve_development(body: Mapping[str, Any], requested_by: str):
         config = config_provider()
         binding = _approved_plan_identity(config)
@@ -526,7 +565,8 @@ def configured_console_mount(
         )
 
     load_dynamic_surface, submit_dynamic_surface_decision = _dynamic_surface_bindings(
-        store, config_provider,
+        store,
+        config_provider,
     )
 
     return OperatorConsoleMount(

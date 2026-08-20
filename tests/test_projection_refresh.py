@@ -8,11 +8,11 @@ HASH = "sha256:" + "a" * 64
 
 
 def revision(source="source", health="READY"):
-    return {"source": source, "materialization": HASH, "build": HASH, "health": health}
+    return {"source": source, "materialization": HASH, "build": HASH, "built_at": "2026-08-20T12:00:00+00:00", "health": health}
 
 
 def request():
-    values = {name: revision(name) for name in ("plan", "code_graph", "workflow", "actor_contract")}
+    values = {name: revision(name) for name in ("plan", "capability_graph", "code_graph", "workflow", "actor_contract")}
     return {
         "schema": "tgw-w18-projection-refresh-request/v1",
         "lease": {"id": "fleet", "generation": 1},
@@ -28,7 +28,7 @@ def test_fresh_refresh_is_deterministic_and_non_activating():
     assert compile_projection_refresh(request=request())["status"] == "FRESH"
 
 
-@pytest.mark.parametrize("projection", ["plan", "code_graph", "workflow", "actor_contract"])
+@pytest.mark.parametrize("projection", ["plan", "capability_graph", "code_graph", "workflow", "actor_contract"])
 def test_stale_projection_holds_all_launch_consumers(projection):
     value = request()
     value["observed"][projection]["health"] = "STALE"

@@ -58,8 +58,13 @@ def test_admitted_receipt_is_rehashed_and_exactly_candidate_bound():
 
 def test_environment_preflight_is_exactly_bound_to_admission_hashes():
     receipt = {
-        "schema": "tgw-environment-preflight-receipt/v1", "result": "PASS", "catalog_sha256": HASH,
-        "actor": "codex", "profile": "development", "attempt_id": "attempt-1", "tools": [],
+        "schema": "tgw-environment-preflight-receipt/v1",
+        "result": "PASS",
+        "catalog_sha256": HASH,
+        "actor": "codex",
+        "profile": "development",
+        "attempt_id": "attempt-1",
+        "tools": [],
     }
     canonical = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     receipt_hash = "sha256:" + hashlib.sha256(canonical).hexdigest()
@@ -71,18 +76,66 @@ def test_environment_preflight_is_exactly_bound_to_admission_hashes():
 
 def test_v2_environment_preflight_evidence_remains_admissible():
     receipt = {
-        "schema": "tgw-environment-preflight-receipt/v1", "result": "PASS", "catalog_sha256": HASH,
-        "actor": "codex", "profile": "mobile", "attempt_id": "attempt-1", "tools": [],
+        "schema": "tgw-environment-preflight-receipt/v1",
+        "result": "PASS",
+        "catalog_sha256": HASH,
+        "actor": "codex",
+        "profile": "mobile",
+        "attempt_id": "attempt-1",
+        "tools": [],
         "workspace_root": "/opt/TGW/w/attempts/attempt-1/mobile/worktree",
-        "cache_roots": {"home": "/var/cache/tgw/attempts/attempt-1/mobile/home"},
-        "environment": {"HOME": "/var/cache/tgw/attempts/attempt-1/mobile/home"},
-        "artifacts": [], "verification_commands": [["flutter", "test"]],
+        "cache_roots": {"home": "/opt/TGW/var/cache/tgw/attempts/attempt-1/mobile/home"},
+        "environment": {"HOME": "/opt/TGW/var/cache/tgw/attempts/attempt-1/mobile/home"},
+        "artifacts": [],
+        "verification_commands": [["flutter", "test"]],
     }
     canonical = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     receipt_hash = "sha256:" + hashlib.sha256(canonical).hexdigest()
-    assert validate_environment_preflight_for_admission(
-        receipt, catalog_hash=HASH, receipt_hash=receipt_hash,
-    ) == receipt
+    assert (
+        validate_environment_preflight_for_admission(
+            receipt,
+            catalog_hash=HASH,
+            receipt_hash=receipt_hash,
+        )
+        == receipt
+    )
+
+
+def test_v3_environment_preflight_requires_bootstrap_and_broker_revisions():
+    receipt = {
+        "schema": "tgw-environment-preflight-receipt/v1",
+        "result": "PASS",
+        "catalog_sha256": HASH,
+        "actor": "codex",
+        "profile": "development",
+        "attempt_id": "attempt-1",
+        "tools": [],
+        "workspace_root": "/opt/TGW/w/attempts/attempt-1",
+        "cache_roots": {"home": "/opt/TGW/var/cache/tgw/attempts/attempt-1/development/home"},
+        "environment": {"HOME": "/opt/TGW/var/cache/tgw/attempts/attempt-1/development/home"},
+        "artifacts": [],
+        "verification_commands": [["python", "-m", "pytest"]],
+        "enforcement_boundary": {"version": 1},
+        "bootstrap_revision": HASH,
+        "broker_policy_revision": HASH,
+    }
+    canonical = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    receipt_hash = "sha256:" + hashlib.sha256(canonical).hexdigest()
+    assert (
+        validate_environment_preflight_for_admission(
+            receipt,
+            catalog_hash=HASH,
+            receipt_hash=receipt_hash,
+        )
+        == receipt
+    )
+    receipt.pop("broker_policy_revision")
+    with pytest.raises(AdmissionRecoveryError, match="fields are not exact"):
+        validate_environment_preflight_for_admission(
+            receipt,
+            catalog_hash=HASH,
+            receipt_hash=receipt_hash,
+        )
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,7 @@ Callers must pass the current server-owned item, listing, workflow, and field
 views.  The assembler only verifies their shared identity/generation and
 emits one stable object which every client can render.
 """
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -68,7 +69,9 @@ def _command_descriptor(command: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "id": command_id,
         "label": {
-            "save-draft": "Save Draft", "list-item": "List Item", "update-item": "Update Item",
+            "save-draft": "Save Draft",
+            "list-item": "List Item",
+            "update-item": "Update Item",
         }[command_id],
         "enabled": enabled,
         "reason": reason,
@@ -113,15 +116,14 @@ def _validate_schema_value(schema: Mapping[str, Any], value: Any, label: str) ->
         nested = _mapping(schema.get("properties", {}), f"{label} properties")
         if not set(value) <= set(nested):
             raise OperatorObjectBindingError(f"{label} contains an unpublished key")
-        return {
-            key: _validate_schema_value(_mapping(nested[key], f"{label}.{key} schema"), nested_value, f"{label}.{key}")
-            for key, nested_value in value.items()
-        }
+        return {key: _validate_schema_value(_mapping(nested[key], f"{label}.{key} schema"), nested_value, f"{label}.{key}") for key, nested_value in value.items()}
     raise OperatorObjectBindingError(f"{label} has an unsupported type")
 
 
 def validate_operator_command_values(
-    published: Mapping[str, Any], command_id: str, values: Mapping[str, Any],
+    published: Mapping[str, Any],
+    command_id: str,
+    values: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Validate client values solely against the server-published schema."""
     published = _mapping(published, "published")
@@ -143,7 +145,9 @@ def validate_operator_command_values(
         raise OperatorObjectBindingError("command values contain an unpublished field")
     return {
         field: _validate_schema_value(
-            _mapping(properties[field], f"command field {field}"), value, f"command field {field}",
+            _mapping(properties[field], f"command field {field}"),
+            value,
+            f"command field {field}",
         )
         for field, value in values.items()
     }
@@ -338,9 +342,7 @@ def build_item_operator_object(
     evidence = []
     for fingerprint in workflow_card.get("fingerprints", ()):
         if isinstance(fingerprint, Mapping):
-            evidence.append(
-                f"condition:{fingerprint.get('condition_id')}:{fingerprint.get('result')}"
-            )
+            evidence.append(f"condition:{fingerprint.get('condition_id')}:{fingerprint.get('result')}")
     for attempt in workflow_card.get("attempts", ()):
         if isinstance(attempt, Mapping) and attempt.get("job_id"):
             evidence.append(f"attempt:{attempt['job_id']}:{attempt.get('state')}")
@@ -387,7 +389,9 @@ def build_item_operator_object(
             "return_policy_id": {"type": "string", "label": "Return policy", "value": draft.get("return_policy_id") or "", "options": deepcopy(context.get("return_policies") or [])},
             "store_category_id": {"type": "string", "label": "Store category", "value": draft.get("store_category_id") or "", "options": deepcopy(context.get("store_categories") or [])},
             "secondary_store_category_id": {
-                "type": "string", "nullable": True, "label": "Secondary store category",
+                "type": "string",
+                "nullable": True,
+                "label": "Secondary store category",
                 "value": draft.get("secondary_store_category_id"),
                 "options": deepcopy(context.get("store_categories") or []),
             },
@@ -437,21 +441,19 @@ def build_item_operator_object(
         },
     }
     save_input_schema = {
-        "type": "object", "additionalProperties": False,
+        "type": "object",
+        "additionalProperties": False,
         "properties": {
             "item_fields": {
-                "type": "object", "additionalProperties": False,
-                "properties": {
-                    name: {key: value for key, value in descriptor.items() if key in {"type", "nullable"}}
-                    for name, descriptor in field_schema["item_fields"].items()
-                },
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {name: {key: value for key, value in descriptor.items() if key in {"type", "nullable"}} for name, descriptor in field_schema["item_fields"].items()},
             },
             "draft_listing": {
-                "type": "object", "additionalProperties": False,
-                "properties": {
-                    name: {key: value for key, value in descriptor.items() if key in {"type", "nullable"}}
-                    for name, descriptor in field_schema["listing_fields"].items()
-                } | {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {name: {key: value for key, value in descriptor.items() if key in {"type", "nullable"}} for name, descriptor in field_schema["listing_fields"].items()}
+                | {
                     "condition_enum": {"type": "string", "enum": [option["value"] for option in conditions]},
                 },
             },
@@ -464,9 +466,11 @@ def build_item_operator_object(
         field_schema=field_schema,
         commands=(
             {
-                "id": "save-draft", "enabled": not active,
+                "id": "save-draft",
+                "enabled": not active,
                 "reason": "The authoritative workflow is active." if active else None,
-                "authority_scope": "local-item-mutation", "input_schema": save_input_schema,
+                "authority_scope": "local-item-mutation",
+                "input_schema": save_input_schema,
             },
             {
                 "id": "list-item",
@@ -488,9 +492,4 @@ def build_item_operator_object(
 
 def web_adapter_view(published: Mapping[str, Any]) -> dict[str, Any]:
     """Web adapter: render and submit only the shared API view."""
-    return adapter_view(published)
-
-
-def flutter_adapter_view(published: Mapping[str, Any]) -> dict[str, Any]:
-    """Flutter adapter: render and submit only the shared API view."""
     return adapter_view(published)
