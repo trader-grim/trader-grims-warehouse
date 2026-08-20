@@ -129,6 +129,13 @@ def test_live_graph_rejects_unknown_receiver(tmp_path):
         live_plan_graph(root, 'PP-ALPHA-001', receiver='marketplace', **_binding(root))
 
 
+def test_live_graph_accepts_deepseek_review_receiver(tmp_path):
+    root = _plan_repo(tmp_path)
+    result = live_plan_graph(root, 'PP-ALPHA-001', receiver='deepseek', **_binding(root))
+    assert result['receiver'] == 'deepseek'
+    assert 'independently review evidence' in result['receiver_profile']
+
+
 def test_live_plan_graph_uses_configured_git_executable(tmp_path):
     root = _plan_repo(tmp_path)
     wrapper = tmp_path / 'held-git'

@@ -20,6 +20,7 @@ _SOLUTION_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 RECEIVER_PROFILES = {
     "codex": "Retrieve cited Plan sources before implementation; run tests and return receipts.",
     "claude": "Retrieve cited Plan sources; independently review evidence and return a verdict receipt.",
+    "deepseek": "Retrieve cited Plan sources; independently review evidence and return a verdict receipt.",
     "aider": "Retrieve cited Plan sources before editing; stay in the named worktree and return the exact diff.",
     "hermes": "Retrieve cited Plan sources and evidence; preserve authority boundaries and return a bounded receipt.",
 }
