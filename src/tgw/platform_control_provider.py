@@ -250,7 +250,11 @@ class PlatformControlProvider:
         })
 
     def _request(self, value: Any) -> dict[str, Any]:
-        if not isinstance(value, Mapping) or value.get("schema") != "tgw-w18-fleet-refresh-request/v1":
+        fields = {
+            "schema", "transaction_id", "idempotency_key", "predecessor_generation",
+            "successor_generation", "revisions", "actors",
+        }
+        if not isinstance(value, Mapping) or set(value) != fields or value.get("schema") != "tgw-w18-fleet-refresh-request/v1":
             raise PlatformControlError("fleet provider request is invalid")
         revisions = value.get("revisions")
         required_revisions = {"plan", "solution", "source", "catalog", "bootstrap", "broker_policy", "admission"}
@@ -261,6 +265,9 @@ class PlatformControlProvider:
         for field in required_revisions - {"plan", "source"}:
             if not isinstance(revisions[field], str) or _HASH.fullmatch(revisions[field]) is None:
                 raise PlatformControlError("fleet provider content revisions are invalid")
+        actors = value.get("actors")
+        if not isinstance(actors, list) or not actors or actors != sorted(set(actors)) or any(not isinstance(actor, str) or not actor for actor in actors):
+            raise PlatformControlError("fleet provider actor set is invalid")
         return dict(value)
 
     def checkpoint(self, request: Mapping[str, Any]) -> dict[str, Any]:

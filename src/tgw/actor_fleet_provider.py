@@ -448,7 +448,7 @@ def create_actor_fleet_app(config: Mapping[str, Any], **provider_kwargs: Any) ->
 
 
 def main() -> int:
-    config = load_operational_config(DEFAULT_CONFIG)
+    config = load_operational_config(Path(os.environ.get("TGW_CONFIG", str(DEFAULT_CONFIG))))
     host = os.environ.get("TGW_ACTOR_FLEET_HOST", "127.0.0.1")
     port = int(os.environ.get("TGW_ACTOR_FLEET_PORT", "7556"))
     uvicorn.run(create_actor_fleet_app(config), host=host, port=port, access_log=False)
