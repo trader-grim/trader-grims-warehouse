@@ -339,6 +339,20 @@ def test_expired_or_incomplete_handoff_never_launches_provider(tmp_path):
         run_review(value, [backend(tmp_path / "review-provider")], environment_preflight_receipt=environment_preflight_receipt(value))
 
 
+@pytest.mark.parametrize("mutate, message", [
+    (lambda receipt: receipt.pop("tools"), "environment preflight receipt is invalid"),
+    (lambda receipt: receipt.update(schema="wrong/v1"), "environment preflight did not pass"),
+    (lambda receipt: receipt.update(result="HOLD"), "environment preflight did not pass"),
+    (lambda receipt: receipt.update(catalog_sha256="sha256:" + "0" * 64), "environment preflight binding mismatch"),
+])
+def test_environment_preflight_rejections_hold_before_provider(tmp_path, mutate, message):
+    bound = handoff(snapshot(tmp_path))
+    receipt = environment_preflight_receipt(bound)
+    mutate(receipt)
+    with pytest.raises(ValueError, match=message):
+        run_review(bound, [backend(tmp_path / "review-provider")], environment_preflight_receipt=receipt)
+
+
 def test_hung_provider_is_terminated_at_bounded_timeout(tmp_path):
     source = snapshot(tmp_path)
     provider = tmp_path / "hung-provider"
