@@ -260,8 +260,11 @@ def preflight(
                 "name": name, "version": version, "content_path": content_path, "observed_sha256": observed_hash,
             })
         required_artifacts = {
-            "flutter-sdk", "dart-sdk", "android-sdk-platform", "android-build-tools", "android-ndk", "android-license",
+            "flutter-sdk", "dart-sdk", "android-sdk-platform",
+            "android-build-tools", "android-ndk", "android-license",
         }
+        if catalog.get("schema") == "tgw-execution-environment-catalog/v3":
+            required_artifacts.add("android-sdk-platform-35")
         if artifact_names != required_artifacts:
             raise EnvironmentPreflightError("mobile profile artifact set is incomplete")
         raw_environment = declared_profile.get("environment")

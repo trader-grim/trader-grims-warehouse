@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 CATALOG_SCHEMAS = {
     "tgw-execution-environment-catalog/v1",
     "tgw-execution-environment-catalog/v2",
+    "tgw-execution-environment-catalog/v3",
 }
 CONTRACT_SCHEMA = "tgw-actor-contract-receipt/v1"
 _HASH = re.compile(r"sha256:[0-9a-f]{64}$")
@@ -157,7 +158,10 @@ def compile_actor_contract(
     declared_actor = verified["actors"][actor]
     declared_profile = verified["profiles"][profile]
     diagnostics: list[dict[str, str]] = []
-    if verified["schema"].endswith("/v2"):
+    if verified["schema"] in {
+        "tgw-execution-environment-catalog/v2",
+        "tgw-execution-environment-catalog/v3",
+    }:
         qualified = declared_actor.get("qualified_roles")
         if (
             declared_actor.get("role") != "execution-provider"

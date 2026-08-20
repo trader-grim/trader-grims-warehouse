@@ -14,7 +14,14 @@ INSTALLERS = ROOT / "agent-services/installers"
 sys.path.insert(0, str(INSTALLERS.parent))
 
 import installers.materialize as materialize_module  # noqa: E402
-from installers.materialize import InstallError, materialize, materialize_fleet, rollback_fleet  # noqa: E402
+from installers.materialize import (  # noqa: E402
+    InstallError,
+    materialize,
+    materialize_complete_actor_contracts,
+    materialize_fleet,
+    rollback_complete_actor_contracts,
+    rollback_fleet,
+)
 
 SIGNER = Ed25519PrivateKey.from_private_bytes(b"z" * 32)
 SIGNER_PUBLIC_KEY = actor_contract_public_key(SIGNER)
@@ -321,3 +328,110 @@ def test_fleet_refuses_replacement_target_changed_after_staging(tmp_path, monkey
     assert destination.is_dir()
     assert not (home / ".codex/skills/tgw-review").exists()
     assert not (home / ".codex/providers/promptcraft").exists()
+
+
+def _complete_bundle(tmp_path):
+    source = tmp_path / "candidate"
+    skill_plan = source / "skills/plan"
+    skill_review = source / "skills/review"
+    skill_plan.mkdir(parents=True)
+    skill_review.mkdir(parents=True)
+    (skill_plan / "SKILL.md").write_text("plan\n")
+    (skill_review / "SKILL.md").write_text("review\n")
+    files = {}
+    for name, content in {
+        "launcher": "#!/bin/sh\nexit 73\n",
+        "mcp": '{"endpoint":"tgw-context"}\n',
+        "bootstrap": '{"status":"PASS"}\n',
+    }.items():
+        path = source / name
+        path.write_text(content)
+        files[name] = path
+    catalog = {"schema": "tgw-execution-environment-catalog/v3", "actors": {"codex": {}}}
+    catalog_path = source / "catalog.json"
+    catalog_path.write_text(json.dumps(catalog))
+    files["catalog"] = catalog_path
+    home, project = tmp_path / "home", tmp_path / "project"
+
+    def file_hash(path):
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+    bindings = [
+        {"kind": "skill", "name": "tgw-plan", "source": str(skill_plan), "destination": str(home / ".codex/skills/tgw-plan"), "sha256": materialize_module.tree_digest(skill_plan)},
+        {"kind": "skill", "name": "tgw-review", "source": str(skill_review), "destination": str(home / ".codex/skills/tgw-review"), "sha256": materialize_module.tree_digest(skill_review)},
+        {"kind": "mcp", "name": "tgw-context", "source": str(files["mcp"]), "destination": str(home / ".codex/tgw-context.json"), "sha256": file_hash(files["mcp"])},
+        {"kind": "launcher", "name": "launcher", "source": str(files["launcher"]), "destination": str(home / ".local/bin/tgw-codex"), "sha256": file_hash(files["launcher"])},
+        {"kind": "bootstrap", "name": "bootstrap-receipt", "source": str(files["bootstrap"]), "destination": str(home / ".codex/tgw-bootstrap.json"), "sha256": file_hash(files["bootstrap"])},
+        {"kind": "environment", "name": "environment-catalog", "source": str(files["catalog"]), "destination": str(home / ".codex/tgw-environment.json"), "sha256": file_hash(files["catalog"])},
+    ]
+    mcp_binding = [{
+        "endpoint": "tgw-context", "source_sha256": file_hash(files["mcp"]),
+        "destination": str(home / ".codex/tgw-context.json"),
+    }]
+    local = {
+        "bootstrap_receipt_hash": file_hash(files["bootstrap"]),
+        "launcher": {"path": str(home / ".local/bin/tgw-codex"), "sha256": file_hash(files["launcher"])},
+        "skills": {"tgw-plan": materialize_module.tree_digest(skill_plan), "tgw-review": materialize_module.tree_digest(skill_review)},
+        "hooks": {},
+        "mcp": {"endpoints": ["tgw-context"], "binding_hash": materialize_module._bundle_binding_hash(mcp_binding)},
+    }
+    canonical_catalog = json.dumps(catalog, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    body = {
+        "schema": "tgw-actor-contract-receipt/v1", "status": "READY",
+        "catalog_hash": "sha256:" + hashlib.sha256(canonical_catalog).hexdigest(),
+        "actor": "codex", "profile": "development", "plan": {}, "code_graph": {},
+        "local": local, "diagnostics": [], "activation": "declarative-only",
+    }
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    contract = sign_actor_contract(
+        {**body, "receipt_hash": "sha256:" + hashlib.sha256(encoded).hexdigest()},
+        signing_private_key=SIGNER,
+    )
+    bundle = {
+        "schema": "tgw-complete-actor-contract-bundle/v1",
+        "generation": "sha256:" + "b" * 64,
+        "actors": {"codex": {"home": str(home), "project": str(project), "bindings": bindings}},
+    }
+    return source, home, bundle, {"codex": contract}
+
+
+def test_complete_actor_contract_materializes_every_declared_boundary(tmp_path):
+    source, home, bundle, contracts = _complete_bundle(tmp_path)
+    dry = materialize_complete_actor_contracts(
+        bundle, source_root=source, contracts=contracts,
+        trusted_contract_public_key=SIGNER_PUBLIC_KEY,
+    )
+    assert dry["status"] == "PREPARED"
+    assert not home.exists()
+    applied = materialize_complete_actor_contracts(
+        bundle, source_root=source, contracts=contracts,
+        trusted_contract_public_key=SIGNER_PUBLIC_KEY, apply=True,
+    )
+    assert applied["status"] == "COMPLETE_MATERIALIZED_NOT_SERVICE_ACTIVATED"
+    assert {item["kind"] for item in applied["bindings"]} == {
+        "skill", "mcp", "launcher", "bootstrap", "environment",
+    }
+    assert all(Path(item["destination"]).is_symlink() for item in applied["bindings"])
+    assert applied["activation"] == "required-in-current-quiet-refresh-transaction"
+
+
+def test_complete_actor_contract_refuses_source_drift_before_writes(tmp_path):
+    source, home, bundle, contracts = _complete_bundle(tmp_path)
+    (source / "mcp").write_text('{"endpoint":"forged"}\n')
+    with pytest.raises(InstallError, match="digest"):
+        materialize_complete_actor_contracts(
+            bundle, source_root=source, contracts=contracts,
+            trusted_contract_public_key=SIGNER_PUBLIC_KEY, apply=True,
+        )
+    assert not home.exists()
+
+
+def test_complete_actor_contract_rollback_removes_one_new_generation(tmp_path):
+    source, home, bundle, contracts = _complete_bundle(tmp_path)
+    applied = materialize_complete_actor_contracts(
+        bundle, source_root=source, contracts=contracts,
+        trusted_contract_public_key=SIGNER_PUBLIC_KEY, apply=True,
+    )
+    rollback_complete_actor_contracts(applied)
+    assert not (home / ".codex/skills/tgw-plan").exists()
+    assert not (home / ".codex/tgw-context.json").exists()

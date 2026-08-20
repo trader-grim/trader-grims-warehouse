@@ -89,6 +89,16 @@ def test_v2_actor_is_a_provider_for_neutral_roles_not_a_fixed_harness_assignment
         _compile(catalog=catalog)
 
 
+def test_v3_actor_uses_the_same_provider_neutral_role_contract():
+    catalog = _catalog()
+    catalog["schema"] = "tgw-execution-environment-catalog/v3"
+    catalog["actors"]["codex"].update({
+        "role": "execution-provider",
+        "qualified_roles": ["implementation", "controller-verification", "independent-review"],
+    })
+    assert _compile(catalog=catalog)["status"] == "READY"
+
+
 def test_missing_catalog_contract_input_quarantines_before_launch():
     local = _local()
     local["mcp"]["endpoints"] = []

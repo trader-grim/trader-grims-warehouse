@@ -337,6 +337,221 @@ def rollback_fleet(materialization: dict[str, Any]) -> None:
             os.replace(previous, destination)
 
 
+def _file_digest(path: Path) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise InstallError(f"actor contract source is not a regular file: {path}")
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _bundle_binding_hash(bindings: list[dict[str, str]]) -> str:
+    encoded = json.dumps(
+        bindings, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False,
+    ).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def materialize_complete_actor_contracts(
+    bundle: dict[str, Any], *, source_root: str | Path,
+    contracts: dict[str, dict[str, Any]], trusted_contract_public_key: str,
+    apply: bool = False, replace_existing: bool = False,
+) -> dict[str, Any]:
+    """Materialize skills, hooks, MCP, launcher and bootstrap as one journal.
+
+    Service/process activation deliberately remains the next step in the same
+    W18 quiet refresh transaction.  Returning from this function alone never
+    marks an actor active or verified.
+    """
+    if (
+        not isinstance(bundle, dict)
+        or set(bundle) != {"schema", "generation", "actors"}
+        or bundle.get("schema") != "tgw-complete-actor-contract-bundle/v1"
+        or not isinstance(bundle.get("generation"), str)
+        or not bundle["generation"].startswith("sha256:")
+        or not isinstance(bundle.get("actors"), dict)
+        or not bundle["actors"]
+        or set(bundle["actors"]) != set(contracts)
+    ):
+        raise InstallError("complete actor contract bundle is invalid")
+    if not isinstance(trusted_contract_public_key, str):
+        raise InstallError("fleet contract signer is invalid")
+    root = Path(source_root).resolve(strict=True)
+    plans: list[dict[str, Any]] = []
+    for actor in sorted(bundle["actors"]):
+        contract = contracts[actor]
+        if (
+            not isinstance(contract, dict)
+            or contract.get("actor") != actor
+            or contract.get("status") != "READY"
+            or not _contract_receipt_matches(contract)
+            or not _contract_signature_matches(contract, trusted_contract_public_key)
+        ):
+            raise InstallError(f"actor contract is not READY: {actor}")
+        specification = bundle["actors"][actor]
+        if not isinstance(specification, dict) or set(specification) != {"home", "project", "bindings"}:
+            raise InstallError(f"actor bundle entry is invalid: {actor}")
+        home = Path(str(specification["home"])).resolve()
+        project = Path(str(specification["project"])).resolve()
+        bindings = specification["bindings"]
+        if not isinstance(bindings, list) or not bindings:
+            raise InstallError(f"actor bundle has no bindings: {actor}")
+        observed: dict[str, dict[str, str]] = {
+            "skill": {}, "hook": {}, "mcp": {}, "launcher": {},
+            "bootstrap": {}, "environment": {},
+        }
+        actor_plans: list[dict[str, Any]] = []
+        destinations: set[Path] = set()
+        for raw in bindings:
+            if not isinstance(raw, dict) or set(raw) != {"kind", "name", "source", "destination", "sha256"}:
+                raise InstallError(f"actor binding is invalid: {actor}")
+            kind, name = raw["kind"], raw["name"]
+            if kind not in observed or not isinstance(name, str) or not name:
+                raise InstallError(f"actor binding kind or name is invalid: {actor}")
+            source = Path(str(raw["source"])).resolve(strict=True)
+            destination = Path(str(raw["destination"])).absolute()
+            if root != source and root not in source.parents:
+                raise InstallError(f"actor binding source escapes the candidate: {actor}:{name}")
+            if not destination.is_absolute() or not any(base == destination or base in destination.parents for base in (home, project)):
+                raise InstallError(f"actor binding destination escapes its account roots: {actor}:{name}")
+            if destination in destinations:
+                raise InstallError(f"actor binding destination is duplicated: {actor}:{name}")
+            destinations.add(destination)
+            digest = tree_digest(source) if source.is_dir() and not source.is_symlink() else _file_digest(source)
+            if raw["sha256"] != digest or name in observed[kind]:
+                raise InstallError(f"actor binding digest or identity is invalid: {actor}:{name}")
+            observed[kind][name] = digest
+            if destination.is_symlink() and destination.resolve(strict=False) == source:
+                state = "CURRENT"
+            elif destination.is_symlink() and replace_existing:
+                state = "REPLACEABLE"
+            elif destination.exists() or destination.is_symlink():
+                state = "CONFLICT"
+            else:
+                state = "MISSING"
+            actor_plans.append({
+                "kind": kind, "name": name, "source": source,
+                "destination": destination, "sha256": digest, "state": state,
+            })
+        local = contract.get("local") if isinstance(contract.get("local"), dict) else {}
+        mcp_bindings = [
+            {"endpoint": item["name"], "source_sha256": item["sha256"], "destination": str(item["destination"])}
+            for item in actor_plans if item["kind"] == "mcp"
+        ]
+        mcp_bindings.sort(key=lambda item: item["endpoint"])
+        if (
+            observed["skill"] != local.get("skills")
+            or observed["hook"] != local.get("hooks")
+            or set(observed["launcher"]) != {"launcher"}
+            or observed["launcher"]["launcher"] != local.get("launcher", {}).get("sha256")
+            or local.get("launcher", {}).get("path") != str(next(item["destination"] for item in actor_plans if item["kind"] == "launcher"))
+            or set(observed["bootstrap"]) != {"bootstrap-receipt"}
+            or observed["bootstrap"]["bootstrap-receipt"] != local.get("bootstrap_receipt_hash")
+            or set(observed["environment"]) != {"environment-catalog"}
+            or set(observed["mcp"]) != set(local.get("mcp", {}).get("endpoints", []))
+            or _bundle_binding_hash(mcp_bindings) != local.get("mcp", {}).get("binding_hash")
+        ):
+            raise InstallError(f"complete bundle differs from signed actor contract: {actor}")
+        environment = next(item for item in actor_plans if item["kind"] == "environment")
+        try:
+            catalog = json.loads(environment["source"].read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise InstallError(f"actor environment catalog is invalid: {actor}") from exc
+        canonical_catalog = json.dumps(catalog, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        if "sha256:" + hashlib.sha256(canonical_catalog).hexdigest() != contract.get("catalog_hash"):
+            raise InstallError(f"actor environment catalog differs from signed contract: {actor}")
+        if any(item["state"] == "CONFLICT" for item in actor_plans):
+            raise InstallError(f"actor contract destination conflict: {actor}")
+        plans.extend({**item, "actor": actor} for item in actor_plans)
+
+    staged: list[tuple[dict[str, Any], Path]] = []
+    created: list[dict[str, Any]] = []
+    backups: list[tuple[Path, Path]] = []
+    try:
+        if apply:
+            for item in plans:
+                if item["state"] not in {"MISSING", "REPLACEABLE"}:
+                    continue
+                destination = item["destination"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                stage = destination.with_name(f".{destination.name}.tgw-w18-next")
+                if stage.exists() or stage.is_symlink():
+                    raise InstallError(f"actor contract staging path exists: {stage}")
+                os.symlink(item["source"], stage, target_is_directory=item["source"].is_dir())
+                staged.append((item, stage))
+            for item, stage in staged:
+                destination = item["destination"]
+                previous = None
+                if item["state"] == "REPLACEABLE":
+                    previous = destination.with_name(f".{destination.name}.tgw-w18-previous")
+                    if previous.exists() or previous.is_symlink():
+                        raise InstallError(f"actor contract rollback path exists: {previous}")
+                    os.replace(destination, previous)
+                    backups.append((destination, previous))
+                os.replace(stage, destination)
+                created.append({**item, "previous": previous})
+    except Exception:
+        for item in reversed(created):
+            destination = item["destination"]
+            if destination.is_symlink():
+                destination.unlink()
+        for destination, previous in reversed(backups):
+            if previous.is_symlink():
+                os.replace(previous, destination)
+        for _item, stage in staged:
+            if stage.is_symlink():
+                stage.unlink()
+        raise
+    return {
+        "schema": "tgw-w18-complete-actor-materialization/v1",
+        "generation": bundle["generation"],
+        "mode": "apply" if apply else "dry-run",
+        "status": "COMPLETE_MATERIALIZED_NOT_SERVICE_ACTIVATED" if apply else "PREPARED",
+        "actors": sorted(bundle["actors"]),
+        "bindings": [{
+            "actor": item["actor"], "kind": item["kind"], "name": item["name"],
+            "source": str(item["source"]), "destination": str(item["destination"]),
+            "sha256": item["sha256"],
+            "status": (
+                "CURRENT" if item["state"] == "CURRENT"
+                else "INSTALLED" if apply and item["state"] == "MISSING"
+                else "REPLACED" if apply else "WOULD_INSTALL" if item["state"] == "MISSING"
+                else "WOULD_REPLACE"
+            ),
+        } for item in plans],
+        "rollback_journal": [{
+            "destination": str(item["destination"]),
+            "materialized_source": str(item["source"]),
+            "previous": str(item["previous"]) if item["previous"] else None,
+        } for item in created],
+        "activation": "required-in-current-quiet-refresh-transaction",
+    }
+
+
+def rollback_complete_actor_contracts(materialization: dict[str, Any]) -> None:
+    """Restore every complete actor binding from its exact rollback journal."""
+    if materialization.get("schema") != "tgw-w18-complete-actor-materialization/v1":
+        raise InstallError("complete actor rollback materialization schema is invalid")
+    journal = materialization.get("rollback_journal")
+    if not isinstance(journal, list):
+        raise InstallError("complete actor rollback journal is invalid")
+    for entry in reversed(journal):
+        if not isinstance(entry, dict) or set(entry) != {"destination", "materialized_source", "previous"}:
+            raise InstallError("complete actor rollback journal entry is invalid")
+        destination = Path(str(entry["destination"]))
+        source = Path(str(entry["materialized_source"]))
+        previous = entry["previous"]
+        if previous is not None and not isinstance(previous, str):
+            raise InstallError("complete actor rollback journal entry is invalid")
+        if not destination.is_symlink() or destination.resolve(strict=False) != source:
+            raise InstallError("complete actor rollback target changed")
+        destination.unlink()
+        if previous is not None:
+            prior = Path(previous)
+            if not prior.is_symlink():
+                raise InstallError("complete actor rollback link is unavailable")
+            os.replace(prior, destination)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="materialize-agent-services")
     parser.add_argument("target", choices=TARGETS)
