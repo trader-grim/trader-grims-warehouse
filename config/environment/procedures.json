@@ -1,6 +1,6 @@
 {
   "schema": "tgw-procedure-registry/v1",
-  "revision": "sha256:3fd90e890ee075a1e50432fc8b13ff48519764b9504b7c62d1e6442b68abf93d",
+  "revision": "sha256:6118a4a51581b6dde3755cd931a61ab197bf2e00b6473ff5a90a21a0ce41e5dd",
   "procedures": {
     "app-release-install/v1": {
       "status": "active",
@@ -9,12 +9,12 @@
       "repository_id": "application",
       "working_directory": "/opt/TGW",
       "run_as": "root",
-      "argv": ["/opt/tgw-installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "install", "--archive", ":archive", "--generation", ":generation", "--commit", ":commit", "--tree", ":tree", "--archive-sha256", ":archive_sha256", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
+      "argv": ["/opt/tgw-installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "install", "--archive", ":archive", "--generation", ":generation", "--commit", ":commit", "--tree", ":tree", "--archive-sha256", ":archive_sha256", "--expected-current", ":expected_current", "--operation-id", ":operation_id", "--admission-receipt", ":admission_receipt", "--environment-preflight-receipt", ":environment_preflight_receipt"],
       "authority_gate": "explicit-deployment-approval",
       "execution_policy": "registered-runner-only",
       "direct_invocation_allowed": false,
       "rollback_procedure": "app-release-rollback/v1",
-      "preconditions": ["exact-commit-tree-and-archive-digest-recorded", "current-generation-recorded", "controller-installer-independence-verified", "explicit-deployment-approval-recorded"],
+      "preconditions": ["exact-commit-tree-and-archive-digest-recorded", "current-generation-recorded", "controller-installer-independence-verified", "exact-independent-review-and-admission-receipt-verified", "exact-environment-preflight-receipt-verified", "explicit-deployment-approval-recorded"],
       "postconditions": ["selection-receipt-completed", "selected-release-manifest-verified", "application-health-verified"],
       "evidence_schema": "tgw-procedure-receipt/v1"
     },

@@ -29,6 +29,8 @@ _FIXED_ARGV = {
         "--archive", ":archive", "--generation", ":generation", "--commit", ":commit",
         "--tree", ":tree", "--archive-sha256", ":archive_sha256",
         "--expected-current", ":expected_current", "--operation-id", ":operation_id",
+        "--admission-receipt", ":admission_receipt",
+        "--environment-preflight-receipt", ":environment_preflight_receipt",
     ],
     "app-release-rollback/v1": [
         "/opt/tgw-installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "rollback",
