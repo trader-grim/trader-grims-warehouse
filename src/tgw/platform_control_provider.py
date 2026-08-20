@@ -9,28 +9,35 @@ under one configured durable root.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
-import pwd
 import re
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException
 
 from tgw.config import DEFAULT_CONFIG, load_operational_config
+from tgw.lifecycle_snapshot import LifecycleSnapshotSource
 
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
-_UNIT = re.compile(r"[A-Za-z0-9_.@-]+\.service\Z")
+_UNIT = re.compile(r"[A-Za-z0-9_.@-]+\.(?:service|timer)\Z")
 _COLLECTIONS = ("live_requests", "role_leases", "rendered_surfaces", "continuations")
 
 
 class PlatformControlError(ValueError):
     pass
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
 
 
 def _canonical(value: Any) -> bytes:
@@ -73,6 +80,80 @@ def _read_json(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
+class _ActorFleetClient:
+    """Exact client for the separately hosted ``tgw-lib`` actor provider."""
+
+    _EXPECTED = {
+        "quiesce": "QUIESCED", "rebuild": "REBUILT", "activate": "ACTIVATED",
+        "restart": "RESTARTED", "health": "HEALTHY", "verify-actor": "VERIFIED",
+        "rollback": "ROLLED_BACK", "repair": "REPAIRED",
+    }
+
+    def __init__(self, value: Mapping[str, Any]):
+        required = {
+            "schema", "provider_id", "endpoint", "transport", "expected_host",
+            "credential_env", "timeout_seconds",
+        }
+        endpoint = value.get("endpoint") if isinstance(value, Mapping) else None
+        parsed = urlsplit(endpoint) if isinstance(endpoint, str) else None
+        local = parsed and parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1"}
+        tailscale = (
+            parsed and value.get("transport") == "tailscale-http"
+            and parsed.scheme == "http" and parsed.hostname == value.get("expected_host")
+        )
+        if (
+            not isinstance(value, Mapping) or set(value) != required
+            or value.get("schema") != "tgw-actor-fleet-provider-binding/v1"
+            or value.get("provider_id") != "tgw-actor-fleet-provider@1"
+            or not parsed or not parsed.netloc or not (local or tailscale)
+            or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment
+            or not isinstance(value.get("credential_env"), str)
+            or re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", value["credential_env"]) is None
+            or isinstance(value.get("timeout_seconds"), bool) or not isinstance(value.get("timeout_seconds"), int)
+            or not 1 <= value["timeout_seconds"] <= 120
+        ):
+            raise PlatformControlError("actor fleet provider binding is invalid")
+        self.endpoint = endpoint.rstrip("/")
+        self.credential_env = value["credential_env"]
+        self.timeout = value["timeout_seconds"]
+
+    def call(self, step: str, arguments: list[Any]) -> dict[str, Any]:
+        expected = self._EXPECTED.get(step)
+        if expected is None:
+            raise PlatformControlError("actor fleet provider step is not allowlisted")
+        credential = os.environ.get(self.credential_env)
+        if not credential:
+            raise PlatformControlError("actor fleet provider credential is unavailable")
+        invocation = {"schema": "tgw-actor-fleet-provider-invocation/v1", "step": step, "arguments": arguments}
+        invocation_hash = _hash(invocation)
+        request = Request(
+            f"{self.endpoint}/v1/actor-fleet/{step}", data=_canonical({**invocation, "invocation_hash": invocation_hash}),
+            headers={"Authorization": f"Bearer {credential}", "Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        try:
+            with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=self.timeout) as response:  # nosec: exact root-owned provider binding
+                raw = response.read(1024 * 1024 + 1)
+                if response.status != 200 or len(raw) > 1024 * 1024:
+                    raise PlatformControlError("actor fleet provider returned an invalid response")
+        except (HTTPError, URLError, OSError) as exc:
+            raise PlatformControlError("actor fleet provider is unavailable") from exc
+        try:
+            result = json.loads(raw)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise PlatformControlError("actor fleet provider response is invalid") from exc
+        if (
+            not isinstance(result, Mapping)
+            or set(result) != {"schema", "provider_id", "step", "invocation_hash", "result"}
+            or result.get("schema") != "tgw-actor-fleet-provider-response/v1"
+            or result.get("provider_id") != "tgw-actor-fleet-provider@1"
+            or result.get("step") != step or result.get("invocation_hash") != invocation_hash
+            or not isinstance(result.get("result"), Mapping) or result["result"].get("status") != expected
+        ):
+            raise PlatformControlError("actor fleet provider response is invalid")
+        return dict(result["result"])
+
+
 def _atomic(path: Path, value: Mapping[str, Any]) -> None:
     stage = path.with_name(f".{path.name}.next")
     if stage.exists() or stage.is_symlink():
@@ -100,13 +181,12 @@ class PlatformControlProvider:
     def __init__(
         self, value: Mapping[str, Any], *,
         service_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
-        materializer_loader: Callable[[Path], Any] | None = None,
+        actor_client: Any | None = None,
+        snapshot_source: Any | None = None,
     ):
         required = {
-            "schema", "token_sha256", "state_root", "lifecycle_snapshot_path",
-            "release_root", "admission_root", "actor_generation_root",
-            "contract_public_key", "systemctl_path",
-            "managed_services",
+            "schema", "token_sha256", "state_root", "lifecycle_snapshot_source",
+            "actor_provider", "systemctl_path", "managed_services",
         }
         if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != "tgw-platform-control-provider/v1":
             raise PlatformControlError("platform control provider configuration is invalid")
@@ -114,20 +194,14 @@ class PlatformControlProvider:
             raise PlatformControlError("platform control provider token binding is invalid")
         self.token_sha256 = value["token_sha256"]
         self.state_root = _directory(value["state_root"], "platform control state root")
-        self.snapshot_path = _regular(value["lifecycle_snapshot_path"], "lifecycle snapshot")
-        self.release_root = _directory(value["release_root"], "platform release root")
-        self.admission_root = _directory(value["admission_root"], "platform admission root")
-        self.actor_generation_root = _directory(value["actor_generation_root"], "actor generation root")
         self.systemctl = _regular(value["systemctl_path"], "systemctl executable")
         services = value.get("managed_services")
         if not isinstance(services, list) or not services or services != sorted(set(services)) or any(not isinstance(unit, str) or _UNIT.fullmatch(unit) is None for unit in services):
             raise PlatformControlError("managed platform service set is invalid")
         self.services = list(services)
-        if not isinstance(value.get("contract_public_key"), str) or not value["contract_public_key"]:
-            raise PlatformControlError("platform contract signer is invalid")
-        self.contract_public_key = value["contract_public_key"]
         self._run = service_runner or self._run_service
-        self._load_materializer = materializer_loader or self._materializer
+        self.actor = actor_client or _ActorFleetClient(value["actor_provider"])
+        self.snapshot_source = snapshot_source or LifecycleSnapshotSource(value["lifecycle_snapshot_source"])
 
     def authorized(self, authorization: str | None) -> bool:
         if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
@@ -189,68 +263,14 @@ class PlatformControlProvider:
                 raise PlatformControlError("fleet provider content revisions are invalid")
         return dict(value)
 
-    def _candidate(self, request: Mapping[str, Any]) -> Path:
-        admission_hash = request["revisions"]["admission"]
-        admission = _read_json(self.admission_root / (admission_hash.removeprefix("sha256:") + ".json"), "fleet admission receipt")
-        unsigned = dict(admission)
-        claimed = unsigned.pop("receipt_hash", None)
-        candidate = admission.get("candidate") if isinstance(admission.get("candidate"), Mapping) else {}
-        plan = admission.get("plan") if isinstance(admission.get("plan"), Mapping) else {}
-        if (
-            claimed != admission_hash or _hash(unsigned) != admission_hash
-            or admission.get("status") != "ADMITTED"
-            or candidate.get("commit") != request["revisions"]["source"]
-            or plan.get("commit") != request["revisions"]["plan"]
-            or plan.get("solution_hash") != request["revisions"]["solution"]
-        ):
-            raise PlatformControlError("fleet admission receipt is not exact")
-        matches = []
-        for child in self.release_root.iterdir():
-            manifest_path = child / ".release-manifest.json"
-            if child.is_dir() and not child.is_symlink() and manifest_path.is_file() and not manifest_path.is_symlink():
-                manifest = _read_json(manifest_path, "release manifest")
-                if manifest.get("commit") == request["revisions"]["source"]:
-                    matches.append(child.resolve())
-        if len(matches) != 1:
-            raise PlatformControlError("exact admitted fleet candidate release is unavailable or ambiguous")
-        return matches[0]
-
-    @staticmethod
-    def _materializer(release: Path) -> Any:
-        source = release / "agent-services/installers/materialize.py"
-        if not source.is_file() or source.is_symlink():
-            raise PlatformControlError("candidate actor materializer is unavailable")
-        spec = importlib.util.spec_from_file_location("tgw_candidate_actor_materializer", source)
-        if spec is None or spec.loader is None:
-            raise PlatformControlError("candidate actor materializer cannot be loaded")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-    def _actor_inputs(self, release: Path, request: Mapping[str, Any]) -> tuple[Any, dict[str, Any], dict[str, dict[str, Any]]]:
-        materializer = self._load_materializer(release)
-        generation_root = self.actor_generation_root / request["successor_generation"].removeprefix("sha256:")
-        if not generation_root.is_dir() or generation_root.is_symlink():
-            raise PlatformControlError("complete actor generation is unavailable")
-        bundle = _read_json(generation_root / "bundle.json", "complete actor bundle")
-        if bundle.get("generation") != request["successor_generation"] or sorted(bundle.get("actors", {})) != sorted(request["actors"]):
-            raise PlatformControlError("complete actor bundle generation or actor set mismatch")
-        contracts: dict[str, dict[str, Any]] = {}
-        for actor in request["actors"]:
-            contracts[actor] = _read_json(generation_root / "contracts" / f"{actor}.json", f"actor contract {actor}")
-            if contracts[actor].get("catalog_hash") != request["revisions"]["catalog"]:
-                raise PlatformControlError(f"actor contract catalog mismatch: {actor}")
-        return materializer, bundle, contracts
-
-    def _generation_root(self, request: Mapping[str, Any]) -> Path:
-        root = self.actor_generation_root / request["successor_generation"].removeprefix("sha256:")
-        if not root.is_dir() or root.is_symlink():
-            raise PlatformControlError("complete actor generation is unavailable")
-        return root
-
     def checkpoint(self, request: Mapping[str, Any]) -> dict[str, Any]:
         value = self._request(request)
-        snapshot = _read_json(self.snapshot_path, "lifecycle snapshot")
+        self._gate(status="SUSPENDING", request=value)
+        try:
+            snapshot = self.snapshot_source.snapshot(value["predecessor_generation"])
+        except Exception:
+            self._gate(status="ACTIVE", request=value)
+            raise
         unsigned = dict(snapshot)
         claimed = unsigned.pop("snapshot_hash", None)
         if (
@@ -260,7 +280,10 @@ class PlatformControlProvider:
             or set(snapshot.get("collections", {})) != set(_COLLECTIONS)
         ):
             raise PlatformControlError("lifecycle snapshot is stale or invalid")
-        result: dict[str, Any] = {"status": "CHECKPOINTED", "transaction_id": value["transaction_id"]}
+        result: dict[str, Any] = {
+            "status": "CHECKPOINTED", "transaction_id": value["transaction_id"],
+            "snapshot_hash": claimed, "observed_at": snapshot.get("observed_at"),
+        }
         for name in _COLLECTIONS:
             records = snapshot["collections"][name]
             if not isinstance(records, list) or not all(isinstance(item, Mapping) for item in records):
@@ -280,47 +303,37 @@ class PlatformControlProvider:
         journal = self._journal(str(transaction_id))
         if journal["status"] != "CHECKPOINTED":
             raise PlatformControlError("platform refresh is not checkpointed")
-        self._service("stop", expected="inactive")
+        actor_receipt = self.actor.call("quiesce", [journal["request"]])
+        try:
+            self._service("stop", expected="inactive")
+        except Exception:
+            self.actor.call("rollback", [journal["request"]])
+            raise
         journal["status"] = "QUIESCED"
+        journal["steps"].append({"name": "actor-quiesce", "receipt_hash": _hash(actor_receipt)})
         self._gate(status="QUIESCED", request=journal["request"])
         self._save(journal)
-        return {"status": "QUIESCED", "transaction_id": transaction_id, "services": self.services}
+        return {"status": "QUIESCED", "transaction_id": transaction_id, "services": self.services, "actor_receipt_hash": _hash(actor_receipt)}
 
     def rebuild(self, request: Mapping[str, Any]) -> dict[str, Any]:
         value = self._request(request)
         journal = self._journal(value["transaction_id"])
         if journal["status"] != "QUIESCED":
             raise PlatformControlError("platform fleet is not quiesced")
-        release = self._candidate(value)
-        materializer, bundle, contracts = self._actor_inputs(release, value)
-        prepared = materializer.materialize_complete_actor_contracts(
-            bundle, source_root=release, contracts=contracts,
-            trusted_contract_public_key=self.contract_public_key,
-            additional_source_roots=(self._generation_root(value),),
-        )
-        if prepared.get("status") != "PREPARED":
-            raise PlatformControlError("complete actor bundle did not prepare")
-        journal["status"], journal["candidate_release"] = "REBUILT", str(release)
-        journal["steps"].append({"name": "rebuild", "receipt_hash": _hash(prepared)})
+        prepared = self.actor.call("rebuild", [value])
+        journal["status"] = "REBUILT"
+        journal["steps"].append({"name": "actor-rebuild", "receipt_hash": _hash(prepared)})
         self._save(journal)
-        return {"status": "REBUILT", "transaction_id": value["transaction_id"], "candidate_commit": value["revisions"]["source"], "preflight_hash": _hash(prepared)}
+        return {"status": "REBUILT", "transaction_id": value["transaction_id"], "candidate_commit": value["revisions"]["source"], "actor_receipt_hash": _hash(prepared)}
 
     def activate(self, request: Mapping[str, Any], rebuilt: Mapping[str, Any]) -> dict[str, Any]:
         value = self._request(request)
         journal = self._journal(value["transaction_id"])
         if journal["status"] != "REBUILT" or rebuilt.get("candidate_commit") != value["revisions"]["source"]:
             raise PlatformControlError("platform actor activation is not bound to rebuild")
-        release = Path(journal["candidate_release"])
-        materializer, bundle, contracts = self._actor_inputs(release, value)
-        applied = materializer.materialize_complete_actor_contracts(
-            bundle, source_root=release, contracts=contracts,
-            trusted_contract_public_key=self.contract_public_key,
-            apply=True, replace_existing=True,
-            additional_source_roots=(self._generation_root(value),),
-        )
-        if applied.get("status") != "COMPLETE_MATERIALIZED_NOT_SERVICE_ACTIVATED":
-            raise PlatformControlError("complete actor bundle did not activate")
-        journal["status"], journal["materialization"] = "ACTIVATED", applied
+        applied = self.actor.call("activate", [value, rebuilt])
+        journal["status"] = "ACTIVATED"
+        journal["steps"].append({"name": "actor-activate", "receipt_hash": _hash(applied)})
         self._save(journal)
         return {"status": "ACTIVATED", "transaction_id": value["transaction_id"], "generation": value["successor_generation"], "materialization_hash": _hash(applied)}
 
@@ -329,70 +342,35 @@ class PlatformControlProvider:
         if journal["status"] != "ACTIVATED" or activated.get("generation") != journal["request"]["successor_generation"]:
             raise PlatformControlError("platform restart is not bound to activation")
         self._service("restart", expected="active")
+        actor_receipt = self.actor.call("restart", [activated])
         journal["status"] = "RESTARTED"
+        journal["steps"].append({"name": "actor-restart", "receipt_hash": _hash(actor_receipt)})
         self._save(journal)
-        return {"status": "RESTARTED", "transaction_id": journal["transaction_id"], "services": self.services}
+        return {"status": "RESTARTED", "transaction_id": journal["transaction_id"], "services": self.services, "actor_receipt_hash": _hash(actor_receipt)}
 
     def health(self, restarted: Mapping[str, Any]) -> dict[str, Any]:
         journal = self._journal(str(restarted.get("transaction_id")))
         if journal["status"] != "RESTARTED":
             raise PlatformControlError("platform health check is not bound to restart")
         self._service("is-active", expected="active")
+        actor_receipt = self.actor.call("health", [restarted])
         journal["status"] = "HEALTHY"
+        journal["steps"].append({"name": "actor-health", "receipt_hash": _hash(actor_receipt)})
         self._save(journal)
-        return {"status": "HEALTHY", "transaction_id": journal["transaction_id"], "services": self.services}
+        return {"status": "HEALTHY", "transaction_id": journal["transaction_id"], "services": self.services, "actor_receipt_hash": _hash(actor_receipt)}
 
     def verify_actor(self, actor: str, request: Mapping[str, Any]) -> dict[str, Any]:
         value = self._request(request)
         journal = self._journal(value["transaction_id"])
         if journal["status"] not in {"HEALTHY", "VERIFYING"} or actor not in value["actors"]:
             raise PlatformControlError("actor verification is not legal")
-        bindings = [item for item in (journal.get("materialization") or {}).get("bindings", []) if item.get("actor") == actor]
-        if not bindings:
-            raise PlatformControlError("actor has no materialized contract")
-        account = pwd.getpwnam(actor)
-        read_fd, write_fd = os.pipe()
-        child = os.fork()
-        if child == 0:  # pragma: no cover - assertions are reported to parent
-            os.close(read_fd)
-            try:
-                if os.geteuid() == 0:
-                    os.initgroups(actor, account.pw_gid)
-                    os.setgid(account.pw_gid)
-                    os.setuid(account.pw_uid)
-                elif os.geteuid() != account.pw_uid:
-                    raise PermissionError("provider cannot assume actor identity")
-                for binding in bindings:
-                    destination, source = Path(binding["destination"]), Path(binding["source"])
-                    if not destination.is_symlink() or destination.resolve(strict=False) != source:
-                        raise PlatformControlError("actor contract binding changed")
-                    with destination.open("rb") as handle:
-                        handle.read(1)
-                payload = {"status": "PASS", "uid": os.geteuid()}
-            except Exception as exc:
-                payload = {"status": "FAIL", "reason": str(exc)}
-            os.write(write_fd, _canonical(payload))
-            os.close(write_fd)
-            os._exit(0 if payload["status"] == "PASS" else 1)
-        os.close(write_fd)
-        raw = b""
-        while True:
-            chunk = os.read(read_fd, 65536)
-            if not chunk:
-                break
-            raw += chunk
-        os.close(read_fd)
-        _pid, wait_status = os.waitpid(child, 0)
-        try:
-            actor_proof = json.loads(raw)
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise PlatformControlError(f"actor contract verification failed: {actor}") from exc
-        if wait_status != 0 or actor_proof != {"status": "PASS", "uid": account.pw_uid}:
-            raise PlatformControlError(f"actor contract verification failed: {actor}")
+        verified = self.actor.call("verify-actor", [actor, value])
+        if verified.get("actor") != actor or verified.get("generation") != value["successor_generation"]:
+            raise PlatformControlError("actor fleet verification response mismatch")
         journal["status"] = "VERIFYING"
-        journal["steps"].append({"name": "verify-actor", "actor": actor, "uid": account.pw_uid, "bindings_hash": _hash(bindings), "actor_proof_hash": _hash(actor_proof)})
+        journal["steps"].append({"name": "verify-actor", "actor": actor, "receipt_hash": _hash(verified)})
         self._save(journal)
-        return {"status": "VERIFIED", "actor": actor, "uid": account.pw_uid, "generation": value["successor_generation"], "bindings_hash": _hash(bindings), "actor_proof_hash": _hash(actor_proof)}
+        return verified
 
     def resume(self, checkpoint: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
         value = self._request(request)
@@ -411,15 +389,13 @@ class PlatformControlProvider:
     def rollback(self, request: Mapping[str, Any], _controller_journal: Mapping[str, Any]) -> dict[str, Any]:
         value = self._request(request)
         journal = self._journal(value["transaction_id"])
-        applied = journal.get("materialization")
-        if isinstance(applied, dict):
-            release = Path(str(journal.get("candidate_release")))
-            self._load_materializer(release).rollback_complete_actor_contracts(applied)
+        actor_receipt = self.actor.call("rollback", [value])
         self._service("restart", expected="active")
         journal["status"] = "ROLLED_BACK"
+        journal["steps"].append({"name": "actor-rollback", "receipt_hash": _hash(actor_receipt)})
         self._gate(status="QUIESCED", request=value)
         self._save(journal)
-        return {"status": "ROLLED_BACK", "transaction_id": value["transaction_id"], "generation": value["predecessor_generation"]}
+        return {"status": "ROLLED_BACK", "transaction_id": value["transaction_id"], "generation": value["predecessor_generation"], "actor_receipt_hash": _hash(actor_receipt)}
 
     def fleet(self, step: str, arguments: list[Any]) -> Mapping[str, Any]:
         dispatch = {
@@ -453,14 +429,7 @@ class PlatformControlProvider:
         if decision == "rollback-platform":
             result = self.rollback(request, journal)
             return {"status": "ROLLED_BACK", "evidence": evidence + [_hash(result)], "rollback_receipt": _hash(result)}
-        release = Path(str(journal.get("candidate_release")))
-        materializer, bundle, contracts = self._actor_inputs(release, request)
-        repaired = materializer.materialize_complete_actor_contracts(
-            bundle, source_root=release, contracts=contracts,
-            trusted_contract_public_key=self.contract_public_key,
-            apply=True, replace_existing=True,
-            additional_source_roots=(self._generation_root(request),),
-        )
+        repaired = self.actor.call("repair", [dict(request)])
         return {"status": "REPAIRED", "evidence": evidence + [_hash(repaired)], "rollback_receipt": None}
 
 

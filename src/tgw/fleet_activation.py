@@ -278,7 +278,10 @@ def run_fleet_refresh_transaction(
         if not isinstance(revision, str) or not revision.startswith("sha256:") or len(revision) != 71:
             raise FleetActivationError(f"fleet {field} revision is invalid")
     actors = value["actors"]
-    if not isinstance(actors, list) or not actors or not all(isinstance(actor, str) and actor for actor in actors) or len(actors) != len(set(actors)):
+    if (
+        not isinstance(actors, list) or not actors or actors != sorted(set(actors))
+        or not all(isinstance(actor, str) and actor for actor in actors)
+    ):
         raise FleetActivationError("fleet actors are invalid")
 
     root = _durable_path(receipt_root, "receipt root")

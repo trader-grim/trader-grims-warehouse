@@ -24,7 +24,10 @@ from tgw.plan_solver import CapabilityGraph, PlanResolutionError, Requirement, s
 LUET_VERSION = "0.9.26"
 LUET_REVISION = "48f17dbc7a9edb94b1415a2eeeac4e5c2d45f5d3"
 PROVIDER_ID = f"luet-pinned-{LUET_VERSION}@1"
-PINNED_LUET_BINARY_SHA256 = "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87"
+# Exact executable produced by nix/luet.nix at LUET_REVISION.  Keep this in
+# lockstep with the flake-owned environment catalog; a different binary must
+# hold resolution rather than silently becoming a second conformance provider.
+PINNED_LUET_BINARY_SHA256 = "sha256:5ef56768e8a9c07906e30711f06a43c793b2e58f0fd28a7e4a12e52769e9f057"
 _VERSION = "1.0"
 _PROVIDER_CATEGORY = "tgw-provider"
 _CAPABILITY_CATEGORY = "tgw-capability"

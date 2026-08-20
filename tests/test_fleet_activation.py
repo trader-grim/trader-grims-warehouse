@@ -25,7 +25,7 @@ def _refresh_request(**updates):
             "bootstrap": "sha256:" + "2" * 64, "broker_policy": "sha256:" + "3" * 64,
             "admission": "sha256:" + "4" * 64,
         },
-        "actors": ["codex", "claude"],
+        "actors": ["claude", "codex"],
     }
     value.update(updates)
     return value
@@ -70,7 +70,7 @@ def test_refresh_transaction_orders_full_fleet_and_is_idempotent(tmp_path):
         request, receipt_root=tmp_path / "receipts", lease_path=tmp_path / "fleet.lock", **providers,
     )
     assert receipt["status"] == "VERIFIED_AND_RESUMED"
-    assert events == ["checkpoint", "quiesce", "rebuild", "activate", "restart", "health", "verify:codex", "verify:claude", "resume"]
+    assert events == ["checkpoint", "quiesce", "rebuild", "activate", "restart", "health", "verify:claude", "verify:codex", "resume"]
     again = run_fleet_refresh_transaction(
         request, receipt_root=tmp_path / "receipts", lease_path=tmp_path / "fleet.lock", **providers,
     )

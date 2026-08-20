@@ -1,0 +1,39 @@
+[Unit]
+Description=TGW bounded actor-fleet provider
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=tgw-coders
+WorkingDirectory=/opt/TGW/tgw-lib
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/opt/TGW/tgw-lib/current/src
+Environment=TGW_CONFIG=/opt/TGW/tgw-lib/config/tgw-controller-config.json
+Environment=TGW_ACTOR_FLEET_HOST=100.68.223.70
+Environment=TGW_ACTOR_FLEET_PORT=7556
+Environment=TMPDIR=/opt/TGW/tgw-lib/var/fleet
+EnvironmentFile=-/etc/tgw/actor-fleet.env
+ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.actor_fleet_provider
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/opt/TGW/tgw-lib/var/fleet /home/codex /home/claude /home/deepseek
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

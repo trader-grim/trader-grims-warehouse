@@ -15,7 +15,7 @@ def _request():
             "source": "e" * 40, "catalog": "sha256:" + "2" * 64,
             "bootstrap": "sha256:" + "3" * 64, "broker_policy": "sha256:" + "4" * 64,
             "admission": "sha256:" + "5" * 64,
-        }, "actors": ["codex", "claude"],
+        }, "actors": ["claude", "codex"],
     }
 
 
