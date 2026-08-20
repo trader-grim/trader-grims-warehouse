@@ -338,8 +338,9 @@ class _ReviewCard extends StatelessWidget {
   Color _conditionColor(String condition) {
     final c = condition.toLowerCase();
     if (c.contains('new') || c.contains('brand')) return Colors.green;
-    if (c.contains('excellent') || c.contains('like new'))
+    if (c.contains('excellent') || c.contains('like new')) {
       return Colors.lightGreen;
+    }
     if (c.contains('good')) return Colors.blue;
     if (c.contains('acceptable') || c.contains('fair')) return Colors.orange;
     if (c.contains('poor') || c.contains('damaged')) return Colors.red;
