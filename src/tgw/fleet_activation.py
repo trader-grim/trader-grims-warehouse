@@ -65,6 +65,12 @@ def apply_fleet_configuration(
                 handle.write(desired)
                 handle.flush()
                 os.fsync(handle.fileno())
+            # A privileged fleet operator must not take ownership of a user
+            # harness configuration merely by atomically replacing it.
+            metadata = path.stat()
+            os.chmod(staged, metadata.st_mode)
+            if hasattr(os, "chown"):
+                os.chown(staged, metadata.st_uid, metadata.st_gid)
             staged_paths.append(staged)
             # Reject a replacement after preflight, before moving its preimage.
             if _sha256(path.read_bytes()) != expected:
