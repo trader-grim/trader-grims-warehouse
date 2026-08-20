@@ -40,20 +40,24 @@ def tree_digest(path: Path) -> str:
 
 def _matrix(target: str, *, home: Path, project: Path, source_root: Path) -> list[Adapter]:
     skill = source_root / "agent-services/skills/tgw-plan"
+    review = source_root / "agent-services/skills/tgw-review"
     provider = source_root / "agent-services/providers/promptcraft"
     if target == "codex":
         return [
             Adapter("tgw-plan", skill, home / ".codex/skills/tgw-plan"),
+            Adapter("tgw-review", review, home / ".codex/skills/tgw-review"),
             Adapter("promptcraft", provider, home / ".codex/providers/promptcraft"),
         ]
     if target == "claude":
         return [
             Adapter("tgw-plan", skill, project / ".claude/skills/tgw-plan", hold_legacy=True),
+            Adapter("tgw-review", review, project / ".claude/skills/tgw-review"),
             Adapter("promptcraft", provider, project / ".claude/providers/promptcraft"),
         ]
     if target == "deepseek":
         return [
             Adapter("tgw-plan", skill, home / ".dsh/skills/tgw-plan"),
+            Adapter("tgw-review", review, home / ".dsh/skills/tgw-review"),
             Adapter("promptcraft", provider, home / ".dsh/providers/promptcraft"),
         ]
     if target == "hermes":

@@ -16,7 +16,7 @@ from installers.materialize import InstallError, materialize, materialize_fleet 
 @pytest.mark.parametrize(
     ("target", "destinations"),
     [
-        ("codex", (".codex/skills/tgw-plan", ".codex/providers/promptcraft")),
+        ("codex", (".codex/skills/tgw-plan", ".codex/skills/tgw-review", ".codex/providers/promptcraft")),
         ("hermes", (".hermes/skills/tgw-plan", ".hermes/providers/promptcraft")),
     ],
 )
@@ -26,14 +26,14 @@ def test_dry_run_is_write_free_then_apply_is_current(tmp_path, target, destinati
     dry = materialize(target, home=home, project=project, source_root=ROOT)
 
     assert dry["ok"] is True
-    assert [action["status"] for action in dry["actions"]] == ["WOULD_INSTALL", "WOULD_INSTALL"]
+    assert [action["status"] for action in dry["actions"]] == ["WOULD_INSTALL"] * len(destinations)
     assert not home.exists()
     installed = materialize(target, home=home, project=project, source_root=ROOT, apply=True)
-    assert [action["status"] for action in installed["actions"]] == ["INSTALLED", "INSTALLED"]
+    assert [action["status"] for action in installed["actions"]] == ["INSTALLED"] * len(destinations)
     for relative in destinations:
         assert (home / relative).is_symlink()
     current = materialize(target, home=home, project=project, source_root=ROOT)
-    assert [action["status"] for action in current["actions"]] == ["CURRENT", "CURRENT"]
+    assert [action["status"] for action in current["actions"]] == ["CURRENT"] * len(destinations)
     assert [action["source_digest"] for action in current["actions"]] == [
         action["source_digest"] for action in installed["actions"]
     ]
@@ -173,7 +173,9 @@ def test_fleet_materialization_is_all_or_rollback_and_never_activates(tmp_path, 
     applied = materialize_fleet(actors, source_root=ROOT, contracts=contracts, apply=True)
     assert applied["status"] == "MATERIALIZED_NOT_ACTIVATED"
     assert (codex_home / ".codex/skills/tgw-plan").is_symlink()
+    assert (codex_home / ".codex/skills/tgw-review").is_symlink()
     assert (deepseek_home / ".dsh/skills/tgw-plan").is_symlink()
+    assert (deepseek_home / ".dsh/skills/tgw-review").is_symlink()
 
     broken = tmp_path / "broken"
     real_symlink = materialize_module.os.symlink
