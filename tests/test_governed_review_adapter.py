@@ -737,6 +737,8 @@ def test_pid_namespace_reaps_sets_id_descendant(tmp_path):
 
 
 def test_non_test_request_composes_provider_and_pinned_sink_readback(tmp_path, monkeypatch):
+    if subprocess.run(["sudo", "-n", "true"], capture_output=True, check=False).returncode:
+        pytest.skip("passwordless sudo is required for protected request regression")
     source, executable, identity, environment, context_private_key = _fixture(tmp_path)
     sink_descriptor = _sink_descriptor()
     handoff = _handoff(source, sink_descriptor=sink_descriptor)
