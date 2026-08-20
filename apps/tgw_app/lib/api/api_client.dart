@@ -118,6 +118,7 @@ class ApiClient {
     String sku,
     OperatorCommandDescriptor command,
     String objectGeneration,
+    Map<String, dynamic> values,
   ) async {
     await ensureInitialized();
     try {
@@ -126,7 +127,7 @@ class ApiClient {
         data: {
           'command_id': command.id,
           'object_generation': objectGeneration,
-          'values': <String, dynamic>{},
+          'values': values,
         },
       );
       if (response.statusCode == 200) {

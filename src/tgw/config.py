@@ -401,6 +401,9 @@ def load_config(path: Path) -> Dict[str, Any]:
         # configuration.
         "coding": raw.get("coding", {}),
         "development": raw.get("development", {}),
+        "dynamic_surfaces": raw.get("dynamic_surfaces"),
+        "platform_recovery": raw.get("platform_recovery"),
+        "fleet_refresh": raw.get("fleet_refresh"),
         "raw": raw,
     }
 

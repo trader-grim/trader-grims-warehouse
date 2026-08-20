@@ -136,6 +136,7 @@ def test_server_builder_publishes_complete_thin_client_contract():
         "options": [{"value": "USED_GOOD", "label": "Used - Good"}],
     }
     assert {command["id"]: command["enabled"] for command in view["commands"]} == {
+        "save-draft": True,
         "list-item": True,
         "update-item": True,
     }
@@ -151,18 +152,22 @@ def test_published_provider_state_disables_list_but_keeps_update_nonpublishing()
     assert published["workflow"]["state"] == "published"
     assert commands["list-item"]["enabled"] is False
     assert commands["list-item"]["authority_scope"] == "publication"
+    assert commands["save-draft"]["authority_scope"] == "local-item-mutation"
     assert commands["update-item"]["enabled"] is True
     assert commands["update-item"]["authority_scope"] == "update-restage"
 
 
-def test_reconciliation_gate_holds_every_mutating_command():
+def test_reconciliation_gate_holds_provider_commands_but_preserves_local_repair():
     published = build_item_operator_object(
         item=_item(), workflow_card=_workflow_card(reconciliation=("listing.stage",)),
         category_context=_category_context(),
     )
 
     assert published["workflow"]["state"] == "reconciliation_required"
-    assert all(command["enabled"] is False for command in published["commands"])
+    commands = {command["id"]: command for command in published["commands"]}
+    assert commands["save-draft"]["enabled"] is True
+    assert commands["list-item"]["enabled"] is False
+    assert commands["update-item"]["enabled"] is False
 
 
 def test_command_values_are_validated_from_published_condition_and_aspect_schema():

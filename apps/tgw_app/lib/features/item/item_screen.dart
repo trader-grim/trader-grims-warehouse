@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -66,9 +67,8 @@ class _ItemDetailView extends ConsumerWidget {
     final isOnline =
         ref.watch(connectionStatusProvider) == ConnectionStatus.online;
     final api = ref.read(apiClientProvider);
-    final localPath = ref
-        .read(offlineDbProvider)
-        .getLocalThumbnailPath(item.sku);
+    final localPath =
+        ref.read(offlineDbProvider).getLocalThumbnailPath(item.sku);
 
     Widget image;
     if (isOnline && item.images.isNotEmpty) {
@@ -216,7 +216,7 @@ class _ItemDetailView extends ConsumerWidget {
     final displayPrice = offerPrice ?? draftPrice;
     final priceStr = displayPrice != null
         ? '\$${(displayPrice as num).toStringAsFixed(2)}'
-              '${offerPrice != null ? ' (offer)' : ''}'
+            '${offerPrice != null ? ' (offer)' : ''}'
         : '-';
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -232,8 +232,8 @@ class _ItemDetailView extends ConsumerWidget {
         const Divider(),
         const Text('Aspects', style: TextStyle(fontWeight: FontWeight.bold)),
         ...?(draft['aspects'] as Map?)?.entries.map(
-          (e) => _infoRow(e.key, e.value.toString()),
-        ),
+              (e) => _infoRow(e.key, e.value.toString()),
+            ),
       ],
     );
   }
@@ -300,14 +300,115 @@ class _OperatorWorkflowPanelState
     extends ConsumerState<_OperatorWorkflowPanel> {
   bool _submitting = false;
 
+  Map<String, dynamic> _draftValues(OperatorObjectView object) {
+    final schema = object.fieldSchema;
+    final item = Map<String, dynamic>.from(
+      schema['item_fields'] as Map? ?? const {},
+    );
+    final listing = Map<String, dynamic>.from(
+      schema['listing_fields'] as Map? ?? const {},
+    );
+    final condition = Map<String, dynamic>.from(
+      schema['condition'] as Map? ?? const {},
+    );
+    final aspects = schema['aspects'] as List? ?? const [];
+    return {
+      'item_fields': item.map(
+        (key, value) =>
+            MapEntry(key, Map<String, dynamic>.from(value as Map)['value']),
+      ),
+      'draft_listing': {
+        ...listing.map(
+          (key, value) =>
+              MapEntry(key, Map<String, dynamic>.from(value as Map)['value']),
+        ),
+        'condition_enum': condition['value'],
+        'item_specifics': {
+          for (final raw in aspects)
+            Map<String, dynamic>.from(raw as Map)['name']:
+                Map<String, dynamic>.from(raw)['value'] ?? '',
+        },
+      },
+    };
+  }
+
+  Future<Map<String, dynamic>?> _editPublishedFields(
+    OperatorObjectView object,
+  ) async {
+    final controller = TextEditingController(
+      text: const JsonEncoder.withIndent('  ').convert(_draftValues(object)),
+    );
+    String? error;
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Server-published item fields'),
+          content: SizedBox(
+            width: 620,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Edit only the published JSON values. The server validates every field and generation.',
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: controller,
+                  minLines: 12,
+                  maxLines: 24,
+                  style: const TextStyle(fontFamily: 'monospace'),
+                ),
+                if (error != null)
+                  Text(error!, style: const TextStyle(color: Colors.red)),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                try {
+                  final value = jsonDecode(controller.text);
+                  if (value is! Map) {
+                    throw const FormatException('root must be an object');
+                  }
+                  Navigator.pop(
+                    dialogContext,
+                    Map<String, dynamic>.from(value),
+                  );
+                } on FormatException catch (exception) {
+                  setDialogState(() => error = exception.message);
+                }
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    controller.dispose();
+    return result;
+  }
+
   Future<void> _execute(
     OperatorObjectView object,
     OperatorCommandDescriptor command,
   ) async {
+    final values = command.id == 'save-draft'
+        ? await _editPublishedFields(object)
+        : <String, dynamic>{};
+    if (values == null) return;
     setState(() => _submitting = true);
-    final response = await ref
-        .read(apiClientProvider)
-        .executeOperatorCommand(widget.sku, command, object.objectGeneration);
+    final response = await ref.read(apiClientProvider).executeOperatorCommand(
+          widget.sku,
+          command,
+          object.objectGeneration,
+          values,
+        );
     if (!mounted) return;
     setState(() => _submitting = false);
     ScaffoldMessenger.of(context).showSnackBar(

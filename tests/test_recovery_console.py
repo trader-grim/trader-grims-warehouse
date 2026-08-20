@@ -32,7 +32,7 @@ def _card():
                 {"type": "heading", "id": "summary", "text": "Bound diagnosis only"},
                 {"type": "input", "id": "reason", "label": "Reason", "input": {"kind": "string", "required": True}},
             ],
-            "actions": [{"id": "diagnose", "label": "Run diagnosis", "decision": "diagnose", "handler_id": "platform-recovery", "field_ids": ["reason"]}],
+            "actions": [{"id": "diagnose", "label": "Run diagnosis", "decision": "diagnose-platform", "handler_id": "platform-recovery", "field_ids": ["reason"]}],
         },
         "card_hash": CARD, "authority_hash": AUTHORITY,
     }
@@ -42,11 +42,13 @@ def _client(renderer=lambda: RENDERER):
     receipts, refusals, effects = [], [], []
     card = _card()
     mount = RecoveryConsoleMount(
-        token_sha256=TOKEN_HASH, load_card=lambda _: card, renderer_version=renderer,
-        handler_contracts={"platform-recovery": {"decisions": ["diagnose"]}},
+        token_sha256=TOKEN_HASH, receipt_sink_hash="sha256:" + "e" * 64,
+        load_card=lambda _: card, renderer_version=renderer,
+        handler_contracts={"platform-recovery": {"decisions": ["diagnose-platform"]}},
         handlers={"platform-recovery": lambda invocation: effects.append(dict(invocation)) or {"status": "DIAGNOSED"}},
         persist_receipt=lambda receipt: receipts.append(dict(receipt)) or {"receipt": receipt["receipt_hash"]},
         persist_refusal=lambda refusal: refusals.append(dict(refusal)),
+        claim_submission=lambda invocation: {"status": "CLAIMED", "claim_hash": "sha256:" + "f" * 64},
     )
     app = FastAPI()
     app.include_router(create_recovery_console_router(mount))
@@ -72,7 +74,7 @@ def test_recovery_decision_cannot_gain_unrelated_effect_or_cross_operator():
     }
     response = client.post("/api/platform-recovery/repair-one/decisions", json=body, headers={"X-TGW-Recovery-Token": TOKEN})
     assert response.status_code == 200
-    assert receipts and effects[0]["decision"] == "diagnose"
+    assert receipts and effects[0]["decision"] == "diagnose-platform"
     body["operator"] = "mallory"
     assert client.post("/api/platform-recovery/repair-one/decisions", json=body, headers={"X-TGW-Recovery-Token": TOKEN}).status_code == 409
     assert "operator identity mismatch" in refusals[-1]["reason"]

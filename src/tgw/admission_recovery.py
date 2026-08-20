@@ -153,7 +153,10 @@ def validate_environment_preflight_for_admission(
     v2_fields = base_fields | {
         "workspace_root", "cache_roots", "environment", "artifacts", "verification_commands",
     }
-    if not isinstance(receipt, Mapping) or frozenset(receipt) not in {frozenset(base_fields), frozenset(v2_fields)}:
+    v3_fields = v2_fields | {"enforcement_boundary"}
+    if not isinstance(receipt, Mapping) or frozenset(receipt) not in {
+        frozenset(base_fields), frozenset(v2_fields), frozenset(v3_fields),
+    }:
         raise AdmissionRecoveryError("environment preflight receipt fields are not exact")
     value = dict(receipt)
     if value["schema"] != "tgw-environment-preflight-receipt/v1" or value["result"] != "PASS":

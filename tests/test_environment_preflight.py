@@ -120,6 +120,59 @@ def test_mobile_v2_preflight_binds_artifacts_caches_environment_and_commands(tmp
         preflight(catalog=value, actor="codex", profile="mobile", attempt_id="attempt-1")
 
 
+def test_v3_preflight_binds_complete_local_dynamic_surface_boundary(tmp_path: Path):
+    executable = tmp_path / ("a" * 32 + "-store") / "tool"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n")
+    os.chmod(executable, 0o555)
+    boundary = tmp_path / "candidate"
+    component = boundary / "src/tgw/dynamic_surface.py"
+    renderer = boundary / "src/tgw/static/plan_console.html"
+    component.parent.mkdir(parents=True)
+    renderer.parent.mkdir(parents=True)
+    component.write_text("validator-controller-binding\n")
+    renderer.write_text("data-only-renderer\n")
+    value = v2_catalog(executable)
+    value["schema"] = "tgw-execution-environment-catalog/v3"
+    value["enforcement_boundary"] = {
+        "schema": "tgw-dynamic-surface-enforcement-boundary/v1", "version": "candidate-one",
+        "remote_inputs": False, "executable_renderer_inputs": False,
+        "components": [{
+            "name": "validator-controller-binding", "relative_path": "src/tgw/dynamic_surface.py",
+            "content_sha256": "sha256:" + hashlib.sha256(component.read_bytes()).hexdigest(),
+            "purpose": "schema validator, controller, and typed handler verifier",
+        }],
+        "assets": [{
+            "name": "data-only-renderer", "relative_path": "src/tgw/static/plan_console.html",
+            "content_sha256": "sha256:" + hashlib.sha256(renderer.read_bytes()).hexdigest(),
+            "purpose": "allowlisted local renderer",
+        }],
+    }
+    receipt = preflight(
+        catalog=value, actor="codex", profile="development", attempt_id="attempt-1",
+        boundary_root=boundary,
+    )
+    assert receipt["enforcement_boundary"]["remote_inputs"] is False
+    assert len(receipt["enforcement_boundary"]["components"]) == 2
+    renderer.write_text("<script>remote()</script>\n")
+    with pytest.raises(EnvironmentPreflightError, match="component mismatch"):
+        preflight(
+            catalog=value, actor="codex", profile="development", attempt_id="attempt-1",
+            boundary_root=boundary,
+        )
+
+
+def test_v3_preflight_refuses_missing_or_unsafe_boundary(tmp_path: Path):
+    executable = tmp_path / ("a" * 32 + "-store") / "tool"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n")
+    os.chmod(executable, 0o555)
+    value = v2_catalog(executable)
+    value["schema"] = "tgw-execution-environment-catalog/v3"
+    with pytest.raises(EnvironmentPreflightError, match="boundary is invalid"):
+        preflight(catalog=value, actor="codex", profile="development", attempt_id="attempt-1")
+
+
 @pytest.mark.parametrize("mutation", ["disabled", "missing", "symlink"])
 def test_preflight_refuses_nonready_or_unavailable_tool(tmp_path: Path, mutation: str):
     executable = tmp_path / ("a" * 32 + "-store") / "tool"

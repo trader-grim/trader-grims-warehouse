@@ -402,10 +402,30 @@ def _dynamic_surface_bindings(
                     os.fsync(handle.fileno())
             return {"path": str(path), "receipt_hash": receipt_hash}
 
+        def claim(invocation: Mapping[str, Any]) -> Mapping[str, Any]:
+            claim_hash = _canonical_hash(invocation)
+            path = root / (claim_hash.removeprefix("sha256:") + ".claim.json")
+            value = {
+                "schema": "tgw-dynamic-surface-submission-claim/v1",
+                "status": "CLAIMED", "claim_hash": claim_hash,
+                "request_id": request_id, "surface_hash": invocation["surface_hash"],
+            }
+            encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+            try:
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+            except FileExistsError as exc:
+                raise ValueError("dynamic surface submission was replayed or is already in progress") from exc
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            return value
+
         return submit_dynamic_surface(
             surface=surface, submission=submission,
             current_card_hash=card_hash, current_authority_hash=authority_hash,
             handlers={"plan-authority-decision": decide}, persist_receipt=persist,
+            claim_submission=claim,
         )
 
     return load, submit

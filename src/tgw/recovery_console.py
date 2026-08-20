@@ -17,12 +17,14 @@ from tgw.dynamic_surface import compile_dynamic_surface, submit_dynamic_surface
 @dataclass(frozen=True)
 class RecoveryConsoleMount:
     token_sha256: str
+    receipt_sink_hash: str
     load_card: Callable[[str], Mapping[str, Any]]
     renderer_version: Callable[[], str]
     handler_contracts: Mapping[str, Mapping[str, Any]]
     handlers: Mapping[str, Callable[[Mapping[str, Any]], Mapping[str, Any]]]
     persist_receipt: Callable[[Mapping[str, Any]], Mapping[str, Any]]
     persist_refusal: Callable[[Mapping[str, Any]], None]
+    claim_submission: Callable[[Mapping[str, Any]], Mapping[str, Any]]
 
 
 def _now() -> str:
@@ -53,6 +55,15 @@ def _compiled(mount: RecoveryConsoleMount, recovery_id: str) -> tuple[dict[str, 
         raise ValueError("recovery surface binding mismatch")
     if proposal.get("plan_commit") != invocation["plan"]["commit"] or proposal.get("solution_hash") != invocation["plan"]["solution_hash"]:
         raise ValueError("recovery surface Plan binding mismatch")
+    if invocation["receipt_sink"] != mount.receipt_sink_hash:
+        raise ValueError("recovery receipt sink binding mismatch")
+    actions = proposal.get("actions")
+    if (
+        not isinstance(actions, list) or not actions
+        or any(action.get("handler_id") != "platform-recovery" for action in actions if isinstance(action, Mapping))
+        or any(action.get("decision") not in invocation["effects"] for action in actions if isinstance(action, Mapping))
+    ):
+        raise ValueError("recovery action exceeds the exact effect set")
     surface = compile_dynamic_surface(
         proposal=proposal, handler_registry=mount.handler_contracts,
         renderer_version=mount.renderer_version(), observed_at=_now(),
@@ -88,6 +99,7 @@ def create_recovery_console_router(mount: RecoveryConsoleMount) -> APIRouter:
                 surface=surface, submission=body,
                 current_card_hash=card["card_hash"], current_authority_hash=card["authority_hash"],
                 handlers=mount.handlers, persist_receipt=mount.persist_receipt,
+                claim_submission=mount.claim_submission,
             )
         except ValueError as exc:
             mount.persist_refusal({

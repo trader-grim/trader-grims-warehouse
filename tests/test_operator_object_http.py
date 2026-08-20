@@ -70,7 +70,9 @@ def test_get_operator_object_mounts_real_http_contract(tmp_path, monkeypatch):
     payload = response.json()["object"]
     assert payload["schema"] == "tgw-operator-object/v1"
     assert payload["object_generation"] == "gen-1"
-    assert payload["commands"][0]["id"] == "list-item"
+    assert [command["id"] for command in payload["commands"]] == [
+        "save-draft", "list-item", "update-item",
+    ]
 
 
 def test_thin_web_item_page_uses_only_published_object_and_command_contract(monkeypatch):
@@ -130,3 +132,44 @@ def test_update_command_uses_nonpublication_dispatcher(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert response.json()["authority_scope"] == "update-restage"
     assert seen["surface"] == "http:operator-object:update-item"
+
+
+def test_save_draft_uses_published_schema_and_never_calls_provider(monkeypatch, tmp_path):
+    monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
+    monkeypatch.setattr(http_server, "_cfg", {"itemdata_root": tmp_path})
+    published = _published()
+    published["commands"].insert(0, {
+        "id": "save-draft", "label": "Save Draft", "enabled": True, "reason": None,
+        "authority_scope": "local-item-mutation", "refresh_target": "current-object",
+        "input_schema": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "item_fields": {"type": "object", "additionalProperties": False, "properties": {"title": {"type": "string"}}},
+                "draft_listing": {"type": "object", "additionalProperties": False, "properties": {"price": {"type": "number", "nullable": True}}},
+            },
+        },
+    })
+    after = json.loads(json.dumps(published))
+    after["object_generation"] = "gen-2"
+    seen = []
+    monkeypatch.setattr(http_server, "_current_item_operator_object", lambda sku: after if seen else published)
+    monkeypatch.setattr(
+        http_server, "patch_item",
+        lambda sku, body, request, operator: seen.append(dict(body.fields)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        listing_migration, "authorize_and_dispatch_next_listing_effect",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("publication dispatcher called")),
+    )
+
+    response = TestClient(http_server.app).post(
+        "/api/operator/items/sku-1/commands", headers=AUTH,
+        json={
+            "command_id": "save-draft", "object_generation": "gen-1",
+            "values": {"item_fields": {"title": "Revised"}, "draft_listing": {"price": 12.5}},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["authority_scope"] == "local-item-mutation"
+    assert seen == [{"title": "Revised", "draft_listing": {"price": 12.5}}]

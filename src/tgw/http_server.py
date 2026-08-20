@@ -1128,6 +1128,24 @@ def _current_item_operator_object(sku: str) -> Dict[str, Any]:
             if category_id and category_id != "99"
             else {}
         )
+        category_context = dict(category_context)
+        try:
+            store_categories, _store_refreshed, _store_error = _store_categories_snapshot(_cfg)
+        except (KeyError, OSError, ValueError):
+            store_categories = []
+        try:
+            fulfillment, _fulfillment_refreshed, _fulfillment_error = _fulfillment_policies_snapshot(_cfg)
+        except (KeyError, OSError, ValueError):
+            fulfillment = {}
+        category_context["store_categories"] = [
+            {"value": entry["id"], "label": entry["name"]}
+            for entry in store_categories
+            if isinstance(entry.get("id"), str) and isinstance(entry.get("name"), str)
+        ]
+        category_context["fulfillment_policies"] = [
+            {"value": policy_id, "label": label}
+            for policy_id, label in sorted(fulfillment.items(), key=lambda item: (item[1].casefold(), item[0]))
+        ]
         return build_item_operator_object(
             item=item,
             workflow_card=workflow_card,
@@ -1197,7 +1215,10 @@ def execute_item_operator_command(
             status_code=409,
             detail={"code": "command_held", "reason": command.get("reason")},
         )
+    if body.command_id == "save-draft" and not body.values:
+        raise HTTPException(status_code=422, detail="save-draft requires server-published field values")
 
+    checked_values: Dict[str, Any] = {}
     if body.values:
         from .operator_objects import validate_operator_command_values
 
@@ -1207,14 +1228,13 @@ def execute_item_operator_command(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        # Reuse the canonical patch boundary so field ownership, provenance,
-        # draft lifecycle and audit behavior do not get reimplemented here.
-        patch_item(
-            sku,
-            PatchBody(fields={"draft_listing": checked_values}),
-            Request({"type": "http", "headers": []}),
-            operator_identity,
-        )
+        if body.command_id == "save-draft":
+            item_fields = checked_values.get("item_fields", {})
+            draft_fields = checked_values.get("draft_listing", {})
+            patch_fields = {**item_fields, "draft_listing": draft_fields}
+        else:
+            patch_fields = {"draft_listing": checked_values}
+        patch_item(sku, PatchBody(fields=patch_fields), Request({"type": "http", "headers": []}), operator_identity)
         published = _current_item_operator_object(sku)
         command = next(
             item for item in published["commands"] if item["id"] == body.command_id
@@ -1224,6 +1244,14 @@ def execute_item_operator_command(
                 status_code=409,
                 detail={"code": "command_held_after_update", "reason": command.get("reason")},
             )
+
+    if body.command_id == "save-draft":
+        return {
+            "ok": True, "command_id": body.command_id,
+            "authority_scope": command["authority_scope"],
+            "object_generation": published["object_generation"],
+            "refresh": f"/api/operator/items/{sku}",
+        }
 
     provider_identity = _workflow_provider_identity()
     if not provider_identity:
@@ -9562,12 +9590,23 @@ def operator_item_form(sku: str):
 
 @app.get("/form/items/{sku}")
 def item_detail_form(sku: str):
-    """Item detail page — photos, fields, revision diff. Server-rendered, no auth."""
+    """Retired direct-action detail URL; canonical UI is the thin adapter."""
     from fastapi.responses import HTMLResponse
 
     if ".." in sku:
         return HTMLResponse("<h2>invalid sku</h2>", status_code=400)
+    return RedirectResponse(
+        url=f"/form/operator/items/{urllib.parse.quote(sku, safe='')}",
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        headers={"Cache-Control": "no-store, no-cache"},
+    )
 
+
+def _retired_item_detail_form_source(sku: str):  # pragma: no cover
+    """Unrouted migration reference for fields not yet represented by W13."""
+    # Historical server-rendered implementation retained temporarily as dead
+    # source for field-edit migration archaeology. It has no registered route
+    # or reachable branch after W13 and cannot issue commands.
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
         return HTMLResponse(f"<h2>SKU not found: {sku}</h2>", status_code=404)

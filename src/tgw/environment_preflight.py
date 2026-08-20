@@ -18,6 +18,7 @@ from typing import Any, Mapping
 SCHEMAS = {
     "tgw-execution-environment-catalog/v1",
     "tgw-execution-environment-catalog/v2",
+    "tgw-execution-environment-catalog/v3",
 }
 RECEIPT_SCHEMA = "tgw-environment-preflight-receipt/v1"
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -108,7 +109,58 @@ def _observe_store_file(declaration: Mapping[str, Any], *, path_key: str, hash_k
     return path_value, observed_hash
 
 
-def preflight(*, catalog: Mapping[str, Any], actor: str, profile: str, attempt_id: str) -> dict[str, Any]:
+def _observe_enforcement_boundary(catalog: Mapping[str, Any], boundary_root: str | Path | None) -> dict[str, Any]:
+    declaration = catalog.get("enforcement_boundary")
+    if not isinstance(declaration, Mapping) or set(declaration) != {
+        "schema", "version", "remote_inputs", "executable_renderer_inputs", "components", "assets",
+    }:
+        raise EnvironmentPreflightError("dynamic-surface enforcement boundary is invalid")
+    if (
+        declaration.get("schema") != "tgw-dynamic-surface-enforcement-boundary/v1"
+        or declaration.get("remote_inputs") is not False
+        or declaration.get("executable_renderer_inputs") is not False
+    ):
+        raise EnvironmentPreflightError("dynamic-surface enforcement boundary is unsafe")
+    version = declaration.get("version")
+    components, assets = declaration.get("components"), declaration.get("assets")
+    if not isinstance(version, str) or not version or not isinstance(components, list) or not components or not isinstance(assets, list):
+        raise EnvironmentPreflightError("dynamic-surface enforcement boundary is incomplete")
+    if boundary_root is None:
+        raise EnvironmentPreflightError("dynamic-surface enforcement root is required")
+    root = Path(boundary_root)
+    if not root.is_absolute() or not root.is_dir() or root.is_symlink():
+        raise EnvironmentPreflightError("dynamic-surface enforcement root is unavailable")
+    observed: list[dict[str, str]] = []
+    names: set[str] = set()
+    for entry in [*components, *assets]:
+        if not isinstance(entry, Mapping) or set(entry) != {"name", "relative_path", "content_sha256", "purpose"}:
+            raise EnvironmentPreflightError("dynamic-surface enforcement component is invalid")
+        name, relative, expected, purpose = (
+            entry.get("name"), entry.get("relative_path"), entry.get("content_sha256"), entry.get("purpose"),
+        )
+        if (
+            not isinstance(name, str) or not name or name in names
+            or not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts
+            or not isinstance(expected, str) or _HASH.fullmatch(expected) is None
+            or not isinstance(purpose, str) or not purpose
+        ):
+            raise EnvironmentPreflightError("dynamic-surface enforcement component is invalid")
+        names.add(name)
+        path = root / relative
+        if path.is_symlink() or not path.is_file() or _file_hash(path) != expected:
+            raise EnvironmentPreflightError(f"dynamic-surface enforcement component mismatch: {name}")
+        observed.append({"name": name, "relative_path": relative, "observed_sha256": expected})
+    return {
+        "schema": declaration["schema"], "version": version,
+        "root": str(root), "remote_inputs": False, "executable_renderer_inputs": False,
+        "components": sorted(observed, key=lambda item: item["name"]),
+    }
+
+
+def preflight(
+    *, catalog: Mapping[str, Any], actor: str, profile: str, attempt_id: str,
+    boundary_root: str | Path | None = None,
+) -> dict[str, Any]:
     """Verify one catalog-defined environment without executing role work."""
     if not isinstance(catalog, Mapping) or catalog.get("schema") not in SCHEMAS:
         raise EnvironmentPreflightError("environment catalog schema is invalid")
@@ -123,8 +175,10 @@ def preflight(*, catalog: Mapping[str, Any], actor: str, profile: str, attempt_i
         raise EnvironmentPreflightError("actor/profile binding is refused")
     if declared_profile.get("state") != "ready-for-preflight":
         raise EnvironmentPreflightError("profile is not ready for preflight")
-    is_v2 = catalog.get("schema") == "tgw-execution-environment-catalog/v2"
-    if is_v2:
+    is_extended = catalog.get("schema") in {
+        "tgw-execution-environment-catalog/v2", "tgw-execution-environment-catalog/v3",
+    }
+    if is_extended:
         qualified_roles = declared_actor.get("qualified_roles")
         if (
             declared_actor.get("role") != "execution-provider"
@@ -182,7 +236,7 @@ def preflight(*, catalog: Mapping[str, Any], actor: str, profile: str, attempt_i
     observed_artifacts: list[dict[str, str]] = []
     verification_commands: list[list[str]] = []
     environment: dict[str, str] = {}
-    if is_v2 and profile == "mobile":
+    if is_extended and profile == "mobile":
         required_tools = {"flutter", "dart", "java", "gradle", "android-sdkmanager", "android-adb"}
         if names != required_tools:
             raise EnvironmentPreflightError("mobile profile tool set is incomplete")
@@ -249,7 +303,7 @@ def preflight(*, catalog: Mapping[str, Any], actor: str, profile: str, attempt_i
         "attempt_id": attempt_id,
         "tools": sorted(observed, key=lambda item: item["name"]),
     }
-    if is_v2:
+    if is_extended:
         unsigned.update({
             "workspace_root": workspace_root,
             "cache_roots": cache_roots,
@@ -257,6 +311,8 @@ def preflight(*, catalog: Mapping[str, Any], actor: str, profile: str, attempt_i
             "artifacts": sorted(observed_artifacts, key=lambda item: item["name"]),
             "verification_commands": verification_commands,
         })
+    if catalog.get("schema") == "tgw-execution-environment-catalog/v3":
+        unsigned["enforcement_boundary"] = _observe_enforcement_boundary(catalog, boundary_root)
     return unsigned
 
 
@@ -266,10 +322,14 @@ def main() -> int:
     parser.add_argument("--actor", required=True)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--attempt-id", required=True)
+    parser.add_argument("--boundary-root", type=Path)
     args = parser.parse_args()
     try:
         raw = json.loads(args.catalog.read_text(encoding="utf-8"))
-        print(json.dumps(preflight(catalog=raw, actor=args.actor, profile=args.profile, attempt_id=args.attempt_id), sort_keys=True))
+        print(json.dumps(preflight(
+            catalog=raw, actor=args.actor, profile=args.profile,
+            attempt_id=args.attempt_id, boundary_root=args.boundary_root,
+        ), sort_keys=True))
         return 0
     except (OSError, json.JSONDecodeError, EnvironmentPreflightError) as exc:
         print(json.dumps({"result": "HOLD", "error": str(exc)}, sort_keys=True), file=sys.stderr)

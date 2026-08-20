@@ -179,7 +179,15 @@ def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_pat
     }, "operator:fixture")
     assert recorded[0].kind.value == "approve"
     assert receipt["outcome"]["decision_id"] == recorded[0].decision_id
-    assert len(list(receipt_root.glob("*.json"))) == 1
+    assert len(list(receipt_root.glob("*.json"))) == 2
+    with pytest.raises(ValueError, match="replayed or is already in progress"):
+        submit(row["request_id"], {
+            "schema": "tgw-dynamic-surface-submission/v1",
+            "surface_hash": surface["surface_hash"], "action_id": "approve",
+            "values": {"reason": "exact scope reviewed"},
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+        }, "operator:fixture")
+    assert len(recorded) == 1
 
 
 def test_standard_http_mount_resolves_bootstrap_provider_after_config_load_and_before_execution():

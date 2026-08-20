@@ -44,7 +44,7 @@ def _string_list(value: Any, name: str) -> list[str]:
 
 def _command_descriptor(command: Mapping[str, Any]) -> dict[str, Any]:
     command_id = command.get("id")
-    if command_id not in {"list-item", "update-item"}:
+    if command_id not in {"save-draft", "list-item", "update-item"}:
         raise OperatorObjectBindingError("unrecognized operator command")
     enabled = command.get("enabled")
     if not isinstance(enabled, bool):
@@ -55,18 +55,66 @@ def _command_descriptor(command: Mapping[str, Any]) -> dict[str, Any]:
 
     # This is declarative metadata only.  Issuing the grant remains in the
     # server command handler; a browser or Flutter client cannot replace it.
-    expected_scope = "publication" if command_id == "list-item" else "update-restage"
+    expected_scope = {
+        "save-draft": "local-item-mutation",
+        "list-item": "publication",
+        "update-item": "update-restage",
+    }[command_id]
     if command.get("authority_scope") != expected_scope:
         raise OperatorObjectBindingError("command authority scope does not match command id")
     return {
         "id": command_id,
-        "label": "List Item" if command_id == "list-item" else "Update Item",
+        "label": {
+            "save-draft": "Save Draft", "list-item": "List Item", "update-item": "Update Item",
+        }[command_id],
         "enabled": enabled,
         "reason": reason,
         "authority_scope": expected_scope,
         "input_schema": deepcopy(command.get("input_schema", {})),
         "refresh_target": "current-object",
     }
+
+
+def _validate_schema_value(schema: Mapping[str, Any], value: Any, label: str) -> Any:
+    field_type = schema.get("type")
+    if value is None and schema.get("nullable") is True:
+        return None
+    if field_type == "string":
+        if not isinstance(value, str):
+            raise OperatorObjectBindingError(f"{label} must be a string")
+        allowed = schema.get("enum")
+        if allowed is not None and (not isinstance(allowed, list) or value not in allowed):
+            raise OperatorObjectBindingError(f"{label} is not an allowed value")
+        return value
+    if field_type == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise OperatorObjectBindingError(f"{label} must be a number")
+        return value
+    if field_type == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise OperatorObjectBindingError(f"{label} must be an integer")
+        return value
+    if field_type == "boolean":
+        if not isinstance(value, bool):
+            raise OperatorObjectBindingError(f"{label} must be boolean")
+        return value
+    if field_type == "string-map":
+        if not isinstance(value, Mapping):
+            raise OperatorObjectBindingError(f"{label} must be an object")
+        if not all(isinstance(key, str) and key and isinstance(item, str) for key, item in value.items()):
+            raise OperatorObjectBindingError(f"{label} must contain string fields")
+        return dict(value)
+    if field_type == "object":
+        if not isinstance(value, Mapping) or schema.get("additionalProperties") is not False:
+            raise OperatorObjectBindingError(f"{label} must be a closed object")
+        nested = _mapping(schema.get("properties", {}), f"{label} properties")
+        if not set(value) <= set(nested):
+            raise OperatorObjectBindingError(f"{label} contains an unpublished key")
+        return {
+            key: _validate_schema_value(_mapping(nested[key], f"{label}.{key} schema"), nested_value, f"{label}.{key}")
+            for key, nested_value in value.items()
+        }
+    raise OperatorObjectBindingError(f"{label} has an unsupported type")
 
 
 def validate_operator_command_values(
@@ -90,35 +138,12 @@ def validate_operator_command_values(
     properties = _mapping(schema.get("properties", {}), "command.input_schema.properties")
     if not set(values) <= set(properties):
         raise OperatorObjectBindingError("command values contain an unpublished field")
-    result: dict[str, Any] = {}
-    for field, value in values.items():
-        field_schema = _mapping(properties[field], f"command field {field}")
-        if field_schema.get("type") == "string":
-            if not isinstance(value, str):
-                raise OperatorObjectBindingError(f"command field {field} must be a string")
-            allowed = field_schema.get("enum")
-            if allowed is not None and (not isinstance(allowed, list) or value not in allowed):
-                raise OperatorObjectBindingError(f"command field {field} is not an allowed value")
-            result[field] = value
-        elif field_schema.get("type") == "object":
-            if not isinstance(value, Mapping) or field_schema.get("additionalProperties") is not False:
-                raise OperatorObjectBindingError(f"command field {field} must be a closed object")
-            nested = _mapping(field_schema.get("properties", {}), f"command field {field} properties")
-            if not set(value) <= set(nested):
-                raise OperatorObjectBindingError(f"command field {field} contains an unpublished key")
-            checked: dict[str, str] = {}
-            for key, nested_value in value.items():
-                nested_schema = _mapping(nested[key], f"command field {field}.{key}")
-                if nested_schema.get("type") != "string" or not isinstance(nested_value, str):
-                    raise OperatorObjectBindingError(f"command field {field}.{key} must be a string")
-                allowed = nested_schema.get("enum")
-                if allowed is not None and nested_value not in allowed:
-                    raise OperatorObjectBindingError(f"command field {field}.{key} is not an allowed value")
-                checked[key] = nested_value
-            result[field] = checked
-        else:
-            raise OperatorObjectBindingError(f"command field {field} has an unsupported type")
-    return result
+    return {
+        field: _validate_schema_value(
+            _mapping(properties[field], f"command field {field}"), value, f"command field {field}",
+        )
+        for field, value in values.items()
+    }
 
 
 def publish_operator_object(
@@ -341,6 +366,33 @@ def build_item_operator_object(
         "details": deepcopy(dict(workflow_card)),
     }
     field_schema = {
+        "item_fields": {
+            "title": {"type": "string", "label": "Inventory title", "value": item.get("title") or ""},
+            "location": {"type": "string", "label": "Location", "value": item.get("location") or ""},
+            "notes": {"type": "string", "label": "Notes", "value": item.get("notes") or ""},
+            "item_attributes": {"type": "string-map", "label": "Inventory attributes", "value": deepcopy(item.get("item_attributes") or {})},
+        },
+        "listing_fields": {
+            "title": {"type": "string", "label": "Listing title", "value": draft.get("title") or item.get("title") or ""},
+            "description": {"type": "string", "label": "Description", "value": draft.get("description") or draft.get("listing_description") or ""},
+            "price": {"type": "number", "nullable": True, "label": "Price", "value": draft.get("price")},
+            "quantity": {"type": "integer", "nullable": True, "label": "Quantity", "value": draft.get("quantity")},
+            "category_id": {"type": "string", "label": "eBay category ID", "value": category_id},
+            "secondary_category_id": {"type": "string", "nullable": True, "label": "Secondary category ID", "value": draft.get("secondary_category_id")},
+            "condition_description": {"type": "string", "label": "Condition description", "value": draft.get("condition_description") or ""},
+            "shipping_profile": {"type": "string", "label": "Shipping policy", "value": draft.get("shipping_profile") or "", "options": deepcopy(context.get("fulfillment_policies") or [])},
+            "return_policy_id": {"type": "string", "label": "Return policy", "value": draft.get("return_policy_id") or "", "options": deepcopy(context.get("return_policies") or [])},
+            "store_category_id": {"type": "string", "label": "Store category", "value": draft.get("store_category_id") or "", "options": deepcopy(context.get("store_categories") or [])},
+            "secondary_store_category_id": {
+                "type": "string", "nullable": True, "label": "Secondary store category",
+                "value": draft.get("secondary_store_category_id"),
+                "options": deepcopy(context.get("store_categories") or []),
+            },
+            "best_offer_enabled": {"type": "boolean", "nullable": True, "label": "Best Offer", "value": draft.get("best_offer_enabled")},
+            "best_offer_auto_accept_price": {"type": "number", "nullable": True, "label": "Best Offer auto-accept", "value": draft.get("best_offer_auto_accept_price")},
+            "best_offer_auto_decline_price": {"type": "number", "nullable": True, "label": "Best Offer auto-decline", "value": draft.get("best_offer_auto_decline_price")},
+            "item_specifics": {"type": "string-map", "label": "Item specifics", "value": deepcopy(specifics)},
+        },
         "category": {
             "value": category_id,
             "label": context.get("category_name") or draft.get("category_name") or item.get("ebay_category_name"),
@@ -381,12 +433,38 @@ def build_item_operator_object(
             },
         },
     }
+    save_input_schema = {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "item_fields": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    name: {key: value for key, value in descriptor.items() if key in {"type", "nullable"}}
+                    for name, descriptor in field_schema["item_fields"].items()
+                },
+            },
+            "draft_listing": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    name: {key: value for key, value in descriptor.items() if key in {"type", "nullable"}}
+                    for name, descriptor in field_schema["listing_fields"].items()
+                } | {
+                    "condition_enum": {"type": "string", "enum": [option["value"] for option in conditions]},
+                },
+            },
+        },
+    }
     return publish_operator_object(
         item=item_view,
         listing=listing_view,
         workflow=workflow_view,
         field_schema=field_schema,
         commands=(
+            {
+                "id": "save-draft", "enabled": not active,
+                "reason": "The authoritative workflow is active." if active else None,
+                "authority_scope": "local-item-mutation", "input_schema": save_input_schema,
+            },
             {
                 "id": "list-item",
                 "enabled": list_enabled,
