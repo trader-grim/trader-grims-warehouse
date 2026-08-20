@@ -73,3 +73,17 @@ def test_explicit_rollback_callback_failure_still_restores_configurations(tmp_pa
             rollback_materialization=lambda _: (_ for _ in ()).throw(RuntimeError("rollback")),
         )
     assert config.read_bytes() == b"old"
+
+
+def test_failed_ownership_preservation_cleans_staging(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    config.write_bytes(b"old")
+    monkeypatch.setattr("tgw.fleet_activation.os.chown", lambda *_: (_ for _ in ()).throw(PermissionError("no chown")))
+    with pytest.raises(PermissionError, match="no chown"):
+        apply_fleet_configuration(
+            {config: {"expected_sha256": _hash(b"old"), "desired": b"new"}},
+            materialize=lambda: {"status": "MATERIALIZED_NOT_ACTIVATED"},
+            rollback_materialization=lambda _: None,
+        )
+    assert config.read_bytes() == b"old"
+    assert not list(tmp_path.glob("*.tgw-w18-next"))

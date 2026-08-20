@@ -61,17 +61,20 @@ def apply_fleet_configuration(
             backup = path.with_name(f".{path.name}.tgw-w18-previous")
             if staged.exists() or staged.is_symlink() or backup.exists() or backup.is_symlink():
                 raise FleetActivationError(f"configuration transaction path exists: {path}")
-            with open(staged, "xb") as handle:
+            metadata = path.stat()
+            # Create privately regardless of the caller's umask; the exact
+            # preimage mode is restored only after ownership is correct.
+            descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            staged_paths.append(staged)
+            with os.fdopen(descriptor, "wb") as handle:
                 handle.write(desired)
                 handle.flush()
                 os.fsync(handle.fileno())
             # A privileged fleet operator must not take ownership of a user
             # harness configuration merely by atomically replacing it.
-            metadata = path.stat()
-            os.chmod(staged, metadata.st_mode)
             if hasattr(os, "chown"):
                 os.chown(staged, metadata.st_uid, metadata.st_gid)
-            staged_paths.append(staged)
+            os.chmod(staged, metadata.st_mode)
             # Reject a replacement after preflight, before moving its preimage.
             if _sha256(path.read_bytes()) != expected:
                 raise FleetActivationError(f"configuration preimage changed: {path}")
