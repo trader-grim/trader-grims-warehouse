@@ -80,6 +80,20 @@ def _same_link(destination: Path, source: Path) -> bool:
     return destination.is_symlink() and destination.resolve(strict=False) == source
 
 
+def _contract_receipt_matches(contract: dict[str, Any]) -> bool:
+    """Verify the exact actor-contract body before it can drive writes."""
+    receipt_hash = contract.get("receipt_hash")
+    if not isinstance(receipt_hash, str) or not receipt_hash.startswith("sha256:"):
+        return False
+    body = dict(contract)
+    body.pop("receipt_hash", None)
+    try:
+        encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+    except (TypeError, ValueError):
+        return False
+    return receipt_hash == "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 def materialize(
     target: str,
     *,
@@ -165,7 +179,12 @@ def materialize_fleet(
     plans: dict[str, list[tuple[Adapter, str]]] = {}
     for actor in sorted(actors):
         contract = contracts[actor]
-        if not isinstance(contract, dict) or contract.get("actor") != actor or contract.get("status") != "READY":
+        if (
+            not isinstance(contract, dict)
+            or contract.get("actor") != actor
+            or contract.get("status") != "READY"
+            or not _contract_receipt_matches(contract)
+        ):
             raise InstallError(f"actor contract is not READY: {actor}")
         entry = actors[actor]
         home, project = entry.get("home"), entry.get("project")

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -158,7 +159,9 @@ def test_apply_failure_rolls_back_all_links_created_by_invocation(tmp_path, monk
 
 
 def _ready_contract(actor):
-    return {"actor": actor, "status": "READY", "receipt_hash": "sha256:" + "a" * 64}
+    body = {"actor": actor, "status": "READY"}
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return {**body, "receipt_hash": "sha256:" + hashlib.sha256(encoded).hexdigest()}
 
 
 def test_fleet_materialization_is_all_or_rollback_and_never_activates(tmp_path, monkeypatch):
@@ -197,6 +200,17 @@ def test_fleet_materialization_is_all_or_rollback_and_never_activates(tmp_path, 
 
 def test_fleet_refuses_quarantined_actor_before_any_write(tmp_path):
     actors = {"codex": {"home": tmp_path / "home", "project": tmp_path / "project"}}
+    contract = _ready_contract("codex")
+    contract["status"] = "QUARANTINED"
     with pytest.raises(InstallError, match="not READY"):
-        materialize_fleet(actors, source_root=ROOT, contracts={"codex": {"actor": "codex", "status": "QUARANTINED"}}, apply=True)
+        materialize_fleet(actors, source_root=ROOT, contracts={"codex": contract}, apply=True)
+    assert not (tmp_path / "home").exists()
+
+
+def test_fleet_refuses_forged_ready_contract_before_any_write(tmp_path):
+    actors = {"codex": {"home": tmp_path / "home", "project": tmp_path / "project"}}
+    contract = _ready_contract("codex")
+    contract["status"] = "QUARANTINED"
+    with pytest.raises(InstallError, match="not READY"):
+        materialize_fleet(actors, source_root=ROOT, contracts={"codex": contract}, apply=True)
     assert not (tmp_path / "home").exists()

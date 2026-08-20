@@ -1,5 +1,6 @@
 {
   "schema": "tgw-harness-review-installations/v1",
+  "evidence_state": "historical-observation-not-live-proof",
   "canonical_skills": {
     "tgw-plan": "agent-services/skills/tgw-plan",
     "tgw-review": "agent-services/skills/tgw-review"

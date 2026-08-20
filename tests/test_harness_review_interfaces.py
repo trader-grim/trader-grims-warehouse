@@ -74,6 +74,7 @@ def test_installation_catalog_does_not_confuse_skill_and_provider_status():
     value = json.loads(
         (ROOT / "etc/interfaces/harness-review-installations.json").read_text()
     )
+    assert value["evidence_state"] == "historical-observation-not-live-proof"
     harnesses = {item["id"]: item for item in value["harnesses"]}
     assert harnesses["codex"]["automated_provider"] == "codex-isolated-review-runner"
     assert harnesses["claude"]["interactive_review"] == "available"
