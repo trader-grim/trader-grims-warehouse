@@ -2,11 +2,101 @@ import hashlib
 
 import pytest
 
-from tgw.fleet_activation import FleetActivationError, apply_fleet_configuration, rollback_fleet_configuration
+from tgw.fleet_activation import (
+    FleetActivationError,
+    apply_fleet_configuration,
+    rollback_fleet_configuration,
+    run_fleet_refresh_transaction,
+)
 
 
 def _hash(value):
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def _refresh_request(**updates):
+    value = {
+        "schema": "tgw-w18-fleet-refresh-request/v1", "transaction_id": "refresh-one",
+        "idempotency_key": "plan-source-catalog-one", "predecessor_generation": "sha256:" + "a" * 64,
+        "successor_generation": "sha256:" + "b" * 64,
+        "revisions": {"plan": "f" * 40, "source": "e" * 40, "catalog": "sha256:" + "c" * 64},
+        "actors": ["codex", "claude"],
+    }
+    value.update(updates)
+    return value
+
+
+def _refresh_providers(events, *, fail=None, rollback_fail=False):
+    def result(name, status, extra=None):
+        def call(*args):
+            events.append(name)
+            if fail == name:
+                raise RuntimeError(f"{name} failed")
+            return {"status": status, **(extra or {})}
+        return call
+    return {
+        "checkpoint": result("checkpoint", "CHECKPOINTED", {"live_requests": [], "role_leases": [], "rendered_surfaces": [], "continuations": []}),
+        "quiesce": result("quiesce", "QUIESCED"), "rebuild": result("rebuild", "REBUILT"),
+        "activate": result("activate", "ACTIVATED"), "restart": result("restart", "RESTARTED"),
+        "health": result("health", "HEALTHY"),
+        "verify_actor": lambda actor, request: events.append(f"verify:{actor}") or {
+            "status": "VERIFIED", "actor": actor, "generation": request["successor_generation"],
+        },
+        "resume": result("resume", "RESUMED"),
+        "rollback": result("rollback", "FAILED" if rollback_fail else "ROLLED_BACK"),
+    }
+
+
+def test_refresh_transaction_orders_full_fleet_and_is_idempotent(tmp_path):
+    events = []
+    request = _refresh_request()
+    providers = _refresh_providers(events)
+    receipt = run_fleet_refresh_transaction(
+        request, receipt_root=tmp_path / "receipts", lease_path=tmp_path / "fleet.lock", **providers,
+    )
+    assert receipt["status"] == "VERIFIED_AND_RESUMED"
+    assert events == ["checkpoint", "quiesce", "rebuild", "activate", "restart", "health", "verify:codex", "verify:claude", "resume"]
+    again = run_fleet_refresh_transaction(
+        request, receipt_root=tmp_path / "receipts", lease_path=tmp_path / "fleet.lock", **providers,
+    )
+    assert again == receipt
+    assert events.count("checkpoint") == 1
+
+
+def test_refresh_failure_rolls_whole_fleet_back_and_resumes_predecessor(tmp_path):
+    events = []
+    receipt = run_fleet_refresh_transaction(
+        _refresh_request(), receipt_root=tmp_path / "receipts", lease_path=tmp_path / "fleet.lock",
+        **_refresh_providers(events, fail="restart"),
+    )
+    assert receipt["status"] == "FAILED_ROLLED_BACK"
+    assert events[-2:] == ["rollback", "resume"]
+    assert receipt["failure"] == "restart failed"
+
+
+def test_refresh_rollback_failure_leaves_fleet_quiesced(tmp_path):
+    receipt = run_fleet_refresh_transaction(
+        _refresh_request(), receipt_root=tmp_path / "receipts", lease_path=tmp_path / "fleet.lock",
+        **_refresh_providers([], fail="health", rollback_fail=True),
+    )
+    assert receipt["status"] == "FAILED_QUIESCED"
+    assert receipt["rollback"]["status"] == "FAILED"
+
+
+def test_refresh_refuses_tmp_receipts_and_incomplete_checkpoint(tmp_path):
+    with pytest.raises(FleetActivationError, match="outside /tmp"):
+        run_fleet_refresh_transaction(
+            _refresh_request(), receipt_root="/tmp/tgw", lease_path=tmp_path / "fleet.lock",
+            **_refresh_providers([]),
+        )
+    providers = _refresh_providers([])
+    providers["checkpoint"] = lambda _: {"status": "CHECKPOINTED"}
+    receipt = run_fleet_refresh_transaction(
+        _refresh_request(idempotency_key="incomplete"), receipt_root=tmp_path / "receipts",
+        lease_path=tmp_path / "fleet.lock", **providers,
+    )
+    assert receipt["status"] == "FAILED_ROLLED_BACK"
+    assert "omits live lifecycle state" in receipt["failure"]
 
 
 def test_configuration_and_materialization_are_receipt_backed_and_rollbackable(tmp_path):
