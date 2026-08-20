@@ -5,6 +5,8 @@ import io
 import json
 import os
 import stat
+import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -106,6 +108,19 @@ def test_bootstrap_selection_requires_an_absent_current_generation(tmp_path: Pat
     assert current_generation(root) == "bootstrap-a"
     with pytest.raises(ReleaseError, match="current generation changed"):
         select(root, "bootstrap-a", expected_current=None, operation_id="bootstrap-b")
+
+
+def test_public_installer_refuses_missing_or_mismatched_admission(tmp_path: Path) -> None:
+    archive = tmp_path / "candidate.tar.gz"
+    digest = _archive(archive, {"src/tgw/example.py": b"candidate\n"}, commit=COMMIT_A)
+    command = [
+        sys.executable, "-m", "tgw.release_installer", "--root", str(tmp_path / "root"), "install",
+        "--archive", str(archive), "--generation", "candidate", "--commit", COMMIT_A, "--tree", TREE,
+        "--archive-sha256", digest, "--expected-current", "none", "--operation-id", "candidate",
+    ]
+    result = subprocess.run(command, text=True, capture_output=True, env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")})
+    assert result.returncode != 0
+    assert not (tmp_path / "root" / "current").exists()
 
 
 @pytest.mark.parametrize("unsafe", ["../escape", "/absolute"])

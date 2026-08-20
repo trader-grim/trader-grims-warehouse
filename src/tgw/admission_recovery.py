@@ -110,6 +110,41 @@ def compile_release_admission(*, request: Mapping[str, Any]) -> dict[str, Any]:
     return {**unsigned, "receipt_hash": _hash(unsigned)}
 
 
+def validate_release_admission(
+    receipt: Mapping[str, Any], *, candidate_commit: str, candidate_tree: str,
+) -> dict[str, Any]:
+    """Verify the one immutable W16 receipt that may select a release.
+
+    This is deliberately separate from compilation: a release boundary must
+    never trust a caller's remembered ``ADMITTED`` result or a mutable file
+    that was not re-hashed at selection time.
+    """
+    value = _mapping(
+        receipt,
+        {"schema", "request_id", "candidate", "plan", "environment", "status", "reasons", "activation", "receipt_hash"},
+        "admission receipt",
+    )
+    if value["schema"] != "tgw-w16-release-admission-receipt/v1":
+        raise AdmissionRecoveryError("admission receipt schema is invalid")
+    unsigned = dict(value)
+    claimed = unsigned.pop("receipt_hash")
+    if claimed != _hash(unsigned):
+        raise AdmissionRecoveryError("admission receipt hash mismatch")
+    if value["activation"] != "declarative-only" or value["status"] != "ADMITTED" or value["reasons"] != []:
+        raise AdmissionRecoveryError("admission receipt does not authorize selection")
+    candidate = _mapping(value["candidate"], {"commit", "tree"}, "admission candidate")
+    if candidate["commit"] != _commit(candidate_commit, "candidate commit"):
+        raise AdmissionRecoveryError("admission receipt candidate commit mismatch")
+    if candidate["tree"] != _commit(candidate_tree, "candidate tree"):
+        raise AdmissionRecoveryError("admission receipt candidate tree mismatch")
+    _mapping(value["plan"], {"commit", "solution_hash"}, "admission Plan")
+    _mapping(value["environment"], {"catalog_hash", "receipt_hash"}, "admission environment")
+    _exact_hash(value["plan"]["solution_hash"], "admission Plan solution")
+    _exact_hash(value["environment"]["catalog_hash"], "admission environment catalog")
+    _exact_hash(value["environment"]["receipt_hash"], "admission environment receipt")
+    return value
+
+
 def compile_recovery_invocation(*, request: Mapping[str, Any], observed_at: str) -> dict[str, Any]:
     """Return a W17 platform-only recovery decision, never an effect."""
     value = _mapping(request, {"schema", "recovery_id", "operator", "plan", "expiry", "effects", "receipt_sink", "candidate_commit"}, "recovery request")

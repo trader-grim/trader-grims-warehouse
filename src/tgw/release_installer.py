@@ -20,6 +20,8 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Mapping
 
+from tgw.admission_recovery import AdmissionRecoveryError, validate_release_admission
+
 SCHEMA = "tgw-release-manifest-v1"
 RECEIPT_SCHEMA = "tgw-immutable-release-selection-v1"
 RUNTIME_SCHEMA = "tgw-release-runtime-files-v1"
@@ -558,6 +560,7 @@ def main() -> int:
     install.add_argument("--archive", type=Path, required=True)
     for name in ("generation", "commit", "tree", "archive-sha256", "expected-current", "operation-id"):
         install.add_argument(f"--{name}", required=True)
+    install.add_argument("--admission-receipt", type=Path, required=True)
     check = commands.add_parser("verify")
     check.add_argument("generation")
     commands.add_parser("recover")
@@ -568,6 +571,16 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "install":
+            try:
+                admission = json.loads(args.admission_receipt.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ReleaseError("admission receipt is unavailable or invalid") from exc
+            try:
+                validate_release_admission(
+                    admission, candidate_commit=args.commit, candidate_tree=args.tree,
+                )
+            except AdmissionRecoveryError as exc:
+                raise ReleaseError(f"release admission refused: {exc}") from exc
             manifest = materialize(
                 args.root, args.archive, generation=args.generation, commit=args.commit,
                 tree=args.tree, archive_sha256=args.archive_sha256,

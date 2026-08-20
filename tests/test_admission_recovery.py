@@ -1,6 +1,11 @@
 import pytest
 
-from tgw.admission_recovery import AdmissionRecoveryError, compile_recovery_invocation, compile_release_admission
+from tgw.admission_recovery import (
+    AdmissionRecoveryError,
+    compile_recovery_invocation,
+    compile_release_admission,
+    validate_release_admission,
+)
 
 HASH = "sha256:" + "a" * 64
 COMMIT = "b" * 40
@@ -35,6 +40,16 @@ def recovery():
 def test_admission_is_deterministic_and_declarative():
     assert compile_release_admission(request=admission()) == compile_release_admission(request=admission())
     assert compile_release_admission(request=admission())["status"] == "ADMITTED"
+
+
+def test_admitted_receipt_is_rehashed_and_exactly_candidate_bound():
+    receipt = compile_release_admission(request=admission())
+    assert validate_release_admission(receipt, candidate_commit=COMMIT, candidate_tree=COMMIT) == receipt
+    with pytest.raises(AdmissionRecoveryError, match="candidate tree mismatch"):
+        validate_release_admission(receipt, candidate_commit=COMMIT, candidate_tree="c" * 40)
+    receipt["status"] = "REFUSED"
+    with pytest.raises(AdmissionRecoveryError, match="hash mismatch"):
+        validate_release_admission(receipt, candidate_commit=COMMIT, candidate_tree=COMMIT)
 
 
 @pytest.mark.parametrize(
