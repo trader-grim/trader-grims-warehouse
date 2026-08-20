@@ -11,7 +11,7 @@ WorkingDirectory=/opt/TGW/tgw-lib
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONPATH=/opt/TGW/tgw-lib/current/src
-Environment=TGW_CONFIG=/opt/TGW/tgw-lib/config/tgw-controller-config.json
+Environment=TGW_CONFIG=/opt/TGW/tgw-lib/config/tgw-governed-actor-control.json
 Environment=TGW_ACTOR_FLEET_HOST=100.68.223.70
 Environment=TGW_ACTOR_FLEET_PORT=7556
 Environment=TMPDIR=/opt/TGW/tgw-lib/var/fleet
