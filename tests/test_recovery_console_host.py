@@ -75,6 +75,10 @@ def test_standalone_recovery_host_claims_before_fixed_provider(tmp_path, monkeyp
     }
     first = client.post("/api/platform-recovery/repair-one/decisions", json=body, headers={"X-TGW-Recovery-Token": "secret"})
     assert first.status_code == 200 and len(calls) == 1
+    assert calls[0]["recovery"]["candidate_commit"] == "1" * 40
+    assert calls[0]["recovery"]["plan"] == {
+        "commit": "f" * 40, "solution_hash": "sha256:" + "a" * 64,
+    }
     second = client.post("/api/platform-recovery/repair-one/decisions", json=body, headers={"X-TGW-Recovery-Token": "secret"})
     assert second.status_code == 409 and len(calls) == 1
 

@@ -353,14 +353,38 @@ def _dynamic_surface_bindings(
 
     contracts = {"plan-authority-decision": {"decisions": ["approve", "hold", "reconcile"]}}
 
+    def retain_surface(root: Path, surface: Mapping[str, Any]) -> dict[str, str]:
+        surface_hash = surface.get("surface_hash")
+        if not isinstance(surface_hash, str) or _SOLUTION_HASH.fullmatch(surface_hash) is None:
+            raise ValueError("dynamic surface identity is invalid")
+        path = root / (surface_hash.removeprefix("sha256:") + ".surface.json")
+        encoded = json.dumps(surface, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() + b"\n"
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+        except FileExistsError:
+            if path.is_symlink() or path.read_bytes() != encoded:
+                raise ValueError("dynamic surface retention identity collision")
+        else:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        return {"path": str(path), "surface_hash": surface_hash}
+
     def load(request_id: str) -> Mapping[str, Any]:
-        renderer, _root = configuration()
+        renderer, root = configuration()
         value, _card_hash, _authority_hash = proposal(request_id)
-        return compile_dynamic_surface(
+        surface = compile_dynamic_surface(
             proposal=value, handler_registry=contracts,
             renderer_version=renderer,
             observed_at=datetime.now(timezone.utc).isoformat(),
         )
+        return {**surface, "retention": retain_surface(root, surface)}
 
     def submit(request_id: str, body: Mapping[str, Any], operator: str) -> Mapping[str, Any]:
         renderer, root = configuration()
@@ -370,6 +394,7 @@ def _dynamic_surface_bindings(
             renderer_version=renderer,
             observed_at=datetime.now(timezone.utc).isoformat(),
         )
+        retain_surface(root, surface)
         submission = dict(body)
         submission["operator"] = operator
 

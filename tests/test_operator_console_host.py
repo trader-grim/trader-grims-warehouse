@@ -171,6 +171,9 @@ def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_pat
     store.decide = lambda decision: recorded.append(decision) or {"decision_id": decision.decision_id}
     load, submit = _dynamic_surface_bindings(store, lambda: config)
     surface = load(row["request_id"])
+    assert Path(surface["retention"]["path"]).name.endswith(".surface.json")
+    retained = json.loads(Path(surface["retention"]["path"]).read_text())
+    assert retained["surface_hash"] == surface["surface_hash"]
     receipt = submit(row["request_id"], {
         "schema": "tgw-dynamic-surface-submission/v1",
         "surface_hash": surface["surface_hash"], "action_id": "approve",
@@ -179,7 +182,7 @@ def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_pat
     }, "operator:fixture")
     assert recorded[0].kind.value == "approve"
     assert receipt["outcome"]["decision_id"] == recorded[0].decision_id
-    assert len(list(receipt_root.glob("*.json"))) == 2
+    assert len(list(receipt_root.glob("*.json"))) == 3
     with pytest.raises(ValueError, match="replayed or is already in progress"):
         submit(row["request_id"], {
             "schema": "tgw-dynamic-surface-submission/v1",

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
@@ -22,6 +23,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 import uvicorn
 from fastapi import FastAPI
 
+from tgw.admission_recovery import compile_recovery_invocation
 from tgw.config import DEFAULT_CONFIG, load_operational_config
 from tgw.recovery_console import RecoveryConsoleMount, create_recovery_console_router
 
@@ -192,13 +194,41 @@ def configured_recovery_mount(config: Mapping[str, Any]) -> RecoveryConsoleMount
         identity = _hash({"refusal": refusal, "time_ns": time.time_ns()})
         _persist_exclusive(refusal_root, identity.removeprefix("sha256:") + ".json", refusal)
 
+    def invoke_provider(invocation: Mapping[str, Any]) -> Mapping[str, Any]:
+        recovery_id = invocation.get("request_id")
+        if not isinstance(recovery_id, str):
+            raise RecoveryHostError("recovery provider request identity is invalid")
+        card = load_card(recovery_id)
+        request = card.get("request")
+        if not isinstance(request, Mapping):
+            raise RecoveryHostError("recovery provider card binding is invalid")
+        observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        compiled = compile_recovery_invocation(request=request, observed_at=observed_at)
+        if (
+            compiled.get("status") != "PREPARED"
+            or invocation.get("operator") != compiled.get("operator")
+            or invocation.get("decision") not in compiled.get("effects", [])
+        ):
+            raise RecoveryHostError("recovery provider invocation differs from the current card")
+        return provider.invoke({
+            **dict(invocation),
+            "recovery": {
+                "plan": compiled["plan"],
+                "candidate_commit": compiled["candidate_commit"],
+                "effects": compiled["effects"],
+                "expiry": compiled["expiry"],
+                "receipt_sink": compiled["receipt_sink"],
+                "invocation_receipt_hash": compiled["receipt_hash"],
+            },
+        })
+
     return RecoveryConsoleMount(
         token_sha256=raw["token_sha256"], receipt_sink_hash=raw["receipt_sink_hash"],
         load_card=load_card, renderer_version=lambda: raw["renderer_sha256"],
         handler_contracts={"platform-recovery": {"decisions": [
             "diagnose-platform", "rollback-platform", "repair-tool-environment",
         ]}},
-        handlers={"platform-recovery": provider.invoke}, persist_receipt=persist_receipt,
+        handlers={"platform-recovery": invoke_provider}, persist_receipt=persist_receipt,
         persist_refusal=persist_refusal, claim_submission=claim,
     )
 
