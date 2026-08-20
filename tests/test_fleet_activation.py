@@ -16,7 +16,7 @@ def test_configuration_and_materialization_are_receipt_backed_and_rollbackable(t
     applied, rolled_back = [], []
     receipt = apply_fleet_configuration(
         {first: {"expected_sha256": _hash(b"old-one"), "desired": b"new-one"}, second: {"expected_sha256": _hash(b"old-two"), "desired": b"new-two"}},
-        materialize=lambda: applied.append(True) or {"schema": "materialization", "rollback_journal": []},
+        materialize=lambda: applied.append(True) or {"schema": "materialization", "status": "MATERIALIZED_NOT_ACTIVATED", "rollback_journal": []},
         rollback_materialization=lambda value: rolled_back.append(value),
     )
     assert receipt["status"] == "CONFIGURED_MATERIALIZED_NOT_SERVICE_ACTIVATED"
@@ -32,6 +32,7 @@ def test_changed_preimage_fails_closed_without_writes(tmp_path):
     with pytest.raises(FleetActivationError, match="preimage changed"):
         apply_fleet_configuration({config: {"expected_sha256": _hash(b"forged"), "desired": b"new"}}, materialize=lambda: {}, rollback_materialization=lambda _: None)
     assert config.read_bytes() == b"actual"
+    assert not list(tmp_path.glob("*.tgw-w18-next"))
 
 
 def test_materialization_failure_restores_configurations(tmp_path):

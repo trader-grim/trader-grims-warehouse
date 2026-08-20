@@ -52,6 +52,7 @@ def apply_fleet_configuration(
         normalized.append((path, expected, desired))
 
     backups: list[tuple[Path, Path]] = []
+    staged_paths: list[Path] = []
     receipt_files: list[dict[str, str]] = []
     materialization: dict[str, Any] | None = None
     try:
@@ -64,14 +65,18 @@ def apply_fleet_configuration(
                 handle.write(desired)
                 handle.flush()
                 os.fsync(handle.fileno())
+            staged_paths.append(staged)
             # Reject a replacement after preflight, before moving its preimage.
             if _sha256(path.read_bytes()) != expected:
                 raise FleetActivationError(f"configuration preimage changed: {path}")
             os.replace(path, backup)
             backups.append((path, backup))
             os.replace(staged, path)
+            staged_paths.remove(staged)
             receipt_files.append({"path": str(path), "previous_sha256": expected, "current_sha256": _sha256(desired), "rollback": str(backup)})
         materialization = materialize()
+        if materialization.get("status") != "MATERIALIZED_NOT_ACTIVATED":
+            raise FleetActivationError("adapter materialization was not applied")
     except Exception:
         if materialization is not None:
             rollback_materialization(materialization)
@@ -80,6 +85,9 @@ def apply_fleet_configuration(
                 path.unlink()
             if backup.exists() and not backup.is_symlink():
                 os.replace(backup, path)
+        for staged in staged_paths:
+            if staged.exists() and not staged.is_symlink():
+                staged.unlink()
         raise
     return {
         "schema": "tgw-w18-fleet-configuration-transaction/v1",
