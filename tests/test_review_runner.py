@@ -125,6 +125,15 @@ def handoff(source):
     )
 
 
+def environment_preflight_receipt(bound):
+    return {
+        "schema": "tgw-environment-preflight-receipt/v1",
+        "result": "PASS",
+        "catalog_sha256": bound["card"]["bindings"]["execution_environment"]["hash"],
+        "actor": "codex", "profile": "development", "attempt_id": "unit", "tools": [],
+    }
+
+
 class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
     """Unit seam for non-review role selection; live attestation uses HTTP."""
 
@@ -194,7 +203,8 @@ def backend(path, verdict="PASS", mutate=False):
 def test_isolated_review_pass_establishes_reviewed_without_mutating_source(tmp_path):
     source = snapshot(tmp_path)
     before = snapshot_hash(source)
-    result = run_review(handoff(source), [backend(tmp_path / "review-provider")])
+    bound = handoff(source)
+    result = run_review(bound, [backend(tmp_path / "review-provider")], environment_preflight_receipt=environment_preflight_receipt(bound))
 
     assert result["outcome"] == "satisfied"
     assert result["established_conditions"] == ["reviewed"]
@@ -240,7 +250,8 @@ def test_bwrap_translates_snapshot_path_and_clears_ambient_environment(tmp_path,
         "print(json.dumps({'schema':'tgw-code-review/v1','verdict':'PASS' if ok else 'FAIL','snapshot_hash':r['snapshot_hash'],'summary':'contract checked','findings':[] if ok else [finding]}))\n"
     )
     provider.chmod(0o755)
-    assert run_review(handoff(source), [str(provider)])["outcome"] == "satisfied"
+    bound = handoff(source)
+    assert run_review(bound, [str(provider)], environment_preflight_receipt=environment_preflight_receipt(bound))["outcome"] == "satisfied"
 
 
 def test_candidate_cannot_supply_provider_imports_or_cwd_modules(tmp_path):
@@ -251,15 +262,17 @@ def test_candidate_cannot_supply_provider_imports_or_cwd_modules(tmp_path):
         "raise RuntimeError('candidate PYTHONPATH import')\n"
     )
 
+    bound = handoff(source)
     assert run_review(
-        handoff(source), [backend(tmp_path / "trusted-review-provider")]
+        bound, [backend(tmp_path / "trusted-review-provider")], environment_preflight_receipt=environment_preflight_receipt(bound)
     )["outcome"] == "satisfied"
 
 
 def test_failed_semantic_review_never_establishes_reviewed(tmp_path):
     source = snapshot(tmp_path)
+    bound = handoff(source)
     result = run_review(
-        handoff(source), [backend(tmp_path / "review-provider", verdict="FAIL")]
+        bound, [backend(tmp_path / "review-provider", verdict="FAIL")], environment_preflight_receipt=environment_preflight_receipt(bound)
     )
 
     assert result["outcome"] == "failed"
@@ -271,8 +284,9 @@ def test_provider_mutation_is_confined_and_rejected(tmp_path):
     source = snapshot(tmp_path)
     before = (source / "app.py").read_text()
     try:
+        bound = handoff(source)
         run_review(
-            handoff(source), [backend(tmp_path / "review-provider", mutate=True)]
+            bound, [backend(tmp_path / "review-provider", mutate=True)], environment_preflight_receipt=environment_preflight_receipt(bound)
         )
     except ValueError as exc:
         assert "Read-only file system" in str(exc)
@@ -299,7 +313,8 @@ def test_review_provider_has_no_network_or_host_secret_access(tmp_path):
         "print(json.dumps({'schema':'tgw-code-review/v1','verdict':'PASS' if ok else 'FAIL','snapshot_hash':r['snapshot_hash'],'summary':'bounded','findings':[] if ok else [finding]}))\n"
     )
     provider.chmod(0o755)
-    assert run_review(handoff(source), [str(provider)])["outcome"] == "satisfied"
+    bound = handoff(source)
+    assert run_review(bound, [str(provider)], environment_preflight_receipt=environment_preflight_receipt(bound))["outcome"] == "satisfied"
 
 
 def test_expired_or_incomplete_handoff_never_launches_provider(tmp_path):
@@ -313,7 +328,7 @@ def test_expired_or_incomplete_handoff_never_launches_provider(tmp_path):
     unsigned.pop("handoff_hash")
     value["handoff_hash"] = "sha256:" + __import__("hashlib").sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     with pytest.raises(ValueError, match="not READY"):
-        run_review(value, [backend(tmp_path / "review-provider")])
+        run_review(value, [backend(tmp_path / "review-provider")], environment_preflight_receipt=environment_preflight_receipt(value))
 
 
 def test_hung_provider_is_terminated_at_bounded_timeout(tmp_path):
@@ -322,7 +337,8 @@ def test_hung_provider_is_terminated_at_bounded_timeout(tmp_path):
     provider.write_text("#!/usr/bin/python3\nimport time\ntime.sleep(30)\n")
     provider.chmod(0o755)
     with pytest.raises(ValueError, match="bounded timeout"):
-        run_review(handoff(source), [str(provider)], timeout_seconds=0.05)
+        bound = handoff(source)
+        run_review(bound, [str(provider)], timeout_seconds=0.05, environment_preflight_receipt=environment_preflight_receipt(bound))
 
 
 def test_attested_fake_broker_contract_binds_runtime_credential_and_audit(tmp_path):
@@ -357,9 +373,11 @@ def test_attested_fake_broker_contract_binds_runtime_credential_and_audit(tmp_pa
         "sessions": [],
     }
     receipt = {**receipt_unsigned, "receipt_hash": "sha256:" + hashlib.sha256(json.dumps(receipt_unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+    bound = handoff(source)
     result = run_review(
-        handoff(source),
+        bound,
         [str(provider_path)],
+        environment_preflight_receipt=environment_preflight_receipt(bound),
         network_egress=True,
         credential_file=credential,
         tool_root=tmp_path,
@@ -384,7 +402,13 @@ def test_network_review_rejects_unbound_or_denied_attestation(tmp_path):
         "credential_sha256": digest(credential),
     }
     with pytest.raises(ValueError, match="attestation fields"):
-        run_review(handoff(source), [str(provider_path)], network_egress=True, credential_file=credential, tool_root=tmp_path, egress_policy=policy)
+        bound = handoff(source)
+        run_review(
+            bound, [str(provider_path)],
+            environment_preflight_receipt=environment_preflight_receipt(bound),
+            network_egress=True, credential_file=credential, tool_root=tmp_path,
+            egress_policy=policy,
+        )
 
 
 def adapters():
@@ -470,7 +494,7 @@ def test_unattested_isolated_review_cannot_admit_even_with_distinct_context(tmp_
     assert providers[review["selected_provider"]]["vendor_family"] == "codex"
     assert implementation["execution_identity"] != review["execution_identity"]
     assert review["status"] == "FAIL", json.dumps(review, indent=2)
-    assert "did not return a service-issued retrieval attestation" in review["artifacts"][-1]["detail"]
+    assert "environment preflight receipt is invalid" in review["artifacts"][-1]["detail"]
     assert admission_gate([implementation, review, controller])["allowed"] is False
 
 

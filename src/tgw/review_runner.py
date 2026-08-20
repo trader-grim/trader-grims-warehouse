@@ -55,6 +55,19 @@ def _snapshot_path(card: Mapping[str, Any]) -> tuple[Path, str]:
     return path, expected
 
 
+def _validate_environment_preflight(invocation: Mapping[str, Any], receipt: Mapping[str, Any] | None) -> None:
+    """Require the W15 flake receipt before constructing any provider command."""
+    if not isinstance(receipt, Mapping) or set(receipt) != {
+        "schema", "result", "catalog_sha256", "actor", "profile", "attempt_id", "tools",
+    }:
+        raise ReviewRunnerError("environment preflight receipt is invalid")
+    if receipt["schema"] != "tgw-environment-preflight-receipt/v1" or receipt["result"] != "PASS":
+        raise ReviewRunnerError("environment preflight did not pass")
+    binding = invocation.get("execution_environment")
+    if not isinstance(binding, Mapping) or receipt["catalog_sha256"] != binding.get("hash"):
+        raise ReviewRunnerError("environment preflight binding mismatch")
+
+
 def _sandbox_command(
     provider_argv: list[str],
     snapshot: Path,
@@ -112,6 +125,7 @@ def run_review(
     handoff: Mapping[str, Any],
     provider_argv: list[str],
     *,
+    environment_preflight_receipt: Mapping[str, Any] | None = None,
     timeout_seconds: float = 300,
     now: datetime | None = None,
     network_egress: bool = False,
@@ -129,6 +143,7 @@ def run_review(
         invocation = verify_for_launcher(handoff, now=now or datetime.now(timezone.utc))
     except HandoffError as exc:
         raise ReviewRunnerError(f"invalid Promptcraft handoff: {exc}") from exc
+    _validate_environment_preflight(invocation, environment_preflight_receipt)
     card = handoff.get("card")
     if not isinstance(card, Mapping) or card.get("role") != "independent-review":
         raise ReviewRunnerError("review runner received another role")
