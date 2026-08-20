@@ -652,6 +652,21 @@ def test_provider_neutral_governed_review_captures_exact_execution(tmp_path):
     execution = _run(*values)
     assert validate_execution(execution)["review"]["verdict"] == "PASS"
     assert execution["provider"] == "claude"
+    assert execution["environment_preflight_receipt"] == {
+        "schema": "tgw-environment-preflight-receipt/v1", "result": "PASS",
+        "catalog_sha256": execution["bindings"]["execution_environment"]["hash"],
+        "actor": "claude", "profile": "development", "attempt_id": "unit", "tools": [],
+    }
+
+
+def test_governed_execution_rejects_retained_preflight_substitution(tmp_path):
+    execution = _run(*_fixture(tmp_path))
+    altered = json.loads(json.dumps(execution))
+    altered["environment_preflight_receipt"]["catalog_sha256"] = "sha256:" + "0" * 64
+    unsigned = {name: value for name, value in altered.items() if name != "execution_hash"}
+    altered["execution_hash"] = _hash(unsigned)
+    with pytest.raises(ReviewRunnerError, match="environment preflight binding mismatch"):
+        validate_execution(altered)
 
 
 def test_root_request_path_has_an_explicit_console_entrypoint():

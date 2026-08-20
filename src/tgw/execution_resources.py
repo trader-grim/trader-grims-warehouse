@@ -76,6 +76,32 @@ class ResourceVerificationError(ValueError):
     """A required registered resource was absent, stale, or substituted."""
 
 
+ENVIRONMENT_PREFLIGHT_RECEIPT_SCHEMA = "tgw-environment-preflight-receipt/v1"
+_ENVIRONMENT_PREFLIGHT_RECEIPT_FIELDS = frozenset(
+    {"schema", "result", "catalog_sha256", "actor", "profile", "attempt_id", "tools"}
+)
+
+
+def validate_environment_preflight_receipt(
+    execution_environment: Mapping[str, Any], receipt: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Validate the W15 launcher-produced receipt at every review boundary.
+
+    The receipt is authenticated by the protected launcher that owns the
+    card-bound environment resource; this pure validator deliberately does not
+    invent a second credential or private key in source.  It preserves the
+    exact verified bytes for immutable execution evidence.
+    """
+
+    if not isinstance(receipt, Mapping) or set(receipt) != _ENVIRONMENT_PREFLIGHT_RECEIPT_FIELDS:
+        raise ResourceVerificationError("environment preflight receipt is invalid")
+    if receipt.get("schema") != ENVIRONMENT_PREFLIGHT_RECEIPT_SCHEMA or receipt.get("result") != "PASS":
+        raise ResourceVerificationError("environment preflight did not pass")
+    if not isinstance(execution_environment, Mapping) or receipt.get("catalog_sha256") != execution_environment.get("hash"):
+        raise ResourceVerificationError("environment preflight binding mismatch")
+    return dict(receipt)
+
+
 def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 

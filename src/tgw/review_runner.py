@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
 
+from tgw.execution_resources import ResourceVerificationError, validate_environment_preflight_receipt
 from tgw.review_broker_supervisor import run_with_broker
 from tgw.review_contract import ReviewRunnerError
 from tgw.review_contract import validate_review_report as _validate_report
@@ -57,15 +58,10 @@ def _snapshot_path(card: Mapping[str, Any]) -> tuple[Path, str]:
 
 def _validate_environment_preflight(invocation: Mapping[str, Any], receipt: Mapping[str, Any] | None) -> None:
     """Require the W15 flake receipt before constructing any provider command."""
-    if not isinstance(receipt, Mapping) or set(receipt) != {
-        "schema", "result", "catalog_sha256", "actor", "profile", "attempt_id", "tools",
-    }:
-        raise ReviewRunnerError("environment preflight receipt is invalid")
-    if receipt["schema"] != "tgw-environment-preflight-receipt/v1" or receipt["result"] != "PASS":
-        raise ReviewRunnerError("environment preflight did not pass")
-    binding = invocation.get("execution_environment")
-    if not isinstance(binding, Mapping) or receipt["catalog_sha256"] != binding.get("hash"):
-        raise ReviewRunnerError("environment preflight binding mismatch")
+    try:
+        validate_environment_preflight_receipt(invocation.get("execution_environment"), receipt)
+    except ResourceVerificationError as exc:
+        raise ReviewRunnerError(str(exc)) from exc
 
 
 def _sandbox_command(

@@ -33,6 +33,7 @@ from tgw.execution_resources import (
     ResourceVerificationError,
     content_hash,
     resource_service_descriptor_hash,
+    validate_environment_preflight_receipt,
     validate_harness_retrieval_attestation,
 )
 from tgw.review_contract import ReviewRunnerError
@@ -57,15 +58,10 @@ _MAX_CONTEXT_GRANT_WINDOW_SECONDS = 900
 
 
 def _validate_environment_preflight(invocation: Mapping[str, Any], receipt: Mapping[str, Any] | None) -> None:
-    if not isinstance(receipt, Mapping) or set(receipt) != {
-        "schema", "result", "catalog_sha256", "actor", "profile", "attempt_id", "tools",
-    }:
-        raise ReviewRunnerError("environment preflight receipt is invalid")
-    if receipt["schema"] != "tgw-environment-preflight-receipt/v1" or receipt["result"] != "PASS":
-        raise ReviewRunnerError("environment preflight did not pass")
-    binding = invocation.get("execution_environment")
-    if not isinstance(binding, Mapping) or receipt["catalog_sha256"] != binding.get("hash"):
-        raise ReviewRunnerError("environment preflight binding mismatch")
+    try:
+        validate_environment_preflight_receipt(invocation.get("execution_environment"), receipt)
+    except ResourceVerificationError as exc:
+        raise ReviewRunnerError(str(exc)) from exc
 
 
 def _review_execution_identity(challenge: str, uid: int, gid: int) -> str:
@@ -527,7 +523,7 @@ def validate_execution(value: Mapping[str, Any]) -> dict[str, Any]:
         "promptcraft_receipt_hash", "resource_receipt_hash", "source",
         "source_protection", "plan_commit", "bindings",
         "provider_identity", "invocation", "lifecycle", "output",
-        "registered_resource_retrieval", "review",
+        "registered_resource_retrieval", "environment_preflight_receipt", "review",
         "execution_hash",
     }
     if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != EXECUTION_SCHEMA:
@@ -681,6 +677,12 @@ def validate_execution(value: Mapping[str, Any]) -> dict[str, Any]:
         handoff_hash=value["handoff_hash"],
         resource_receipt_hash=value["resource_receipt_hash"],
     )
+    try:
+        validate_environment_preflight_receipt(
+            bindings["execution_environment"], value.get("environment_preflight_receipt"),
+        )
+    except ResourceVerificationError as exc:
+        raise ReviewRunnerError(str(exc)) from exc
     if (
         registered_retrieval["skill_contract_hash"] != invocation["skill_contract_hash"]
         or registered_retrieval["context_grant_hash"]
@@ -846,6 +848,9 @@ def run_governed_review(
     except HandoffError as exc:
         raise ReviewRunnerError(f"invalid governed review handoff: {exc}") from exc
     _validate_environment_preflight(invocation, environment_preflight_receipt)
+    validated_environment_preflight = validate_environment_preflight_receipt(
+        invocation["execution_environment"], environment_preflight_receipt,
+    )
     card = handoff["card"]
     receiver_identity = f"{provider}:tgw-review"
     if invocation["receiver_identity"] != receiver_identity or card["selected_provider"] != provider:
@@ -1139,6 +1144,7 @@ def run_governed_review(
             "stdout_size": len(stdout), "stderr_size": len(stderr),
         },
         "registered_resource_retrieval": registered_retrieval,
+        "environment_preflight_receipt": validated_environment_preflight,
         "review": review,
     }
     result = {**unsigned, "execution_hash": _hash(unsigned)}
