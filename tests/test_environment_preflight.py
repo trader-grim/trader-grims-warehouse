@@ -31,6 +31,16 @@ def test_preflight_is_deterministic_and_observes_declared_binary(tmp_path: Path)
     assert first["result"] == "PASS" and first["tools"][0]["observed_sha256"].startswith("sha256:")
 
 
+def test_preflight_accepts_the_extended_v2_catalog(tmp_path: Path):
+    executable = tmp_path / ("a" * 32 + "-store") / "tool"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n")
+    os.chmod(executable, 0o555)
+    value = catalog(executable)
+    value["schema"] = "tgw-execution-environment-catalog/v2"
+    assert preflight(catalog=value, actor="codex", profile="development", attempt_id="attempt-1")["result"] == "PASS"
+
+
 @pytest.mark.parametrize("mutation", ["disabled", "missing", "symlink"])
 def test_preflight_refuses_nonready_or_unavailable_tool(tmp_path: Path, mutation: str):
     executable = tmp_path / ("a" * 32 + "-store") / "tool"

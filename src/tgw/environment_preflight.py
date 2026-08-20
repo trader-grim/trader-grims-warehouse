@@ -15,7 +15,10 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-SCHEMA = "tgw-execution-environment-catalog/v1"
+SCHEMAS = {
+    "tgw-execution-environment-catalog/v1",
+    "tgw-execution-environment-catalog/v2",
+}
 RECEIPT_SCHEMA = "tgw-environment-preflight-receipt/v1"
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
@@ -50,7 +53,7 @@ def _identifier(value: str, label: str) -> str:
 
 def preflight(*, catalog: Mapping[str, Any], actor: str, profile: str, attempt_id: str) -> dict[str, Any]:
     """Verify one catalog-defined environment without executing role work."""
-    if not isinstance(catalog, Mapping) or catalog.get("schema") != SCHEMA:
+    if not isinstance(catalog, Mapping) or catalog.get("schema") not in SCHEMAS:
         raise EnvironmentPreflightError("environment catalog schema is invalid")
     actors, profiles = catalog.get("actors"), catalog.get("profiles")
     if not isinstance(actors, Mapping) or not isinstance(profiles, Mapping):

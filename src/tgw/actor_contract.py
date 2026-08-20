@@ -11,7 +11,10 @@ from typing import Any, Mapping
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-CATALOG_SCHEMA = "tgw-execution-environment-catalog/v1"
+CATALOG_SCHEMAS = {
+    "tgw-execution-environment-catalog/v1",
+    "tgw-execution-environment-catalog/v2",
+}
 CONTRACT_SCHEMA = "tgw-actor-contract-receipt/v1"
 _HASH = re.compile(r"sha256:[0-9a-f]{64}$")
 _SRI_HASH = re.compile(r"sha256-[A-Za-z0-9+/]{43}=$")
@@ -90,7 +93,7 @@ def _strings(value: Any, label: str) -> list[str]:
 
 def _catalog(raw: Mapping[str, Any]) -> dict[str, Any]:
     catalog = dict(raw)
-    if catalog.get("schema") != CATALOG_SCHEMA:
+    if catalog.get("schema") not in CATALOG_SCHEMAS:
         raise ActorContractError("unsupported environment catalog")
     if not isinstance(catalog.get("actors"), dict) or not isinstance(catalog.get("profiles"), dict):
         raise ActorContractError("catalog actor or profile registry is invalid")
@@ -154,6 +157,18 @@ def compile_actor_contract(
     declared_actor = verified["actors"][actor]
     declared_profile = verified["profiles"][profile]
     diagnostics: list[dict[str, str]] = []
+    if verified["schema"].endswith("/v2"):
+        qualified = declared_actor.get("qualified_roles")
+        if (
+            declared_actor.get("role") != "execution-provider"
+            or not isinstance(qualified, list)
+            or not qualified
+            or not all(role in {
+                "implementation", "controller-verification", "independent-review", "release-operation",
+            } for role in qualified)
+            or len(qualified) != len(set(qualified))
+        ):
+            raise ActorContractError("catalog actor role qualification is invalid")
     if not declared_actor.get("enabled"):
         diagnostics.append({"code": "ACTOR_DISABLED", "detail": actor})
     if profile not in declared_actor.get("permitted_profiles", []):

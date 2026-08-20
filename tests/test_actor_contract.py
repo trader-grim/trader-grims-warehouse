@@ -76,6 +76,19 @@ def test_contract_accepts_nix_bare_hex_flake_lock_hash():
     assert _compile(catalog=catalog)["status"] == "READY"
 
 
+def test_v2_actor_is_a_provider_for_neutral_roles_not_a_fixed_harness_assignment():
+    catalog = _catalog()
+    catalog["schema"] = "tgw-execution-environment-catalog/v2"
+    catalog["actors"]["codex"].update({
+        "role": "execution-provider",
+        "qualified_roles": ["implementation", "controller-verification", "independent-review"],
+    })
+    assert _compile(catalog=catalog)["status"] == "READY"
+    catalog["actors"]["codex"]["role"] = "implementer"
+    with pytest.raises(ActorContractError, match="role qualification"):
+        _compile(catalog=catalog)
+
+
 def test_missing_catalog_contract_input_quarantines_before_launch():
     local = _local()
     local["mcp"]["endpoints"] = []
