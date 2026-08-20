@@ -11,7 +11,7 @@ INSTALLERS = ROOT / "agent-services/installers"
 sys.path.insert(0, str(INSTALLERS.parent))
 
 import installers.materialize as materialize_module  # noqa: E402
-from installers.materialize import InstallError, materialize, materialize_fleet  # noqa: E402
+from installers.materialize import InstallError, materialize, materialize_fleet, rollback_fleet  # noqa: E402
 
 
 @pytest.mark.parametrize(
@@ -214,3 +214,53 @@ def test_fleet_refuses_forged_ready_contract_before_any_write(tmp_path):
     with pytest.raises(InstallError, match="not READY"):
         materialize_fleet(actors, source_root=ROOT, contracts={"codex": contract}, apply=True)
     assert not (tmp_path / "home").exists()
+
+
+def test_fleet_replaces_old_generation_and_retains_exact_rollback_links(tmp_path):
+    home, project = tmp_path / "home", tmp_path / "project"
+    old_root = tmp_path / "old"
+    old_root.mkdir()
+    old_skill = old_root / "tgw-plan"
+    old_skill.mkdir()
+    destination = home / ".codex/skills/tgw-plan"
+    destination.parent.mkdir(parents=True)
+    destination.symlink_to(old_skill, target_is_directory=True)
+    result = materialize_fleet(
+        {"codex": {"home": home, "project": project}}, source_root=ROOT,
+        contracts={"codex": _ready_contract("codex")}, apply=True, replace_existing=True,
+    )
+    assert next(action for action in result["actors"][0]["actions"] if action["capability"] == "tgw-plan")["status"] == "REPLACED"
+    assert destination.resolve() == ROOT / "agent-services/skills/tgw-plan"
+    previous = home / ".codex/skills/.tgw-plan.tgw-w18-previous"
+    assert previous.resolve() == old_skill
+    rollback_fleet(result)
+    assert destination.resolve() == old_skill
+
+
+def test_fleet_replacement_failure_restores_old_generation(tmp_path, monkeypatch):
+    home, project = tmp_path / "home", tmp_path / "project"
+    old_root = tmp_path / "old"
+    old_root.mkdir()
+    for name in ("tgw-plan", "tgw-review", "promptcraft"):
+        (old_root / name).mkdir()
+    for name in ("tgw-plan", "tgw-review", "promptcraft"):
+        destination = home / (".codex/skills" if name != "promptcraft" else ".codex/providers") / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.symlink_to(old_root / name, target_is_directory=True)
+    real_replace = materialize_module.os.replace
+    calls = 0
+    def fail_second_replace(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError("injected replacement failure")
+        return real_replace(source, destination)
+    monkeypatch.setattr(materialize_module.os, "replace", fail_second_replace)
+    with pytest.raises(OSError, match="replacement failure"):
+        materialize_fleet(
+            {"codex": {"home": home, "project": project}}, source_root=ROOT,
+            contracts={"codex": _ready_contract("codex")}, apply=True, replace_existing=True,
+        )
+    for name in ("tgw-plan", "tgw-review", "promptcraft"):
+        destination = home / (".codex/skills" if name != "promptcraft" else ".codex/providers") / name
+        assert destination.resolve() == old_root / name

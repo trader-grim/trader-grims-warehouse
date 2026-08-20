@@ -165,7 +165,7 @@ def materialize(
 
 def materialize_fleet(
     actors: dict[str, dict[str, str | Path]], *, source_root: str | Path,
-    contracts: dict[str, dict[str, Any]], apply: bool = False,
+    contracts: dict[str, dict[str, Any]], apply: bool = False, replace_existing: bool = False,
 ) -> dict[str, Any]:
     """Materialize every READY actor as one local, rollback-safe transaction.
 
@@ -197,6 +197,8 @@ def materialize_fleet(
                 raise InstallError(f"canonical source is missing: {adapter.source}")
             if _same_link(adapter.destination, adapter.source):
                 state = "CURRENT"
+            elif adapter.destination.is_symlink() and replace_existing:
+                state = "REPLACEABLE"
             elif adapter.destination.exists() or adapter.destination.is_symlink():
                 state = "HELD_LEGACY" if adapter.hold_legacy else "CONFLICT"
             else:
@@ -207,26 +209,52 @@ def materialize_fleet(
         plans[actor] = states
 
     created: list[Path] = []
+    backups: list[tuple[Path, Path]] = []
+    staged: list[tuple[Adapter, Path, str]] = []
     try:
         if apply:
             for actor in sorted(plans):
                 for adapter, state in plans[actor]:
-                    if state != "MISSING":
+                    if state not in {"MISSING", "REPLACEABLE"}:
                         continue
                     adapter.destination.parent.mkdir(parents=True, exist_ok=True)
-                    os.symlink(adapter.source, adapter.destination, target_is_directory=adapter.source.is_dir())
-                    created.append(adapter.destination)
+                    staged_path = adapter.destination.with_name(f".{adapter.destination.name}.tgw-w18-next")
+                    if staged_path.exists() or staged_path.is_symlink():
+                        raise InstallError(f"staged fleet path already exists: {staged_path}")
+                    os.symlink(adapter.source, staged_path, target_is_directory=adapter.source.is_dir())
+                    staged.append((adapter, staged_path, state))
+            for adapter, staged_path, state in staged:
+                if state == "REPLACEABLE":
+                    backup = adapter.destination.with_name(f".{adapter.destination.name}.tgw-w18-previous")
+                    if backup.exists() or backup.is_symlink():
+                        raise InstallError(f"fleet rollback path already exists: {backup}")
+                    os.replace(adapter.destination, backup)
+                    backups.append((adapter.destination, backup))
+                os.replace(staged_path, adapter.destination)
+                created.append(adapter.destination)
     except Exception:
         for destination in reversed(created):
             if destination.is_symlink():
                 destination.unlink()
+        for destination, backup in reversed(backups):
+            if backup.is_symlink():
+                os.replace(backup, destination)
+        for _adapter, staged_path, _state in staged:
+            if staged_path.is_symlink():
+                staged_path.unlink()
         raise
 
     actor_actions = []
     for actor in sorted(plans):
         actions = []
         for adapter, state in plans[actor]:
-            status = "INSTALLED" if apply and state == "MISSING" else ("WOULD_INSTALL" if state == "MISSING" else state)
+            status = (
+                "INSTALLED" if apply and state == "MISSING"
+                else "REPLACED" if apply and state == "REPLACEABLE"
+                else "WOULD_INSTALL" if state == "MISSING"
+                else "WOULD_REPLACE" if state == "REPLACEABLE"
+                else state
+            )
             actions.append({
                 "capability": adapter.capability,
                 "destination": str(adapter.destination),
@@ -240,8 +268,37 @@ def materialize_fleet(
         "mode": "apply" if apply else "dry-run",
         "status": "PREPARED" if not apply else "MATERIALIZED_NOT_ACTIVATED",
         "actors": actor_actions,
+        "rollback_journal": [
+            {
+                "destination": str(destination),
+                "previous": next((str(backup) for replaced, backup in backups if replaced == destination), None),
+            }
+            for destination in created
+        ],
         "activation": "declarative-only",
     }
+
+
+def rollback_fleet(materialization: dict[str, Any]) -> None:
+    """Restore the exact links preserved by an unapplied W18 materialization."""
+    if materialization.get("schema") != "tgw-w18-fleet-adapter-materialization/v1":
+        raise InstallError("fleet rollback materialization schema is invalid")
+    journal = materialization.get("rollback_journal")
+    if not isinstance(journal, list):
+        raise InstallError("fleet rollback journal is invalid")
+    for entry in reversed(journal):
+        if not isinstance(entry, dict) or set(entry) != {"destination", "previous"}:
+            raise InstallError("fleet rollback journal entry is invalid")
+        destination = Path(entry["destination"])
+        if entry["previous"] is not None and not isinstance(entry["previous"], str):
+            raise InstallError("fleet rollback journal entry is invalid")
+        if destination.is_symlink():
+            destination.unlink()
+        if entry["previous"] is not None:
+            previous = Path(entry["previous"])
+            if not previous.is_symlink():
+                raise InstallError("fleet rollback link is unavailable")
+            os.replace(previous, destination)
 
 
 def main() -> int:
