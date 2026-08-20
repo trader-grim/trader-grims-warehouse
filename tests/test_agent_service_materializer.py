@@ -5,6 +5,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from tgw.actor_contract import actor_contract_public_key, sign_actor_contract
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLERS = ROOT / "agent-services/installers"
@@ -12,6 +15,9 @@ sys.path.insert(0, str(INSTALLERS.parent))
 
 import installers.materialize as materialize_module  # noqa: E402
 from installers.materialize import InstallError, materialize, materialize_fleet, rollback_fleet  # noqa: E402
+
+SIGNER = Ed25519PrivateKey.from_private_bytes(b"z" * 32)
+SIGNER_PUBLIC_KEY = actor_contract_public_key(SIGNER)
 
 
 @pytest.mark.parametrize(
@@ -159,9 +165,16 @@ def test_apply_failure_rolls_back_all_links_created_by_invocation(tmp_path, monk
 
 
 def _ready_contract(actor):
-    body = {"actor": actor, "status": "READY"}
+    body = {
+        "schema": "tgw-actor-contract-receipt/v1", "status": "READY", "catalog_hash": "sha256:" + "a" * 64,
+        "actor": actor, "profile": "development", "plan": {}, "code_graph": {}, "local": {},
+        "diagnostics": [], "activation": "declarative-only",
+    }
     encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    return {**body, "receipt_hash": "sha256:" + hashlib.sha256(encoded).hexdigest()}
+    return sign_actor_contract(
+        {**body, "receipt_hash": "sha256:" + hashlib.sha256(encoded).hexdigest()},
+        signing_private_key=SIGNER,
+    )
 
 
 def test_fleet_materialization_is_all_or_rollback_and_never_activates(tmp_path, monkeypatch):
@@ -171,9 +184,9 @@ def test_fleet_materialization_is_all_or_rollback_and_never_activates(tmp_path, 
         "deepseek": {"home": deepseek_home, "project": project},
     }
     contracts = {actor: _ready_contract(actor) for actor in actors}
-    dry = materialize_fleet(actors, source_root=ROOT, contracts=contracts)
+    dry = materialize_fleet(actors, source_root=ROOT, contracts=contracts, trusted_contract_public_key=SIGNER_PUBLIC_KEY)
     assert dry["status"] == "PREPARED" and not codex_home.exists() and not deepseek_home.exists()
-    applied = materialize_fleet(actors, source_root=ROOT, contracts=contracts, apply=True)
+    applied = materialize_fleet(actors, source_root=ROOT, contracts=contracts, trusted_contract_public_key=SIGNER_PUBLIC_KEY, apply=True)
     assert applied["status"] == "MATERIALIZED_NOT_ACTIVATED"
     assert (codex_home / ".codex/skills/tgw-plan").is_symlink()
     assert (codex_home / ".codex/skills/tgw-review").is_symlink()
@@ -193,7 +206,7 @@ def test_fleet_materialization_is_all_or_rollback_and_never_activates(tmp_path, 
     with pytest.raises(OSError, match="fleet failure"):
         materialize_fleet(
             {"codex": {"home": broken, "project": project}, "deepseek": {"home": tmp_path / "other", "project": project}},
-            source_root=ROOT, contracts=contracts, apply=True,
+            source_root=ROOT, contracts=contracts, trusted_contract_public_key=SIGNER_PUBLIC_KEY, apply=True,
         )
     assert not (broken / ".codex/skills/tgw-plan").exists()
 
@@ -203,16 +216,16 @@ def test_fleet_refuses_quarantined_actor_before_any_write(tmp_path):
     contract = _ready_contract("codex")
     contract["status"] = "QUARANTINED"
     with pytest.raises(InstallError, match="not READY"):
-        materialize_fleet(actors, source_root=ROOT, contracts={"codex": contract}, apply=True)
+        materialize_fleet(actors, source_root=ROOT, contracts={"codex": contract}, trusted_contract_public_key=SIGNER_PUBLIC_KEY, apply=True)
     assert not (tmp_path / "home").exists()
 
 
 def test_fleet_refuses_forged_ready_contract_before_any_write(tmp_path):
     actors = {"codex": {"home": tmp_path / "home", "project": tmp_path / "project"}}
     contract = _ready_contract("codex")
-    contract["status"] = "QUARANTINED"
+    contract["signature"] = "A" * 88
     with pytest.raises(InstallError, match="not READY"):
-        materialize_fleet(actors, source_root=ROOT, contracts={"codex": contract}, apply=True)
+        materialize_fleet(actors, source_root=ROOT, contracts={"codex": contract}, trusted_contract_public_key=SIGNER_PUBLIC_KEY, apply=True)
     assert not (tmp_path / "home").exists()
 
 
@@ -227,7 +240,7 @@ def test_fleet_replaces_old_generation_and_retains_exact_rollback_links(tmp_path
     destination.symlink_to(old_skill, target_is_directory=True)
     result = materialize_fleet(
         {"codex": {"home": home, "project": project}}, source_root=ROOT,
-        contracts={"codex": _ready_contract("codex")}, apply=True, replace_existing=True,
+        contracts={"codex": _ready_contract("codex")}, trusted_contract_public_key=SIGNER_PUBLIC_KEY, apply=True, replace_existing=True,
     )
     assert next(action for action in result["actors"][0]["actions"] if action["capability"] == "tgw-plan")["status"] == "REPLACED"
     assert destination.resolve() == ROOT / "agent-services/skills/tgw-plan"
@@ -259,8 +272,37 @@ def test_fleet_replacement_failure_restores_old_generation(tmp_path, monkeypatch
     with pytest.raises(OSError, match="replacement failure"):
         materialize_fleet(
             {"codex": {"home": home, "project": project}}, source_root=ROOT,
-            contracts={"codex": _ready_contract("codex")}, apply=True, replace_existing=True,
+            contracts={"codex": _ready_contract("codex")}, trusted_contract_public_key=SIGNER_PUBLIC_KEY, apply=True, replace_existing=True,
         )
     for name in ("tgw-plan", "tgw-review", "promptcraft"):
         destination = home / (".codex/skills" if name != "promptcraft" else ".codex/providers") / name
         assert destination.resolve() == old_root / name
+
+
+def test_fleet_refuses_replacement_target_changed_after_staging(tmp_path, monkeypatch):
+    home, project = tmp_path / "home", tmp_path / "project"
+    old = tmp_path / "old"
+    old.mkdir()
+    destination = home / ".codex/skills/tgw-plan"
+    destination.parent.mkdir(parents=True)
+    destination.symlink_to(old, target_is_directory=True)
+    real_symlink = materialize_module.os.symlink
+    calls = 0
+    def replace_target_after_staging(source, target, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = real_symlink(source, target, **kwargs)
+        if calls == 3:
+            destination.unlink()
+            destination.mkdir()
+        return result
+    monkeypatch.setattr(materialize_module.os, "symlink", replace_target_after_staging)
+    with pytest.raises(InstallError, match="target changed"):
+        materialize_fleet(
+            {"codex": {"home": home, "project": project}}, source_root=ROOT,
+            contracts={"codex": _ready_contract("codex")}, trusted_contract_public_key=SIGNER_PUBLIC_KEY,
+            apply=True, replace_existing=True,
+        )
+    assert destination.is_dir()
+    assert not (home / ".codex/skills/tgw-review").exists()
+    assert not (home / ".codex/providers/promptcraft").exists()

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
 from typing import Any, Mapping
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 CATALOG_SCHEMA = "tgw-execution-environment-catalog/v1"
 CONTRACT_SCHEMA = "tgw-actor-contract-receipt/v1"
@@ -18,6 +22,36 @@ _COMMIT = re.compile(r"[0-9a-f]{40}$")
 
 class ActorContractError(ValueError):
     """The requested actor contract is malformed or not catalog-bound."""
+
+
+def _private_key(value: Ed25519PrivateKey | str | bytes) -> Ed25519PrivateKey:
+    if isinstance(value, Ed25519PrivateKey):
+        return value
+    raw = value.encode("ascii") if isinstance(value, str) else value
+    if not isinstance(raw, bytes) or len(raw) != 32:
+        raise ActorContractError("actor contract signing key is invalid")
+    return Ed25519PrivateKey.from_private_bytes(raw)
+
+
+def actor_contract_public_key(value: Ed25519PrivateKey | Ed25519PublicKey | str | bytes) -> str:
+    key = value if isinstance(value, Ed25519PublicKey) else _private_key(value).public_key()
+    return base64.b64encode(key.public_bytes(Encoding.Raw, PublicFormat.Raw)).decode("ascii")
+
+
+def sign_actor_contract(receipt: Mapping[str, Any], *, signing_private_key: Ed25519PrivateKey | str | bytes) -> dict[str, Any]:
+    """Bind a compiled contract to the trusted bootstrap signer."""
+    value = dict(receipt)
+    if set(value) != {
+        "schema", "status", "catalog_hash", "actor", "profile", "plan", "code_graph", "local",
+        "diagnostics", "activation", "receipt_hash",
+    } or value.get("receipt_hash") != _hash({key: item for key, item in value.items() if key != "receipt_hash"}):
+        raise ActorContractError("actor contract receipt is invalid")
+    key = _private_key(signing_private_key)
+    return {
+        **value,
+        "issuer_public_key": actor_contract_public_key(key),
+        "signature": base64.b64encode(key.sign(_canonical(value))).decode("ascii"),
+    }
 
 
 def _canonical(value: Any) -> bytes:

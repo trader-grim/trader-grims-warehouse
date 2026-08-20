@@ -3,8 +3,9 @@ from __future__ import annotations
 from copy import deepcopy
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from tgw.actor_contract import ActorContractError, compile_actor_contract
+from tgw.actor_contract import ActorContractError, actor_contract_public_key, compile_actor_contract, sign_actor_contract
 
 HASH = "sha256:" + "a" * 64
 COMMIT = "b" * 40
@@ -54,6 +55,13 @@ def test_contract_is_deterministic_and_non_activating_when_exactly_bound():
     assert first == second
     assert first["status"] == "READY"
     assert first["activation"] == "declarative-only"
+
+
+def test_contract_signature_binds_the_exact_compiled_receipt():
+    signer = Ed25519PrivateKey.from_private_bytes(b"x" * 32)
+    signed = sign_actor_contract(_compile(), signing_private_key=signer)
+    assert signed["issuer_public_key"] == actor_contract_public_key(signer)
+    assert isinstance(signed["signature"], str)
 
 
 def test_contract_accepts_nix_sri_flake_lock_hash():

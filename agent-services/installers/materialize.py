@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -87,11 +88,37 @@ def _contract_receipt_matches(contract: dict[str, Any]) -> bool:
         return False
     body = dict(contract)
     body.pop("receipt_hash", None)
+    body.pop("issuer_public_key", None)
+    body.pop("signature", None)
     try:
         encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
     except (TypeError, ValueError):
         return False
     return receipt_hash == "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _contract_signature_matches(contract: dict[str, Any], trusted_public_key: str) -> bool:
+    if contract.get("issuer_public_key") != trusted_public_key:
+        return False
+    signature = contract.get("signature")
+    if not isinstance(signature, str):
+        return False
+    signed = dict(contract)
+    signed.pop("issuer_public_key", None)
+    signed.pop("signature", None)
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+        key = Ed25519PublicKey.from_public_bytes(base64.b64decode(trusted_public_key, validate=True))
+        value = base64.b64decode(signature, validate=True)
+        if len(value) != 64:
+            return False
+        key.verify(value, json.dumps(signed, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode())
+    except (ValueError, TypeError):
+        return False
+    except Exception:
+        return False
+    return True
 
 
 def materialize(
@@ -165,7 +192,8 @@ def materialize(
 
 def materialize_fleet(
     actors: dict[str, dict[str, str | Path]], *, source_root: str | Path,
-    contracts: dict[str, dict[str, Any]], apply: bool = False, replace_existing: bool = False,
+    contracts: dict[str, dict[str, Any]], trusted_contract_public_key: str,
+    apply: bool = False, replace_existing: bool = False,
 ) -> dict[str, Any]:
     """Materialize every READY actor as one local, rollback-safe transaction.
 
@@ -175,6 +203,8 @@ def materialize_fleet(
     """
     if not actors or set(actors) != set(contracts):
         raise InstallError("fleet actors and contracts must have the same non-empty identities")
+    if not isinstance(trusted_contract_public_key, str):
+        raise InstallError("fleet contract signer is invalid")
     root = Path(source_root).resolve()
     plans: dict[str, list[tuple[Adapter, str]]] = {}
     for actor in sorted(actors):
@@ -184,6 +214,7 @@ def materialize_fleet(
             or contract.get("actor") != actor
             or contract.get("status") != "READY"
             or not _contract_receipt_matches(contract)
+            or not _contract_signature_matches(contract, trusted_contract_public_key)
         ):
             raise InstallError(f"actor contract is not READY: {actor}")
         entry = actors[actor]
@@ -225,6 +256,8 @@ def materialize_fleet(
                     staged.append((adapter, staged_path, state))
             for adapter, staged_path, state in staged:
                 if state == "REPLACEABLE":
+                    if not adapter.destination.is_symlink():
+                        raise InstallError(f"fleet replacement target changed: {adapter.destination}")
                     backup = adapter.destination.with_name(f".{adapter.destination.name}.tgw-w18-previous")
                     if backup.exists() or backup.is_symlink():
                         raise InstallError(f"fleet rollback path already exists: {backup}")
