@@ -1,9 +1,13 @@
+import hashlib
+import json
+
 import pytest
 
 from tgw.admission_recovery import (
     AdmissionRecoveryError,
     compile_recovery_invocation,
     compile_release_admission,
+    validate_environment_preflight_for_admission,
     validate_release_admission,
 )
 
@@ -50,6 +54,19 @@ def test_admitted_receipt_is_rehashed_and_exactly_candidate_bound():
     receipt["status"] = "REFUSED"
     with pytest.raises(AdmissionRecoveryError, match="hash mismatch"):
         validate_release_admission(receipt, candidate_commit=COMMIT, candidate_tree=COMMIT)
+
+
+def test_environment_preflight_is_exactly_bound_to_admission_hashes():
+    receipt = {
+        "schema": "tgw-environment-preflight-receipt/v1", "result": "PASS", "catalog_sha256": HASH,
+        "actor": "codex", "profile": "development", "attempt_id": "attempt-1", "tools": [],
+    }
+    canonical = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    receipt_hash = "sha256:" + hashlib.sha256(canonical).hexdigest()
+    assert validate_environment_preflight_for_admission(receipt, catalog_hash=HASH, receipt_hash=receipt_hash) == receipt
+    receipt["actor"] = "claude"
+    with pytest.raises(AdmissionRecoveryError, match="receipt hash mismatch"):
+        validate_environment_preflight_for_admission(receipt, catalog_hash=HASH, receipt_hash=receipt_hash)
 
 
 @pytest.mark.parametrize(

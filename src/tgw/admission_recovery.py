@@ -145,6 +145,24 @@ def validate_release_admission(
     return value
 
 
+def validate_environment_preflight_for_admission(
+    receipt: Mapping[str, Any], *, catalog_hash: str, receipt_hash: str,
+) -> dict[str, Any]:
+    """Re-hash the W15 observation before a W16 boundary relies on it."""
+    value = _mapping(
+        receipt,
+        {"schema", "result", "catalog_sha256", "actor", "profile", "attempt_id", "tools"},
+        "environment preflight receipt",
+    )
+    if value["schema"] != "tgw-environment-preflight-receipt/v1" or value["result"] != "PASS":
+        raise AdmissionRecoveryError("environment preflight did not pass")
+    if value["catalog_sha256"] != _exact_hash(catalog_hash, "admission environment catalog"):
+        raise AdmissionRecoveryError("environment preflight catalog mismatch")
+    if _hash(value) != _exact_hash(receipt_hash, "admission environment receipt"):
+        raise AdmissionRecoveryError("environment preflight receipt hash mismatch")
+    return value
+
+
 def compile_recovery_invocation(*, request: Mapping[str, Any], observed_at: str) -> dict[str, Any]:
     """Return a W17 platform-only recovery decision, never an effect."""
     value = _mapping(request, {"schema", "recovery_id", "operator", "plan", "expiry", "effects", "receipt_sink", "candidate_commit"}, "recovery request")

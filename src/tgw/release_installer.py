@@ -20,7 +20,11 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Mapping
 
-from tgw.admission_recovery import AdmissionRecoveryError, validate_release_admission
+from tgw.admission_recovery import (
+    AdmissionRecoveryError,
+    validate_environment_preflight_for_admission,
+    validate_release_admission,
+)
 
 SCHEMA = "tgw-release-manifest-v1"
 RECEIPT_SCHEMA = "tgw-immutable-release-selection-v1"
@@ -561,6 +565,7 @@ def main() -> int:
     for name in ("generation", "commit", "tree", "archive-sha256", "expected-current", "operation-id"):
         install.add_argument(f"--{name}", required=True)
     install.add_argument("--admission-receipt", type=Path, required=True)
+    install.add_argument("--environment-preflight-receipt", type=Path, required=True)
     check = commands.add_parser("verify")
     check.add_argument("generation")
     commands.add_parser("recover")
@@ -579,8 +584,16 @@ def main() -> int:
                 validate_release_admission(
                     admission, candidate_commit=args.commit, candidate_tree=args.tree,
                 )
+                preflight = json.loads(args.environment_preflight_receipt.read_text(encoding="utf-8"))
+                validate_environment_preflight_for_admission(
+                    preflight,
+                    catalog_hash=admission["environment"]["catalog_hash"],
+                    receipt_hash=admission["environment"]["receipt_hash"],
+                )
             except AdmissionRecoveryError as exc:
                 raise ReleaseError(f"release admission refused: {exc}") from exc
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ReleaseError("environment preflight receipt is unavailable or invalid") from exc
             manifest = materialize(
                 args.root, args.archive, generation=args.generation, commit=args.commit,
                 tree=args.tree, archive_sha256=args.archive_sha256,
