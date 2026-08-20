@@ -129,7 +129,17 @@ def _codex_binary() -> str:
 def _codex(
     *, cwd: Path, prompt: str, schema: Mapping[str, Any], read_only: bool,
 ) -> tuple[subprocess.CompletedProcess[str], Mapping[str, Any] | None]:
-    with tempfile.TemporaryDirectory(prefix="tgw-governed-codex-") as temporary:
+    attempt_value = os.environ.get("TGW_ATTEMPT_ROOT")
+    if not isinstance(attempt_value, str) or not attempt_value:
+        raise GovernedRoleRunnerError("durable card attempt root is unavailable")
+    attempt_root = Path(attempt_value)
+    if not attempt_root.is_absolute() or attempt_root.is_symlink():
+        raise GovernedRoleRunnerError("durable card attempt root is invalid")
+    provider_tmp = attempt_root / "provider-tmp"
+    provider_tmp.mkdir(parents=True, exist_ok=True)
+    if provider_tmp.is_symlink():
+        raise GovernedRoleRunnerError("durable provider scratch root is invalid")
+    with tempfile.TemporaryDirectory(prefix="tgw-governed-codex-", dir=provider_tmp) as temporary:
         root = Path(temporary)
         codex_home = root / "codex-home"
         codex_home.mkdir(mode=0o700)

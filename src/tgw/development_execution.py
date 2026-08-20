@@ -227,7 +227,9 @@ def _serve_resources(
         "catalog_ref": catalog["catalog_ref"],
         "catalog_hash": resource_service_catalog_hash(catalog),
     }
-    return server, thread, template, catalog, resolver, {credential_env: token}
+    return server, thread, template, catalog, resolver, {
+        credential_env: token, "TGW_ATTEMPT_ROOT": str(root.parent.resolve()),
+    }
 
 
 def execute_development_lifecycle(config: Mapping[str, Any], document: Mapping[str, Any]) -> dict[str, Any]:

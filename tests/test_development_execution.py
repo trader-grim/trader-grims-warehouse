@@ -155,6 +155,7 @@ def test_native_controller_provider_runs_from_exact_card_worktree_and_retrieves_
     server, thread, template, catalog, resolver, runner_env = development_execution._serve_resources(
         card=card, values=values, root=tmp_path / "resources",
     )
+    assert runner_env["TGW_ATTEMPT_ROOT"] == str(tmp_path)
     try:
         source_root = Path(__file__).resolve().parents[1]
         promptcraft = source_root / "agent-services/providers/promptcraft/bin/promptcraft-handoff"
