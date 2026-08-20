@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -49,15 +50,30 @@ def v2_catalog(executable: Path):
     return value
 
 
-def add_v3_revisions(value):
+def add_v3_revisions(value, root: Path):
+    bootstrap = root / "agent-services/actor-bootstrap/bootstrap-policy-v1.json"
+    bootstrap.parent.mkdir(parents=True, exist_ok=True)
+    bootstrap.write_text('{"policy":"bounded"}\n')
+    members = {}
+    for actor in value["actors"]:
+        policy = root / "agent-services/harnesses" / actor / "tgw-context-policy.json"
+        policy.parent.mkdir(parents=True, exist_ok=True)
+        policy.write_text('{"actor":"' + actor + '"}\n')
+        members[actor] = "sha256:" + hashlib.sha256(policy.read_bytes()).hexdigest()
     value["bootstrap_revision"] = {
         "source_relative_path": "agent-services/actor-bootstrap/bootstrap-policy-v1.json",
-        "content_sha256": "sha256:" + "b" * 64,
+        "content_sha256": "sha256:" + hashlib.sha256(bootstrap.read_bytes()).hexdigest(),
     }
     value["broker_policy_revision"] = {
         "schema": "tgw-harness-broker-policy-set/v1",
-        "content_sha256": "sha256:" + "c" * 64,
-        "members": {"codex": "sha256:" + "d" * 64},
+        "content_sha256": "sha256:" + hashlib.sha256(
+            json.dumps(
+                {"schema": "tgw-harness-broker-policy-set/v1", "members": members},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+        "members": members,
     }
     value["profiles"]["development"]["verification_commands"] = [["tool", "--version"]]
     return value
@@ -187,8 +203,8 @@ def test_mobile_preflight_binds_complete_versioned_tool_contract(
     }
     boundary_root = None
     if schema == "tgw-execution-environment-catalog/v3":
-        add_v3_revisions(value)
         boundary_root = tmp_path / "candidate"
+        add_v3_revisions(value, boundary_root)
         component = boundary_root / "src/tgw/dynamic_surface.py"
         renderer = boundary_root / "src/tgw/static/plan_console.html"
         component.parent.mkdir(parents=True)
@@ -246,7 +262,7 @@ def test_v3_preflight_binds_complete_local_dynamic_surface_boundary(tmp_path: Pa
     renderer.write_text("data-only-renderer\n")
     value = v2_catalog(executable)
     value["schema"] = "tgw-execution-environment-catalog/v3"
-    add_v3_revisions(value)
+    add_v3_revisions(value, boundary)
     value["enforcement_boundary"] = {
         "schema": "tgw-dynamic-surface-enforcement-boundary/v1",
         "version": "candidate-one",
@@ -296,7 +312,7 @@ def test_v3_preflight_refuses_missing_or_unsafe_boundary(tmp_path: Path):
     os.chmod(executable, 0o555)
     value = v2_catalog(executable)
     value["schema"] = "tgw-execution-environment-catalog/v3"
-    add_v3_revisions(value)
+    add_v3_revisions(value, tmp_path / "candidate")
     with pytest.raises(EnvironmentPreflightError, match="boundary is invalid"):
         preflight(catalog=value, actor="codex", profile="development", attempt_id="attempt-1")
 

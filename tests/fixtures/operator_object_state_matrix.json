@@ -1,36 +1,2255 @@
 [
   {
-    "object": {
-      "schema": "tgw-operator-object/v1",
-      "entity_id": "sku-ready",
-      "object_generation": "generation-ready",
-      "item": {"record": {"sku": "sku-ready", "title": "Ready item"}},
-      "listing": {"provider_state": "not-staged"},
-      "workflow": {"state": "ready", "reasons": [], "evidence": ["condition:ready:TRUE"], "details": {}},
-      "field_schema": {"condition": {"options": [{"value": "USED_GOOD", "label": "Used - Good"}]}},
-      "commands": [
-        {"id": "save-draft", "enabled": true, "reason": null, "authority_scope": "local-item-mutation", "input_schema": {}},
-        {"id": "list-item", "enabled": true, "reason": null, "authority_scope": "publication", "input_schema": {}},
-        {"id": "update-item", "enabled": false, "reason": "Not staged", "authority_scope": "update-restage", "input_schema": {}}
-      ]
+    "expected": {
+      "authority_scopes": {
+        "list-item": "publication",
+        "save-draft": "local-item-mutation",
+        "update-item": "update-restage"
+      },
+      "enabled_commands": [
+        "save-draft",
+        "list-item"
+      ],
+      "field_schema_keys": [
+        "aspects",
+        "category",
+        "condition",
+        "defaults",
+        "item_fields",
+        "listing_fields",
+        "validation_messages"
+      ],
+      "reasons": [],
+      "state": "ready"
     },
-    "expected": {"state": "ready", "reasons": [], "enabled_commands": ["save-draft", "list-item"]}
+    "object": {
+      "commands": [
+        {
+          "authority_scope": "local-item-mutation",
+          "enabled": true,
+          "id": "save-draft",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "draft_listing": {
+                "additionalProperties": false,
+                "properties": {
+                  "best_offer_auto_accept_price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "best_offer_auto_decline_price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "best_offer_enabled": {
+                    "nullable": true,
+                    "type": "boolean"
+                  },
+                  "category_id": {
+                    "type": "string"
+                  },
+                  "condition_description": {
+                    "type": "string"
+                  },
+                  "condition_enum": {
+                    "enum": [
+                      "USED_GOOD"
+                    ],
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "item_specifics": {
+                    "type": "string-map"
+                  },
+                  "price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "quantity": {
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "return_policy_id": {
+                    "type": "string"
+                  },
+                  "secondary_category_id": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "secondary_store_category_id": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "shipping_profile": {
+                    "type": "string"
+                  },
+                  "store_category_id": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "item_fields": {
+                "additionalProperties": false,
+                "properties": {
+                  "item_attributes": {
+                    "type": "string-map"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Save Draft",
+          "reason": null,
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "publication",
+          "enabled": true,
+          "id": "list-item",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "condition_enum": {
+                "enum": [
+                  "USED_GOOD"
+                ],
+                "type": "string"
+              },
+              "item_specifics": {
+                "additionalProperties": false,
+                "properties": {
+                  "Brand": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "List Item",
+          "reason": null,
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "update-restage",
+          "enabled": false,
+          "id": "update-item",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "condition_enum": {
+                "enum": [
+                  "USED_GOOD"
+                ],
+                "type": "string"
+              },
+              "item_specifics": {
+                "additionalProperties": false,
+                "properties": {
+                  "Brand": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Update Item",
+          "reason": "The item has not been staged at the provider.",
+          "refresh_target": "current-object"
+        }
+      ],
+      "entity_id": "sku-ready",
+      "field_schema": {
+        "aspects": [
+          {
+            "allowed_values": [],
+            "mode": null,
+            "name": "Brand",
+            "required": true,
+            "value": "TGW"
+          }
+        ],
+        "category": {
+          "label": null,
+          "required": true,
+          "value": "123"
+        },
+        "condition": {
+          "label": "Used - Good",
+          "options": [
+            {
+              "label": "Used - Good",
+              "value": "USED_GOOD"
+            }
+          ],
+          "required": true,
+          "valid": true,
+          "value": "USED_GOOD"
+        },
+        "defaults": {
+          "fulfillment_policy_id": null,
+          "store_category": null
+        },
+        "item_fields": {
+          "item_attributes": {
+            "label": "Inventory attributes",
+            "type": "string-map",
+            "value": {}
+          },
+          "location": {
+            "label": "Location",
+            "type": "string",
+            "value": ""
+          },
+          "notes": {
+            "label": "Notes",
+            "type": "string",
+            "value": ""
+          },
+          "title": {
+            "label": "Inventory title",
+            "type": "string",
+            "value": "Ready item"
+          }
+        },
+        "listing_fields": {
+          "best_offer_auto_accept_price": {
+            "label": "Best Offer auto-accept",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "best_offer_auto_decline_price": {
+            "label": "Best Offer auto-decline",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "best_offer_enabled": {
+            "label": "Best Offer",
+            "nullable": true,
+            "type": "boolean",
+            "value": null
+          },
+          "category_id": {
+            "label": "eBay category ID",
+            "type": "string",
+            "value": "123"
+          },
+          "condition_description": {
+            "label": "Condition description",
+            "type": "string",
+            "value": ""
+          },
+          "description": {
+            "label": "Description",
+            "type": "string",
+            "value": ""
+          },
+          "item_specifics": {
+            "label": "Item specifics",
+            "type": "string-map",
+            "value": {
+              "Brand": "TGW"
+            }
+          },
+          "price": {
+            "label": "Price",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "quantity": {
+            "label": "Quantity",
+            "nullable": true,
+            "type": "integer",
+            "value": null
+          },
+          "return_policy_id": {
+            "label": "Return policy",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "secondary_category_id": {
+            "label": "Secondary category ID",
+            "nullable": true,
+            "type": "string",
+            "value": null
+          },
+          "secondary_store_category_id": {
+            "label": "Secondary store category",
+            "nullable": true,
+            "options": [],
+            "type": "string",
+            "value": null
+          },
+          "shipping_profile": {
+            "label": "Shipping policy",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "store_category_id": {
+            "label": "Store category",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "title": {
+            "label": "Listing title",
+            "type": "string",
+            "value": "Ready item"
+          }
+        },
+        "validation_messages": []
+      },
+      "item": {
+        "entity_id": "sku-ready",
+        "object_generation": "generation-ready",
+        "record": {
+          "draft_listing": {
+            "category_id": "123",
+            "condition_enum": "USED_GOOD",
+            "condition_label": "Used - Good",
+            "item_specifics": {
+              "Brand": "TGW"
+            }
+          },
+          "sku": "sku-ready",
+          "title": "Ready item"
+        }
+      },
+      "listing": {
+        "entity_id": "sku-ready",
+        "listing": {},
+        "object_generation": "generation-ready",
+        "offer": {},
+        "provider_state": "not-staged"
+      },
+      "object_generation": "generation-ready",
+      "schema": "tgw-operator-object/v1",
+      "workflow": {
+        "details": {
+          "active_attempts": [],
+          "attempts": [],
+          "entity_id": "sku-ready",
+          "fingerprints": [],
+          "graph_id": "graph-ready",
+          "object_generation": "generation-ready",
+          "operator_gates": [],
+          "ownership_conflicts": [],
+          "reconciliation_gates": []
+        },
+        "evidence": [],
+        "graph_id": "graph-ready",
+        "reasons": [],
+        "state": "ready"
+      }
+    }
   },
   {
-    "object": {
-      "schema": "tgw-operator-object/v1",
-      "entity_id": "sku-held",
-      "object_generation": "generation-held",
-      "item": {"record": {"sku": "sku-held", "title": "Held item"}},
-      "listing": {"provider_state": "UNPUBLISHED"},
-      "workflow": {"state": "reconciliation_required", "reasons": ["provider evidence is stale"], "evidence": ["attempt:job-1:held"], "details": {}},
-      "field_schema": {"condition": {"options": []}},
-      "commands": [
-        {"id": "save-draft", "enabled": true, "reason": null, "authority_scope": "local-item-mutation", "input_schema": {}},
-        {"id": "list-item", "enabled": false, "reason": "provider evidence is stale", "authority_scope": "publication", "input_schema": {}},
-        {"id": "update-item", "enabled": false, "reason": "provider evidence is stale", "authority_scope": "update-restage", "input_schema": {}}
-      ]
+    "expected": {
+      "authority_scopes": {
+        "list-item": "publication",
+        "save-draft": "local-item-mutation",
+        "update-item": "update-restage"
+      },
+      "enabled_commands": [
+        "save-draft",
+        "list-item",
+        "update-item"
+      ],
+      "field_schema_keys": [
+        "aspects",
+        "category",
+        "condition",
+        "defaults",
+        "item_fields",
+        "listing_fields",
+        "validation_messages"
+      ],
+      "reasons": [],
+      "state": "staged"
     },
-    "expected": {"state": "reconciliation_required", "reasons": ["provider evidence is stale"], "enabled_commands": ["save-draft"]}
+    "object": {
+      "commands": [
+        {
+          "authority_scope": "local-item-mutation",
+          "enabled": true,
+          "id": "save-draft",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "draft_listing": {
+                "additionalProperties": false,
+                "properties": {
+                  "best_offer_auto_accept_price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "best_offer_auto_decline_price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "best_offer_enabled": {
+                    "nullable": true,
+                    "type": "boolean"
+                  },
+                  "category_id": {
+                    "type": "string"
+                  },
+                  "condition_description": {
+                    "type": "string"
+                  },
+                  "condition_enum": {
+                    "enum": [
+                      "USED_GOOD"
+                    ],
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "item_specifics": {
+                    "type": "string-map"
+                  },
+                  "price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "quantity": {
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "return_policy_id": {
+                    "type": "string"
+                  },
+                  "secondary_category_id": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "secondary_store_category_id": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "shipping_profile": {
+                    "type": "string"
+                  },
+                  "store_category_id": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "item_fields": {
+                "additionalProperties": false,
+                "properties": {
+                  "item_attributes": {
+                    "type": "string-map"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Save Draft",
+          "reason": null,
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "publication",
+          "enabled": true,
+          "id": "list-item",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "condition_enum": {
+                "enum": [
+                  "USED_GOOD"
+                ],
+                "type": "string"
+              },
+              "item_specifics": {
+                "additionalProperties": false,
+                "properties": {
+                  "Brand": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "List Item",
+          "reason": null,
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "update-restage",
+          "enabled": true,
+          "id": "update-item",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "condition_enum": {
+                "enum": [
+                  "USED_GOOD"
+                ],
+                "type": "string"
+              },
+              "item_specifics": {
+                "additionalProperties": false,
+                "properties": {
+                  "Brand": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Update Item",
+          "reason": null,
+          "refresh_target": "current-object"
+        }
+      ],
+      "entity_id": "sku-staged",
+      "field_schema": {
+        "aspects": [
+          {
+            "allowed_values": [],
+            "mode": null,
+            "name": "Brand",
+            "required": true,
+            "value": "TGW"
+          }
+        ],
+        "category": {
+          "label": null,
+          "required": true,
+          "value": "123"
+        },
+        "condition": {
+          "label": "Used - Good",
+          "options": [
+            {
+              "label": "Used - Good",
+              "value": "USED_GOOD"
+            }
+          ],
+          "required": true,
+          "valid": true,
+          "value": "USED_GOOD"
+        },
+        "defaults": {
+          "fulfillment_policy_id": null,
+          "store_category": null
+        },
+        "item_fields": {
+          "item_attributes": {
+            "label": "Inventory attributes",
+            "type": "string-map",
+            "value": {}
+          },
+          "location": {
+            "label": "Location",
+            "type": "string",
+            "value": ""
+          },
+          "notes": {
+            "label": "Notes",
+            "type": "string",
+            "value": ""
+          },
+          "title": {
+            "label": "Inventory title",
+            "type": "string",
+            "value": "Staged item"
+          }
+        },
+        "listing_fields": {
+          "best_offer_auto_accept_price": {
+            "label": "Best Offer auto-accept",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "best_offer_auto_decline_price": {
+            "label": "Best Offer auto-decline",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "best_offer_enabled": {
+            "label": "Best Offer",
+            "nullable": true,
+            "type": "boolean",
+            "value": null
+          },
+          "category_id": {
+            "label": "eBay category ID",
+            "type": "string",
+            "value": "123"
+          },
+          "condition_description": {
+            "label": "Condition description",
+            "type": "string",
+            "value": ""
+          },
+          "description": {
+            "label": "Description",
+            "type": "string",
+            "value": ""
+          },
+          "item_specifics": {
+            "label": "Item specifics",
+            "type": "string-map",
+            "value": {
+              "Brand": "TGW"
+            }
+          },
+          "price": {
+            "label": "Price",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "quantity": {
+            "label": "Quantity",
+            "nullable": true,
+            "type": "integer",
+            "value": null
+          },
+          "return_policy_id": {
+            "label": "Return policy",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "secondary_category_id": {
+            "label": "Secondary category ID",
+            "nullable": true,
+            "type": "string",
+            "value": null
+          },
+          "secondary_store_category_id": {
+            "label": "Secondary store category",
+            "nullable": true,
+            "options": [],
+            "type": "string",
+            "value": null
+          },
+          "shipping_profile": {
+            "label": "Shipping policy",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "store_category_id": {
+            "label": "Store category",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "title": {
+            "label": "Listing title",
+            "type": "string",
+            "value": "Staged item"
+          }
+        },
+        "validation_messages": []
+      },
+      "item": {
+        "entity_id": "sku-staged",
+        "object_generation": "generation-staged",
+        "record": {
+          "draft_listing": {
+            "category_id": "123",
+            "condition_enum": "USED_GOOD",
+            "condition_label": "Used - Good",
+            "item_specifics": {
+              "Brand": "TGW"
+            }
+          },
+          "ebay_offer": {
+            "offer_id": "offer-staged",
+            "status": "UNPUBLISHED"
+          },
+          "sku": "sku-staged",
+          "title": "Staged item"
+        }
+      },
+      "listing": {
+        "entity_id": "sku-staged",
+        "listing": {},
+        "object_generation": "generation-staged",
+        "offer": {
+          "offer_id": "offer-staged",
+          "status": "UNPUBLISHED"
+        },
+        "provider_state": "UNPUBLISHED"
+      },
+      "object_generation": "generation-staged",
+      "schema": "tgw-operator-object/v1",
+      "workflow": {
+        "details": {
+          "active_attempts": [],
+          "attempts": [],
+          "entity_id": "sku-staged",
+          "fingerprints": [],
+          "graph_id": "graph-staged",
+          "object_generation": "generation-staged",
+          "operator_gates": [],
+          "ownership_conflicts": [],
+          "reconciliation_gates": []
+        },
+        "evidence": [],
+        "graph_id": "graph-staged",
+        "reasons": [],
+        "state": "staged"
+      }
+    }
+  },
+  {
+    "expected": {
+      "authority_scopes": {
+        "list-item": "publication",
+        "save-draft": "local-item-mutation",
+        "update-item": "update-restage"
+      },
+      "enabled_commands": [
+        "save-draft",
+        "update-item"
+      ],
+      "field_schema_keys": [
+        "aspects",
+        "category",
+        "condition",
+        "defaults",
+        "item_fields",
+        "listing_fields",
+        "validation_messages"
+      ],
+      "reasons": [],
+      "state": "published"
+    },
+    "object": {
+      "commands": [
+        {
+          "authority_scope": "local-item-mutation",
+          "enabled": true,
+          "id": "save-draft",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "draft_listing": {
+                "additionalProperties": false,
+                "properties": {
+                  "best_offer_auto_accept_price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "best_offer_auto_decline_price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "best_offer_enabled": {
+                    "nullable": true,
+                    "type": "boolean"
+                  },
+                  "category_id": {
+                    "type": "string"
+                  },
+                  "condition_description": {
+                    "type": "string"
+                  },
+                  "condition_enum": {
+                    "enum": [
+                      "USED_GOOD"
+                    ],
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "item_specifics": {
+                    "type": "string-map"
+                  },
+                  "price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "quantity": {
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "return_policy_id": {
+                    "type": "string"
+                  },
+                  "secondary_category_id": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "secondary_store_category_id": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "shipping_profile": {
+                    "type": "string"
+                  },
+                  "store_category_id": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "item_fields": {
+                "additionalProperties": false,
+                "properties": {
+                  "item_attributes": {
+                    "type": "string-map"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Save Draft",
+          "reason": null,
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "publication",
+          "enabled": false,
+          "id": "list-item",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "condition_enum": {
+                "enum": [
+                  "USED_GOOD"
+                ],
+                "type": "string"
+              },
+              "item_specifics": {
+                "additionalProperties": false,
+                "properties": {
+                  "Brand": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "List Item",
+          "reason": "The provider already reports this item as published.",
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "update-restage",
+          "enabled": true,
+          "id": "update-item",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "condition_enum": {
+                "enum": [
+                  "USED_GOOD"
+                ],
+                "type": "string"
+              },
+              "item_specifics": {
+                "additionalProperties": false,
+                "properties": {
+                  "Brand": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Update Item",
+          "reason": null,
+          "refresh_target": "current-object"
+        }
+      ],
+      "entity_id": "sku-published",
+      "field_schema": {
+        "aspects": [
+          {
+            "allowed_values": [],
+            "mode": null,
+            "name": "Brand",
+            "required": true,
+            "value": "TGW"
+          }
+        ],
+        "category": {
+          "label": null,
+          "required": true,
+          "value": "123"
+        },
+        "condition": {
+          "label": "Used - Good",
+          "options": [
+            {
+              "label": "Used - Good",
+              "value": "USED_GOOD"
+            }
+          ],
+          "required": true,
+          "valid": true,
+          "value": "USED_GOOD"
+        },
+        "defaults": {
+          "fulfillment_policy_id": null,
+          "store_category": null
+        },
+        "item_fields": {
+          "item_attributes": {
+            "label": "Inventory attributes",
+            "type": "string-map",
+            "value": {}
+          },
+          "location": {
+            "label": "Location",
+            "type": "string",
+            "value": ""
+          },
+          "notes": {
+            "label": "Notes",
+            "type": "string",
+            "value": ""
+          },
+          "title": {
+            "label": "Inventory title",
+            "type": "string",
+            "value": "Published item"
+          }
+        },
+        "listing_fields": {
+          "best_offer_auto_accept_price": {
+            "label": "Best Offer auto-accept",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "best_offer_auto_decline_price": {
+            "label": "Best Offer auto-decline",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "best_offer_enabled": {
+            "label": "Best Offer",
+            "nullable": true,
+            "type": "boolean",
+            "value": null
+          },
+          "category_id": {
+            "label": "eBay category ID",
+            "type": "string",
+            "value": "123"
+          },
+          "condition_description": {
+            "label": "Condition description",
+            "type": "string",
+            "value": ""
+          },
+          "description": {
+            "label": "Description",
+            "type": "string",
+            "value": ""
+          },
+          "item_specifics": {
+            "label": "Item specifics",
+            "type": "string-map",
+            "value": {
+              "Brand": "TGW"
+            }
+          },
+          "price": {
+            "label": "Price",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "quantity": {
+            "label": "Quantity",
+            "nullable": true,
+            "type": "integer",
+            "value": null
+          },
+          "return_policy_id": {
+            "label": "Return policy",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "secondary_category_id": {
+            "label": "Secondary category ID",
+            "nullable": true,
+            "type": "string",
+            "value": null
+          },
+          "secondary_store_category_id": {
+            "label": "Secondary store category",
+            "nullable": true,
+            "options": [],
+            "type": "string",
+            "value": null
+          },
+          "shipping_profile": {
+            "label": "Shipping policy",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "store_category_id": {
+            "label": "Store category",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "title": {
+            "label": "Listing title",
+            "type": "string",
+            "value": "Published item"
+          }
+        },
+        "validation_messages": []
+      },
+      "item": {
+        "entity_id": "sku-published",
+        "object_generation": "generation-published",
+        "record": {
+          "draft_listing": {
+            "category_id": "123",
+            "condition_enum": "USED_GOOD",
+            "condition_label": "Used - Good",
+            "item_specifics": {
+              "Brand": "TGW"
+            }
+          },
+          "ebay_listing": {
+            "listing_id": "listing-published",
+            "status": "Active"
+          },
+          "ebay_offer": {
+            "offer_id": "offer-published",
+            "status": "PUBLISHED"
+          },
+          "sku": "sku-published",
+          "title": "Published item"
+        }
+      },
+      "listing": {
+        "entity_id": "sku-published",
+        "listing": {
+          "listing_id": "listing-published",
+          "status": "Active"
+        },
+        "object_generation": "generation-published",
+        "offer": {
+          "offer_id": "offer-published",
+          "status": "PUBLISHED"
+        },
+        "provider_state": "Active"
+      },
+      "object_generation": "generation-published",
+      "schema": "tgw-operator-object/v1",
+      "workflow": {
+        "details": {
+          "active_attempts": [],
+          "attempts": [],
+          "entity_id": "sku-published",
+          "fingerprints": [],
+          "graph_id": "graph-published",
+          "object_generation": "generation-published",
+          "operator_gates": [],
+          "ownership_conflicts": [],
+          "reconciliation_gates": []
+        },
+        "evidence": [
+          "provider-listing:listing-published:Active"
+        ],
+        "graph_id": "graph-published",
+        "reasons": [],
+        "state": "published"
+      }
+    }
+  },
+  {
+    "expected": {
+      "authority_scopes": {
+        "list-item": "publication",
+        "save-draft": "local-item-mutation",
+        "update-item": "update-restage"
+      },
+      "enabled_commands": [
+        "save-draft"
+      ],
+      "field_schema_keys": [
+        "aspects",
+        "category",
+        "condition",
+        "defaults",
+        "item_fields",
+        "listing_fields",
+        "validation_messages"
+      ],
+      "reasons": [
+        "A valid eBay category is required.",
+        "A category-valid displayed condition is required.",
+        "Required aspects are missing: Brand"
+      ],
+      "state": "held"
+    },
+    "object": {
+      "commands": [
+        {
+          "authority_scope": "local-item-mutation",
+          "enabled": true,
+          "id": "save-draft",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "draft_listing": {
+                "additionalProperties": false,
+                "properties": {
+                  "best_offer_auto_accept_price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "best_offer_auto_decline_price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "best_offer_enabled": {
+                    "nullable": true,
+                    "type": "boolean"
+                  },
+                  "category_id": {
+                    "type": "string"
+                  },
+                  "condition_description": {
+                    "type": "string"
+                  },
+                  "condition_enum": {
+                    "enum": [
+                      "USED_GOOD"
+                    ],
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "item_specifics": {
+                    "type": "string-map"
+                  },
+                  "price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "quantity": {
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "return_policy_id": {
+                    "type": "string"
+                  },
+                  "secondary_category_id": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "secondary_store_category_id": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "shipping_profile": {
+                    "type": "string"
+                  },
+                  "store_category_id": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "item_fields": {
+                "additionalProperties": false,
+                "properties": {
+                  "item_attributes": {
+                    "type": "string-map"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Save Draft",
+          "reason": null,
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "publication",
+          "enabled": false,
+          "id": "list-item",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "condition_enum": {
+                "enum": [
+                  "USED_GOOD"
+                ],
+                "type": "string"
+              },
+              "item_specifics": {
+                "additionalProperties": false,
+                "properties": {
+                  "Brand": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "List Item",
+          "reason": "A valid eBay category is required.",
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "update-restage",
+          "enabled": false,
+          "id": "update-item",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "condition_enum": {
+                "enum": [
+                  "USED_GOOD"
+                ],
+                "type": "string"
+              },
+              "item_specifics": {
+                "additionalProperties": false,
+                "properties": {
+                  "Brand": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Update Item",
+          "reason": "A valid eBay category is required.",
+          "refresh_target": "current-object"
+        }
+      ],
+      "entity_id": "sku-held",
+      "field_schema": {
+        "aspects": [
+          {
+            "allowed_values": [],
+            "mode": null,
+            "name": "Brand",
+            "required": true,
+            "value": null
+          }
+        ],
+        "category": {
+          "label": null,
+          "required": true,
+          "value": "99"
+        },
+        "condition": {
+          "label": null,
+          "options": [
+            {
+              "label": "Used - Good",
+              "value": "USED_GOOD"
+            }
+          ],
+          "required": true,
+          "valid": false,
+          "value": ""
+        },
+        "defaults": {
+          "fulfillment_policy_id": null,
+          "store_category": null
+        },
+        "item_fields": {
+          "item_attributes": {
+            "label": "Inventory attributes",
+            "type": "string-map",
+            "value": {}
+          },
+          "location": {
+            "label": "Location",
+            "type": "string",
+            "value": ""
+          },
+          "notes": {
+            "label": "Notes",
+            "type": "string",
+            "value": ""
+          },
+          "title": {
+            "label": "Inventory title",
+            "type": "string",
+            "value": "Held item"
+          }
+        },
+        "listing_fields": {
+          "best_offer_auto_accept_price": {
+            "label": "Best Offer auto-accept",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "best_offer_auto_decline_price": {
+            "label": "Best Offer auto-decline",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "best_offer_enabled": {
+            "label": "Best Offer",
+            "nullable": true,
+            "type": "boolean",
+            "value": null
+          },
+          "category_id": {
+            "label": "eBay category ID",
+            "type": "string",
+            "value": "99"
+          },
+          "condition_description": {
+            "label": "Condition description",
+            "type": "string",
+            "value": ""
+          },
+          "description": {
+            "label": "Description",
+            "type": "string",
+            "value": ""
+          },
+          "item_specifics": {
+            "label": "Item specifics",
+            "type": "string-map",
+            "value": {}
+          },
+          "price": {
+            "label": "Price",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "quantity": {
+            "label": "Quantity",
+            "nullable": true,
+            "type": "integer",
+            "value": null
+          },
+          "return_policy_id": {
+            "label": "Return policy",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "secondary_category_id": {
+            "label": "Secondary category ID",
+            "nullable": true,
+            "type": "string",
+            "value": null
+          },
+          "secondary_store_category_id": {
+            "label": "Secondary store category",
+            "nullable": true,
+            "options": [],
+            "type": "string",
+            "value": null
+          },
+          "shipping_profile": {
+            "label": "Shipping policy",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "store_category_id": {
+            "label": "Store category",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "title": {
+            "label": "Listing title",
+            "type": "string",
+            "value": "Held item"
+          }
+        },
+        "validation_messages": [
+          "A valid eBay category is required.",
+          "A category-valid displayed condition is required.",
+          "Required aspects are missing: Brand"
+        ]
+      },
+      "item": {
+        "entity_id": "sku-held",
+        "object_generation": "generation-held",
+        "record": {
+          "draft_listing": {
+            "category_id": "99",
+            "item_specifics": {}
+          },
+          "sku": "sku-held",
+          "title": "Held item"
+        }
+      },
+      "listing": {
+        "entity_id": "sku-held",
+        "listing": {},
+        "object_generation": "generation-held",
+        "offer": {},
+        "provider_state": "not-staged"
+      },
+      "object_generation": "generation-held",
+      "schema": "tgw-operator-object/v1",
+      "workflow": {
+        "details": {
+          "active_attempts": [],
+          "attempts": [],
+          "entity_id": "sku-held",
+          "fingerprints": [],
+          "graph_id": "graph-held",
+          "object_generation": "generation-held",
+          "operator_gates": [],
+          "ownership_conflicts": [],
+          "reconciliation_gates": []
+        },
+        "evidence": [],
+        "graph_id": "graph-held",
+        "reasons": [
+          "A valid eBay category is required.",
+          "A category-valid displayed condition is required.",
+          "Required aspects are missing: Brand"
+        ],
+        "state": "held"
+      }
+    }
+  },
+  {
+    "expected": {
+      "authority_scopes": {
+        "list-item": "publication",
+        "save-draft": "local-item-mutation",
+        "update-item": "update-restage"
+      },
+      "enabled_commands": [],
+      "field_schema_keys": [
+        "aspects",
+        "category",
+        "condition",
+        "defaults",
+        "item_fields",
+        "listing_fields",
+        "validation_messages"
+      ],
+      "reasons": [],
+      "state": "in_progress"
+    },
+    "object": {
+      "commands": [
+        {
+          "authority_scope": "local-item-mutation",
+          "enabled": false,
+          "id": "save-draft",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "draft_listing": {
+                "additionalProperties": false,
+                "properties": {
+                  "best_offer_auto_accept_price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "best_offer_auto_decline_price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "best_offer_enabled": {
+                    "nullable": true,
+                    "type": "boolean"
+                  },
+                  "category_id": {
+                    "type": "string"
+                  },
+                  "condition_description": {
+                    "type": "string"
+                  },
+                  "condition_enum": {
+                    "enum": [
+                      "USED_GOOD"
+                    ],
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "item_specifics": {
+                    "type": "string-map"
+                  },
+                  "price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "quantity": {
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "return_policy_id": {
+                    "type": "string"
+                  },
+                  "secondary_category_id": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "secondary_store_category_id": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "shipping_profile": {
+                    "type": "string"
+                  },
+                  "store_category_id": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "item_fields": {
+                "additionalProperties": false,
+                "properties": {
+                  "item_attributes": {
+                    "type": "string-map"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Save Draft",
+          "reason": "The authoritative workflow is active.",
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "publication",
+          "enabled": false,
+          "id": "list-item",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "condition_enum": {
+                "enum": [
+                  "USED_GOOD"
+                ],
+                "type": "string"
+              },
+              "item_specifics": {
+                "additionalProperties": false,
+                "properties": {
+                  "Brand": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "List Item",
+          "reason": "The authoritative workflow is already running.",
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "update-restage",
+          "enabled": false,
+          "id": "update-item",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "condition_enum": {
+                "enum": [
+                  "USED_GOOD"
+                ],
+                "type": "string"
+              },
+              "item_specifics": {
+                "additionalProperties": false,
+                "properties": {
+                  "Brand": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Update Item",
+          "reason": "The authoritative workflow is already running.",
+          "refresh_target": "current-object"
+        }
+      ],
+      "entity_id": "sku-in_progress",
+      "field_schema": {
+        "aspects": [
+          {
+            "allowed_values": [],
+            "mode": null,
+            "name": "Brand",
+            "required": true,
+            "value": "TGW"
+          }
+        ],
+        "category": {
+          "label": null,
+          "required": true,
+          "value": "123"
+        },
+        "condition": {
+          "label": "Used - Good",
+          "options": [
+            {
+              "label": "Used - Good",
+              "value": "USED_GOOD"
+            }
+          ],
+          "required": true,
+          "valid": true,
+          "value": "USED_GOOD"
+        },
+        "defaults": {
+          "fulfillment_policy_id": null,
+          "store_category": null
+        },
+        "item_fields": {
+          "item_attributes": {
+            "label": "Inventory attributes",
+            "type": "string-map",
+            "value": {}
+          },
+          "location": {
+            "label": "Location",
+            "type": "string",
+            "value": ""
+          },
+          "notes": {
+            "label": "Notes",
+            "type": "string",
+            "value": ""
+          },
+          "title": {
+            "label": "Inventory title",
+            "type": "string",
+            "value": "In Progress item"
+          }
+        },
+        "listing_fields": {
+          "best_offer_auto_accept_price": {
+            "label": "Best Offer auto-accept",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "best_offer_auto_decline_price": {
+            "label": "Best Offer auto-decline",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "best_offer_enabled": {
+            "label": "Best Offer",
+            "nullable": true,
+            "type": "boolean",
+            "value": null
+          },
+          "category_id": {
+            "label": "eBay category ID",
+            "type": "string",
+            "value": "123"
+          },
+          "condition_description": {
+            "label": "Condition description",
+            "type": "string",
+            "value": ""
+          },
+          "description": {
+            "label": "Description",
+            "type": "string",
+            "value": ""
+          },
+          "item_specifics": {
+            "label": "Item specifics",
+            "type": "string-map",
+            "value": {
+              "Brand": "TGW"
+            }
+          },
+          "price": {
+            "label": "Price",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "quantity": {
+            "label": "Quantity",
+            "nullable": true,
+            "type": "integer",
+            "value": null
+          },
+          "return_policy_id": {
+            "label": "Return policy",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "secondary_category_id": {
+            "label": "Secondary category ID",
+            "nullable": true,
+            "type": "string",
+            "value": null
+          },
+          "secondary_store_category_id": {
+            "label": "Secondary store category",
+            "nullable": true,
+            "options": [],
+            "type": "string",
+            "value": null
+          },
+          "shipping_profile": {
+            "label": "Shipping policy",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "store_category_id": {
+            "label": "Store category",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "title": {
+            "label": "Listing title",
+            "type": "string",
+            "value": "In Progress item"
+          }
+        },
+        "validation_messages": []
+      },
+      "item": {
+        "entity_id": "sku-in_progress",
+        "object_generation": "generation-in_progress",
+        "record": {
+          "draft_listing": {
+            "category_id": "123",
+            "condition_enum": "USED_GOOD",
+            "condition_label": "Used - Good",
+            "item_specifics": {
+              "Brand": "TGW"
+            }
+          },
+          "sku": "sku-in_progress",
+          "title": "In Progress item"
+        }
+      },
+      "listing": {
+        "entity_id": "sku-in_progress",
+        "listing": {},
+        "object_generation": "generation-in_progress",
+        "offer": {},
+        "provider_state": "not-staged"
+      },
+      "object_generation": "generation-in_progress",
+      "schema": "tgw-operator-object/v1",
+      "workflow": {
+        "details": {
+          "active_attempts": [
+            "job-active"
+          ],
+          "attempts": [],
+          "entity_id": "sku-in_progress",
+          "fingerprints": [],
+          "graph_id": "graph-in_progress",
+          "object_generation": "generation-in_progress",
+          "operator_gates": [],
+          "ownership_conflicts": [],
+          "reconciliation_gates": []
+        },
+        "evidence": [],
+        "graph_id": "graph-in_progress",
+        "reasons": [],
+        "state": "in_progress"
+      }
+    }
+  },
+  {
+    "expected": {
+      "authority_scopes": {
+        "list-item": "publication",
+        "save-draft": "local-item-mutation",
+        "update-item": "update-restage"
+      },
+      "enabled_commands": [
+        "save-draft"
+      ],
+      "field_schema_keys": [
+        "aspects",
+        "category",
+        "condition",
+        "defaults",
+        "item_fields",
+        "listing_fields",
+        "validation_messages"
+      ],
+      "reasons": [
+        "provider evidence is stale"
+      ],
+      "state": "reconciliation_required"
+    },
+    "object": {
+      "commands": [
+        {
+          "authority_scope": "local-item-mutation",
+          "enabled": true,
+          "id": "save-draft",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "draft_listing": {
+                "additionalProperties": false,
+                "properties": {
+                  "best_offer_auto_accept_price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "best_offer_auto_decline_price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "best_offer_enabled": {
+                    "nullable": true,
+                    "type": "boolean"
+                  },
+                  "category_id": {
+                    "type": "string"
+                  },
+                  "condition_description": {
+                    "type": "string"
+                  },
+                  "condition_enum": {
+                    "enum": [
+                      "USED_GOOD"
+                    ],
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "item_specifics": {
+                    "type": "string-map"
+                  },
+                  "price": {
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "quantity": {
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "return_policy_id": {
+                    "type": "string"
+                  },
+                  "secondary_category_id": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "secondary_store_category_id": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "shipping_profile": {
+                    "type": "string"
+                  },
+                  "store_category_id": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "item_fields": {
+                "additionalProperties": false,
+                "properties": {
+                  "item_attributes": {
+                    "type": "string-map"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Save Draft",
+          "reason": null,
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "publication",
+          "enabled": false,
+          "id": "list-item",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "condition_enum": {
+                "enum": [
+                  "USED_GOOD"
+                ],
+                "type": "string"
+              },
+              "item_specifics": {
+                "additionalProperties": false,
+                "properties": {
+                  "Brand": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "List Item",
+          "reason": "provider evidence is stale",
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "update-restage",
+          "enabled": false,
+          "id": "update-item",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "condition_enum": {
+                "enum": [
+                  "USED_GOOD"
+                ],
+                "type": "string"
+              },
+              "item_specifics": {
+                "additionalProperties": false,
+                "properties": {
+                  "Brand": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Update Item",
+          "reason": "provider evidence is stale",
+          "refresh_target": "current-object"
+        }
+      ],
+      "entity_id": "sku-reconciliation_required",
+      "field_schema": {
+        "aspects": [
+          {
+            "allowed_values": [],
+            "mode": null,
+            "name": "Brand",
+            "required": true,
+            "value": "TGW"
+          }
+        ],
+        "category": {
+          "label": null,
+          "required": true,
+          "value": "123"
+        },
+        "condition": {
+          "label": "Used - Good",
+          "options": [
+            {
+              "label": "Used - Good",
+              "value": "USED_GOOD"
+            }
+          ],
+          "required": true,
+          "valid": true,
+          "value": "USED_GOOD"
+        },
+        "defaults": {
+          "fulfillment_policy_id": null,
+          "store_category": null
+        },
+        "item_fields": {
+          "item_attributes": {
+            "label": "Inventory attributes",
+            "type": "string-map",
+            "value": {}
+          },
+          "location": {
+            "label": "Location",
+            "type": "string",
+            "value": ""
+          },
+          "notes": {
+            "label": "Notes",
+            "type": "string",
+            "value": ""
+          },
+          "title": {
+            "label": "Inventory title",
+            "type": "string",
+            "value": "Reconciliation Required item"
+          }
+        },
+        "listing_fields": {
+          "best_offer_auto_accept_price": {
+            "label": "Best Offer auto-accept",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "best_offer_auto_decline_price": {
+            "label": "Best Offer auto-decline",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "best_offer_enabled": {
+            "label": "Best Offer",
+            "nullable": true,
+            "type": "boolean",
+            "value": null
+          },
+          "category_id": {
+            "label": "eBay category ID",
+            "type": "string",
+            "value": "123"
+          },
+          "condition_description": {
+            "label": "Condition description",
+            "type": "string",
+            "value": ""
+          },
+          "description": {
+            "label": "Description",
+            "type": "string",
+            "value": ""
+          },
+          "item_specifics": {
+            "label": "Item specifics",
+            "type": "string-map",
+            "value": {
+              "Brand": "TGW"
+            }
+          },
+          "price": {
+            "label": "Price",
+            "nullable": true,
+            "type": "number",
+            "value": null
+          },
+          "quantity": {
+            "label": "Quantity",
+            "nullable": true,
+            "type": "integer",
+            "value": null
+          },
+          "return_policy_id": {
+            "label": "Return policy",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "secondary_category_id": {
+            "label": "Secondary category ID",
+            "nullable": true,
+            "type": "string",
+            "value": null
+          },
+          "secondary_store_category_id": {
+            "label": "Secondary store category",
+            "nullable": true,
+            "options": [],
+            "type": "string",
+            "value": null
+          },
+          "shipping_profile": {
+            "label": "Shipping policy",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "store_category_id": {
+            "label": "Store category",
+            "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "title": {
+            "label": "Listing title",
+            "type": "string",
+            "value": "Reconciliation Required item"
+          }
+        },
+        "validation_messages": []
+      },
+      "item": {
+        "entity_id": "sku-reconciliation_required",
+        "object_generation": "generation-reconciliation_required",
+        "record": {
+          "draft_listing": {
+            "category_id": "123",
+            "condition_enum": "USED_GOOD",
+            "condition_label": "Used - Good",
+            "item_specifics": {
+              "Brand": "TGW"
+            }
+          },
+          "sku": "sku-reconciliation_required",
+          "title": "Reconciliation Required item"
+        }
+      },
+      "listing": {
+        "entity_id": "sku-reconciliation_required",
+        "listing": {},
+        "object_generation": "generation-reconciliation_required",
+        "offer": {},
+        "provider_state": "not-staged"
+      },
+      "object_generation": "generation-reconciliation_required",
+      "schema": "tgw-operator-object/v1",
+      "workflow": {
+        "details": {
+          "active_attempts": [],
+          "attempts": [],
+          "entity_id": "sku-reconciliation_required",
+          "fingerprints": [],
+          "graph_id": "graph-reconciliation_required",
+          "object_generation": "generation-reconciliation_required",
+          "operator_gates": [],
+          "ownership_conflicts": [],
+          "reconciliation_gates": [
+            "provider evidence is stale"
+          ]
+        },
+        "evidence": [],
+        "graph_id": "graph-reconciliation_required",
+        "reasons": [
+          "provider evidence is stale"
+        ],
+        "state": "reconciliation_required"
+      }
+    }
   }
 ]

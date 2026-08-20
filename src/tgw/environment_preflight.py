@@ -12,9 +12,13 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+
+from tgw.admission_recovery import AdmissionRecoveryError, sign_environment_preflight_receipt
 
 SCHEMAS = {
     "tgw-execution-environment-catalog/v1",
@@ -170,6 +174,42 @@ def _observe_enforcement_boundary(catalog: Mapping[str, Any], boundary_root: str
         "executable_renderer_inputs": False,
         "components": sorted(observed, key=lambda item: item["name"]),
     }
+
+
+def _observe_policy_revisions(
+    catalog: Mapping[str, Any], boundary_root: str | Path | None, actors: Mapping[str, Any],
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Bind declared bootstrap and per-actor broker policy revisions to bytes."""
+    if boundary_root is None:
+        raise EnvironmentPreflightError("policy revision source root is required")
+    root = Path(boundary_root)
+    bootstrap = catalog["bootstrap_revision"]
+    broker = catalog["broker_policy_revision"]
+    bootstrap_path = root / bootstrap["source_relative_path"]
+    if bootstrap_path.is_symlink() or not bootstrap_path.is_file():
+        raise EnvironmentPreflightError("bootstrap policy source is unavailable")
+    bootstrap_hash = _file_hash(bootstrap_path)
+    if bootstrap_hash != bootstrap["content_sha256"]:
+        raise EnvironmentPreflightError("bootstrap policy revision mismatch")
+    members = broker["members"]
+    if set(members) != set(actors):
+        raise EnvironmentPreflightError("broker policy actors and catalog actors differ")
+    observed_members: dict[str, str] = {}
+    for actor_name, expected_hash in sorted(members.items()):
+        policy_path = root / "agent-services" / "harnesses" / actor_name / "tgw-context-policy.json"
+        if policy_path.is_symlink() or not policy_path.is_file():
+            raise EnvironmentPreflightError(f"broker policy source is unavailable: {actor_name}")
+        observed_hash = _file_hash(policy_path)
+        if observed_hash != expected_hash:
+            raise EnvironmentPreflightError(f"broker policy revision mismatch: {actor_name}")
+        observed_members[actor_name] = observed_hash
+    observed_set = {"schema": broker["schema"], "members": observed_members}
+    if _hash(observed_set) != broker["content_sha256"]:
+        raise EnvironmentPreflightError("broker policy set revision mismatch")
+    return (
+        {"source_relative_path": bootstrap["source_relative_path"], "content_sha256": bootstrap_hash},
+        {**observed_set, "content_sha256": broker["content_sha256"]},
+    )
 
 
 def preflight(
@@ -392,9 +432,12 @@ def preflight(
             }
         )
     if catalog.get("schema") == "tgw-execution-environment-catalog/v3":
-        unsigned["bootstrap_revision"] = dict(catalog["bootstrap_revision"])
-        unsigned["broker_policy_revision"] = dict(catalog["broker_policy_revision"])
         unsigned["enforcement_boundary"] = _observe_enforcement_boundary(catalog, boundary_root)
+        bootstrap_revision, broker_policy_revision = _observe_policy_revisions(
+            catalog, boundary_root, actors,
+        )
+        unsigned["bootstrap_revision"] = bootstrap_revision
+        unsigned["broker_policy_revision"] = broker_policy_revision
     return unsigned
 
 
@@ -405,23 +448,43 @@ def main() -> int:
     parser.add_argument("--profile", required=True)
     parser.add_argument("--attempt-id", required=True)
     parser.add_argument("--boundary-root", type=Path)
+    parser.add_argument("--signing-key", type=Path, required=True)
+    parser.add_argument("--signer-key-id", required=True)
+    parser.add_argument("--expires-at", required=True)
     args = parser.parse_args()
     try:
         raw = json.loads(args.catalog.read_text(encoding="utf-8"))
+        key_metadata = args.signing_key.lstat()
+        key_bytes = args.signing_key.read_bytes()
+        if (
+            args.signing_key.is_symlink()
+            or not stat.S_ISREG(key_metadata.st_mode)
+            or key_metadata.st_mode & 0o077
+            or len(key_bytes) != 32
+        ):
+            raise EnvironmentPreflightError("preflight signing key is not a protected raw Ed25519 key")
+        issued_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        observed = preflight(
+            catalog=raw,
+            actor=args.actor,
+            profile=args.profile,
+            attempt_id=args.attempt_id,
+            boundary_root=args.boundary_root,
+        )
         print(
             json.dumps(
-                preflight(
-                    catalog=raw,
-                    actor=args.actor,
-                    profile=args.profile,
-                    attempt_id=args.attempt_id,
-                    boundary_root=args.boundary_root,
+                sign_environment_preflight_receipt(
+                    observed,
+                    signing_private_key=key_bytes,
+                    signer_key_id=args.signer_key_id,
+                    issued_at=issued_at,
+                    expires_at=args.expires_at,
                 ),
                 sort_keys=True,
             )
         )
         return 0
-    except (OSError, json.JSONDecodeError, EnvironmentPreflightError) as exc:
+    except (OSError, json.JSONDecodeError, EnvironmentPreflightError, AdmissionRecoveryError) as exc:
         print(json.dumps({"result": "HOLD", "error": str(exc)}, sort_keys=True), file=sys.stderr)
         return 2
 

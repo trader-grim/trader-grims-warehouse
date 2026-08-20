@@ -18,6 +18,7 @@ import stat
 import tarfile
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Mapping
 
@@ -106,6 +107,24 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ReleaseError(f"JSON object required at {path}")
     return value
+
+
+def _read_trusted_public_key(path: Path) -> bytes:
+    """Read an exact root-owned raw Ed25519 authority key."""
+    try:
+        metadata = path.lstat()
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ReleaseError("trusted receipt public key is unavailable") from exc
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_mode & 0o022
+        or len(raw) != 32
+    ):
+        raise ReleaseError("trusted receipt public key is not root-owned immutable authority")
+    return raw
 
 
 def _identity(name: str, value: str, length: int) -> str:
@@ -544,9 +563,22 @@ def select(
     operation_id: str,
     admission_receipt: Mapping[str, Any] | None = None,
     environment_preflight_receipt: Mapping[str, Any] | None = None,
+    admission_public_key: bytes | None = None,
+    environment_public_key: bytes | None = None,
+    current_plan_commit: str | None = None,
+    current_solution_hash: str | None = None,
+    current_time: str | None = None,
 ) -> dict[str, Any]:
     """Select only after revalidating exact W15/W16 evidence at this boundary."""
-    if admission_receipt is None or environment_preflight_receipt is None:
+    if (
+        admission_receipt is None
+        or environment_preflight_receipt is None
+        or admission_public_key is None
+        or environment_public_key is None
+        or current_plan_commit is None
+        or current_solution_hash is None
+        or current_time is None
+    ):
         record_refusal(root, generation, operation_id, reason="missing-admission-evidence")
         raise ReleaseError("release selection requires admission and environment-preflight receipts")
     try:
@@ -555,11 +587,17 @@ def select(
             admission_receipt,
             candidate_commit=manifest["commit"],
             candidate_tree=manifest["git_tree"],
+            trusted_public_key=admission_public_key,
+            current_time=current_time,
+            current_plan_commit=current_plan_commit,
+            current_solution_hash=current_solution_hash,
         )
         validate_environment_preflight_for_admission(
             environment_preflight_receipt,
             catalog_hash=admission["environment"]["catalog_hash"],
             receipt_hash=admission["environment"]["receipt_hash"],
+            trusted_public_key=environment_public_key,
+            current_time=current_time,
         )
     except (AdmissionRecoveryError, KeyError) as exc:
         record_refusal(root, generation, operation_id, reason="invalid-admission-evidence")
@@ -648,6 +686,10 @@ def main() -> int:
         install.add_argument(f"--{name}", required=True)
     install.add_argument("--admission-receipt", type=Path)
     install.add_argument("--environment-preflight-receipt", type=Path)
+    install.add_argument("--admission-public-key", type=Path)
+    install.add_argument("--environment-public-key", type=Path)
+    install.add_argument("--current-plan-commit")
+    install.add_argument("--current-solution-hash")
     check = commands.add_parser("verify")
     check.add_argument("generation")
     commands.add_parser("recover")
@@ -658,7 +700,14 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "install":
-            if args.admission_receipt is None or args.environment_preflight_receipt is None:
+            if (
+                args.admission_receipt is None
+                or args.environment_preflight_receipt is None
+                or args.admission_public_key is None
+                or args.environment_public_key is None
+                or args.current_plan_commit is None
+                or args.current_solution_hash is None
+            ):
                 record_refusal(
                     args.root,
                     args.generation,
@@ -671,16 +720,25 @@ def main() -> int:
             except (OSError, json.JSONDecodeError) as exc:
                 raise ReleaseError("admission receipt is unavailable or invalid") from exc
             try:
+                admission_public_key = _read_trusted_public_key(args.admission_public_key)
+                environment_public_key = _read_trusted_public_key(args.environment_public_key)
+                current_time = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
                 validate_release_admission(
                     admission,
                     candidate_commit=args.commit,
                     candidate_tree=args.tree,
+                    trusted_public_key=admission_public_key,
+                    current_time=current_time,
+                    current_plan_commit=args.current_plan_commit,
+                    current_solution_hash=args.current_solution_hash,
                 )
                 preflight = json.loads(args.environment_preflight_receipt.read_text(encoding="utf-8"))
                 validate_environment_preflight_for_admission(
                     preflight,
                     catalog_hash=admission["environment"]["catalog_hash"],
                     receipt_hash=admission["environment"]["receipt_hash"],
+                    trusted_public_key=environment_public_key,
+                    current_time=current_time,
                 )
             except AdmissionRecoveryError as exc:
                 raise ReleaseError(f"release admission refused: {exc}") from exc
@@ -702,6 +760,11 @@ def main() -> int:
                 operation_id=args.operation_id,
                 admission_receipt=admission,
                 environment_preflight_receipt=preflight,
+                admission_public_key=admission_public_key,
+                environment_public_key=environment_public_key,
+                current_plan_commit=args.current_plan_commit,
+                current_solution_hash=args.current_solution_hash,
+                current_time=current_time,
             )
             result = {"manifest": manifest, "receipt": receipt}
         elif args.command == "verify":

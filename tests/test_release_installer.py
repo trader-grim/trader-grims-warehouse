@@ -11,8 +11,9 @@ import tarfile
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from tgw.admission_recovery import compile_release_admission
+from tgw.admission_recovery import compile_release_admission, sign_environment_preflight_receipt
 from tgw.release_installer import (
     RECEIPT_SCHEMA,
     ReleaseError,
@@ -29,6 +30,21 @@ from tgw.release_installer import (
 COMMIT_A = "a" * 40
 COMMIT_B = "b" * 40
 TREE = "c" * 40
+ADMISSION_KEY = Ed25519PrivateKey.generate()
+PREFLIGHT_KEY = Ed25519PrivateKey.generate()
+ISSUED = "2026-08-20T00:00:00Z"
+EXPIRES = "2026-08-21T00:00:00Z"
+CURRENT = "2026-08-20T12:00:00Z"
+
+
+def _selection_authority(plan_commit: str) -> dict[str, object]:
+    return {
+        "admission_public_key": ADMISSION_KEY.public_key(),
+        "environment_public_key": PREFLIGHT_KEY.public_key(),
+        "current_plan_commit": plan_commit,
+        "current_solution_hash": "sha256:" + "d" * 64,
+        "current_time": CURRENT,
+    }
 
 
 def _archive(
@@ -80,11 +96,12 @@ def _selection_evidence(commit: str, tree: str) -> tuple[dict[str, object], dict
         "attempt_id": "test-attempt",
         "tools": [],
     }
-    preflight_hash = (
-        "sha256:"
-        + hashlib.sha256(
-            json.dumps(preflight, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(),
-        ).hexdigest()
+    preflight = sign_environment_preflight_receipt(
+        preflight,
+        signing_private_key=PREFLIGHT_KEY,
+        signer_key_id="preflight-authority",
+        issued_at=ISSUED,
+        expires_at=EXPIRES,
     )
     evidence = {"status": "PASS", "candidate_commit": commit, "solution_hash": digest, "receipt_hash": digest}
     admission = compile_release_admission(
@@ -93,10 +110,14 @@ def _selection_evidence(commit: str, tree: str) -> tuple[dict[str, object], dict
             "request_id": "test-admission",
             "candidate": {"commit": commit, "tree": tree},
             "plan": {"commit": commit, "solution_hash": digest},
-            "environment": {"catalog_hash": digest, "receipt_hash": preflight_hash},
+            "environment": {"catalog_hash": digest, "receipt_hash": preflight["receipt_hash"]},
             "review": dict(evidence),
             "admission": dict(evidence),
-        }
+        },
+        signing_private_key=ADMISSION_KEY,
+        signer_key_id="admission-authority",
+        issued_at=ISSUED,
+        expires_at=EXPIRES,
     )
     return admission, preflight
 
@@ -113,12 +134,16 @@ def test_materialize_verify_select_replay_and_rollback(tmp_path: Path) -> None:
     _release(root, tmp_path, "release-b", COMMIT_B, b"B\n")
 
     admission, preflight = _selection_evidence(COMMIT_B, TREE)
-    receipt = select(root, "release-b", expected_current="release-a", operation_id="deploy-b", admission_receipt=admission, environment_preflight_receipt=preflight)
+    receipt = select(root, "release-b", expected_current="release-a", operation_id="deploy-b", admission_receipt=admission, environment_preflight_receipt=preflight, **_selection_authority(COMMIT_B))
     assert receipt["state"] == "completed"
     assert receipt["selected_commit"] == COMMIT_B
     assert len(receipt["selected_manifest_sha256"]) == 64
     assert current_generation(root) == "release-b"
-    assert select(root, "release-b", expected_current="release-a", operation_id="deploy-b", admission_receipt=admission, environment_preflight_receipt=preflight) == receipt
+    assert select(
+        root, "release-b", expected_current="release-a", operation_id="deploy-b",
+        admission_receipt=admission, environment_preflight_receipt=preflight,
+        **_selection_authority(COMMIT_B),
+    ) == receipt
 
     rolled_back = rollback(
         root,
@@ -143,6 +168,7 @@ def test_selection_is_compare_and_swap(tmp_path: Path) -> None:
             operation_id="deploy-b",
             admission_receipt=admission,
             environment_preflight_receipt=preflight,
+            **_selection_authority(COMMIT_B),
         )
     assert current_generation(root) == "release-a"
     assert not (root / "operations" / "deploy-b.json").exists()
@@ -152,11 +178,11 @@ def test_bootstrap_selection_requires_an_absent_current_generation(tmp_path: Pat
     root = tmp_path / "tgw"
     _release(root, tmp_path, "bootstrap-a", COMMIT_A, b"A\n")
     admission, preflight = _selection_evidence(COMMIT_A, TREE)
-    receipt = select(root, "bootstrap-a", expected_current=None, operation_id="bootstrap-a", admission_receipt=admission, environment_preflight_receipt=preflight)
+    receipt = select(root, "bootstrap-a", expected_current=None, operation_id="bootstrap-a", admission_receipt=admission, environment_preflight_receipt=preflight, **_selection_authority(COMMIT_A))
     assert receipt["previous_generation"] is None
     assert current_generation(root) == "bootstrap-a"
     with pytest.raises(ReleaseError, match="current generation changed"):
-        select(root, "bootstrap-a", expected_current=None, operation_id="bootstrap-b", admission_receipt=admission, environment_preflight_receipt=preflight)
+        select(root, "bootstrap-a", expected_current=None, operation_id="bootstrap-b", admission_receipt=admission, environment_preflight_receipt=preflight, **_selection_authority(COMMIT_A))
 
 
 def test_direct_select_refuses_without_exact_admission_evidence(tmp_path: Path) -> None:

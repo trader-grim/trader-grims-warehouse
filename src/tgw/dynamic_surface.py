@@ -206,7 +206,7 @@ def submit_dynamic_surface(
     current_card_hash: str, current_authority_hash: str,
     handlers: Mapping[str, Callable[[Mapping[str, Any]], Mapping[str, Any]]],
     persist_receipt: Callable[[Mapping[str, Any]], Mapping[str, Any]],
-    claim_submission: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    claim_submission: Callable[[Mapping[str, Any]], Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Invoke only the registered typed decision bound by a still-live surface."""
     value = _mapping(submission, {"schema", "surface_hash", "action_id", "values", "operator", "submitted_at"}, "surface submission")
@@ -237,26 +237,35 @@ def submit_dynamic_surface(
         "authority_hash": source["authority_hash"], "operator": operator,
         "decision": action["decision"], "values": typed_values,
     }
-    claim: dict[str, Any] | None = None
-    if claim_submission is not None:
-        claimed = claim_submission(invocation)
-        if (
-            not isinstance(claimed, Mapping)
-            or claimed.get("status") != "CLAIMED"
-            or not isinstance(claimed.get("claim_hash"), str)
-            or _HASH.fullmatch(claimed["claim_hash"]) is None
-        ):
-            raise DynamicSurfaceError("submission claim was refused")
-        claim = dict(claimed)
+    if not callable(claim_submission):
+        raise DynamicSurfaceError("submission claim boundary is unavailable")
+    claimed = claim_submission(invocation)
+    if (
+        not isinstance(claimed, Mapping)
+        or claimed.get("status") != "CLAIMED"
+        or not isinstance(claimed.get("claim_hash"), str)
+        or _HASH.fullmatch(claimed["claim_hash"]) is None
+    ):
+        raise DynamicSurfaceError("submission claim was refused")
+    claim = dict(claimed)
+    pending = {
+        "schema": "tgw-dynamic-surface-decision-receipt/v1", **invocation,
+        "handler_id": action["handler_id"], "submitted_at": value["submitted_at"],
+        "presentation_hash": surface["presentation_hash"], "render_hash": surface["render_hash"],
+        "claim": claim, "status": "PENDING",
+    }
+    pending["receipt_hash"] = _hash(pending)
+    pending_sink = persist_receipt(pending)
+    if not isinstance(pending_sink, Mapping) or not pending_sink:
+        raise DynamicSurfaceError("immutable receipt sink refused the pending decision")
     outcome = dict(handler(invocation))
     receipt = {
         "schema": "tgw-dynamic-surface-decision-receipt/v1", **invocation,
         "handler_id": action["handler_id"], "submitted_at": value["submitted_at"],
         "presentation_hash": surface["presentation_hash"], "render_hash": surface["render_hash"],
-        "outcome": outcome,
+        "claim": claim, "status": "FINALIZED", "pending_receipt_hash": pending["receipt_hash"],
+        "pending_sink": dict(pending_sink), "outcome": outcome,
     }
-    if claim is not None:
-        receipt["claim"] = claim
     receipt["receipt_hash"] = _hash(receipt)
     sink = persist_receipt(receipt)
     if not isinstance(sink, Mapping) or not sink:

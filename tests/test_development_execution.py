@@ -2,11 +2,15 @@ import hashlib
 import json
 import subprocess
 import sys
+from copy import deepcopy
 from pathlib import Path
+
+import pytest
 
 from tgw import development_execution
 from tgw.governed_coding import dispatch_role
 from tgw.harness_registry import observe_health
+from tgw.queue.worker_base import HardFailure
 
 
 def canonical_hash(value):
@@ -22,6 +26,8 @@ def git(cwd, *args):
 
 
 def test_lifecycle_uses_distinct_role_worktrees_and_checkpoints_implementation(tmp_path, monkeypatch):
+    monkeypatch.setattr(development_execution, "_WORKTREE_ROOT", type(development_execution._WORKTREE_ROOT)(tmp_path / "worktrees"))
+    monkeypatch.setattr(development_execution, "_ATTEMPT_ROOT", type(development_execution._ATTEMPT_ROOT)(tmp_path / "attempts"))
     repository = tmp_path / "repository"
     repository.mkdir()
     git(repository, "init")
@@ -50,14 +56,16 @@ def test_lifecycle_uses_distinct_role_worktrees_and_checkpoints_implementation(t
     cards = []
     for index, role in enumerate(development_execution._ROLE_ORDER, start=1):
         key = "sha256:" + format(index, "064x")
+        attempt_id = f"attempt-{index:03d}"
         cards.append({
             "idempotency_key": key, "unit": "site", "role": role,
             "root": {"kind": "Plan", "id": "PLAN-SITE"},
             "plan": {"commit": plan_commit, "solution_hash": "sha256:" + "b" * 64},
             "execution_identity": f"site:{role}:{index}",
             "allocation": {
-                "worktree": str(tmp_path / "worktrees" / str(index) / "worktree"),
-                "attempt_root": str(tmp_path / "attempts" / str(index)),
+                "attempt_id": attempt_id,
+                "worktree": str(tmp_path / "worktrees" / "development-job" / attempt_id / "worktree"),
+                "attempt_root": str(tmp_path / "attempts" / "development-job" / attempt_id),
             },
             "execution_card_template": {
                 "card_id": key, "solution_id": "sha256:" + "b" * 64,
@@ -67,7 +75,7 @@ def test_lifecycle_uses_distinct_role_worktrees_and_checkpoints_implementation(t
             },
         })
     lifecycle = {
-        "request": {"original_request": "Build the site", "scope": "site"},
+        "request": {"request_id": "development-job", "original_request": "Build the site", "scope": "site"},
         "resolution": {"status": "RESOLVED"}, "launch_cards": cards,
     }
     lifecycle["lifecycle_hash"] = canonical_hash(lifecycle)
@@ -130,6 +138,48 @@ def test_lifecycle_uses_distinct_role_worktrees_and_checkpoints_implementation(t
     assert calls[1][3] == calls[2][3] == result["candidate"]["commit"]
     assert result["candidate"]["commit"] != source
     assert result["result_hash"] == canonical_hash({key: value for key, value in result.items() if key != "result_hash"})
+
+
+@pytest.mark.parametrize("tamper", ["lifecycle", "worktree", "attempt_root"])
+def test_executor_rejects_tampered_lifecycle_or_allocation_before_effects(tmp_path, monkeypatch, tamper):
+    request_id = "development-job"
+    attempt_id = "attempt-001"
+    monkeypatch.setattr(development_execution, "_WORKTREE_ROOT", type(development_execution._WORKTREE_ROOT)(tmp_path / "worktrees"))
+    monkeypatch.setattr(development_execution, "_ATTEMPT_ROOT", type(development_execution._ATTEMPT_ROOT)(tmp_path / "attempts"))
+    card = {
+        "idempotency_key": "sha256:" + "1" * 64, "unit": "site", "role": "implementation",
+        "allocation": {
+            "attempt_id": attempt_id,
+            "worktree": str(tmp_path / "worktrees" / request_id / attempt_id / "worktree"),
+            "attempt_root": str(tmp_path / "attempts" / request_id / attempt_id),
+        },
+    }
+    lifecycle = {"request": {"request_id": request_id}, "launch_cards": [card], "resolution": {}}
+    lifecycle["lifecycle_hash"] = canonical_hash(lifecycle)
+    document = {
+        "lifecycle": lifecycle,
+        "execution": {
+            "schema": "tgw-development-execution/v1",
+            "development_request_hash": lifecycle["lifecycle_hash"],
+            "card_idempotency_keys": [card["idempotency_key"]],
+        },
+    }
+    altered = deepcopy(document)
+    if tamper == "lifecycle":
+        altered["lifecycle"]["resolution"] = {"status": "tampered"}
+    else:
+        altered["lifecycle"]["launch_cards"][0]["allocation"][tamper] = str(tmp_path / "escaped" / tamper)
+        altered["lifecycle"]["lifecycle_hash"] = canonical_hash(
+            {key: value for key, value in altered["lifecycle"].items() if key != "lifecycle_hash"}
+        )
+        altered["execution"]["development_request_hash"] = altered["lifecycle"]["lifecycle_hash"]
+    monkeypatch.setattr(
+        development_execution, "_load_registry",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("effect reached")),
+    )
+    with pytest.raises(HardFailure):
+        development_execution.execute_development_lifecycle({"coding": {"development": {}}}, altered)
+    assert not (tmp_path / "escaped").exists()
 
 
 def test_native_controller_provider_runs_from_exact_card_worktree_and_retrieves_resources(tmp_path):

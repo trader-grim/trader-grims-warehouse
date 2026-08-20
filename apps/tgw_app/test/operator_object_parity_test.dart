@@ -29,6 +29,17 @@ void main() {
             .toList(),
         List<String>.from(expected['enabled_commands'] as List),
       );
+      expect(
+        {
+          for (final command in object.commands)
+            command.id: command.authorityScope,
+        },
+        Map<String, String>.from(expected['authority_scopes'] as Map),
+      );
+      expect(
+        object.fieldSchema.keys.toList()..sort(),
+        List<String>.from(expected['field_schema_keys'] as List),
+      );
     }
   });
 }

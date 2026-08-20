@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import runpy
+from pathlib import Path
 
 import pytest
 
@@ -12,17 +14,27 @@ from tgw.operator_objects import (
     web_adapter_view,
 )
 
+encoded_matrix = runpy.run_path(str(Path(__file__).with_name("operator_object_matrix.py")))["encoded_matrix"]
+
 
 def test_shared_state_matrix_matches_web_adapter_contract():
     import json
     from pathlib import Path
 
-    matrix = json.loads((Path(__file__).parent / "fixtures/operator_object_state_matrix.json").read_text())
+    fixture_path = Path(__file__).parent / "fixtures/operator_object_state_matrix.json"
+    fixture_bytes = fixture_path.read_text()
+    assert fixture_bytes == encoded_matrix()
+    matrix = json.loads(fixture_bytes)
+    assert {row["expected"]["state"] for row in matrix} == {
+        "ready", "staged", "published", "held", "in_progress", "reconciliation_required",
+    }
     for row in matrix:
         view = web_adapter_view(row["object"])
         assert view["state"] == row["expected"]["state"]
         assert view["reasons"] == row["expected"]["reasons"]
         assert [command["id"] for command in view["commands"] if command["enabled"]] == row["expected"]["enabled_commands"]
+        assert {command["id"]: command["authority_scope"] for command in view["commands"]} == row["expected"]["authority_scopes"]
+        assert sorted(view["field_schema"]) == row["expected"]["field_schema_keys"]
 
 
 def _published(*, state: str = "ready", generation: str = "gen-1"):

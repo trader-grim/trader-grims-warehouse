@@ -6,11 +6,15 @@ select a release nor invoke a broker, shell, installer, service, or provider.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Mapping
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -66,7 +70,58 @@ def _utc(value: Any, label: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def compile_release_admission(*, request: Mapping[str, Any]) -> dict[str, Any]:
+def _private_key(value: Ed25519PrivateKey | bytes) -> Ed25519PrivateKey:
+    if isinstance(value, Ed25519PrivateKey):
+        return value
+    try:
+        return Ed25519PrivateKey.from_private_bytes(value)
+    except (TypeError, ValueError) as exc:
+        raise AdmissionRecoveryError("receipt signing key is invalid") from exc
+
+
+def _public_key(value: Ed25519PublicKey | bytes) -> Ed25519PublicKey:
+    if isinstance(value, Ed25519PublicKey):
+        return value
+    try:
+        return Ed25519PublicKey.from_public_bytes(value)
+    except (TypeError, ValueError) as exc:
+        raise AdmissionRecoveryError("trusted receipt public key is invalid") from exc
+
+
+def _signature(value: Any) -> bytes:
+    if not isinstance(value, str):
+        raise AdmissionRecoveryError("receipt signature is invalid")
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise AdmissionRecoveryError("receipt signature is invalid") from exc
+    if len(decoded) != 64 or base64.b64encode(decoded).decode("ascii") != value:
+        raise AdmissionRecoveryError("receipt signature is invalid")
+    return decoded
+
+
+def _fresh(*, issued_at: Any, expires_at: Any, current_time: str) -> tuple[str, str]:
+    issued, expires, current = (
+        _utc(issued_at, "receipt issued_at"),
+        _utc(expires_at, "receipt expires_at"),
+        _utc(current_time, "receipt current time"),
+    )
+    issue_dt = datetime.fromisoformat(issued.replace("Z", "+00:00"))
+    expiry_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    current_dt = datetime.fromisoformat(current.replace("Z", "+00:00"))
+    if not issue_dt <= current_dt < expiry_dt:
+        raise AdmissionRecoveryError("receipt is not currently valid")
+    return issued, expires
+
+
+def compile_release_admission(
+    *,
+    request: Mapping[str, Any],
+    signing_private_key: Ed25519PrivateKey | bytes,
+    signer_key_id: str,
+    issued_at: str,
+    expires_at: str,
+) -> dict[str, Any]:
     """Return a W16 allow/refusal receipt without selecting any release."""
     value = _mapping(request, {"schema", "request_id", "candidate", "plan", "environment", "review", "admission"}, "admission request")
     if value["schema"] != "tgw-w16-release-admission-request/v1":
@@ -106,8 +161,39 @@ def compile_release_admission(*, request: Mapping[str, Any]) -> dict[str, Any]:
         "status": "REFUSED" if reasons else "ADMITTED",
         "reasons": sorted(set(reasons)),
         "activation": "declarative-only",
+        "issued_at": _utc(issued_at, "admission issued_at"),
+        "expires_at": _utc(expires_at, "admission expires_at"),
+        "signer_key_id": _identity(signer_key_id, "admission signer key id"),
     }
-    return {**unsigned, "receipt_hash": _hash(unsigned)}
+    if datetime.fromisoformat(unsigned["expires_at"].replace("Z", "+00:00")) <= datetime.fromisoformat(unsigned["issued_at"].replace("Z", "+00:00")):
+        raise AdmissionRecoveryError("admission receipt expiry is invalid")
+    hashed = {**unsigned, "receipt_hash": _hash(unsigned)}
+    signature = _private_key(signing_private_key).sign(_canonical(hashed))
+    return {**hashed, "signature": base64.b64encode(signature).decode("ascii")}
+
+
+def sign_environment_preflight_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    signing_private_key: Ed25519PrivateKey | bytes,
+    signer_key_id: str,
+    issued_at: str,
+    expires_at: str,
+) -> dict[str, Any]:
+    """Authenticate a completed W15 observation for later W16 admission."""
+    if not isinstance(receipt, Mapping) or receipt.get("schema") != "tgw-environment-preflight-receipt/v1" or receipt.get("result") != "PASS":
+        raise AdmissionRecoveryError("environment preflight did not pass")
+    unsigned = {
+        **dict(receipt),
+        "issued_at": _utc(issued_at, "preflight issued_at"),
+        "expires_at": _utc(expires_at, "preflight expires_at"),
+        "signer_key_id": _identity(signer_key_id, "preflight signer key id"),
+    }
+    if datetime.fromisoformat(unsigned["expires_at"].replace("Z", "+00:00")) <= datetime.fromisoformat(unsigned["issued_at"].replace("Z", "+00:00")):
+        raise AdmissionRecoveryError("environment preflight expiry is invalid")
+    hashed = {**unsigned, "receipt_hash": _hash(unsigned)}
+    signature = _private_key(signing_private_key).sign(_canonical(hashed))
+    return {**hashed, "signature": base64.b64encode(signature).decode("ascii")}
 
 
 def validate_release_admission(
@@ -115,6 +201,10 @@ def validate_release_admission(
     *,
     candidate_commit: str,
     candidate_tree: str,
+    trusted_public_key: Ed25519PublicKey | bytes,
+    current_time: str,
+    current_plan_commit: str,
+    current_solution_hash: str,
 ) -> dict[str, Any]:
     """Verify the one immutable W16 receipt that may select a release.
 
@@ -124,15 +214,22 @@ def validate_release_admission(
     """
     value = _mapping(
         receipt,
-        {"schema", "request_id", "candidate", "plan", "environment", "status", "reasons", "activation", "receipt_hash"},
+        {"schema", "request_id", "candidate", "plan", "environment", "status", "reasons", "activation", "issued_at", "expires_at", "signer_key_id", "receipt_hash", "signature"},
         "admission receipt",
     )
     if value["schema"] != "tgw-w16-release-admission-receipt/v1":
         raise AdmissionRecoveryError("admission receipt schema is invalid")
-    unsigned = dict(value)
+    signed = dict(value)
+    signature = signed.pop("signature")
+    unsigned = dict(signed)
     claimed = unsigned.pop("receipt_hash")
     if claimed != _hash(unsigned):
         raise AdmissionRecoveryError("admission receipt hash mismatch")
+    try:
+        _public_key(trusted_public_key).verify(_signature(signature), _canonical(signed))
+    except InvalidSignature as exc:
+        raise AdmissionRecoveryError("admission receipt signature is invalid") from exc
+    _fresh(issued_at=value["issued_at"], expires_at=value["expires_at"], current_time=current_time)
     if value["activation"] != "declarative-only" or value["status"] != "ADMITTED" or value["reasons"] != []:
         raise AdmissionRecoveryError("admission receipt does not authorize selection")
     candidate = _mapping(value["candidate"], {"commit", "tree"}, "admission candidate")
@@ -140,11 +237,13 @@ def validate_release_admission(
         raise AdmissionRecoveryError("admission receipt candidate commit mismatch")
     if candidate["tree"] != _commit(candidate_tree, "candidate tree"):
         raise AdmissionRecoveryError("admission receipt candidate tree mismatch")
-    _mapping(value["plan"], {"commit", "solution_hash"}, "admission Plan")
+    plan = _mapping(value["plan"], {"commit", "solution_hash"}, "admission Plan")
     _mapping(value["environment"], {"catalog_hash", "receipt_hash"}, "admission environment")
     _exact_hash(value["plan"]["solution_hash"], "admission Plan solution")
     _exact_hash(value["environment"]["catalog_hash"], "admission environment catalog")
     _exact_hash(value["environment"]["receipt_hash"], "admission environment receipt")
+    if plan["commit"] != _commit(current_plan_commit, "current Plan commit") or plan["solution_hash"] != _exact_hash(current_solution_hash, "current Plan solution"):
+        raise AdmissionRecoveryError("admission receipt Plan binding is stale")
     return value
 
 
@@ -153,9 +252,12 @@ def validate_environment_preflight_for_admission(
     *,
     catalog_hash: str,
     receipt_hash: str,
+    trusted_public_key: Ed25519PublicKey | bytes,
+    current_time: str,
 ) -> dict[str, Any]:
     """Re-hash the W15 observation before a W16 boundary relies on it."""
-    base_fields = {"schema", "result", "catalog_sha256", "actor", "profile", "attempt_id", "tools"}
+    authentication_fields = {"issued_at", "expires_at", "signer_key_id", "receipt_hash", "signature"}
+    base_fields = {"schema", "result", "catalog_sha256", "actor", "profile", "attempt_id", "tools"} | authentication_fields
     v2_fields = base_fields | {
         "workspace_root",
         "cache_roots",
@@ -179,9 +281,17 @@ def validate_environment_preflight_for_admission(
         raise AdmissionRecoveryError("environment preflight did not pass")
     if value["catalog_sha256"] != _exact_hash(catalog_hash, "admission environment catalog"):
         raise AdmissionRecoveryError("environment preflight catalog mismatch")
-    if _hash(value) != _exact_hash(receipt_hash, "admission environment receipt"):
+    signature = value.pop("signature")
+    claimed = value.pop("receipt_hash")
+    if claimed != _hash(value) or claimed != _exact_hash(receipt_hash, "admission environment receipt"):
         raise AdmissionRecoveryError("environment preflight receipt hash mismatch")
-    return value
+    signed = {**value, "receipt_hash": claimed}
+    try:
+        _public_key(trusted_public_key).verify(_signature(signature), _canonical(signed))
+    except InvalidSignature as exc:
+        raise AdmissionRecoveryError("environment preflight receipt signature is invalid") from exc
+    _fresh(issued_at=value["issued_at"], expires_at=value["expires_at"], current_time=current_time)
+    return {**signed, "signature": signature}
 
 
 def compile_recovery_invocation(*, request: Mapping[str, Any], observed_at: str) -> dict[str, Any]:

@@ -265,7 +265,9 @@ def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_pat
     )
     assert recorded[0].kind.value == "approve"
     assert receipt["outcome"]["decision_id"] == recorded[0].decision_id
-    assert len(list(receipt_root.glob("*.json"))) == 3
+    retained_documents = [json.loads(path.read_text()) for path in receipt_root.glob("*.json")]
+    assert len(retained_documents) == 4
+    assert {item.get("status") for item in retained_documents} >= {"PENDING", "FINALIZED"}
     with pytest.raises(ValueError, match="replayed or is already in progress"):
         submit(
             row["request_id"],

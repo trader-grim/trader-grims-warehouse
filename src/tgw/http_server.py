@@ -242,7 +242,6 @@ def _listing_index_built_at_reset() -> None:
 
 PIPELINE_ACTIONS = {
     "ai_identify",
-    "ebay_end_listing",
     "resync_photos",
     "accept_proposals",
     "dismiss_proposals",
@@ -1505,6 +1504,16 @@ def patch_item(
     # field updates and let the accessor build the envelope.
     _caller_for_envelope_gate = request.headers.get("X-TGW-Caller", "")
     _is_machine_caller = _caller_for_envelope_gate.startswith("background:") or "worker:" in _caller_for_envelope_gate
+    if "draft_listing" in body.fields and not operator_object_write and not _is_machine_caller:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "operator_object_command_required",
+                "field": "draft_listing",
+                "command_endpoint": f"/api/operator/items/{sku}/commands",
+                "reason": "listing drafts may be changed only through a published command and object generation",
+            },
+        )
     if not _is_machine_caller:
         _ia = body.fields.get("item_attributes")
         if isinstance(_ia, dict) and inventory_record.is_envelope(_ia):
@@ -1636,72 +1645,6 @@ def patch_item(
             )
 
     _enqueue_catalog_rebuild(f"http_patch:{sku}")
-
-    # If draft_listing content changed and the item is already on eBay, push the
-    # update automatically — the operator should never have to remember to click
-    # "Update Listing".
-    #
-    # OPERATOR EDITS ONLY (session-42 incident): workers patch draft_listing
-    # through this same endpoint (ebay_draft writes the draft, ebay_upload writes
-    # imageUrls, ...). Auto-redrafting on those created an infinite
-    # draft→patch→redraft pipeline loop — one SKU accumulated 287 draft jobs and
-    # two live listings were PUT to eBay every ~90s for hours. Fence clients now
-    # identify themselves via X-TGW-Caller (background:worker:<queue>); anything
-    # backgrounded is skipped here.
-    _caller = request.headers.get("X-TGW-Caller", "")
-    # Machine write = any worker-process fence write, regardless of quota
-    # context: C10 operator-origin jobs run as interactive:worker:<queue>:operator,
-    # but a worker acting for the operator is still not a human editing in the
-    # UI — treating it as one resurrected the s42 redraft loop (2026-07-03).
-    _machine_write = _caller.startswith("background:") or "worker:" in _caller
-    # todo #1114 (2026-07-04): this used to enqueue ebay_draft here, which
-    # RE-RUNS the AI drafting pass and overwrites draft_listing with fresh
-    # model output — clobbering the very edit the operator just made. Root
-    # cause: the trigger field set conflated two different edits. The
-    # editor UI only ever PATCHes into draft_listing.* directly (condition,
-    # shipping profile, aspects, price, title, description all live there —
-    # confirmed by grep, no UI path sends bare top-level title/description/
-    # item_attributes through this endpoint), so this branch has, in
-    # practice, ALWAYS meant "the operator polished the final draft
-    # content," never "a raw fact changed, please regenerate." Regenerating
-    # is therefore never correct here. Fixed to mirror the existing
-    # "Update Listing" button's ebay_update action exactly: push the
-    # operator's edited draft_listing straight to the live offer
-    # (ebay_stage, force=True, origin=operator) — no AI involved.
-    #
-    # Code-review fix (2026-07-04): trigger set narrowed to just
-    # "draft_listing" — ebay_stage/stage_draft() only ever reads
-    # item["draft_listing"] when building the eBay push body (falling back
-    # to a bare top-level field only if draft_listing's own value is
-    # empty). Keeping bare "title"/"description"/"item_attributes" in the
-    # trigger meant a PATCH to one of those alone would fire the push and
-    # log "pushed" while the stale draft_listing content — not the actual
-    # edit — is what reaches eBay. dedupe_key added to match the other
-    # ebay_stage enqueue call sites in this file (this one and the sibling
-    # "ebay_update" action were the only two without it).
-    _DRAFT_LISTING_FIELDS = {"draft_listing"}
-    # List on eBay saves the draft immediately before dispatching the governed
-    # publish chain.  That chain owns its prerequisite stage; auto-pushing here
-    # would create a second, force-restage authority for the same click and
-    # leave a spurious provider-effect-binding dead letter behind.
-    _draft_intent = request.headers.get("X-TGW-Draft-Intent", "")
-    if not _machine_write and not operator_object_write and _draft_intent != "publish" and _DRAFT_LISTING_FIELDS.intersection(body.fields):
-        offer_id = (doc_before.get("ebay_offer") or {}).get("offer_id")
-        if offer_id:
-            try:
-                current = _current_item_operator_object(sku)
-                execute_item_operator_command(
-                    sku,
-                    OperatorCommandBody(
-                        command_id="update-item",
-                        object_generation=current["object_generation"],
-                    ),
-                    operator_identity=operator_identity,
-                )
-                log.info("auto-dispatched ebay_stage (push, no regen) for %s (draft_listing changed, offer_id present)", sku)
-            except Exception as _eq:
-                if "unique" not in str(_eq).lower() and "duplicate" not in str(_eq).lower():
-                    log.warning("failed to auto-enqueue ebay_stage for %s: %s", sku, _eq)
 
     return {
         "ok": True,
@@ -2326,7 +2269,7 @@ def bulk_apply(body: BulkBody) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _BULK_PIPELINE_ACTIONS = {"ai_identify"}
-_BULK_VALID_ACTIONS = _BULK_PIPELINE_ACTIONS | {"set_ready", "mark_sold", "delete", "approve", "ebay_end_listing", "archive"}
+_BULK_VALID_ACTIONS = _BULK_PIPELINE_ACTIONS | {"set_ready", "mark_sold", "delete", "approve", "archive"}
 
 
 @app.post("/api/bulk/action")
@@ -2416,62 +2359,6 @@ def bulk_action(
             except Exception as exc:
                 errors.append(f"{sku}: {exc}")
         _enqueue_catalog_rebuild(f"bulk_{body.action}")
-        return {"ok": not errors, "count": len(done), "done": done, "errors": errors}
-
-    if body.action == "ebay_end_listing":
-        done = []
-        errors = []
-        for sku in body.skus:
-            json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
-            if not json_path.exists():
-                errors.append(f"{sku}: not found")
-                continue
-            try:
-                doc = load_item_doc(json_path)
-                eb = doc.get("ebay_listing") or {}
-                offer_id = (doc.get("ebay_offer") or {}).get("offer_id")
-                listing_id_val = eb.get("listing_id")
-                if not offer_id and not listing_id_val:
-                    errors.append(f"{sku}: no eBay offer or listing")
-                    continue
-                if offer_id:
-                    from .apis.ebay.client import ebay_post
-
-                    ebay_post(_cfg, f"/sell/inventory/v1/offer/{offer_id}/withdraw", {})
-                else:
-                    from .apis.ebay.trading import end_item as _end_item
-
-                    _end_item(_cfg, listing_id_val)
-            except Exception as exc:
-                errors.append(f"{sku}: {exc}")
-                continue
-            # eBay call above has already succeeded — a failure past this
-            # point means the listing is ended on eBay but our local mirror
-            # says PUBLISHED forever. Invariant C11: persist that as a
-            # finding rather than just returning an API error (session 43
-            # local/eBay desync class).
-            try:
-                _apply_ebay_write(
-                    json_path,
-                    sku,
-                    ebay_listing={
-                        "status": "Ended",
-                        "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    },
-                    # withdraw makes the offer UNPUBLISHED on eBay — mirror it (s42)
-                    ebay_offer={"status": "UNPUBLISHED"},
-                )
-                done.append(sku)
-            except Exception as exc:
-                errors.append(f"{sku}: ended on eBay but local write failed: {exc}")
-                _persist_finding(
-                    json_path,
-                    sku,
-                    "ebay_end_desync",
-                    f"eBay listing ended but local ebay_offer/ebay_listing update failed: {exc}",
-                    "bulk_action:ebay_end_listing",
-                )
-        _enqueue_catalog_rebuild("bulk_ebay_end_listing")
         return {"ok": not errors, "count": len(done), "done": done, "errors": errors}
 
     # Pipeline actions — enqueue a job per SKU
@@ -2600,44 +2487,6 @@ def item_action(
             _apply_patch(json_path, {"status": "archived"})
             _enqueue_catalog_rebuild(f"archive:{sku}")
             return {"ok": True, "sku": sku, "action": "archive", "status": "archived"}
-
-        elif action == "ebay_end_listing":
-            doc = load_item_doc(json_path)
-            eb = doc.get("ebay_listing") or {}
-            offer_id = (doc.get("ebay_offer") or {}).get("offer_id")
-            listing_id_val = eb.get("listing_id")
-            if not offer_id and not listing_id_val:
-                raise HTTPException(status_code=400, detail="no eBay offer or listing to end")
-            try:
-                if offer_id:
-                    # Inventory API: withdraw the published offer
-                    from .apis.ebay.client import ebay_post
-
-                    ebay_post(_cfg, f"/sell/inventory/v1/offer/{offer_id}/withdraw", {})
-                else:
-                    # Trading API: end the legacy listing
-                    from .apis.ebay.trading import end_item as _end_item
-
-                    _end_item(_cfg, listing_id_val)
-                # Session 42 (Dave's one-at-a-time test #1): ending must update the
-                # WHOLE local truth — withdraw makes the offer UNPUBLISHED on eBay
-                # (verified live), but this used to leave ebay_offer.status at
-                # 'PUBLISHED', so every display kept showing the item as listed.
-                _apply_ebay_write(
-                    json_path,
-                    sku,
-                    ebay_listing={
-                        "status": "Ended",
-                        "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    },
-                    ebay_offer={"status": "UNPUBLISHED"},
-                )
-                _enqueue_catalog_rebuild(f"ebay_end:{sku}")
-            except HTTPException:
-                raise
-            except Exception as exc:
-                raise HTTPException(status_code=502, detail=f"eBay end listing failed: {exc}")
-            return {"ok": True, "sku": sku, "action": "ebay_end_listing", "status": "Ended"}
 
         elif action == "migrate_unblock":
             import json as _json
@@ -6572,9 +6421,8 @@ function _ebayBadge(it){{
   return '<span class="eb eb-none">Not Listed</span>';
 }}
 const _ALL_ACTIONS=[
-  ['ai_identify','Re-identify'],['ebay_draft','Re-draft'],['ebay_price','Re-price'],
-  ['approve','Set Ready'],['ebay_stage','Stage'],['ebay_publish','Publish'],
-  ['ebay_end_listing','End on eBay'],['mark_sold','Mark Sold'],['archive','Archive'],
+  ['ai_identify','Re-identify'],['approve','Set Ready'],
+  ['mark_sold','Mark Sold'],['archive','Archive'],
 ];
 function _cardActions(it){{
   const lid=it.ebay_listing_id,oid=it.ebay_offer_id,rat=it.ebay_ready_at;
@@ -6583,18 +6431,15 @@ function _cardActions(it){{
   const sold=(it.status||'').toLowerCase()==='sold';
   const acts=[];
   if(!sold){{
-    acts.push(['ai_identify','Re-identify'],['ebay_draft','Re-draft'],['ebay_price','Re-price']);
+    acts.push(['ai_identify','Re-identify']);
   }}
   if(!live&&!sold){{
-    // Ended items get the relist path, not the end-listing path (s42)
     acts.push(['approve','Set Ready']);
-    if(it.has_draft||oid) acts.push(['ebay_stage','Stage']);
-    acts.push(['ebay_publish','Publish']);
   }}
   if(live){{
-    acts.push(['ebay_end_listing','End on eBay'],['mark_sold','Mark Sold']);
+    acts.push(['mark_sold','Mark Sold']);
   }}
-  if(sold) acts.push(['ai_identify','Re-identify'],['ebay_draft','Re-draft']);
+  if(sold) acts.push(['ai_identify','Re-identify']);
   acts.push(['archive','Archive']);
   return acts;
 }}

@@ -58,7 +58,7 @@ def test_rejects_html_remote_resources_and_unregistered_effects(mutation, messag
 
 def test_submission_binds_surface_card_authority_handler_and_immutable_sink():
     surface = _compile()
-    seen = {}
+    seen, persisted = {}, []
     receipt = submit_dynamic_surface(
         surface=surface,
         submission={
@@ -68,11 +68,14 @@ def test_submission_binds_surface_card_authority_handler_and_immutable_sink():
         },
         current_card_hash=CARD, current_authority_hash=AUTHORITY,
         handlers={"recovery-decision": lambda invocation: seen.setdefault("invocation", dict(invocation)) or {"status": "ACCEPTED"}},
-        persist_receipt=lambda value: {"sink_hash": value["receipt_hash"]},
+        persist_receipt=lambda value: persisted.append(dict(value)) or {"sink_hash": value["receipt_hash"]},
+        claim_submission=lambda invocation: {"status": "CLAIMED", "claim_hash": HASH},
     )
     assert receipt["decision"] == "approve"
     assert receipt["sink"]["sink_hash"] == receipt["receipt_hash"]
     assert seen["invocation"]["values"]["mode"] == "rollback"
+    assert [item["status"] for item in persisted] == ["PENDING", "FINALIZED"]
+    assert persisted[0]["receipt_hash"] == persisted[1]["pending_receipt_hash"]
 
 
 def test_expired_replayed_or_cross_card_submission_is_inert():
@@ -84,8 +87,39 @@ def test_expired_replayed_or_cross_card_submission_is_inert():
     }
     with pytest.raises(DynamicSurfaceError, match="expired"):
         submit_dynamic_surface(surface=surface, submission=submission, current_card_hash=CARD,
-                               current_authority_hash=AUTHORITY, handlers={}, persist_receipt=lambda _: {})
+                               current_authority_hash=AUTHORITY, handlers={}, persist_receipt=lambda _: {},
+                               claim_submission=lambda _: {"status": "CLAIMED", "claim_hash": HASH})
     submission["submitted_at"] = datetime.now(timezone.utc).isoformat()
     with pytest.raises(DynamicSurfaceError, match="stale or superseded"):
         submit_dynamic_surface(surface=surface, submission=submission, current_card_hash="sha256:" + "e" * 64,
-                               current_authority_hash=AUTHORITY, handlers={}, persist_receipt=lambda _: {})
+                               current_authority_hash=AUTHORITY, handlers={}, persist_receipt=lambda _: {},
+                               claim_submission=lambda _: {"status": "CLAIMED", "claim_hash": HASH})
+
+
+def test_submission_requires_claim_and_persists_pending_before_effect():
+    surface = _compile()
+    submission = {
+        "schema": "tgw-dynamic-surface-submission/v1", "surface_hash": surface["surface_hash"],
+        "action_id": "approve-repair", "values": {"reason": "verified", "mode": "diagnose"},
+        "operator": "dave", "submitted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    effects, persisted = [], []
+    with pytest.raises(DynamicSurfaceError, match="claim boundary"):
+        submit_dynamic_surface(
+            surface=surface, submission=submission, current_card_hash=CARD,
+            current_authority_hash=AUTHORITY,
+            handlers={"recovery-decision": lambda value: effects.append(value) or {}},
+            persist_receipt=lambda value: persisted.append(value) or {"ok": True},
+            claim_submission=None,
+        )
+    assert effects == persisted == []
+
+    submit_dynamic_surface(
+        surface=surface, submission=submission, current_card_hash=CARD,
+        current_authority_hash=AUTHORITY,
+        handlers={"recovery-decision": lambda value: effects.append(value) or {"ok": True}},
+        persist_receipt=lambda value: persisted.append(dict(value)) or {"ok": True},
+        claim_submission=lambda _: {"status": "CLAIMED", "claim_hash": HASH},
+    )
+    assert persisted[0]["status"] == "PENDING"
+    assert len(effects) == 1

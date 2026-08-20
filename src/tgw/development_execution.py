@@ -14,6 +14,12 @@ from typing import Any, Mapping
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from tgw.development_request import (
+    _ATTEMPT_ROOT,
+    _WORKTREE_ROOT,
+    DevelopmentRequestError,
+    _request_bound_path,
+)
 from tgw.execution_resources import (
     CARD_RESOURCE_NAMES,
     RESOURCE_SERVICE_CAPABILITIES,
@@ -77,12 +83,30 @@ def _adapters(development: Mapping[str, Any]) -> dict[str, Path]:
     return adapters
 
 
-def _card_worktree(repository: Path, card: Mapping[str, Any], source: str, index: int) -> Path:
+def _bound_allocation(card: Mapping[str, Any], request_id: str) -> tuple[Path, Path]:
     allocation = card.get("allocation")
-    raw = allocation.get("worktree") if isinstance(allocation, Mapping) else None
-    if not isinstance(raw, str):
-        raise HardFailure("development card worktree allocation is invalid")
-    worktree = Path(raw)
+    attempt_id = allocation.get("attempt_id") if isinstance(allocation, Mapping) else None
+    if not isinstance(attempt_id, str):
+        raise HardFailure("development card attempt allocation is invalid")
+    try:
+        worktree_raw = _request_bound_path(
+            allocation.get("worktree"), "worktree", _WORKTREE_ROOT, request_id, attempt_id,
+        )
+        attempt_raw = _request_bound_path(
+            allocation.get("attempt_root"), "attempt root", _ATTEMPT_ROOT, request_id, attempt_id,
+        )
+    except DevelopmentRequestError as exc:
+        raise HardFailure("development card allocation is no longer request-bound") from exc
+    worktree, attempt_root = Path(worktree_raw), Path(attempt_raw)
+    if worktree.resolve() != worktree or attempt_root.resolve() != attempt_root:
+        raise HardFailure("development card allocation traverses a symlink")
+    return worktree, attempt_root
+
+
+def _card_worktree(
+    repository: Path, card: Mapping[str, Any], source: str, index: int, request_id: str,
+) -> tuple[Path, Path]:
+    worktree, attempt_root = _bound_allocation(card, request_id)
     if worktree.is_symlink():
         raise HardFailure("development card worktree must not be a symlink")
     branch = "development/card-" + str(index).zfill(3) + "-" + card["idempotency_key"][7:19]
@@ -100,7 +124,7 @@ def _card_worktree(repository: Path, card: Mapping[str, Any], source: str, index
         raise HardFailure("development card worktree source changed before launch")
     if _git(worktree, "status", "--porcelain=v1", "--untracked-files=all"):
         raise HardFailure("development card worktree is not clean before launch")
-    return worktree
+    return worktree, attempt_root
 
 
 def _checkpoint(worktree: Path, card: Mapping[str, Any]) -> tuple[str, str]:
@@ -237,22 +261,37 @@ def execute_development_lifecycle(config: Mapping[str, Any], document: Mapping[s
     coding, development = _config(config)
     execution = document.get("execution")
     lifecycle = document.get("lifecycle")
+    lifecycle_body = (
+        {key: value for key, value in lifecycle.items() if key != "lifecycle_hash"}
+        if isinstance(lifecycle, Mapping) else {}
+    )
+    embedded_lifecycle_hash = lifecycle.get("lifecycle_hash") if isinstance(lifecycle, Mapping) else None
+    computed_lifecycle_hash = _hash(lifecycle_body)
     if (
         not isinstance(execution, Mapping)
         or execution.get("schema") != "tgw-development-execution/v1"
         or not isinstance(lifecycle, Mapping)
-        or lifecycle.get("lifecycle_hash") != execution.get("development_request_hash")
+        or embedded_lifecycle_hash != computed_lifecycle_hash
+        or computed_lifecycle_hash != execution.get("development_request_hash")
     ):
         raise HardFailure("development execution authorization is invalid")
+    request = lifecycle.get("request")
+    request_id = request.get("request_id") if isinstance(request, Mapping) else None
+    if not isinstance(request_id, str):
+        raise HardFailure("development lifecycle request identity is invalid")
+    cards = lifecycle.get("launch_cards")
+    if not isinstance(cards, list) or [card.get("idempotency_key") for card in cards if isinstance(card, Mapping)] != execution.get("card_idempotency_keys"):
+        raise HardFailure("development card closure differs from service authorization")
+    for card in cards:
+        if not isinstance(card, Mapping):
+            raise HardFailure("development card is invalid")
+        _bound_allocation(card, request_id)
     registry = _load_registry(development, str(execution["provider_registry_hash"]))
     adapters = _adapters(development)
     health = observe_health(registry, coding_config=coding, adapters=adapters)
     repository = Path(str(coding["repository_root"])).resolve()
     source = str(execution["source_commit"])
     candidate_tree = _git(repository, "rev-parse", f"{source}^{{tree}}")
-    cards = lifecycle.get("launch_cards")
-    if not isinstance(cards, list) or [card.get("idempotency_key") for card in cards] != execution.get("card_idempotency_keys"):
-        raise HardFailure("development card closure differs from service authorization")
     wrappers: list[dict[str, Any]] = []
     unit_receipts: list[dict[str, Any]] = []
     current_unit: str | None = None
@@ -270,11 +309,10 @@ def execute_development_lifecycle(config: Mapping[str, Any], document: Mapping[s
         if expected_role >= len(_ROLE_ORDER) or role != _ROLE_ORDER[expected_role]:
             raise HardFailure("development role sequence is invalid")
         expected_role += 1
-        worktree = _card_worktree(repository, card, source, index)
+        worktree, attempt_root = _card_worktree(repository, card, source, index, request_id)
         values = _resource_values(document, card, worktree, source, wrappers, coding)
-        attempt_root = Path(str(card["allocation"]["attempt_root"])) / "resources"
         server, thread, template, catalog, resolver, runner_env = _serve_resources(
-            card=card, values=values, root=attempt_root,
+            card=card, values=values, root=attempt_root / "resources",
         )
         try:
             receipt = dispatch_role(
