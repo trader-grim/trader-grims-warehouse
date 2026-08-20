@@ -157,6 +157,34 @@ def test_discovery_names_one_backend_and_non_authority_surfaces():
         "id": "plan-authority", "label": "Plan Authority",
         "href": "/form/plan-authority", "group": "Admin", "order": 30,
     }
+    assert discovery["dynamic_surfaces"] == {
+        "available": False, "schema": "tgw-dynamic-surface/v1",
+    }
+
+
+def test_dynamic_surface_api_uses_host_auth_and_mounted_controller():
+    app = FastAPI()
+    seen = {}
+    app.include_router(create_operator_console_router(
+        Store(_row()), current_plan_commit=lambda: "f" * 40,
+        load_solution=lambda _: {}, require_operator=lambda: OPERATOR,
+        require_executor=lambda: EXECUTOR,
+        load_dynamic_surface=lambda request_id: {
+            "schema": "tgw-dynamic-surface/v1", "request_id": request_id,
+        },
+        submit_dynamic_surface_decision=lambda request_id, body, operator: (
+            seen.update(request_id=request_id, body=body, operator=operator)
+            or {"status": "RECORDED"}
+        ),
+    ))
+    client = TestClient(app)
+    assert client.get("/api/operator-console/requests/request:sha256:abc/surface").json()["request_id"] == "request:sha256:abc"
+    response = client.post(
+        "/api/operator-console/requests/request:sha256:abc/surface/decisions",
+        json={"surface_hash": "sha256:value"},
+    )
+    assert response.json()["status"] == "RECORDED"
+    assert seen["operator"] == OPERATOR.identity
 
 
 def test_shared_authenticated_site_navigation_links_canonical_authority():

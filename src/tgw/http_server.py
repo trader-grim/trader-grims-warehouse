@@ -1157,7 +1157,7 @@ def operator_item_catalog(
             {
                 **item,
                 "object_url": f"/api/operator/items/{item['sku']}",
-                "web_url": f"/form/items/{item['sku']}",
+                "web_url": f"/form/operator/items/{item['sku']}",
             }
             for item in catalog["items"]
         ],
@@ -1176,8 +1176,6 @@ def execute_item_operator_command(
     operator_identity: str = Depends(_require_auth),
 ) -> Dict[str, Any]:
     """Execute only a command supplied by the current published object."""
-    if body.values:
-        raise HTTPException(status_code=422, detail="this command accepts no client policy values")
     published = _current_item_operator_object(sku)
     current_generation = published["object_generation"]
     if body.object_generation != current_generation:
@@ -1199,6 +1197,33 @@ def execute_item_operator_command(
             status_code=409,
             detail={"code": "command_held", "reason": command.get("reason")},
         )
+
+    if body.values:
+        from .operator_objects import validate_operator_command_values
+
+        try:
+            checked_values = validate_operator_command_values(
+                published, body.command_id, body.values,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # Reuse the canonical patch boundary so field ownership, provenance,
+        # draft lifecycle and audit behavior do not get reimplemented here.
+        patch_item(
+            sku,
+            PatchBody(fields={"draft_listing": checked_values}),
+            Request({"type": "http", "headers": []}),
+            operator_identity,
+        )
+        published = _current_item_operator_object(sku)
+        command = next(
+            item for item in published["commands"] if item["id"] == body.command_id
+        )
+        if not command["enabled"]:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "command_held_after_update", "reason": command.get("reason")},
+            )
 
     provider_identity = _workflow_provider_identity()
     if not provider_identity:
@@ -5011,7 +5036,7 @@ _INTAKE_FORM_HTML = """\
 
 <button class="btn" onclick="submitForm()">Save</button>
 <div style="margin-top:10px;text-align:center">
-  <a class="detail-link" href="/form/items/{sku}">View detail &rarr;</a>
+  <a class="detail-link" href="/form/operator/items/{sku}">View detail &rarr;</a>
 </div>
 <div class="msg" id="msg"></div>
 
@@ -6579,12 +6604,12 @@ function _cardHtml(it){{
   const opts=_cardOpts(it);
   return `<div class="card${{sel?' selected':''}}" data-sku="${{esc(it.sku)}}">
   <div class="card-chk-wrap"><input type="checkbox" class="card-chk"${{sel?' checked':''}} onclick="_togSel(event,'${{esc(it.sku)}}')"></div>
-  <a href="/form/items/${{it.sku}}" class="card-inner">
+  <a href="/form/operator/items/${{it.sku}}" class="card-inner">
     <img class="thumb" src="/thumb/${{it.sku}}" loading="lazy" alt="" onerror="this.style.visibility='hidden'">
   </a>
   <div class="card-body">
     <div class="card-sku">${{esc(it.sku)}}${{loc}}</div>
-    <div class="card-title"><a href="/form/items/${{it.sku}}" style="color:inherit;text-decoration:none">${{esc(it.title||'')}}</a></div>
+    <div class="card-title"><a href="/form/operator/items/${{it.sku}}" style="color:inherit;text-decoration:none">${{esc(it.title||'')}}</a></div>
     <div class="card-status">${{_ebayBadge(it)}}<span class="sbadge ${{scls(it.status)}}">${{esc(it.status||'—')}}</span></div>
     <div class="card-meta"><span class="price">${{price}}</span><span class="card-cat">${{cat}}</span></div>
   </div>
@@ -6647,8 +6672,8 @@ function _rowHtml(it){{
   const pf=parseFloat(it.price);const price=isNaN(pf)?'—':'$'+pf.toFixed(2);
   return `<tr>
     <td><img class="lt-thumb" src="/thumb/${{it.sku}}" loading="lazy" onerror="this.style.visibility='hidden'" alt=""></td>
-    <td><a href="/form/items/${{it.sku}}" class="lt-sku">${{esc(it.sku)}}</a></td>
-    <td><a href="/form/items/${{it.sku}}" class="lt-title">${{esc(it.title||'')}}</a></td>
+    <td><a href="/form/operator/items/${{it.sku}}" class="lt-sku">${{esc(it.sku)}}</a></td>
+    <td><a href="/form/operator/items/${{it.sku}}" class="lt-title">${{esc(it.title||'')}}</a></td>
     <td><span class="sbadge ${{scls(it.status)}}">${{esc(it.status||'—')}}</span></td>
     <td style="color:#888;font-size:.8em">${{esc(it.location||'')}}</td>
     <td class="lt-price">${{price}}</td>
@@ -9521,6 +9546,20 @@ def items_browse_form():
     return HTMLResponse(html, headers={"Cache-Control": "no-store, no-cache"})
 
 
+@app.get("/form/operator/items/{sku}")
+def operator_item_form(sku: str):
+    """Thin item client: render only the current published API object."""
+    from fastapi.responses import HTMLResponse
+
+    if ".." in sku or not sku:
+        return HTMLResponse("<h2>invalid sku</h2>", status_code=400)
+    client = Path(__file__).with_name("static").joinpath("operator_item.html")
+    return HTMLResponse(
+        client.read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-store, no-cache"},
+    )
+
+
 @app.get("/form/items/{sku}")
 def item_detail_form(sku: str):
     """Item detail page — photos, fields, revision diff. Server-rendered, no auth."""
@@ -10729,7 +10768,7 @@ function renderQueue(data) {{
   _items.forEach(function(item) {{
     var sku = item.sku;
     var thumbUrl = '/thumb/' + encodeURIComponent(sku);
-    var editUrl = '/form/items/' + encodeURIComponent(sku);
+    var editUrl = '/form/operator/items/' + encodeURIComponent(sku);
     var thumbHtml = '<img class="rq-thumb" src="' + thumbUrl +
       '" onerror="this.style.display=\\'none\\';this.nextElementSibling.style.display=\\'flex\\'" loading="lazy">' +
       '<div class="rq-thumb-ph" style="display:none">&#128247;</div>';
@@ -10974,7 +11013,7 @@ function renderNeeds(data) {{
       var rb  = it.review_block || {{}};
       var sku = it.sku;
       var fid = flashId(sku);
-      var editUrl = '/form/items/' + encodeURIComponent(sku);
+      var editUrl = '/form/operator/items/' + encodeURIComponent(sku);
       html += '<div class="nr-card" id="nr-card-' + escapeHtml(sku) + '">';
       html += '<div class="nr-body">';
       html += '<div class="nr-sku">' + escapeHtml(sku) + '</div>';

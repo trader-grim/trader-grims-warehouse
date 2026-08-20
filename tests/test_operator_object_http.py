@@ -73,6 +73,19 @@ def test_get_operator_object_mounts_real_http_contract(tmp_path, monkeypatch):
     assert payload["commands"][0]["id"] == "list-item"
 
 
+def test_thin_web_item_page_uses_only_published_object_and_command_contract(monkeypatch):
+    monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
+    client = TestClient(http_server.app)
+    http_server._sessions["operator-object-browser"] = float("inf")
+    client.cookies.set("tgw_session", "operator-object-browser")
+    response = client.get("/form/operator/items/sku-1")
+    assert response.status_code == 200
+    assert "/api/operator/items/" in response.text
+    assert "data-command" in response.text
+    assert "ebay_publish" not in response.text
+    assert "triggerAction" not in response.text
+
+
 def test_command_rejects_stale_generation_before_dispatch(monkeypatch):
     monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
     monkeypatch.setattr(http_server, "_current_item_operator_object", lambda sku: _published())

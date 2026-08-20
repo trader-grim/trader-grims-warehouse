@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping
 
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
-_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
+_ID = re.compile(r"[a-z][a-z0-9:._-]{0,255}\Z")
 _URL = re.compile(r"(?:https?|ftp|file|data|javascript):", re.IGNORECASE)
 _COMPONENT_FIELDS = {
     "heading": {"type", "id", "text"},

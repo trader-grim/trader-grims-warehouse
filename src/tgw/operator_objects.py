@@ -69,6 +69,58 @@ def _command_descriptor(command: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def validate_operator_command_values(
+    published: Mapping[str, Any], command_id: str, values: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate client values solely against the server-published schema."""
+    published = _mapping(published, "published")
+    if published.get("schema") != OPERATOR_OBJECT_SCHEMA:
+        raise OperatorObjectBindingError("unsupported published object schema")
+    commands = published.get("commands")
+    if not isinstance(commands, list):
+        raise OperatorObjectBindingError("published.commands must be a list")
+    command = next((item for item in commands if item.get("id") == command_id), None)
+    if command is None:
+        raise OperatorObjectBindingError("command is not published for this object")
+    schema = _mapping(command.get("input_schema"), "command.input_schema")
+    if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
+        raise OperatorObjectBindingError("command input schema is not closed")
+    if not isinstance(values, Mapping):
+        raise OperatorObjectBindingError("command values must be an object")
+    properties = _mapping(schema.get("properties", {}), "command.input_schema.properties")
+    if not set(values) <= set(properties):
+        raise OperatorObjectBindingError("command values contain an unpublished field")
+    result: dict[str, Any] = {}
+    for field, value in values.items():
+        field_schema = _mapping(properties[field], f"command field {field}")
+        if field_schema.get("type") == "string":
+            if not isinstance(value, str):
+                raise OperatorObjectBindingError(f"command field {field} must be a string")
+            allowed = field_schema.get("enum")
+            if allowed is not None and (not isinstance(allowed, list) or value not in allowed):
+                raise OperatorObjectBindingError(f"command field {field} is not an allowed value")
+            result[field] = value
+        elif field_schema.get("type") == "object":
+            if not isinstance(value, Mapping) or field_schema.get("additionalProperties") is not False:
+                raise OperatorObjectBindingError(f"command field {field} must be a closed object")
+            nested = _mapping(field_schema.get("properties", {}), f"command field {field} properties")
+            if not set(value) <= set(nested):
+                raise OperatorObjectBindingError(f"command field {field} contains an unpublished key")
+            checked: dict[str, str] = {}
+            for key, nested_value in value.items():
+                nested_schema = _mapping(nested[key], f"command field {field}.{key}")
+                if nested_schema.get("type") != "string" or not isinstance(nested_value, str):
+                    raise OperatorObjectBindingError(f"command field {field}.{key} must be a string")
+                allowed = nested_schema.get("enum")
+                if allowed is not None and nested_value not in allowed:
+                    raise OperatorObjectBindingError(f"command field {field}.{key} is not an allowed value")
+                checked[key] = nested_value
+            result[field] = checked
+        else:
+            raise OperatorObjectBindingError(f"command field {field} has an unsupported type")
+    return result
+
+
 def publish_operator_object(
     *,
     item: Mapping[str, Any],
@@ -308,6 +360,27 @@ def build_item_operator_object(
         },
         "validation_messages": validation_messages,
     }
+    command_input_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "condition_enum": {
+                "type": "string",
+                "enum": [option["value"] for option in conditions],
+            },
+            "item_specifics": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    aspect["name"]: {
+                        "type": "string",
+                        **({"enum": aspect["allowed_values"]} if aspect["allowed_values"] else {}),
+                    }
+                    for aspect in aspects
+                },
+            },
+        },
+    }
     return publish_operator_object(
         item=item_view,
         listing=listing_view,
@@ -319,14 +392,14 @@ def build_item_operator_object(
                 "enabled": list_enabled,
                 "reason": list_reason,
                 "authority_scope": "publication",
-                "input_schema": {"type": "object", "additionalProperties": False},
+                "input_schema": command_input_schema,
             },
             {
                 "id": "update-item",
                 "enabled": update_enabled,
                 "reason": update_reason,
                 "authority_scope": "update-restage",
-                "input_schema": {"type": "object", "additionalProperties": False},
+                "input_schema": command_input_schema,
             },
         ),
     )

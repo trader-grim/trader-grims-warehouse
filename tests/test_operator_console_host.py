@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -15,6 +16,7 @@ from tgw.bootstrap_host_integration import BootstrapHostIntegrationError, config
 from tgw.operator_console_host import (
     DEFAULT_PLAN_ROOT,
     ConfiguredAuthorityStore,
+    _dynamic_surface_bindings,
     configured_authority_principal,
     configured_console_mount,
     configured_execution_controller,
@@ -140,6 +142,44 @@ def test_configured_mount_is_late_bound_and_reuses_auth_functions():
     assert mount.execute_effect is not None
     with pytest.raises(RuntimeError, match="not configured"):
         mount.store.list()
+
+
+def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_path: Path):
+    import tgw.dynamic_surface as boundary
+
+    receipt_root = tmp_path / "surface-receipts"
+    receipt_root.mkdir()
+    renderer_hash = "sha256:" + hashlib.sha256(Path(boundary.__file__).read_bytes()).hexdigest()
+    config = {
+        "dynamic_surfaces": {
+            "renderer_sha256": renderer_hash,
+            "receipt_root": str(receipt_root),
+        },
+    }
+    store = ConfiguredAuthorityStore(lambda: config)
+    row = {
+        "request_id": "request:sha256:" + "1" * 64,
+        "plan_commit": "f" * 40, "solution_hash": "sha256:" + "a" * 64,
+        "closure_hash": "sha256:" + "b" * 64, "effect_hash": "effect:sha256:value",
+        "effect_generation": "generation-one", "object_generation": "object-one",
+        "effect_kind": "development-launch", "summary": "Review exact launch",
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        "decision_kind": None, "receipt_id": None,
+    }
+    recorded = []
+    store.get = lambda request_id: row if request_id == row["request_id"] else None
+    store.decide = lambda decision: recorded.append(decision) or {"decision_id": decision.decision_id}
+    load, submit = _dynamic_surface_bindings(store, lambda: config)
+    surface = load(row["request_id"])
+    receipt = submit(row["request_id"], {
+        "schema": "tgw-dynamic-surface-submission/v1",
+        "surface_hash": surface["surface_hash"], "action_id": "approve",
+        "values": {"reason": "exact scope reviewed"},
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+    }, "operator:fixture")
+    assert recorded[0].kind.value == "approve"
+    assert receipt["outcome"]["decision_id"] == recorded[0].decision_id
+    assert len(list(receipt_root.glob("*.json"))) == 1
 
 
 def test_standard_http_mount_resolves_bootstrap_provider_after_config_load_and_before_execution():

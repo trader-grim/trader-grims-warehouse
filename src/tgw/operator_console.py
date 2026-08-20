@@ -71,7 +71,10 @@ def _status(row: Mapping[str, Any], now: datetime) -> str:
     return "pending"
 
 
-def project_request(row: Mapping[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+def project_request(
+    row: Mapping[str, Any], *, now: datetime | None = None,
+    dynamic_surface_available: bool = False,
+) -> dict[str, Any]:
     """Produce the shared web/Flutter representation and its legal actions."""
     status = _status(row, now or datetime.now(timezone.utc))
     effect_parameters = row.get("effect_parameters")
@@ -135,6 +138,10 @@ def project_request(row: Mapping[str, Any], *, now: datetime | None = None) -> d
             and isinstance(effect_parameters, Mapping)
             and isinstance(effect_parameters.get("lifecycle"), Mapping)
         ) else None,
+        "dynamic_surface": (
+            f"/api/operator-console/requests/{row.get('request_id')}/surface"
+            if dynamic_surface_available else None
+        ),
     }
 
 
@@ -147,6 +154,8 @@ def create_operator_console_router(
     require_executor: Callable[[], Any],
     execute_effect: Callable[..., Any] | None = None,
     resolve_development: Callable[[Mapping[str, Any], str], tuple[Mapping[str, Any], AuthorityRequest]] | None = None,
+    load_dynamic_surface: Callable[[str], Mapping[str, Any]] | None = None,
+    submit_dynamic_surface_decision: Callable[[str, Mapping[str, Any], str], Mapping[str, Any]] | None = None,
 ) -> APIRouter:
     """Return one mountable router for UI, shared API, and authority writes."""
     router = APIRouter()
@@ -169,6 +178,10 @@ def create_operator_console_router(
             "authority_api": "/api/plan-authority",
             "authority_backend": AUTHORITY_SCHEMA,
             "clients": ["web", "flutter"],
+            "dynamic_surfaces": {
+                "available": load_dynamic_surface is not None and submit_dynamic_surface_decision is not None,
+                "schema": "tgw-dynamic-surface/v1",
+            },
             "navigation": NAVIGATION,
             "non_authority_surfaces": NON_AUTHORITY_SURFACES,
         }
@@ -176,7 +189,13 @@ def create_operator_console_router(
     @router.get("/api/operator-console/requests")
     def requests(limit: int = 100, operator_identity: Any = Depends(require_operator)):
         require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR)
-        return {"schema": CONSOLE_SCHEMA, "requests": [project_request(row) for row in store.list(limit)]}
+        return {
+            "schema": CONSOLE_SCHEMA,
+            "requests": [
+                project_request(row, dynamic_surface_available=load_dynamic_surface is not None)
+                for row in store.list(limit)
+            ],
+        }
 
     @router.get("/api/operator-console/requests/{request_id}")
     def request(request_id: str, operator_identity: Any = Depends(require_operator)):
@@ -186,7 +205,7 @@ def create_operator_console_router(
             raise HTTPException(404, "request not found")
         return {
             "schema": CONSOLE_SCHEMA,
-            "request": project_request(row),
+            "request": project_request(row, dynamic_surface_available=load_dynamic_surface is not None),
             "events": store.events(request_id),
         }
 
@@ -200,9 +219,32 @@ def create_operator_console_router(
             row = store.create_request(authority)
             return {
                 "schema": CONSOLE_SCHEMA,
-                "request": project_request(row),
+                "request": project_request(row, dynamic_surface_available=load_dynamic_surface is not None),
                 "development": dict(lifecycle),
             }
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.get("/api/operator-console/requests/{request_id}/surface")
+    def dynamic_surface(request_id: str, operator_identity: Any = Depends(require_operator)):
+        require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR)
+        if load_dynamic_surface is None:
+            raise HTTPException(503, "dynamic surface controller is not mounted")
+        try:
+            return dict(load_dynamic_surface(request_id))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/api/operator-console/requests/{request_id}/surface/decisions")
+    def dynamic_surface_decision(
+        request_id: str, body: dict[str, Any],
+        operator_identity: Any = Depends(require_operator),
+    ):
+        principal = require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR)
+        if submit_dynamic_surface_decision is None:
+            raise HTTPException(503, "dynamic surface decision controller is not mounted")
+        try:
+            return dict(submit_dynamic_surface_decision(request_id, body, principal.identity))
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 

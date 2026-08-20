@@ -11,6 +11,7 @@ from tgw.operator_objects import (
     build_item_operator_object,
     flutter_adapter_view,
     publish_operator_object,
+    validate_operator_command_values,
     web_adapter_view,
 )
 
@@ -162,3 +163,16 @@ def test_reconciliation_gate_holds_every_mutating_command():
 
     assert published["workflow"]["state"] == "reconciliation_required"
     assert all(command["enabled"] is False for command in published["commands"])
+
+
+def test_command_values_are_validated_from_published_condition_and_aspect_schema():
+    published = build_item_operator_object(
+        item=_item(), workflow_card=_workflow_card(), category_context=_category_context(),
+    )
+    assert validate_operator_command_values(
+        published, "update-item", {"condition_enum": "USED_GOOD", "item_specifics": {"Brand": "TGW"}},
+    ) == {"condition_enum": "USED_GOOD", "item_specifics": {"Brand": "TGW"}}
+    with pytest.raises(OperatorObjectBindingError, match="unpublished"):
+        validate_operator_command_values(published, "update-item", {"price": "1.00"})
+    with pytest.raises(OperatorObjectBindingError, match="allowed value"):
+        validate_operator_command_values(published, "list-item", {"condition_enum": "invented"})

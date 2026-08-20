@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -15,9 +17,15 @@ from tgw.bootstrap_host_integration import (
 )
 from tgw.development_console import resolve_request as resolve_development_request
 from tgw.development_launch import enqueue_development_launch
+from tgw.dynamic_surface import compile_dynamic_surface, submit_dynamic_surface
 from tgw.effect_handlers import AuthorityEffectController, EffectHandlerError, TypedEffectHandlerRegistry
 from tgw.operator_console_plugin import OperatorConsoleMount
-from tgw.plan_authority import AuthorityPrincipal, PostgresAuthorityStore, PrincipalRole
+from tgw.plan_authority import (
+    AuthorityDecision,
+    AuthorityPrincipal,
+    PostgresAuthorityStore,
+    PrincipalRole,
+)
 
 DEFAULT_PLAN_ROOT = Path("/opt/TGW/library/plans")
 _IDENTITY = re.compile(r"^[A-Za-z0-9:._-]+$")
@@ -269,6 +277,140 @@ def configured_execution_controller(
     return AuthorityEffectController(registry, store)
 
 
+def _dynamic_surface_bindings(
+    store: ConfiguredAuthorityStore,
+    config_provider: Callable[[], Mapping[str, Any]],
+) -> tuple[
+    Callable[[str], Mapping[str, Any]],
+    Callable[[str, Mapping[str, Any], str], Mapping[str, Any]],
+]:
+    """Build late-bound W14 surface callbacks over PlanAuthority itself."""
+
+    def configuration() -> tuple[str, Path]:
+        raw = config_provider().get("dynamic_surfaces")
+        if not isinstance(raw, Mapping) or set(raw) != {"renderer_sha256", "receipt_root"}:
+            raise ValueError("dynamic surface configuration is unavailable")
+        expected = raw["renderer_sha256"]
+        source = Path(__file__).with_name("dynamic_surface.py")
+        actual = "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest()
+        if expected != actual:
+            raise ValueError("dynamic surface renderer hash mismatch")
+        root = Path(raw["receipt_root"])
+        if (
+            not root.is_absolute() or root == Path("/tmp") or Path("/tmp") in root.parents
+            or not root.is_dir() or root.is_symlink()
+        ):
+            raise ValueError("dynamic surface receipt root is not a durable directory")
+        return actual, root
+
+    def proposal(request_id: str) -> tuple[dict[str, Any], str, str]:
+        row = store.get(request_id)
+        if row is None:
+            raise ValueError("authority request not found")
+        if row.get("decision_kind") is not None or row.get("receipt_id") is not None:
+            raise ValueError("authority request is no longer pending")
+        plan_commit, solution_hash = row.get("plan_commit"), row.get("solution_hash")
+        if not isinstance(plan_commit, str) or _COMMIT.fullmatch(plan_commit) is None:
+            raise ValueError("dynamic surface Plan commit is invalid")
+        if not isinstance(solution_hash, str) or _SOLUTION_HASH.fullmatch(solution_hash) is None:
+            raise ValueError("dynamic surface Plan solution is invalid")
+        expiry = row.get("expires_at")
+        if isinstance(expiry, datetime):
+            expiry = expiry.astimezone(timezone.utc).isoformat()
+        if not isinstance(expiry, str):
+            raise ValueError("dynamic surface expiry is unavailable")
+        card_hash = _canonical_hash({
+            "request_id": request_id, "effect_hash": row.get("effect_hash"),
+            "effect_generation": row.get("effect_generation"),
+            "object_generation": row.get("object_generation"),
+        })
+        authority_hash = _canonical_hash({
+            "request_id": request_id, "plan_commit": plan_commit,
+            "solution_hash": solution_hash, "closure_hash": row.get("closure_hash"),
+            "expires_at": expiry,
+        })
+        value = {
+            "schema": "tgw-dynamic-surface-proposal/v1",
+            "surface_id": "authority-" + card_hash.removeprefix("sha256:")[:24],
+            "request_id": request_id, "plan_commit": plan_commit,
+            "solution_hash": solution_hash, "card_hash": card_hash,
+            "authority_hash": authority_hash, "expiry": expiry,
+            "audience": "operator", "title": str(row.get("summary") or "Plan authority decision"),
+            "state": "LIVE",
+            "components": [
+                {"type": "heading", "id": "scope", "text": "Exact bound effect"},
+                {"type": "text", "id": "effect", "text": str(row.get("effect_kind") or "governed effect")},
+                {"type": "input", "id": "reason", "label": "Decision reason", "input": {"kind": "string", "required": True}},
+                {"type": "input", "id": "reconciliation-evidence", "label": "Reconciliation evidence identities, one per line", "input": {"kind": "string", "required": False}},
+            ],
+            "actions": [
+                {"id": "approve", "label": "Approve", "decision": "approve", "handler_id": "plan-authority-decision", "field_ids": ["reason"]},
+                {"id": "hold", "label": "Hold", "decision": "hold", "handler_id": "plan-authority-decision", "field_ids": ["reason"]},
+                {"id": "reconcile", "label": "Reconcile", "decision": "reconcile", "handler_id": "plan-authority-decision", "field_ids": ["reason", "reconciliation-evidence"]},
+            ],
+        }
+        return value, card_hash, authority_hash
+
+    contracts = {"plan-authority-decision": {"decisions": ["approve", "hold", "reconcile"]}}
+
+    def load(request_id: str) -> Mapping[str, Any]:
+        renderer, _root = configuration()
+        value, _card_hash, _authority_hash = proposal(request_id)
+        return compile_dynamic_surface(
+            proposal=value, handler_registry=contracts,
+            renderer_version=renderer,
+            observed_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def submit(request_id: str, body: Mapping[str, Any], operator: str) -> Mapping[str, Any]:
+        renderer, root = configuration()
+        value, card_hash, authority_hash = proposal(request_id)
+        surface = compile_dynamic_surface(
+            proposal=value, handler_registry=contracts,
+            renderer_version=renderer,
+            observed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        submission = dict(body)
+        submission["operator"] = operator
+
+        def decide(invocation: Mapping[str, Any]) -> Mapping[str, Any]:
+            values = invocation["values"]
+            evidence = tuple(
+                line.strip() for line in str(values.get("reconciliation-evidence") or "").splitlines()
+                if line.strip()
+            )
+            decision = AuthorityDecision.create(request_id, {
+                "kind": invocation["decision"], "decided_by": operator,
+                "reason": values["reason"], "reconciliation_evidence": evidence,
+            })
+            recorded = store.decide(decision)
+            return {"status": "RECORDED", "decision_id": str(recorded.get("decision_id") or decision.decision_id)}
+
+        def persist(receipt: Mapping[str, Any]) -> Mapping[str, Any]:
+            receipt_hash = receipt["receipt_hash"]
+            path = root / (receipt_hash.removeprefix("sha256:") + ".json")
+            encoded = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() + b"\n"
+            try:
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+            except FileExistsError:
+                if path.is_symlink() or path.read_bytes() != encoded:
+                    raise ValueError("dynamic surface receipt identity collision")
+            else:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            return {"path": str(path), "receipt_hash": receipt_hash}
+
+        return submit_dynamic_surface(
+            surface=surface, submission=submission,
+            current_card_hash=card_hash, current_authority_hash=authority_hash,
+            handlers={"plan-authority-decision": decide}, persist_receipt=persist,
+        )
+
+    return load, submit
+
+
 def configured_console_mount(
     config_provider: Callable[[], Mapping[str, Any]],
     *,
@@ -316,6 +458,10 @@ def configured_console_mount(
             card_contract=card_contract,
         )
 
+    load_dynamic_surface, submit_dynamic_surface_decision = _dynamic_surface_bindings(
+        store, config_provider,
+    )
+
     return OperatorConsoleMount(
         store=store,
         current_plan_commit=lambda: current_plan_commit(config_provider),
@@ -324,4 +470,6 @@ def configured_console_mount(
         require_executor=require_executor,
         execute_effect=execute_effect,
         resolve_development=resolve_development,
+        load_dynamic_surface=load_dynamic_surface,
+        submit_dynamic_surface_decision=submit_dynamic_surface_decision,
     )

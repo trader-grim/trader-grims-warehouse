@@ -5636,10 +5636,10 @@ def test_intake_form_has_polling_js(env):
 
 
 def test_intake_form_has_view_detail_link(env):
-    """Intake form has a 'View detail' link to /form/items/{sku}."""
+    """Intake links to the thin published-object item client."""
     _login(env["client"])
     r = env["client"].get(f"/form/intake/{SKU_A}")
-    assert f"/form/items/{SKU_A}" in r.text
+    assert f"/form/operator/items/{SKU_A}" in r.text
     assert "detail-link" in r.text
 
 
