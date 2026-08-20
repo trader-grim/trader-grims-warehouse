@@ -180,10 +180,18 @@ def compile_actor_contract(
     if declared_profile.get("state") != "ready-for-preflight":
         diagnostics.append({"code": "PROFILE_NOT_READY", "detail": profile})
     for field, local_name in (("required_skills", "skills"), ("required_hooks", "hooks")):
-        missing = sorted(set(declared_actor.get(field, [])) - set(local_value[local_name]))
+        declared = set(declared_actor.get(field, []))
+        installed = set(local_value[local_name])
+        missing = sorted(declared - installed)
+        extra = sorted(installed - declared)
         diagnostics.extend({"code": "MISSING_" + field.upper(), "detail": item} for item in missing)
-    missing_mcp = sorted(set(declared_actor.get("required_mcp_endpoints", [])) - set(mcp["endpoints"]))
+        diagnostics.extend({"code": "UNDECLARED_" + field.upper(), "detail": item} for item in extra)
+    declared_mcp = set(declared_actor.get("required_mcp_endpoints", []))
+    installed_mcp = set(mcp["endpoints"])
+    missing_mcp = sorted(declared_mcp - installed_mcp)
+    extra_mcp = sorted(installed_mcp - declared_mcp)
     diagnostics.extend({"code": "MISSING_MCP_ENDPOINT", "detail": item} for item in missing_mcp)
+    diagnostics.extend({"code": "UNDECLARED_MCP_ENDPOINT", "detail": item} for item in extra_mcp)
     body = {
         "schema": CONTRACT_SCHEMA,
         "status": "QUARANTINED" if diagnostics else "READY",

@@ -27,6 +27,21 @@ def _hash(value):
     return "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _file_hash(path):
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _tree_hash(path):
+    root = Path(path)
+    digest = hashlib.sha256()
+    for item in sorted((item for item in root.rglob("*") if item.is_file()), key=lambda value: value.relative_to(root).as_posix()):
+        digest.update(item.relative_to(root).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(item.read_bytes())
+        digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
 class _Materializer:
     def materialize_complete_actor_contracts(self, bundle, *, source_root, contracts, trusted_contract_public_key, apply=False, replace_existing=False, additional_source_roots=()):
         bindings = []
@@ -40,6 +55,7 @@ class _Materializer:
                         destination.unlink()
                     destination.symlink_to(source)
                 bindings.append({"actor": actor, "source": str(source), "destination": str(destination), "kind": raw["kind"]})
+                bindings[-1].update({"name": raw["name"], "sha256": raw["sha256"]})
         return {
             "schema": "tgw-w18-complete-actor-materialization/v1",
             "status": "COMPLETE_MATERIALIZED_NOT_SERVICE_ACTIVATED" if apply else "PREPARED",
@@ -59,25 +75,69 @@ def _fixture(tmp_path):
         path.mkdir()
     actor = pwd.getpwuid(os.getuid()).pw_name
     source_commit, plan_commit = "e" * 40, "f" * 40
-    solution, catalog = "sha256:" + "1" * 64, "sha256:" + "2" * 64
+    solution = "sha256:" + "1" * 64
     release = releases / "candidate"
     release.mkdir()
     (release / ".release-manifest.json").write_text(json.dumps({"commit": source_commit}))
-    (release / "source").write_text("actor source\n")
-    destination = tmp_path / "actor-home" / "binding"
+    for name, content in {
+        "launcher": "actor launcher\n", "bootstrap.json": '{"status":"PASS"}\n',
+        "mcp.json": '{"endpoint":"tgw-context"}\n', "skill/SKILL.md": "bounded plan\n",
+    }.items():
+        path = release / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    home, project = tmp_path / "actor-home", tmp_path / "project"
+    destination = home / "bin/tgw-actor"
     generation_hash = "sha256:" + "b" * 64
     generation = generations / generation_hash.removeprefix("sha256:")
     (generation / "contracts").mkdir(parents=True)
+    environment = {
+        "schema": "tgw-execution-environment-catalog/v3",
+        "flake_lock": {"path": "flake.lock", "sha256": "1" * 64},
+        "actors": {actor: {
+            "enabled": True, "permitted_profiles": ["development"],
+            "required_skills": ["tgw-plan"], "required_hooks": [],
+            "required_mcp_endpoints": ["tgw-context"],
+        }},
+        "profiles": {"development": {
+            "state": "ready-for-preflight", "broker_capabilities": ["plan-read", "source-read"],
+        }},
+    }
+    environment_path = generation / "environment-catalog.json"
+    environment_path.write_text(json.dumps(environment))
+    catalog = _hash(environment)
+    launcher_hash = _file_hash(release / "launcher")
+    bootstrap_hash = _file_hash(release / "bootstrap.json")
+    skill_hash = _tree_hash(release / "skill")
+    mcp_hash = _file_hash(release / "mcp.json")
+    mcp_destination = home / ".mcp/tgw-context.json"
     contract = {
         "actor": actor, "catalog_hash": catalog,
         "plan": {"commit": plan_commit, "solution_hash": solution},
-        "code_graph": {"commit": source_commit},
+        "code_graph": {"commit": source_commit}, "profile": "development",
+        "local": {
+            "bootstrap_receipt_hash": bootstrap_hash,
+            "launcher": {"path": str(destination), "sha256": launcher_hash},
+            "skills": {"tgw-plan": skill_hash}, "hooks": {},
+            "mcp": {
+                "endpoints": ["tgw-context"],
+                "binding_hash": _hash([{
+                    "endpoint": "tgw-context", "source_sha256": mcp_hash,
+                    "destination": str(mcp_destination),
+                }]),
+            },
+        },
     }
+    bindings = [
+        {"kind": "skill", "name": "tgw-plan", "source": "skill", "destination": str(home / ".skills/tgw-plan"), "sha256": skill_hash},
+        {"kind": "mcp", "name": "tgw-context", "source": "mcp.json", "destination": str(mcp_destination), "sha256": mcp_hash},
+        {"kind": "launcher", "name": "launcher", "source": "launcher", "destination": str(destination), "sha256": launcher_hash},
+        {"kind": "bootstrap", "name": "bootstrap-receipt", "source": "bootstrap.json", "destination": str(home / ".tgw/bootstrap.json"), "sha256": bootstrap_hash},
+        {"kind": "environment", "name": "environment-catalog", "source": str(environment_path), "destination": str(home / ".tgw/execution-environment-catalog.json"), "sha256": _file_hash(environment_path)},
+    ]
     bundle = {
         "schema": "tgw-complete-actor-contract-bundle/v1", "generation": generation_hash,
-        "actors": {actor: {"home": str(tmp_path / "actor-home"), "project": str(tmp_path / "project"), "bindings": [
-            {"kind": "launcher", "name": "launcher", "source": "source", "destination": str(destination), "sha256": _hash("source")},
-        ]}},
+        "actors": {actor: {"home": str(home), "project": str(project), "bindings": bindings}},
     }
     (generation / "bundle.json").write_text(json.dumps(bundle))
     (generation / "contracts" / f"{actor}.json").write_text(json.dumps(contract))

@@ -66,6 +66,28 @@ def _read_json(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
+def _binding_digest(path: Path) -> str:
+    """Hash one post-activation binding using the materializer's rules."""
+    if path.is_symlink():
+        raise ActorFleetError("actor binding source cannot be a symlink")
+    digest = hashlib.sha256()
+    if path.is_file():
+        digest.update(path.read_bytes())
+    elif path.is_dir():
+        files = [
+            item for item in path.rglob("*")
+            if item.is_file() and not item.is_symlink() and "__pycache__" not in item.parts
+        ]
+        for item in sorted(files, key=lambda value: value.relative_to(path).as_posix()):
+            digest.update(item.relative_to(path).as_posix().encode())
+            digest.update(b"\0")
+            digest.update(item.read_bytes())
+            digest.update(b"\0")
+    else:
+        raise ActorFleetError("actor binding source is unavailable")
+    return "sha256:" + digest.hexdigest()
+
+
 def _atomic(path: Path, value: Mapping[str, Any]) -> None:
     stage = path.with_name(f".{path.name}.next")
     if stage.exists() or stage.is_symlink():
@@ -338,6 +360,20 @@ class ActorFleetProvider:
         bindings = [item for item in (journal.get("materialization") or {}).get("bindings", []) if item.get("actor") == actor]
         if not bindings:
             raise ActorFleetError("actor has no materialized contract")
+        _materializer, bundle, contracts = self._actor_inputs(Path(str(journal["candidate_release"])), value)
+        contract = contracts[actor]
+        local = contract.get("local") if isinstance(contract.get("local"), Mapping) else {}
+        specification = bundle["actors"][actor]
+        declared = {
+            (item["kind"], item["name"], item["destination"]): item["sha256"]
+            for item in specification["bindings"]
+        }
+        observed = {
+            (item.get("kind"), item.get("name"), item.get("destination")): item.get("sha256")
+            for item in bindings
+        }
+        if observed != declared:
+            raise ActorFleetError("actor materialization differs from its complete bundle")
         account = pwd.getpwnam(actor)
         read_fd, write_fd = os.pipe()
         child = os.fork()
@@ -354,9 +390,51 @@ class ActorFleetProvider:
                     destination, source = Path(binding["destination"]), Path(binding["source"])
                     if not destination.is_symlink() or destination.resolve(strict=False) != source:
                         raise ActorFleetError("actor contract binding changed")
-                    with destination.open("rb") as handle:
-                        handle.read(1)
-                payload = {"status": "PASS", "uid": os.geteuid()}
+                    if _binding_digest(source) != binding["sha256"]:
+                        raise ActorFleetError("actor contract binding content changed")
+                by_kind: dict[str, dict[str, Mapping[str, Any]]] = {}
+                for binding in bindings:
+                    by_kind.setdefault(binding["kind"], {})[binding["name"]] = binding
+                mcp_bindings = [{
+                    "endpoint": name,
+                    "source_sha256": binding["sha256"],
+                    "destination": binding["destination"],
+                } for name, binding in sorted(by_kind.get("mcp", {}).items())]
+                environment_binding = by_kind.get("environment", {}).get("environment-catalog")
+                if environment_binding is None:
+                    raise ActorFleetError("actor environment catalog binding is missing")
+                environment = _read_json(Path(environment_binding["source"]), "actor environment catalog")
+                profile = environment.get("profiles", {}).get(contract.get("profile"), {})
+                actor_declaration = environment.get("actors", {}).get(actor, {})
+                if (
+                    _hash(environment) != contract.get("catalog_hash")
+                    or contract.get("plan") != {
+                        "commit": value["revisions"]["plan"],
+                        "solution_hash": value["revisions"]["solution"],
+                    }
+                    or contract.get("code_graph", {}).get("commit") != value["revisions"]["source"]
+                    or set(by_kind.get("skill", {})) != set(local.get("skills", {}))
+                    or set(by_kind.get("hook", {})) != set(local.get("hooks", {}))
+                    or set(by_kind.get("mcp", {})) != set(local.get("mcp", {}).get("endpoints", []))
+                    or _hash(mcp_bindings) != local.get("mcp", {}).get("binding_hash")
+                    or by_kind.get("launcher", {}).get("launcher", {}).get("destination") != local.get("launcher", {}).get("path")
+                    or by_kind.get("launcher", {}).get("launcher", {}).get("sha256") != local.get("launcher", {}).get("sha256")
+                    or by_kind.get("bootstrap", {}).get("bootstrap-receipt", {}).get("sha256") != local.get("bootstrap_receipt_hash")
+                    or actor_declaration.get("enabled") is not True
+                    or contract.get("profile") not in actor_declaration.get("permitted_profiles", [])
+                    or profile.get("state") != "ready-for-preflight"
+                ):
+                    raise ActorFleetError("actor startup binding is stale or mixed")
+                payload = {
+                    "status": "PASS", "uid": os.geteuid(),
+                    "plan": value["revisions"]["plan"],
+                    "solution": value["revisions"]["solution"],
+                    "source": value["revisions"]["source"],
+                    "catalog": value["revisions"]["catalog"],
+                    "generation": value["successor_generation"],
+                    "profile": contract["profile"],
+                    "required_capabilities": sorted(profile.get("broker_capabilities", [])),
+                }
             except Exception as exc:
                 payload = {"status": "FAIL", "reason": str(exc)}
             os.write(write_fd, _canonical(payload))
@@ -372,11 +450,19 @@ class ActorFleetProvider:
             proof = json.loads(raw)
         except (TypeError, json.JSONDecodeError) as exc:
             raise ActorFleetError(f"actor contract verification failed: {actor}") from exc
-        if wait_status != 0 or proof != {"status": "PASS", "uid": account.pw_uid}:
+        if wait_status != 0 or proof.get("status") != "PASS" or proof.get("uid") != account.pw_uid:
             raise ActorFleetError(f"actor contract verification failed: {actor}")
         journal["status"] = "VERIFYING"
         self._save(journal)
-        return {"status": "VERIFIED", "actor": actor, "uid": account.pw_uid, "generation": value["successor_generation"], "bindings_hash": _hash(bindings), "actor_proof_hash": _hash(proof)}
+        return {
+            "status": "VERIFIED", "actor": actor, "uid": account.pw_uid,
+            "generation": value["successor_generation"],
+            "plan": proof["plan"], "solution": proof["solution"],
+            "source": proof["source"], "catalog": proof["catalog"],
+            "profile": proof["profile"],
+            "required_capabilities": proof["required_capabilities"],
+            "bindings_hash": _hash(bindings), "actor_proof_hash": _hash(proof),
+        }
 
     def rollback(self, request: Mapping[str, Any]) -> dict[str, Any]:
         value = _request(request)

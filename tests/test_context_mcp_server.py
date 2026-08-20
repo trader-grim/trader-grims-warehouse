@@ -74,12 +74,24 @@ def bound_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, 
     _git(source, "init", "-q")
     source_commit = _commit(source, "source")
 
+    catalog = {
+        "schema": "tgw-execution-environment-catalog/v3",
+        "flake_lock": {"path": "flake.lock", "sha256": "1" * 64},
+        "actors": {"codex": {"enabled": True}},
+        "profiles": {"development": {"state": "ready-for-preflight"}},
+    }
+    catalog_path = tmp_path / "execution-environment-catalog.json"
+    catalog_path.write_text(json.dumps(catalog))
+    catalog_hash = "sha256:" + hashlib.sha256(context._canonical(catalog)).hexdigest()
+
     monkeypatch.setenv("TGW_CONTEXT_PLAN_ROOT", str(materialization))
     monkeypatch.setenv("TGW_CONTEXT_PLAN_REPOSITORY", str(plan_repository))
     monkeypatch.setenv("TGW_CONTEXT_PLAN_COMMIT", approved)
     monkeypatch.setenv("TGW_CONTEXT_PLAN_SOLUTION", "sha256:" + "a" * 64)
     monkeypatch.setenv("TGW_CONTEXT_SOURCE_ROOT", str(source))
     monkeypatch.setenv("TGW_CONTEXT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TGW_CONTEXT_ENVIRONMENT_CATALOG", str(catalog_path))
+    monkeypatch.setenv("TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH", catalog_hash)
     context._code_snapshot.cache_clear()
     return {"approved": approved, "evidence_head": evidence_head, "source": source, "source_commit": source_commit}
 
@@ -91,6 +103,8 @@ def test_status_binds_approved_plan_evidence_and_committed_source(bound_context)
     assert status["plan"]["evidence_head"] == bound_context["evidence_head"]
     assert status["source"]["commit"] == bound_context["source_commit"]
     assert status["code_graph"]["commit"] == bound_context["source_commit"]
+    assert status["environment"]["catalog_hash"].startswith("sha256:")
+    assert status["environment"]["catalog"]["profiles"]["development"]["state"] == "ready-for-preflight"
     assert status["scope_semantics"]["platform_w11_completion_implies_master_plan_completion"] is False
 
 
@@ -127,6 +141,12 @@ def test_fail_closed_path_and_materialization_checks_and_read_only_surface(bound
     }
     payload = json.loads(context.tgw_context_status())
     assert payload["ok"] is False
+
+
+def test_status_rejects_a_stale_environment_catalog_binding(bound_context, monkeypatch):
+    monkeypatch.setenv("TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH", "sha256:" + "0" * 64)
+    with pytest.raises(context.ContextError, match="catalog hash"):
+        context.context_status()
 
 
 def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):

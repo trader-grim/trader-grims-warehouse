@@ -75,6 +75,7 @@ def test_builder_emits_signed_complete_external_generation_consumable_by_materia
     )
     assert applied["status"] == "COMPLETE_MATERIALIZED_NOT_SERVICE_ACTIVATED"
     assert (home / ".tgw/execution-environment-catalog.json").is_symlink()
+    assert (home / ".tgw/actor-contract.json").is_symlink()
     assert build_actor_generation(
         catalog_path=catalog_path, descriptor_path=descriptor_path,
         source_root=source, output_root=output, signing_key_path=key_path,

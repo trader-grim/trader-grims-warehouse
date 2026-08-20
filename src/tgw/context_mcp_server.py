@@ -118,6 +118,27 @@ def _bindings() -> dict[str, Any]:
         raise ContextError("TGW_CONTEXT_RUNTIME_ROOT must be an absolute path")
     approved = _approved_commit()
     solution = _approved_solution()
+    catalog_path = _path_env(
+        "TGW_CONTEXT_ENVIRONMENT_CATALOG",
+        "/etc/tgw/execution-environment-catalog.json",
+    )
+    try:
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ContextError("execution environment catalog is invalid") from exc
+    if (
+        not isinstance(catalog, dict)
+        or catalog.get("schema") != "tgw-execution-environment-catalog/v3"
+        or not isinstance(catalog.get("actors"), dict)
+        or not isinstance(catalog.get("profiles"), dict)
+    ):
+        raise ContextError("execution environment catalog is invalid")
+    catalog_hash = _sha(_canonical(catalog))
+    expected_catalog_hash = os.environ.get("TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH", "")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_catalog_hash):
+        raise ContextError("TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH must be exact")
+    if catalog_hash != expected_catalog_hash:
+        raise ContextError("execution environment catalog hash does not match configured revision")
     if _git(plan_root, "rev-parse", "HEAD^{commit}") != approved:
         raise ContextError("approved Plan materialization does not match configured commit")
     if _git(plan_root, "status", "--porcelain=v1", "--untracked-files=all"):
@@ -140,6 +161,9 @@ def _bindings() -> dict[str, Any]:
         "source_worktree_clean": not bool(source_status),
         "source_status_sha256": _sha(str(source_status).encode()),
         "runtime_root": runtime_root,
+        "environment_catalog": catalog,
+        "environment_catalog_path": catalog_path,
+        "environment_catalog_hash": catalog_hash,
     }
 
 
@@ -215,6 +239,11 @@ def context_status() -> dict[str, Any]:
             "status_sha256": binding["source_status_sha256"],
         },
         "code_graph": {key: graph[key] for key in ("commit", "tree", "freshness_hash", "capabilities")},
+        "environment": {
+            "catalog": binding["environment_catalog"],
+            "catalog_path": str(binding["environment_catalog_path"]),
+            "catalog_hash": binding["environment_catalog_hash"],
+        },
         "scope_semantics": dict(SCOPE_SEMANTICS),
     }
     result["context_sha256"] = _sha(_canonical(result))

@@ -667,6 +667,7 @@ def test_scratch_root_rejects_symlink_or_wrong_mode_without_chmod(tmp_path):
         _prepare_scratch_root(scratch, expected_uid=os.geteuid())
     scratch.unlink()
     scratch.mkdir(mode=0o755)
+    scratch.chmod(0o755)
     with pytest.raises(EvaluationError, match="root-owned"):
         _prepare_scratch_root(scratch, expected_uid=os.geteuid())
     assert scratch.stat().st_mode & 0o777 == 0o755
@@ -791,6 +792,7 @@ def test_real_sshd_preserves_shell_quoted_python_program_and_metacharacters(tmp_
     host_key, client_key = tmp_path / "host_key", tmp_path / "client_key"
     for key in (host_key, client_key):
         subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+        key.chmod(0o600)
     authorized = tmp_path / "authorized_keys"
     authorized.write_text(client_key.with_suffix(".pub").read_text())
     with socket.socket() as probe:

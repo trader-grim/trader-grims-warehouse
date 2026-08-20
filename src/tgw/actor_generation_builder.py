@@ -180,7 +180,14 @@ def build_actor_generation(
             if contract["status"] != "READY":
                 raise ActorGenerationError(f"actor generation contract is quarantined: {actor}:{contract['diagnostics']}")
             signed = sign_actor_contract(contract, signing_private_key=key)
-            (contracts_root / f"{actor}.json").write_bytes(_canonical(signed) + b"\n")
+            signed_bytes = _canonical(signed) + b"\n"
+            (contracts_root / f"{actor}.json").write_bytes(signed_bytes)
+            compiled_bindings.append({
+                "kind": "contract", "name": "actor-contract",
+                "source": str(final / "contracts" / f"{actor}.json"),
+                "destination": str(home / ".tgw" / "actor-contract.json"),
+                "sha256": "sha256:" + hashlib.sha256(signed_bytes).hexdigest(),
+            })
             contract_hashes[actor] = signed["receipt_hash"]
             bundle_actors[actor] = {
                 "home": str(home), "project": str(project), "bindings": compiled_bindings,

@@ -108,6 +108,18 @@ def test_missing_catalog_contract_input_quarantines_before_launch():
     assert {item["code"] for item in receipt["diagnostics"]} == {"MISSING_REQUIRED_HOOKS", "MISSING_MCP_ENDPOINT"}
 
 
+def test_undeclared_local_capability_quarantines_instead_of_becoming_fallback():
+    local = _local()
+    local["skills"]["user-local-skill"] = HASH
+    local["hooks"]["user-local-hook"] = HASH
+    local["mcp"]["endpoints"].append("ambient-mcp")
+    receipt = _compile(local=local)
+    assert receipt["status"] == "QUARANTINED"
+    assert {item["code"] for item in receipt["diagnostics"]} == {
+        "UNDECLARED_REQUIRED_SKILLS", "UNDECLARED_REQUIRED_HOOKS", "UNDECLARED_MCP_ENDPOINT",
+    }
+
+
 @pytest.mark.parametrize(
     "change",
     [

@@ -402,7 +402,7 @@ def materialize_complete_actor_contracts(
             raise InstallError(f"actor bundle has no bindings: {actor}")
         observed: dict[str, dict[str, str]] = {
             "skill": {}, "hook": {}, "mcp": {}, "launcher": {},
-            "bootstrap": {}, "environment": {},
+            "bootstrap": {}, "environment": {}, "contract": {},
         }
         actor_plans: list[dict[str, Any]] = []
         destinations: set[Path] = set()
@@ -456,6 +456,7 @@ def materialize_complete_actor_contracts(
             or set(observed["bootstrap"]) != {"bootstrap-receipt"}
             or observed["bootstrap"]["bootstrap-receipt"] != local.get("bootstrap_receipt_hash")
             or set(observed["environment"]) != {"environment-catalog"}
+            or set(observed["contract"]) != {"actor-contract"}
             or set(observed["mcp"]) != set(local.get("mcp", {}).get("endpoints", []))
             or _bundle_binding_hash(mcp_bindings) != local.get("mcp", {}).get("binding_hash")
         ):
