@@ -10,7 +10,7 @@ INSTALLERS = ROOT / "agent-services/installers"
 sys.path.insert(0, str(INSTALLERS.parent))
 
 import installers.materialize as materialize_module  # noqa: E402
-from installers.materialize import materialize  # noqa: E402
+from installers.materialize import InstallError, materialize, materialize_fleet  # noqa: E402
 
 
 @pytest.mark.parametrize(
@@ -155,3 +155,46 @@ def test_apply_failure_rolls_back_all_links_created_by_invocation(tmp_path, monk
         materialize("codex", home=home, project=project, source_root=ROOT, apply=True)
     assert not (home / ".codex/skills/tgw-plan").exists()
     assert not (home / ".codex/providers/promptcraft").exists()
+
+
+def _ready_contract(actor):
+    return {"actor": actor, "status": "READY", "receipt_hash": "sha256:" + "a" * 64}
+
+
+def test_fleet_materialization_is_all_or_rollback_and_never_activates(tmp_path, monkeypatch):
+    codex_home, deepseek_home, project = tmp_path / "codex", tmp_path / "deepseek", tmp_path / "project"
+    actors = {
+        "codex": {"home": codex_home, "project": project},
+        "deepseek": {"home": deepseek_home, "project": project},
+    }
+    contracts = {actor: _ready_contract(actor) for actor in actors}
+    dry = materialize_fleet(actors, source_root=ROOT, contracts=contracts)
+    assert dry["status"] == "PREPARED" and not codex_home.exists() and not deepseek_home.exists()
+    applied = materialize_fleet(actors, source_root=ROOT, contracts=contracts, apply=True)
+    assert applied["status"] == "MATERIALIZED_NOT_ACTIVATED"
+    assert (codex_home / ".codex/skills/tgw-plan").is_symlink()
+    assert (deepseek_home / ".dsh/skills/tgw-plan").is_symlink()
+
+    broken = tmp_path / "broken"
+    real_symlink = materialize_module.os.symlink
+    calls = 0
+    def fail_second(source, destination, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected fleet failure")
+        return real_symlink(source, destination, **kwargs)
+    monkeypatch.setattr(materialize_module.os, "symlink", fail_second)
+    with pytest.raises(OSError, match="fleet failure"):
+        materialize_fleet(
+            {"codex": {"home": broken, "project": project}, "deepseek": {"home": tmp_path / "other", "project": project}},
+            source_root=ROOT, contracts=contracts, apply=True,
+        )
+    assert not (broken / ".codex/skills/tgw-plan").exists()
+
+
+def test_fleet_refuses_quarantined_actor_before_any_write(tmp_path):
+    actors = {"codex": {"home": tmp_path / "home", "project": tmp_path / "project"}}
+    with pytest.raises(InstallError, match="not READY"):
+        materialize_fleet(actors, source_root=ROOT, contracts={"codex": {"actor": "codex", "status": "QUARANTINED"}}, apply=True)
+    assert not (tmp_path / "home").exists()

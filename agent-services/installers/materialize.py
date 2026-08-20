@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "tgw-agent-service-installation/v1"
-TARGETS = ("codex", "claude", "hermes", "isolated-worker")
+TARGETS = ("codex", "claude", "deepseek", "hermes", "isolated-worker")
 
 
 class InstallError(ValueError):
@@ -50,6 +50,11 @@ def _matrix(target: str, *, home: Path, project: Path, source_root: Path) -> lis
         return [
             Adapter("tgw-plan", skill, project / ".claude/skills/tgw-plan", hold_legacy=True),
             Adapter("promptcraft", provider, project / ".claude/providers/promptcraft"),
+        ]
+    if target == "deepseek":
+        return [
+            Adapter("tgw-plan", skill, home / ".dsh/skills/tgw-plan"),
+            Adapter("promptcraft", provider, home / ".dsh/providers/promptcraft"),
         ]
     if target == "hermes":
         return [
@@ -137,6 +142,82 @@ def materialize(
         "actions": actions,
         "ok": ok,
         "legacy_held": any(item["status"] == "HELD_LEGACY" for item in actions),
+    }
+
+
+def materialize_fleet(
+    actors: dict[str, dict[str, str | Path]], *, source_root: str | Path,
+    contracts: dict[str, dict[str, Any]], apply: bool = False,
+) -> dict[str, Any]:
+    """Materialize every READY actor as one local, rollback-safe transaction.
+
+    This installer deliberately owns only canonical adapter links.  It neither
+    starts services nor changes MCP registrations: those effects remain a
+    separate W18 activation boundary after this receipt has been verified.
+    """
+    if not actors or set(actors) != set(contracts):
+        raise InstallError("fleet actors and contracts must have the same non-empty identities")
+    root = Path(source_root).resolve()
+    plans: dict[str, list[tuple[Adapter, str]]] = {}
+    for actor in sorted(actors):
+        contract = contracts[actor]
+        if not isinstance(contract, dict) or contract.get("actor") != actor or contract.get("status") != "READY":
+            raise InstallError(f"actor contract is not READY: {actor}")
+        entry = actors[actor]
+        home, project = entry.get("home"), entry.get("project")
+        if not isinstance(home, (str, Path)) or not isinstance(project, (str, Path)):
+            raise InstallError(f"actor paths are invalid: {actor}")
+        matrix = _matrix(actor, home=Path(home).resolve(), project=Path(project).resolve(), source_root=root)
+        states: list[tuple[Adapter, str]] = []
+        for adapter in matrix:
+            if not adapter.source.exists():
+                raise InstallError(f"canonical source is missing: {adapter.source}")
+            if _same_link(adapter.destination, adapter.source):
+                state = "CURRENT"
+            elif adapter.destination.exists() or adapter.destination.is_symlink():
+                state = "HELD_LEGACY" if adapter.hold_legacy else "CONFLICT"
+            else:
+                state = "MISSING"
+            states.append((adapter, state))
+        if any(state == "CONFLICT" for _, state in states):
+            raise InstallError(f"actor adapter conflict: {actor}")
+        plans[actor] = states
+
+    created: list[Path] = []
+    try:
+        if apply:
+            for actor in sorted(plans):
+                for adapter, state in plans[actor]:
+                    if state != "MISSING":
+                        continue
+                    adapter.destination.parent.mkdir(parents=True, exist_ok=True)
+                    os.symlink(adapter.source, adapter.destination, target_is_directory=adapter.source.is_dir())
+                    created.append(adapter.destination)
+    except Exception:
+        for destination in reversed(created):
+            if destination.is_symlink():
+                destination.unlink()
+        raise
+
+    actor_actions = []
+    for actor in sorted(plans):
+        actions = []
+        for adapter, state in plans[actor]:
+            status = "INSTALLED" if apply and state == "MISSING" else ("WOULD_INSTALL" if state == "MISSING" else state)
+            actions.append({
+                "capability": adapter.capability,
+                "destination": str(adapter.destination),
+                "source": str(adapter.source),
+                "source_digest": tree_digest(adapter.source) if adapter.source.is_dir() else "sha256:" + hashlib.sha256(adapter.source.read_bytes()).hexdigest(),
+                "status": status,
+            })
+        actor_actions.append({"actor": actor, "contract_receipt_hash": contracts[actor].get("receipt_hash"), "actions": actions})
+    return {
+        "schema": "tgw-w18-fleet-adapter-materialization/v1",
+        "mode": "apply" if apply else "dry-run",
+        "status": "PREPARED" if not apply else "MATERIALIZED_NOT_ACTIVATED",
+        "actors": actor_actions,
+        "activation": "declarative-only",
     }
 
 
