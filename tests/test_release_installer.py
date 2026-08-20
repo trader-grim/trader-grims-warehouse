@@ -98,6 +98,16 @@ def test_selection_is_compare_and_swap(tmp_path: Path) -> None:
     assert not (root / "operations" / "deploy-b.json").exists()
 
 
+def test_bootstrap_selection_requires_an_absent_current_generation(tmp_path: Path) -> None:
+    root = tmp_path / "tgw"
+    _release(root, tmp_path, "bootstrap-a", COMMIT_A, b"A\n")
+    receipt = select(root, "bootstrap-a", expected_current=None, operation_id="bootstrap-a")
+    assert receipt["previous_generation"] is None
+    assert current_generation(root) == "bootstrap-a"
+    with pytest.raises(ReleaseError, match="current generation changed"):
+        select(root, "bootstrap-a", expected_current=None, operation_id="bootstrap-b")
+
+
 @pytest.mark.parametrize("unsafe", ["../escape", "/absolute"])
 def test_materialize_rejects_traversal(tmp_path: Path, unsafe: str) -> None:
     root = tmp_path / "tgw"

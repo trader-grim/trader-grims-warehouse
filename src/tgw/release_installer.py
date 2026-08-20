@@ -435,12 +435,13 @@ def install_runtime_files(root: Path, generation: str, files: Mapping[str, bytes
 
 
 def select(
-    root: Path, generation: str, *, expected_current: str, operation_id: str,
+    root: Path, generation: str, *, expected_current: str | None, operation_id: str,
     rollback_of: str | None = None,
 ) -> dict[str, Any]:
     """CAS-select an already materialized release and durably receipt it."""
     generation = _generation(generation)
-    expected_current = _generation(expected_current)
+    if expected_current is not None:
+        expected_current = _generation(expected_current)
     if not _GENERATION.fullmatch(operation_id):
         raise ReleaseError("unsafe operation id")
     with _lock(root):
@@ -571,8 +572,9 @@ def main() -> int:
                 args.root, args.archive, generation=args.generation, commit=args.commit,
                 tree=args.tree, archive_sha256=args.archive_sha256,
             )
+            expected_current = None if args.expected_current == "none" else args.expected_current
             receipt = select(
-                args.root, args.generation, expected_current=args.expected_current,
+                args.root, args.generation, expected_current=expected_current,
                 operation_id=args.operation_id,
             )
             result = {"manifest": manifest, "receipt": receipt}
