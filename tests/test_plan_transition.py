@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +17,8 @@ from tgw.plan_transition import (
     inspect_detached_materialization,
     prepare_detached_materialization,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def git(path: Path, *args: str) -> str:
@@ -179,3 +183,20 @@ def test_failed_materialization_cleanup_is_bounded(tmp_path):
     ]
     assert len(cleanup_calls) == 1
     assert cleanup_calls[0].kwargs["timeout"] == 30
+
+
+def test_w12_catalog_content_bindings_cover_the_reviewed_transition_bytes():
+    catalog = json.loads(
+        (ROOT / "agent-services/catalogs/w12-bootstrap-transition-v1.json").read_text(),
+    )
+    provider = catalog["providers"][0]
+    expected = provider["implementation_content"]
+    observed = {
+        path: "sha256:" + hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+        for path in sorted(expected)
+    }
+    assert observed == expected
+    evidence = catalog["observations"][0]["evidence"]
+    assert f"source-commit:{provider['implementation_commit']}" in evidence
+    for path, digest in expected.items():
+        assert f"source-content:{path}:{digest}" in evidence

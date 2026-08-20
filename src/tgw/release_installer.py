@@ -440,7 +440,7 @@ def install_runtime_files(root: Path, generation: str, files: Mapping[str, bytes
         return {**verification, "verification_status": verification["status"], "status": "installed"}
 
 
-def select(
+def _select(
     root: Path, generation: str, *, expected_current: str | None, operation_id: str,
     rollback_of: str | None = None,
 ) -> dict[str, Any]:
@@ -493,7 +493,30 @@ def select(
         receipt = {**intent, "state": "completed"}
         _atomic_json(root / "receipts" / f"{operation_id}.json", receipt)
         _atomic_json(operation_path, receipt, mode=0o600)
-        return receipt
+    return receipt
+
+
+def select(
+    root: Path, generation: str, *, expected_current: str | None, operation_id: str,
+    admission_receipt: Mapping[str, Any] | None = None,
+    environment_preflight_receipt: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Select only after revalidating exact W15/W16 evidence at this boundary."""
+    if admission_receipt is None or environment_preflight_receipt is None:
+        raise ReleaseError("release selection requires admission and environment-preflight receipts")
+    try:
+        manifest = _read_json(root / "releases" / _generation(generation) / ".release-manifest.json")
+        admission = validate_release_admission(
+            admission_receipt, candidate_commit=manifest["commit"], candidate_tree=manifest["git_tree"],
+        )
+        validate_environment_preflight_for_admission(
+            environment_preflight_receipt,
+            catalog_hash=admission["environment"]["catalog_hash"],
+            receipt_hash=admission["environment"]["receipt_hash"],
+        )
+    except (AdmissionRecoveryError, KeyError) as exc:
+        raise ReleaseError(f"release admission refused: {exc}") from exc
+    return _select(root, generation, expected_current=expected_current, operation_id=operation_id)
 
 
 def rollback(
@@ -517,7 +540,7 @@ def rollback(
     if not isinstance(previous, str) or not isinstance(source_operation, str):
         raise ReleaseError("rollback receipt has no previous generation")
     _generation(source_operation)
-    return select(
+    return _select(
         root, previous, expected_current=expected_current, operation_id=operation_id,
         rollback_of=source_operation,
     )
@@ -601,7 +624,8 @@ def main() -> int:
             expected_current = None if args.expected_current == "none" else args.expected_current
             receipt = select(
                 args.root, args.generation, expected_current=expected_current,
-                operation_id=args.operation_id,
+                operation_id=args.operation_id, admission_receipt=admission,
+                environment_preflight_receipt=preflight,
             )
             result = {"manifest": manifest, "receipt": receipt}
         elif args.command == "verify":
