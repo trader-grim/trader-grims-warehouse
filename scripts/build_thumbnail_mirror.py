@@ -20,6 +20,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator
 
+from tgw.logging import announce_script_run
+
 try:
     from PIL import Image, UnidentifiedImageError
 except ImportError as exc:  # pragma: no cover
@@ -130,6 +132,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    announce_script_run(
+        "build_thumbnail_mirror.py",
+        "build an explicitly bounded development thumbnail mirror",
+        source=str(args.source),
+        destination=str(args.destination),
+        dry_run=args.dry_run,
+    )
     source, destination = args.source.resolve(), args.destination.resolve()
     if not source.is_dir():
         print(f"source ItemData root does not exist or is not a directory: {source}", file=sys.stderr)

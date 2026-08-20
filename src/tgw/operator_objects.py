@@ -10,6 +10,9 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping, Sequence
 
+from tgw import inventory_record
+from tgw.ebay.draft_specifics import get_ebay_aspects
+
 OPERATOR_OBJECT_SCHEMA = "tgw-operator-object/v1"
 ADAPTER_VIEW_SCHEMA = "tgw-operator-adapter-view/v1"
 
@@ -267,7 +270,7 @@ def build_item_operator_object(
 
     aspects = []
     missing_aspects = []
-    specifics = draft.get("item_specifics") if isinstance(draft.get("item_specifics"), Mapping) else {}
+    specifics = get_ebay_aspects(item)
     for aspect in context.get("aspects", ()):
         if not isinstance(aspect, Mapping) or not isinstance(aspect.get("name"), str):
             continue
@@ -370,7 +373,7 @@ def build_item_operator_object(
             "title": {"type": "string", "label": "Inventory title", "value": item.get("title") or ""},
             "location": {"type": "string", "label": "Location", "value": item.get("location") or ""},
             "notes": {"type": "string", "label": "Notes", "value": item.get("notes") or ""},
-            "item_attributes": {"type": "string-map", "label": "Inventory attributes", "value": deepcopy(item.get("item_attributes") or {})},
+            "item_attributes": {"type": "string-map", "label": "Inventory attributes", "value": deepcopy(inventory_record.get_inventory_fields(item))},
         },
         "listing_fields": {
             "title": {"type": "string", "label": "Listing title", "value": draft.get("title") or item.get("title") or ""},

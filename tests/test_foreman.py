@@ -502,7 +502,10 @@ def test_tick_admits_most_urgent_eligible_todo():
         )
 
     assert result.dispatched == 1
-    assert enqueue.call_args.kwargs["dedupe_key"] == "graph-urgent"
+    assert enqueue.call_args.kwargs["dedupe_key"] == (
+        "treatment:codex-implement:coding_task:/tmp/wt-urgent:"
+        "abc123:codex-implement:1"
+    )
     assert enqueue.call_args.kwargs["payload"]["todo_id"] == urgent.todo_id
 
 
@@ -525,7 +528,9 @@ def test_tick_equal_priority_orders_by_todo_id_then_treatment_identity():
         result = tick(fetch_todos=lambda: [first, second], check_active_fn=lambda _: False, enqueue_fn=enqueue)
 
     assert result.dispatched == 1
-    assert enqueue.call_args.kwargs["dedupe_key"] == "graph-z"
+    assert enqueue.call_args.kwargs["dedupe_key"] == (
+        "treatment:zeta:coding_task:/tmp/wt-z:abc123:zeta:1"
+    )
 
 
 def test_tick_null_priority_is_last():
@@ -546,7 +551,10 @@ def test_tick_null_priority_is_last():
         result = tick(fetch_todos=lambda: [missing, real], check_active_fn=lambda _: False, enqueue_fn=enqueue)
 
     assert result.dispatched == 1
-    assert enqueue.call_args.kwargs["dedupe_key"] == "graph-real"
+    assert enqueue.call_args.kwargs["dedupe_key"] == (
+        "treatment:codex-implement:coding_task:/tmp/wt-real:"
+        "abc123:codex-implement:1"
+    )
 
 
 def test_tick_retry_wait_job_is_active_and_not_reenqueued():
@@ -610,7 +618,10 @@ def test_tick_wires_evaluator_fingerprints_to_codex_dispatch():
     call = enqueue.call_args.kwargs
     assert call["queue_name"] == "codex-implement"
     assert call["handler_family"] == "codex-implement"
-    assert call["dedupe_key"] == "graph-ready"
+    assert call["dedupe_key"] == (
+        "treatment:codex-implement:coding_task:/tmp/worktree-1:"
+        "abc123:codex-implement:1"
+    )
     assert call["entity_type"] == "coding_task"
     assert call["payload"]["todo_id"] == 1731
     assert call["payload"]["treatment_id"] == "codex-implement"
@@ -697,7 +708,10 @@ def test_tick_dispatch_failure_continues_to_lower_priority_todo():
         result = tick(fetch_todos=lambda: [first, second], check_active_fn=lambda _: False, check_terminal_fn=lambda _: False, enqueue_fn=enqueue)
     assert result.dispatched == 1
     assert result.errors == 1
-    assert enqueue.call_args.kwargs["dedupe_key"] == "second"
+    assert enqueue.call_args.kwargs["dedupe_key"] == (
+        "treatment:codex-implement:coding_task:/tmp/second:"
+        "abc123:codex-implement:1"
+    )
 
 
 def test_tick_duplicate_dispatch_is_not_an_error_and_continues():
@@ -740,7 +754,10 @@ def test_tick_terminal_graph_is_durably_skipped_and_does_not_starve_next_todo():
         result = tick(fetch_todos=lambda: [first, second], check_active_fn=lambda _: False, check_terminal_fn=lambda graph_id: graph_id == "terminal", enqueue_fn=enqueue)
     assert result.dispatched == 1
     assert result.skipped_terminal == 1
-    assert enqueue.call_args.kwargs["dedupe_key"] == "fresh"
+    assert enqueue.call_args.kwargs["dedupe_key"] == (
+        "treatment:codex-implement:coding_task:/tmp/second:"
+        "abc123:codex-implement:1"
+    )
 
 
 def test_tick_rejects_outside_root_before_snapshot_or_dispatch(tmp_path, monkeypatch):

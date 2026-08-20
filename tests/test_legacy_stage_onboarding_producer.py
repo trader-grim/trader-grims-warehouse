@@ -72,7 +72,10 @@ def test_producer_constructs_exact_generation_bound_payload_and_dedupe(
     assert payload["expected_offer"] == offer
     assert payload["treatment_id"] == "ebay-onboard-legacy-stage"
     assert payload["treatment_version"] == "1"
-    assert call["dedupe_key"] == payload["graph_id"]
+    assert call["dedupe_key"] == (
+        f"treatment:ebay_onboard_legacy_stage:item:{sku}:"
+        f"{payload['object_generation']}:ebay-onboard-legacy-stage:1"
+    )
 
 
 def test_missing_canonical_marketplace_uses_exact_read_only_offer(

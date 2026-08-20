@@ -37,7 +37,10 @@ def test_dispatch_is_constructed_from_exact_ledger_and_canonical_marker(tmp_path
     assert payload["provider_effect_id"] == "effect-1"
     assert payload["expected_offer_id"] == "OFF-1"
     assert payload["object_generation"]
-    assert payload["graph_id"] == calls[0]["dedupe_key"]
+    assert calls[0]["dedupe_key"] == (
+        f"treatment:ebay_sync:item:SKU-1:{payload['object_generation']}:"
+        "ebay-sync-targeted:1"
+    )
     assert calls[0]["queue_name"] == "ebay_sync"
 
 

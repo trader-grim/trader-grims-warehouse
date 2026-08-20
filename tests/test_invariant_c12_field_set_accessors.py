@@ -59,10 +59,10 @@ _MIGRATION_SCRIPT = _SCRIPTS / "migrate_field_set_envelope.py"
 # A new entry here must be justified the same way, in code review.
 _ALLOWLIST = {
     (_SRC / "tgw" / "draft_sync.py", 90),
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 600),   # (b) AI model response
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 694),   # (a) accessor patch write
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 621),   # (b) AI model response
     (_SRC / "tgw" / "workers" / "ai_identify.py", 715),   # (a) required-schema accessor patch write
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 810),   # (a) accessor patch write to fence payload
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 736),   # (a) accessor patch write
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 831),   # (a) accessor patch write to fence payload
     # Refreshed 2026-07-18 (this packet — todo #1499/#1500/#1506/#1507, the
     # same stale-line-numbers report independently rediscovered 4 times by
     # different tgw-coder packets today, each correctly declining to fix an
@@ -90,29 +90,29 @@ _ALLOWLIST = {
     # Refreshed 2026-08-15: governed execution/authority additions shifted
     # existing HTTP access sites only; each remains an approved envelope gate,
     # accessor-patch handoff, or unrelated revision proposal field.
-    (_SRC / "tgw" / "http_server.py", 1210),              # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 1219),              # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 1696),              # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 1717),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
-    (_SRC / "tgw" / "http_server.py", 1722),              # (a) accessor output (full envelope) moving onward
-    (_SRC / "tgw" / "http_server.py", 1735),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
-    (_SRC / "tgw" / "http_server.py", 2392),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 2394),              # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 2400),              # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 4089),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
-    (_SRC / "tgw" / "http_server.py", 4148),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
+    (_SRC / "tgw" / "http_server.py", 1510),              # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
+    (_SRC / "tgw" / "http_server.py", 1519),              # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
+    (_SRC / "tgw" / "http_server.py", 2003),              # (a) accessor patch write
+    (_SRC / "tgw" / "http_server.py", 2024),              # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
+    (_SRC / "tgw" / "http_server.py", 2029),              # (a) accessor output (full envelope) moving onward
+    (_SRC / "tgw" / "http_server.py", 2042),              # (a) accessor patch write — padlock auto-sync (todo #1406/2026-07-18, inventory_record.sync_from_draft's patch)
+    (_SRC / "tgw" / "http_server.py", 2699),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 2701),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 2707),              # (a) accessor patch write (todo #1416)
+    (_SRC / "tgw" / "http_server.py", 4407),              # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
+    (_SRC / "tgw" / "http_server.py", 4466),              # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
     # Refreshed 2026-07-20 (todo #1582, PP-AGENTTRACE-001 Phase 3): the new
     # /form/runs route + _render_runs_html() inserted ~186 lines before this
     # entry, shifting it from 5855 to 6041 — re-verified against current
     # HEAD, no accessor-routing behavior changed, only position.
-    (_SRC / "tgw" / "http_server.py", 7407),              # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 7800),              # (b) revision_draft.delta
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "inventory_diff.py", 159),   # (a) accessor patch output moving onward (todo #1417 apply_inventory_diff)
     (_SRC / "tgw" / "ebay" / "inventory_diff.py", 163),   # (a) accessor patch output moving onward (todo #1417 apply_inventory_diff)
-    (_SRC / "tgw" / "workers" / "ebay_draft.py", 618),    # (a) required-schema accessor patch write
-    (_SRC / "tgw" / "workers" / "ebay_draft.py", 908),    # (a) required-schema accessor patch write to fence payload
+    (_SRC / "tgw" / "workers" / "ebay_draft.py", 636),    # (a) required-schema accessor patch write
+    (_SRC / "tgw" / "workers" / "ebay_draft.py", 944),    # (a) required-schema accessor patch write to fence payload
     # Refreshed 2026-07-20 (todo #1598, PP-MULTIMODEL-001 / invariant E15
     # sweep): removed a dead `_OLLAMA_FALLBACK_MODEL` module constant + docstring
     # rewrite in ai_identify.py, net +3 lines before these entries — shifted
