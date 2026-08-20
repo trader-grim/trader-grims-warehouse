@@ -1,0 +1,32 @@
+{
+  "schema": "tgw-plan-provider-catalog/v1",
+  "id": "w12-bootstrap-transition-providers@1",
+  "plan_id": "PLAN-ACTIVE-AMENDMENT-PROCESS",
+  "plan_commit": "5f9a8ac895511e1bb9bbb72334089bd868e3323f",
+  "profiles": {
+    "plan-amendment": {"minimum_state": "reviewed"}
+  },
+  "capabilities": [
+    "plan.active-amendment-transition@1"
+  ],
+  "providers": [
+    {
+      "id": "w12-transition-controller-bootstrap",
+      "provides": ["plan.active-amendment-transition@1"],
+      "requires": [],
+      "implementation_commit": "beea8b60be915b6aa28b20526d45a8ee77a7f8b6"
+    }
+  ],
+  "observations": [
+    {
+      "capability": "plan.active-amendment-transition@1",
+      "provider": "w12-transition-controller-bootstrap",
+      "state": "reviewed",
+      "evidence": [
+        "source-commit:beea8b60be915b6aa28b20526d45a8ee77a7f8b6",
+        "test:tests/test_plan_transition.py:passed",
+        "review:review-diagnostic-2026-08-19T19-41-50-351Z-9edc25:PASS"
+      ]
+    }
+  ]
+}
