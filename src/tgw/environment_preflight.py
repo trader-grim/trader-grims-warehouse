@@ -19,6 +19,7 @@ SCHEMA = "tgw-execution-environment-catalog/v1"
 RECEIPT_SCHEMA = "tgw-environment-preflight-receipt/v1"
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_NIX_STORE_HASH = re.compile(r"[0-9abcdfghijklmnpqrsvwxyz]{32}\Z")
 
 
 class EnvironmentPreflightError(ValueError):
@@ -78,6 +79,11 @@ def preflight(*, catalog: Mapping[str, Any], actor: str, profile: str, attempt_i
         store_path = tool["store_path"]
         if not isinstance(store_path, str) or not store_path.startswith("/"):
             raise EnvironmentPreflightError("catalog tool store path is invalid")
+        store_hash = tool["store_path_hash"]
+        if not isinstance(store_hash, str) or _NIX_STORE_HASH.fullmatch(store_hash) is None:
+            raise EnvironmentPreflightError("catalog tool store hash is invalid")
+        if Path(store_path).name.split("-", 1)[0] != store_hash:
+            raise EnvironmentPreflightError("catalog tool store hash mismatch")
         if not isinstance(tool["executable_sha256"], str) or _HASH.fullmatch(tool["executable_sha256"]) is None:
             raise EnvironmentPreflightError("catalog executable hash is invalid")
         # Nix package bin entries commonly symlink to an immutable store file.

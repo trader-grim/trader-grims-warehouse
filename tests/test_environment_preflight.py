@@ -22,7 +22,7 @@ def catalog(executable: Path):
 
 
 def test_preflight_is_deterministic_and_observes_declared_binary(tmp_path: Path):
-    executable = tmp_path / "store" / "tool"
+    executable = tmp_path / ("a" * 32 + "-store") / "tool"
     executable.parent.mkdir()
     executable.write_text("#!/bin/sh\n")
     os.chmod(executable, 0o555)
@@ -33,7 +33,7 @@ def test_preflight_is_deterministic_and_observes_declared_binary(tmp_path: Path)
 
 @pytest.mark.parametrize("mutation", ["disabled", "missing", "symlink"])
 def test_preflight_refuses_nonready_or_unavailable_tool(tmp_path: Path, mutation: str):
-    executable = tmp_path / "store" / "tool"
+    executable = tmp_path / ("a" * 32 + "-store") / "tool"
     executable.parent.mkdir()
     executable.write_text("#!/bin/sh\n")
     os.chmod(executable, 0o555)
@@ -50,7 +50,7 @@ def test_preflight_refuses_nonready_or_unavailable_tool(tmp_path: Path, mutation
 
 
 def test_preflight_refuses_hash_mismatch_and_store_escape(tmp_path: Path):
-    executable = tmp_path / "store" / "tool"
+    executable = tmp_path / ("a" * 32 + "-store") / "tool"
     executable.parent.mkdir()
     executable.write_text("#!/bin/sh\n")
     os.chmod(executable, 0o555)
@@ -66,4 +66,19 @@ def test_preflight_refuses_hash_mismatch_and_store_escape(tmp_path: Path):
     executable.symlink_to(outside)
     value["profiles"]["development"]["tools"][0]["executable_sha256"] = "sha256:" + hashlib.sha256(outside.read_bytes()).hexdigest()
     with pytest.raises(EnvironmentPreflightError, match="unavailable"):
+        preflight(catalog=value, actor="codex", profile="development", attempt_id="attempt-1")
+
+
+def test_preflight_refuses_forged_or_mismatched_store_hash(tmp_path: Path):
+    executable = tmp_path / ("a" * 32 + "-store") / "tool"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n")
+    os.chmod(executable, 0o555)
+    value = catalog(executable)
+    value["profiles"]["development"]["tools"][0]["store_path_hash"] = "e" * 32
+    with pytest.raises(EnvironmentPreflightError, match="store hash is invalid"):
+        preflight(catalog=value, actor="codex", profile="development", attempt_id="attempt-1")
+    value = catalog(executable)
+    value["profiles"]["development"]["tools"][0]["store_path_hash"] = "b" * 32
+    with pytest.raises(EnvironmentPreflightError, match="store hash mismatch"):
         preflight(catalog=value, actor="codex", profile="development", attempt_id="attempt-1")
