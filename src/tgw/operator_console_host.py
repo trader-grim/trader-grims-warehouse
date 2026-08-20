@@ -314,6 +314,12 @@ def _dynamic_surface_bindings(
             raise ValueError("dynamic surface Plan commit is invalid")
         if not isinstance(solution_hash, str) or _SOLUTION_HASH.fullmatch(solution_hash) is None:
             raise ValueError("dynamic surface Plan solution is invalid")
+        current = _approved_plan_identity(config_provider())
+        if (
+            plan_commit != current["plan_commit"]
+            or solution_hash != current["solution_hash"]
+        ):
+            raise ValueError("dynamic surface request is bound to a stale Plan solution")
         expiry = row.get("expires_at")
         if isinstance(expiry, datetime):
             expiry = expiry.astimezone(timezone.utc).isoformat()

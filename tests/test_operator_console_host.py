@@ -147,10 +147,14 @@ def test_configured_mount_is_late_bound_and_reuses_auth_functions():
 def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_path: Path):
     import tgw.dynamic_surface as boundary
 
+    plan, plan_commit = _plan(tmp_path)
     receipt_root = tmp_path / "surface-receipts"
     receipt_root.mkdir()
     renderer_hash = "sha256:" + hashlib.sha256(Path(boundary.__file__).read_bytes()).hexdigest()
     config = {
+        "standalone_plan_root": plan,
+        "plan_approved_commit": plan_commit,
+        "plan_approved_solution_hash": "sha256:" + "a" * 64,
         "dynamic_surfaces": {
             "renderer_sha256": renderer_hash,
             "receipt_root": str(receipt_root),
@@ -159,7 +163,7 @@ def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_pat
     store = ConfiguredAuthorityStore(lambda: config)
     row = {
         "request_id": "request:sha256:" + "1" * 64,
-        "plan_commit": "f" * 40, "solution_hash": "sha256:" + "a" * 64,
+        "plan_commit": plan_commit, "solution_hash": "sha256:" + "a" * 64,
         "closure_hash": "sha256:" + "b" * 64, "effect_hash": "effect:sha256:value",
         "effect_generation": "generation-one", "object_generation": "object-one",
         "effect_kind": "development-launch", "summary": "Review exact launch",
@@ -191,6 +195,10 @@ def test_configured_dynamic_surface_records_same_plan_authority_decision(tmp_pat
             "submitted_at": datetime.now(timezone.utc).isoformat(),
         }, "operator:fixture")
     assert len(recorded) == 1
+
+    row["plan_commit"] = "f" * 40
+    with pytest.raises(ValueError, match="stale Plan solution"):
+        load(row["request_id"])
 
 
 def test_standard_http_mount_resolves_bootstrap_provider_after_config_load_and_before_execution():

@@ -34,6 +34,16 @@ def _refresh_providers(events, *, fail=None, rollback_fail=False):
                 raise RuntimeError(f"{name} failed")
             return {"status": status, **(extra or {})}
         return call
+    def resume(checkpoint, request):
+        events.append("resume")
+        if fail == "resume":
+            raise RuntimeError("resume failed")
+        return {"status": "RESUMED", "dispositions": {
+            name: [{"checkpoint_identity": item["checkpoint_identity"], "disposition": "successor"}
+                   for item in checkpoint[name]]
+            for name in ("live_requests", "role_leases", "rendered_surfaces", "continuations")
+        }}
+
     return {
         "checkpoint": result("checkpoint", "CHECKPOINTED", {"live_requests": [], "role_leases": [], "rendered_surfaces": [], "continuations": []}),
         "quiesce": result("quiesce", "QUIESCED"), "rebuild": result("rebuild", "REBUILT"),
@@ -42,7 +52,7 @@ def _refresh_providers(events, *, fail=None, rollback_fail=False):
         "verify_actor": lambda actor, request: events.append(f"verify:{actor}") or {
             "status": "VERIFIED", "actor": actor, "generation": request["successor_generation"],
         },
-        "resume": result("resume", "RESUMED"),
+        "resume": resume,
         "rollback": result("rollback", "FAILED" if rollback_fail else "ROLLED_BACK"),
     }
 
@@ -97,6 +107,30 @@ def test_refresh_refuses_tmp_receipts_and_incomplete_checkpoint(tmp_path):
     )
     assert receipt["status"] == "FAILED_ROLLED_BACK"
     assert "omits live lifecycle state" in receipt["failure"]
+
+
+def test_refresh_requires_exact_successor_disposition_for_every_checkpoint_object(tmp_path):
+    events = []
+    providers = _refresh_providers(events)
+    identity = "sha256:" + "1" * 64
+    providers["checkpoint"] = lambda _: {
+        "status": "CHECKPOINTED",
+        "live_requests": [{"checkpoint_identity": identity, "request_id": "request-one"}],
+        "role_leases": [], "rendered_surfaces": [], "continuations": [],
+    }
+    good_resume = providers["resume"]
+    providers["resume"] = lambda checkpoint, request: (
+        {"status": "RESUMED", "dispositions": {
+            "live_requests": [], "role_leases": [], "rendered_surfaces": [], "continuations": [],
+        }} if request["successor_generation"] == "sha256:" + "b" * 64
+        else good_resume(checkpoint, request)
+    )
+    receipt = run_fleet_refresh_transaction(
+        _refresh_request(idempotency_key="missing-disposition"),
+        receipt_root=tmp_path / "receipts", lease_path=tmp_path / "fleet.lock", **providers,
+    )
+    assert receipt["status"] == "FAILED_ROLLED_BACK"
+    assert "does not cover every live_requests checkpoint" in receipt["failure"]
 
 
 def test_configuration_and_materialization_are_receipt_backed_and_rollbackable(tmp_path):

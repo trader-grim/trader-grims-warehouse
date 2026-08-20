@@ -61,6 +61,52 @@ def _step(name: str, callback: Callable[..., Mapping[str, Any]], *args: Any, exp
     return dict(value)
 
 
+_CHECKPOINT_COLLECTIONS = (
+    "live_requests", "role_leases", "rendered_surfaces", "continuations",
+)
+
+
+def _validate_checkpoint(receipt: Mapping[str, Any]) -> None:
+    """Require stable identities for every lifecycle object in a quiet checkpoint."""
+    if not set(_CHECKPOINT_COLLECTIONS) <= set(receipt):
+        raise FleetActivationError("quiet checkpoint omits live lifecycle state")
+    for collection in _CHECKPOINT_COLLECTIONS:
+        records = receipt[collection]
+        if not isinstance(records, list):
+            raise FleetActivationError(f"quiet checkpoint {collection} is not a list")
+        identities: set[str] = set()
+        for record in records:
+            identity = record.get("checkpoint_identity") if isinstance(record, Mapping) else None
+            if (
+                not isinstance(identity, str) or not identity.startswith("sha256:")
+                or len(identity) != 71 or identity in identities
+            ):
+                raise FleetActivationError(f"quiet checkpoint {collection} identity is invalid")
+            identities.add(identity)
+
+
+def _validate_resume(checkpoint: Mapping[str, Any], receipt: Mapping[str, Any]) -> None:
+    """Prove every checkpointed object has exactly one legal post-refresh disposition."""
+    dispositions = receipt.get("dispositions")
+    if not isinstance(dispositions, Mapping) or set(dispositions) != set(_CHECKPOINT_COLLECTIONS):
+        raise FleetActivationError("fleet resume omits lifecycle dispositions")
+    for collection in _CHECKPOINT_COLLECTIONS:
+        expected = {record["checkpoint_identity"] for record in checkpoint[collection]}
+        records = dispositions[collection]
+        if not isinstance(records, list):
+            raise FleetActivationError(f"fleet resume {collection} dispositions are invalid")
+        observed: set[str] = set()
+        for record in records:
+            if not isinstance(record, Mapping) or set(record) != {"checkpoint_identity", "disposition"}:
+                raise FleetActivationError(f"fleet resume {collection} disposition is invalid")
+            identity, disposition = record["checkpoint_identity"], record["disposition"]
+            if identity in observed or disposition not in {"successor", "terminal", "reconcile"}:
+                raise FleetActivationError(f"fleet resume {collection} disposition is invalid")
+            observed.add(identity)
+        if observed != expected:
+            raise FleetActivationError(f"fleet resume does not cover every {collection} checkpoint")
+
+
 def apply_fleet_configuration(
     configurations: Mapping[str | Path, Mapping[str, Any]],
     *,
@@ -253,9 +299,9 @@ def run_fleet_refresh_transaction(
         _atomic_json(journal_path, journal)
         checkpoint_receipt: dict[str, Any] | None = None
         try:
-            checkpoint_receipt = _step("checkpoint", checkpoint, value, expected="CHECKPOINTED")
-            if not {"live_requests", "role_leases", "rendered_surfaces", "continuations"} <= set(checkpoint_receipt):
-                raise FleetActivationError("quiet checkpoint omits live lifecycle state")
+            observed_checkpoint = _step("checkpoint", checkpoint, value, expected="CHECKPOINTED")
+            _validate_checkpoint(observed_checkpoint)
+            checkpoint_receipt = observed_checkpoint
             journal["steps"].append({"name": "checkpoint", "receipt": checkpoint_receipt})
             journal["status"] = "CHECKPOINTED"
             _atomic_json(journal_path, journal)
@@ -279,6 +325,7 @@ def run_fleet_refresh_transaction(
                 actor_receipts.append(verified)
             journal["steps"].append({"name": "actor-verification", "receipts": actor_receipts})
             resumed = _step("resume", resume, checkpoint_receipt, value, expected="RESUMED")
+            _validate_resume(checkpoint_receipt, resumed)
             journal["steps"].append({"name": "resume", "receipt": resumed})
             unsigned = {
                 "schema": "tgw-w18-fleet-refresh-receipt/v1", "request_hash": request_hash,
@@ -298,6 +345,7 @@ def run_fleet_refresh_transaction(
                         "rollback resume", resume, checkpoint_receipt,
                         {**value, "successor_generation": value["predecessor_generation"]}, expected="RESUMED",
                     )
+                    _validate_resume(checkpoint_receipt, rollback_resume)
                 status = "FAILED_ROLLED_BACK"
                 rollback_receipt = {"rollback": rolled_back, "resume": rollback_resume}
             except Exception as rollback_error:

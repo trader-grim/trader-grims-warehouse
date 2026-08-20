@@ -45,6 +45,10 @@ def test_configured_fleet_controller_runs_exact_request_and_actor_set(tmp_path, 
             return {"status": "CHECKPOINTED", "live_requests": [], "role_leases": [], "rendered_surfaces": [], "continuations": []}
         if step == "verify-actor":
             return {"status": "VERIFIED", "actor": arguments[0], "generation": arguments[1]["successor_generation"]}
+        if step == "resume":
+            return {"status": "RESUMED", "dispositions": {
+                "live_requests": [], "role_leases": [], "rendered_surfaces": [], "continuations": [],
+            }}
         return {"status": statuses[step]}
 
     monkeypatch.setattr(_FleetProvider, "call", call)
