@@ -56,6 +56,18 @@ _MAX_CONTEXT_BUNDLE_BYTES = 64 * 1024 * 1024
 _MAX_CONTEXT_GRANT_WINDOW_SECONDS = 900
 
 
+def _validate_environment_preflight(invocation: Mapping[str, Any], receipt: Mapping[str, Any] | None) -> None:
+    if not isinstance(receipt, Mapping) or set(receipt) != {
+        "schema", "result", "catalog_sha256", "actor", "profile", "attempt_id", "tools",
+    }:
+        raise ReviewRunnerError("environment preflight receipt is invalid")
+    if receipt["schema"] != "tgw-environment-preflight-receipt/v1" or receipt["result"] != "PASS":
+        raise ReviewRunnerError("environment preflight did not pass")
+    binding = invocation.get("execution_environment")
+    if not isinstance(binding, Mapping) or receipt["catalog_sha256"] != binding.get("hash"):
+        raise ReviewRunnerError("environment preflight binding mismatch")
+
+
 def _review_execution_identity(challenge: str, uid: int, gid: int) -> str:
     return f"governed-review:{challenge}:uid={uid}:gid={gid}"
 
@@ -817,6 +829,7 @@ def run_governed_review(
     read_context_bundle: Callable[[str], Mapping[str, Any]],
     context_grant: Mapping[str, Any],
     timeout_seconds: float = 900, output_limit: int = 8 * 1024 * 1024,
+    environment_preflight_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute and capture one exact provider-neutral tgw-review invocation.
 
@@ -832,6 +845,7 @@ def run_governed_review(
         invocation = verify_for_launcher(handoff, now=execution_observed_at)
     except HandoffError as exc:
         raise ReviewRunnerError(f"invalid governed review handoff: {exc}") from exc
+    _validate_environment_preflight(invocation, environment_preflight_receipt)
     card = handoff["card"]
     receiver_identity = f"{provider}:tgw-review"
     if invocation["receiver_identity"] != receiver_identity or card["selected_provider"] != provider:
@@ -1852,6 +1866,7 @@ def execute_request(request_path: Path) -> dict[str, Any]:
             "environment", "trusted_uid", "trusted_gid", "timeout_seconds",
             "output_limit", "evidence_sink", "review_packet",
             "resource_service_catalog", "context_grant",
+            "environment_preflight_receipt",
         }
         if (
             not isinstance(value, Mapping)
@@ -1874,6 +1889,7 @@ def execute_request(request_path: Path) -> dict[str, Any]:
             publish_execution=sink.publish, read_execution=sink.read,
             read_context_bundle=context_client.read,
             context_grant=value["context_grant"],
+            environment_preflight_receipt=value["environment_preflight_receipt"],
             timeout_seconds=value["timeout_seconds"], output_limit=value["output_limit"],
         )
         if (

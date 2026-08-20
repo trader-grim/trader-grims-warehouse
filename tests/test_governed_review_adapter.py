@@ -504,10 +504,11 @@ def _fixture(
         "network_mode": "shared-host-network",
     }, sort_keys=True, separators=(",", ":")))
     execution_environment.chmod(0o444)
+    health_now = datetime.now(timezone.utc)
     health_unsigned = {
         "schema": "tgw-governed-review-provider-health/v1", "provider": "claude",
-        "account_identity": account_identity, "observed_at": "2026-08-16T00:00:00+00:00",
-        "expires_at": "2026-08-17T00:00:00+00:00", "status": "AUTHENTICATED",
+        "account_identity": account_identity, "observed_at": health_now.isoformat(),
+        "expires_at": (health_now + timedelta(minutes=10)).isoformat(), "status": "AUTHENTICATED",
     }
     provenance_unsigned = {
         "schema": "tgw-review-skill-projection-receipt/v1",
@@ -638,6 +639,11 @@ def _run(
         read_context_bundle=read_context,
         context_grant=grant,
         timeout_seconds=5,
+        environment_preflight_receipt={
+            "schema": "tgw-environment-preflight-receipt/v1", "result": "PASS",
+            "catalog_sha256": selected_handoff["card"]["bindings"]["execution_environment"]["hash"],
+            "actor": "claude", "profile": "development", "attempt_id": "unit", "tools": [],
+        },
     )
 
 
@@ -805,9 +811,14 @@ def test_non_test_request_composes_provider_and_pinned_sink_readback(tmp_path, m
         "timeout_seconds": 5, "output_limit": 8 * 1024 * 1024,
         "evidence_sink": sink_descriptor,
         "review_packet": _review_packet(source),
-        "resource_service_catalog": _resource_service_catalog()[1],
-        "context_grant": context_grant,
-    }
+            "resource_service_catalog": _resource_service_catalog()[1],
+            "context_grant": context_grant,
+            "environment_preflight_receipt": {
+                "schema": "tgw-environment-preflight-receipt/v1", "result": "PASS",
+                "catalog_sha256": handoff["card"]["bindings"]["execution_environment"]["hash"],
+                "actor": "claude", "profile": "development", "attempt_id": "unit", "tools": [],
+            },
+        }
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(request))
     request_path.chmod(0o444)
