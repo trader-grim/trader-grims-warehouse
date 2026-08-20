@@ -259,6 +259,7 @@ def main() -> int:
     parser.add_argument("--egress-policy", type=Path)
     parser.add_argument("--network-attestation", type=Path)
     parser.add_argument("--egress-receipt", type=Path)
+    parser.add_argument("--environment-preflight-receipt", type=Path, required=True)
     parser.add_argument("--broker-command-json")
     parser.add_argument("--egress-receipt-path", type=Path)
     args = parser.parse_args()
@@ -267,6 +268,7 @@ def main() -> int:
         result = run_review(
             json.load(sys.stdin),
             provider_argv,
+            environment_preflight_receipt=json.loads(args.environment_preflight_receipt.read_text()),
             timeout_seconds=args.timeout_seconds,
             network_egress=args.network_egress,
             credential_file=args.credential_file,

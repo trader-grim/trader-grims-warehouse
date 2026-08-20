@@ -134,6 +134,14 @@ def environment_preflight_receipt(bound):
     }
 
 
+def write_environment_preflight_receipt(path):
+    path.write_text(json.dumps({
+        "schema": "tgw-environment-preflight-receipt/v1", "result": "PASS",
+        "catalog_sha256": "sha256:" + hashlib.sha256(b"environment").hexdigest(),
+        "actor": "codex", "profile": "development", "attempt_id": "unit", "tools": [],
+    }))
+
+
 class UnitAttestedResourceResolver(HTTPRegisteredResourceResolver):
     """Unit seam for non-review role selection; live attestation uses HTTP."""
 
@@ -451,12 +459,15 @@ def test_unattested_isolated_review_cannot_admit_even_with_distinct_context(tmp_
     source = snapshot(tmp_path)
     registry = load_registry(ROOT / "agent-services/catalogs/harness-providers-v1.json")
     provider = backend(tmp_path / "review-provider")
+    preflight = tmp_path / "preflight.json"
+    write_environment_preflight_receipt(preflight)
     wrapper = [
         sys.executable,
         "-m",
         "tgw.review_runner",
         "--provider-command-json",
         json.dumps([provider]),
+        "--environment-preflight-receipt", str(preflight),
     ]
     local = simple_runner(tmp_path / "local-runner")
     config = {"commands": {"codex-implement": [local], "controller-verify": [local], "harness-review": wrapper}}
@@ -494,7 +505,7 @@ def test_unattested_isolated_review_cannot_admit_even_with_distinct_context(tmp_
     assert providers[review["selected_provider"]]["vendor_family"] == "codex"
     assert implementation["execution_identity"] != review["execution_identity"]
     assert review["status"] == "FAIL", json.dumps(review, indent=2)
-    assert "environment preflight receipt is invalid" in review["artifacts"][-1]["detail"]
+    assert "did not return a service-issued retrieval attestation" in review["artifacts"][-1]["detail"]
     assert admission_gate([implementation, review, controller])["allowed"] is False
 
 
@@ -502,7 +513,9 @@ def test_failed_isolated_review_blocks_governed_admission(tmp_path):
     source = snapshot(tmp_path)
     registry = load_registry(ROOT / "agent-services/catalogs/harness-providers-v1.json")
     failing = backend(tmp_path / "review-provider", verdict="FAIL")
-    wrapper = [sys.executable, "-m", "tgw.review_runner", "--provider-command-json", json.dumps([failing])]
+    preflight = tmp_path / "preflight.json"
+    write_environment_preflight_receipt(preflight)
+    wrapper = [sys.executable, "-m", "tgw.review_runner", "--provider-command-json", json.dumps([failing]), "--environment-preflight-receipt", str(preflight)]
     local = simple_runner(tmp_path / "local-runner")
     config = {"commands": {"codex-implement": [local], "controller-verify": [local], "harness-review": wrapper}}
     bound = adapters()
