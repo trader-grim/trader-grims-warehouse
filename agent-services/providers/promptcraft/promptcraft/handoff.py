@@ -335,5 +335,9 @@ def verify_for_launcher(
         "receipt_sink": card.value["bindings"]["receipt_sink"]["ref"],
         "resource_service": resource_service,
         "resource_receipt_hash": resource_receipt["receipt_hash"],
+        # The launcher must resolve this exact card-bound manifest before role
+        # work begins.  This adapter does not select a flake, execute a tool,
+        # or otherwise create an activation path.
+        "execution_environment": card.value["bindings"]["execution_environment"],
         "lease": card.value["lease"],
     }

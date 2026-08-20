@@ -110,6 +110,7 @@ def test_card_is_immutable_and_handoff_is_deterministic_and_provider_neutral():
         name: binding["hash"] for name, binding in sorted(bound.value["bindings"].items())
     }
     assert first["receipt"]["resource_receipt_hash"] == first["resource_receipt"]["receipt_hash"]
+    assert invocation["execution_environment"] == bound.value["bindings"]["execution_environment"]
 
 
 def test_manual_authority_broadening_fails_even_if_outer_handoff_is_rehashed():
