@@ -132,6 +132,43 @@ def _authorize_execution(document: dict[str, Any], location: dict[str, Any], sna
     }
 
 
+def _authorize_development_execution(document: dict[str, Any], location: dict[str, Any]) -> dict[str, Any]:
+    """Issue a bounded service authorization for one immutable v2 lifecycle.
+
+    Unlike the legacy Todo path, the Plan resolver has already closed this
+    request into exact cards.  The service therefore verifies the lifecycle
+    identity and worker-observed source location; it does not manufacture a
+    Todo or route the request through the legacy treatment scheduler.
+    """
+    lifecycle = document.get("lifecycle")
+    if not isinstance(lifecycle, dict):
+        raise HardFailure("development lifecycle is unavailable")
+    unsigned = dict(lifecycle)
+    lifecycle_hash = unsigned.pop("lifecycle_hash", None)
+    if lifecycle_hash != "sha256:" + _hash(unsigned):
+        raise HardFailure("development lifecycle hash is invalid")
+    if lifecycle_hash != document.get("development_request_hash"):
+        raise HardFailure("development lifecycle differs from the queued request")
+    cards = lifecycle.get("launch_cards")
+    if not isinstance(cards, list) or not cards:
+        raise HardFailure("development lifecycle has no executable cards")
+    card_keys = [card.get("idempotency_key") for card in cards if isinstance(card, dict)]
+    if (
+        len(card_keys) != len(cards)
+        or any(not isinstance(key, str) or not key.startswith("sha256:") for key in card_keys)
+        or len(set(card_keys)) != len(card_keys)
+    ):
+        raise HardFailure("development lifecycle card identities are invalid")
+    return {
+        "schema": "tgw-development-execution/v1",
+        "development_request_hash": lifecycle_hash,
+        "source_commit": document["source_commit"],
+        "provider_registry_hash": document["provider_registry_hash"],
+        "card_idempotency_keys": card_keys,
+        "location": dict(location),
+    }
+
+
 def _validate_treatment_result(document: dict[str, Any], result: dict[str, Any]) -> None:
     """Require success evidence to be bound to the evaluated treatment."""
     execution = execution_envelope(document)
@@ -243,6 +280,7 @@ def create_development_request(config: dict[str, Any], *, launch: dict[str, Any]
         "source_commit": validated["source_commit"],
         "provider_registry_hash": validated["provider_registry_hash"],
         "freshness_receipt_hash": validated["freshness"]["receipt_hash"],
+        "lifecycle": lifecycle,
         "launch_cards": lifecycle["launch_cards"],
         "timeline": lifecycle["timeline"],
         "host": coding["host"],
@@ -326,7 +364,18 @@ def _validate_service_worker(document: dict[str, Any], coding: dict[str, Any], l
         raise HardFailure("coding provision envelope is invalid")
     if _hash(location) != envelope_hash:
         raise HardFailure("coding provision envelope hash is invalid")
-    if location.get("todo_id") != document.get("todo_id"):
+    if document.get("kind") == "coding-provision/v2":
+        lifecycle = document.get("lifecycle")
+        cards = lifecycle.get("launch_cards") if isinstance(lifecycle, dict) else None
+        first = cards[0] if isinstance(cards, list) and cards and isinstance(cards[0], dict) else None
+        allocation = first.get("allocation") if isinstance(first, dict) else None
+        if (
+            not isinstance(allocation, dict)
+            or location.get("request_hash") != document.get("development_request_hash")
+            or location.get("worktree") != allocation.get("worktree")
+        ):
+            raise HardFailure("development envelope is not bound to its request allocation")
+    elif location.get("todo_id") != document.get("todo_id"):
         raise HardFailure("coding provision envelope does not match request todo_id")
     requested_commit = document.get("source_commit")
     if requested_commit is not None and location.get("head") != requested_commit:
@@ -353,7 +402,12 @@ def claim_request(config: dict[str, Any], *, request_id: str, local_host: str, w
     if document["state"] != "queued":
         raise HardFailure("coding provision request is not claimable")
     _validate_service_worker(document, coding, local_host, worker_identity, envelope_hash, location)
-    execution = _authorize_execution(document, location, snapshot)
+    development = document.get("kind") == "coding-provision/v2"
+    execution = (
+        _authorize_development_execution(document, location)
+        if development
+        else _authorize_execution(document, location, snapshot)
+    )
     envelope = {
         "location": location,
         "envelope_hash": envelope_hash,
@@ -362,7 +416,7 @@ def claim_request(config: dict[str, Any], *, request_id: str, local_host: str, w
         # An ordinary request arrives unbound.  Persist the worker-attested
         # generation at the same atomic claim boundary as its execution proof,
         # so every later worker transition verifies one durable identity.
-        "object_generation": execution["object_generation"],
+        "object_generation": execution.get("object_generation", document.get("source_commit")),
     }
     job = state_machine.claim_job_with_envelope(
         request_id,
@@ -382,7 +436,12 @@ def start_request(config: dict[str, Any], *, request_id: str, worker_identity: s
     """Start an exact canonical lease; token validation occurs in the queue."""
     if worker_identity != _coding(config).get("worker_identity") or not lease_token:
         raise HardFailure("coding worker identity or lease token is invalid")
-    execution_envelope(get_request(config, request_id))
+    document = get_request(config, request_id)
+    if document.get("kind") == "coding-provision/v2":
+        if document.get("execution", {}).get("schema") != "tgw-development-execution/v1":
+            raise HardFailure("development execution envelope is unavailable")
+    else:
+        execution_envelope(document)
     state_machine.start_claimed_job(request_id, worker_identity, lease_token)
     return get_request(config, request_id)
 
@@ -395,7 +454,11 @@ def complete_request(config: dict[str, Any], *, request_id: str, worker_identity
         raise HardFailure("coding worker identity or lease token is invalid")
     if not isinstance(result, dict):
         raise HardFailure("coding provision returned no structured result")
-    _validate_treatment_result(document, result)
+    development = document.get("kind") == "coding-provision/v2"
+    if development:
+        _validate_development_result(document, result)
+    else:
+        _validate_treatment_result(document, result)
     receipt = {
         "receipt_id": str(uuid.uuid4()),
         "receipt_source": f"queue-job:{request_id}",
@@ -403,12 +466,70 @@ def complete_request(config: dict[str, Any], *, request_id: str, worker_identity
         "location": document["location"],
         "envelope_hash": document["envelope_hash"],
         "object_generation": document["object_generation"],
-        "execution": execution_envelope(document),
+        "execution": document["execution"] if development else execution_envelope(document),
         "outcome": "succeeded",
         "result": result,
     }
     state_machine.succeed_claimed_job(request_id, worker_identity, lease_token, {"receipt": receipt})
     return get_request(config, request_id)
+
+
+def _validate_development_result(document: dict[str, Any], result: dict[str, Any]) -> None:
+    """Accept only a complete, self-hashed result for the exact v2 cards."""
+    from tgw.governed_coding import GovernedCodingError, validate_receipt
+
+    if result.get("schema") != "tgw-development-execution-result/v1":
+        raise HardFailure("development execution result schema is invalid")
+    unsigned = dict(result)
+    claimed = unsigned.pop("result_hash", None)
+    if claimed != "sha256:" + _hash(unsigned):
+        raise HardFailure("development execution result hash is invalid")
+    execution = document.get("execution")
+    if not isinstance(execution, dict):
+        raise HardFailure("development execution envelope is unavailable")
+    if (
+        result.get("development_request_hash") != execution.get("development_request_hash")
+        or result.get("source_commit") != execution.get("source_commit")
+        or result.get("outcome") != "satisfied"
+    ):
+        raise HardFailure("development execution result differs from its authorization")
+    roles = result.get("role_receipts")
+    expected = execution.get("card_idempotency_keys")
+    if not isinstance(roles, list) or len(roles) != len(expected or []):
+        raise HardFailure("development execution result has an incomplete role closure")
+    actual = [item.get("idempotency_key") for item in roles if isinstance(item, dict)]
+    if actual != expected:
+        raise HardFailure("development execution result did not pass every authorized role")
+    cards = document.get("lifecycle", {}).get("launch_cards", [])
+    for wrapper, card in zip(roles, cards, strict=True):
+        if not isinstance(wrapper, dict) or set(wrapper) != {
+            "idempotency_key", "unit", "role", "status", "receipt",
+        }:
+            raise HardFailure("development role receipt wrapper is invalid")
+        receipt = wrapper["receipt"]
+        try:
+            validate_receipt(receipt)
+        except GovernedCodingError as exc:
+            raise HardFailure(f"development governed role receipt is invalid: {exc}") from exc
+        if (
+            wrapper["idempotency_key"] != card.get("idempotency_key")
+            or wrapper["unit"] != card.get("unit")
+            or wrapper["role"] != card.get("role")
+            or wrapper["status"] != "PASS"
+            or receipt.get("status") != "PASS"
+            or receipt.get("role") != card.get("role")
+            or receipt.get("execution_identity") != card.get("execution_identity")
+        ):
+            raise HardFailure("development governed role receipt differs from its card")
+    final = result.get("candidate")
+    if (
+        not isinstance(final, dict)
+        or not isinstance(final.get("commit"), str)
+        or re.fullmatch(r"[0-9a-f]{40}", final["commit"]) is None
+        or not isinstance(final.get("tree"), str)
+        or re.fullmatch(r"[0-9a-f]{40}", final["tree"]) is None
+    ):
+        raise HardFailure("development execution result candidate identity is invalid")
 
 
 def fail_request(

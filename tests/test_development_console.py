@@ -3,11 +3,14 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tgw import coding_provision
 from tgw.development_console import resolve_request
 from tgw.development_launch import DevelopmentLaunchError, validate_development_launch
+from tgw.execution_resources import CARD_RESOURCE_NAMES, issue_harness_retrieval_attestation
 from tgw.operator_console import create_operator_console_router, project_request
 from tgw.plan_authority import AuthorityPrincipal, PrincipalRole
 
@@ -20,6 +23,45 @@ def digest(value):
     return "sha256:" + hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def passing_role_receipt(card):
+    role = card["role"]
+    resource_hash = "sha256:" + "3" * 64
+    card_hash = "sha256:" + hashlib.sha256(card["idempotency_key"].encode()).hexdigest()
+    handoff_hash = "sha256:" + "4" * 64
+    resources = {
+        name: {"ref": f"resource:{name}", "hash": "sha256:" + format(index, "064x")}
+        for index, name in enumerate(sorted(CARD_RESOURCE_NAMES), start=1)
+    }
+    attestation = issue_harness_retrieval_attestation({
+        "schema": "tgw-registered-resource-retrieval-attestation/v3",
+        "service_id": "test-development-service", "client_id": "test-development-client",
+        "run_id": "test-development-run", "card_hash": card_hash, "role": role,
+        "execution_identity": card["execution_identity"], "handoff_hash": handoff_hash,
+        "resource_receipt_hash": resource_hash, "resources": resources,
+        "attestation_key_id": "test-development-key",
+    }, signing_private_key=Ed25519PrivateKey.generate())
+    established = {
+        "implementation": ["implemented"],
+        "controller-verification": ["controller_verified"],
+        "independent-review": ["reviewed"],
+    }[role]
+    unsigned = {
+        "schema": "tgw-governed-coding-receipt/v1", "status": "PASS", "role": role,
+        "selected_provider": "replaceable-runner", "execution_identity": card["execution_identity"],
+        "card_hash": card_hash, "promptcraft_receipt_hash": "sha256:" + "5" * 64,
+        "handoff_hash": handoff_hash, "resource_receipt_hash": resource_hash,
+        "harness_resource_receipt_hash": resource_hash,
+        "harness_retrieval_attestation_hash": attestation["attestation_hash"],
+        "harness_retrieval_attestation": attestation,
+        "resource_service_descriptor_hash": "sha256:" + "6" * 64,
+        "resource_service_client_id": "test-development-client",
+        "resource_service_catalog_ref": "catalog:test-development@1",
+        "resource_service_catalog_hash": "sha256:" + "7" * 64,
+        "outcome": "satisfied", "established_conditions": established, "artifacts": [],
+    }
+    return {**unsigned, "receipt_hash": digest(unsigned)}
 
 
 def solution():
@@ -64,6 +106,37 @@ def registry():
     }
 
 
+def card_contract():
+    role_contracts = {}
+    for role in ("implementation", "independent-review", "controller-verification"):
+        role_contracts[role] = {
+            "execution_identity": f"development-{role}",
+            "resource_service": {
+                "id": "development-resources",
+                "client_id": "client-" + role,
+                "descriptor_hash": "sha256:" + "e" * 64,
+                "catalog_ref": "catalog:development-resources@1",
+                "catalog_hash": "sha256:" + "f" * 64,
+            },
+        }
+    resources = {
+        name: {"ref": f"resource:{name}", "hash": "sha256:" + format(index, "064x")}
+        for index, name in enumerate(sorted({
+            "plan_input", "plan_commit", "plan_graph", "codegraph_snapshot", "source_tree",
+            "execution_environment", "authority_conditions", "candidate_evidence", "receipt_sink",
+        }), start=1)
+    }
+    return {
+        "schema": "tgw-development-card-contract/v1",
+        "plan_commit": PLAN,
+        "solution_hash": solution()["solution_hash"],
+        "source_commit": SOURCE,
+        "provider_registry_hash": digest(registry()),
+        "bindings": resources,
+        "roles": role_contracts,
+    }
+
+
 def body(**extra):
     return {
         "schema": "tgw-development-console-request/v1",
@@ -80,6 +153,7 @@ def resolved(**extra):
         body=body(**extra), solution=solution(), plan_commit=PLAN,
         requested_by="operator:dave", source_commit=SOURCE,
         freshness=freshness(), provider_registry=registry(),
+        card_contract=card_contract(),
     )
 
 
@@ -166,6 +240,7 @@ def test_http_creation_uses_the_same_authority_store_and_projection():
             body=request, solution=solution(), plan_commit=PLAN,
             requested_by=principal, source_commit=SOURCE,
             freshness=freshness(), provider_registry=registry(),
+            card_contract=card_contract(),
         ),
     ))
     response = TestClient(app).post("/api/operator-console/development-requests", json=body())
@@ -174,3 +249,78 @@ def test_http_creation_uses_the_same_authority_store_and_projection():
     assert value["request"]["effect"]["kind"] == "development-launch"
     assert value["request"]["development"]["request"]["original_request"] == "Build the site"
     assert len(store.rows) == 1
+
+
+def test_v2_queue_claim_and_completion_are_bound_to_the_harness_neutral_cards(monkeypatch):
+    """The service must authorize the Plan lifecycle, not reinterpret it as a Todo."""
+    class Queue:
+        def __init__(self):
+            self.job = None
+
+        def enqueue_job(self, _name, payload, **_kwargs):
+            self.job = {"job_id": "development-job", "state": "queued", "payload_json": payload}
+            return "development-job"
+
+        def get_job(self, _job_id):
+            return dict(self.job)
+
+        def claim_job_with_envelope(self, _job_id, owner, envelope, **_kwargs):
+            self.job.update(
+                state="leased", lease_owner=owner, lease_token="development-lease",
+                payload_json={**self.job["payload_json"], **envelope},
+            )
+            return dict(self.job)
+
+        def start_claimed_job(self, _job_id, _owner, _token):
+            self.job["state"] = "running"
+
+        def succeed_claimed_job(self, _job_id, _owner, _token, result):
+            self.job.update(state="succeeded", result=result)
+
+    queue = Queue()
+    monkeypatch.setattr(coding_provision, "state_machine", queue)
+    _, authority = resolved()
+    config = {"coding": {
+        "host": "tgw-lib-local", "worker_identity": "development-worker",
+        "api_endpoint": "https://tgw.example", "role": "coding-requester",
+    }}
+    request = coding_provision.create_development_request(
+        config, launch=authority.effect.parameters,
+    )
+    first = request["lifecycle"]["launch_cards"][0]
+    location = {
+        "repository_root": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
+        "worktree": first["allocation"]["worktree"],
+        "request_hash": request["development_request_hash"],
+        "branch": "development/development-job",
+        "head": SOURCE,
+        "worker_identity": "development-worker",
+    }
+    claimed = coding_provision.claim_request(
+        config, request_id="development-job", local_host="tgw-lib-local",
+        worker_identity="development-worker", envelope_hash=coding_provision._hash(location),
+        location=location, snapshot=None,
+    )
+    assert claimed["request"]["execution"]["schema"] == "tgw-development-execution/v1"
+    coding_provision.start_request(
+        config, request_id="development-job", worker_identity="development-worker",
+        lease_token="development-lease",
+    )
+    unsigned = {
+        "schema": "tgw-development-execution-result/v1",
+        "development_request_hash": request["development_request_hash"],
+        "source_commit": SOURCE,
+        "outcome": "satisfied",
+        "role_receipts": [{
+            "idempotency_key": card["idempotency_key"], "unit": card["unit"],
+            "role": card["role"], "status": "PASS", "receipt": passing_role_receipt(card),
+        } for card in request["lifecycle"]["launch_cards"]],
+        "candidate": {"commit": "c" * 40, "tree": "d" * 40},
+    }
+    result = {**unsigned, "result_hash": "sha256:" + coding_provision._hash(unsigned)}
+    completed = coding_provision.complete_request(
+        config, request_id="development-job", worker_identity="development-worker",
+        lease_token="development-lease", result=result,
+    )
+    assert completed["state"] == "succeeded"
+    assert completed["receipt"]["execution"]["development_request_hash"] == request["development_request_hash"]

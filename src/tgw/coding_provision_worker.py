@@ -13,7 +13,7 @@ import re
 import shutil
 import socket
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -178,9 +178,87 @@ def _prepare_request_worktree(document: dict[str, Any], coding: dict[str, Any], 
         raise
 
 
+def _development_worktree(document: dict[str, Any], coding: dict[str, Any]) -> tuple[Path, str]:
+    lifecycle = document.get("lifecycle")
+    cards = lifecycle.get("launch_cards") if isinstance(lifecycle, dict) else None
+    first = cards[0] if isinstance(cards, list) and cards and isinstance(cards[0], dict) else None
+    allocation = first.get("allocation") if isinstance(first, dict) else None
+    raw = allocation.get("worktree") if isinstance(allocation, dict) else None
+    root = PurePosixPath(str(coding.get("development_worktree_root", "/opt/TGW/w/attempts")))
+    if not isinstance(raw, str):
+        raise HardFailure("development request has no exact worktree allocation")
+    parsed = PurePosixPath(raw)
+    try:
+        relative = parsed.relative_to(root)
+    except ValueError as exc:
+        raise HardFailure("development worktree is outside the configured allocation root") from exc
+    if not parsed.is_absolute() or ".." in parsed.parts or len(relative.parts) < 3 or relative.parts[-1] != "worktree":
+        raise HardFailure("development worktree allocation is unsafe")
+    request_hash = document.get("development_request_hash")
+    if not isinstance(request_hash, str) or not request_hash.startswith("sha256:"):
+        raise HardFailure("development request hash is invalid")
+    return Path(raw), "development/" + request_hash.removeprefix("sha256:")[:20] + "-001"
+
+
+def _prepare_development_worktree(
+    document: dict[str, Any], coding: dict[str, Any], worker_identity: str,
+) -> dict[str, Any]:
+    repository = Path(str(coding.get("repository_root", DEFAULT_REPOSITORY_ROOT))).resolve()
+    worktree, branch = _development_worktree(document, coding)
+    source = _verified_source_commit(repository, document.get("source_commit"))
+    created = False
+    try:
+        if worktree.exists() or worktree.is_symlink():
+            if worktree.is_symlink():
+                raise HardFailure("development worktree must not be a symlink")
+            _require_clean_worktree(worktree)
+        else:
+            worktree.parent.mkdir(parents=True, exist_ok=True)
+            added = subprocess.run(
+                ["git", "worktree", "add", "-b", branch, str(worktree), source],
+                cwd=repository, check=False, text=True, capture_output=True,
+            )
+            if added.returncode:
+                raise HardFailure(f"failed to create development worktree: {added.stderr.strip()}")
+            created = True
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=worktree,
+            check=False, text=True, capture_output=True,
+        )
+        current_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree,
+            check=False, text=True, capture_output=True,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=worktree,
+            check=False, text=True, capture_output=True,
+        )
+        if (
+            top.returncode or current_branch.returncode or head.returncode
+            or top.stdout.strip() != str(worktree)
+            or current_branch.stdout.strip() != branch
+            or head.stdout.strip() != source
+        ):
+            raise HardFailure("development worktree Git identity is invalid")
+        return {
+            "repository_root": str(repository), "worktree": str(worktree),
+            "request_hash": document["development_request_hash"], "branch": branch,
+            "head": source, "worker_identity": worker_identity,
+        }
+    except Exception:
+        if created:
+            _remove_incomplete_worktree(repository, worktree, branch)
+        raise
+
+
 def _validate_before_claim(document: dict[str, Any], coding: dict[str, Any], local_host: str, worker_identity: str) -> dict[str, Any]:
     if local_host != coding.get("host") or worker_identity != coding.get("worker_identity") or document.get("host") != local_host or document.get("worker_identity") != worker_identity:
         raise HardFailure("local coding worker identity does not match configured envelope")
+    if document.get("kind") == "coding-provision/v2":
+        worktree, _branch = _development_worktree(document, coding)
+        attempt_created = not worktree.exists() and not worktree.is_symlink()
+        location = _prepare_development_worktree(document, coding, worker_identity)
+        return {"location": location, "envelope_hash": _hash(location), "attempt_created": attempt_created}
     root = Path(str(coding.get("worktree_root", ""))).resolve()
     worktree, _branch = _request_worktree(int(document.get("todo_id", 0)), document.get("request_id"), root)
     attempt_created = not worktree.exists() and not worktree.is_symlink()
@@ -283,6 +361,12 @@ def _discard_definitively_rejected_attempt(
     repository = Path(
         str(coding.get("repository_root", DEFAULT_REPOSITORY_ROOT))
     ).resolve()
+    if document.get("kind") == "coding-provision/v2":
+        expected, branch = _development_worktree(document, coding)
+        actual = Path(str(envelope.get("location", {}).get("worktree", "")))
+        if actual == expected:
+            _remove_incomplete_worktree(repository, actual, branch)
+        return
     root = Path(str(coding.get("worktree_root", ""))).resolve()
     expected, branch = _request_worktree(
         int(document.get("todo_id", 0)), document.get("request_id"), root,
@@ -302,10 +386,9 @@ def claim_and_run(
     if document.get("state") != "queued":
         raise HardFailure("coding provision request is not claimable")
     envelope = _validate_before_claim(document, coding, local_host, worker_identity)
-    snapshot = local_snapshot_claim(
-        config,
-        envelope["location"]["worktree"],
-        document.get("source_commit"),
+    development = document.get("kind") == "coding-provision/v2"
+    snapshot = None if development else local_snapshot_claim(
+        config, envelope["location"]["worktree"], document.get("source_commit"),
     )
     try:
         claimed = service.claim(request_id, local_host, envelope["envelope_hash"], envelope["location"], snapshot)
@@ -324,23 +407,34 @@ def claim_and_run(
         authorized = claimed.get("request")
         if not isinstance(authorized, dict):
             raise HardFailure("canonical coding service returned no execution envelope")
-        execution = execution_envelope(authorized)
+        execution = authorized.get("execution") if development else execution_envelope(authorized)
+        if development and (
+            not isinstance(execution, dict)
+            or execution.get("schema") != "tgw-development-execution/v1"
+        ):
+            raise HardFailure("canonical coding service returned no development execution envelope")
         service.start(request_id, lease_token)
         # Re-attest at the last possible point before any treatment launcher.
         # The service's lease is not evidence that this worktree stayed put.
-        current = local_location_identity(
-            execution["todo_id"],
-            envelope["location"]["worktree"],
-            coding,
-            worker_identity,
+        current = (
+            _prepare_development_worktree(authorized, coding, worker_identity)
+            if development
+            else local_location_identity(
+                execution["todo_id"], envelope["location"]["worktree"], coding, worker_identity,
+            )
         )
         if current != envelope["location"]:
             raise HardFailure("coding worktree identity changed after claim")
-        current_snapshot = local_snapshot_claim(config, current["worktree"])
-        if current_snapshot.get("object_id") != current["worktree"] or current_snapshot.get("generation") != execution["object_generation"]:
-            raise HardFailure("coding worktree object generation changed after claim")
+        if not development:
+            current_snapshot = local_snapshot_claim(config, current["worktree"])
+            if current_snapshot.get("object_id") != current["worktree"] or current_snapshot.get("generation") != execution["object_generation"]:
+                raise HardFailure("coding worktree object generation changed after claim")
         if provision:
             result = provision(authorized)
+        elif development:
+            from tgw.development_execution import execute_development_lifecycle
+
+            result = execute_development_lifecycle(config, authorized)
         else:
             result = execute_authorized_treatment(
                 config,
@@ -352,7 +446,8 @@ def claim_and_run(
             )
         if not isinstance(result, dict):
             raise HardFailure("coding provision returned no structured result")
-        result["execution_identity"] = current
+        if not development:
+            result["execution_identity"] = current
         completed = service.complete(request_id, lease_token, result)
         receipt = completed.get("receipt")
         if not isinstance(receipt, dict) or receipt.get("worker_identity") != worker_identity:

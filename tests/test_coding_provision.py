@@ -47,7 +47,7 @@ class NativeQueue:
 
     def enqueue_job(self, queue_name, payload, **kwargs):
         assert queue_name == coding_provision.QUEUE_NAME
-        assert kwargs["dedupe_key"].startswith("coding-provision:")
+        assert kwargs["dedupe_key"].startswith(("coding-provision:", "development-launch:"))
         if kwargs.get("idempotent"):
             for job_id, job in self.jobs.items():
                 prior = next(
@@ -75,7 +75,7 @@ class NativeQueue:
         for job in self.jobs.values():
             if (
                 job["state"] == "queued"
-                and job["payload_json"].get("kind") == "coding-provision/v1"
+                and job["payload_json"].get("kind") in {"coding-provision/v1", "coding-provision/v2"}
                 and (worker_identity is None or job["payload_json"].get("worker_identity") == worker_identity)
             ):
                 return dict(job)
@@ -437,6 +437,87 @@ def test_worker_creates_fresh_request_bound_worktree_from_repository_head(tmp_pa
     assert result["location"]["worktree"] == str(expected)
     assert result["location"]["branch"] == "coding/todo-1706-request-1706"
     assert result["location"]["head"] == head
+
+
+def test_worker_creates_the_exact_v2_card_allocation(tmp_path):
+    repository = _init_coding_repository(tmp_path)
+    source = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, check=True, text=True, capture_output=True,
+    ).stdout.strip()
+    root = tmp_path / "development-worktrees"
+    allocated = root / "development-request" / "attempt-001" / "worktree"
+    document = {
+        "kind": "coding-provision/v2", "development_request_hash": "sha256:" + "1" * 64,
+        "source_commit": source, "host": "tgw-lib-local", "worker_identity": "tgw-coding-worker",
+        "lifecycle": {"launch_cards": [{"allocation": {"worktree": str(allocated)}}]},
+    }
+    coding = {
+        **_config(tmp_path)["coding"], "development_worktree_root": str(root),
+    }
+    result = coding_provision_worker._validate_before_claim(
+        document, coding, "tgw-lib-local", "tgw-coding-worker",
+    )
+    assert result["location"]["worktree"] == str(allocated)
+    assert result["location"]["request_hash"] == document["development_request_hash"]
+    assert result["location"]["head"] == source
+    assert result["location"]["branch"].startswith("development/")
+
+
+def test_worker_runs_v2_without_reinterpreting_it_as_a_todo(tmp_path, monkeypatch):
+    location = {
+        "repository_root": str(tmp_path / "repo"), "worktree": str(tmp_path / "worktree"),
+        "request_hash": "sha256:" + "2" * 64, "branch": "development/request",
+        "head": "a" * 40, "worker_identity": "tgw-coding-worker",
+    }
+    execution = {
+        "schema": "tgw-development-execution/v1",
+        "development_request_hash": location["request_hash"], "source_commit": "a" * 40,
+        "provider_registry_hash": "sha256:" + "3" * 64, "card_idempotency_keys": [],
+        "location": location,
+    }
+    queued = {
+        "kind": "coding-provision/v2", "request_id": "v2-request", "state": "queued",
+        "host": "tgw-lib-local", "worker_identity": "tgw-coding-worker",
+    }
+    authorized = {**queued, "state": "leased", "execution": execution}
+    envelope = {
+        "location": location, "envelope_hash": coding_provision_worker._hash(location),
+        "attempt_created": False,
+    }
+    monkeypatch.setattr(coding_provision_worker, "_validate_before_claim", lambda *_args: envelope)
+    monkeypatch.setattr(coding_provision_worker, "_prepare_development_worktree", lambda *_args: location)
+
+    class Service:
+        completed = None
+
+        def get(self, _request_id):
+            return queued
+
+        def claim(self, *_args):
+            return {"lease_token": "v2-lease", "request": authorized}
+
+        def start(self, *_args):
+            return authorized
+
+        def complete(self, _request_id, _lease, result):
+            self.completed = result
+            return {"receipt": {
+                "worker_identity": "tgw-coding-worker", "envelope_hash": envelope["envelope_hash"],
+                "location": location, "execution": execution, "receipt_source": "queue-job:v2-request",
+            }}
+
+        def fail(self, *_args):
+            raise AssertionError("v2 execution unexpectedly failed")
+
+    service = Service()
+    result = {"schema": "test-v2-result", "outcome": "satisfied"}
+    coding_provision_worker.claim_and_run(
+        _config(tmp_path), request_id="v2-request", local_host="tgw-lib-local",
+        worker_identity="tgw-coding-worker", provision=lambda document: result,
+        client=service,
+    )
+    assert service.completed == result
+    assert "execution_identity" not in service.completed
 
 
 def test_worker_does_not_reuse_historical_todo_prefix_worktree(tmp_path):

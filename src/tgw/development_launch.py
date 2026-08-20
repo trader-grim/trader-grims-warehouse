@@ -7,6 +7,8 @@ import json
 import re
 from typing import Any, Mapping
 
+from tgw.execution_resources import CARD_RESOURCE_NAMES
+
 _HASH = re.compile(r"sha256:[0-9a-f]{64}$")
 _COMMIT = re.compile(r"[0-9a-f]{40}$")
 _ROLES = frozenset({"implementation", "independent-review", "controller-verification"})
@@ -54,6 +56,7 @@ def validate_development_launch(parameters: Mapping[str, Any]) -> dict[str, Any]
     if not isinstance(resolution, Mapping) or resolution.get("status") != "RESOLVED" or not isinstance(cards, list) or not cards:
         raise DevelopmentLaunchError("development lifecycle has no resolved launch closure")
     seen: set[str] = set()
+    execution_identities: set[str] = set()
     for card in cards:
         if not isinstance(card, Mapping) or card.get("state") != "PREPARED" or card.get("activation") != "declarative-only":
             raise DevelopmentLaunchError("development launch card is not prepared")
@@ -72,6 +75,44 @@ def validate_development_launch(parameters: Mapping[str, Any]) -> dict[str, Any]
             or selection.get("selected_provider") is not None
         ):
             raise DevelopmentLaunchError("development launch card bypasses qualified provider selection")
+        execution_identity = card.get("execution_identity")
+        if not isinstance(execution_identity, str) or not execution_identity:
+            raise DevelopmentLaunchError("development launch card execution identity is invalid")
+        if execution_identity in execution_identities:
+            raise DevelopmentLaunchError("mandatory development cards share an execution identity")
+        execution_identities.add(execution_identity)
+        template = card.get("execution_card_template")
+        if not isinstance(template, Mapping) or set(template) != {
+            "card_id", "solution_id", "plan_commit", "resource_service", "bindings",
+            "authority", "exclusions", "acceptance", "lease",
+        }:
+            raise DevelopmentLaunchError("development execution-card template is invalid")
+        if template.get("card_id") != key or template.get("solution_id") != card.get("plan", {}).get("solution_hash") or template.get("plan_commit") != card.get("plan", {}).get("commit"):
+            raise DevelopmentLaunchError("development execution-card Plan binding is invalid")
+        bindings = template.get("bindings")
+        if not isinstance(bindings, Mapping) or set(bindings) != CARD_RESOURCE_NAMES:
+            raise DevelopmentLaunchError("development execution-card resources are incomplete")
+        for binding in bindings.values():
+            if (
+                not isinstance(binding, Mapping)
+                or set(binding) != {"ref", "hash"}
+                or not isinstance(binding.get("ref"), str)
+                or not binding["ref"]
+                or not isinstance(binding.get("hash"), str)
+                or _HASH.fullmatch(binding["hash"]) is None
+            ):
+                raise DevelopmentLaunchError("development execution-card resource binding is invalid")
+        if bindings["plan_graph"]["ref"] == bindings["codegraph_snapshot"]["ref"]:
+            raise DevelopmentLaunchError("Plan Graph and CodeGraph bindings must remain distinct")
+        for field in ("authority", "exclusions", "acceptance"):
+            if not isinstance(template.get(field), list) or not all(isinstance(item, str) and item for item in template[field]):
+                raise DevelopmentLaunchError(f"development execution-card {field} is invalid")
+        service = template.get("resource_service")
+        if not isinstance(service, Mapping) or set(service) != {"id", "client_id", "descriptor_hash", "catalog_ref", "catalog_hash"}:
+            raise DevelopmentLaunchError("development execution-card resource service is invalid")
+        lease = template.get("lease")
+        if not isinstance(lease, Mapping) or set(lease) != {"id", "expires_at", "stop_policy"} or lease.get("id") != key:
+            raise DevelopmentLaunchError("development execution-card lease is invalid")
     return {
         "schema": parameters["schema"],
         "lifecycle": dict(lifecycle),

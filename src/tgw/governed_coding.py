@@ -113,6 +113,8 @@ def dispatch_role(
     resource_resolver: ResourceResolver | None = None,
     resource_service: Mapping[str, Any] | None = None,
     resource_service_catalog: Mapping[str, Any] | None = None,
+    runner_environment: Mapping[str, str] | None = None,
+    runner_cwd: str | os.PathLike[str] | None = None,
     run: Run = subprocess.run,
 ) -> dict[str, Any]:
     """Select, adapt, execute, and bind one role result to an immutable receipt."""
@@ -194,18 +196,24 @@ def dispatch_role(
     invocation = _promptcraft(promptcraft, "verify", handoff, receiver_identity=execution_identity, run=run)
     if invocation.get("selected_provider") != selection["selected_provider"]:
         raise GovernedCodingError("Promptcraft invocation provider does not match selection")
-    runner = run(
-        selection["runner_argv"],
-        input=json.dumps(handoff),
-        text=True,
-        capture_output=True,
-        check=False,
-        env={
+    runner_options: dict[str, Any] = {
+        "input": json.dumps(handoff),
+        "text": True,
+        "capture_output": True,
+        "check": False,
+        "env": {
             **os.environ,
+            **dict(runner_environment or {}),
             "TGW_EXECUTION_HANDOFF_HASH": str(handoff["handoff_hash"]),
             "TGW_EXECUTION_CARD_HASH": str(card["card_hash"]),
             "TGW_EXECUTION_RESOURCE_RECEIPT_HASH": str(resource_receipt["receipt_hash"]),
         },
+    }
+    if runner_cwd is not None:
+        runner_options["cwd"] = str(Path(runner_cwd).resolve())
+    runner = run(
+        selection["runner_argv"],
+        **runner_options,
     )
     artifacts: list[Any] = []
     outcome = "failed"

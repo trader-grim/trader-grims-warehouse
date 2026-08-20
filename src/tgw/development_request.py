@@ -165,8 +165,14 @@ def compile_request_lifecycle(*, request: Mapping[str, Any], resolution: Mapping
         for role in roles:
             if not _IDENTITY.fullmatch(role):
                 raise DevelopmentRequestError("role is invalid")
+            card_attempt = f"{allocated['attempt_id']}-{len(cards) + 1:03d}"
+            card_allocation = {
+                "attempt_id": card_attempt,
+                "worktree": str(_WORKTREE_ROOT / requested["request_id"] / card_attempt / "worktree"),
+                "attempt_root": str(_ATTEMPT_ROOT / requested["request_id"] / card_attempt),
+            }
             card = {"request_hash": request_hash, "plan": dict(plan), "root": dict(root), "unit": unit_id,
-                    "role": role, "allocation": dict(allocated), "idempotency_key": _hash([request_hash, unit_id, role, allocated["attempt_id"]]),
+                    "role": role, "allocation": card_allocation, "idempotency_key": _hash([request_hash, unit_id, role, card_attempt]),
                     "state": "PREPARED", "activation": "declarative-only"}
             cards.append(card)
     body["launch_cards"] = cards

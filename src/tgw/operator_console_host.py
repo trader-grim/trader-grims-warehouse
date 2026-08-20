@@ -142,7 +142,7 @@ def _canonical_hash(value: Any) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def _development_artifacts(config: Mapping[str, Any]) -> tuple[str, Mapping[str, Any], Mapping[str, Any]]:
+def _development_artifacts(config: Mapping[str, Any]) -> tuple[str, Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
     raw = config.get("development")
     if not isinstance(raw, Mapping):
         raise ValueError("development console configuration is required")
@@ -150,7 +150,7 @@ def _development_artifacts(config: Mapping[str, Any]) -> tuple[str, Mapping[str,
     if not isinstance(source_commit, str) or _COMMIT.fullmatch(source_commit) is None:
         raise ValueError("development console source commit is not exact")
     artifacts: list[Mapping[str, Any]] = []
-    for name in ("provider_registry", "freshness_receipt"):
+    for name in ("provider_registry", "freshness_receipt", "card_contract"):
         path_value, expected = raw.get(name + "_path"), raw.get(name + "_hash")
         if not isinstance(path_value, str) or not path_value.startswith("/") or not isinstance(expected, str) or _SOLUTION_HASH.fullmatch(expected) is None:
             raise ValueError(f"development console {name} binding is invalid")
@@ -164,14 +164,14 @@ def _development_artifacts(config: Mapping[str, Any]) -> tuple[str, Mapping[str,
         if not isinstance(value, Mapping) or _canonical_hash(value) != expected:
             raise ValueError(f"development console {name} hash mismatch")
         artifacts.append(value)
-    registry, freshness = artifacts
+    registry, freshness, card_contract = artifacts
     if registry.get("schema") != "tgw-harness-provider-registry/v1":
         raise ValueError("development console provider registry schema is invalid")
     unsigned = dict(freshness)
     claimed = unsigned.pop("receipt_hash", None)
     if freshness.get("schema") != "tgw-w18-projection-refresh-receipt/v1" or claimed != _canonical_hash(unsigned):
         raise ValueError("development console freshness receipt is invalid")
-    return source_commit, registry, freshness
+    return source_commit, registry, freshness, card_contract
 
 
 class ConfiguredAuthorityStore:
@@ -304,7 +304,7 @@ def configured_console_mount(
         config = config_provider()
         binding = _approved_plan_identity(config)
         solution = load_solution(config_provider, binding["solution_hash"])
-        source_commit, provider_registry, freshness = _development_artifacts(config)
+        source_commit, provider_registry, freshness, card_contract = _development_artifacts(config)
         return resolve_development_request(
             body=body,
             solution=solution,
@@ -313,6 +313,7 @@ def configured_console_mount(
             source_commit=source_commit,
             freshness=freshness,
             provider_registry=provider_registry,
+            card_contract=card_contract,
         )
 
     return OperatorConsoleMount(

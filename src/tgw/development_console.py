@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from tgw.development_request import compile_request_lifecycle
+from tgw.execution_resources import CARD_RESOURCE_NAMES
 from tgw.plan_authority import AuthorityRequest
 
 SCHEMA = "tgw-development-console-request/v1"
@@ -103,6 +104,7 @@ def resolve_request(
     source_commit: str,
     freshness: Mapping[str, Any],
     provider_registry: Mapping[str, Any],
+    card_contract: Mapping[str, Any],
 ) -> tuple[dict[str, Any], AuthorityRequest]:
     """Resolve and compile one immutable development authority request."""
     if not isinstance(plan_commit, str) or _COMMIT.fullmatch(plan_commit) is None:
@@ -120,6 +122,28 @@ def resolve_request(
     if provider_registry.get("schema") != "tgw-harness-provider-registry/v1" or not isinstance(provider_registry.get("providers"), list):
         raise DevelopmentConsoleError("harness provider registry is unavailable")
     provider_registry_hash = _hash(provider_registry)
+    if (
+        card_contract.get("schema") != "tgw-development-card-contract/v1"
+        or card_contract.get("plan_commit") != plan_commit
+        or card_contract.get("solution_hash") != solution_hash
+        or card_contract.get("source_commit") != source_commit
+        or card_contract.get("provider_registry_hash") != provider_registry_hash
+    ):
+        raise DevelopmentConsoleError("development execution-card contract binding is invalid")
+    bindings = card_contract.get("bindings")
+    roles = card_contract.get("roles")
+    if not isinstance(bindings, Mapping) or set(bindings) != CARD_RESOURCE_NAMES or not isinstance(roles, Mapping):
+        raise DevelopmentConsoleError("development execution-card resources are incomplete")
+    for name, binding in bindings.items():
+        if (
+            not isinstance(binding, Mapping)
+            or set(binding) != {"ref", "hash"}
+            or not isinstance(binding["ref"], str)
+            or not binding["ref"]
+            or not isinstance(binding["hash"], str)
+            or _HASH.fullmatch(binding["hash"]) is None
+        ):
+            raise DevelopmentConsoleError(f"development execution-card resource is invalid: {name}")
 
     allowed = {"schema", "original_request", "scope", "constraints", "effect_limits", "root"}
     if set(body) - allowed or body.get("schema") not in {None, SCHEMA}:
@@ -178,13 +202,48 @@ def resolve_request(
         "attempt_root": f"/var/cache/tgw/attempts/{request_id}/{attempt_id}",
     }
     lifecycle = compile_request_lifecycle(request=request, resolution=resolution, allocation=allocation)
+    expires = datetime.now(timezone.utc) + timedelta(hours=24)
     if lifecycle["launch_cards"]:
         for card in lifecycle["launch_cards"]:
+            role_contract = roles.get(card["role"])
+            if (
+                not isinstance(role_contract, Mapping)
+                or set(role_contract) != {"execution_identity", "resource_service"}
+                or not isinstance(role_contract["execution_identity"], str)
+                or not role_contract["execution_identity"]
+                or not isinstance(role_contract["resource_service"], Mapping)
+            ):
+                raise DevelopmentConsoleError(f"development role contract is unavailable: {card['role']}")
             card["provider_selection"] = {
                 "mode": "launch-time-qualified-provider",
                 "registry_id": provider_registry.get("id"),
                 "registry_hash": provider_registry_hash,
                 "selected_provider": None,
+            }
+            card["execution_identity"] = (
+                role_contract["execution_identity"] + ":" + card["idempotency_key"].removeprefix("sha256:")[:16]
+            )
+            card["execution_card_template"] = {
+                "card_id": card["idempotency_key"],
+                "solution_id": solution_hash,
+                "plan_commit": plan_commit,
+                "resource_service": dict(role_contract["resource_service"]),
+                "bindings": {name: dict(binding) for name, binding in bindings.items()},
+                "authority": list(effect_limits),
+                "exclusions": [
+                    "no authority outside the declared effect limits",
+                    "no Plan, source, environment, or receipt substitution",
+                    "no deployment before independent review and admission",
+                ],
+                "acceptance": [
+                    f"complete the {card['role']} role for {card['unit']}",
+                    "return a hash-bound governed role receipt",
+                ],
+                "lease": {
+                    "id": card["idempotency_key"],
+                    "expires_at": expires.isoformat().replace("+00:00", "Z"),
+                    "stop_policy": "hold-and-retain-evidence",
+                },
             }
         unsigned = dict(lifecycle)
         unsigned.pop("lifecycle_hash", None)
@@ -196,7 +255,6 @@ def resolve_request(
         "freshness": dict(freshness),
         "provider_registry_hash": provider_registry_hash,
     }
-    expires = datetime.now(timezone.utc) + timedelta(hours=24)
     authority = AuthorityRequest.create(
         {
             "solution_hash": solution_hash,

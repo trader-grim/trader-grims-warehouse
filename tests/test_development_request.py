@@ -44,6 +44,7 @@ def test_each_launch_card_owns_its_allocation_snapshot():
     first["allocation"]["worktree"] = "/mutated"
     assert second["allocation"]["worktree"] != "/mutated"
     assert result["allocation"]["worktree"] != "/mutated"
+    assert len({card["allocation"]["worktree"] for card in result["launch_cards"]}) == len(result["launch_cards"])
 
 
 def test_lifecycle_receipt_does_not_alias_caller_request_or_resolution():
