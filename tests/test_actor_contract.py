@@ -56,6 +56,18 @@ def test_contract_is_deterministic_and_non_activating_when_exactly_bound():
     assert first["activation"] == "declarative-only"
 
 
+def test_contract_accepts_nix_sri_flake_lock_hash():
+    catalog = _catalog()
+    catalog["flake_lock"]["sha256"] = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    assert _compile(catalog=catalog)["status"] == "READY"
+
+
+def test_contract_accepts_nix_bare_hex_flake_lock_hash():
+    catalog = _catalog()
+    catalog["flake_lock"]["sha256"] = "e5f94446bdaaa47cd7aba1b0d5f67402dd645159561db9de0a48a1baebd1a967"
+    assert _compile(catalog=catalog)["status"] == "READY"
+
+
 def test_missing_catalog_contract_input_quarantines_before_launch():
     local = _local()
     local["mcp"]["endpoints"] = []

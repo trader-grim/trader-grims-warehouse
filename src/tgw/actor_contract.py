@@ -10,6 +10,9 @@ from typing import Any, Mapping
 CATALOG_SCHEMA = "tgw-execution-environment-catalog/v1"
 CONTRACT_SCHEMA = "tgw-actor-contract-receipt/v1"
 _HASH = re.compile(r"sha256:[0-9a-f]{64}$")
+_SRI_HASH = re.compile(r"sha256-[A-Za-z0-9+/]{43}=$")
+_NIX_BASE32_HASH = re.compile(r"[0-9abcdfghijklmnpqrsvwxyz]{52}$")
+_BARE_HEX_HASH = re.compile(r"[0-9a-f]{64}$")
 _COMMIT = re.compile(r"[0-9a-f]{40}$")
 
 
@@ -31,6 +34,18 @@ def _require_hash(value: Any, label: str) -> str:
     return value
 
 
+def _require_catalog_hash(value: Any, label: str) -> str:
+    """Accept the Nix SRI form used by a flake lock as well as TGW hex."""
+    if not isinstance(value, str) or (
+        _HASH.fullmatch(value) is None
+        and _SRI_HASH.fullmatch(value) is None
+        and _NIX_BASE32_HASH.fullmatch(value) is None
+        and _BARE_HEX_HASH.fullmatch(value) is None
+    ):
+        raise ActorContractError(f"{label} must be an exact sha256 hash")
+    return value
+
+
 def _strings(value: Any, label: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise ActorContractError(f"{label} must be a string list")
@@ -48,7 +63,7 @@ def _catalog(raw: Mapping[str, Any]) -> dict[str, Any]:
     lock = catalog.get("flake_lock")
     if not isinstance(lock, dict) or set(lock) != {"path", "sha256"} or lock["path"] != "flake.lock":
         raise ActorContractError("catalog flake lock binding is invalid")
-    _require_hash(lock["sha256"], "catalog flake lock")
+    _require_catalog_hash(lock["sha256"], "catalog flake lock")
     return catalog
 
 
