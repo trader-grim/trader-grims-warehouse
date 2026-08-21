@@ -133,12 +133,15 @@ def _bindings() -> dict[str, Any]:
         raise ContextError("TGW_CONTEXT_RUNTIME_ROOT must be an absolute path")
     approved = _approved_commit()
     solution = _approved_solution()
-    catalog_path = _path_env(
+    catalog_path = Path(os.environ.get(
         "TGW_CONTEXT_ENVIRONMENT_CATALOG",
         "/etc/tgw/execution-environment-catalog.json",
-    )
+    ))
+    if not catalog_path.is_absolute():
+        raise ContextError("TGW_CONTEXT_ENVIRONMENT_CATALOG must be an absolute path")
+    catalog_resolved_path = catalog_path.resolve(strict=True)
     try:
-        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        catalog = json.loads(catalog_resolved_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ContextError("execution environment catalog is invalid") from exc
     if (
@@ -185,6 +188,7 @@ def _bindings() -> dict[str, Any]:
         "runtime_root": runtime_root,
         "environment_catalog": catalog,
         "environment_catalog_path": catalog_path,
+        "environment_catalog_resolved_path": catalog_resolved_path,
         "environment_catalog_hash": catalog_hash,
     }
 
@@ -267,6 +271,7 @@ def context_status() -> dict[str, Any]:
         "environment": {
             "catalog": binding["environment_catalog"],
             "catalog_path": str(binding["environment_catalog_path"]),
+            "catalog_resolved_path": str(binding["environment_catalog_resolved_path"]),
             "catalog_hash": binding["environment_catalog_hash"],
         },
         "scope_semantics": dict(SCOPE_SEMANTICS),
@@ -373,6 +378,12 @@ def onboarding_bundle(actor: str) -> dict[str, Any]:
     profiles = declaration.get("permitted_profiles")
     if not isinstance(profiles, list) or not profiles:
         raise ContextError("actor has no permitted catalog profile")
+    missing_profiles = [
+        name for name in profiles
+        if not isinstance(name, str) or not isinstance(catalog["profiles"].get(name), Mapping)
+    ]
+    if missing_profiles:
+        raise ContextError("actor references a missing catalog profile")
     plan_runbook = runbooks(path="reference/runbooks/actor-mcp-onboarding.md", authority="current-plan")
     manual_recovery = runbooks(path="reference/runbooks/manual-platform-recovery.md", authority="current-plan")
     policy_path = "agent-services/actor-bootstrap/bootstrap-policy-v1.json"
@@ -401,6 +412,7 @@ def onboarding_bundle(actor: str) -> dict[str, Any]:
         "actor": actor,
         "catalog": {
             "path": str(binding["environment_catalog_path"]),
+            "resolved_path": str(binding["environment_catalog_resolved_path"]),
             "hash": binding["environment_catalog_hash"],
             "declaration": declaration,
             "profiles": {name: catalog["profiles"].get(name) for name in profiles},

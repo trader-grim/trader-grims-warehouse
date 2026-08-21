@@ -65,12 +65,12 @@ replace the approved execution binding with an unapproved evidence HEAD.
 ## Required environment
 
 ```text
-PYTHONPATH=/opt/TGW/tgw-lib/src/trader-grims-warehouse/src
+PYTHONPATH=<exact-source-root>/src
 TGW_CONTEXT_PLAN_ROOT=/opt/TGW/library/approved/<full-approved-commit>
 TGW_CONTEXT_PLAN_REPOSITORY=/opt/TGW/library/plans
 TGW_CONTEXT_PLAN_COMMIT=<full-approved-commit>
 TGW_CONTEXT_PLAN_SOLUTION=sha256:<approved-solution-hash>
-TGW_CONTEXT_SOURCE_ROOT=/opt/TGW/tgw-lib/src/trader-grims-warehouse
+TGW_CONTEXT_SOURCE_ROOT=<exact-source-root>
 TGW_CONTEXT_RUNTIME_ROOT=/opt/TGW/tgw-lib/var/context
 TGW_CONTEXT_ENVIRONMENT_CATALOG=/etc/tgw/execution-environment-catalog.json
 TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH=sha256:<verified-catalog-hash>
@@ -80,15 +80,13 @@ TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH=sha256:<verified-catalog-hash>
 Plan commit. `TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH` must be computed from the
 installed catalog bytes and must match the signed environment receipt.  An
 operator must never copy either value from conversation text or an unbuilt
-candidate catalog.  The context MCP refuses startup when either binding is
-missing or inconsistent.
+candidate catalog. Each Context MCP tool call fails closed when either binding
+is missing or inconsistent.
 
 Launch command:
 
-```text
-/opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/python \
-  -m tgw.context_mcp_server
-```
+Use the exact `command`, `args`, resolved-command identity/hash, and environment
+returned by `tgw_context_onboarding`; do not infer or hard-code a Python path.
 
 The server is read-only and exposes no queue, repository mutation, deployment,
 inventory mutation, or provider-effect tool.
@@ -100,18 +98,22 @@ Remove only a stale `tgw-context` registration, then add the exact replacement:
 ```bash
 codex mcp remove tgw-context
 codex mcp add tgw-context \
-  --env PYTHONPATH=/opt/TGW/tgw-lib/src/trader-grims-warehouse/src \
+  --env PYTHONPATH=<exact-source-root>/src \
   --env TGW_CONTEXT_PLAN_ROOT=/opt/TGW/library/approved/<full-approved-commit> \
   --env TGW_CONTEXT_PLAN_REPOSITORY=/opt/TGW/library/plans \
   --env TGW_CONTEXT_PLAN_COMMIT=<full-approved-commit> \
   --env TGW_CONTEXT_PLAN_SOLUTION=sha256:<approved-solution-hash> \
-  --env TGW_CONTEXT_SOURCE_ROOT=/opt/TGW/tgw-lib/src/trader-grims-warehouse \
+  --env TGW_CONTEXT_SOURCE_ROOT=<exact-source-root> \
   --env TGW_CONTEXT_RUNTIME_ROOT=/opt/TGW/tgw-lib/var/context \
   --env TGW_CONTEXT_ENVIRONMENT_CATALOG=/etc/tgw/execution-environment-catalog.json \
   --env TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH=sha256:<verified-catalog-hash> \
-  -- /opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/python \
-  -m tgw.context_mcp_server
+  -- <context-mcp-command> -m tgw.context_mcp_server
 ```
+
+Every placeholder above must come from the same onboarding bundle. The catalog
+environment value preserves its configured canonical path (normally
+`/etc/tgw/execution-environment-catalog.json`) and separately reports the
+resolved Nix-store identity used for byte verification.
 
 Each individual harness account needs the equivalent registration.  Shared
 source and Plan access comes through `tgw-coders`/`tgw-access`; credentials and

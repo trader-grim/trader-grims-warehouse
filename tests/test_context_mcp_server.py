@@ -169,6 +169,42 @@ def test_canonical_plan_runbooks_and_onboarding_are_first_class_context(bound_co
     assert registration["resolved_command_sha256"].startswith("sha256:")
 
 
+def test_onboarding_rejects_unknown_actor_and_missing_catalog_profile(bound_context, monkeypatch):
+    with pytest.raises(context.ContextError, match="not enabled"):
+        context.onboarding_bundle("unknown")
+    catalog_path = Path(os.environ["TGW_CONTEXT_ENVIRONMENT_CATALOG"])
+    catalog = json.loads(catalog_path.read_text())
+    catalog["actors"]["codex"]["permitted_profiles"] = ["absent"]
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setenv(
+        "TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH",
+        "sha256:" + hashlib.sha256(context._canonical(catalog)).hexdigest(),
+    )
+    with pytest.raises(context.ContextError, match="missing catalog profile"):
+        context.onboarding_bundle("codex")
+
+
+def test_onboarding_rejects_missing_committed_bootstrap_input(bound_context):
+    source = bound_context["source"]
+    assert isinstance(source, Path)
+    _git(source, "rm", "scripts/tgw_actor_startup.py")
+    _commit(source, "remove required launcher")
+    with pytest.raises(context.ContextError, match="does not exist"):
+        context.onboarding_bundle("codex")
+
+
+def test_runbook_authority_mismatch_and_dirty_plan_fail_closed(bound_context):
+    with pytest.raises(context.ContextError, match="outside"):
+        context.runbooks(
+            path="docs/runbooks/context.md",
+            authority="current-plan",
+        )
+    repository = Path(os.environ["TGW_CONTEXT_PLAN_REPOSITORY"])
+    (repository / "untracked.md").write_text("drift\n")
+    with pytest.raises(context.ContextError, match="not clean"):
+        context.context_status()
+
+
 def test_fail_closed_path_and_materialization_checks_and_read_only_surface(bound_context, monkeypatch):
     with pytest.raises(context.ContextError, match="outside"):
         context.source_chunk("docs/runbooks/context.md")
