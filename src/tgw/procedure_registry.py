@@ -37,7 +37,7 @@ _FIXED_ARGV = {
     "app-release-install/v1": [
         "/opt/TGW/installer/current/bin/tgw-release-install",
         "--root",
-        "/opt/TGW/releases",
+        "/opt/TGW",
         "install",
         "--archive",
         ":archive",
@@ -69,7 +69,7 @@ _FIXED_ARGV = {
     "app-release-rollback/v1": [
         "/opt/TGW/installer/current/bin/tgw-release-install",
         "--root",
-        "/opt/TGW/releases",
+        "/opt/TGW",
         "rollback",
         "--receipt",
         ":receipt",

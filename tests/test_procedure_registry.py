@@ -31,7 +31,7 @@ def test_repository_procedure_registry_is_revision_bound_and_non_executing():
     install = registry["procedures"]["app-release-install/v1"]
     assert install["status"] == "active"
     assert install["argv"][0] == "/opt/TGW/installer/current/bin/tgw-release-install"
-    assert install["argv"][2] == "/opt/TGW/releases"
+    assert install["argv"][2] == "/opt/TGW"
     assert install["rollback_procedure"] == "app-release-rollback/v1"
     assert resolve_procedure(registry, "app-release-install/v1")["status"] == "active"
     for flag, value in (

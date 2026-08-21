@@ -1,6 +1,6 @@
 {
   "schema": "tgw-procedure-registry/v1",
-  "revision": "sha256:ff27df0fabf2bf438b94de167c544ef57282c15f69ae2a246db247f990044008",
+  "revision": "sha256:ab0b16cabda4f251ddb2d6b0a87cbe6fd35740bdcd985f3af07872bcd5a1ad19",
   "procedures": {
     "app-release-install/v1": {
       "status": "active",
@@ -9,7 +9,7 @@
       "repository_id": "application",
       "working_directory": "/opt/TGW",
       "run_as": "root",
-      "argv": ["/opt/TGW/installer/current/bin/tgw-release-install", "--root", "/opt/TGW/releases", "install", "--archive", ":archive", "--generation", ":generation", "--commit", ":commit", "--tree", ":tree", "--archive-sha256", ":archive_sha256", "--expected-current", ":expected_current", "--operation-id", ":operation_id", "--admission-receipt", ":admission_receipt", "--environment-preflight-receipt", ":environment_preflight_receipt", "--admission-public-key", ":admission_public_key", "--environment-public-key", ":environment_public_key", "--current-plan-commit", ":current_plan_commit", "--current-solution-hash", ":current_solution_hash"],
+      "argv": ["/opt/TGW/installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "install", "--archive", ":archive", "--generation", ":generation", "--commit", ":commit", "--tree", ":tree", "--archive-sha256", ":archive_sha256", "--expected-current", ":expected_current", "--operation-id", ":operation_id", "--admission-receipt", ":admission_receipt", "--environment-preflight-receipt", ":environment_preflight_receipt", "--admission-public-key", ":admission_public_key", "--environment-public-key", ":environment_public_key", "--current-plan-commit", ":current_plan_commit", "--current-solution-hash", ":current_solution_hash"],
       "authority_gate": "explicit-deployment-approval",
       "execution_policy": "registered-runner-only",
       "direct_invocation_allowed": false,
@@ -25,7 +25,7 @@
       "repository_id": "application",
       "working_directory": "/opt/TGW",
       "run_as": "root",
-      "argv": ["/opt/TGW/installer/current/bin/tgw-release-install", "--root", "/opt/TGW/releases", "rollback", "--receipt", ":receipt", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
+      "argv": ["/opt/TGW/installer/current/bin/tgw-release-install", "--root", "/opt/TGW", "rollback", "--receipt", ":receipt", "--expected-current", ":expected_current", "--operation-id", ":operation_id"],
       "authority_gate": "explicit-deployment-approval",
       "execution_policy": "registered-runner-only",
       "direct_invocation_allowed": false,

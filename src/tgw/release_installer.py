@@ -695,7 +695,7 @@ def recover(root: Path) -> list[dict[str, Any]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="tgw-release-install")
-    parser.add_argument("--root", type=Path, default=Path("/opt/TGW/releases"))
+    parser.add_argument("--root", type=Path, default=Path("/opt/TGW"))
     commands = parser.add_subparsers(dest="command", required=True)
     install = commands.add_parser("install")
     install.add_argument("--archive", type=Path, required=True)

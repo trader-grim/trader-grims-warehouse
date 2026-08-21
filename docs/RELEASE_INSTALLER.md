@@ -7,8 +7,10 @@ the database, or delete old releases.
 
 ## Install and select
 
-Build the archive and obtain the Git identities outside this command. Then
-run the installed entry point as the account that owns the TGW release root:
+Build the archive and obtain the Git identities outside this command. Normal
+production use is only through the registered W16 procedure runner; the
+installer rejects selection without both signed admission and environment
+preflight evidence:
 
 ```text
 tgw-release-install --root /opt/TGW install \
@@ -18,7 +20,13 @@ tgw-release-install --root /opt/TGW install \
   --tree <40-character-tree> \
   --archive-sha256 <64-character-sha256> \
   --expected-current <current-generation> \
-  --operation-id <unique-operation-id>
+  --operation-id <unique-operation-id> \
+  --admission-receipt <admission.json> \
+  --environment-preflight-receipt <preflight.json> \
+  --admission-public-key <root-configured-public-key> \
+  --environment-public-key <root-configured-public-key> \
+  --current-plan-commit <40-character-plan-commit> \
+  --current-solution-hash <sha256:...>
 ```
 
 The installer rejects unsafe archive members, verifies the supplied archive
@@ -31,6 +39,11 @@ written before the symlink swap and a completion receipt afterward.
 The command is idempotent for the same materialized generation and exact
 completed operation. Reusing a generation or operation ID with different
 identity is rejected.
+
+This syntax documents the installer contract; it is not permission for an
+agent or chat session to invoke it directly. `app-release-install/v1` supplies
+these exact arguments after a signed, expiring human deployment approval and
+writes its own prepared/completed/refusal receipt.
 
 ## Verify
 
