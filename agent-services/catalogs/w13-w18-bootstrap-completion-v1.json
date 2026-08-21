@@ -43,6 +43,6 @@
     {"capability": "deployment.non-bypassable-admission@1", "provider": "w16-fail-closed-admission", "state": "tested", "evidence": ["source-commit:83096b38c43c86b2ece718d20a4c905b7da12b9e", "test:full-pytest:5203-passed-16-skipped"]},
     {"capability": "coding.fail-closed-launch@1", "provider": "w16-fail-closed-admission", "state": "tested", "evidence": ["source-commit:83096b38c43c86b2ece718d20a4c905b7da12b9e", "test:full-pytest:5203-passed-16-skipped"]},
     {"capability": "operator.object-publishing-api@1", "provider": "w13-operator-object-publication", "state": "tested", "evidence": ["source-commit:83096b38c43c86b2ece718d20a4c905b7da12b9e", "test:full-pytest:5203-passed-16-skipped"]},
-    {"capability": "operator.thin-client-adapters@1", "provider": "w13-operator-object-publication", "state": "tested", "evidence": ["source-commit:83096b38c43c86b2ece718d20a4c905b7da12b9e", "test:full-pytest:5203-passed-16-skipped", "hold:successor-mobile-parity-build-pending"]}
+    {"capability": "operator.thin-client-adapters@1", "provider": "w13-operator-object-publication", "state": "tested", "evidence": ["source-commit:83096b38c43c86b2ece718d20a4c905b7da12b9e", "source-tree:apps/tgw_app:fed7d1b48df33315bc32622f3b0872f406cdc0f2", "test:full-pytest:5203-passed-16-skipped", "test:mobile:flutter-doctor:passed", "test:mobile:flutter-analyze:passed", "test:mobile:flutter-test:2-passed", "build:mobile:apk-debug:sha256:d1408c14b7c65474fdb116911d104637903db9b2f7857df3628f053a786390e5"]}
   ]
 }
