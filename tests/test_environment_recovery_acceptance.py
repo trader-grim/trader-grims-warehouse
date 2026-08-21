@@ -14,7 +14,7 @@ def test_current_program_audit_proves_server_and_reports_satellite_gaps_exactly(
     assert by_id["task-context-reproducible"]["status"] == "proved"
     assert by_id["clean-steward-boundary"]["status"] == "proved"
     assert by_id["registered-procedures"]["status"] == "proved"
-    assert by_id["registered-procedures"]["detail"] == ("sha256:ff27df0fabf2bf438b94de167c544ef57282c15f69ae2a246db247f990044008")
+    assert by_id["registered-procedures"]["detail"] == ("sha256:ab0b16cabda4f251ddb2d6b0a87cbe6fd35740bdcd985f3af07872bcd5a1ad19")
     for host in ("catnanny", "helicrew"):
         assert by_id[f"{host}-evidence-package"]["status"] == "missing"
         assert by_id[f"{host}-review-complete"]["status"] == "missing"
