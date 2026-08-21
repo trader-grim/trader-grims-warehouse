@@ -21,10 +21,14 @@ going forward.
 ### Codex and other coding harnesses
 
 Before changing code, reconciling implementation, or reporting completion,
-retrieve one exact task bundle from the registered `tgw-context` MCP on
-**tgw-lib**.  The bundle binds the approved standalone Plan, relevant committed
-runbooks, and the CodeGraph snapshot to exact commits and hashes.  Follow its
-citations rather than relying on conversation memory or an embedded Plan copy.
+call `tgw_context_onboarding` for the declared actor and then retrieve one exact
+task bundle from the registered `tgw-context` MCP on **tgw-lib**.  The onboarding
+bundle binds the immutable approved Plan/solution, current descendant Plan
+evidence, canonical onboarding and manual-recovery runbooks, exact application
+source/environment catalog, and the required MCP registration values.  The
+task bundle binds the relevant Plan, runbooks, and CodeGraph snapshot to exact
+commits and hashes.  Follow those returned citations rather than conversation
+memory or an embedded Plan copy.
 
 Keep these statuses separate in every report: Master Plan, selected Plan or PP,
 Todo, source implementation, review/admission, deployment, live verification,
@@ -32,9 +36,13 @@ and operator acceptance.  In particular, completion of W11 in
 `GOVERNED-EXECUTION-PLATFORM-v1.yaml` is completion of that platform Plan only;
 it does **not** mean that the TGW Master Plan has been coded or completed.
 
-If `tgw-context` is unavailable, stop Plan-derived coding and report the missing
-context service.  Do not substitute `CLAUDE.md`, `docs/TGW-Plan-Vault`, a release,
-an actor worktree, or chat history as Plan authority.
+If `tgw-context` is unavailable or stale, stop Plan-derived coding and repair
+the canonical Plan/MCP projection; never work around it.  Before W19 activates
+the governed coding fleet, this is direct operator maintenance and does not
+require quiescence, but the predecessor bindings must remain recoverable.  Use
+`/opt/TGW/library/plans/reference/runbooks/actor-mcp-onboarding.md` for bootstrap
+or manual recovery.  Do not substitute `CLAUDE.md`, `docs/TGW-Plan-Vault`, a
+release, an actor worktree, or chat history as Plan authority.
 
 For source or candidate review, use the canonical shared `tgw-review` skill in
 `agent-services/skills/tgw-review`.  A visible skill is procedural context, not

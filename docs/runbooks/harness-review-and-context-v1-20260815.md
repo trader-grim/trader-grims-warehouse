@@ -8,8 +8,9 @@ coding harness accounts on tgw-lib.
 
 - Skills: `agent-services/skills/tgw-plan` and
   `agent-services/skills/tgw-review` in canonical application source.
-- Plan: `/opt/TGW/library/plans`, approved commit
-  `f0a8cf22b2c7b2f064292a048ffcb8ee98919e99`.
+- Plan: `/opt/TGW/library/plans`. Resolve the immutable approved Plan/solution
+  and the current descendant evidence HEAD from `tgw_context_onboarding`; this
+  runbook intentionally carries no mutable "current commit" constant.
 - Context MCP: `tgw.context_mcp_server` from canonical application source.
 - Production inventory MCP: `http://100.107.99.66:8765/sse`.
 
@@ -41,18 +42,20 @@ overwrite an independent file or directory so recovered material is not lost.
 The Tigwadev Claude compatibility location may also be linked with
 `--harness claude --home /home/tigwadev`; it is not an admitted runner.
 
-## Configure MCP
+## Configure MCP and onboard
 
 For Claude Code, add both entries in `etc/interfaces/claude/mcp-servers.json`
-at user scope with `claude mcp add-json --scope user`. Codex also supports both
-entries through its native MCP configuration. Keep MCP credentials and model
-authentication per account.
+at user scope with `claude mcp add-json --scope user`, but first materialize all
+`<...>` fields from one verified `tgw_context_onboarding` result. Never install
+the checked-in template literally. Codex and DeepSeek use the same catalog-
+bound values through their native MCP configuration. Keep MCP credentials and
+model authentication per account.
 
-Hermes currently supports the local stdio `tgw-context` server. Its native HTTP
-client rejected the production `tgw` server's legacy SSE endpoint with HTTP
-405, so the production inventory MCP is an explicit HOLD for Hermes. Do not
-hide that incompatibility behind an ad hoc proxy. Admit either a streamable-HTTP
-production endpoint or a reviewed adapter before enabling it.
+Hermes supports the local stdio `tgw-context` server. A historical test of its
+native HTTP client against the production `tgw` legacy SSE endpoint returned
+HTTP 405; treat production inventory access as HOLD unless a current catalog-
+bound probe proves a reviewed compatible endpoint. Do not hide incompatibility
+behind an ad hoc proxy.
 
 Do not restore `tgw-aider` until its `/home/tgw` runtime and legacy worktree
 assumptions are removed and Aider is installed and admitted.
@@ -65,25 +68,26 @@ assumptions are removed and Aider is installed and admitted.
 
 Provider qualification still requires a registered runner, Promptcraft receiver
 profile, exact execution card, independent execution identity/context, health,
-and validated receipt. Codex currently has the admitted isolated review runner.
-Claude is installed for interactive review but has no admitted automated runner;
-Hermes remains within its IN TRAINING contract; Aider is absent.
+and validated receipt. Do not infer current qualification from this runbook or
+its historical installation matrix; query the catalog and validate the exact
+card and receipt for the requested execution.
 
 ## Verification
 
 For each account:
 
-1. resolve both skill links to canonical application source;
-2. list native skills and confirm `tgw-plan` and `tgw-review`;
-3. list MCP servers and call `tgw_context_status`;
-4. confirm the approved Plan commit, canonical source commit/tree, and CodeGraph
+1. call `tgw_context_onboarding` for the declared actor;
+2. resolve both skill links to the exact catalog-bound application source;
+3. list native skills and confirm `tgw-plan` and `tgw-review`;
+4. list MCP servers and call `tgw_context_status`;
+5. confirm the approved Plan/solution, descendant evidence HEAD, canonical
+   source commit/tree, and CodeGraph
    freshness hash;
-5. invoke `tgw-review` on a read-only fixture and verify it does not claim
+6. invoke `tgw-review` on a read-only fixture and verify it does not claim
    admission without an execution card; and
-6. record authentication or unavailable-provider gaps separately from install
+7. record authentication or unavailable-provider gaps separately from install
    success.
 
-The current installation matrix is tracked in
+The historical installation observation is tracked in
 `etc/interfaces/harness-review-installations.json`; it distinguishes skill,
-MCP, authentication, and automated-provider status so one cannot be mistaken
-for another.
+MCP, authentication, and automated-provider status but is not live proof.

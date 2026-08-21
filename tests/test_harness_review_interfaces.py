@@ -21,13 +21,14 @@ def test_review_skill_is_provider_neutral_and_current():
         assert stale not in text
 
 
-def test_recovery_reference_binds_both_historical_skills():
+def test_recovery_reference_binds_both_historical_skills_without_static_current_plan():
     text = (SKILL.parent / "references/recovered-contracts.md").read_text()
     assert "tgw-pr-review" in text
     assert "tgw-runner-review" in text
     assert "9a267214fd4efec051af38173ac9b3cfc50a4fd8" in text
     assert "f59f653b2922b66ea0523c3abc28a68e0bf0156d" in text
-    assert "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99" in text
+    assert "hard-coded historical" in text
+    assert "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99" not in text
 
 
 def test_shared_skill_installer_is_idempotent_and_refuses_copies(tmp_path: Path):
@@ -62,11 +63,14 @@ def test_claude_mcp_config_uses_current_context_and_omits_legacy_aider():
     context = value["mcpServers"]["tgw-context"]
     assert context["type"] == "stdio"
     assert context["args"] == ["-m", "tgw.context_mcp_server"]
-    assert context["env"]["TGW_CONTEXT_PLAN_COMMIT"] == (
-        "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99"
+    assert context["command"] == "<context-mcp-command>"
+    assert context["env"]["TGW_CONTEXT_PLAN_COMMIT"] == "<approved-plan-commit>"
+    assert context["env"]["TGW_CONTEXT_PLAN_SOLUTION"] == (
+        "sha256:<approved-solution-hash>"
     )
-    assert context["env"]["TGW_CONTEXT_SOURCE_ROOT"] == (
-        "/opt/TGW/tgw-lib/src/trader-grims-warehouse"
+    assert context["env"]["TGW_CONTEXT_SOURCE_ROOT"] == "<exact-source-root>"
+    assert context["env"]["TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH"] == (
+        "sha256:<verified-catalog-hash>"
     )
 
 
@@ -108,5 +112,7 @@ def test_runbook_does_not_claim_hermes_legacy_sse_compatibility():
     text = (ROOT / "docs/runbooks/harness-review-and-context-v1-20260815.md").read_text()
     assert "legacy SSE endpoint" in text
     assert "405" in text
-    assert "explicit HOLD for Hermes" in text
+    assert "treat production inventory access as HOLD" in text
+    assert "unless a current catalog-" in text
+    assert "bound probe proves" in text
     assert "ad hoc proxy" in text

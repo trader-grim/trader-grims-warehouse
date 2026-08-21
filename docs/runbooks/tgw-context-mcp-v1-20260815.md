@@ -57,6 +57,11 @@ Never move an existing approved materialization to a new commit.  Create a new
 path, verify it, update the MCP registration, then retire the old path only
 after all harnesses report the successor binding.
 
+The canonical Plan evidence branch may advance beyond the immutable approved
+execution commit. The service must prove that the current evidence HEAD is a
+clean descendant of the approved commit and report both identities. Never
+replace the approved execution binding with an unapproved evidence HEAD.
+
 ## Required environment
 
 ```text
@@ -129,11 +134,21 @@ work around the stale projection. Conversation memory, `CLAUDE.md`, an
 embedded `docs/TGW-Plan-Vault`, a production release, or an actor worktree is
 not a fallback Plan authority.
 
+Before W19 activates the governed coding fleet, Plan/MCP projection maintenance
+is direct operator maintenance and does not require quiescence because no
+governed coding workflow is active. Preserve the predecessor Plan, source,
+catalog, configuration, and skill bindings so the projection can be rolled
+back atomically. Once the governed workflow is active, use its quiescing refresh
+and doctor procedures.
+
 For a declared actor, call `tgw_context_onboarding` before enrollment. It returns
 one hash-bound bundle containing the current canonical onboarding and manual
 recovery runbooks, exact approved Plan/solution, current descendant evidence
 HEAD, source, environment catalog, bootstrap policy, launcher, and all required
-Context MCP environment values. A result of `SEED_REQUIRED` is intentional: the
+Context MCP registration values, including the invoked executable, its resolved
+identity/hash, argv, `PYTHONPATH`, and fail-closed environment. Materialize the
+harness registration from those returned values; do not infer a Python path or
+copy a different actor's configuration. A result of `SEED_REQUIRED` is intentional: the
 bundle supplies immutable context but grants no enrollment effect. Only the
 orchestrator's expiring one-use `actor-onboarding-seed/v1` may authorize the
 bounded installation procedure.

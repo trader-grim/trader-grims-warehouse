@@ -161,6 +161,12 @@ def test_canonical_plan_runbooks_and_onboarding_are_first_class_context(bound_co
     assert bundle["plan"]["evidence_descends_from_approved"] is True
     assert bundle["runbooks"]["onboarding"]["authority"] == "canonical-plan-runbook"
     assert bundle["required_context_environment"]["TGW_CONTEXT_PLAN_COMMIT"] == bound_context["approved"]
+    registration = bundle["context_mcp_registration"]
+    assert registration["command"] == sys.executable
+    assert registration["args"] == ["-m", "tgw.context_mcp_server"]
+    assert registration["environment"] == bundle["required_context_environment"]
+    assert registration["environment"]["PYTHONPATH"] == str(bound_context["source"] / "src")
+    assert registration["resolved_command_sha256"].startswith("sha256:")
 
 
 def test_fail_closed_path_and_materialization_checks_and_read_only_surface(bound_context, monkeypatch):

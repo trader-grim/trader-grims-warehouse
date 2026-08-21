@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
@@ -379,6 +380,21 @@ def onboarding_bundle(actor: str) -> dict[str, Any]:
     launcher_path = "scripts/tgw_actor_startup.py"
     launcher_raw = _bytes_at(binding["source_root"], binding["source_commit"], launcher_path)
     policy = json.loads(policy_raw)
+    context_python = Path(sys.executable)
+    if not context_python.is_absolute() or not context_python.is_file() or not os.access(context_python, os.X_OK):
+        raise ContextError("Context MCP executable is not an absolute executable file")
+    resolved_context_python = context_python.resolve(strict=True)
+    required_context_environment = {
+        "PYTHONPATH": str(binding["source_root"] / "src"),
+        "TGW_CONTEXT_PLAN_ROOT": str(binding["plan_root"]),
+        "TGW_CONTEXT_PLAN_REPOSITORY": str(binding["plan_repository"]),
+        "TGW_CONTEXT_PLAN_COMMIT": binding["plan_commit"],
+        "TGW_CONTEXT_PLAN_SOLUTION": binding["plan_solution_hash"],
+        "TGW_CONTEXT_SOURCE_ROOT": str(binding["source_root"]),
+        "TGW_CONTEXT_RUNTIME_ROOT": str(binding["runtime_root"]),
+        "TGW_CONTEXT_ENVIRONMENT_CATALOG": str(binding["environment_catalog_path"]),
+        "TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH": binding["environment_catalog_hash"],
+    }
     result = {
         "schema": "tgw-actor-onboarding-context-bundle/v1",
         "status": "SEED_REQUIRED",
@@ -403,16 +419,15 @@ def onboarding_bundle(actor: str) -> dict[str, Any]:
             "sha256": _sha(policy_raw), "value": policy,
         },
         "launcher": {"path": launcher_path, "commit": binding["source_commit"], "sha256": _sha(launcher_raw)},
-        "required_context_environment": {
-            "TGW_CONTEXT_PLAN_ROOT": str(binding["plan_root"]),
-            "TGW_CONTEXT_PLAN_REPOSITORY": str(binding["plan_repository"]),
-            "TGW_CONTEXT_PLAN_COMMIT": binding["plan_commit"],
-            "TGW_CONTEXT_PLAN_SOLUTION": binding["plan_solution_hash"],
-            "TGW_CONTEXT_SOURCE_ROOT": str(binding["source_root"]),
-            "TGW_CONTEXT_RUNTIME_ROOT": str(binding["runtime_root"]),
-            "TGW_CONTEXT_ENVIRONMENT_CATALOG": str(binding["environment_catalog_path"]),
-            "TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH": binding["environment_catalog_hash"],
+        "context_mcp_registration": {
+            "transport": "stdio",
+            "command": str(context_python),
+            "resolved_command": str(resolved_context_python),
+            "resolved_command_sha256": _sha(resolved_context_python.read_bytes()),
+            "args": ["-m", "tgw.context_mcp_server"],
+            "environment": required_context_environment,
         },
+        "required_context_environment": required_context_environment,
         "next_authority": "one unexpired actor-onboarding-seed/v1 issued by the orchestrator",
         "fallback": "FORBIDDEN",
     }

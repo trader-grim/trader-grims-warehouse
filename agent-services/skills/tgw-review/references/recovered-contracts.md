@@ -30,11 +30,11 @@ archives and application Git history.
   embedded Plan checkout, silent pass-through, and a Claude-specific stitch
   handoff.
 
-## Current authority
+## Current authority resolution
 
-The surviving contract is governed by approved Plan commit
-`f0a8cf22b2c7b2f064292a048ffcb8ee98919e99`, especially
-`plan/SPEC-plan-capability-graph-v2.md` and work unit W07 in
-`plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml`. The canonical Plan lives
-in `/opt/TGW/library/plans`; the application repository's historical skill
-blobs are provenance, not Plan authority.
+The surviving contract is governed by the exact approved Plan/solution and
+execution card returned for the requested review by the catalog-bound Context
+MCP. The canonical Plan lives in `/opt/TGW/library/plans`; its current evidence
+HEAD must be a clean descendant of the immutable approved commit. The
+application repository's historical skill blobs and hard-coded historical
+Plan commits are provenance, not current Plan authority.

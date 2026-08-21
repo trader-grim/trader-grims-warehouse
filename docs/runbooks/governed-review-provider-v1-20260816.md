@@ -14,8 +14,9 @@ admitted execution provider.
 - Established restoration: source commits `234ff848`, `16e4d850`, and
   `0925a657`; retained successful-review history includes `5b86421d`,
   `048902b2`, and `18e0677a`.
-- Current Plan authority for this restoration:
-  `f0a8cf22b2c7b2f064292a048ffcb8ee98919e99`.
+- Execution authority: the exact approved Plan/solution, current descendant
+  Plan evidence, and execution card returned by the catalog-bound Context MCP.
+  This runbook intentionally carries no mutable "current Plan" constant.
 
 The governed adapter is provider-neutral. The packet's selected provider,
 Promptcraft receiver identity, provider identity record, execution record,
@@ -69,7 +70,8 @@ Before launch, the controller must create and freeze:
 
 1. a root-owned, non-writable, single-link source snapshot for exact candidate
    commit/tree X;
-2. Plan f0, solution/closure, CodeGraph, execution environment, candidate
+2. the card-bound approved Plan/solution, current descendant Plan evidence,
+   CodeGraph, execution environment, candidate
    evidence, and receipt-sink bindings;
 3. an unexpired independent-review execution card and Promptcraft handoff;
 4. the provider's exact executable, version, account identity, root-protected
@@ -193,16 +195,18 @@ publishes the packet/report/result and all seven semantic-review artifacts in
 the v4 pointer bundle. It reads every object back from X before returning its
 final result.
 
-## Installation status
+## Historical installation status and live verification
 
-This source change is a candidate only. It is not installed or deployed. The
-current selected provider is HOLD, not disabled: its executable and existing
+The 2026-08-16 source change described below was a candidate only and was not
+then installed or deployed. That observation does not state current provider
+readiness. At that time the selected provider was HOLD, not disabled: its executable and existing
 credential are present, but the protected generic skill, loopback MCP config,
 minimal runtime projections, separately privileged context broker
 and its protected backend credential/signing authority, registered signed
 context readback, X publisher, and protected execution-environment authority
-have not been issued. Before first
-production use, the release operator must install a reviewed successor,
+had not been issued. Before any production use, the release operator must
+query the current catalog and Context MCP, validate the exact card, and, for
+any still-missing components, install a reviewed successor,
 provision those root-owned projections plus snapshot staging and the X-store,
 capture a fresh provider identity/health receipt, bind the truthful shared-host
 network environment, run the focused tests, then perform one real minimal-root bubblewrap

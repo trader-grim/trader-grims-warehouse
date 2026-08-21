@@ -12,8 +12,11 @@ Install the skill links as the Claude account:
 python3 scripts/install_shared_harness_skills.py --harness claude
 ```
 
-Add the two user-scoped MCP definitions from `mcp-servers.json` with
-`claude mcp add-json --scope user`. Claude Code stores user-scoped MCP state in
+Call `tgw_context_onboarding` for the declared actor, materialize the command,
+argv, and every `<...>` field in `mcp-servers.json` from that one verified
+`context_mcp_registration` result, and add the two
+user-scoped MCP definitions with `claude mcp add-json --scope user`. Never
+install the checked-in template literally. Claude Code stores user-scoped MCP state in
 `~/.claude.json`; do not paste it into `settings.json`, copy another user's
 OAuth state, or restore the old `sudo -u tgw` command.
 
