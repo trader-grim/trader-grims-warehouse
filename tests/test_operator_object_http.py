@@ -23,6 +23,24 @@ def _card():
         "reconciliation_gates": [],
         "ownership_conflicts": [],
         "operator_gates": [],
+        "legal_actions": [
+            {
+                "treatment_id": "ebay-publish",
+                "treatment_version": "1",
+                "effect_class": "external",
+                "action": "held_external_contract",
+                "reasons": [],
+            },
+        ],
+        "operator_projection": {
+            "state": "staged",
+            "reasons": [],
+            "commands": {
+                "save-draft": {"enabled": True, "reason": None},
+                "list-item": {"enabled": True, "reason": None},
+                "update-item": {"enabled": True, "reason": None},
+            },
+        },
     }
 
 
@@ -68,7 +86,6 @@ def test_get_operator_object_mounts_real_http_contract(tmp_path, monkeypatch):
     monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
     monkeypatch.setattr(http_server, "_workflow_attempt_rows", lambda sku: [])
     monkeypatch.setattr(http_server, "_workflow_reconciled_provider_effect_ids", lambda rows: frozenset())
-    monkeypatch.setattr(action_cards, "build_item_action_card", lambda *args, **kwargs: _card())
     monkeypatch.setattr(
         http_server,
         "ebay_category_context",
@@ -83,7 +100,7 @@ def test_get_operator_object_mounts_real_http_contract(tmp_path, monkeypatch):
     assert response.status_code == 200
     payload = response.json()["object"]
     assert payload["schema"] == "tgw-operator-object/v1"
-    assert payload["object_generation"] == "gen-1"
+    assert len(payload["object_generation"]) == 64
     assert [command["id"] for command in payload["commands"]] == [
         "save-draft",
         "list-item",

@@ -112,14 +112,11 @@ def _authoritative_stage_lookup(item: dict, provider_identity: str):
 PHASE3_SUCCESSOR_INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     ("src/tgw/workers/bundle_intake.py", "_enqueue_downstream", "catalog_rebuild", "retained-derived"),
     ("src/tgw/workers/bundle_intake.py", "_enqueue_downstream", "thumbnail_gen", "retained-derived"),
-    ("src/tgw/workers/bundle_intake.py", "_enqueue_downstream", "ai_identify", "migrate"),
     ("src/tgw/workers/ebay_upload.py", "handle", "ebay_upload", "migrate"),
-    ("src/tgw/workers/ebay_publish.py", "handle", "ebay_stage", "migrate"),
     ("src/tgw/workers/ebay_publish.py", "handle", "catalog_rebuild", "retained-derived"),
     ("src/tgw/workers/ebay_publish.py", "handle", "ebay_sync", "migrate"),
     ("src/tgw/workers/ebay_stage.py", "handle", "ebay_sync", "migrate"),
     ("src/tgw/workers/ebay_price.py", "handle", "catalog_rebuild", "retained-derived"),
-    ("src/tgw/ebay/sync.py", "enqueue_post_push_sync", "ebay_sync", "migrate"),
     ("src/tgw/workers/ebay_dole.py", "handle", "ebay_publish", "migrate"),
     ("src/tgw/workers/ebay_dole.py", "run", "ebay_dole", "scheduler-timer"),
     ("src/tgw/workers/ebay_dole.py", "_reschedule", "ebay_dole", "scheduler-timer"),
@@ -132,12 +129,7 @@ PHASE3_SUCCESSOR_INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     ("src/tgw/http_server.py", "_maybe_early_identify", "ai_identify", "entrypoint-authority"),
     ("src/tgw/http_server.py", "_maybe_session_complete_identify", "ai_identify", "entrypoint-authority"),
     ("src/tgw/http_server.py", "apply_revision", "ebay_sync", "entrypoint-authority"),
-    ("src/tgw/http_server.py", "item_action", "ai_identify", "entrypoint-authority"),
-    ("src/tgw/http_server.py", "item_action", "ebay_draft", "entrypoint-authority"),
-    ("src/tgw/http_server.py", "item_action", "ebay_price", "entrypoint-authority"),
     ("src/tgw/http_server.py", "item_action", "ebay_upload", "entrypoint-authority"),
-    ("src/tgw/http_server.py", "item_action", "ebay_stage", "entrypoint-authority"),
-    ("src/tgw/http_server.py", "item_action", "ebay_publish", "entrypoint-authority"),
     ("src/tgw/http_server.py", "item_action", "ebay_sync", "entrypoint-authority"),
 )
 

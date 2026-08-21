@@ -250,6 +250,33 @@ def test_public_installer_refuses_missing_or_mismatched_admission(tmp_path: Path
     result = subprocess.run(command, text=True, capture_output=True, env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")})
     assert result.returncode != 0
     assert not (tmp_path / "root" / "current").exists()
+    refusal = json.loads((tmp_path / "root/refusals/candidate.json").read_text())
+    assert refusal["reasons"] == ["missing-admission-evidence"]
+
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text("not-json\n")
+    key = tmp_path / "public.key"
+    key.write_bytes(b"0" * 32)
+    invalid_command = [
+        *("malformed-admission" if value == "candidate" else value for value in command),
+        "--admission-receipt", str(malformed),
+        "--environment-preflight-receipt", str(malformed),
+        "--admission-public-key", str(key),
+        "--environment-public-key", str(key),
+        "--current-plan-commit", COMMIT_A,
+        "--current-solution-hash", "sha256:" + "d" * 64,
+    ]
+    invalid = subprocess.run(
+        invalid_command,
+        text=True,
+        capture_output=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")},
+    )
+    assert invalid.returncode != 0
+    invalid_refusal = json.loads(
+        (tmp_path / "root/refusals/malformed-admission.json").read_text()
+    )
+    assert invalid_refusal["reasons"] == ["invalid-admission-evidence"]
 
 
 @pytest.mark.parametrize("unsafe", ["../escape", "/absolute"])

@@ -159,6 +159,63 @@ def build_item_action_card(
         condition for condition, result in graph.explicit_requirements
         if result in {FingerprintResult.UNKNOWN, FingerprintResult.CONTRADICTORY}
     )
+    exact_operator_gates = sorted(set(operator_gates))
+    fingerprint_results = {
+        item.condition_id: item.result.value for item in graph.fingerprints
+    }
+    active = bool(active_keys)
+    published = fingerprint_results.get("published") == FingerprintResult.TRUE.value
+    staged = (
+        fingerprint_results.get("staged") == FingerprintResult.TRUE.value
+        and fingerprint_results.get("staged_content_current")
+        == FingerprintResult.TRUE.value
+    )
+    if graph.reconciliation_gates or graph.ownership_conflicts:
+        operator_state = "reconciliation_required"
+    elif active:
+        operator_state = "in_progress"
+    elif published:
+        operator_state = "published"
+    elif staged:
+        operator_state = "staged"
+    elif legal_actions:
+        operator_state = "ready"
+    else:
+        operator_state = "held"
+
+    def command(enabled: bool, reason: str | None) -> dict[str, Any]:
+        return {"enabled": enabled, "reason": None if enabled else reason}
+
+    first_gate = exact_operator_gates[0] if exact_operator_gates else None
+    list_enabled = bool(legal_actions) and not active and not first_gate and not published
+    update_enabled = staged and not active and not first_gate
+    operator_projection = {
+        "state": operator_state,
+        "reasons": exact_operator_gates,
+        "commands": {
+            "save-draft": command(
+                not active,
+                "The authoritative workflow is active." if active else None,
+            ),
+            "list-item": command(
+                list_enabled,
+                (
+                    "The authoritative workflow is active." if active
+                    else first_gate
+                    or ("The provider already reports this item as published." if published
+                        else "The evaluator exposes no legal listing action.")
+                ),
+            ),
+            "update-item": command(
+                update_enabled,
+                (
+                    "The authoritative workflow is active." if active
+                    else first_gate
+                    or "The evaluator has no current provider stage to update."
+                ),
+            ),
+        },
+    }
     return {
         "schema_version": "workflow-action-card/v1",
         "entity_id": snapshot.object_id,
@@ -181,7 +238,8 @@ def build_item_action_card(
         "waiting_treatments": [asdict(item) for item in graph.waiting_treatments],
         "ownership_conflicts": [list(item) for item in graph.ownership_conflicts],
         "reconciliation_gates": list(graph.reconciliation_gates),
-        "operator_gates": sorted(set(operator_gates)),
+        "operator_gates": exact_operator_gates,
+        "operator_projection": operator_projection,
         "next_event_classes": list(graph.next_event_classes),
         "attempts": attempt_rows,
         "active_attempts": [item for item in attempt_rows if item["active"]],

@@ -116,6 +116,8 @@ def resolve_request(
     freshness: Mapping[str, Any],
     provider_registry: Mapping[str, Any],
     card_contract: Mapping[str, Any],
+    live_revisions: Mapping[str, Any],
+    recovery_status: Mapping[str, Any],
 ) -> tuple[dict[str, Any], AuthorityRequest]:
     """Resolve and compile one immutable development authority request."""
     if not isinstance(plan_commit, str) or _COMMIT.fullmatch(plan_commit) is None:
@@ -128,8 +130,40 @@ def resolve_request(
     closure_hash = solution.get("closure_hash")
     if not isinstance(solution_hash, str) or _HASH.fullmatch(solution_hash) is None or not isinstance(closure_hash, str) or _HASH.fullmatch(closure_hash) is None:
         raise DevelopmentConsoleError("approved solution hashes are invalid")
-    if freshness.get("status") != "FRESH":
+    revision_names = {
+        "plan", "capability_graph", "code_graph", "workflow", "actor_contract",
+    }
+    desired = freshness.get("desired")
+    observed = freshness.get("observed")
+    if (
+        freshness.get("status") != "FRESH"
+        or not isinstance(desired, Mapping)
+        or not isinstance(observed, Mapping)
+        or set(desired) != revision_names
+        or set(observed) != revision_names
+        or desired != observed
+        or not isinstance(live_revisions, Mapping)
+        or set(live_revisions) != revision_names
+        or any(
+            not isinstance(desired[name], Mapping)
+            or desired[name].get("source") != live_revisions[name]
+            or desired[name].get("health") != "READY"
+            for name in revision_names
+        )
+        or freshness.get("refresh", {}).get("outcome") != "HEALTHY"
+    ):
         raise DevelopmentConsoleError("development launch is held: required projections are not fresh")
+    if (
+        recovery_status.get("schema") != "tgw-w18-fleet-transition-gate/v1"
+        or recovery_status.get("status") != "ACTIVE"
+    ):
+        raise DevelopmentConsoleError(
+            "development launch is held: platform recovery or fleet transition is active"
+        )
+    if live_revisions["plan"] != plan_commit or live_revisions["code_graph"] != source_commit:
+        raise DevelopmentConsoleError(
+            "development launch is held: live Plan or source revision changed"
+        )
     if provider_registry.get("schema") != "tgw-harness-provider-registry/v1" or not isinstance(provider_registry.get("providers"), list):
         raise DevelopmentConsoleError("harness provider registry is unavailable")
     provider_registry_hash = _hash(provider_registry)

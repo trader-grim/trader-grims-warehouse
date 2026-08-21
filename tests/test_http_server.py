@@ -35,6 +35,7 @@ import pytest
 httpx = pytest.importorskip("httpx", reason="httpx is required by fastapi.testclient.TestClient")
 
 from fastapi.testclient import TestClient  # noqa: E402
+from starlette.requests import Request  # noqa: E402
 
 from tgw import http_server, inventory_record  # noqa: E402
 from tgw.ebay import draft_specifics  # noqa: E402
@@ -47,6 +48,22 @@ WORKER_HEADERS = {
     "Authorization": f"Bearer {MACHINE_API_KEY}",
     "X-TGW-Caller": "background:worker:test",
 }
+
+
+def _published_command_patch(sku, fields, operator_identity="operator:test"):
+    """Exercise the generic patch only through its in-process command cap."""
+    return http_server.patch_item(
+        sku,
+        http_server.PatchBody(fields=fields),
+        Request({
+            "type": "http",
+            "headers": [],
+            "_tgw_operator_object_capability": (
+                http_server._OPERATOR_OBJECT_CAPABILITY
+            ),
+        }),
+        operator_identity,
+    )
 
 
 def _login(client):
@@ -844,13 +861,11 @@ def test_patch_rejects_invalid_condition_enum(env, enqueue_calls):
     never silently written — this is the actual bug that dead-lettered
     tgw202605051124483 at ebay_stage ("Could not serialize field
     [condition]")."""
-    r = env["client"].patch(
-        f"/api/items/{SKU_A}",
-        json={"fields": {"draft_listing": {"condition_enum": "Very Good"}}},
-        headers=WORKER_HEADERS,
+    r = _published_command_patch(
+        SKU_A, {"draft_listing": {"condition_enum": "Very Good"}},
     )
     assert r.status_code == 422
-    body = r.json()
+    body = json.loads(r.body)
     assert body["ok"] is False
     assert body["field"] == "condition_enum"
 
@@ -860,12 +875,10 @@ def test_patch_rejects_invalid_condition_enum(env, enqueue_calls):
 
 
 def test_patch_accepts_valid_condition_enum(env, enqueue_calls):
-    r = env["client"].patch(
-        f"/api/items/{SKU_A}",
-        json={"fields": {"draft_listing": {"condition_enum": "USED_VERY_GOOD"}}},
-        headers=WORKER_HEADERS,
+    r = _published_command_patch(
+        SKU_A, {"draft_listing": {"condition_enum": "USED_VERY_GOOD"}},
     )
-    assert r.status_code == 200
+    assert r["ok"] is True
     doc = json.loads((env["itemdata_root"] / SKU_A / f"{SKU_A}.json").read_text(encoding="utf-8"))
     assert doc["draft_listing"]["condition_enum"] == "USED_VERY_GOOD"
 
@@ -1017,10 +1030,9 @@ def test_operator_patch_to_live_draft_requires_published_command(
     assert "item_specifics" not in doc["draft_listing"]
 
 
-def test_worker_write_to_live_draft_does_not_auto_enqueue(env, enqueue_calls):
-    """A machine write (X-TGW-Caller identifies it as a worker) must not
-    trigger the push — only genuine operator edits should (s42 regression
-    guard, still applies after the #1114 fix)."""
+def test_machine_fence_cannot_write_listing_draft_without_governed_treatment(
+    env, enqueue_calls,
+):
     sku = "tgw20260401000000010"
     _seed_live_item(env, sku)
 
@@ -1029,10 +1041,37 @@ def test_worker_write_to_live_draft_does_not_auto_enqueue(env, enqueue_calls):
         json={"fields": {"draft_listing": {"title": "Worker-written title"}}},
         headers={**WORKER_HEADERS, "X-TGW-Caller": "background:worker:ebay_draft"},
     )
-    assert r.status_code == 200
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "operator_object_command_required"
     queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
     assert "ebay_stage" not in queue_names
     assert "ebay_draft" not in queue_names
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("ebay_offer", {"offer_id": "forged"}),
+        ("ebay_listing", {"status": "Active"}),
+        ("ebay_submitted", {"offer": {"offerId": "forged"}}),
+        ("ebay_live", {"offer": {"status": "PUBLISHED"}}),
+        ("draft_listing_state", "baseline"),
+        ("status", "published"),
+    ],
+)
+def test_generic_patch_cannot_fabricate_workflow_evidence(env, field, value):
+    sku = "tgw20260401000000010"
+    _seed_live_item(env, sku)
+
+    response = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {field: value}},
+        headers=WORKER_HEADERS,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "workflow_evidence_write_required"
+    assert response.json()["detail"]["fields"] == [field]
 
 
 def test_forged_worker_header_does_not_authorize_machine_envelope(env):
@@ -1088,10 +1127,9 @@ def test_legacy_end_listing_routes_are_rejected_before_provider_effect(env, monk
         "tgw.apis.ebay.client.ebay_post",
         lambda *_args, **_kwargs: effects.append("inventory-withdraw"),
     )
-    monkeypatch.setattr(
-        "tgw.apis.ebay.trading.end_item",
-        lambda *_args, **_kwargs: effects.append("trading-end"),
-    )
+    from tgw.apis.ebay import trading
+
+    assert not hasattr(trading, "end_item")
     direct = env["client"].post(
         f"/api/items/{sku}/action", json={"action": "ebay_end_listing"}, headers=AUTH_HEADERS,
     )
@@ -1180,12 +1218,10 @@ def test_worker_edit_to_not_yet_live_draft_does_not_auto_enqueue(env, enqueue_ca
             "draft_listing": {"title": "Draft Widget"},
         },
     )
-    r = env["client"].patch(
-        f"/api/items/{sku}",
-        json={"fields": {"draft_listing": {"title": "Draft Widget v2"}}},
-        headers=WORKER_HEADERS,
+    r = _published_command_patch(
+        sku, {"draft_listing": {"title": "Draft Widget v2"}},
     )
-    assert r.status_code == 200
+    assert r["ok"] is True
     queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
     assert "ebay_stage" not in queue_names
     assert "ebay_draft" not in queue_names
@@ -1243,12 +1279,10 @@ def test_saveebaydraft_shaped_patch_routes_item_specifics_through_accessor(
         },
     )
 
-    r = env["client"].patch(
-        f"/api/items/{sku}",
-        json={"fields": {"draft_listing": {"item_specifics": {"Type": "Brooch"}}}},
-        headers=WORKER_HEADERS,
+    r = _published_command_patch(
+        sku, {"draft_listing": {"item_specifics": {"Type": "Brooch"}}},
     )
-    assert r.status_code == 200
+    assert r["ok"] is True
 
     doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
     assert draft_specifics.get_ebay_aspects(doc)["Type"] == "Brooch"
@@ -1483,17 +1517,20 @@ def test_bulk_action_ai_identify_enqueues(env, enqueue_calls):
     r = client.post("/api/bulk/action", headers=AUTH_HEADERS, json={"skus": [SKU_A, SKU_B], "action": "ai_identify"})
     assert r.status_code == 200
     body = r.json()
-    assert body["ok"] is True
-    assert body["count"] == 2
-    assert set(body["queued"]) == {SKU_A, SKU_B}
-    # ai_reidentify flag written for each
+    # The evaluator refuses SKU_A because it has no photos; bulk fanout may
+    # not fabricate eligibility merely because the operator selected it.
+    assert body["ok"] is False
+    assert body["count"] == 1
+    assert body["queued"] == [SKU_B]
+    assert body["errors"] and body["errors"][0].startswith(f"{SKU_A}:")
+    # Pending intent is durable for each requested SKU, including a held one.
     itemdata_root = env["itemdata_root"]
     for sku in (SKU_A, SKU_B):
         doc = json.loads((itemdata_root / sku / f"{sku}.json").read_text())
         assert doc.get("ai_reidentify") is True
     # jobs enqueued
     queued_names = [c["kwargs"]["queue_name"] for c in enqueue_calls]
-    assert queued_names.count("ai_identify") == 2
+    assert queued_names.count("ai_identify") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -4607,8 +4644,8 @@ def test_patch_allows_envelope_item_attributes_from_machine_caller(env):
     assert doc["item_attributes"]["fields"] == {"Type": "Brooch"}
 
 
-def test_patch_allows_bare_partial_item_specifics_from_machine_caller(env):
-    """A fenced machine write may persist a bare partial aspects mapping."""
+def test_patch_refuses_bare_partial_item_specifics_from_machine_caller(env):
+    """Machine transport cannot bypass the published draft command."""
     sku = "tgw20260615110000043"
     _write_item(
         env["itemdata_root"],
@@ -4625,9 +4662,10 @@ def test_patch_allows_bare_partial_item_specifics_from_machine_caller(env):
         json={"fields": {"draft_listing": {"item_specifics": {"Material": ""}}}},
         headers=WORKER_HEADERS,
     )
-    assert r.status_code == 200
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "operator_object_command_required"
     doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
-    assert doc["draft_listing"]["item_specifics"]["fields"]["Material"] == ""
+    assert doc["draft_listing"]["item_specifics"] == {"Material": "Silver"}
 
 
 # ---------------------------------------------------------------------------
@@ -4837,12 +4875,10 @@ def test_draft_save_auto_syncs_unlocked_key_to_inventory_record(env, enqueue_cal
             "draft_listing": {"title": "Elephant Widget", "item_specifics": {"Type": "Elephant Figurine"}},
         },
     )
-    r = env["client"].patch(
-        f"/api/items/{sku}",
-        json={"fields": {"draft_listing": {"item_specifics": {"Type": "Mouse Figurine"}}}},
-        headers=WORKER_HEADERS,
+    r = _published_command_patch(
+        sku, {"draft_listing": {"item_specifics": {"Type": "Mouse Figurine"}}},
     )
-    assert r.status_code == 200
+    assert r["ok"] is True
     doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
     ia = inventory_record.get_inventory_fields(doc)
     assert ia["Type"] == "Mouse Figurine"
@@ -4865,19 +4901,14 @@ def test_draft_save_auto_syncs_title_and_description_top_level(env, enqueue_call
             "draft_listing": {"title": "Elephant Thimble", "description": "An elephant."},
         },
     )
-    r = env["client"].patch(
-        f"/api/items/{sku}",
-        json={
-            "fields": {
-                "draft_listing": {
-                    "title": "Mouse Thimble",
-                    "description": "A mouse.",
-                }
-            }
-        },
-        headers=WORKER_HEADERS,
+    r = _published_command_patch(
+        sku,
+        {"draft_listing": {
+            "title": "Mouse Thimble",
+            "description": "A mouse.",
+        }},
     )
-    assert r.status_code == 200
+    assert r["ok"] is True
     doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
     assert doc["title"] == "Mouse Thimble"
     assert doc["description"] == "A mouse."
@@ -4898,12 +4929,10 @@ def test_locked_title_does_not_auto_sync_from_draft_save(env, enqueue_calls):
             "draft_listing": {"title": "Elephant Thimble"},
         },
     )
-    r = env["client"].patch(
-        f"/api/items/{sku}",
-        json={"fields": {"draft_listing": {"title": "Mouse Thimble"}}},
-        headers=WORKER_HEADERS,
+    r = _published_command_patch(
+        sku, {"draft_listing": {"title": "Mouse Thimble"}},
     )
-    assert r.status_code == 200
+    assert r["ok"] is True
     doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
     assert doc["draft_listing"]["title"] == "Mouse Thimble"
     assert doc["title"] == "Elephant Thimble"
@@ -4931,12 +4960,10 @@ def test_locked_key_does_not_auto_sync_from_draft_save(env, enqueue_calls):
             "draft_listing": {"item_specifics": {"Type": "Brooch"}},
         },
     )
-    r = env["client"].patch(
-        f"/api/items/{sku}",
-        json={"fields": {"draft_listing": {"item_specifics": {"Type": "Pendant"}}}},
-        headers=WORKER_HEADERS,
+    r = _published_command_patch(
+        sku, {"draft_listing": {"item_specifics": {"Type": "Pendant"}}},
     )
-    assert r.status_code == 200
+    assert r["ok"] is True
     doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())
     # Set B (the actual eBay draft) still updates normally...
     assert draft_specifics.get_ebay_aspects(doc)["Type"] == "Pendant"
@@ -5522,8 +5549,8 @@ def test_every_http_sku_enqueue_uses_canonical_item_identity():
     assert missing == []
 
 
-def test_provider_effect_item_queues_have_one_http_dispatch_authority():
-    """No bulk, retry, or patch endpoint may bypass item_action authority."""
+def test_provider_effect_item_queues_have_no_direct_http_dispatch_authority():
+    """HTTP surfaces dispatch listing effects only through the evaluator."""
     source_path = Path(http_server.__file__)
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
     direct = []
@@ -5549,8 +5576,7 @@ def test_provider_effect_item_queues_have_one_http_dispatch_authority():
             self.generic_visit(node)
 
     Visitor().visit(tree)
-    assert direct
-    assert {function for function, _, _ in direct} == {"item_action"}
+    assert direct == []
 
 
 def test_cancel_job_requires_auth(client):
@@ -7325,21 +7351,17 @@ def test_c14_patch_item_aspects_form_clear_roundtrip(env):
     client = env["client"]
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
 
-    r = client.patch(
-        f"/api/items/{SKU_A}",
-        json={"fields": {"draft_listing": {"item_specifics": {"Material": "Silver"}}}},
-        headers=WORKER_HEADERS,
+    r = _published_command_patch(
+        SKU_A, {"draft_listing": {"item_specifics": {"Material": "Silver"}}},
     )
-    assert r.status_code == 200
+    assert r["ok"] is True
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     assert draft_specifics.get_ebay_aspects(doc)["Material"] == "Silver"
 
-    r = client.patch(
-        f"/api/items/{SKU_A}",
-        json={"fields": {"draft_listing": {"item_specifics": {"Material": ""}}}},
-        headers=WORKER_HEADERS,
+    r = _published_command_patch(
+        SKU_A, {"draft_listing": {"item_specifics": {"Material": ""}}},
     )
-    assert r.status_code == 200
+    assert r["ok"] is True
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     assert draft_specifics.get_ebay_aspects(doc)["Material"] == "", (
         "operator cleared the Material aspect via the aspects form and the save reported ok, but the cleared value was not actually persisted — the exact 2026-07-16 live incident, invariant C14"
@@ -7427,8 +7449,8 @@ def test_c14_locked_top_level_field_clear_survives_unrelated_draft_save(env):
     assert doc["description"] == ""
 
     # Unrelated draft_listing save (e.g. a price edit via the aspects form).
-    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"draft_listing": {"price": 12.34}}}, headers=WORKER_HEADERS)
-    assert r.status_code == 200
+    r = _published_command_patch(SKU_A, {"draft_listing": {"price": 12.34}})
+    assert r["ok"] is True
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     assert doc["description"] == "", "a LOCKED top-level field's clear should survive an unrelated draft_listing save — if this fails, the padlock mitigation itself has regressed"
 
@@ -7458,8 +7480,8 @@ def test_c14_unlocked_description_clear_reverted_by_unrelated_draft_save(env):
 
     # Later, the operator saves an unrelated field on the aspects form
     # (e.g. price) — any draft_listing PATCH triggers the padlock sync.
-    r = client.patch(f"/api/items/{SKU_A}", json={"fields": {"draft_listing": {"price": 12.34}}}, headers=WORKER_HEADERS)
-    assert r.status_code == 200
+    r = _published_command_patch(SKU_A, {"draft_listing": {"price": 12.34}})
+    assert r["ok"] is True
     doc = json.loads(json_path.read_text(encoding="utf-8"))
     assert doc["description"] == "", "operator's cleared 'description' was silently restored to the stale draft_listing.description value by the next unrelated draft_listing save — invariant C14"
 

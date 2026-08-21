@@ -58,22 +58,11 @@ def test_workflow_decision_uses_authoritative_snapshot_and_skips_satisfied(tmp_p
     assert pending.graph_id != satisfied.graph_id
 
 
-def test_legacy_rollback_is_exact_and_workflow_difference_is_generation_binding(tmp_path, monkeypatch):
+def test_default_workflow_dispatch_is_generation_bound(tmp_path, monkeypatch):
     _item(tmp_path, 'A')
     calls = _capture(monkeypatch)
     _worker(tmp_path)._enqueue_downstream('A')
-    legacy = list(calls)
-    assert legacy[2][2] == {
-        'queue_name': 'ai_identify', 'payload': {'sku': 'A'},
-        'entity_type': 'item', 'entity_id': 'A',
-        'dedupe_key': 'ai_identify:A', 'max_attempts': 3,
-    }
-    calls.clear()
-    _worker(tmp_path, 'workflow')._enqueue_downstream('A')
     assert [call[0] for call in calls] == ['catalog_rebuild', 'thumbnail_gen', 'ai_identify']
-    # Retained derived invalidations remain exact; the AI seam intentionally
-    # changes to graph/generation-bound scheduler dispatch.
-    assert calls[:2] == legacy[:2]
     assert calls[1][2] == {
         'queue_name': 'thumbnail_gen', 'payload': {'sku': 'A'},
         'entity_type': 'item', 'entity_id': 'A',
@@ -93,7 +82,7 @@ def test_legacy_rollback_is_exact_and_workflow_difference_is_generation_binding(
     assert workflow['payload']['object_generation']
     assert workflow['payload']['condition_hash']
     assert workflow['payload']['fingerprints']
-    assert workflow != legacy[2][2]
+    assert workflow['payload'] != {'sku': 'A'}
 
 
 def test_workflow_satisfied_retains_only_derived_invalidations(tmp_path, monkeypatch):
@@ -134,14 +123,17 @@ def test_workflow_dispatch_failure_is_truthful_but_dedupe_is_success(tmp_path, m
     _worker(tmp_path, 'workflow')._enqueue_downstream('A')
 
 
-def test_selector_is_fail_closed_and_legacy_is_rollback_default(tmp_path, monkeypatch):
+def test_selector_is_fail_closed_and_workflow_is_default(tmp_path, monkeypatch):
     _item(tmp_path, 'A', ebay_category_id='12345')
     calls = _capture(monkeypatch)
-    with pytest.raises(bundle_intake.HardFailure, match='legacy.*workflow'):
+    with pytest.raises(bundle_intake.HardFailure, match='workflow'):
         _worker(tmp_path, 'dual')._enqueue_downstream('A')
     assert calls == []
+    with pytest.raises(bundle_intake.HardFailure, match='workflow'):
+        _worker(tmp_path, 'legacy')._enqueue_downstream('A')
+    assert calls == []
     _worker(tmp_path)._enqueue_downstream('A')
-    assert [call[0] for call in calls] == ['catalog_rebuild', 'thumbnail_gen', 'ai_identify']
+    assert [call[0] for call in calls] == ['catalog_rebuild', 'thumbnail_gen']
 
 
 def test_selector_reads_normalized_config_raw_block(tmp_path, monkeypatch):

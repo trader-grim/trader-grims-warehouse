@@ -75,8 +75,8 @@ class EbayStageWorker(QueueWorker):
         if migration is None and isinstance(self.config.get('raw'), dict):
             migration = self.config['raw'].get('workflow_migration')
         migration = migration if isinstance(migration, dict) else {}
-        mode = migration.get('ebay_stage_provider_effect', 'legacy')
-        if mode not in {'legacy', 'workflow'}:
+        mode = migration.get('ebay_stage_provider_effect', 'workflow')
+        if mode != 'workflow':
             raise HardFailure(
                 f'invalid workflow_migration.ebay_stage_provider_effect mode {mode!r}'
             )

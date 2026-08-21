@@ -259,8 +259,6 @@ def build_item_operator_object(
     draft = item.get("draft_listing") if isinstance(item.get("draft_listing"), Mapping) else {}
     listing_status = str(provider_listing.get("status") or "")
     offer_status = str(offer.get("status") or "")
-    is_published = listing_status.lower() == "active" or offer_status.upper() == "PUBLISHED"
-
     conditions = []
     for condition in context.get("conditions", ()):
         if not isinstance(condition, Mapping):
@@ -300,44 +298,38 @@ def build_item_operator_object(
     if missing_aspects:
         validation_messages.append("Required aspects are missing: " + ", ".join(sorted(missing_aspects)))
 
-    reconciliation = list(workflow_card.get("reconciliation_gates") or ())
-    conflicts = list(workflow_card.get("ownership_conflicts") or ())
-    active = list(workflow_card.get("active_attempts") or ())
-    blockers = [str(value) for value in reconciliation]
-    blockers.extend("ownership conflict: " + ", ".join(map(str, value)) for value in conflicts)
-    blockers.extend(validation_messages)
+    operator_projection = _mapping(
+        workflow_card.get("operator_projection"),
+        "workflow_card.operator_projection",
+    )
+    state = operator_projection.get("state")
+    if state not in {
+        "reconciliation_required", "in_progress", "published", "staged",
+        "ready", "held",
+    }:
+        raise OperatorObjectBindingError("operator projection state is invalid")
+    projection_reasons = _string_list(
+        operator_projection.get("reasons", ()),
+        "workflow_card.operator_projection.reasons",
+    )
+    projected_commands = _mapping(
+        operator_projection.get("commands"),
+        "workflow_card.operator_projection.commands",
+    )
+    if set(projected_commands) != {"save-draft", "list-item", "update-item"}:
+        raise OperatorObjectBindingError("operator projection commands are incomplete")
 
-    if reconciliation or conflicts:
-        state = "reconciliation_required"
-    elif active:
-        state = "in_progress"
-    elif is_published:
-        state = "published"
-    elif offer.get("offer_id"):
-        state = "staged"
-    elif validation_messages:
-        state = "held"
-    else:
-        state = "ready"
-
-    list_enabled = not blockers and not active and not is_published
-    update_enabled = bool(draft and (offer.get("offer_id") or provider_listing.get("listing_id"))) and not blockers and not active
-    list_reason = None
-    if is_published:
-        list_reason = "The provider already reports this item as published."
-    elif active:
-        list_reason = "The authoritative workflow is already running."
-    elif blockers:
-        list_reason = blockers[0]
-    update_reason = None
-    if active:
-        update_reason = "The authoritative workflow is already running."
-    elif blockers:
-        update_reason = blockers[0]
-    elif not draft:
-        update_reason = "No listing draft exists."
-    elif not (offer.get("offer_id") or provider_listing.get("listing_id")):
-        update_reason = "The item has not been staged at the provider."
+    def projected_command(command_id: str) -> tuple[bool, str | None]:
+        value = _mapping(
+            projected_commands[command_id],
+            f"workflow_card.operator_projection.commands.{command_id}",
+        )
+        if set(value) != {"enabled", "reason"} or not isinstance(value["enabled"], bool):
+            raise OperatorObjectBindingError("operator projection command is invalid")
+        reason = value["reason"]
+        if reason is not None and (not isinstance(reason, str) or not reason):
+            raise OperatorObjectBindingError("operator projection command reason is invalid")
+        return value["enabled"], reason
 
     evidence = []
     for fingerprint in workflow_card.get("fingerprints", ()):
@@ -365,7 +357,7 @@ def build_item_operator_object(
         "entity_id": entity_id,
         "object_generation": generation,
         "state": state,
-        "reasons": blockers,
+        "reasons": projection_reasons,
         "evidence": sorted(set(evidence)),
         "graph_id": workflow_card.get("graph_id"),
         "details": deepcopy(dict(workflow_card)),
@@ -467,22 +459,22 @@ def build_item_operator_object(
         commands=(
             {
                 "id": "save-draft",
-                "enabled": not active,
-                "reason": "The authoritative workflow is active." if active else None,
+                "enabled": projected_command("save-draft")[0],
+                "reason": projected_command("save-draft")[1],
                 "authority_scope": "local-item-mutation",
                 "input_schema": save_input_schema,
             },
             {
                 "id": "list-item",
-                "enabled": list_enabled,
-                "reason": list_reason,
+                "enabled": projected_command("list-item")[0],
+                "reason": projected_command("list-item")[1],
                 "authority_scope": "publication",
                 "input_schema": command_input_schema,
             },
             {
                 "id": "update-item",
-                "enabled": update_enabled,
-                "reason": update_reason,
+                "enabled": projected_command("update-item")[0],
+                "reason": projected_command("update-item")[1],
                 "authority_scope": "update-restage",
                 "input_schema": command_input_schema,
             },

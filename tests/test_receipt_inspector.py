@@ -33,9 +33,13 @@ def test_list_and_show_verify_claimed_receipt_hash(tmp_path):
     listed = list_receipts(_config(tmp_path), root_id="fleet")
     assert listed["receipts"] == [{
         "id": "one", "schema": "example/v1", "status": "PASS",
+        "status_semantics": "UNTRUSTED_REPORTED_FIELD",
         "content_sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
         "claimed_receipt_hash": receipt["receipt_hash"],
         "receipt_hash_valid": True,
+        "signature_authority_verified": False,
+        "current_state_verified": False,
+        "admission_authority": False,
     }]
     shown = inspect_receipt(_config(tmp_path), root_id="fleet", receipt_id="one")
     assert shown["receipt"] == receipt
@@ -48,6 +52,8 @@ def test_forged_hash_is_reported_without_trusting_status(tmp_path):
     summary = list_receipts(_config(tmp_path), root_id="fleet")["receipts"][0]
     assert summary["status"] == "PASS"
     assert summary["receipt_hash_valid"] is False
+    assert summary["status_semantics"] == "UNTRUSTED_REPORTED_FIELD"
+    assert summary["admission_authority"] is False
 
 
 def test_unregistered_traversal_symlink_and_tmp_roots_fail_closed(tmp_path):

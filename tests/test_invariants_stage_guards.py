@@ -13,10 +13,12 @@ Worker built via object.__new__ to skip the DB-touching __init__
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 import tgw.workers.ebay_stage as ebay_stage
+import tgw.provider_effects as provider_effects
 from tgw.queue.worker_base import HardFailure, classify_dead_letter
 
 
@@ -36,18 +38,36 @@ def stage(tmp_path, monkeypatch):
         return {'offer_id': 'OFF-NEW', 'status': 'UNPUBLISHED', 'inventory_item': {}}
 
     monkeypatch.setattr(ebay_stage, 'stage_draft', fake_stage_draft)
+    monkeypatch.setattr(ebay_stage, 'enqueue_post_push_sync', lambda *a, **k: True)
+    monkeypatch.setattr(
+        provider_effects, 'reserve_and_begin_authorized_effect',
+        lambda **kwargs: SimpleNamespace(
+            effect_id='test-stage-effect', state='dispatched', result=None),
+    )
+    monkeypatch.setattr(
+        provider_effects, 'finish_provider_effect',
+        lambda effect_id, **kwargs: SimpleNamespace(
+            effect_id=effect_id, state=kwargs['state'], result=kwargs.get('result')),
+    )
 
     worker = object.__new__(ebay_stage.EbayStageWorker)
     from tests.conftest import make_fake_fence_write, make_fake_patch_item
     monkeypatch.setattr(ebay_stage, 'fence_ebay_write', make_fake_fence_write(tmp_path))
     monkeypatch.setattr(ebay_stage, 'fence_patch_item', make_fake_patch_item(tmp_path))
-    worker.config = {'itemdata_root': tmp_path, 'pretty': False, 'api_key': 'test-api-key'}
+    worker.config = {
+        'itemdata_root': tmp_path, 'pretty': False, 'api_key': 'test-api-key',
+        'workflow_migration': {
+            'ebay_stage_provider_effect': 'workflow',
+            'ebay_provider_identity': 'test-seller',
+        },
+    }
     worker._staged = calls
     worker._enqueued = enqueued
     return worker
 
 
 def _write(tmp_path, sku, item):
+    item = {'sku': sku, **item}
     d = tmp_path / sku
     d.mkdir(parents=True)
     path = d / f'{sku}.json'
@@ -68,8 +88,16 @@ def _ready_item(**extra):
     return item
 
 
-def _run(worker, sku):
-    worker.handle({'payload_json': {'sku': sku}})
+def _job(worker, sku, **payload_extra):
+    from tests.conftest import make_governed_ebay_job
+    return make_governed_ebay_job(
+        worker.config['itemdata_root'], sku,
+        treatment_id='ebay-stage', **payload_extra,
+    )
+
+
+def _run(worker, sku, **payload_extra):
+    return worker.handle(_job(worker, sku, **payload_extra))
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +108,9 @@ def test_active_listing_never_staged(stage, tmp_path):
     item = _ready_item(ebay_listing={'status': 'Active', 'listing_id': '110001'})
     path = _write(tmp_path, 'tgw1', item)
     before = path.read_text()
-    _run(stage, 'tgw1')
+    with pytest.raises(ebay_stage.TreatmentFailure) as caught:
+        _run(stage, 'tgw1')
+    assert caught.value.result['evidence']['reason_code'] == 'ACTIVE_LISTING_REQUIRES_FORCE'
     assert stage._staged == []
     assert path.read_text() == before   # skip writes nothing
 
@@ -98,11 +128,18 @@ def test_resolved_legacy_listing_may_stage(stage, tmp_path):
     assert stage._staged == ['tgw3']
 
 
-def test_existing_offer_skips_idempotently(stage, tmp_path):
+def test_existing_offer_without_bound_effect_requires_reconciliation(stage, tmp_path, monkeypatch):
     item = _ready_item()
     item['ebay_offer']['offer_id'] = 'OFF-EXISTING'
     _write(tmp_path, 'tgw4', item)
-    _run(stage, 'tgw4')
+    monkeypatch.setattr(
+        provider_effects, 'validate_succeeded_authorized_effect',
+        lambda **kwargs: (_ for _ in ()).throw(
+            provider_effects.ProviderEffectConflict('missing bound effect')),
+    )
+    with pytest.raises(ebay_stage.TreatmentFailure) as caught:
+        _run(stage, 'tgw4')
+    assert caught.value.result['evidence']['reason_code'] == 'PROVIDER_EFFECT_REPLAY_INVALID'
     assert stage._staged == []
 
 
@@ -176,7 +213,7 @@ def test_successful_stage_is_unpublished_and_preserves_comps(stage, tmp_path):
 def _run_force(worker, sku, **extra_payload):
     # operator origin by default — C9 blocks operator-less force on live items
     payload = {'sku': sku, 'force': True, 'origin': 'operator', **extra_payload}
-    worker.handle({'payload_json': payload})
+    worker.handle(_job(worker, sku, **{key: value for key, value in payload.items() if key != 'sku'}))
 
 
 def _live_item(draft_price, offer_price):
@@ -232,7 +269,9 @@ def test_nonforce_unpublished_stage_not_clamped(stage, tmp_path):
 def test_force_on_live_listing_without_operator_origin_is_blocked(stage, tmp_path):
     path = _write(tmp_path, 'tgw14', _live_item(draft_price=9.99, offer_price=9.99))
     before = path.read_text()
-    stage.handle({'payload_json': {'sku': 'tgw14', 'force': True}})
+    with pytest.raises(ebay_stage.TreatmentFailure) as caught:
+        _run(stage, 'tgw14', force=True)
+    assert caught.value.result['evidence']['reason_code'] == 'OPERATOR_ORIGIN_REQUIRED'
     assert stage._staged == []               # refused — no PUT
     assert path.read_text() == before        # and nothing written
 
@@ -243,7 +282,7 @@ def test_force_on_unpublished_offer_passes_without_origin(stage, tmp_path):
     item = _ready_item()
     item['ebay_offer'].update({'offer_id': 'OFF-2', 'status': 'UNPUBLISHED'})
     _write(tmp_path, 'tgw15', item)
-    stage.handle({'payload_json': {'sku': 'tgw15', 'force': True}})
+    _run(stage, 'tgw15', force=True)
     assert stage._staged == ['tgw15']
 
 
@@ -263,7 +302,7 @@ def test_legacy_skip_persists_durably_even_without_operator_origin(stage, tmp_pa
     """The core data-loss fix: a legacy skip must land in the item JSON, not
     just journald — regardless of whether a duplicate check was attempted."""
     _write(tmp_path, 'tgw20', _legacy_item())
-    stage.handle({'payload_json': {'sku': 'tgw20', 'force': True, 'origin': 'operator'}})
+    _run(stage, 'tgw20', force=True, origin='operator')
     after = json.loads((tmp_path / 'tgw20' / 'tgw20.json').read_text(encoding='utf-8'))
     assert after['legacy_listing_blocked']['item_number'] == '110000012345'
     assert after['legacy_listing_blocked']['listing_id'] == '226700000001'
@@ -279,7 +318,7 @@ def test_legacy_duplicate_check_only_attempted_with_operator_origin(stage, tmp_p
                         lambda cfg, sku, listing_id: check_calls.append(sku) or {'ok': True, 'match': True})
 
     _write(tmp_path, 'tgw21', _legacy_item())
-    stage.handle({'payload_json': {'sku': 'tgw21', 'force': True}})  # no origin
+    _run(stage, 'tgw21', force=True)  # no origin
     assert check_calls == []
     after = json.loads((tmp_path / 'tgw21' / 'tgw21.json').read_text(encoding='utf-8'))
     assert after['legacy_listing_blocked']['duplicate_check'] is None
@@ -297,7 +336,7 @@ def test_legacy_confirmed_not_duplicate_resolves_and_falls_through(stage, tmp_pa
                             'inventory_listing_id': listing_id, 'inventory_status': 'ACTIVE'})
 
     _write(tmp_path, 'tgw22', _legacy_item())
-    stage.handle({'payload_json': {'sku': 'tgw22', 'force': True, 'origin': 'operator'}})
+    _run(stage, 'tgw22', force=True, origin='operator')
     assert stage._staged == ['tgw22']   # fell through to stage_draft
     after = json.loads((tmp_path / 'tgw22' / 'tgw22.json').read_text(encoding='utf-8'))
     assert after['legacy_listing_resolved'] is True
@@ -316,7 +355,7 @@ def test_legacy_duplicate_risk_never_resolves(stage, tmp_path, monkeypatch):
                             'reason': 'no published Inventory API offer found for this SKU'})
 
     _write(tmp_path, 'tgw23', _legacy_item())
-    stage.handle({'payload_json': {'sku': 'tgw23', 'force': True, 'origin': 'operator'}})
+    _run(stage, 'tgw23', force=True, origin='operator')
     assert stage._staged == []
     after = json.loads((tmp_path / 'tgw23' / 'tgw23.json').read_text(encoding='utf-8'))
     assert 'legacy_listing_resolved' not in after
@@ -331,7 +370,7 @@ def test_legacy_duplicate_check_fetch_error_never_resolves(stage, tmp_path, monk
                         lambda cfg, sku, listing_id: {'ok': False, 'error': 'timeout'})
 
     _write(tmp_path, 'tgw24', _legacy_item())
-    stage.handle({'payload_json': {'sku': 'tgw24', 'force': True, 'origin': 'operator'}})
+    _run(stage, 'tgw24', force=True, origin='operator')
     assert stage._staged == []
     after = json.loads((tmp_path / 'tgw24' / 'tgw24.json').read_text(encoding='utf-8'))
     assert 'legacy_listing_resolved' not in after
@@ -362,7 +401,7 @@ def test_operator_list_without_price_hard_fails_with_finding(stage, tmp_path, mo
     item['ebay_offer']['price'] = 40.99
     _write(tmp_path, 'tgw9s45', item)
     with pytest.raises(HardFailure, match='no price set in draft_listing'):
-        stage.handle({'payload_json': {'sku': 'tgw9s45', 'origin': 'operator'}})
+        _run(stage, 'tgw9s45', origin='operator')
     assert stage._staged == []
     assert patched and patched[0][1]['pipeline_error']['code'] == 'no_price_set'
 

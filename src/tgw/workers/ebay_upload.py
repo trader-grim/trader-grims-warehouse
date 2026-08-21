@@ -140,12 +140,12 @@ class EbayUploadWorker(QueueWorker):
             migration = self.config['raw'].get('workflow_migration')
         if migration is None:
             migration = {}
-        mode = migration.get('ebay_upload_quota_timer', 'legacy') \
-            if isinstance(migration, dict) else 'legacy'
-        if mode not in {'legacy', 'workflow'}:
+        mode = migration.get('ebay_upload_quota_timer', 'workflow') \
+            if isinstance(migration, dict) else 'workflow'
+        if mode != 'workflow':
             raise HardFailure(
                 f"invalid workflow_migration.ebay_upload_quota_timer mode {mode!r}; "
-                "expected 'legacy' or 'workflow'"
+                "expected 'workflow'"
             )
         return mode
 
@@ -154,8 +154,8 @@ class EbayUploadWorker(QueueWorker):
         if migration is None and isinstance(self.config.get('raw'), dict):
             migration = self.config['raw'].get('workflow_migration')
         migration = migration if isinstance(migration, dict) else {}
-        mode = migration.get('ebay_upload_provider_effect', 'legacy')
-        if mode not in {'legacy', 'workflow'}:
+        mode = migration.get('ebay_upload_provider_effect', 'workflow')
+        if mode != 'workflow':
             raise HardFailure(
                 f'invalid workflow_migration.ebay_upload_provider_effect mode {mode!r}'
             )
@@ -216,6 +216,10 @@ class EbayUploadWorker(QueueWorker):
             raise HardFailure('ebay_upload job missing sku in payload')
         quota_timer_mode = self._quota_timer_mode()
         provider_effect_mode = self._provider_effect_mode()
+        if provider_effect_mode == 'workflow':
+            self._require_provider_binding(payload)
+            if not self._provider_identity().strip():
+                raise HardFailure('workflow upload provider identity is not configured')
         if quota_timer_mode == 'workflow':
             required = ('treatment_id', 'treatment_version', 'graph_id',
                         'object_generation', 'condition_hash')
@@ -225,10 +229,6 @@ class EbayUploadWorker(QueueWorker):
                     'workflow quota timer missing bound identity: '
                     + ', '.join(missing)
                 )
-        if provider_effect_mode == 'workflow':
-            self._require_provider_binding(payload)
-            if not self._provider_identity().strip():
-                raise HardFailure('workflow upload provider identity is not configured')
         governed = isinstance(payload.get('treatment_id'), str)
 
         json_path = _cfg_sku_json(self.config, sku)
@@ -274,13 +274,21 @@ class EbayUploadWorker(QueueWorker):
             # transient failure worth retry/backoff churn).
             log.warning('no uploadable photos found for %s — skipping upload', sku)
             tgw_logging.log_event('ebay_upload_no_photos', sku=sku)
-            fence_patch_item(self.config, sku, {
+            response = fence_patch_item(self.config, sku, {
                 'ebay_upload_blocked': {
                     'reason': 'no_photos_on_disk',
                     'detected_at': datetime.now(timezone.utc).isoformat(),
                 },
             })
-            return
+            receipt = self._provider_receipt(
+                payload, sku, outcome='failed', effect_id='',
+                reason_code='NO_PHOTOS_ON_DISK',
+                resulting_generation=_committed_generation(response),
+            )
+            receipt['evidence']['operator_attention_required'] = True
+            raise TreatmentFailure(
+                f'{sku}: no uploadable photos on disk', receipt,
+            )
 
         expected_total = len(photos)
         to_attempt = expected_total - len(existing & {str(p) for p in photos})

@@ -19,7 +19,12 @@ from typing import Any, Callable, Mapping
 from tgw.plan_solver import validate_for_dispatch, validate_solution_integrity
 
 HANDOFF_SCHEMA = "tgw-plan-transition-handoff/v1"
+CHECKPOINT_SCHEMA = "tgw-plan-transition-checkpoint-disposition/v1"
+LIFECYCLE_SCHEMA = "tgw-w18-lifecycle-snapshot/v1"
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_CHECKPOINT_DISPOSITIONS = frozenset({
+    "continue", "quiet-checkpoint-and-restart", "terminal-reconcile", "supersede",
+})
 
 
 class PlanTransitionError(ValueError):
@@ -153,11 +158,19 @@ class PlanTransitionController:
         predecessor_materialization: DetachedMaterialization,
         successor_materialization: DetachedMaterialization,
         amendment_id: str,
+        lifecycle_snapshot: Mapping[str, Any],
+        checkpoint_disposition: str,
     ) -> dict[str, Any]:
         previous = predecessor.validate()
         next_binding = successor.validate(dispatchable=True)
         if not amendment_id or not isinstance(amendment_id, str):
             raise PlanTransitionError("stable amendment ID is required")
+        checkpoint = self._checkpoint_disposition(
+            amendment_id=amendment_id,
+            predecessor=previous,
+            lifecycle_snapshot=lifecycle_snapshot,
+            disposition=checkpoint_disposition,
+        )
         previous_materialization = self._reinspect_materialization(
             predecessor_materialization, expected_commit=predecessor.plan_commit,
             label="rollback materialization",
@@ -172,6 +185,7 @@ class PlanTransitionController:
             "amendment_id": amendment_id,
             "predecessor": {**previous, "materialization": previous_materialization.as_data()},
             "successor": {**next_binding, "materialization": next_materialization.as_data()},
+            "checkpoint_disposition": checkpoint,
             "activation_boundary": {
                 "requires_operator_direction": True,
                 "atomic_updates": ["approved_ref", "approved_materialization", "context_plan_commit", "context_solution_hash"],
@@ -193,6 +207,51 @@ class PlanTransitionController:
         }
         receipt["receipt_hash"] = _hash(receipt)
         return receipt
+
+    @staticmethod
+    def _checkpoint_disposition(
+        *, amendment_id: str, predecessor: Mapping[str, str],
+        lifecycle_snapshot: Mapping[str, Any], disposition: str,
+    ) -> dict[str, Any]:
+        """Bind every live W18 lifecycle collection into the W12 handoff.
+
+        This is a prepared transition record, so it records suspension as an
+        activation precondition rather than pretending that this non-effecting
+        module has already quiesced the live fleet.
+        """
+        if disposition not in _CHECKPOINT_DISPOSITIONS:
+            raise PlanTransitionError("checkpoint disposition is invalid")
+        if not isinstance(lifecycle_snapshot, Mapping):
+            raise PlanTransitionError("lifecycle snapshot is required")
+        snapshot = dict(lifecycle_snapshot)
+        claimed_hash = snapshot.pop("snapshot_hash", None)
+        collections = snapshot.get("collections")
+        required_collections = {
+            "live_requests", "role_leases", "rendered_surfaces", "continuations",
+        }
+        if (
+            snapshot.get("schema") != LIFECYCLE_SCHEMA
+            or snapshot.get("generation") != predecessor["solution_hash"]
+            or not isinstance(collections, Mapping)
+            or set(collections) != required_collections
+            or any(not isinstance(collections[name], list)
+                   for name in required_collections)
+            or claimed_hash != _hash(snapshot)
+        ):
+            raise PlanTransitionError("lifecycle snapshot binding is invalid")
+        unsigned = {
+            "schema": CHECKPOINT_SCHEMA,
+            "amendment_id": amendment_id,
+            "disposition": disposition,
+            "predecessor": dict(predecessor),
+            "lifecycle_snapshot": dict(lifecycle_snapshot),
+            "activation_preconditions": {
+                "affected_surfaces": "suspend-before-successor-activation",
+                "predecessor_continuations": "inert-after-cutover",
+                "new_dispatch": "quiesced-until-successor-resolution",
+            },
+        }
+        return {**unsigned, "checkpoint_hash": _hash(unsigned)}
 
     @staticmethod
     def _reinspect_materialization(

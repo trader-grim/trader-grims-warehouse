@@ -34,10 +34,11 @@ def test_payload_classifier_never_reinterprets_partial_or_unknown_schema():
         }) == "ambiguous"
 
 
-def test_producer_defaults_legacy_and_workflow_never_falls_back():
-    with patch("tgw.ebay.sync.state_machine.enqueue_job", return_value="legacy") as enqueue:
-        assert enqueue_post_push_sync("SKU-1", config={}) is True
-    assert enqueue.call_args.kwargs["payload"] == {"sku": "SKU-1", "reason": "post_push"}
+def test_producer_defaults_governed_and_never_falls_back():
+    with patch("tgw.ebay.sync.state_machine.enqueue_job") as legacy, \
+         pytest.raises(ValueError, match="binding is incomplete"):
+        enqueue_post_push_sync("SKU-1", config={})
+    legacy.assert_not_called()
     config = {"itemdata_root": "/items", "workflow_migration": {
         "ebay_post_push_sync_producer": "workflow",
         "ebay_provider_identity": "ebay:account",

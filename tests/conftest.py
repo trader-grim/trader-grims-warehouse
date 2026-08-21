@@ -101,3 +101,40 @@ def make_fake_patch_item_tmp(tmp_path):
             return {'ok': True, 'resulting_generation': item_generation(doc)}
         return {'ok': True}
     return fake_fence_patch_item
+
+
+def make_governed_ebay_job(itemdata_root, sku, *, treatment_id, **payload_extra):
+    """Construct the smallest real workflow-bound eBay worker job.
+
+    Old tests used unbound direct queue payloads.  Those are no longer a
+    production mode, so behavioral tests must exercise the same generation
+    and authority envelope as the evaluator-created job.
+    """
+    root = Path(itemdata_root)
+    from tgw.item_mutation import item_generation
+    item_path = root / sku / f'{sku}.json'
+    item = json.loads(item_path.read_text(encoding='utf-8')) if item_path.is_file() else None
+    payload = {
+        'sku': sku,
+        'entity_id': sku,
+        'object_id': sku,
+        'treatment_id': treatment_id,
+        'treatment_version': '1',
+        'graph_id': 'test-governed-graph',
+        'goal_profile_id': 'test-goal',
+        'goal_profile_version': '1',
+        'object_generation': item_generation(item) if item is not None else '0' * 64,
+        'condition_hash': 'test-condition',
+        'operator_authority_id': 'test-authority',
+        'pre_authority_condition_hash': 'test-pre-authority-condition',
+        **payload_extra,
+    }
+    return {
+        'job_id': '00000000-0000-4000-8000-000000000001',
+        'lease_token': '00000000-0000-4000-8000-000000000002',
+        'entity_type': 'item',
+        'entity_id': sku,
+        'payload_json': payload,
+        'attempt_count': 0,
+        'max_attempts': 3,
+    }

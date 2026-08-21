@@ -696,7 +696,7 @@ def test_item_action_ai_identify_workflow_uses_authenticated_goal_not_direct_fan
     assert written["ai_redraft_requested"] is True
 
 
-def test_item_action_ai_identify_defaults_to_exact_legacy_fanout(tmp_path, monkeypatch):
+def test_item_action_ai_identify_defaults_to_exact_governed_fanout(tmp_path, monkeypatch):
     root, _ = _item(tmp_path)
     monkeypatch.setattr(http_server, "_cfg", {"itemdata_root": root, "raw": {}})
     calls = []
@@ -713,16 +713,18 @@ def test_item_action_ai_identify_defaults_to_exact_legacy_fanout(tmp_path, monke
     )
 
     assert response["job_id"] == "job-legacy"
-    assert calls == [
-        {
-            "queue_name": "ai_identify",
-            "payload": {"sku": "SKU-1", "origin": "operator"},
-            "entity_type": "item",
-            "entity_id": "SKU-1",
-            "dedupe_key": "ai_identify:SKU-1",
-            "max_attempts": 3,
-        }
-    ]
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["queue_name"] == call["handler_family"] == "ai_identify"
+    assert call["entity_type"] == "item" and call["entity_id"] == "SKU-1"
+    assert call["payload"]["sku"] == call["payload"]["entity_id"] == "SKU-1"
+    assert call["payload"]["treatment_id"] == "ai-identify"
+    assert call["payload"]["origin"] == "operator"
+    assert call["payload"]["operator_identity"] == "operator:test"
+    assert call["payload"]["operator_surface"] == "http:item-action:ai-identify"
+    assert call["payload"]["graph_id"]
+    assert call["payload"]["object_generation"]
+    assert call["payload"]["condition_hash"]
 
 
 @pytest.mark.parametrize(

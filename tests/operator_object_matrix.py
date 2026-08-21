@@ -32,6 +32,20 @@ def _item(state: str) -> dict:
 
 
 def _workflow(state: str) -> dict:
+    enabled = {
+        "ready": {"save-draft", "list-item"},
+        "staged": {"save-draft", "list-item", "update-item"},
+        "published": {"save-draft", "update-item"},
+        "held": {"save-draft"},
+        "in_progress": set(),
+        "reconciliation_required": {"save-draft"},
+    }[state]
+    reason = {
+        "published": "The provider already reports this item as published.",
+        "held": "The evaluator exposes no legal listing action.",
+        "in_progress": "The authoritative workflow is active.",
+        "reconciliation_required": "provider evidence is stale",
+    }.get(state)
     return {
         "entity_id": f"sku-{state}",
         "object_generation": f"generation-{state}",
@@ -42,6 +56,26 @@ def _workflow(state: str) -> dict:
         "reconciliation_gates": ["provider evidence is stale"] if state == "reconciliation_required" else [],
         "ownership_conflicts": [],
         "operator_gates": [],
+        "legal_actions": [] if state in {"published", "held", "in_progress", "reconciliation_required"} else [
+            {
+                "treatment_id": "ebay-publish",
+                "treatment_version": "1",
+                "effect_class": "external",
+                "action": "held_external_contract",
+                "reasons": [],
+            },
+        ],
+        "operator_projection": {
+            "state": state,
+            "reasons": [reason] if state == "reconciliation_required" else [],
+            "commands": {
+                command_id: {
+                    "enabled": command_id in enabled,
+                    "reason": None if command_id in enabled else reason,
+                }
+                for command_id in ("save-draft", "list-item", "update-item")
+            },
+        },
     }
 
 

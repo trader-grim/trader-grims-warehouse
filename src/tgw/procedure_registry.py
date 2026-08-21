@@ -35,9 +35,9 @@ _PROCEDURE_KEYS = {
 }
 _FIXED_ARGV = {
     "app-release-install/v1": [
-        "/opt/tgw-installer/current/bin/tgw-release-install",
+        "/opt/TGW/installer/current/bin/tgw-release-install",
         "--root",
-        "/opt/tgw-releases",
+        "/opt/TGW/releases",
         "install",
         "--archive",
         ":archive",
@@ -57,11 +57,19 @@ _FIXED_ARGV = {
         ":admission_receipt",
         "--environment-preflight-receipt",
         ":environment_preflight_receipt",
+        "--admission-public-key",
+        ":admission_public_key",
+        "--environment-public-key",
+        ":environment_public_key",
+        "--current-plan-commit",
+        ":current_plan_commit",
+        "--current-solution-hash",
+        ":current_solution_hash",
     ],
     "app-release-rollback/v1": [
-        "/opt/tgw-installer/current/bin/tgw-release-install",
+        "/opt/TGW/installer/current/bin/tgw-release-install",
         "--root",
-        "/opt/tgw-releases",
+        "/opt/TGW/releases",
         "rollback",
         "--receipt",
         ":receipt",

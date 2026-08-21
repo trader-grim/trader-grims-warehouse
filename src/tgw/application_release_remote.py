@@ -28,7 +28,6 @@ from tgw.release_installer import (
     install_runtime_files,
     materialize,
     rollback,
-    select,
     verify,
 )
 
@@ -961,6 +960,24 @@ def execute(
 ) -> dict[str, Any]:
     request = validate_request(request_value, config, artifact_bytes=artifact_bytes)
     parameters = request["parameters"]
+    if request["action"] == "install":
+        # W09 predates the signed W15 environment and W16 admission boundary.
+        # Its packet has no trusted keys or exact signed receipts, so it is a
+        # read-only compatibility endpoint now.  Holding here—before journal
+        # creation, quiescence, backup, materialization, migration, or selector
+        # mutation—prevents the obsolete helper from bypassing admission.
+        return _bound_response(
+            parameters,
+            {
+                "status": "HOLD",
+                "reason": "W16_ADMISSION_REQUIRED",
+                "evidence": [
+                    "w09-install:retired-before-mutation",
+                    "required-provider:app-release-install/v1",
+                ],
+            },
+            config,
+        )
     journal = _load_journal(config, parameters["operation_id"])
     if request["action"] == "rollback":
         result = _reconcile(parameters, config, runtime, journal)
@@ -1049,7 +1066,9 @@ def execute(
             raise ApplicationReleaseRemoteError("runtime overlay manifest differs from W09 contract")
         verify(root, parameters["generation"])
         evidence.append(_stage(config, journal, "runtime-staged", ["runtime:" + str(installed["runtime_manifest_sha256"])]))
-        selected = select(root, parameters["generation"], expected_current=parameters["expected_current"], operation_id=operation)
+        raise ApplicationReleaseRemoteError(
+            "retired W09 install path cannot cross the W16 admission boundary"
+        )
         successor_config = config["active_config_metadata"]
         _atomic(
             Path(config["active_config_path"]),

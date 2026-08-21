@@ -13,14 +13,12 @@ from __future__ import annotations
 
 from tgw.apis.ebay.trading import (
     _resolve_site_id,
-    end_item,
     get_api_access_rules,
     get_best_offers,
     get_my_ebay_selling,
     get_orders,
     get_store_categories,
     respond_to_best_offer,
-    revise_item_pictures,
     revise_item_sku,
 )
 
@@ -70,27 +68,9 @@ def _fake_root(call_name):
     return _FakeElement()
 
 
-def test_end_item_passes_motors_site_id(monkeypatch):
-    calls = _capture_site_id(monkeypatch)
-    end_item({}, '12345', marketplace_id='EBAY_MOTORS')
-    assert calls == ['100']
-
-
-def test_end_item_defaults_to_ebay_us(monkeypatch):
-    calls = _capture_site_id(monkeypatch)
-    end_item({}, '12345')
-    assert calls == ['0']
-
-
 def test_revise_item_sku_passes_motors_site_id(monkeypatch):
     calls = _capture_site_id(monkeypatch)
     revise_item_sku({}, '12345', 'tgwNEW', marketplace_id='EBAY_MOTORS')
-    assert calls == ['100']
-
-
-def test_revise_item_pictures_passes_motors_site_id(monkeypatch):
-    calls = _capture_site_id(monkeypatch)
-    revise_item_pictures({}, '12345', ['https://eps/1.jpg'], marketplace_id='EBAY_MOTORS')
     assert calls == ['100']
 
 

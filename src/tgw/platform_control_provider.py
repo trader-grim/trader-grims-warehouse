@@ -396,6 +396,19 @@ class PlatformControlProvider:
     def rollback(self, request: Mapping[str, Any], _controller_journal: Mapping[str, Any]) -> dict[str, Any]:
         value = self._request(request)
         journal = self._journal(value["transaction_id"])
+        allowed = {"QUIESCED", "REBUILT", "ACTIVATED", "RESTARTED", "HEALTHY", "VERIFYING"}
+        if journal["status"] not in allowed:
+            raise PlatformControlError(
+                f"platform rollback is not legal from {journal['status']}"
+            )
+        if (
+            not isinstance(_controller_journal, Mapping)
+            or _controller_journal.get("schema") != "tgw-w18-fleet-refresh-journal/v1"
+            or _controller_journal.get("request") != value
+            or _controller_journal.get("request_hash") != _hash(value)
+            or _controller_journal.get("status") != "ROLLBACK_REQUIRED"
+        ):
+            raise PlatformControlError("platform rollback is not controller-bound")
         actor_receipt = self.actor.call("rollback", [value])
         self._service("restart", expected="active")
         journal["status"] = "ROLLED_BACK"
@@ -426,15 +439,41 @@ class PlatformControlProvider:
         evidence = [_hash({"gate": gate})]
         if decision == "diagnose-platform":
             return {"status": "DIAGNOSED", "evidence": evidence, "rollback_receipt": None}
-        candidates = sorted(self.state_root.glob("*.provider.json"), key=lambda path: path.stat().st_mtime_ns, reverse=True)
-        if not candidates:
+        candidates = sorted(
+            self.state_root.glob("*.provider.json"),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        journals = []
+        for candidate in candidates:
+            observed = _read_json(candidate, "platform provider journal")
+            request = observed.get("request")
+            if (
+                isinstance(request, Mapping)
+                and request.get("revisions", {}).get("source")
+                == recovery.get("candidate_commit")
+            ):
+                journals.append(observed)
+        if not journals:
             raise PlatformControlError("no platform transaction is available for recovery")
-        journal = _read_json(candidates[0], "platform provider journal")
+        journal = journals[0]
         request = journal.get("request")
-        if not isinstance(request, Mapping) or request.get("revisions", {}).get("source") != recovery.get("candidate_commit"):
-            raise PlatformControlError("recovery candidate differs from the repair transaction")
+        recoverable = {
+            "QUIESCED", "REBUILT", "ACTIVATED", "RESTARTED", "HEALTHY", "VERIFYING",
+        }
+        if journal.get("status") not in recoverable:
+            raise PlatformControlError(
+                f"platform transaction is not recoverable from {journal.get('status')}"
+            )
         if decision == "rollback-platform":
-            result = self.rollback(request, journal)
+            controller_journal = {
+                "schema": "tgw-w18-fleet-refresh-journal/v1",
+                "request_hash": _hash(request),
+                "request": request,
+                "status": "ROLLBACK_REQUIRED",
+                "steps": [],
+            }
+            result = self.rollback(request, controller_journal)
             return {"status": "ROLLED_BACK", "evidence": evidence + [_hash(result)], "rollback_receipt": _hash(result)}
         repaired = self.actor.call("repair", [dict(request)])
         return {"status": "REPAIRED", "evidence": evidence + [_hash(repaired)], "rollback_receipt": None}

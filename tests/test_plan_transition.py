@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from tgw.plan_solver import solve
+from tgw.lifecycle_snapshot import compile_lifecycle_snapshot
 from tgw.plan_transition import (
     DetachedMaterialization,
     PlanBinding,
@@ -19,6 +21,13 @@ from tgw.plan_transition import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def lifecycle_snapshot(solution_hash: str) -> dict:
+    return compile_lifecycle_snapshot(
+        generation=solution_hash, rows=[], surfaces=[],
+        observed_at=datetime(2026, 8, 20, 20, 0, tzinfo=timezone.utc),
+    )
 
 
 def git(path: Path, *args: str) -> str:
@@ -68,6 +77,8 @@ def test_prepares_handoff_with_atomic_activation_and_rollback_boundaries(tmp_pat
         predecessor=PlanBinding(prior_commit, prior_solution), successor=successor_binding,
         predecessor_materialization=prior, successor_materialization=successor,
         amendment_id="AMENDMENT-TEST-001",
+        lifecycle_snapshot=lifecycle_snapshot(prior_solution["solution_hash"]),
+        checkpoint_disposition="quiet-checkpoint-and-restart",
     )
 
     assert receipt["status"] == "prepared-not-activated"
@@ -75,6 +86,14 @@ def test_prepares_handoff_with_atomic_activation_and_rollback_boundaries(tmp_pat
     assert receipt["successor"]["plan_commit"] == successor_commit
     assert receipt["activation_boundary"]["atomic_updates"] == ["approved_ref", "approved_materialization", "context_plan_commit", "context_solution_hash"]
     assert receipt["rollback_boundary"]["target"]["plan_commit"] == prior_commit
+    checkpoint = receipt["checkpoint_disposition"]
+    assert checkpoint["disposition"] == "quiet-checkpoint-and-restart"
+    assert checkpoint["predecessor"]["solution_hash"] == prior_solution["solution_hash"]
+    assert checkpoint["lifecycle_snapshot"]["collections"] == {
+        "live_requests": [], "role_leases": [],
+        "rendered_surfaces": [], "continuations": [],
+    }
+    assert checkpoint["checkpoint_hash"].startswith("sha256:")
     for boundary, binding, materialization in (
         (receipt["activation_boundary"], receipt["successor"], successor),
         (receipt["rollback_boundary"], receipt["predecessor"], prior),
@@ -130,6 +149,8 @@ def test_handoff_reinspects_and_rejects_forged_or_changed_materializations(tmp_p
             predecessor=PlanBinding(prior_commit, prior_solution), successor=successor_binding,
             predecessor_materialization=before, successor_materialization=after,
             amendment_id="AMENDMENT-TEST-001",
+            lifecycle_snapshot=lifecycle_snapshot(prior_solution["solution_hash"]),
+            checkpoint_disposition="quiet-checkpoint-and-restart",
         )
 
     with pytest.raises(PlanTransitionError):
@@ -165,6 +186,35 @@ def test_detached_head_check_is_bounded(tmp_path):
     ]
     assert len(symbolic_calls) == 1
     assert symbolic_calls[0].kwargs["timeout"] == 30
+
+
+def test_handoff_rejects_missing_or_mismatched_checkpoint_inventory(tmp_path):
+    repo, prior_commit, successor_commit = commit_repo(tmp_path)
+    _, prior_solution = solution(prior_commit)
+    _, successor_solution = solution(successor_commit)
+    prior = prepare_detached_materialization(
+        repo, successor_commit=prior_commit, destination=tmp_path / "prior")
+    successor = prepare_detached_materialization(
+        repo, successor_commit=successor_commit, destination=tmp_path / "successor")
+    controller = PlanTransitionController()
+    kwargs = {
+        "predecessor": PlanBinding(prior_commit, prior_solution),
+        "successor": PlanBinding(successor_commit, successor_solution),
+        "predecessor_materialization": prior,
+        "successor_materialization": successor,
+        "amendment_id": "AMENDMENT-TEST-001",
+        "checkpoint_disposition": "quiet-checkpoint-and-restart",
+    }
+    with pytest.raises(PlanTransitionError, match="snapshot"):
+        controller.handoff(lifecycle_snapshot={}, **kwargs)
+    wrong = lifecycle_snapshot(successor_solution["solution_hash"])
+    with pytest.raises(PlanTransitionError, match="binding"):
+        controller.handoff(lifecycle_snapshot=wrong, **kwargs)
+    with pytest.raises(PlanTransitionError, match="disposition"):
+        controller.handoff(
+            lifecycle_snapshot=lifecycle_snapshot(prior_solution["solution_hash"]),
+            **{**kwargs, "checkpoint_disposition": "invented"},
+        )
 
 
 def test_failed_materialization_cleanup_is_bounded(tmp_path):

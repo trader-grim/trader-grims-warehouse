@@ -175,7 +175,7 @@
             "type": "object"
           },
           "label": "Update Item",
-          "reason": "The item has not been staged at the provider.",
+          "reason": null,
           "refresh_target": "current-object"
         }
       ],
@@ -357,8 +357,35 @@
           "entity_id": "sku-ready",
           "fingerprints": [],
           "graph_id": "graph-ready",
+          "legal_actions": [
+            {
+              "action": "held_external_contract",
+              "effect_class": "external",
+              "reasons": [],
+              "treatment_id": "ebay-publish",
+              "treatment_version": "1"
+            }
+          ],
           "object_generation": "generation-ready",
           "operator_gates": [],
+          "operator_projection": {
+            "commands": {
+              "list-item": {
+                "enabled": true,
+                "reason": null
+              },
+              "save-draft": {
+                "enabled": true,
+                "reason": null
+              },
+              "update-item": {
+                "enabled": false,
+                "reason": null
+              }
+            },
+            "reasons": [],
+            "state": "ready"
+          },
           "ownership_conflicts": [],
           "reconciliation_gates": []
         },
@@ -735,8 +762,35 @@
           "entity_id": "sku-staged",
           "fingerprints": [],
           "graph_id": "graph-staged",
+          "legal_actions": [
+            {
+              "action": "held_external_contract",
+              "effect_class": "external",
+              "reasons": [],
+              "treatment_id": "ebay-publish",
+              "treatment_version": "1"
+            }
+          ],
           "object_generation": "generation-staged",
           "operator_gates": [],
+          "operator_projection": {
+            "commands": {
+              "list-item": {
+                "enabled": true,
+                "reason": null
+              },
+              "save-draft": {
+                "enabled": true,
+                "reason": null
+              },
+              "update-item": {
+                "enabled": true,
+                "reason": null
+              }
+            },
+            "reasons": [],
+            "state": "staged"
+          },
           "ownership_conflicts": [],
           "reconciliation_gates": []
         },
@@ -1119,8 +1173,27 @@
           "entity_id": "sku-published",
           "fingerprints": [],
           "graph_id": "graph-published",
+          "legal_actions": [],
           "object_generation": "generation-published",
           "operator_gates": [],
+          "operator_projection": {
+            "commands": {
+              "list-item": {
+                "enabled": false,
+                "reason": "The provider already reports this item as published."
+              },
+              "save-draft": {
+                "enabled": true,
+                "reason": null
+              },
+              "update-item": {
+                "enabled": true,
+                "reason": null
+              }
+            },
+            "reasons": [],
+            "state": "published"
+          },
           "ownership_conflicts": [],
           "reconciliation_gates": []
         },
@@ -1152,11 +1225,7 @@
         "listing_fields",
         "validation_messages"
       ],
-      "reasons": [
-        "A valid eBay category is required.",
-        "A category-valid displayed condition is required.",
-        "Required aspects are missing: Brand"
-      ],
+      "reasons": [],
       "state": "held"
     },
     "object": {
@@ -1283,7 +1352,7 @@
             "type": "object"
           },
           "label": "List Item",
-          "reason": "A valid eBay category is required.",
+          "reason": "The evaluator exposes no legal listing action.",
           "refresh_target": "current-object"
         },
         {
@@ -1312,7 +1381,7 @@
             "type": "object"
           },
           "label": "Update Item",
-          "reason": "A valid eBay category is required.",
+          "reason": "The evaluator exposes no legal listing action.",
           "refresh_target": "current-object"
         }
       ],
@@ -1492,18 +1561,33 @@
           "entity_id": "sku-held",
           "fingerprints": [],
           "graph_id": "graph-held",
+          "legal_actions": [],
           "object_generation": "generation-held",
           "operator_gates": [],
+          "operator_projection": {
+            "commands": {
+              "list-item": {
+                "enabled": false,
+                "reason": "The evaluator exposes no legal listing action."
+              },
+              "save-draft": {
+                "enabled": true,
+                "reason": null
+              },
+              "update-item": {
+                "enabled": false,
+                "reason": "The evaluator exposes no legal listing action."
+              }
+            },
+            "reasons": [],
+            "state": "held"
+          },
           "ownership_conflicts": [],
           "reconciliation_gates": []
         },
         "evidence": [],
         "graph_id": "graph-held",
-        "reasons": [
-          "A valid eBay category is required.",
-          "A category-valid displayed condition is required.",
-          "Required aspects are missing: Brand"
-        ],
+        "reasons": [],
         "state": "held"
       }
     }
@@ -1652,7 +1736,7 @@
             "type": "object"
           },
           "label": "List Item",
-          "reason": "The authoritative workflow is already running.",
+          "reason": "The authoritative workflow is active.",
           "refresh_target": "current-object"
         },
         {
@@ -1681,7 +1765,7 @@
             "type": "object"
           },
           "label": "Update Item",
-          "reason": "The authoritative workflow is already running.",
+          "reason": "The authoritative workflow is active.",
           "refresh_target": "current-object"
         }
       ],
@@ -1865,8 +1949,27 @@
           "entity_id": "sku-in_progress",
           "fingerprints": [],
           "graph_id": "graph-in_progress",
+          "legal_actions": [],
           "object_generation": "generation-in_progress",
           "operator_gates": [],
+          "operator_projection": {
+            "commands": {
+              "list-item": {
+                "enabled": false,
+                "reason": "The authoritative workflow is active."
+              },
+              "save-draft": {
+                "enabled": false,
+                "reason": "The authoritative workflow is active."
+              },
+              "update-item": {
+                "enabled": false,
+                "reason": "The authoritative workflow is active."
+              }
+            },
+            "reasons": [],
+            "state": "in_progress"
+          },
           "ownership_conflicts": [],
           "reconciliation_gates": []
         },
@@ -2236,8 +2339,29 @@
           "entity_id": "sku-reconciliation_required",
           "fingerprints": [],
           "graph_id": "graph-reconciliation_required",
+          "legal_actions": [],
           "object_generation": "generation-reconciliation_required",
           "operator_gates": [],
+          "operator_projection": {
+            "commands": {
+              "list-item": {
+                "enabled": false,
+                "reason": "provider evidence is stale"
+              },
+              "save-draft": {
+                "enabled": true,
+                "reason": null
+              },
+              "update-item": {
+                "enabled": false,
+                "reason": "provider evidence is stale"
+              }
+            },
+            "reasons": [
+              "provider evidence is stale"
+            ],
+            "state": "reconciliation_required"
+          },
           "ownership_conflicts": [],
           "reconciliation_gates": [
             "provider evidence is stale"

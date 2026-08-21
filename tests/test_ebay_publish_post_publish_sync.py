@@ -24,9 +24,8 @@ from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import patch
 
-import psycopg2.errors
-
 import tgw.workers.ebay_publish as ebay_publish_mod
+import tgw.provider_effects as provider_effects
 from tgw.workers.ebay_publish import EbayPublishWorker
 
 
@@ -38,7 +37,14 @@ def _worker(cfg: Dict[str, Any]) -> EbayPublishWorker:
 
 
 def _cfg(tmp_path) -> Dict[str, Any]:
-    return {'itemdata_root': tmp_path, 'raw': {}, 'reprice_stages': [], 'category_price_defaults': {}}
+    return {
+        'itemdata_root': tmp_path, 'raw': {}, 'reprice_stages': [],
+        'category_price_defaults': {},
+        'workflow_migration': {
+            'ebay_publish_provider_effect': 'workflow',
+            'ebay_provider_identity': 'test-seller',
+        },
+    }
 
 
 def _write_item(tmp_path, sku, item):
@@ -47,40 +53,74 @@ def _write_item(tmp_path, sku, item):
     (d / f'{sku}.json').write_text(json.dumps(item), encoding='utf-8')
 
 
-def _capture_enqueue(monkeypatch):
+def _job(tmp_path, sku):
+    from tests.conftest import make_governed_ebay_job
+    return make_governed_ebay_job(
+        tmp_path, sku, treatment_id='ebay-publish',
+    )
+
+
+def _capture_sync(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        ebay_publish_mod.state_machine, 'enqueue_job',
-        lambda **k: calls.append(k) or 'job-1',
+        ebay_publish_mod, 'enqueue_post_push_sync',
+        lambda sku, **kwargs: calls.append((sku, kwargs)) or True,
     )
     return calls
+
+
+def _patch_common(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        ebay_publish_mod.state_machine, 'active_jobs_for_sku', lambda *a, **k: [])
+    from tests.conftest import make_fake_fence_write, make_fake_patch_item
+    monkeypatch.setattr(
+        ebay_publish_mod, 'fence_ebay_write', make_fake_fence_write(tmp_path))
+    monkeypatch.setattr(
+        ebay_publish_mod, 'fence_patch_item', make_fake_patch_item(tmp_path))
+    monkeypatch.setattr(
+        ebay_publish_mod.state_machine, 'enqueue_catalog_rebuild',
+        lambda *a, **k: 'catalog')
+    monkeypatch.setattr(
+        ebay_publish_mod.EbayPublishWorker, '_refresh_photo_verify',
+        lambda *a, **k: None)
+    monkeypatch.setattr(
+        provider_effects, 'reserve_and_begin_authorized_effect',
+        lambda **kwargs: SimpleNamespace(
+            effect_id='publish-effect-1', state='dispatched', result=None),
+    )
+    monkeypatch.setattr(
+        provider_effects, 'finish_provider_effect',
+        lambda effect_id, **kwargs: SimpleNamespace(
+            effect_id=effect_id, state=kwargs['state'], result=kwargs.get('result')),
+    )
+    monkeypatch.setattr(
+        provider_effects, 'validate_succeeded_authorized_effect',
+        lambda **kwargs: SimpleNamespace(result={'listing_id': 'L1'}),
+    )
+    import tgw.ebay.description as description
+    monkeypatch.setattr(description, 'build_listing_description', lambda *a, **k: 'desc')
 
 
 def test_fresh_publish_enqueues_post_publish_sync(tmp_path, monkeypatch):
     sku = 'tgw1'
     _write_item(tmp_path, sku, {
         'sku': sku,
-        'draft_listing': {'price': 29.99},
+        'draft_listing': {'title': 'Widget', 'price': 29.99},
         'ebay_offer': {'offer_id': 'off-1', 'staged_price': 29.99, 'price_comps': {}},
         'ebay_listing': {},
     })
-    calls = _capture_enqueue(monkeypatch)
-    monkeypatch.setattr(
-        ebay_publish_mod.state_machine, 'active_jobs_for_sku', lambda *a, **k: [])
+    calls = _capture_sync(monkeypatch)
+    _patch_common(tmp_path, monkeypatch)
     monkeypatch.setattr(ebay_publish_mod, 'publish_offer',
                         lambda cfg, offer_id: {'listing_id': 'L1', 'listing_url': 'http://x', 'status': 'PUBLISHED'})
-    monkeypatch.setattr(ebay_publish_mod, 'fence_ebay_write', lambda *a, **k: {'ok': True})
-    monkeypatch.setattr(ebay_publish_mod, 'fence_patch_item', lambda *a, **k: {'ok': True})
-    monkeypatch.setattr(
-        ebay_publish_mod.state_machine, 'enqueue_catalog_rebuild', lambda *a, **k: 'catalog')
-
     worker = _worker(_cfg(tmp_path))
-    worker.handle({'payload_json': {'sku': sku}})
+    receipt = worker.handle(_job(tmp_path, sku))
 
-    sync_calls = [c for c in calls if c['queue_name'] == 'ebay_sync']
-    assert len(sync_calls) == 1
-    assert sync_calls[0]['payload'] == {'sku': sku, 'reason': 'post_push'}
-    assert sync_calls[0]['dedupe_key'] == f'ebay_sync:post_push:{sku}'
+    assert calls == [(sku, {
+        'config': worker.config,
+        'source_provider_effect_id': 'publish-effect-1',
+    })]
+    assert receipt['outcome'] == 'satisfied'
 
 
 def test_governed_sync_failure_replay_completes_outbox_without_republish(
@@ -88,23 +128,17 @@ def test_governed_sync_failure_replay_completes_outbox_without_republish(
 ):
     sku = 'tgw-sync-repair'
     _write_item(tmp_path, sku, {
-        'sku': sku, 'draft_listing': {'price': 29.99},
+        'sku': sku, 'draft_listing': {'title': 'Widget', 'price': 29.99},
         'ebay_offer': {'offer_id': 'off-1', 'staged_price': 29.99, 'price_comps': {}},
         'ebay_listing': {},
     })
-    monkeypatch.setattr(
-        ebay_publish_mod.state_machine, 'active_jobs_for_sku', lambda *a, **k: [])
+    _patch_common(tmp_path, monkeypatch)
     published = []
     monkeypatch.setattr(
         ebay_publish_mod, 'publish_offer',
         lambda cfg, offer_id: published.append(offer_id) or {
             'listing_id': 'L1', 'listing_url': 'http://x', 'status': 'PUBLISHED'},
     )
-    from tests.conftest import make_fake_fence_write, make_fake_patch_item
-    monkeypatch.setattr(ebay_publish_mod, 'fence_ebay_write', make_fake_fence_write(tmp_path))
-    monkeypatch.setattr(ebay_publish_mod, 'fence_patch_item', make_fake_patch_item(tmp_path))
-    monkeypatch.setattr(
-        ebay_publish_mod.state_machine, 'enqueue_catalog_rebuild', lambda *a, **k: 'catalog')
     sync_attempts = 0
 
     def fail_once(sku, **kwargs):
@@ -116,27 +150,12 @@ def test_governed_sync_failure_replay_completes_outbox_without_republish(
     monkeypatch.setattr(ebay_publish_mod, 'enqueue_post_push_sync', fail_once)
     worker = _worker(_cfg(tmp_path))
     worker.owner = 'owner'
-    job = {
-        'job_id': 'job-sync',
-        'lease_token': '11111111-1111-4111-8111-111111111111',
-        'queue_name': 'ebay_publish',
-        'entity_type': 'item', 'entity_id': sku,
-        'attempt_count': 1, 'max_attempts': 3,
-        'payload_json': {
-            'sku': sku, 'entity_id': sku, 'object_id': sku,
-            'treatment_id': 'ebay-publish', 'treatment_version': '1',
-            'graph_id': 'graph-sync',
-            'goal_profile_id': 'tgw.ebay_listable',
-            'goal_profile_version': '1', 'object_generation': 'generation-sync',
-            'condition_hash': 'condition-sync',
-        },
-    }
+    job = _job(tmp_path, sku)
+    job.update({'job_id': 'job-sync',
+                'lease_token': '11111111-1111-4111-8111-111111111111',
+                'queue_name': 'ebay_publish', 'attempt_count': 1})
 
     with patch.object(ebay_publish_mod.state_machine, 'mark_running'), \
-         patch(
-             'tgw.provider_effects.validate_succeeded_authorized_effect',
-             return_value=SimpleNamespace(result={'listing_id': 'L1'}),
-         ), \
          patch.object(
              ebay_publish_mod.state_machine, 'mark_failed',
              return_value='retry_wait',
@@ -157,54 +176,59 @@ def test_governed_sync_failure_replay_completes_outbox_without_republish(
     assert atomic.call_args.args[2] == job['lease_token']
     receipt = atomic.call_args.args[3]
     assert receipt['receipt_schema_id'] == 'treatment-receipt/v1'
-    assert receipt['graph_id'] == 'graph-sync'
+    assert receipt['graph_id'] == job['payload_json']['graph_id']
     assert receipt['entity_id'] == sku
-    assert receipt['condition_hash'] == 'condition-sync'
+    assert receipt['condition_hash'] == job['payload_json']['condition_hash']
     assert receipt['outcome'] == 'satisfied'
     ordinary.assert_not_called()
 
 
 def test_already_active_skip_still_enqueues_post_publish_sync(tmp_path, monkeypatch):
     sku = 'tgw2'
+    published_at = '2026-08-20T00:00:00+00:00'
     _write_item(tmp_path, sku, {
         'sku': sku,
-        'draft_listing': {'price': 29.99},
-        'ebay_offer': {'offer_id': 'off-1', 'staged_price': 29.99, 'price_comps': {}},
-        'ebay_listing': {'status': 'Active', 'listing_id': 'L1'},
+        'draft_listing': {'title': 'Widget', 'price': 29.99},
+        'draft_listing_state': 'baseline', 'baseline_at': published_at,
+        'ebay_offer': {
+            'offer_id': 'off-1', 'staged_price': 29.99, 'price_comps': {},
+            'published_at': published_at,
+        },
+        'ebay_listing': {
+            'status': 'Active', 'listing_id': 'L1',
+            'published_at': published_at, 'provider_effect_id': 'publish-effect-1',
+        },
     })
-    calls = _capture_enqueue(monkeypatch)
-    monkeypatch.setattr(
-        ebay_publish_mod.state_machine, 'active_jobs_for_sku', lambda *a, **k: [])
-    monkeypatch.setattr(ebay_publish_mod, 'fence_ebay_write', lambda *a, **k: {'ok': True})
+    calls = _capture_sync(monkeypatch)
+    _patch_common(tmp_path, monkeypatch)
 
     worker = _worker(_cfg(tmp_path))
-    worker.handle({'payload_json': {'sku': sku}})
+    receipt = worker.handle(_job(tmp_path, sku))
 
-    sync_calls = [c for c in calls if c['queue_name'] == 'ebay_sync']
-    assert len(sync_calls) == 1
-    assert sync_calls[0]['payload'] == {'sku': sku, 'reason': 'post_push'}
-    assert sync_calls[0]['dedupe_key'] == f'ebay_sync:post_push:{sku}'
+    assert calls[0][1]['source_provider_effect_id'] == 'publish-effect-1'
+    assert receipt['outcome'] == 'satisfied'
 
 
-def test_post_publish_sync_enqueue_collision_is_non_fatal(tmp_path, monkeypatch):
-    """A colliding dedupe_key (sync already queued/running for this SKU) must
-    not turn a successful publish into a failed job."""
+def test_post_publish_sync_governed_dedupe_success_is_non_fatal(tmp_path, monkeypatch):
+    """The governed dispatcher represents exact dedupe as successful."""
     sku = 'tgw3'
+    published_at = '2026-08-20T00:00:00+00:00'
     _write_item(tmp_path, sku, {
         'sku': sku,
-        'draft_listing': {'price': 29.99},
-        'ebay_offer': {'offer_id': 'off-1', 'staged_price': 29.99, 'price_comps': {}},
-        'ebay_listing': {'status': 'Active', 'listing_id': 'L1'},
+        'draft_listing': {'title': 'Widget', 'price': 29.99},
+        'draft_listing_state': 'baseline', 'baseline_at': published_at,
+        'ebay_offer': {
+            'offer_id': 'off-1', 'staged_price': 29.99, 'price_comps': {},
+            'published_at': published_at,
+        },
+        'ebay_listing': {
+            'status': 'Active', 'listing_id': 'L1',
+            'published_at': published_at, 'provider_effect_id': 'publish-effect-1',
+        },
     })
-
-    def _raise_unique_violation(**k):
-        raise psycopg2.errors.UniqueViolation('duplicate dedupe_key')
-
-    monkeypatch.setattr(
-        ebay_publish_mod.state_machine, 'enqueue_job', _raise_unique_violation)
-    monkeypatch.setattr(
-        ebay_publish_mod.state_machine, 'active_jobs_for_sku', lambda *a, **k: [])
-    monkeypatch.setattr(ebay_publish_mod, 'fence_ebay_write', lambda *a, **k: {'ok': True})
+    calls = _capture_sync(monkeypatch)
+    _patch_common(tmp_path, monkeypatch)
 
     worker = _worker(_cfg(tmp_path))
-    worker.handle({'payload_json': {'sku': sku}})  # must not raise
+    worker.handle(_job(tmp_path, sku))
+    assert len(calls) == 1

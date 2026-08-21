@@ -70,8 +70,8 @@ def _post_push_producer_mode(config) -> str:
     if migration is None and isinstance(config.get("raw"), dict):
         migration = config["raw"].get("workflow_migration")
     migration = migration if isinstance(migration, dict) else {}
-    mode = migration.get("ebay_post_push_sync_producer", "legacy")
-    if mode not in {"legacy", "workflow"}:
+    mode = migration.get("ebay_post_push_sync_producer", "workflow")
+    if mode != "workflow":
         raise ValueError(f"invalid ebay_post_push_sync_producer mode {mode!r}")
     return mode
 
@@ -98,36 +98,26 @@ def enqueue_post_push_sync(
     a failed job.
     """
     config = config or {}
-    mode = _post_push_producer_mode(config)
+    _post_push_producer_mode(config)
     try:
-        if mode == "workflow":
-            from tgw.config import sku_json
-            from tgw.workflow.post_push_sync import dispatch_targeted_sync
-            migration = config.get("workflow_migration")
-            if migration is None and isinstance(config.get("raw"), dict):
-                migration = config["raw"].get("workflow_migration")
-            migration = migration if isinstance(migration, dict) else {}
-            provider_identity = migration.get("ebay_provider_identity", "")
-            if not source_provider_effect_id or not provider_identity:
-                raise ValueError("governed post-push sync binding is incomplete")
-            result = dispatch_targeted_sync(
-                sku_json(config, sku),
-                source_provider_effect_id=source_provider_effect_id,
-                provider_identity=provider_identity,
-            )
-            return result.enqueued or result.outcome == "already_dispatched"
-        state_machine.enqueue_job(
-            queue_name='ebay_sync',
-            payload={'sku': sku, 'reason': 'post_push'},
-            dedupe_key=f'ebay_sync:post_push:{sku}',
-            max_attempts=3,
+        from tgw.config import sku_json
+        from tgw.workflow.post_push_sync import dispatch_targeted_sync
+        migration = config.get("workflow_migration")
+        if migration is None and isinstance(config.get("raw"), dict):
+            migration = config["raw"].get("workflow_migration")
+        migration = migration if isinstance(migration, dict) else {}
+        provider_identity = migration.get("ebay_provider_identity", "")
+        if not source_provider_effect_id or not provider_identity:
+            raise ValueError("governed post-push sync binding is incomplete")
+        result = dispatch_targeted_sync(
+            sku_json(config, sku),
+            source_provider_effect_id=source_provider_effect_id,
+            provider_identity=provider_identity,
         )
-        return True
+        return result.enqueued or result.outcome == "already_dispatched"
     except Exception as exc:
         log.warning('%s: post-push ebay_sync enqueue failed (non-fatal): %s', sku, exc)
-        if mode == "workflow":
-            raise
-        return False
+        raise
 
 
 def format_ebay_error(body: str, status: int) -> str:

@@ -113,10 +113,10 @@ def test_unfinished_or_changed_content_never_blind_replays(monkeypatch):
     assert provider_calls == []
 
 
-def test_default_selector_preserves_legacy():
+def test_default_selector_is_governed():
     worker = EbayStageWorker.__new__(EbayStageWorker)
     worker.config = {'raw': {}}
-    assert worker._provider_effect_mode() == 'legacy'
+    assert worker._provider_effect_mode() == 'workflow'
 
 
 def test_forced_restage_has_distinct_identity_and_stronger_scope(monkeypatch):

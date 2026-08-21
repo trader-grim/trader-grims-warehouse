@@ -348,31 +348,6 @@ def get_store_categories(cfg: Dict[str, Any],
     return _parse(cat_array)
 
 
-def end_item(cfg: Dict[str, Any], listing_id: str,
-             reason: str = 'NotAvailable',
-             marketplace_id: Optional[str] = None) -> None:
-    """
-    End an active Trading API listing via EndFixedPriceItem.
-
-    reason: 'NotAvailable' (default) | 'LostOrBroken' | 'OtherListingError'
-    *marketplace_id* (e.g. 'EBAY_MOTORS') selects the Trading API SiteID for
-    *listing_id*'s actual marketplace; defaults to EBAY_US. Pass the item's
-    stored marketplace_id when known — a Motors-site listing ended under
-    the wrong SiteID may silently no-op or error (todo #1214 follow-up).
-    Raises RuntimeError on API failure.
-    """
-    xml_body = (
-        f'<?xml version="1.0" encoding="utf-8"?>\n'
-        f'<EndFixedPriceItemRequest xmlns="{_NS}">\n'
-        f'  <ItemID>{_xml_escape(listing_id)}</ItemID>\n'
-        f'  <EndingReason>{_xml_escape(reason)}</EndingReason>\n'
-        f'</EndFixedPriceItemRequest>'
-    )
-    trading_call(cfg, 'EndFixedPriceItem', xml_body, timeout=30,
-                site_id=_resolve_site_id(marketplace_id))
-    log.info('EndFixedPriceItem: listing %s ended (reason=%s)', listing_id, reason)
-
-
 def revise_item_sku(cfg: Dict[str, Any], listing_id: str, new_sku: str,
                     marketplace_id: Optional[str] = None) -> None:
     """
@@ -394,40 +369,6 @@ def revise_item_sku(cfg: Dict[str, Any], listing_id: str, new_sku: str,
     trading_call(cfg, 'ReviseFixedPriceItem', xml_body,
                 site_id=_resolve_site_id(marketplace_id))
     log.info('ReviseFixedPriceItem: listing %s custom label → %s', listing_id, new_sku)
-
-
-def revise_item_pictures(cfg: Dict[str, Any], listing_id: str,
-                         image_urls: List[str],
-                         marketplace_id: Optional[str] = None) -> None:
-    """
-    Replace the photo set on a live Trading API (legacy Item#) listing in-place.
-
-    Uses ReviseFixedPriceItem with only ItemID + PictureDetails — every other
-    field (price, title, description, listing age, watchers, search rank) is
-    left untouched. This is the in-place repair path for listings ebay_stage's
-    relist guard refuses to touch via the Inventory API (PP-PHOTOSYNC-001 P10,
-    session 43): those items are real classic eBay listings mislabeled
-    'api: inventory' in our local metadata, and ending+relisting them via the
-    modern flow would lose their listing history for no reason — this call
-    updates the SAME listing instead.
-
-    *marketplace_id* (e.g. 'EBAY_MOTORS') selects the Trading API SiteID for
-    *listing_id*'s actual marketplace; defaults to EBAY_US (todo #1214 follow-up).
-    """
-    pics = ''.join(f'<PictureURL>{_xml_escape(u)}</PictureURL>' for u in image_urls)
-    xml_body = f'''<?xml version="1.0" encoding="utf-8"?>
-<ReviseFixedPriceItemRequest xmlns="{_NS}">
-  <Item>
-    <ItemID>{_xml_escape(listing_id)}</ItemID>
-    <PictureDetails>
-      {pics}
-    </PictureDetails>
-  </Item>
-</ReviseFixedPriceItemRequest>'''
-    trading_call(cfg, 'ReviseFixedPriceItem', xml_body,
-                site_id=_resolve_site_id(marketplace_id))
-    log.info('ReviseFixedPriceItem: listing %s photos replaced (%d urls)',
-             listing_id, len(image_urls))
 
 
 def get_api_access_rules(cfg: Dict[str, Any],

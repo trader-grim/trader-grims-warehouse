@@ -15,6 +15,7 @@ from tgw.application_release_remote import (
     _hash,
     _reconcile,
     _successor_identity,
+    execute,
     validate_request,
 )
 
@@ -110,6 +111,29 @@ def test_request_rejects_migration_traversal_or_reordering_before_host_action():
     bad["request_hash"] = _hash(unsigned)
     with pytest.raises(ApplicationReleaseRemoteError, match="migration receipt"):
         validate_request(bad, _config())
+
+
+def test_w09_install_is_typed_hold_before_any_host_mutation(tmp_path):
+    config = {
+        **_config(),
+        "helper_sha256": "sha256:" + "a" * 64,
+        "config_sha256": "sha256:" + "b" * 64,
+        "receipt_root": str(tmp_path / "receipts"),
+        "release_root": str(tmp_path / "releases"),
+    }
+    runtime = Mock()
+
+    response = execute(_request(), config, runtime)
+
+    assert response["status"] == "HOLD"
+    assert response["reason"] == "W16_ADMISSION_REQUIRED"
+    assert response["evidence"] == [
+        "w09-install:retired-before-mutation",
+        "required-provider:app-release-install/v1",
+    ]
+    assert runtime.mock_calls == []
+    assert not (tmp_path / "receipts").exists()
+    assert not (tmp_path / "releases").exists()
 
 
 def test_reconcile_restore_marker_without_exact_predecessor_state_is_ambiguous(tmp_path):

@@ -158,6 +158,12 @@ def _validate_response_shape(response: Mapping[str, Any]) -> None:
     status = response.get("status")
     if status == "SUCCEEDED":
         expected = common | {"evidence"}
+    elif status == "HOLD":
+        expected = common | {"reason", "evidence"}
+        if response.get("reason") != "W16_ADMISSION_REQUIRED":
+            raise ApplicationReleaseProviderError(
+                "remote application release hold reason is invalid"
+            )
     elif status in {"RESTORED", "AMBIGUOUS"}:
         expected = common | {"generation", "predecessor_healthy", "evidence"}
         if "receipt" in response:
@@ -784,6 +790,10 @@ class SshApplicationReleaseProvider:
         result = self._dispatch("install", parameters)
         if result.get("status") == "SUCCEEDED" and isinstance(result.get("evidence"), list) and result["evidence"]:
             return {"evidence": list(result["evidence"]) + ["application-release:" + result["receipt_sha256"]]}
+        if result.get("status") == "HOLD":
+            raise ApplicationReleaseProviderError(
+                "W09 application release is retired; W16 admission is required"
+            )
         if result.get("status") == "AMBIGUOUS":
             raise BootstrapStateAmbiguous(
                 "remote application deployment is ambiguous",

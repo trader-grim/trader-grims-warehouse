@@ -1,4 +1,9 @@
-"""Supported, read-only inspection of configured production receipt sinks."""
+"""Supported, read-only inspection of configured production receipt sinks.
+
+Inspection proves only JSON readability and, when present, self-consistency of
+the receipt's content hash.  It never proves signer authority, admission,
+deployment, live state, or completion merely because a receipt reports PASS.
+"""
 
 from __future__ import annotations
 
@@ -94,9 +99,13 @@ def _summary(receipt_id: str, value: Mapping[str, Any], raw: bytes) -> dict[str,
         "id": receipt_id,
         "schema": value.get("schema"),
         "status": status,
+        "status_semantics": "UNTRUSTED_REPORTED_FIELD",
         "content_sha256": _hash_bytes(raw),
         "claimed_receipt_hash": claimed,
         "receipt_hash_valid": hash_valid,
+        "signature_authority_verified": False,
+        "current_state_verified": False,
+        "admission_authority": False,
     }
 
 
@@ -126,8 +135,12 @@ def list_receipts(config: Mapping[str, Any], *, root_id: str) -> dict[str, Any]:
         except ReceiptInspectionError:
             summaries.append({
                 "id": receipt_id, "schema": None, "status": "INVALID",
+                "status_semantics": "INSPECTOR_VALIDATION_RESULT",
                 "content_sha256": _hash_bytes(raw), "claimed_receipt_hash": None,
                 "receipt_hash_valid": False,
+                "signature_authority_verified": False,
+                "current_state_verified": False,
+                "admission_authority": False,
             })
         else:
             summaries.append(_summary(receipt_id, value, raw))

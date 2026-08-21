@@ -330,6 +330,60 @@ def test_v3_preflight_refuses_missing_or_unsafe_boundary(tmp_path: Path):
         preflight(catalog=value, actor="codex", profile="development", attempt_id="attempt-1", request_id="request-1")
 
 
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("bootstrap", "bootstrap policy revision mismatch"),
+        ("broker-member", "broker policy revision mismatch: codex"),
+        ("broker-set", "broker policy set revision mismatch"),
+    ],
+)
+def test_v3_preflight_refuses_policy_revision_mismatch(
+    tmp_path: Path, mutation: str, message: str,
+):
+    executable = tmp_path / ("a" * 32 + "-store") / "tool"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n")
+    os.chmod(executable, 0o555)
+    boundary = tmp_path / "exact-candidate-root"
+    component = boundary / "src/tgw/dynamic_surface.py"
+    component.parent.mkdir(parents=True)
+    component.write_text("validator-controller-binding\n")
+    value = v2_catalog(executable)
+    value["schema"] = "tgw-execution-environment-catalog/v3"
+    add_v3_revisions(value, boundary)
+    value["enforcement_boundary"] = {
+        "schema": "tgw-dynamic-surface-enforcement-boundary/v1",
+        "version": "candidate-policy-negative",
+        "remote_inputs": False,
+        "executable_renderer_inputs": False,
+        "components": [
+            {
+                "name": "validator-controller-binding",
+                "relative_path": "src/tgw/dynamic_surface.py",
+                "content_sha256": "sha256:" + hashlib.sha256(component.read_bytes()).hexdigest(),
+                "purpose": "closed validator and controller",
+            }
+        ],
+        "assets": [],
+    }
+    if mutation == "bootstrap":
+        (boundary / value["bootstrap_revision"]["source_relative_path"]).write_text('{"policy":"changed"}\n')
+    elif mutation == "broker-member":
+        (boundary / "agent-services/harnesses/codex/tgw-context-policy.json").write_text('{"actor":"changed"}\n')
+    else:
+        value["broker_policy_revision"]["content_sha256"] = "sha256:" + "0" * 64
+    with pytest.raises(EnvironmentPreflightError, match=message):
+        preflight(
+            catalog=value,
+            actor="codex",
+            profile="development",
+            attempt_id="attempt-1",
+            request_id="request-1",
+            boundary_root=boundary,
+        )
+
+
 @pytest.mark.parametrize("mutation", ["disabled", "missing", "symlink"])
 def test_preflight_refuses_nonready_or_unavailable_tool(tmp_path: Path, mutation: str):
     executable = tmp_path / ("a" * 32 + "-store") / "tool"

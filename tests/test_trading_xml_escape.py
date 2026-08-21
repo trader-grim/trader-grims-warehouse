@@ -1,16 +1,11 @@
 """SECURITY audit#COHESION-2026-07, todo #1277 — Trading API XML builders must
-escape caller-supplied string values (end_item, revise_item_sku,
-revise_item_pictures, respond_to_best_offer) so a malicious value can't
+escape caller-supplied string values (revise_item_sku and
+respond_to_best_offer) so a malicious value can't
 inject extra XML structure into the outbound request body."""
 
 import xml.etree.ElementTree as ET
 
-from tgw.apis.ebay.trading import (
-    end_item,
-    respond_to_best_offer,
-    revise_item_pictures,
-    revise_item_sku,
-)
+from tgw.apis.ebay.trading import respond_to_best_offer, revise_item_sku
 
 
 def _capture(monkeypatch):
@@ -41,20 +36,6 @@ def test_revise_item_sku_escapes_malicious_new_sku(monkeypatch):
     assert root.find('.//Evil') is None
 
 
-def test_end_item_escapes_malicious_reason(monkeypatch):
-    calls = _capture(monkeypatch)
-    malicious = 'x</EndingReason><Evil>y</Evil><EndingReason>'
-
-    end_item({}, '226700000001', reason=malicious)
-
-    _, xml_body = calls[0]
-    assert '&lt;' in xml_body
-    assert '&gt;' in xml_body
-    assert '<Evil>' not in xml_body
-    root = ET.fromstring(xml_body)
-    assert root.find('.//Evil') is None
-
-
 def test_respond_to_best_offer_escapes_malicious_offer_id(monkeypatch):
     calls = _capture(monkeypatch)
     malicious = '123</BestOfferID><Evil>y</Evil><BestOfferID>'
@@ -69,18 +50,6 @@ def test_respond_to_best_offer_escapes_malicious_offer_id(monkeypatch):
     assert root.find('.//Evil') is None
 
 
-def test_revise_item_pictures_escapes_malicious_url(monkeypatch):
-    calls = _capture(monkeypatch)
-    malicious = 'https://eps/1.jpg</PictureURL><Evil>y</Evil><PictureURL>x'
-
-    revise_item_pictures({}, '226700000001', [malicious])
-
-    _, xml_body = calls[0]
-    assert '&lt;' in xml_body
-    assert '&gt;' in xml_body
-    assert '<Evil>' not in xml_body
-
-
 def test_normal_values_pass_through_unchanged(monkeypatch):
     """Ordinary characters (real SKU, numeric listing_id, HTTPS EPS URL) must
     be byte-identical to the pre-escaping output — no regression to the
@@ -91,17 +60,6 @@ def test_normal_values_pass_through_unchanged(monkeypatch):
     _, xml_body = calls[0]
     assert '<ItemID>226700000001</ItemID>' in xml_body
     assert '<SKU>tgw20260713120000123</SKU>' in xml_body
-
-    calls.clear()
-    end_item({}, '226700000001', reason='NotAvailable')
-    _, xml_body = calls[0]
-    assert '<ItemID>226700000001</ItemID>' in xml_body
-    assert '<EndingReason>NotAvailable</EndingReason>' in xml_body
-
-    calls.clear()
-    revise_item_pictures({}, '226700000001', ['https://i.ebayimg.com/images/g/abc/s-l1600.jpg'])
-    _, xml_body = calls[0]
-    assert '<PictureURL>https://i.ebayimg.com/images/g/abc/s-l1600.jpg</PictureURL>' in xml_body
 
     calls.clear()
     respond_to_best_offer({}, offer_id='5551234567890', listing_id='226700000001', action='Accept')

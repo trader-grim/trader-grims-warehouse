@@ -87,7 +87,19 @@ def test_adapter_view_is_detached_from_caller_mutation():
     assert rendered == before
 
 
-def _workflow_card(*, reconciliation=(), active=()):
+def _workflow_card(*, reconciliation=(), active=(), state="staged"):
+    blocked = bool(reconciliation)
+    running = bool(active)
+    projected_state = (
+        "reconciliation_required" if blocked
+        else "in_progress" if running
+        else state
+    )
+    reason = (
+        str(reconciliation[0]) if blocked
+        else "The authoritative workflow is active." if running
+        else None
+    )
     return {
         "entity_id": "sku-1",
         "object_generation": "gen-1",
@@ -100,6 +112,36 @@ def _workflow_card(*, reconciliation=(), active=()):
         "reconciliation_gates": list(reconciliation),
         "ownership_conflicts": [],
         "operator_gates": [],
+        "legal_actions": [] if blocked or running or state == "published" else [
+            {
+                "treatment_id": "ebay-publish",
+                "treatment_version": "1",
+                "effect_class": "external",
+                "action": "held_external_contract",
+                "reasons": [],
+            },
+        ],
+        "operator_projection": {
+            "state": projected_state,
+            "reasons": [str(value) for value in reconciliation],
+            "commands": {
+                "save-draft": {
+                    "enabled": not running,
+                    "reason": "The authoritative workflow is active." if running else None,
+                },
+                "list-item": {
+                    "enabled": not blocked and not running and state != "published",
+                    "reason": reason or (
+                        "The provider already reports this item as published."
+                        if state == "published" else None
+                    ),
+                },
+                "update-item": {
+                    "enabled": not blocked and not running,
+                    "reason": reason,
+                },
+            },
+        },
     }
 
 
@@ -152,7 +194,7 @@ def test_server_builder_publishes_complete_thin_client_contract():
 def test_published_provider_state_disables_list_but_keeps_update_nonpublishing():
     published = build_item_operator_object(
         item=_item(published=True),
-        workflow_card=_workflow_card(),
+        workflow_card=_workflow_card(state="published"),
         category_context=_category_context(),
     )
     commands = {command["id"]: command for command in published["commands"]}

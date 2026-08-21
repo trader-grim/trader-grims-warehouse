@@ -306,6 +306,28 @@ def run_fleet_refresh_transaction(
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise FleetActivationError("fleet refresh lease is already held") from exc
+        if journal_path.exists() or journal_path.is_symlink():
+            if journal_path.is_symlink() or not journal_path.is_file():
+                raise FleetActivationError("fleet refresh journal path is unsafe")
+            try:
+                existing_journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise FleetActivationError(
+                    "existing fleet refresh journal is invalid"
+                ) from exc
+            if (
+                not isinstance(existing_journal, Mapping)
+                or existing_journal.get("schema")
+                != "tgw-w18-fleet-refresh-journal/v1"
+                or existing_journal.get("request_hash") != request_hash
+                or existing_journal.get("request") != value
+            ):
+                raise FleetActivationError(
+                    "existing fleet refresh journal binding differs"
+                )
+            raise FleetActivationError(
+                "incomplete fleet refresh journal requires explicit recovery"
+            )
         journal: dict[str, Any] = {
             "schema": "tgw-w18-fleet-refresh-journal/v1", "request_hash": request_hash,
             "request": value, "status": "STARTED", "steps": [],

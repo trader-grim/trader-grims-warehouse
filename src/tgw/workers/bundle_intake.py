@@ -417,8 +417,8 @@ class BundleIntakeWorker(QueueWorker):
             migration = self.config['raw'].get('workflow_migration')
         if migration is None:
             migration = {}
-        mode = migration.get('bundle_downstream', 'legacy') if isinstance(migration, dict) else 'legacy'
-        if mode not in {'legacy', 'workflow'}:
+        mode = migration.get('bundle_downstream', 'workflow') if isinstance(migration, dict) else 'workflow'
+        if mode != 'workflow':
             raise HardFailure(
                 f"invalid workflow_migration.bundle_downstream mode {mode!r}; "
                 "expected 'legacy' or 'workflow'"
@@ -443,48 +443,31 @@ class BundleIntakeWorker(QueueWorker):
         except psycopg2.errors.UniqueViolation:
             pass
 
-        # ai_identify: vision model identification, immediate.  The default
-        # legacy mode preserves the old unconditional fanout.  Workflow mode
-        # derives eligibility from the authoritative post-intake item; it does
-        # not dispatch any eBay provider treatment.
-        workflow_decision = None
-        if mode == 'workflow':
-            from tgw.workflow.listing_migration import derive_bundle_downstream
+        # The evaluator alone decides whether the intake generation may enqueue
+        # identification. There is no unconditional compatibility fanout.
+        from tgw.workflow.listing_migration import derive_bundle_downstream
 
-            item_path = _cfg_sku_dir(self.config, sku) / f'{sku}.json'
-            workflow_decision = derive_bundle_downstream(item_path)
-        if workflow_decision is not None and not workflow_decision.enqueue_ai_identify:
+        item_path = _cfg_sku_dir(self.config, sku) / f'{sku}.json'
+        workflow_decision = derive_bundle_downstream(item_path)
+        if not workflow_decision.enqueue_ai_identify:
             return
-        if workflow_decision is not None:
-            from tgw.workflow.scheduler import dispatch_treatment
+        from tgw.workflow.scheduler import dispatch_treatment
 
-            dispatch = dispatch_treatment(
-                disposition=workflow_decision.disposition,
-                entity_id=sku,
-                graph=workflow_decision.graph,
-                payload_extra={
-                    'sku': sku,
-                    'condition_hash': workflow_decision.graph.condition_hash,
-                },
-                enqueue_fn=state_machine.enqueue_job,
+        dispatch = dispatch_treatment(
+            disposition=workflow_decision.disposition,
+            entity_id=sku,
+            graph=workflow_decision.graph,
+            payload_extra={
+                'sku': sku,
+                'condition_hash': workflow_decision.graph.condition_hash,
+            },
+            enqueue_fn=state_machine.enqueue_job,
+        )
+        if not dispatch.enqueued and dispatch.outcome != 'already_dispatched':
+            raise RuntimeError(
+                f'workflow dispatch failed for ai-identify graph '
+                f'{workflow_decision.graph_id}'
             )
-            if not dispatch.enqueued and dispatch.outcome != 'already_dispatched':
-                raise RuntimeError(
-                    f'workflow dispatch failed for ai-identify graph '
-                    f'{workflow_decision.graph_id}'
-                )
-            return
-        try:
-            state_machine.enqueue_job(
-                queue_name='ai_identify',
-                payload={'sku': sku},
-                entity_type='item',
-                entity_id=sku,
-                dedupe_key=f'ai_identify:{sku}',
-                max_attempts=3,
-            )
-        except psycopg2.errors.UniqueViolation:
-            pass
 
 
 def main() -> int:

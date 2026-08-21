@@ -1254,7 +1254,11 @@ def execute_item_operator_command(
         patch_item(
             sku,
             PatchBody(fields=patch_fields),
-            Request({"type": "http", "headers": [], "state": {"tgw_operator_object": True}}),
+            Request({
+                "type": "http",
+                "headers": [],
+                "_tgw_operator_object_capability": _OPERATOR_OBJECT_CAPABILITY,
+            }),
             operator_identity,
         )
         published = _current_item_operator_object(sku)
@@ -1492,6 +1496,9 @@ def get_item(sku: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+_OPERATOR_OBJECT_CAPABILITY = object()
+
+
 @app.patch("/api/items/{sku}")
 def patch_item(
     sku: str,
@@ -1504,7 +1511,12 @@ def patch_item(
     if not body.fields:
         raise HTTPException(status_code=400, detail="no fields provided")
 
-    operator_object_write = bool(getattr(getattr(request, "state", None), "tgw_operator_object", False))
+    # Only the in-process published-command executor can possess this identity
+    # sentinel. HTTP headers/query/body values cannot manufacture it.
+    operator_object_write = (
+        request.scope.get("_tgw_operator_object_capability")
+        is _OPERATOR_OBJECT_CAPABILITY
+    )
 
     # Todo #1464 (Tigwa's field-set-boundary audit, invariant C12/C14): a
     # caller-supplied FULL Set A/Set B envelope bypasses the sanctioned
@@ -1523,9 +1535,29 @@ def patch_item(
     # Gate: only the separately authenticated machine fence may submit an
     # envelope-shaped value here. X-TGW-Caller is attribution only: it is
     # client-controlled and therefore never an authorization signal.
-    _caller_for_envelope_gate = request.headers.get("X-TGW-Caller", "")
     _is_machine_caller = operator_identity == "machine:item-write-fence"
-    if "draft_listing" in body.fields and not operator_object_write and not _is_machine_caller:
+    workflow_evidence_fields = {
+        "ebay_offer",
+        "ebay_listing",
+        "ebay_submitted",
+        "ebay_live",
+        "draft_listing_state",
+        "status",
+    }
+    forbidden_evidence = sorted(workflow_evidence_fields.intersection(body.fields))
+    if forbidden_evidence:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "workflow_evidence_write_required",
+                "fields": forbidden_evidence,
+                "reason": (
+                    "provider and listing-lifecycle evidence may not be written "
+                    "through the generic item PATCH fence"
+                ),
+            },
+        )
+    if "draft_listing" in body.fields and not operator_object_write:
         raise HTTPException(
             status_code=409,
             detail={
@@ -1559,12 +1591,9 @@ def patch_item(
     if "location" in body.fields:
         location_value = body.fields.pop("location")
 
-    # Draft lifecycle (broker B1a): any draft_listing write — AI worker via
-    # the fence or operator via the editor — is a manipulation in progress,
-    # so mark 'editing' unless the caller manages the state itself (the pin
-    # and baseline paths patch draft_listing_state explicitly).
-    if "draft_listing" in body.fields and "draft_listing_state" not in body.fields:
-        body.fields["draft_listing_state"] = "editing"
+    # The published operator-object command owns draft lifecycle changes.
+    # Generic PATCH, including the machine fence, cannot synthesize this
+    # evaluator-visible evidence.
 
     doc_before = load_item_doc(json_path)
 
@@ -2746,8 +2775,8 @@ def item_action(
             if migration is None and isinstance(_cfg.get("raw"), dict):
                 migration = _cfg["raw"].get("workflow_migration")
             migration = migration if isinstance(migration, dict) else {}
-            mode = migration.get("item_ai_identify_fanout", "legacy")
-            if mode not in {"legacy", "workflow"}:
+            mode = migration.get("item_ai_identify_fanout", "workflow")
+            if mode != "workflow":
                 raise HTTPException(
                     status_code=503,
                     detail=f"invalid item_ai_identify_fanout mode {mode!r}",
@@ -2785,22 +2814,6 @@ def item_action(
                         "reconciliation_gates": list(result.graph.reconciliation_gates),
                     }
                 job_id = result.dispatched.job_id
-            else:
-                _apply_patch(
-                    json_path,
-                    {
-                        "ai_reidentify": True,
-                        "ai_redraft_requested": True,
-                    },
-                )
-                job_id = state_machine.enqueue_job(
-                    queue_name="ai_identify",
-                    payload={"sku": sku, "origin": "operator"},
-                    entity_type="item",
-                    entity_id=sku,
-                    dedupe_key=f"ai_identify:{sku}",
-                    max_attempts=3,
-                )
 
         elif action == "ebay_draft":
             migration = _cfg.get("workflow_migration")
@@ -2809,9 +2822,9 @@ def item_action(
             migration = migration if isinstance(migration, dict) else {}
             mode = migration.get(
                 "item_ebay_draft_fanout",
-                migration.get("bundle_downstream", "legacy"),
+                migration.get("bundle_downstream", "workflow"),
             )
-            if mode not in {"legacy", "workflow"}:
+            if mode != "workflow":
                 raise HTTPException(
                     status_code=503,
                     detail=f"invalid item_ebay_draft_fanout mode {mode!r}",
@@ -2841,15 +2854,6 @@ def item_action(
                         "reconciliation_gates": list(result.graph.reconciliation_gates),
                     }
                 job_id = result.dispatched.job_id
-            else:
-                job_id = state_machine.enqueue_job(
-                    queue_name="ebay_draft",
-                    payload={"sku": sku, "origin": "operator"},
-                    entity_type="item",
-                    entity_id=sku,
-                    dedupe_key=f"ebay_draft:{sku}",
-                    max_attempts=5,
-                )
 
         elif action == "ebay_price":
             migration = _cfg.get("workflow_migration")
@@ -2858,9 +2862,9 @@ def item_action(
             migration = migration if isinstance(migration, dict) else {}
             mode = migration.get(
                 "item_ebay_price_fanout",
-                migration.get("bundle_downstream", "legacy"),
+                migration.get("bundle_downstream", "workflow"),
             )
-            if mode not in {"legacy", "workflow"}:
+            if mode != "workflow":
                 raise HTTPException(
                     status_code=503,
                     detail=f"invalid item_ebay_price_fanout mode {mode!r}",
@@ -2900,23 +2904,14 @@ def item_action(
                         "reconciliation_gates": list(result.graph.reconciliation_gates),
                     }
                 job_id = result.dispatched.job_id
-            else:
-                job_id = state_machine.enqueue_job(
-                    queue_name="ebay_price",
-                    payload={"sku": sku, "origin": "operator"},
-                    entity_type="item",
-                    entity_id=sku,
-                    dedupe_key=f"ebay_price:{sku}",
-                    max_attempts=5,
-                )
 
         elif action == "ebay_stage":
             migration = _cfg.get("workflow_migration")
             if migration is None and isinstance(_cfg.get("raw"), dict):
                 migration = _cfg["raw"].get("workflow_migration")
             migration = migration if isinstance(migration, dict) else {}
-            mode = migration.get("item_ebay_stage_fanout", "legacy")
-            if mode not in {"legacy", "workflow"}:
+            mode = migration.get("item_ebay_stage_fanout", "workflow")
+            if mode != "workflow":
                 raise HTTPException(
                     status_code=503,
                     detail=f"invalid item_ebay_stage_fanout mode {mode!r}",
@@ -2970,36 +2965,13 @@ def item_action(
                     "authority_id": authority_id,
                     "authority_created": authority_created,
                 }
-            _doc = load_item_doc(json_path)
-            _has_photos = bool((_doc.get("draft_listing") or {}).get("imageUrls") or _doc.get("ebay_photos"))
-            if not _has_photos:
-                try:
-                    state_machine.enqueue_job(
-                        queue_name="ebay_upload",
-                        payload={"sku": sku, "origin": "operator"},
-                        entity_type="item",
-                        entity_id=sku,
-                        dedupe_key=f"ebay_upload:{sku}",
-                        max_attempts=5,
-                    )
-                except Exception:
-                    pass
-            job_id = state_machine.enqueue_job(
-                queue_name="ebay_stage",
-                payload={"sku": sku, "origin": "operator"},
-                entity_type="item",
-                entity_id=sku,
-                dedupe_key=f"ebay_stage:{sku}",
-                max_attempts=5,
-            )
-
         elif action == "ebay_publish":
             migration = _cfg.get("workflow_migration")
             if migration is None and isinstance(_cfg.get("raw"), dict):
                 migration = _cfg["raw"].get("workflow_migration")
             migration = migration if isinstance(migration, dict) else {}
-            mode = migration.get("ebay_publish_provider_effect", "legacy")
-            if mode not in {"legacy", "workflow"}:
+            mode = migration.get("ebay_publish_provider_effect", "workflow")
+            if mode != "workflow":
                 raise HTTPException(
                     status_code=503,
                     detail=f"invalid ebay_publish_provider_effect mode {mode!r}",
@@ -3052,62 +3024,6 @@ def item_action(
                     "authority_id": authority_id,
                     "authority_created": authority_created,
                 }
-            _doc = load_item_doc(json_path)
-            _offer_id = (_doc.get("ebay_offer") or {}).get("offer_id")
-            _has_photos = bool((_doc.get("draft_listing") or {}).get("imageUrls") or _doc.get("ebay_photos"))
-            if not _offer_id:
-                # Not yet staged — queue the full chain; each worker retries until
-                # its prerequisite completes (upload → stage → publish).
-                if not _has_photos:
-                    try:
-                        state_machine.enqueue_job(
-                            queue_name="ebay_upload",
-                            payload={"sku": sku, "origin": "operator"},
-                            entity_type="item",
-                            entity_id=sku,
-                            dedupe_key=f"ebay_upload:{sku}",
-                            max_attempts=5,
-                        )
-                    except Exception:
-                        pass
-                try:
-                    state_machine.enqueue_job(
-                        queue_name="ebay_stage",
-                        payload={"sku": sku, "origin": "operator"},
-                        entity_type="item",
-                        entity_id=sku,
-                        dedupe_key=f"ebay_stage:{sku}",
-                        max_attempts=5,
-                    )
-                except Exception:
-                    pass
-            else:
-                # Session 42 (Dave's order finding): an existing offer holds the
-                # PREVIOUSLY staged content — without a re-stage, publish ships
-                # stale content no matter how well-ordered the queue is. The
-                # operator pressed the button, so the re-stage carries operator
-                # origin (C9) and the ordering guards serialize it after
-                # draft/price/upload and before publish.
-                try:
-                    state_machine.enqueue_job(
-                        queue_name="ebay_stage",
-                        payload={"sku": sku, "force": True, "origin": "operator"},
-                        entity_type="item",
-                        entity_id=sku,
-                        dedupe_key=f"ebay_stage:{sku}",
-                        max_attempts=5,
-                    )
-                except Exception:
-                    pass
-            job_id = state_machine.enqueue_job(
-                queue_name="ebay_publish",
-                payload={"sku": sku, "origin": "operator"},
-                entity_type="item",
-                entity_id=sku,
-                dedupe_key=f"ebay_publish:{sku}",
-                max_attempts=10,
-            )
-
         else:
             job_id = state_machine.enqueue_job(
                 queue_name=action,

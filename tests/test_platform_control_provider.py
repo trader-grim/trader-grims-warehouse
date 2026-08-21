@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from tgw.platform_control_provider import PlatformControlProvider, create_platform_control_app
+from tgw.platform_control_provider import (
+    PlatformControlError,
+    PlatformControlProvider,
+    create_platform_control_app,
+)
 
 
 @pytest.fixture
@@ -123,6 +127,38 @@ def test_platform_provider_coordinates_closed_full_fleet_sequence(durable_path):
     assert resumed["dispositions"]["live_requests"][0]["disposition"] == "reconcile"
     assert json.loads((Path(config["state_root"]) / "fleet-transition-gate.json").read_text())["status"] == "ACTIVE"
     assert [step for step, _ in actor.calls] == ["quiesce", "rebuild", "activate", "restart", "health", "verify-actor"]
+
+    invocation = {
+        "recovery": {"candidate_commit": request["revisions"]["source"]},
+    }
+    with pytest.raises(
+        PlatformControlError,
+        match="not recoverable from RESUMED",
+    ):
+        provider.recover("rollback-platform", invocation)
+    assert [step for step, _ in actor.calls].count("rollback") == 0
+
+
+def test_platform_rollback_requires_failed_controller_and_effectful_provider_state(
+    durable_path,
+):
+    config, request, snapshot = _fixture(durable_path)
+    provider = PlatformControlProvider(
+        config,
+        service_runner=lambda args: subprocess.CompletedProcess(args, 0, "active\n", ""),
+        actor_client=_ActorClient(),
+        snapshot_source=_SnapshotSource(snapshot),
+    )
+    provider.checkpoint(request)
+    controller = {
+        "schema": "tgw-w18-fleet-refresh-journal/v1",
+        "request_hash": _hash(request),
+        "request": request,
+        "status": "ROLLBACK_REQUIRED",
+        "steps": [],
+    }
+    with pytest.raises(PlatformControlError, match="not legal from CHECKPOINTED"):
+        provider.rollback(request, controller)
 
 
 def test_platform_provider_http_rejects_missing_auth_and_invocation_drift(durable_path):

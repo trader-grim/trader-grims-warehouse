@@ -11,11 +11,13 @@ publish_offer and the lazily-imported description builder are stubbed.
 """
 
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 import tgw.workers.ebay_publish as publish_mod
+import tgw.provider_effects as provider_effects
 from tgw.ebay.pricing import to_99
 from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
@@ -48,6 +50,21 @@ def publisher(tmp_path, monkeypatch):
                 'status': 'PUBLISHED'}
 
     monkeypatch.setattr(publish_mod, 'publish_offer', fake_publish_offer)
+    monkeypatch.setattr(publish_mod, 'enqueue_post_push_sync', lambda *a, **k: True)
+    monkeypatch.setattr(
+        provider_effects, 'reserve_and_begin_authorized_effect',
+        lambda **kwargs: SimpleNamespace(
+            effect_id='test-publish-effect', state='dispatched', result=None),
+    )
+    monkeypatch.setattr(
+        provider_effects, 'finish_provider_effect',
+        lambda effect_id, **kwargs: SimpleNamespace(
+            effect_id=effect_id, state=kwargs['state'], result=kwargs.get('result')),
+    )
+    monkeypatch.setattr(
+        provider_effects, 'validate_succeeded_authorized_effect',
+        lambda **kwargs: SimpleNamespace(result={'listing_id': '110555'}),
+    )
     # build_listing_description is imported lazily inside handle()
     import tgw.ebay.description as desc
     monkeypatch.setattr(desc, 'build_listing_description',
@@ -62,7 +79,11 @@ def publisher(tmp_path, monkeypatch):
     worker.config = {'itemdata_root': tmp_path, 'pretty': False,
                      'reprice_stages': STAGES, 'category_price_defaults': {},
                      'reprice_schedule_enabled': True,
-                     'api_key': 'test-api-key'}
+                     'api_key': 'test-api-key',
+                     'workflow_migration': {
+                         'ebay_publish_provider_effect': 'workflow',
+                         'ebay_provider_identity': 'test-seller',
+                     }}
     worker._published = published
     worker._enqueued = enqueued
     return worker
@@ -90,8 +111,19 @@ def _staged_item(**extra):
     return item
 
 
+def _complete_active_projection(item):
+    published_at = item['ebay_listing']['published_at']
+    item['ebay_listing']['provider_effect_id'] = 'test-publish-effect'
+    item['ebay_offer']['published_at'] = published_at
+    item['draft_listing_state'] = 'baseline'
+    item['baseline_at'] = published_at
+    return item
+
+
 def _run(worker, sku):
-    worker.handle({'payload_json': {'sku': sku}})
+    from tests.conftest import make_governed_ebay_job
+    return worker.handle(make_governed_ebay_job(
+        worker.config['itemdata_root'], sku, treatment_id='ebay-publish'))
 
 
 def _governed_job(sku):
@@ -124,6 +156,11 @@ def test_already_active_item_is_not_republished(publisher, tmp_path, monkeypatch
                            'done_at': '2026-06-01T00:00:00+00:00'}],
     )
     item['ebay_offer']['status'] = 'PUBLISHED'
+    _complete_active_projection(item)
+    monkeypatch.setattr(
+        provider_effects, 'validate_succeeded_authorized_effect',
+        lambda **kwargs: SimpleNamespace(result={'listing_id': '110001'}),
+    )
     path = _write(tmp_path, 'tgw1', item)
     before = path.read_text()
     _run(publisher, 'tgw1')
@@ -146,6 +183,11 @@ def test_already_active_item_refreshes_photo_verify(publisher, tmp_path, monkeyp
             'imageUrls': ['https://x/1', 'https://x/2', 'https://x/3']}}},
     )
     item['ebay_offer']['status'] = 'PUBLISHED'
+    _complete_active_projection(item)
+    monkeypatch.setattr(
+        provider_effects, 'validate_succeeded_authorized_effect',
+        lambda **kwargs: SimpleNamespace(result={'listing_id': '110001'}),
+    )
     _write(tmp_path, 'tgw1', item)
     _run(publisher, 'tgw1')
     after = json.loads((tmp_path / 'tgw1' / 'tgw1.json').read_text(encoding='utf-8'))
@@ -209,13 +251,16 @@ def test_satisfied_receipt_is_after_projection_and_invalidations(
         lambda sku, **kwargs: (sync_bindings.append((sku, kwargs)), order.append('sync'))[-1],
     )
 
-    receipt = publisher.handle({'payload_json': {'sku': 'tgw-order'}})
+    from tests.conftest import make_governed_ebay_job
+    receipt = publisher.handle(make_governed_ebay_job(
+        tmp_path, 'tgw-order', treatment_id='ebay-publish'))
 
     assert order == ['canonical', 'baseline', 'catalog', 'sync']
     assert sync_bindings == [('tgw-order', {
-        'config': publisher.config, 'source_provider_effect_id': '',
+        'config': publisher.config,
+        'source_provider_effect_id': 'test-publish-effect',
     })]
-    assert receipt is None  # legacy unbound completion stays non-treatment
+    assert receipt['outcome'] == 'satisfied'
 
 
 def test_governed_fresh_publish_completes_through_atomic_evaluation_outbox(
@@ -233,7 +278,11 @@ def test_governed_fresh_publish_completes_through_atomic_evaluation_outbox(
              return_value='evaluation-1',
          ) as atomic, \
          patch.object(publish_mod.state_machine, 'mark_succeeded') as ordinary:
-        publisher._process(_governed_job(sku))
+        job = _governed_job(sku)
+        from tgw.item_mutation import item_generation
+        job['payload_json']['object_generation'] = item_generation(
+            json.loads((tmp_path / sku / f'{sku}.json').read_text()))
+        publisher._process(job)
 
     assert publisher._published == ['OFF1']
     assert atomic.call_args.args[2] == (
@@ -246,7 +295,7 @@ def test_governed_fresh_publish_completes_through_atomic_evaluation_outbox(
             'graph_id': 'graph-1', 'outcome': 'satisfied',
             'goal_profile_id': 'tgw.ebay_listable',
             'goal_profile_version': '1',
-            'object_generation': 'generation-1',
+            'object_generation': job['payload_json']['object_generation'],
             'condition_hash': 'condition-1',
             'entity_id': sku,
             'established_conditions': ['published'],
@@ -267,17 +316,16 @@ def test_canonical_projection_failure_requires_reconciliation_not_retry(
     )
 
     with pytest.raises(TreatmentFailure, match='reconciliation required') as caught:
-        publisher.handle({'payload_json': {
-            'sku': 'tgw-projection-failure',
-            'treatment_id': 'ebay-publish', 'treatment_version': '1',
-            'graph_id': 'graph-1', 'origin': 'operator',
-        }})
+        from tests.conftest import make_governed_ebay_job
+        publisher.handle(make_governed_ebay_job(
+            tmp_path, 'tgw-projection-failure', treatment_id='ebay-publish',
+            origin='operator'))
 
     assert json.loads(path.read_text()).get('ebay_listing') is None
     assert publisher._published == ['OFF1']
     receipt = caught.value.result
     assert receipt['outcome'] == 'reconciliation_required'
-    assert receipt['graph_id'] == 'graph-1'
+    assert receipt['graph_id'] == 'test-governed-graph'
     assert receipt['evidence'] == {
         'reason_code': 'CANONICAL_PROJECTION_AFTER_PUBLISH_FAILED',
         'provider': 'ebay',
@@ -285,7 +333,7 @@ def test_canonical_projection_failure_requires_reconciliation_not_retry(
         'listing_id': '110555',
         'listing_url': 'https://www.ebay.com/itm/110555',
         'provider_status': 'PUBLISHED',
-        'provider_effect_id': None,
+        'provider_effect_id': 'test-publish-effect',
         'projection_error': 'RuntimeError: canonical projection failed',
         'operator_origin': True,
     }
@@ -310,6 +358,9 @@ def test_second_projection_failure_and_active_replay_never_false_satisfy(
         ),
     )
     job = _governed_job(sku)
+    from tgw.item_mutation import item_generation
+    job['payload_json']['object_generation'] = item_generation(
+        json.loads((tmp_path / sku / f'{sku}.json').read_text()))
 
     with patch.object(publish_mod.state_machine, 'mark_running'), \
          patch.object(publish_mod.state_machine, 'mark_dead_letter') as dead, \
@@ -378,7 +429,9 @@ def test_provider_effect_confirmed_result_repairs_without_second_post(
     _write(tmp_path, sku, item)
     publisher.config['workflow_migration'] = {
         'ebay_publish_provider_effect': 'workflow',
+        'ebay_provider_identity': 'ebay:test',
     }
+    monkeypatch.setattr(publish_mod, 'enqueue_post_push_sync', lambda *args, **kwargs: True)
     payload = _governed_job(sku)['payload_json']
     payload['condition_hash'] = 'condition-1'
     payload['object_generation'] = item_generation(item)
@@ -387,7 +440,9 @@ def test_provider_effect_confirmed_result_repairs_without_second_post(
         entity_type='item', entity_id=sku,
         object_generation=payload['object_generation'], graph_id='graph-1',
         treatment_id='ebay-publish', treatment_version='1',
-        condition_hash='condition-1', request={'offer_id': 'OFF1'},
+        condition_hash='condition-1', request={
+            'offer_id': 'OFF1', 'condition_fallback': 'USED_EXCELLENT',
+        },
         authority={'origin': 'workflow'}, state='reserved',
     )
 
@@ -455,7 +510,9 @@ def test_provider_effect_ambiguous_restart_never_blind_replays(
         entity_type='item', entity_id=sku,
         object_generation=payload['object_generation'], graph_id='graph-1',
         treatment_id='ebay-publish', treatment_version='1',
-        condition_hash='condition-1', request={'offer_id': 'OFF1'},
+        condition_hash='condition-1', request={
+            'offer_id': 'OFF1', 'condition_fallback': 'USED_EXCELLENT',
+        },
         authority={'origin': 'workflow'}, state='reserved',
     )
     def reserve_begin(**kwargs):
@@ -510,7 +567,9 @@ def test_provider_effect_definitive_rejection_is_terminal_not_fallback(
         effect_id='c' * 64, provider='ebay', operation='publish-offer',
         entity_type='item', entity_id='SKU-1', object_generation='generation-1',
         graph_id='graph-1', treatment_id='ebay-publish', treatment_version='1',
-        condition_hash='condition-1', request={'offer_id': 'OFF1'},
+        condition_hash='condition-1', request={
+            'offer_id': 'OFF1', 'condition_fallback': 'USED_EXCELLENT',
+        },
         authority={'authority_id': 'authority-1'}, state='dispatched',
     )
     monkeypatch.setattr(effects, 'reserve_and_begin_authorized_effect',
@@ -566,7 +625,9 @@ def test_governed_publish_rejection_persists_exact_aspect_field(publisher, monke
         effect_id='c' * 64, provider='ebay', operation='publish-offer',
         entity_type='item', entity_id='SKU-1', object_generation='generation-1',
         graph_id='graph-1', treatment_id='ebay-publish', treatment_version='1',
-        condition_hash='condition-1', request={'offer_id': 'OFF1'},
+        condition_hash='condition-1', request={
+            'offer_id': 'OFF1', 'condition_fallback': 'USED_EXCELLENT',
+        },
         authority={'authority_id': 'authority-1'}, state='dispatched',
     )
     monkeypatch.setattr(effects, 'reserve_and_begin_authorized_effect', lambda **kwargs: effect)
@@ -608,7 +669,9 @@ def test_provider_effect_rejected_replay_never_posts_again(publisher, monkeypatc
         effect_id='c' * 64, provider='ebay', operation='publish-offer',
         entity_type='item', entity_id='SKU-1', object_generation='generation-1',
         graph_id='graph-1', treatment_id='ebay-publish', treatment_version='1',
-        condition_hash='condition-1', request={'offer_id': 'OFF1'},
+        condition_hash='condition-1', request={
+            'offer_id': 'OFF1', 'condition_fallback': 'USED_EXCELLENT',
+        },
         authority={'authority_id': 'authority-1'}, state='rejected',
         error_detail='HTTP 400',
     )

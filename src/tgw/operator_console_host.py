@@ -150,7 +150,7 @@ def _canonical_hash(value: Any) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def _development_artifacts(config: Mapping[str, Any]) -> tuple[str, Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+def _development_artifacts(config: Mapping[str, Any]) -> tuple[str, Mapping[str, Any], Mapping[str, Any], Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
     raw = config.get("development")
     if not isinstance(raw, Mapping):
         raise ValueError("development console configuration is required")
@@ -179,7 +179,35 @@ def _development_artifacts(config: Mapping[str, Any]) -> tuple[str, Mapping[str,
     claimed = unsigned.pop("receipt_hash", None)
     if freshness.get("schema") != "tgw-w18-projection-refresh-receipt/v1" or claimed != _canonical_hash(unsigned):
         raise ValueError("development console freshness receipt is invalid")
-    return source_commit, registry, freshness, card_contract
+    live_revisions = raw.get("live_revisions")
+    revision_names = {
+        "plan", "capability_graph", "code_graph", "workflow", "actor_contract",
+    }
+    if (
+        not isinstance(live_revisions, Mapping)
+        or set(live_revisions) != revision_names
+        or not all(isinstance(value, str) and value for value in live_revisions.values())
+    ):
+        raise ValueError("development console live revision binding is invalid")
+    gate_path = raw.get("transition_gate_path")
+    if not isinstance(gate_path, str):
+        raise ValueError("development console transition gate binding is invalid")
+    gate = Path(gate_path)
+    if (
+        not gate.is_absolute() or gate == Path("/tmp") or Path("/tmp") in gate.parents
+        or gate.is_symlink() or not gate.is_file()
+    ):
+        raise ValueError("development console transition gate is unavailable")
+    try:
+        recovery_status = json.loads(gate.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("development console transition gate is invalid") from exc
+    if not isinstance(recovery_status, Mapping):
+        raise ValueError("development console transition gate is invalid")
+    return (
+        source_commit, registry, freshness, card_contract,
+        dict(live_revisions), recovery_status,
+    )
 
 
 class ConfiguredAuthorityStore:
@@ -552,7 +580,10 @@ def configured_console_mount(
         config = config_provider()
         binding = _approved_plan_identity(config)
         solution = load_solution(config_provider, binding["solution_hash"])
-        source_commit, provider_registry, freshness, card_contract = _development_artifacts(config)
+        (
+            source_commit, provider_registry, freshness, card_contract,
+            live_revisions, recovery_status,
+        ) = _development_artifacts(config)
         return resolve_development_request(
             body=body,
             solution=solution,
@@ -562,6 +593,8 @@ def configured_console_mount(
             freshness=freshness,
             provider_registry=provider_registry,
             card_contract=card_contract,
+            live_revisions=live_revisions,
+            recovery_status=recovery_status,
         )
 
     load_dynamic_surface, submit_dynamic_surface_decision = _dynamic_surface_bindings(

@@ -91,10 +91,20 @@ def test_ebay_upload_handle_uses_config_sku_json(tmp_path):
     from tgw.queue.worker_base import HardFailure
 
     w = ebay_upload_mod.EbayUploadWorker.__new__(ebay_upload_mod.EbayUploadWorker)
-    w.config = {"itemdata_root": tmp_path}
+    w.config = {
+        "itemdata_root": tmp_path,
+        "workflow_migration": {"ebay_provider_identity": "test-seller"},
+    }
 
     with pytest.raises(HardFailure, match="item JSON not found"):
-        w.handle({"payload_json": {"sku": "tgw20260101120000004"}})
+        w.handle({"payload_json": {
+            "sku": "tgw20260101120000004",
+            "treatment_id": "ebay-upload", "treatment_version": "1",
+            "graph_id": "graph", "goal_profile_id": "goal",
+            "goal_profile_version": "1", "object_generation": "generation",
+            "condition_hash": "condition", "operator_authority_id": "authority",
+            "pre_authority_condition_hash": "pre-authority",
+        }})
 
 
 def test_ai_identify_handle_uses_config_sku_dir(tmp_path):

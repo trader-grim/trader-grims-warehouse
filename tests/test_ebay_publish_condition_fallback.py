@@ -15,12 +15,14 @@ completely offline.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
 import requests
 
 import tgw.workers.ebay_publish as ebay_publish_mod
+import tgw.provider_effects as provider_effects
 from tgw.workers.ebay_publish import EbayPublishWorker
 
 
@@ -46,7 +48,14 @@ def _worker(cfg: Dict[str, Any]) -> EbayPublishWorker:
 
 
 def _cfg(tmp_path) -> Dict[str, Any]:
-    return {'itemdata_root': tmp_path, 'raw': {}, 'reprice_stages': [], 'category_price_defaults': {}}
+    return {
+        'itemdata_root': tmp_path, 'raw': {}, 'reprice_stages': [],
+        'category_price_defaults': {},
+        'workflow_migration': {
+            'ebay_publish_provider_effect': 'workflow',
+            'ebay_provider_identity': 'test-seller',
+        },
+    }
 
 
 def _write_item(tmp_path, sku, item):
@@ -61,6 +70,9 @@ class _FakeResponse:
         self._body = body
         self.text = json.dumps(body)
 
+    def json(self):
+        return self._body
+
 
 def _http_error_25021() -> requests.exceptions.HTTPError:
     resp = _FakeResponse(400, {'errors': [{'errorId': 25021, 'message': 'condition not allowed'}]})
@@ -71,6 +83,23 @@ def _mock_common(monkeypatch, tmp_path):
     monkeypatch.setattr(ebay_publish_mod.state_machine, 'active_jobs_for_sku', lambda *a, **k: [])
     monkeypatch.setattr(ebay_publish_mod.state_machine, 'enqueue_job', lambda **k: 'job-1')
     monkeypatch.setattr(ebay_publish_mod, 'fence_ebay_write', lambda *a, **k: {'ok': True})
+    monkeypatch.setattr(ebay_publish_mod, 'enqueue_post_push_sync', lambda *a, **k: True)
+    monkeypatch.setattr(
+        provider_effects, 'reserve_and_begin_authorized_effect',
+        lambda **kwargs: SimpleNamespace(
+            effect_id='condition-effect', state='dispatched', result=None),
+    )
+    monkeypatch.setattr(
+        provider_effects, 'finish_provider_effect',
+        lambda effect_id, **kwargs: SimpleNamespace(
+            effect_id=effect_id, state=kwargs['state'], result=kwargs.get('result')),
+    )
+
+
+def _job(tmp_path, sku):
+    from tests.conftest import make_governed_ebay_job
+    return make_governed_ebay_job(
+        tmp_path, sku, treatment_id='ebay-publish', origin='operator')
 
 
 def test_condition_fallback_writes_corrected_condition_back_to_draft_listing(tmp_path, monkeypatch):
@@ -97,7 +126,7 @@ def test_condition_fallback_writes_corrected_condition_back_to_draft_listing(tmp
                         lambda cfg, sku, fields: patched.update(fields) or {'ok': True})
 
     worker = _worker(_cfg(tmp_path))
-    worker.handle({'payload_json': {'sku': sku}})
+    worker.handle(_job(tmp_path, sku))
 
     assert calls['publish'] == 2
     assert patched['draft_listing']['condition_enum'] == 'USED_EXCELLENT'
@@ -133,7 +162,7 @@ def test_condition_fallback_uses_category_specific_label_when_available(tmp_path
                         lambda cfg, sku, fields: patched.update(fields) or {'ok': True})
 
     worker = _worker(_cfg(tmp_path))
-    worker.handle({'payload_json': {'sku': sku}})
+    worker.handle(_job(tmp_path, sku))
 
     assert patched['draft_listing']['condition_label'] == 'Pre-owned - Good'
 
@@ -166,7 +195,7 @@ def test_condition_fallback_label_lookup_failure_falls_back_safely(tmp_path, mon
                         lambda cfg, sku, fields: patched.update(fields) or {'ok': True})
 
     worker = _worker(_cfg(tmp_path))
-    worker.handle({'payload_json': {'sku': sku}})
+    worker.handle(_job(tmp_path, sku))
 
     assert calls['publish'] == 2
     assert patched['draft_listing']['condition_label'] == 'Used'
@@ -187,7 +216,7 @@ def test_non_25021_error_does_not_touch_condition(tmp_path, monkeypatch):
                         lambda cfg, sku, fields: patched.update(fields) or {'ok': True})
 
     worker = _worker(_cfg(tmp_path))
-    with pytest.raises(ebay_publish_mod.HardFailure):
-        worker.handle({'payload_json': {'sku': sku}})
+    with pytest.raises(ebay_publish_mod.TreatmentFailure):
+        worker.handle(_job(tmp_path, sku))
 
     assert patched.get('pipeline_error', {}).get('code') == 'ebay_rejected'

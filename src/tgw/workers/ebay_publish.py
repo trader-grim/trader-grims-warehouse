@@ -113,8 +113,8 @@ class EbayPublishWorker(QueueWorker):
         if migration is None and isinstance(self.config.get('raw'), dict):
             migration = self.config['raw'].get('workflow_migration')
         migration = migration if isinstance(migration, dict) else {}
-        mode = migration.get('ebay_publish_provider_effect', 'legacy')
-        if mode not in {'legacy', 'workflow'}:
+        mode = migration.get('ebay_publish_provider_effect', 'workflow')
+        if mode != 'workflow':
             raise HardFailure(
                 f'invalid workflow_migration.ebay_publish_provider_effect mode {mode!r}'
             )
@@ -167,7 +167,13 @@ class EbayPublishWorker(QueueWorker):
                 entity_id=sku, object_generation=payload['object_generation'],
                 graph_id=payload['graph_id'], treatment_id=payload['treatment_id'],
                 treatment_version=payload['treatment_version'],
-                condition_hash=payload['condition_hash'], request={'offer_id': offer_id},
+                condition_hash=payload['condition_hash'], request={
+                    'offer_id': offer_id,
+                    # The category-condition fallback is part of this one
+                    # authorized operation.  It must never become an
+                    # unledgered inventory PUT followed by a blind publish.
+                    'condition_fallback': 'USED_EXCELLENT',
+                },
             )
         except ProviderEffectConflict as exc:
             raise HardFailure(f'{sku}: provider effect admission failed: {exc}') from exc
@@ -189,6 +195,7 @@ class EbayPublishWorker(QueueWorker):
                     'PROVIDER_EFFECT_REJECTED', effect.result,
                 ),
             )
+        condition_fallback_applied = False
         try:
             result = publish_offer(self.config, offer_id)
         except requests.exceptions.HTTPError as exc:
@@ -196,39 +203,70 @@ class EbayPublishWorker(QueueWorker):
             if status in (400, 422):
                 rejection = _rejection_detail(exc)
                 body_text = exc.response.text if exc.response is not None else ''
-                # The governed path retained the provider rejection in
-                # Postgres but did not persist the C11 item finding that the
-                # editor uses to flag the exact invalid control.
-                fence_patch_item(self.config, sku, {'pipeline_error': {
-                    'code': 'ebay_rejected',
-                    'detail': _format_ebay_error(body_text, status),
-                    'raw': body_text[:800],
-                    'ts': datetime.now(timezone.utc).isoformat(),
-                    'source': 'ebay_publish',
-                    'field': _extract_ebay_error_field(body_text),
-                }})
-                rejected = finish_provider_effect(
-                    effect.effect_id, state='rejected',
-                    error_detail=json.dumps(rejection, sort_keys=True),
+                errors = rejection.get('response', {}).get('errors', [])
+                if any(error.get('errorId') == 25021 for error in errors):
+                    # Both calls remain inside the already-reserved provider
+                    # effect. A crash or ambiguous response marks that effect
+                    # for reconciliation; a retry cannot dispatch it again.
+                    try:
+                        ebay_put(
+                            self.config,
+                            f'/sell/inventory/v1/inventory_item/{sku}',
+                            {'condition': 'USED_EXCELLENT'},
+                        )
+                        result = publish_offer(self.config, offer_id)
+                        condition_fallback_applied = True
+                    except Exception as fallback_exc:
+                        ambiguous = finish_provider_effect(
+                            effect.effect_id, state='ambiguous',
+                            error_detail=(
+                                'condition fallback dispatch: '
+                                f'{type(fallback_exc).__name__}: {fallback_exc}'
+                            ),
+                        )
+                        raise TreatmentFailure(
+                            f'{sku}: provider condition fallback outcome ambiguous; '
+                            'reconciliation required',
+                            self._provider_effect_receipt(
+                                payload, sku, ambiguous.effect_id, 'ambiguous',
+                                'PROVIDER_EFFECT_CONDITION_FALLBACK_AMBIGUOUS', None,
+                            ),
+                        ) from fallback_exc
+                else:
+                    # The governed path retains the provider rejection in
+                    # Postgres and persists the C11 item finding used by the
+                    # editor to flag the exact invalid control.
+                    fence_patch_item(self.config, sku, {'pipeline_error': {
+                        'code': 'ebay_rejected',
+                        'detail': _format_ebay_error(body_text, status),
+                        'raw': body_text[:800],
+                        'ts': datetime.now(timezone.utc).isoformat(),
+                        'source': 'ebay_publish',
+                        'field': _extract_ebay_error_field(body_text),
+                    }})
+                    rejected = finish_provider_effect(
+                        effect.effect_id, state='rejected',
+                        error_detail=json.dumps(rejection, sort_keys=True),
+                    )
+                    raise TreatmentFailure(
+                        f'{sku}: provider definitively rejected publish',
+                        self._provider_effect_receipt(
+                            payload, sku, rejected.effect_id, 'failed',
+                            'PROVIDER_EFFECT_REJECTED', rejection,
+                        ),
+                    ) from exc
+            else:
+                ambiguous = finish_provider_effect(
+                    effect.effect_id, state='ambiguous',
+                    error_detail=f'{type(exc).__name__}: {exc}',
                 )
                 raise TreatmentFailure(
-                    f'{sku}: provider definitively rejected publish',
+                    f'{sku}: provider publish outcome ambiguous; reconciliation required',
                     self._provider_effect_receipt(
-                        payload, sku, rejected.effect_id, 'failed',
-                        'PROVIDER_EFFECT_REJECTED', rejection,
+                        payload, sku, ambiguous.effect_id, 'ambiguous',
+                        'PROVIDER_EFFECT_AMBIGUOUS', None,
                     ),
                 ) from exc
-            ambiguous = finish_provider_effect(
-                effect.effect_id, state='ambiguous',
-                error_detail=f'{type(exc).__name__}: {exc}',
-            )
-            raise TreatmentFailure(
-                f'{sku}: provider publish outcome ambiguous; reconciliation required',
-                self._provider_effect_receipt(
-                    payload, sku, ambiguous.effect_id, 'ambiguous',
-                    'PROVIDER_EFFECT_AMBIGUOUS', None,
-                ),
-            ) from exc
         except Exception as exc:
             ambiguous = finish_provider_effect(
                 effect.effect_id, state='ambiguous',
@@ -241,8 +279,12 @@ class EbayPublishWorker(QueueWorker):
                     'PROVIDER_EFFECT_AMBIGUOUS', None,
                 ),
             ) from exc
-        finish_provider_effect(effect.effect_id, state='succeeded', result=result)
-        return {**result, '_provider_effect_id': effect.effect_id}
+        durable_result = {
+            **result,
+            'condition_fallback_applied': condition_fallback_applied,
+        }
+        finish_provider_effect(effect.effect_id, state='succeeded', result=durable_result)
+        return {**durable_result, '_provider_effect_id': effect.effect_id}
 
     @staticmethod
     def _provider_effect_receipt(
@@ -422,6 +464,7 @@ class EbayPublishWorker(QueueWorker):
                     ProviderEffectReconciliationRequired,
                     validate_succeeded_authorized_effect,
                 )
+                from tgw.workflow.operator_authority import listing_content_identity
                 effect_id = existing_listing.get('provider_effect_id')
                 authority_id = payload.get('operator_authority_id')
                 try:
@@ -434,6 +477,7 @@ class EbayPublishWorker(QueueWorker):
                             'object_generation': payload['object_generation'],
                             'pre_authority_condition_hash': payload.get(
                                 'pre_authority_condition_hash', ''),
+                            'content_identity': listing_content_identity(item),
                             'provider_identity': self._provider_identity(),
                         }, expected_binding={
                             'provider': 'ebay', 'operation': 'publish-offer',
@@ -443,8 +487,10 @@ class EbayPublishWorker(QueueWorker):
                             'treatment_id': payload['treatment_id'],
                             'treatment_version': payload['treatment_version'],
                             'condition_hash': payload['condition_hash'],
-                            'request': {'offer_id': (item.get('ebay_offer') or {}).get(
-                                'offer_id')},
+                            'request': {
+                                'offer_id': (item.get('ebay_offer') or {}).get('offer_id'),
+                                'condition_fallback': 'USED_EXCELLENT',
+                            },
                         },
                     )
                     if effect.result.get('listing_id') != existing_listing.get('listing_id'):
@@ -469,16 +515,15 @@ class EbayPublishWorker(QueueWorker):
             )
             return self._governed_success_receipt(payload, sku)
 
-        if effect_mode == 'workflow':
-            from tgw.item_mutation import item_generation
-            observed_generation = item_generation(item)
-            if observed_generation != payload['object_generation']:
-                raise HardFailure(
-                    f'{sku}: provider effect generation conflict: expected '
-                    f"{payload['object_generation']}, observed {observed_generation}"
-                )
-            # Authority validation and dispatch admission are atomic inside
-            # reserve_and_begin_authorized_effect().
+        from tgw.item_mutation import item_generation
+        observed_generation = item_generation(item)
+        if observed_generation != payload['object_generation']:
+            raise HardFailure(
+                f'{sku}: provider effect generation conflict: expected '
+                f"{payload['object_generation']}, observed {observed_generation}"
+            )
+        # Authority validation and dispatch admission are atomic inside
+        # reserve_and_begin_authorized_effect().
 
         ebay_offer = item.get('ebay_offer', {})
         offer_id = ebay_offer.get('offer_id')
@@ -496,31 +541,35 @@ class EbayPublishWorker(QueueWorker):
         staged_price = ebay_offer.get('staged_price')
         if draft_price is not None and staged_price is not None:
             if abs(float(draft_price) - float(staged_price)) > 0.001:
-                # Session 41: ebay_stage's idempotency guard (existing offer_id →
-                # skip) has no price-drift check, so nothing was ever forcing a
-                # re-stage here — this used to just retry forever waiting for a
-                # correction that would never come (see tgw202605060201087, stuck
-                # since 2026-07-01 with staged price $340.99 vs draft $29.99).
-                # Break the deadlock by requesting the force-restage ourselves.
-                try:
-                    # Invariant C10: the forced re-stage keeps the publish job's
-                    # operator provenance (also satisfies C9's inspection gate
-                    # when the operator pressed the button).
-                    state_machine.enqueue_job(
-                        queue_name='ebay_stage',
-                        payload={'sku': sku, 'force': True,
-                                 **({'origin': 'operator'}
-                                    if payload.get('origin') == 'operator' else {})},
-                        entity_type='item',
-                        entity_id=sku,
-                        dedupe_key=f'ebay_stage:force:{sku}',
-                        max_attempts=3,
-                    )
-                except psycopg2.errors.UniqueViolation:
-                    pass
-                raise RuntimeError(
-                    f'{sku}: draft price ${draft_price} != staged price ${staged_price} '
-                    f'— requested a forced ebay_stage re-sync, will retry'
+                # The publish worker cannot mint force-restage authority or
+                # create a second treatment behind the evaluator's back.  A
+                # new evaluation may select force-restage only when the
+                # orchestrator holds that exact operator scope.
+                raise TreatmentFailure(
+                    f'{sku}: draft price ${draft_price} != staged price '
+                    f'${staged_price}; governed force-restage is required',
+                    {
+                        'receipt_schema_id': 'treatment-receipt/v1',
+                        'treatment_id': payload['treatment_id'],
+                        'treatment_version': payload['treatment_version'],
+                        'graph_id': payload['graph_id'],
+                        'goal_profile_id': payload['goal_profile_id'],
+                        'goal_profile_version': payload['goal_profile_version'],
+                        'object_generation': payload['object_generation'],
+                        'condition_hash': payload['condition_hash'],
+                        'entity_id': sku,
+                        'outcome': 'failed',
+                        'established_conditions': [],
+                        'artifacts': [f'item:{sku}'],
+                        'evidence': {
+                            'reason_code': 'PRICE_DRIFT_REQUIRES_FORCE_RESTAGE',
+                            'draft_price': float(draft_price),
+                            'staged_price': float(staged_price),
+                            'proposed_treatment': 'ebay-stage',
+                            'required_authority_scope': 'force-restage',
+                            'operator_attention_required': True,
+                        },
+                    },
                 )
 
         # Reprice-schedule minting is DISABLED by default (session 42): schedules
@@ -548,81 +597,26 @@ class EbayPublishWorker(QueueWorker):
         log.info('publishing %s (offerId=%s)', sku, offer_id)
         tgw_logging.log_event('ebay_publish_start', sku=sku, offer_id=offer_id)
 
-        try:
-            result = (
-                self._publish_with_provider_effect(
-                    payload, sku, offer_id, item,
+        result = self._publish_with_provider_effect(payload, sku, offer_id, item)
+        if result.get('condition_fallback_applied') and item.get('draft_listing'):
+            label = 'Used'
+            category_id = str(item.get('ebay_category_id', ''))
+            try:
+                for condition in conditions.allowed_conditions_for_category(
+                        self.config, category_id):
+                    if condition['condition_id'] == '3000':
+                        label = condition['condition_label']
+                        break
+            except Exception as exc:
+                log.warning(
+                    '%s: could not resolve conditionId 3000 label (%s); using %r',
+                    sku, exc, label,
                 )
-                if effect_mode == 'workflow'
-                else publish_offer(self.config, offer_id)
-            )
-        except requests.exceptions.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else 0
-            if status in (400, 422):
-                body_text = exc.response.text if exc.response is not None else ''
-                errors = []
-                try:
-                    errors = json.loads(body_text).get('errors', [])
-                except Exception:
-                    pass
-                if any(e.get('errorId') == 25021 for e in errors):
-                    # Category rejects granular condition — fall back to USED_EXCELLENT
-                    # (conditionId 3000, accepted universally for used-item categories)
-                    log.warning('%s: condition rejected by category at publish — '
-                                'retrying with USED_EXCELLENT', sku)
-                    ebay_put(self.config,
-                             f'/sell/inventory/v1/inventory_item/{sku}',
-                             {'condition': 'USED_EXCELLENT'})
-                    result = publish_offer(self.config, offer_id)
-                    # audit#1143 #1168: this succeeded on eBay, but draft_listing's
-                    # condition_enum was left at the rejected granular value —
-                    # the next ebay_stage re-stage would resubmit that same
-                    # value, get 25021 again, and re-apply this same fallback
-                    # forever (local record permanently disagreeing with what's
-                    # actually live). Persisted below via the function's own
-                    # end-of-run fence_patch_item(draft_listing=...) write.
-                    if item.get('draft_listing'):
-                        # code-review follow-up: use conditions.py's canonical
-                        # mapping instead of hardcoding the enum/label, so this
-                        # never drifts from the same source of truth
-                        # ebay_draft.py uses. The label is the category's own
-                        # eBay-returned description for conditionId 3000 (can
-                        # legitimately differ per category — e.g. "Used" vs
-                        # "Pre-owned - Good"), not a fixed string; 'Used' is
-                        # only the fallback if that lookup is unavailable.
-                        label = 'Used'
-                        cat_id_for_condition = str(item.get('ebay_category_id', ''))
-                        try:
-                            for cond in conditions.allowed_conditions_for_category(
-                                    self.config, cat_id_for_condition):
-                                if cond['condition_id'] == '3000':
-                                    label = cond['condition_label']
-                                    break
-                        except Exception as exc:
-                            log.warning('%s: could not look up canonical label for '
-                                        'conditionId 3000 (%s) — using default %r',
-                                        sku, exc, label)
-                        item['draft_listing']['condition_id']    = '3000'
-                        item['draft_listing']['condition_label'] = label
-                        item['draft_listing']['condition_enum']  = conditions.condition_enum('3000')
-                else:
-                    msg = _format_ebay_error(body_text, status)
-                    # Canonical pipeline_error schema (broker B1b) — see
-                    # ebay_stage.py; legacy schema still rendered by shim.
-                    pipeline_error = {
-                        'code':   'ebay_rejected',
-                        'detail': msg,
-                        'raw':    body_text[:800],
-                        'ts':     datetime.now(timezone.utc).isoformat(),
-                        'source': 'ebay_publish',
-                        # PP-CONDITION-ENUM-001 / todo #1562 — see ebay_stage.py's
-                        # identical field for rationale.
-                        'field':  _extract_ebay_error_field(body_text),
-                    }
-                    fence_patch_item(self.config, sku, {'pipeline_error': pipeline_error})
-                    raise HardFailure(f'{sku}: eBay rejected publish: {msg}') from exc
-            else:
-                raise  # transient — base class retries
+            item['draft_listing'].update({
+                'condition_id': '3000',
+                'condition_label': label,
+                'condition_enum': conditions.condition_enum('3000'),
+            })
 
         now = datetime.now(timezone.utc)
         item['ebay_listing'] = {
@@ -755,14 +749,6 @@ class EbayPublishWorker(QueueWorker):
         # once the first canonical write has landed, the already-Active guard
         # makes its repair replay provider-idempotent.
         return self._governed_success_receipt(payload, sku)
-
-        return {
-            "treatment_id": "ebay-publish",
-            "outcome": "satisfied",
-            "established_conditions": ("published",),
-            "artifacts": (f"item:{sku}",),
-        }
-
 
 def main() -> int:
     import argparse

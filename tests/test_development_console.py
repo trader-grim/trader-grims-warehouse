@@ -17,6 +17,17 @@ from tgw.plan_authority import AuthorityPrincipal, PrincipalRole
 PLAN = "a" * 40
 SOURCE = "b" * 40
 CLOSURE_HASH = "sha256:" + "d" * 64
+LIVE_REVISIONS = {
+    "plan": PLAN,
+    "capability_graph": "sha256:" + "1" * 64,
+    "code_graph": SOURCE,
+    "workflow": "sha256:" + "2" * 64,
+    "actor_contract": "sha256:" + "3" * 64,
+}
+ACTIVE_GATE = {
+    "schema": "tgw-w18-fleet-transition-gate/v1",
+    "status": "ACTIVE",
+}
 
 
 def digest(value):
@@ -91,14 +102,28 @@ def solution():
 
 
 def freshness():
+    revisions = {
+        name: {
+            "source": source,
+            "materialization": "sha256:" + format(index, "064x"),
+            "build": "sha256:" + format(index + 10, "064x"),
+            "built_at": "2026-08-20T12:00:00Z",
+            "health": "READY",
+        }
+        for index, (name, source) in enumerate(LIVE_REVISIONS.items(), start=1)
+    }
     body = {
         "schema": "tgw-w18-projection-refresh-receipt/v1",
         "status": "FRESH",
-        "desired": {},
-        "observed": {},
+        "desired": revisions,
+        "observed": json.loads(json.dumps(revisions)),
         "actors": [],
-        "refresh": {},
-        "lease": {},
+        "refresh": {
+            "predecessor": "sha256:" + "4" * 64,
+            "successor": "sha256:" + "5" * 64,
+            "outcome": "HEALTHY",
+        },
+        "lease": {"id": "fleet", "generation": 1},
         "reasons": [],
         "activation": "declarative-only",
     }
@@ -182,6 +207,8 @@ def resolved(**extra):
         freshness=freshness(),
         provider_registry=registry(),
         card_contract=card_contract(),
+        live_revisions=LIVE_REVISIONS,
+        recovery_status=ACTIVE_GATE,
     )
 
 
@@ -239,6 +266,32 @@ def test_provider_selection_or_lifecycle_tamper_fails_closed():
         validate_development_launch(parameters)
 
 
+def test_fresh_label_cannot_hide_live_revision_drift_or_active_recovery():
+    stale = freshness()
+    stale["desired"]["code_graph"]["source"] = "c" * 40
+    stale["observed"]["code_graph"]["source"] = "c" * 40
+    unsigned = dict(stale)
+    unsigned.pop("receipt_hash")
+    stale["receipt_hash"] = digest(unsigned)
+    with pytest.raises(ValueError, match="not fresh"):
+        resolve_request(
+            body=body(), solution=solution(), plan_commit=PLAN,
+            requested_by="operator:dave", source_commit=SOURCE,
+            freshness=stale, provider_registry=registry(),
+            card_contract=card_contract(), live_revisions=LIVE_REVISIONS,
+            recovery_status=ACTIVE_GATE,
+        )
+
+    with pytest.raises(ValueError, match="recovery or fleet transition"):
+        resolve_request(
+            body=body(), solution=solution(), plan_commit=PLAN,
+            requested_by="operator:dave", source_commit=SOURCE,
+            freshness=freshness(), provider_registry=registry(),
+            card_contract=card_contract(), live_revisions=LIVE_REVISIONS,
+            recovery_status={**ACTIVE_GATE, "status": "QUIESCED"},
+        )
+
+
 class Store:
     def __init__(self):
         self.rows = []
@@ -290,6 +343,8 @@ def test_http_creation_uses_the_same_authority_store_and_projection():
                 freshness=freshness(),
                 provider_registry=registry(),
                 card_contract=card_contract(),
+                live_revisions=LIVE_REVISIONS,
+                recovery_status=ACTIVE_GATE,
             ),
         )
     )

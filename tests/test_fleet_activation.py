@@ -1,4 +1,5 @@
 import hashlib
+import json
 
 import pytest
 
@@ -7,6 +8,7 @@ from tgw.fleet_activation import (
     apply_fleet_configuration,
     rollback_fleet_configuration,
     run_fleet_refresh_transaction,
+    _value_hash,
 )
 
 
@@ -49,14 +51,21 @@ def _refresh_providers(events, *, fail=None, rollback_fail=False):
             for name in ("live_requests", "role_leases", "rendered_surfaces", "continuations")
         }}
 
+    def verify_actor(actor, request):
+        events.append(f"verify:{actor}")
+        if fail == "verify-actor":
+            raise RuntimeError("verify-actor failed")
+        return {
+            "status": "VERIFIED", "actor": actor,
+            "generation": request["successor_generation"],
+        }
+
     return {
         "checkpoint": result("checkpoint", "CHECKPOINTED", {"live_requests": [], "role_leases": [], "rendered_surfaces": [], "continuations": []}),
         "quiesce": result("quiesce", "QUIESCED"), "rebuild": result("rebuild", "REBUILT"),
         "activate": result("activate", "ACTIVATED"), "restart": result("restart", "RESTARTED"),
         "health": result("health", "HEALTHY"),
-        "verify_actor": lambda actor, request: events.append(f"verify:{actor}") or {
-            "status": "VERIFIED", "actor": actor, "generation": request["successor_generation"],
-        },
+        "verify_actor": verify_actor,
         "resume": resume,
         "rollback": result("rollback", "FAILED" if rollback_fail else "ROLLED_BACK"),
     }
@@ -78,6 +87,34 @@ def test_refresh_transaction_orders_full_fleet_and_is_idempotent(tmp_path):
     assert events.count("checkpoint") == 1
 
 
+def test_incomplete_journal_is_preserved_and_requires_explicit_recovery(tmp_path):
+    request = _refresh_request()
+    root = tmp_path / "receipts"
+    root.mkdir()
+    journal_path = root / f"{request['transaction_id']}.journal.json"
+    journal = {
+        "schema": "tgw-w18-fleet-refresh-journal/v1",
+        "request_hash": _value_hash(request),
+        "request": request,
+        "status": "QUIESCED",
+        "steps": [{"name": "checkpoint"}, {"name": "quiesce"}],
+    }
+    journal_path.write_text(json.dumps(journal, sort_keys=True) + "\n")
+    before = journal_path.read_bytes()
+    events = []
+
+    with pytest.raises(FleetActivationError, match="explicit recovery"):
+        run_fleet_refresh_transaction(
+            request,
+            receipt_root=root,
+            lease_path=tmp_path / "fleet.lock",
+            **_refresh_providers(events),
+        )
+
+    assert journal_path.read_bytes() == before
+    assert events == []
+
+
 def test_refresh_failure_rolls_whole_fleet_back_and_resumes_predecessor(tmp_path):
     events = []
     receipt = run_fleet_refresh_transaction(
@@ -96,6 +133,37 @@ def test_refresh_rollback_failure_leaves_fleet_quiesced(tmp_path):
     )
     assert receipt["status"] == "FAILED_QUIESCED"
     assert receipt["rollback"]["status"] == "FAILED"
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "checkpoint", "quiesce", "rebuild", "activate", "restart", "health",
+        "verify-actor", "resume",
+    ],
+)
+def test_every_refresh_boundary_failure_is_terminal_and_never_claims_success(
+    tmp_path, boundary,
+):
+    events = []
+    request = _refresh_request(
+        transaction_id=f"refresh-{boundary}",
+        idempotency_key=f"failure-{boundary}",
+    )
+    receipt = run_fleet_refresh_transaction(
+        request,
+        receipt_root=tmp_path / "receipts",
+        lease_path=tmp_path / "fleet.lock",
+        **_refresh_providers(events, fail=boundary),
+    )
+
+    assert receipt["status"] in {"FAILED_ROLLED_BACK", "FAILED_QUIESCED"}
+    assert receipt["status"] != "VERIFIED_AND_RESUMED"
+    journal = json.loads(
+        (tmp_path / "receipts" / f"refresh-{boundary}.journal.json").read_text()
+    )
+    assert journal["status"] == receipt["status"]
+    assert journal["terminal_receipt_hash"] == receipt["receipt_hash"]
 
 
 def test_refresh_refuses_tmp_receipts_and_incomplete_checkpoint(tmp_path):

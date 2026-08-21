@@ -695,7 +695,7 @@ def recover(root: Path) -> list[dict[str, Any]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="tgw-release-install")
-    parser.add_argument("--root", type=Path, default=Path("/opt/tgw-releases"))
+    parser.add_argument("--root", type=Path, default=Path("/opt/TGW/releases"))
     commands = parser.add_subparsers(dest="command", required=True)
     install = commands.add_parser("install")
     install.add_argument("--archive", type=Path, required=True)
@@ -735,6 +735,12 @@ def main() -> int:
             try:
                 admission = json.loads(args.admission_receipt.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
+                record_refusal(
+                    args.root,
+                    args.generation,
+                    args.operation_id,
+                    reason="invalid-admission-evidence",
+                )
                 raise ReleaseError("admission receipt is unavailable or invalid") from exc
             try:
                 admission_public_key = _read_trusted_public_key(args.admission_public_key)
@@ -761,8 +767,20 @@ def main() -> int:
                     current_time=prevalidation_time,
                 )
             except AdmissionRecoveryError as exc:
+                record_refusal(
+                    args.root,
+                    args.generation,
+                    args.operation_id,
+                    reason="invalid-admission-evidence",
+                )
                 raise ReleaseError(f"release admission refused: {exc}") from exc
             except (OSError, json.JSONDecodeError) as exc:
+                record_refusal(
+                    args.root,
+                    args.generation,
+                    args.operation_id,
+                    reason="invalid-admission-evidence",
+                )
                 raise ReleaseError("environment preflight receipt is unavailable or invalid") from exc
             manifest = materialize(
                 args.root,

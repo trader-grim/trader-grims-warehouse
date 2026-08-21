@@ -19,9 +19,11 @@ completely offline.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any, Dict
 
 import tgw.workers.ebay_stage as ebay_stage_mod
+import tgw.provider_effects as provider_effects
 from tgw.workers.ebay_stage import EbayStageWorker
 
 
@@ -32,7 +34,13 @@ def _worker(cfg: Dict[str, Any]) -> EbayStageWorker:
 
 
 def _cfg(tmp_path) -> Dict[str, Any]:
-    return {'itemdata_root': tmp_path, 'raw': {}}
+    return {
+        'itemdata_root': tmp_path, 'raw': {},
+        'workflow_migration': {
+            'ebay_stage_provider_effect': 'workflow',
+            'ebay_provider_identity': 'test-seller',
+        },
+    }
 
 
 def _write_item(tmp_path, sku, item):
@@ -41,24 +49,45 @@ def _write_item(tmp_path, sku, item):
     (d / f'{sku}.json').write_text(json.dumps(item), encoding='utf-8')
 
 
-def _capture_enqueue(monkeypatch):
+def _job(tmp_path, sku, **payload_extra):
+    from tests.conftest import make_governed_ebay_job
+    return make_governed_ebay_job(
+        tmp_path, sku, treatment_id='ebay-stage',
+        goal_profile_id='tgw.ebay_staged', **payload_extra,
+    )
+
+
+def _capture_sync(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        ebay_stage_mod.state_machine, 'enqueue_job',
-        lambda **k: calls.append(k) or 'job-1',
+        ebay_stage_mod, 'enqueue_post_push_sync',
+        lambda sku, **kwargs: calls.append((sku, kwargs)) or True,
     )
     return calls
 
 
-def _patch_common(monkeypatch):
+def _patch_common(monkeypatch, tmp_path):
     monkeypatch.setattr(
         ebay_stage_mod.state_machine, 'active_jobs_for_sku', lambda *a, **k: [])
-    monkeypatch.setattr(ebay_stage_mod, 'fence_ebay_write', lambda *a, **k: {'ok': True})
-    monkeypatch.setattr(ebay_stage_mod, 'fence_patch_item', lambda *a, **k: {'ok': True})
+    from tests.conftest import make_fake_fence_write, make_fake_patch_item
+    monkeypatch.setattr(
+        ebay_stage_mod, 'fence_ebay_write', make_fake_fence_write(tmp_path))
+    monkeypatch.setattr(
+        ebay_stage_mod, 'fence_patch_item', make_fake_patch_item(tmp_path))
     monkeypatch.setattr(ebay_stage_mod, 'stage_draft', lambda cfg, sku, item: {
         'offer_id': 'off-1',
         'inventory_item': {'product': {'imageUrls': ['http://x/1.jpg']}},
     })
+    monkeypatch.setattr(
+        provider_effects, 'reserve_and_begin_authorized_effect',
+        lambda **kwargs: SimpleNamespace(
+            effect_id='stage-effect-1', state='dispatched', result=None),
+    )
+    monkeypatch.setattr(
+        provider_effects, 'finish_provider_effect',
+        lambda effect_id, **kwargs: SimpleNamespace(
+            effect_id=effect_id, state=kwargs['state'], result=kwargs.get('result')),
+    )
 
 
 def test_fresh_stage_enqueues_post_push_sync(tmp_path, monkeypatch):
@@ -72,21 +101,19 @@ def test_fresh_stage_enqueues_post_push_sync(tmp_path, monkeypatch):
         'ebay_offer': {},
         'ebay_listing': {},
     })
-    calls = _capture_enqueue(monkeypatch)
-    _patch_common(monkeypatch)
+    calls = _capture_sync(monkeypatch)
+    _patch_common(monkeypatch, tmp_path)
 
     worker = _worker(_cfg(tmp_path))
-    result = worker.handle({'payload_json': {'sku': sku}})
+    result = worker.handle(_job(tmp_path, sku))
 
-    # A direct operator stage is a legacy queue job, not a workflow treatment
-    # receipt.  It must finish normally rather than be dead-lettered by the
-    # queue's strict workflow-receipt validator.
-    assert result == {'status': 'staged', 'offer_id': 'off-1', 'entity_id': sku}
+    assert result['receipt_schema_id'] == 'treatment-receipt/v1'
+    assert result['outcome'] == 'satisfied'
 
-    sync_calls = [c for c in calls if c['queue_name'] == 'ebay_sync']
-    assert len(sync_calls) == 1
-    assert sync_calls[0]['payload'] == {'sku': sku, 'reason': 'post_push'}
-    assert sync_calls[0]['dedupe_key'] == f'ebay_sync:post_push:{sku}'
+    assert calls == [(sku, {
+        'config': worker.config,
+        'source_provider_effect_id': 'stage-effect-1',
+    })]
 
 
 def test_forced_restage_of_live_item_enqueues_post_push_sync(tmp_path, monkeypatch):
@@ -103,13 +130,13 @@ def test_forced_restage_of_live_item_enqueues_post_push_sync(tmp_path, monkeypat
         'ebay_offer': {'offer_id': 'off-1', 'price': 19.99},
         'ebay_listing': {'status': 'Active', 'listing_id': 'L1'},
     })
-    calls = _capture_enqueue(monkeypatch)
-    _patch_common(monkeypatch)
+    calls = _capture_sync(monkeypatch)
+    _patch_common(monkeypatch, tmp_path)
 
     worker = _worker(_cfg(tmp_path))
-    worker.handle({'payload_json': {'sku': sku, 'force': True, 'origin': 'operator'}})
+    result = worker.handle(_job(
+        tmp_path, sku, force=True, origin='operator',
+    ))
 
-    sync_calls = [c for c in calls if c['queue_name'] == 'ebay_sync']
-    assert len(sync_calls) == 1
-    assert sync_calls[0]['payload'] == {'sku': sku, 'reason': 'post_push'}
-    assert sync_calls[0]['dedupe_key'] == f'ebay_sync:post_push:{sku}'
+    assert result['outcome'] == 'satisfied'
+    assert calls[0][1]['source_provider_effect_id'] == 'stage-effect-1'
