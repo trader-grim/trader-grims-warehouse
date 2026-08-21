@@ -113,6 +113,29 @@ def test_request_rejects_migration_traversal_or_reordering_before_host_action():
         validate_request(bad, _config())
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("generation", "current"),
+        ("generation", "releases"),
+        ("generation", "operations"),
+        ("generation", "receipts"),
+        ("generation", "refusals"),
+        ("generation", ".stage-candidate"),
+        ("expected_current", ".current-candidate"),
+    ],
+)
+def test_request_rejects_reserved_generation_names_before_host_action(field, value):
+    bad = _request()
+    bad["parameters"][field] = value
+    if field == "generation":
+        bad["parameters"]["immutable_generation_path"] = f"/opt/TGW/releases/{value}"
+    unsigned = {key: item for key, item in bad.items() if key != "request_hash"}
+    bad["request_hash"] = _hash(unsigned)
+    with pytest.raises(ApplicationReleaseRemoteError, match="unsafe generation name"):
+        validate_request(bad, _config())
+
+
 def test_w09_install_is_typed_hold_before_any_host_mutation(tmp_path):
     config = {
         **_config(),

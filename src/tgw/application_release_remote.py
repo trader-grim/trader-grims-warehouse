@@ -37,6 +37,8 @@ CONFIG_SCHEMA = "tgw-w09-application-release-helper-config/v1"
 RESPONSE_SCHEMA = "tgw-w09-application-release-response/v1"
 _SHA = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _GENERATION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_RESERVED_GENERATIONS = frozenset({"current", "releases", "operations", "receipts", "refusals"})
+_RESERVED_GENERATION_PREFIXES = (".stage-", ".current-")
 MIGRATION_PATHS = (
     "src/tgw/plan_authority.sql",
     "src/tgw/queue/migrations/20260815_terminal_lease_expiry_fence.sql",
@@ -46,6 +48,17 @@ PROJECTION_PATH = "agent-services/plan-runtime/GOVERNED-EXECUTION-PLATFORM-f0a8c
 
 class ApplicationReleaseRemoteError(RuntimeError):
     pass
+
+
+def _generation(value: Any) -> str:
+    text = str(value)
+    if (
+        _GENERATION.fullmatch(text) is None
+        or text in _RESERVED_GENERATIONS
+        or text.startswith(_RESERVED_GENERATION_PREFIXES)
+    ):
+        raise ApplicationReleaseRemoteError("unsafe generation name")
+    return text
 
 
 def _group_empty_or_kill(pgid: int) -> dict[str, bool]:
@@ -274,15 +287,17 @@ def validate_request(
         },
         "release parameters",
     )
+    generation = _generation(parameters["generation"])
+    expected_current = _generation(parameters["expected_current"])
     if (
-        _GENERATION.fullmatch(str(parameters["generation"])) is None
-        or _GENERATION.fullmatch(str(parameters["expected_current"])) is None
-        or parameters["root_id"] != config["root_id"]
+        parameters["root_id"] != config["root_id"]
         or parameters["services"] != config["services"]
         or parameters["health_probes"] != config["health_probes"]
-        or parameters["immutable_generation_path"] != f"/opt/TGW/releases/{parameters['generation']}"
+        or parameters["immutable_generation_path"] != f"/opt/TGW/releases/{generation}"
     ):
         raise ApplicationReleaseRemoteError("release parameters differ from root-owned composition")
+    parameters["generation"] = generation
+    parameters["expected_current"] = expected_current
     predecessor = _exact(
         parameters["predecessor"],
         {

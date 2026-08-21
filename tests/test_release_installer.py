@@ -18,6 +18,7 @@ from tgw.release_installer import (
     RECEIPT_SCHEMA,
     ReleaseError,
     _atomic_json,
+    _generation,
     current_generation,
     install_runtime_files,
     materialize,
@@ -35,6 +36,15 @@ PREFLIGHT_KEY = Ed25519PrivateKey.generate()
 ISSUED = "2026-08-20T00:00:00Z"
 EXPIRES = "2026-08-21T00:00:00Z"
 CURRENT = "2026-08-20T12:00:00Z"
+
+
+@pytest.mark.parametrize(
+    "generation",
+    ["current", "releases", "operations", "receipts", "refusals", ".stage-candidate", ".current-candidate"],
+)
+def test_generation_rejects_layout_names_and_internal_staging_prefixes(generation: str) -> None:
+    with pytest.raises(ReleaseError, match="unsafe generation name"):
+        _generation(generation)
 
 
 def _selection_authority(plan_commit: str) -> dict[str, object]:

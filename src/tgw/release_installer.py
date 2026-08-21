@@ -34,6 +34,8 @@ REFUSAL_SCHEMA = "tgw-immutable-release-refusal-v1"
 RUNTIME_SCHEMA = "tgw-release-runtime-files-v1"
 _HEX = re.compile(r"^[0-9a-f]+$")
 _GENERATION = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
+_RESERVED_GENERATIONS = frozenset({"current", "releases", "operations", "receipts", "refusals"})
+_RESERVED_GENERATION_PREFIXES = (".stage-", ".current-")
 
 
 class ReleaseError(RuntimeError):
@@ -134,7 +136,11 @@ def _identity(name: str, value: str, length: int) -> str:
 
 
 def _generation(value: str) -> str:
-    if not _GENERATION.fullmatch(value):
+    if (
+        not _GENERATION.fullmatch(value)
+        or value in _RESERVED_GENERATIONS
+        or value.startswith(_RESERVED_GENERATION_PREFIXES)
+    ):
         raise ReleaseError("unsafe generation name")
     return value
 

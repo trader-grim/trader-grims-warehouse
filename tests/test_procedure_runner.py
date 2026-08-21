@@ -124,3 +124,20 @@ def test_runner_refuses_parameter_and_evidence_drift(tmp_path, monkeypatch):
     with pytest.raises(ProcedureRunnerError, match="hash differs"):
         service.execute(changed)
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("generation", "current"),
+        ("generation", "releases"),
+        ("generation", "operations"),
+        ("generation", "receipts"),
+        ("generation", "refusals"),
+        ("generation", ".stage-candidate"),
+        ("expected_current", ".current-candidate"),
+    ],
+)
+def test_runner_refuses_reserved_generation_parameters(name, value):
+    with pytest.raises(ProcedureRunnerError, match=f"unsafe: {name}"):
+        runner_module._argv({"argv": [f":{name}"]}, {name: value})

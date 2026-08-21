@@ -37,6 +37,8 @@ _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _ID = re.compile(r"[a-z0-9][a-z0-9._-]{2,127}\Z")
 _VALUE = re.compile(r"[A-Za-z0-9_./:@+=,-]{1,1024}\Z")
 _PLACEHOLDER = re.compile(r":[a-z][a-z0-9_]{0,63}\Z")
+_RESERVED_GENERATIONS = frozenset({"current", "releases", "operations", "receipts", "refusals"})
+_RESERVED_GENERATION_PREFIXES = (".stage-", ".current-")
 _REQUEST_FIELDS = {
     "schema", "request_id", "procedure_id", "registry_revision", "plan_commit",
     "solution_hash", "card_hash", "parameters", "precondition_evidence",
@@ -208,6 +210,11 @@ def _argv(procedure: Mapping[str, Any], parameters: Any) -> list[str]:
         name = arg[1:]
         value = parameters[name]
         if _VALUE.fullmatch(value) is None or ".." in Path(value).parts:
+            raise ProcedureRunnerError(f"procedure parameter is unsafe: {name}")
+        if name in {"generation", "expected_current"} and (
+            value in _RESERVED_GENERATIONS
+            or value.startswith(_RESERVED_GENERATION_PREFIXES)
+        ):
             raise ProcedureRunnerError(f"procedure parameter is unsafe: {name}")
         roots = _APP_PATH_ROOTS.get(name)
         if roots is not None and not _contained(Path(value), roots):
