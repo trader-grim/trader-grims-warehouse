@@ -63,11 +63,25 @@ def _identifier(value: str, label: str) -> str:
     return value
 
 
-def _attempt_path(value: Any, label: str, attempt_id: str, *, root: str) -> str:
-    if not isinstance(value, str) or value.count("{attempt_id}") != 1:
-        raise EnvironmentPreflightError(f"{label} must contain one attempt id placeholder")
-    rendered = Path(value.replace("{attempt_id}", attempt_id))
-    expected = Path(root) / attempt_id
+def _attempt_path(
+    value: Any,
+    label: str,
+    attempt_id: str,
+    *,
+    root: str,
+    request_id: str | None = None,
+) -> str:
+    required = {"{attempt_id}": attempt_id}
+    if request_id is not None:
+        required["{request_id}"] = request_id
+    if not isinstance(value, str) or any(value.count(token) != 1 for token in required):
+        names = " and ".join(token.strip("{}") for token in required)
+        raise EnvironmentPreflightError(f"{label} must contain one {names} placeholder")
+    rendered_value = value
+    for token, identifier in required.items():
+        rendered_value = rendered_value.replace(token, identifier)
+    rendered = Path(rendered_value)
+    expected = Path(root) / request_id / attempt_id if request_id is not None else Path(root) / attempt_id
     if not rendered.is_absolute():
         raise EnvironmentPreflightError(f"{label} must be absolute")
     try:
@@ -218,6 +232,7 @@ def preflight(
     actor: str,
     profile: str,
     attempt_id: str,
+    request_id: str | None = None,
     boundary_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Verify one catalog-defined environment without executing role work."""
@@ -227,6 +242,10 @@ def preflight(
     if not isinstance(actors, Mapping) or not isinstance(profiles, Mapping):
         raise EnvironmentPreflightError("environment catalog registry is invalid")
     actor, profile, attempt_id = (_identifier(actor, "actor"), _identifier(profile, "profile"), _identifier(attempt_id, "attempt id"))
+    if catalog.get("schema") == "tgw-execution-environment-catalog/v3":
+        request_id = _identifier(request_id, "request id")
+    else:
+        request_id = None
     declared_actor, declared_profile = actors.get(actor), profiles.get(profile)
     if not isinstance(declared_actor, Mapping) or not isinstance(declared_profile, Mapping):
         raise EnvironmentPreflightError("catalog actor or profile is unknown")
@@ -253,6 +272,7 @@ def preflight(
             "profile workspace root",
             attempt_id,
             root="/opt/TGW/w/attempts",
+            request_id=request_id,
         )
         if "cache_roots" in declared_profile:
             raw_cache_roots = declared_profile.get("cache_roots")
@@ -264,6 +284,7 @@ def preflight(
                     f"profile cache root {name}",
                     attempt_id,
                     root="/opt/TGW/var/cache/tgw/attempts",
+                    request_id=request_id,
                 )
                 for name, value in raw_cache_roots.items()
                 if isinstance(name, str) and name
@@ -277,6 +298,7 @@ def preflight(
                     "profile cache root",
                     attempt_id,
                     root="/opt/TGW/var/cache/tgw/attempts",
+                    request_id=request_id,
                 )
             }
     else:
@@ -402,6 +424,8 @@ def preflight(
             if not isinstance(value, str) or not value.startswith("/"):
                 raise EnvironmentPreflightError("mobile profile environment is invalid")
             environment[name] = value.replace("{attempt_id}", attempt_id)
+            if request_id is not None:
+                environment[name] = environment[name].replace("{request_id}", request_id)
         expected_cache_environment = {
             "HOME": cache_roots.get("home"),
             "PUB_CACHE": cache_roots.get("pub"),
@@ -432,6 +456,7 @@ def preflight(
             }
         )
     if catalog.get("schema") == "tgw-execution-environment-catalog/v3":
+        unsigned["request_id"] = request_id
         unsigned["enforcement_boundary"] = _observe_enforcement_boundary(catalog, boundary_root)
         bootstrap_revision, broker_policy_revision = _observe_policy_revisions(
             catalog, boundary_root, actors,
@@ -447,6 +472,7 @@ def main() -> int:
     parser.add_argument("--actor", required=True)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--attempt-id", required=True)
+    parser.add_argument("--request-id")
     parser.add_argument("--boundary-root", type=Path)
     parser.add_argument("--signing-key", type=Path, required=True)
     parser.add_argument("--signer-key-id", required=True)
@@ -469,6 +495,7 @@ def main() -> int:
             actor=args.actor,
             profile=args.profile,
             attempt_id=args.attempt_id,
+            request_id=args.request_id,
             boundary_root=args.boundary_root,
         )
         print(

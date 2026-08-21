@@ -270,10 +270,12 @@ def validate_environment_preflight_for_admission(
         "bootstrap_revision",
         "broker_policy_revision",
     }
+    v3_request_fields = v3_fields | {"request_id"}
     if not isinstance(receipt, Mapping) or frozenset(receipt) not in {
         frozenset(base_fields),
         frozenset(v2_fields),
         frozenset(v3_fields),
+        frozenset(v3_request_fields),
     }:
         raise AdmissionRecoveryError("environment preflight receipt fields are not exact")
     value = dict(receipt)

@@ -80,12 +80,47 @@ def _mcp_registration(
     source_commit: str, catalog_hash: str, trusted_public_key: str,
 ) -> bytes:
     policy = _read_json(policy_path, f"MCP registration policy {actor}:{endpoint}")
+    expected_fields = {
+        "schema", "harness", "endpoint", "transport", "fallback",
+        "role_source", "harness_identity_grants_role", "allowed_tools",
+        "write_effects", "unregistered_tools", "stale_or_mixed_binding",
+        "proposal_only",
+    }
+    allowed_tools = policy.get("allowed_tools")
+    proposal_only = policy.get("proposal_only")
     if (
-        set(policy) != {"schema", "harness", "endpoint", "fallback"}
+        set(policy) != expected_fields
         or policy.get("schema") != "tgw-mcp-registration-policy/v1"
         or policy.get("harness") not in {"codex", "claude", "deepseek", "generic"}
+        or (
+            policy.get("harness") != "generic"
+            and actor in {"codex", "claude", "deepseek"}
+            and policy.get("harness") != actor
+        )
         or policy.get("endpoint") != endpoint
+        or policy.get("transport") != "authenticated-registered-mcp"
         or policy.get("fallback") != "forbidden"
+        or policy.get("role_source") != "signed-actor-contract"
+        or policy.get("harness_identity_grants_role") is not False
+        or not isinstance(allowed_tools, Mapping)
+        or not allowed_tools
+        or any(
+            not isinstance(name, str)
+            or not name.startswith("tgw_")
+            or not isinstance(contract, Mapping)
+            or set(contract) != {"arguments"}
+            or not isinstance(contract.get("arguments"), Mapping)
+            for name, contract in allowed_tools.items()
+        )
+        or policy.get("write_effects") != "none"
+        or policy.get("unregistered_tools") != "forbidden"
+        or policy.get("stale_or_mixed_binding") != "hold"
+        or not isinstance(proposal_only, Mapping)
+        or proposal_only != {
+            "on_missing_capability": True,
+            "has_effect_authority": False,
+            "recipient": "orchestrator",
+        }
     ):
         raise ActorGenerationError(f"MCP registration policy is invalid: {actor}:{endpoint}")
     environment = {

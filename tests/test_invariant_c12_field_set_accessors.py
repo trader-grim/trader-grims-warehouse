@@ -92,22 +92,22 @@ _ALLOWLIST = {
     # accessor-patch handoff, or unrelated revision proposal field.
     # Refreshed 2026-08-20 after the W13 direct-publication branches were
     # retired; the same reviewed sites moved, with no accessor bypass added.
-    (_SRC / "tgw" / "http_server.py", 1518),  # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 1525),  # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 1957),  # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 1976),  # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
-    (_SRC / "tgw" / "http_server.py", 1981),  # (a) accessor output (full envelope) moving onward
-    (_SRC / "tgw" / "http_server.py", 1993),  # (a) accessor patch write — padlock auto-sync
-    (_SRC / "tgw" / "http_server.py", 2556),  # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 2557),  # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 2562),  # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 4285),  # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
-    (_SRC / "tgw" / "http_server.py", 4345),  # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
+    (_SRC / "tgw" / "http_server.py", 1539),  # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
+    (_SRC / "tgw" / "http_server.py", 1546),  # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
+    (_SRC / "tgw" / "http_server.py", 1978),  # (a) accessor patch write
+    (_SRC / "tgw" / "http_server.py", 1997),  # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
+    (_SRC / "tgw" / "http_server.py", 2002),  # (a) accessor output (full envelope) moving onward
+    (_SRC / "tgw" / "http_server.py", 2014),  # (a) accessor patch write — padlock auto-sync
+    (_SRC / "tgw" / "http_server.py", 2577),  # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 2578),  # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 2583),  # (a) accessor patch write (todo #1416)
+    (_SRC / "tgw" / "http_server.py", 4241),  # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
+    (_SRC / "tgw" / "http_server.py", 4301),  # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
     # Refreshed 2026-07-20 (todo #1582, PP-AGENTTRACE-001 Phase 3): the new
     # /form/runs route + _render_runs_html() inserted ~186 lines before this
     # entry, shifting it from 5855 to 6041 — re-verified against current
     # HEAD, no accessor-routing behavior changed, only position.
-    (_SRC / "tgw" / "http_server.py", 7596),  # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 7550),  # (b) revision_draft.delta
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)

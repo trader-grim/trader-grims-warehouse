@@ -20,7 +20,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from tgw.admission_recovery import (
     AdmissionRecoveryError,
@@ -467,6 +467,7 @@ def _select(
     expected_current: str | None,
     operation_id: str,
     rollback_of: str | None = None,
+    evidence_validator: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """CAS-select an already materialized release and durably receipt it."""
     generation = _generation(generation)
@@ -497,6 +498,11 @@ def _select(
             raise ReleaseError(f"current generation changed: expected {expected_current}, got {observed}")
         verify(root, generation)
         manifest = _read_json(root / "releases" / generation / ".release-manifest.json")
+        # The final evidence check belongs inside the same selector lock as
+        # the CAS observation and symlink swap. Validation before materialize
+        # remains useful, but cannot authorize a later selection by itself.
+        if evidence_validator is not None:
+            evidence_validator(manifest)
         intent = {
             "schema": RECEIPT_SCHEMA,
             "state": "prepared",
@@ -567,7 +573,7 @@ def select(
     environment_public_key: bytes | None = None,
     current_plan_commit: str | None = None,
     current_solution_hash: str | None = None,
-    current_time: str | None = None,
+    current_time: str | Callable[[], str] | None = None,
 ) -> dict[str, Any]:
     """Select only after revalidating exact W15/W16 evidence at this boundary."""
     if (
@@ -581,14 +587,15 @@ def select(
     ):
         record_refusal(root, generation, operation_id, reason="missing-admission-evidence")
         raise ReleaseError("release selection requires admission and environment-preflight receipts")
-    try:
-        manifest = _read_json(root / "releases" / _generation(generation) / ".release-manifest.json")
+    def validate_evidence(manifest: Mapping[str, Any]) -> None:
+        evidence_time = current_time() if callable(current_time) else current_time
+        assert evidence_time is not None
         admission = validate_release_admission(
             admission_receipt,
             candidate_commit=manifest["commit"],
             candidate_tree=manifest["git_tree"],
             trusted_public_key=admission_public_key,
-            current_time=current_time,
+            current_time=evidence_time,
             current_plan_commit=current_plan_commit,
             current_solution_hash=current_solution_hash,
         )
@@ -597,12 +604,22 @@ def select(
             catalog_hash=admission["environment"]["catalog_hash"],
             receipt_hash=admission["environment"]["receipt_hash"],
             trusted_public_key=environment_public_key,
-            current_time=current_time,
+            current_time=evidence_time,
+        )
+
+    try:
+        manifest = _read_json(root / "releases" / _generation(generation) / ".release-manifest.json")
+        validate_evidence(manifest)
+        return _select(
+            root,
+            generation,
+            expected_current=expected_current,
+            operation_id=operation_id,
+            evidence_validator=validate_evidence,
         )
     except (AdmissionRecoveryError, KeyError) as exc:
         record_refusal(root, generation, operation_id, reason="invalid-admission-evidence")
         raise ReleaseError(f"release admission refused: {exc}") from exc
-    return _select(root, generation, expected_current=expected_current, operation_id=operation_id)
 
 
 def rollback(
@@ -722,13 +739,16 @@ def main() -> int:
             try:
                 admission_public_key = _read_trusted_public_key(args.admission_public_key)
                 environment_public_key = _read_trusted_public_key(args.environment_public_key)
-                current_time = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                def current_time() -> str:
+                    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+                prevalidation_time = current_time()
                 validate_release_admission(
                     admission,
                     candidate_commit=args.commit,
                     candidate_tree=args.tree,
                     trusted_public_key=admission_public_key,
-                    current_time=current_time,
+                    current_time=prevalidation_time,
                     current_plan_commit=args.current_plan_commit,
                     current_solution_hash=args.current_solution_hash,
                 )
@@ -738,7 +758,7 @@ def main() -> int:
                     catalog_hash=admission["environment"]["catalog_hash"],
                     receipt_hash=admission["environment"]["receipt_hash"],
                     trusted_public_key=environment_public_key,
-                    current_time=current_time,
+                    current_time=prevalidation_time,
                 )
             except AdmissionRecoveryError as exc:
                 raise ReleaseError(f"release admission refused: {exc}") from exc

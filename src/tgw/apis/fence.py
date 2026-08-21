@@ -4,7 +4,8 @@ tgw.apis.fence — HTTP client for the ItemData write fence (PP-FENCE-001).
 Workers use these functions instead of atomic_write_json. All writes are
 routed through the tgw-http fence at http://127.0.0.1:7373.
 
-Auth: Bearer token from cfg["api_key"] — same key used by Flutter / MC.
+Machine writes use the distinct Bearer token from cfg["machine_api_key"].
+The caller header is retained only for attribution and loop prevention.
 """
 from __future__ import annotations
 
@@ -27,6 +28,15 @@ def _headers(cfg: Dict[str, Any]) -> Dict[str, str]:
     from tgw import quota
     return {"Authorization": f"Bearer {cfg['api_key']}",
             "X-TGW-Caller": f"{quota._context_kind}:{quota._context_name}"}
+
+
+def _machine_headers(cfg: Dict[str, Any]) -> Dict[str, str]:
+    headers = _headers(cfg)
+    machine_key = cfg.get("machine_api_key")
+    if not machine_key:
+        raise RuntimeError("machine_api_key is required for item fence writes")
+    headers["Authorization"] = f"Bearer {machine_key}"
+    return headers
 
 
 def _raise(resp: requests.Response) -> None:
@@ -52,7 +62,7 @@ def patch_item(cfg: Dict[str, Any], sku: str, fields: Dict[str, Any]) -> Dict[st
     resp = requests.patch(
         f"{_BASE}/api/items/{sku}",
         json={"fields": fields},
-        headers=_headers(cfg),
+        headers=_machine_headers(cfg),
         timeout=10,
     )
     _raise(resp)

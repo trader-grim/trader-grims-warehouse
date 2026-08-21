@@ -261,16 +261,21 @@ def test_api_key_present_when_secret_file_missing(tmp_path):
     cfg = load_config(cfg_path)
     assert "api_key" in cfg
     assert cfg["api_key"] == ""
+    assert cfg["machine_api_key"] == ""
 
 
 def test_api_key_loaded_when_secret_file_present(tmp_path):
     """When the key file exists, its 'api_key' value is surfaced onto cfg."""
     secrets_root = tmp_path / "secrets"
     secrets_root.mkdir(parents=True, exist_ok=True)
-    (secrets_root / "tgw-api-key.json").write_text(json.dumps({"api_key": "sekrit-123"}))
+    (secrets_root / "tgw-api-key.json").write_text(json.dumps({
+        "api_key": "sekrit-123",
+        "machine_api_key": "machine-sekrit-456",
+    }))
     cfg_path = _write_cfg(tmp_path, {})
     cfg = load_config(cfg_path)
     assert cfg["api_key"] == "sekrit-123"
+    assert cfg["machine_api_key"] == "machine-sekrit-456"
 
 
 def test_api_key_present_when_secret_file_malformed(tmp_path):
@@ -284,3 +289,4 @@ def test_api_key_present_when_secret_file_malformed(tmp_path):
     cfg = load_config(cfg_path)
     assert "api_key" in cfg
     assert cfg["api_key"] == ""
+    assert cfg["machine_api_key"] == ""

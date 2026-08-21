@@ -2,5 +2,55 @@
   "schema": "tgw-actor-bootstrap-policy/v1",
   "fallback": "forbidden",
   "authority": "exact-signed-actor-contract",
-  "on_mismatch": "quarantine"
+  "on_mismatch": "quarantine",
+  "host_contract": {
+    "execution_host": "tgw-lib",
+    "production_host": "tgw-prod",
+    "actor_accounts_from": "environment_catalog.actors.*.account",
+    "forbidden_groups": ["wheel", "sudo", "root"],
+    "ssh_to_production": "forbidden",
+    "canonical_source_mutation": "forbidden",
+    "allocated_worktree_required": true
+  },
+  "durable_roots": {
+    "workspace": "/opt/TGW/w/attempts/{request_id}/{attempt_id}",
+    "cache": "/opt/TGW/var/cache/tgw/attempts/{request_id}/{attempt_id}",
+    "actor_home_as_workspace": "forbidden",
+    "tmp_as_workspace_or_dependency_cache": "forbidden",
+    "ownership": "exact-actor-account-and-primary-group"
+  },
+  "git_contract": {
+    "read": "exact-committed-source-through-registered-capability",
+    "mutation": "allocated-worktree-through-registered-capability",
+    "canonical_branch_write": "forbidden",
+    "production_checkout": "forbidden"
+  },
+  "tool_contract": {
+    "required_endpoint": "tgw-context",
+    "catalog_declared_tools_only": true,
+    "ambient_shell_fallback": "forbidden",
+    "ambient_network_fallback": "forbidden",
+    "ambient_credentials": "forbidden",
+    "service_control": "registered-procedure-only",
+    "release_selection": "registered-procedure-only"
+  },
+  "credential_contract": {
+    "mode": "presence-only",
+    "raw_secret_read": "forbidden",
+    "inheritance": "forbidden",
+    "cross_actor_reuse": "forbidden"
+  },
+  "startup_attestation": {
+    "required": true,
+    "before_first_prompt": true,
+    "bindings": ["actor", "provider", "role", "request_id", "plan_commit", "solution_hash", "card_hash", "source_commit", "environment_receipt_hash", "attempt_id", "workspace_root", "cache_root", "broker_policy_hash"],
+    "drift_action": "quarantine-and-open-platform-doctor-proposal"
+  },
+  "proposal_only_fallback": {
+    "enabled": true,
+    "has_effect_authority": false,
+    "recipient": "orchestrator",
+    "required_fields": ["request_id", "missing_capability", "reason", "proposed_scope"]
+  },
+  "rollback": "atomic-actor-contract-generation-or-quarantine"
 }

@@ -174,6 +174,32 @@ def test_selection_is_compare_and_swap(tmp_path: Path) -> None:
     assert not (root / "operations" / "deploy-b.json").exists()
 
 
+def test_selection_revalidates_evidence_inside_selector_lock(tmp_path: Path) -> None:
+    root = _selected_root(tmp_path)
+    _release(root, tmp_path, "release-b", COMMIT_B, b"B\n")
+    admission, preflight = _selection_evidence(COMMIT_B, TREE)
+    observed_times = iter([CURRENT, "2026-08-21T00:00:00Z"])
+
+    with pytest.raises(ReleaseError, match="release admission refused"):
+        select(
+            root,
+            "release-b",
+            expected_current="release-a",
+            operation_id="expired-at-selector",
+            admission_receipt=admission,
+            environment_preflight_receipt=preflight,
+            **{
+                **_selection_authority(COMMIT_B),
+                "current_time": lambda: next(observed_times),
+            },
+        )
+
+    assert current_generation(root) == "release-a"
+    assert not (root / "operations" / "expired-at-selector.json").exists()
+    refusal = json.loads((root / "refusals/expired-at-selector.json").read_text())
+    assert refusal["reasons"] == ["invalid-admission-evidence"]
+
+
 def test_bootstrap_selection_requires_an_absent_current_generation(tmp_path: Path) -> None:
     root = tmp_path / "tgw"
     _release(root, tmp_path, "bootstrap-a", COMMIT_A, b"A\n")

@@ -43,7 +43,19 @@ def test_builder_emits_signed_complete_external_generation_consumable_by_materia
                 "schema": "tgw-mcp-registration-policy/v1",
                 "harness": "generic",
                 "endpoint": "tgw-context",
+                "transport": "authenticated-registered-mcp",
                 "fallback": "forbidden",
+                "role_source": "signed-actor-contract",
+                "harness_identity_grants_role": False,
+                "allowed_tools": {"tgw_context_status": {"arguments": {}}},
+                "write_effects": "none",
+                "unregistered_tools": "forbidden",
+                "stale_or_mixed_binding": "hold",
+                "proposal_only": {
+                    "on_missing_capability": True,
+                    "has_effect_authority": False,
+                    "recipient": "orchestrator",
+                },
             }
         )
         + "\n",
@@ -220,3 +232,28 @@ def test_checked_in_descriptor_builds_all_provider_neutral_actor_registrations(d
     codex_config = tomllib.loads(Path(codex_binding["source"]).read_text())
     assert codex_config["mcp_servers"]["tgw-context"]["args"] == ["--context-mcp"]
     assert codex_config["mcp_servers"]["tgw-context"]["env"]["TGW_ACTOR_EXPECTED_GENERATION"] == receipt["generation"]
+
+
+def test_actor_generation_rejects_content_free_mcp_policy(durable_path):
+    policy = durable_path / "stub.json"
+    policy.write_text(json.dumps({
+        "schema": "tgw-mcp-registration-policy/v1",
+        "harness": "generic",
+        "endpoint": "tgw-context",
+        "fallback": "forbidden",
+    }))
+    from tgw.actor_generation_builder import ActorGenerationError, _mcp_registration
+
+    with pytest.raises(ActorGenerationError, match="policy is invalid"):
+        _mcp_registration(
+            policy_path=policy,
+            actor="fixture",
+            endpoint="tgw-context",
+            launcher="/opt/TGW/bin/tgw-actor",
+            generation="sha256:" + "1" * 64,
+            plan_commit="f" * 40,
+            solution_hash="sha256:" + "2" * 64,
+            source_commit="e" * 40,
+            catalog_hash="sha256:" + "3" * 64,
+            trusted_public_key="fixture",
+        )

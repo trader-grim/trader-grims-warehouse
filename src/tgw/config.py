@@ -235,6 +235,7 @@ def load_config(path: Path) -> Dict[str, Any]:
 
     _api_key_path = secrets_root / "tgw-api-key.json"
     _api_key = ""
+    _machine_api_key = ""
     try:
         _api_key_present = _api_key_path.exists()
     except PermissionError:
@@ -247,7 +248,9 @@ def load_config(path: Path) -> Dict[str, Any]:
         _api_key_present = False
     if _api_key_present:
         try:
-            _api_key = json.loads(_api_key_path.read_text(encoding="utf-8"))["api_key"]
+            _api_key_data = json.loads(_api_key_path.read_text(encoding="utf-8"))
+            _api_key = _api_key_data["api_key"]
+            _machine_api_key = _api_key_data.get("machine_api_key", "")
         except Exception:
             # Malformed/unreadable key file — pre-existing tolerant
             # behavior, unrelated to the permission fix above.
@@ -312,6 +315,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         "ebay_credentials_path": ebay_credentials_path,
         "ebay_draft_csv_path": ebay_draft_csv_path,
         "api_key": _api_key,
+        "machine_api_key": _machine_api_key,
         "postgres_dsn": postgres_dsn,
         "itemdata_root": itemdata_root,
         "catalog_root": catalog_root,

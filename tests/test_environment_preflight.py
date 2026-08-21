@@ -51,6 +51,10 @@ def v2_catalog(executable: Path):
 
 
 def add_v3_revisions(value, root: Path):
+    development = value["profiles"].get("development")
+    if development is not None:
+        development["workspace_root_template"] = "/opt/TGW/w/attempts/{request_id}/{attempt_id}/development/worktree"
+        development["cache_root_template"] = "/opt/TGW/var/cache/tgw/attempts/{request_id}/{attempt_id}/development"
     bootstrap = root / "agent-services/actor-bootstrap/bootstrap-policy-v1.json"
     bootstrap.parent.mkdir(parents=True, exist_ok=True)
     bootstrap.write_text('{"policy":"bounded"}\n')
@@ -160,20 +164,21 @@ def test_mobile_preflight_binds_complete_versioned_tool_contract(
         "android-license",
         *extra_artifacts,
     ]
+    identity_root = "{request_id}/{attempt_id}" if schema.endswith("/v3") else "{attempt_id}"
     value["profiles"]["mobile"] = {
         "state": "ready-for-preflight",
-        "workspace_root_template": "/opt/TGW/w/attempts/{attempt_id}/mobile/worktree",
+        "workspace_root_template": f"/opt/TGW/w/attempts/{identity_root}/mobile/worktree",
         "cache_roots": {
-            "home": "/opt/TGW/var/cache/tgw/attempts/{attempt_id}/mobile/home",
-            "pub": "/opt/TGW/var/cache/tgw/attempts/{attempt_id}/mobile/pub",
-            "gradle": "/opt/TGW/var/cache/tgw/attempts/{attempt_id}/mobile/gradle",
-            "android_user": "/opt/TGW/var/cache/tgw/attempts/{attempt_id}/mobile/android-user",
+            "home": f"/opt/TGW/var/cache/tgw/attempts/{identity_root}/mobile/home",
+            "pub": f"/opt/TGW/var/cache/tgw/attempts/{identity_root}/mobile/pub",
+            "gradle": f"/opt/TGW/var/cache/tgw/attempts/{identity_root}/mobile/gradle",
+            "android_user": f"/opt/TGW/var/cache/tgw/attempts/{identity_root}/mobile/android-user",
         },
         "environment": {
-            "HOME": "/opt/TGW/var/cache/tgw/attempts/{attempt_id}/mobile/home",
-            "PUB_CACHE": "/opt/TGW/var/cache/tgw/attempts/{attempt_id}/mobile/pub",
-            "GRADLE_USER_HOME": "/opt/TGW/var/cache/tgw/attempts/{attempt_id}/mobile/gradle",
-            "ANDROID_USER_HOME": "/opt/TGW/var/cache/tgw/attempts/{attempt_id}/mobile/android-user",
+            "HOME": f"/opt/TGW/var/cache/tgw/attempts/{identity_root}/mobile/home",
+            "PUB_CACHE": f"/opt/TGW/var/cache/tgw/attempts/{identity_root}/mobile/pub",
+            "GRADLE_USER_HOME": f"/opt/TGW/var/cache/tgw/attempts/{identity_root}/mobile/gradle",
+            "ANDROID_USER_HOME": f"/opt/TGW/var/cache/tgw/attempts/{identity_root}/mobile/android-user",
             "ANDROID_HOME": "/nix/store/android-sdk",
             "ANDROID_SDK_ROOT": "/nix/store/android-sdk",
             "JAVA_HOME": "/nix/store/jdk",
@@ -238,14 +243,20 @@ def test_mobile_preflight_binds_complete_versioned_tool_contract(
         actor="codex",
         profile="mobile",
         attempt_id="attempt-1",
+        request_id="request-1",
         boundary_root=boundary_root,
     )
     assert len(receipt["artifacts"]) == artifact_count
-    assert receipt["environment"]["HOME"].endswith("/attempt-1/mobile/home")
+    if schema.endswith("/v3"):
+        assert receipt["request_id"] == "request-1"
+        assert receipt["environment"]["HOME"].endswith("/request-1/attempt-1/mobile/home")
+    else:
+        assert "request_id" not in receipt
+        assert receipt["environment"]["HOME"].endswith("/attempt-1/mobile/home")
     assert receipt["verification_commands"][0] == ["flutter", "doctor", "--verbose"]
     value["profiles"]["mobile"]["artifacts"].pop()
     with pytest.raises(EnvironmentPreflightError, match="artifact set"):
-        preflight(catalog=value, actor="codex", profile="mobile", attempt_id="attempt-1")
+        preflight(catalog=value, actor="codex", profile="mobile", attempt_id="attempt-1", request_id="request-1")
 
 
 def test_v3_preflight_binds_complete_local_dynamic_surface_boundary(tmp_path: Path):
@@ -290,6 +301,7 @@ def test_v3_preflight_binds_complete_local_dynamic_surface_boundary(tmp_path: Pa
         actor="codex",
         profile="development",
         attempt_id="attempt-1",
+        request_id="request-1",
         boundary_root=boundary,
     )
     assert receipt["enforcement_boundary"]["remote_inputs"] is False
@@ -301,6 +313,7 @@ def test_v3_preflight_binds_complete_local_dynamic_surface_boundary(tmp_path: Pa
             actor="codex",
             profile="development",
             attempt_id="attempt-1",
+            request_id="request-1",
             boundary_root=boundary,
         )
 
@@ -314,7 +327,7 @@ def test_v3_preflight_refuses_missing_or_unsafe_boundary(tmp_path: Path):
     value["schema"] = "tgw-execution-environment-catalog/v3"
     add_v3_revisions(value, tmp_path / "candidate")
     with pytest.raises(EnvironmentPreflightError, match="boundary is invalid"):
-        preflight(catalog=value, actor="codex", profile="development", attempt_id="attempt-1")
+        preflight(catalog=value, actor="codex", profile="development", attempt_id="attempt-1", request_id="request-1")
 
 
 @pytest.mark.parametrize("mutation", ["disabled", "missing", "symlink"])

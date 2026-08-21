@@ -40,9 +40,13 @@ from tgw import http_server, inventory_record  # noqa: E402
 from tgw.ebay import draft_specifics  # noqa: E402
 
 API_KEY = "test-key-abc123"
+MACHINE_API_KEY = "test-machine-key-def456"
 WEB_KEY = "test-web-key-xyz"  # browser login password (checked against _web_password)
 AUTH_HEADERS = {"Authorization": f"Bearer {API_KEY}"}
-WORKER_HEADERS = {**AUTH_HEADERS, "X-TGW-Caller": "background:worker:test"}
+WORKER_HEADERS = {
+    "Authorization": f"Bearer {MACHINE_API_KEY}",
+    "X-TGW-Caller": "background:worker:test",
+}
 
 
 def _login(client):
@@ -223,6 +227,7 @@ def env(tmp_path, monkeypatch, queue_rows):
 
     monkeypatch.setattr(http_server, "_cfg", cfg)
     monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_machine_api_key", MACHINE_API_KEY)
     monkeypatch.setattr(http_server, "_web_password", WEB_KEY)
 
     # No real PostgreSQL: psycopg2.connect returns our fake connection.
@@ -1022,12 +1027,26 @@ def test_worker_write_to_live_draft_does_not_auto_enqueue(env, enqueue_calls):
     r = env["client"].patch(
         f"/api/items/{sku}",
         json={"fields": {"draft_listing": {"title": "Worker-written title"}}},
-        headers={**AUTH_HEADERS, "X-TGW-Caller": "background:worker:ebay_draft"},
+        headers={**WORKER_HEADERS, "X-TGW-Caller": "background:worker:ebay_draft"},
     )
     assert r.status_code == 200
     queue_names = [c["kwargs"].get("queue_name") for c in enqueue_calls]
     assert "ebay_stage" not in queue_names
     assert "ebay_draft" not in queue_names
+
+
+def test_forged_worker_header_does_not_authorize_machine_envelope(env):
+    sku = "tgw20260401000000011"
+    _seed_live_item(env, sku)
+
+    response = env["client"].patch(
+        f"/api/items/{sku}",
+        json={"fields": {"draft_listing": {"title": "forged machine write"}}},
+        headers={**AUTH_HEADERS, "X-TGW-Caller": "background:worker:forged"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "operator_object_command_required"
 
 
 def test_legacy_ebay_update_action_is_rejected(env, enqueue_calls):
@@ -1081,6 +1100,17 @@ def test_legacy_end_listing_routes_are_rejected_before_provider_effect(env, monk
     )
     assert direct.status_code == bulk.status_code == 400
     assert effects == []
+
+
+def test_legacy_provider_actions_have_no_served_ui_or_direct_branch() -> None:
+    source = Path(http_server.__file__).read_text(encoding="utf-8")
+    for forbidden in (
+        'elif action == "ebay_update"',
+        'value="ebay_end_listing"',
+        '_abtn("End Listing"',
+        "triggerAction('ebay_end_listing'",
+    ):
+        assert forbidden not in source
 
 
 def test_resync_photos_queues_upload_for_same_count_but_wrong_photo_set(
@@ -1216,7 +1246,7 @@ def test_saveebaydraft_shaped_patch_routes_item_specifics_through_accessor(
     r = env["client"].patch(
         f"/api/items/{sku}",
         json={"fields": {"draft_listing": {"item_specifics": {"Type": "Brooch"}}}},
-        headers={**AUTH_HEADERS, "X-TGW-Caller": "background:worker:test"},
+        headers=WORKER_HEADERS,
     )
     assert r.status_code == 200
 
@@ -4570,7 +4600,7 @@ def test_patch_allows_envelope_item_attributes_from_machine_caller(env):
     r = env["client"].patch(
         f"/api/items/{sku}",
         json={"fields": {"item_attributes": real_envelope}},
-        headers={**AUTH_HEADERS, "X-TGW-Caller": "background:worker:ai_identify"},
+        headers={**WORKER_HEADERS, "X-TGW-Caller": "background:worker:ai_identify"},
     )
     assert r.status_code == 200
     doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text())

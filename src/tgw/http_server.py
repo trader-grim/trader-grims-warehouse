@@ -182,6 +182,7 @@ def _queue_consumers(queue_names: List[str]) -> Dict[str, Dict[str, str]]:
 
 _cfg: Dict[str, Any] = {}
 _api_key: str = ""
+_machine_api_key: str = ""
 _web_password: str = ""  # human-memorable login password; falls back to _api_key if unset
 _sessions: Dict[str, float] = {}  # token → expiry timestamp (epoch seconds)
 
@@ -265,7 +266,7 @@ PIPELINE_ACTIONS = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _cfg, _api_key, _web_password
+    global _cfg, _api_key, _machine_api_key, _web_password
     from tgw.config import load_operational_config
 
     _cfg = load_operational_config(DEFAULT_CONFIG)
@@ -276,6 +277,9 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(f"API key file not found: {key_path}")
     key_data = json.loads(key_path.read_text(encoding="utf-8"))
     _api_key = key_data["api_key"]
+    _machine_api_key = key_data.get("machine_api_key", "")
+    if not _machine_api_key or secrets.compare_digest(_machine_api_key.encode(), _api_key.encode()):
+        raise RuntimeError("tgw-api-key.json requires a distinct non-empty machine_api_key")
     _web_password = key_data.get("web_password") or _api_key
 
     # PP-AIOPS-001: start NATS publisher and set API attribution context
@@ -400,6 +404,25 @@ def _require_auth(
     if tok and _sessions.get(tok, 0) > time.time():
         return "operator:web-session"
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
+
+
+def _require_fence_patch_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(_security),
+    request: Request = None,
+) -> str:
+    """Authenticate the item-write fence without trusting caller headers.
+
+    The dedicated machine credential is intentionally accepted only at this
+    boundary.  It is not a second general API credential and cannot authorize
+    operator, Plan-authority, or provider-effect endpoints.
+    """
+    if (
+        credentials
+        and _machine_api_key
+        and secrets.compare_digest(credentials.credentials.encode(), _machine_api_key.encode())
+    ):
+        return "machine:item-write-fence"
+    return _require_auth(credentials, request)
 
 
 def _configured_authority_principal(field: str, role: PrincipalRole, binding: str) -> AuthorityPrincipal:
@@ -1474,7 +1497,7 @@ def patch_item(
     sku: str,
     body: PatchBody,
     request: Request,
-    operator_identity: str = Depends(_require_auth),
+    operator_identity: str = Depends(_require_fence_patch_auth),
 ) -> Dict[str, Any]:
     if "sku" in body.fields:
         raise HTTPException(status_code=400, detail="sku field is immutable")
@@ -1497,13 +1520,11 @@ def patch_item(
     # accessor ever having seen the change. A bare partial dict (the eBay
     # Draft Editor's own normal save path, todo #1461) is unaffected — that
     # already routes through the real accessor below and keeps working.
-    # Gate: only a machine (fence) caller — identified by the same
-    # X-TGW-Caller signal invariant C10's auto-redraft-loop guard already
-    # trusts elsewhere in this function — may submit an envelope-shaped
-    # value here; any operator/browser-originated request must send bare
-    # field updates and let the accessor build the envelope.
+    # Gate: only the separately authenticated machine fence may submit an
+    # envelope-shaped value here. X-TGW-Caller is attribution only: it is
+    # client-controlled and therefore never an authorization signal.
     _caller_for_envelope_gate = request.headers.get("X-TGW-Caller", "")
-    _is_machine_caller = _caller_for_envelope_gate.startswith("background:") or "worker:" in _caller_for_envelope_gate
+    _is_machine_caller = operator_identity == "machine:item-write-fence"
     if "draft_listing" in body.fields and not operator_object_write and not _is_machine_caller:
         raise HTTPException(
             status_code=409,
@@ -2474,7 +2495,7 @@ def item_action(
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
 
     try:
-        if action in {"ebay_stage", "ebay_publish", "ebay_update"}:
+        if action in {"ebay_stage", "ebay_publish"}:
             _normalize_draft_condition_for_provider(json_path)
         if action == "approve":
             # Human approval of AI draft — set status=Ready, no job enqueued
@@ -2589,75 +2610,10 @@ def item_action(
             _apply_patch(json_path, {"revision_draft": None})
             return {"ok": True, "sku": sku, "action": "dismiss_proposals"}
 
-        elif action == "ebay_update":
-            # Update a live listing in place — PUT inventory item + offer without ending/relisting.
-            # Preserves listing age, view history, and search ranking.
-            # Reads current draft_listing; run Re-draft first to incorporate aspect edits.
-            # origin='operator': this button IS the inspection gate (invariant C9) —
-            # ebay_stage refuses force updates of live listings without it.
-            #
-            # Todo #1469 (live incident, 2026-07-16): "Update Listing" calls
-            # saveEbayDraft() first (which PATCHes draft_listing and, per the
-            # auto-push logic above, ALREADY enqueues an ebay_stage job under
-            # dedupe_key f"ebay_stage:{sku}"), then this action fires as
-            # saveEbayDraft's own success callback. Without a matching
-            # dedupe_key here, this was a SECOND, unguarded ebay_stage
-            # enqueue for the same click — two near-simultaneous stage jobs
-            # racing to PUT the same item, confirmed live: "why is every item
-            # staging twice... not even close to the same as ui." Same key as
-            # the auto-push logic so the redundant attempt coalesces instead
-            # of racing.
-            migration = _cfg.get("workflow_migration")
-            if migration is None and isinstance(_cfg.get("raw"), dict):
-                migration = _cfg["raw"].get("workflow_migration")
-            migration = migration if isinstance(migration, dict) else {}
-            mode = migration.get("item_ebay_stage_fanout", "legacy")
-            if mode not in {"legacy", "workflow"}:
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"invalid item_ebay_stage_fanout mode {mode!r}",
-                )
-            if mode == "workflow":
-                from .workflow.listing_migration import (
-                    authorize_and_dispatch_force_restage,
-                )
-
-                provider_identity = migration.get("ebay_provider_identity", "")
-                result, dispatched, authority_id, authority_created = authorize_and_dispatch_force_restage(
-                    json_path,
-                    operator_identity=operator_identity,
-                    surface="http:item-action:ebay-update",
-                    provider_identity=provider_identity,
-                )
-                return {
-                    "ok": True,
-                    "sku": sku,
-                    "action": action,
-                    "job_id": dispatched.job_id,
-                    "status": ("workflow_dispatched" if dispatched.enqueued else "already_queued"),
-                    "treatment_id": dispatched.treatment_id,
-                    "graph_id": result.graph.graph_id,
-                    "object_generation": result.graph.object_generation,
-                    "authority_id": authority_id,
-                    "authority_created": authority_created,
-                }
-            try:
-                job_id = state_machine.enqueue_job(
-                    queue_name="ebay_stage",
-                    payload={"sku": sku, "force": True, "origin": "operator"},
-                    entity_type="item",
-                    entity_id=sku,
-                    dedupe_key=f"ebay_stage:{sku}",
-                    max_attempts=2,
-                )
-            except psycopg2.errors.UniqueViolation:
-                job_id = None
-            return {"ok": True, "sku": sku, "action": "ebay_update", "job_id": job_id}
-
         elif action == "resync_photos":
             # On-demand photo re-verify + re-push (Dave, 2026-07-17): photos
             # don't need pushing on every "Update Listing" click, so this is
-            # a separate button rather than baked into ebay_update — see
+            # a separate action rather than baked into a listing update — see
             # tgw.ebay.repush's module docstring.
             #
             # Live bug found same day (tgw202605041013227): photo_order can
@@ -6378,7 +6334,6 @@ _BROWSE_HTML = """\
       <option value="ebay_publish">Publish</option>
     </optgroup>
     <optgroup label="⚠ Destructive">
-      <option value="ebay_end_listing">End on eBay</option>
       <option value="mark_sold">Mark Sold</option>
       <option value="archive">Archive</option>
       <option value="delete">Delete</option>
@@ -6497,7 +6452,6 @@ function _renderSelBar(){{
 const _BULK_CONFIRM={{
   mark_sold:'Mark {{n}} item(s) as Sold?',
   delete:'Delete {{n}} item(s) locally?',
-  ebay_end_listing:'End {{n}} listing(s) on eBay? This cannot be undone.',
   archive:'Archive {{n}} item(s)? They will be hidden from the catalog.',
 }};
 async function _bulkAct(action){{
@@ -6511,7 +6465,7 @@ async function _bulkAct(action){{
     const d=await r.json();
     const msg=d.ok?`${{action}}: ${{d.count??skus.length}} queued/done`:`${{action}} errors: ${{(d.errors||[]).slice(0,3).join('; ')}}`;
     alert(msg);
-    const reload=action==='mark_sold'||action==='delete'||action==='archive'||action==='ebay_end_listing';
+    const reload=action==='mark_sold'||action==='delete'||action==='archive';
     _clearSel();
     if(reload)load(0);
   }}catch(err){{alert('Network error: '+err);}}
@@ -8161,7 +8115,6 @@ def _render_item_detail_html(
         # broken-draft states (e.g. draft price empty vs live price set) are
         # exactly the ones the _diverged heuristic can't see.
         _line.append(_abtn("Reset Draft", "resetDraftFromLive()", "blue", title="Discard local edits — re-pin the draft to what is live on eBay"))
-        _line.append(_abtn("End Listing", ("triggerAction('ebay_end_listing','End this listing on eBay? This cannot be undone.')"), "red"))
 
     _line.append(_abtn("Archive", ("triggerAction('archive','Archive this item? It will be hidden from the catalog.')"), "grey", push=True))
     _line.append(_abtn("Delete", "deleteItem()", "grey"))
@@ -8780,9 +8733,9 @@ def _render_item_detail_html(
         f"    headers:authHeaders({{'Content-Type':'application/json'}}),"
         f"    body:JSON.stringify({{action:action}})"
         f"  }}).then(function(r){{return r.json();}}).then(function(d){{"
-        f"    if(d.ok&&(action==='archive'||action==='ebay_end_listing')){{window.location.href='/form/items';return;}}"
+        f"    if(d.ok&&action==='archive'){{window.location.href='/form/items';return;}}"
         f"    if(d.ok&&(action==='set_ready'||action==='unset_ready'||action==='reset_draft_from_live')){{location.reload();return;}}"
-        f"    if(d.ok&&(action==='ai_identify'||action==='ebay_draft'||action==='ebay_price'||action==='ebay_upload'||action==='ebay_publish'||action==='ebay_stage'||action==='ebay_update')){{waitForAction(action,d.job_id||'');return;}}"
+        f"    if(d.ok&&(action==='ai_identify'||action==='ebay_draft'||action==='ebay_price'||action==='ebay_upload'||action==='ebay_publish'||action==='ebay_stage')){{waitForAction(action,d.job_id||'');return;}}"
         f"    alert(d.ok ? 'Action queued: '+action : 'Error: '+(d.detail||'failed'));"
         f"  }}).catch(function(e){{alert('Network error: '+e);}});"
         f"}}"
@@ -8902,7 +8855,7 @@ def _render_item_detail_html(
         f"}}"
         f"function deleteItem(){{"
         f"  var msg='Delete '+_SKU+'?\\nThis marks the item as deleted.\\nThe ItemData folder is preserved.';"
-        f"  if(_IS_ACTIVE){{msg+='\\n\\n⚠️ Active eBay listing (ID: '+_LISTING_ID+').\\nEnd Listing first, or use the End Listing button.';}} "
+        f"  if(_IS_ACTIVE){{msg+='\\n\\n⚠️ Active eBay listing (ID: '+_LISTING_ID+').\\nActive marketplace state must be resolved through a governed listing command before local deletion.';}} "
         f"  if(!confirm(msg))return;"
         f"  fetch('/api/items/'+_SKU,{{"
         f"    method:'DELETE',"
