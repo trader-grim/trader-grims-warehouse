@@ -2,7 +2,7 @@
   "schema": "tgw-plan-provider-catalog/v1",
   "id": "w12-bootstrap-transition-providers@1",
   "plan_id": "PLAN-ACTIVE-AMENDMENT-PROCESS",
-  "plan_commit": "3c9cbe18db929e60eb7562d4c5ec1ccc73cdb3b2",
+  "plan_commit": "679372924e3b6668dfdad5de7b421a216062892f",
   "profiles": {
     "plan-amendment": {"minimum_state": "reviewed"}
   },
@@ -14,7 +14,7 @@
       "id": "w12-transition-controller",
       "provides": ["plan.active-amendment-transition@1"],
       "requires": [],
-      "implementation_commit": "0587ca26c806deacdfa4fff794eb05428ba6f3ad",
+      "implementation_commit": "83096b38c43c86b2ece718d20a4c905b7da12b9e",
       "implementation_content": {
         "src/tgw/plan_transition.py": "sha256:5752a294093cf3be3f27cae13bdfb9015584d8cf5d97d0387da5dea784b85f96",
         "tests/test_plan_transition.py": "sha256:c32b91885e12defb3a37d77289a587447d1f545b88796249d216e332d18c0177"
@@ -27,7 +27,7 @@
       "provider": "w12-transition-controller",
       "state": "tested",
       "evidence": [
-        "source-commit:0587ca26c806deacdfa4fff794eb05428ba6f3ad",
+        "source-commit:83096b38c43c86b2ece718d20a4c905b7da12b9e",
         "source-content:src/tgw/plan_transition.py:sha256:5752a294093cf3be3f27cae13bdfb9015584d8cf5d97d0387da5dea784b85f96",
         "source-content:tests/test_plan_transition.py:sha256:c32b91885e12defb3a37d77289a587447d1f545b88796249d216e332d18c0177",
         "test:tests/test_plan_transition.py:8-passed",
