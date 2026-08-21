@@ -41,6 +41,7 @@ MAX_RESULTS = 100
 MAX_REVIEW_BUNDLE_BYTES = 64 * 1024 * 1024
 PLAN_PREFIXES = ("plan/", "pp/", "reference/")
 RUNBOOK_PREFIX = "docs/runbooks/"
+PLAN_RUNBOOK_PREFIX = "reference/runbooks/"
 SCOPE_SEMANTICS = {
     "default_execution_root": "TGW Master Plan",
     "governed_execution_platform_ref": "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml",
@@ -91,6 +92,19 @@ def _git(root: Path, *args: str, bytes_output: bool = False) -> str | bytes:
         message = result.stderr.decode(errors="replace").strip()
         raise ContextError(message or f"git {' '.join(args)} failed")
     return result.stdout if bytes_output else result.stdout.decode().strip()
+
+
+def _is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(
+        ["git", "-c", f"safe.directory={root}", "-C", str(root), "merge-base", "--is-ancestor", ancestor, descendant],
+        check=False,
+        capture_output=True,
+        timeout=30,
+        env=_git_env(),
+    )
+    if result.returncode not in {0, 1}:
+        raise ContextError(result.stderr.decode(errors="replace").strip() or "Plan ancestry check failed")
+    return result.returncode == 0
 
 
 def _approved_commit() -> str:
@@ -145,6 +159,12 @@ def _bindings() -> dict[str, Any]:
         raise ContextError("approved Plan materialization is not clean")
     if _git(plan_repository, "cat-file", "-t", approved) != "commit":
         raise ContextError("approved Plan commit is absent from the canonical repository")
+    evidence_head = _git(plan_repository, "rev-parse", "HEAD^{commit}")
+    assert isinstance(evidence_head, str)
+    if _git(plan_repository, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise ContextError("canonical Plan repository is not clean")
+    if not _is_ancestor(plan_repository, approved, evidence_head):
+        raise ContextError("canonical Plan evidence HEAD does not descend from the approved Plan")
     source_commit = _git(source_root, "rev-parse", "HEAD^{commit}")
     assert isinstance(source_commit, str)
     source_status = _git(source_root, "status", "--porcelain=v1", "--untracked-files=all")
@@ -154,7 +174,8 @@ def _bindings() -> dict[str, Any]:
         "plan_commit": approved,
         "plan_solution_hash": solution,
         "plan_tree": _git(plan_root, "rev-parse", "HEAD^{tree}"),
-        "plan_repository_head": _git(plan_repository, "rev-parse", "HEAD^{commit}"),
+        "plan_repository_head": evidence_head,
+        "plan_repository_tree": _git(plan_repository, "rev-parse", f"{evidence_head}^{{tree}}"),
         "source_root": source_root,
         "source_commit": source_commit,
         "source_tree": _git(source_root, "rev-parse", f"{source_commit}^{{tree}}"),
@@ -231,7 +252,10 @@ def context_status() -> dict[str, Any]:
             "repository": str(plan_root), "approved_materialization": str(binding["plan_root"]),
             "approved_commit": plan_commit, "approved_tree": binding["plan_tree"],
             "approved_solution_hash": binding["plan_solution_hash"],
-            "evidence_head": binding["plan_repository_head"], "sources": identities,
+            "evidence_head": binding["plan_repository_head"],
+            "evidence_tree": binding["plan_repository_tree"],
+            "evidence_descends_from_approved": True,
+            "sources": identities,
         },
         "source": {
             "repository": str(source_root), "commit": source_commit, "tree": binding["source_tree"],
@@ -274,33 +298,126 @@ def source_chunk(path: str, start_line: int = 1, max_lines: int = 200) -> dict[s
     return result
 
 
-def runbooks(query: str = "", path: str = "", start_line: int = 1, max_lines: int = 200, limit: int = 20) -> dict[str, Any]:
+def _runbook_sources(binding: Mapping[str, Any], authority: str) -> list[tuple[str, Path, str, str, str]]:
+    sources = {
+        "current-plan": (
+            "canonical-plan-runbook", binding["plan_repository"],
+            binding["plan_repository_head"], binding["plan_repository_tree"], PLAN_RUNBOOK_PREFIX,
+        ),
+        "approved-plan": (
+            "approved-plan-runbook", binding["plan_repository"],
+            binding["plan_commit"], binding["plan_tree"], PLAN_RUNBOOK_PREFIX,
+        ),
+        "application": (
+            "committed-application-runbook", binding["source_root"],
+            binding["source_commit"], binding["source_tree"], RUNBOOK_PREFIX,
+        ),
+    }
+    if authority == "all":
+        return [sources["current-plan"], sources["application"]]
+    if authority not in sources:
+        raise ContextError("runbook authority must be all, current-plan, approved-plan, or application")
+    return [sources[authority]]
+
+
+def runbooks(
+    query: str = "", path: str = "", start_line: int = 1, max_lines: int = 200,
+    limit: int = 20, authority: str = "all",
+) -> dict[str, Any]:
     binding = _bindings()
-    root, commit = binding["source_root"], binding["source_commit"]
-    assert isinstance(root, Path) and isinstance(commit, str)
     if path:
-        result = _chunk(root, commit, _safe_path(path, (RUNBOOK_PREFIX,)), start_line, max_lines)
-        result["authority"] = "committed-application-runbook"
+        if authority == "all":
+            authority = "current-plan" if path.startswith(PLAN_RUNBOOK_PREFIX) else "application"
+        selected = _runbook_sources(binding, authority)
+        source_authority, root, commit, tree, prefix = selected[0]
+        result = _chunk(root, commit, _safe_path(path, (prefix,)), start_line, max_lines)
+        result.update({"authority": source_authority, "tree": tree})
         return result
     if not isinstance(query, str) or len(query) > MAX_QUERY:
         raise ContextError("query must be a bounded string")
     if type(limit) is not int or not 1 <= limit <= MAX_RESULTS:
         raise ContextError(f"limit must be between 1 and {MAX_RESULTS}")
     tokens = sorted(set(re.findall(r"[a-z0-9_-]{3,}", query.casefold())))
-    paths = _git(root, "ls-tree", "-r", "--name-only", commit, "--", RUNBOOK_PREFIX)
-    assert isinstance(paths, str)
     matches = []
-    for candidate in paths.splitlines():
-        if not candidate.endswith(".md"):
-            continue
-        raw = _bytes_at(root, commit, candidate)
-        haystack = f"{candidate}\n{raw.decode('utf-8')}".casefold()
-        score = sum(haystack.count(token) for token in tokens)
-        if query.casefold().strip() and score == 0:
-            continue
-        matches.append({"path": candidate, "sha256": _sha(raw), "bytes": len(raw), "score": score})
-    matches.sort(key=lambda item: (-item["score"], item["path"]))
-    return {"schema": "tgw-context-runbook-index/v1", "commit": commit, "tree": binding["source_tree"], "query": query, "matches": matches[:limit]}
+    revisions = []
+    for source_authority, root, commit, tree, prefix in _runbook_sources(binding, authority):
+        paths = _git(root, "ls-tree", "-r", "--name-only", commit, "--", prefix)
+        assert isinstance(paths, str)
+        revisions.append({"authority": source_authority, "commit": commit, "tree": tree, "prefix": prefix})
+        for candidate in paths.splitlines():
+            if not candidate.endswith(".md"):
+                continue
+            raw = _bytes_at(root, commit, candidate)
+            haystack = f"{candidate}\n{raw.decode('utf-8')}".casefold()
+            score = sum(haystack.count(token) for token in tokens)
+            if query.casefold().strip() and score == 0:
+                continue
+            matches.append({
+                "authority": source_authority, "commit": commit, "tree": tree,
+                "path": candidate, "sha256": _sha(raw), "bytes": len(raw), "score": score,
+            })
+    matches.sort(key=lambda item: (-item["score"], item["authority"], item["path"]))
+    return {"schema": "tgw-context-runbook-index/v2", "revisions": revisions, "query": query, "matches": matches[:limit]}
+
+
+def onboarding_bundle(actor: str) -> dict[str, Any]:
+    """Return every immutable input a seed launcher needs before actor enrollment."""
+    if not isinstance(actor, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", actor):
+        raise ContextError("actor must be a canonical account identity")
+    binding = _bindings()
+    catalog = binding["environment_catalog"]
+    declaration = catalog.get("actors", {}).get(actor)
+    if not isinstance(declaration, Mapping) or declaration.get("enabled") is not True:
+        raise ContextError("actor is not enabled in the exact environment catalog")
+    profiles = declaration.get("permitted_profiles")
+    if not isinstance(profiles, list) or not profiles:
+        raise ContextError("actor has no permitted catalog profile")
+    plan_runbook = runbooks(path="reference/runbooks/actor-mcp-onboarding.md", authority="current-plan")
+    manual_recovery = runbooks(path="reference/runbooks/manual-platform-recovery.md", authority="current-plan")
+    policy_path = "agent-services/actor-bootstrap/bootstrap-policy-v1.json"
+    policy_raw = _bytes_at(binding["source_root"], binding["source_commit"], policy_path)
+    launcher_path = "scripts/tgw_actor_startup.py"
+    launcher_raw = _bytes_at(binding["source_root"], binding["source_commit"], launcher_path)
+    policy = json.loads(policy_raw)
+    result = {
+        "schema": "tgw-actor-onboarding-context-bundle/v1",
+        "status": "SEED_REQUIRED",
+        "actor": actor,
+        "catalog": {
+            "path": str(binding["environment_catalog_path"]),
+            "hash": binding["environment_catalog_hash"],
+            "declaration": declaration,
+            "profiles": {name: catalog["profiles"].get(name) for name in profiles},
+        },
+        "plan": {
+            "approved_commit": binding["plan_commit"],
+            "approved_solution_hash": binding["plan_solution_hash"],
+            "evidence_head": binding["plan_repository_head"],
+            "evidence_tree": binding["plan_repository_tree"],
+            "evidence_descends_from_approved": True,
+        },
+        "source": {"commit": binding["source_commit"], "tree": binding["source_tree"]},
+        "runbooks": {"onboarding": plan_runbook, "manual_recovery": manual_recovery},
+        "bootstrap_policy": {
+            "path": policy_path, "commit": binding["source_commit"],
+            "sha256": _sha(policy_raw), "value": policy,
+        },
+        "launcher": {"path": launcher_path, "commit": binding["source_commit"], "sha256": _sha(launcher_raw)},
+        "required_context_environment": {
+            "TGW_CONTEXT_PLAN_ROOT": str(binding["plan_root"]),
+            "TGW_CONTEXT_PLAN_REPOSITORY": str(binding["plan_repository"]),
+            "TGW_CONTEXT_PLAN_COMMIT": binding["plan_commit"],
+            "TGW_CONTEXT_PLAN_SOLUTION": binding["plan_solution_hash"],
+            "TGW_CONTEXT_SOURCE_ROOT": str(binding["source_root"]),
+            "TGW_CONTEXT_RUNTIME_ROOT": str(binding["runtime_root"]),
+            "TGW_CONTEXT_ENVIRONMENT_CATALOG": str(binding["environment_catalog_path"]),
+            "TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH": binding["environment_catalog_hash"],
+        },
+        "next_authority": "one unexpired actor-onboarding-seed/v1 issued by the orchestrator",
+        "fallback": "FORBIDDEN",
+    }
+    result["bundle_sha256"] = _sha(_canonical(result))
+    return result
 
 
 def code_graph(operation: str = "status", query: str = "", limit: int = 20) -> dict[str, Any]:
@@ -321,7 +438,8 @@ def context_bundle(task: str, receiver: str = "codex", limit: int = 12) -> dict[
         "status": context_status(), "plan_graph": plan_graph(task, receiver, limit=limit),
         "runbooks": runbooks(query=task, limit=min(limit, 20)), "code_graph": code_graph(),
         "instructions": [
-            "Retrieve cited Plan and runbook chunks before changing code.",
+            "Repair a stale Plan or MCP projection before changing code; never work around it.",
+            "Retrieve cited Plan and canonical/application runbook chunks before changing code.",
             "Use CodeGraph queries against the bound source commit; do not infer from a worktree.",
             "Report Plan, PP, Todo, implementation, deployment, and live status separately.",
             "Never describe platform W11 completion as completion of the TGW Master Plan.",
@@ -621,9 +739,18 @@ def tgw_context_plan_source(path: str, start_line: int = 1, max_lines: int = 200
 
 
 @mcp.tool()
-def tgw_context_runbooks(query: str = "", path: str = "", start_line: int = 1, max_lines: int = 200, limit: int = 20) -> str:
-    """Search or read committed application runbooks from the bound source tree."""
-    return _json_call(runbooks, query, path, start_line, max_lines, limit)
+def tgw_context_runbooks(
+    query: str = "", path: str = "", start_line: int = 1, max_lines: int = 200,
+    limit: int = 20, authority: str = "all",
+) -> str:
+    """Search/read current canonical Plan, approved Plan, or application runbooks."""
+    return _json_call(runbooks, query, path, start_line, max_lines, limit, authority)
+
+
+@mcp.tool()
+def tgw_context_onboarding(actor: str) -> str:
+    """Return the exact Plan/catalog/source/runbook inputs required to enroll an actor."""
+    return _json_call(onboarding_bundle, actor)
 
 
 @mcp.tool()

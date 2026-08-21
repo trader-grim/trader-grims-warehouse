@@ -67,6 +67,8 @@ def bound_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, 
         ),
         "plan/pp/PP-CONTEXT-001.md": "# PP\n",
         "reference/context.md": "# Context\n",
+        "reference/runbooks/actor-mcp-onboarding.md": "# Actor MCP onboarding\n\nCanonical current procedure.\n",
+        "reference/runbooks/manual-platform-recovery.md": "# Manual recovery\n\nHuman fallback.\n",
     }.items():
         target = plan_repository / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -83,13 +85,19 @@ def bound_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, 
     (source / "src" / "fixture" / "provider.py").write_text("class ContextProvider:\n    pass\n")
     (source / "docs" / "runbooks").mkdir(parents=True)
     (source / "docs" / "runbooks" / "context.md").write_text("# Context\n\nCommitted runbook.\n")
+    (source / "agent-services" / "actor-bootstrap").mkdir(parents=True)
+    (source / "agent-services" / "actor-bootstrap" / "bootstrap-policy-v1.json").write_text(
+        json.dumps({"schema": "tgw-actor-bootstrap-policy/v1", "effects": "mcp-only"})
+    )
+    (source / "scripts").mkdir()
+    (source / "scripts" / "tgw_actor_startup.py").write_text("raise SystemExit(73)\n")
     _git(source, "init", "-q")
     source_commit = _commit(source, "source")
 
     catalog = {
         "schema": "tgw-execution-environment-catalog/v3",
         "flake_lock": {"path": "flake.lock", "sha256": "1" * 64},
-        "actors": {"codex": {"enabled": True}},
+        "actors": {"codex": {"enabled": True, "permitted_profiles": ["development"]}},
         "profiles": {"development": {"state": "ready-for-preflight"}},
     }
     catalog_path = tmp_path / "execution-environment-catalog.json"
@@ -140,6 +148,21 @@ def test_committed_plan_runbook_and_codegraph_ignore_dirty_bytes(bound_context):
     assert context.context_status()["source"]["working_tree_clean"] is False
 
 
+def test_canonical_plan_runbooks_and_onboarding_are_first_class_context(bound_context):
+    current = context.runbooks(path="reference/runbooks/actor-mcp-onboarding.md")
+    assert current["authority"] == "canonical-plan-runbook"
+    assert current["commit"] == context.context_status()["plan"]["evidence_head"]
+    assert "Canonical current procedure" in current["content"]
+    indexed = context.runbooks(query="onboarding")
+    assert {item["authority"] for item in indexed["matches"]} >= {"canonical-plan-runbook"}
+    bundle = context.onboarding_bundle("codex")
+    assert bundle["status"] == "SEED_REQUIRED"
+    assert bundle["fallback"] == "FORBIDDEN"
+    assert bundle["plan"]["evidence_descends_from_approved"] is True
+    assert bundle["runbooks"]["onboarding"]["authority"] == "canonical-plan-runbook"
+    assert bundle["required_context_environment"]["TGW_CONTEXT_PLAN_COMMIT"] == bound_context["approved"]
+
+
 def test_fail_closed_path_and_materialization_checks_and_read_only_surface(bound_context, monkeypatch):
     with pytest.raises(context.ContextError, match="outside"):
         context.source_chunk("docs/runbooks/context.md")
@@ -150,6 +173,7 @@ def test_fail_closed_path_and_materialization_checks_and_read_only_surface(bound
     assert tools == {
         "tgw_context_status", "tgw_context_bundle", "tgw_context_plan_graph",
         "tgw_context_plan_source", "tgw_context_runbooks", "tgw_context_code_graph",
+        "tgw_context_onboarding",
     }
     payload = json.loads(context.tgw_context_status())
     assert payload["ok"] is False
@@ -159,6 +183,25 @@ def test_status_rejects_a_stale_environment_catalog_binding(bound_context, monke
     monkeypatch.setenv("TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH", "sha256:" + "0" * 64)
     with pytest.raises(context.ContextError, match="catalog hash"):
         context.context_status()
+
+
+def test_status_rejects_plan_evidence_head_that_does_not_descend_from_approval(bound_context):
+    repository = Path(os.environ["TGW_CONTEXT_PLAN_REPOSITORY"])
+    approved = str(bound_context["approved"])
+    _git(repository, "checkout", "--orphan", "divergent-evidence")
+    for item in repository.iterdir():
+        if item.name != ".git":
+            if item.is_dir():
+                import shutil
+
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+    (repository / "unrelated.md").write_text("unrelated\n")
+    _commit(repository, "divergent")
+    with pytest.raises(context.ContextError, match="does not descend"):
+        context.context_status()
+    _git(repository, "checkout", "-q", approved)
 
 
 def test_governed_review_context_run_fetches_every_bound_resource(monkeypatch):

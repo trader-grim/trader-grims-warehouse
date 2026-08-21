@@ -29,7 +29,8 @@ The `tgw-context` MCP makes that distinction machine-visible and supplies one
 hash-bound task bundle containing:
 
 1. the exact approved standalone Plan and derived Plan Graph;
-2. relevant runbooks from the committed application source;
+2. current canonical Plan runbooks, the immutable approved-Plan variants, and
+   relevant runbooks from the committed application source;
 3. a CodeGraph snapshot of the committed canonical source tree; and
 4. explicit Plan/PP/Todo/source/review/deployment/live scope semantics.
 
@@ -39,7 +40,8 @@ Verify the approved commit first:
 
 ```bash
 python3 /home/codex/.codex/skills/tgw-plan/scripts/verify_plan_root.py \
-  /opt/TGW/library/plans <full-approved-commit>
+  /opt/TGW/library/plans <full-approved-commit> \
+  sha256:<approved-solution-hash>
 ```
 
 Then create a distinct detached worktree on tgw-lib:
@@ -121,9 +123,20 @@ Before coding, reconciliation, or a completion claim:
 5. keep Master Plan, selected Plan/PP/Todo, implementation, review, deployment,
    live verification, and operator acceptance separate in the final report.
 
-Missing or stale context is a HOLD.  Conversation memory, `CLAUDE.md`, an
+Missing or stale Plan/context is a repair HOLD. Advance or repair the canonical
+Plan/evidence repository and refresh its MCP projection before resuming; never
+work around the stale projection. Conversation memory, `CLAUDE.md`, an
 embedded `docs/TGW-Plan-Vault`, a production release, or an actor worktree is
 not a fallback Plan authority.
+
+For a declared actor, call `tgw_context_onboarding` before enrollment. It returns
+one hash-bound bundle containing the current canonical onboarding and manual
+recovery runbooks, exact approved Plan/solution, current descendant evidence
+HEAD, source, environment catalog, bootstrap policy, launcher, and all required
+Context MCP environment values. A result of `SEED_REQUIRED` is intentional: the
+bundle supplies immutable context but grants no enrollment effect. Only the
+orchestrator's expiring one-use `actor-onboarding-seed/v1` may authorize the
+bounded installation procedure.
 
 ## Verification
 
@@ -136,11 +149,12 @@ not a fallback Plan authority.
 - `platform_w11_completion_implies_master_plan_completion=false`; and
 - `narrow_plan_pp_or_todo_completion_implies_parent_completion=false`.
 
-Run an MCP protocol smoke and confirm the six-tool read-only surface:
+Run an MCP protocol smoke and confirm the seven-tool read-only surface:
 
 - `tgw_context_status`
 - `tgw_context_bundle`
 - `tgw_context_plan_graph`
 - `tgw_context_plan_source`
 - `tgw_context_runbooks`
+- `tgw_context_onboarding`
 - `tgw_context_code_graph`
