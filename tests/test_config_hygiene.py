@@ -128,6 +128,29 @@ def test_runtime_python_does_not_depend_on_legacy_production_source_checkout() -
     assert offenders == []
 
 
+def test_shipped_runtime_uses_only_the_canonical_release_selector() -> None:
+    repository = Path(__file__).parents[1]
+    runtime_roots = [
+        repository / "bin",
+        repository / "etc",
+        repository / "scripts",
+        repository / "src" / "tgw",
+        repository / "systemd",
+    ]
+    forbidden = "/opt/TGW/releases/" + "current"
+    text_suffixes = {"", ".json", ".py", ".service", ".sh", ".timer"}
+    offenders = sorted(
+        path.relative_to(repository)
+        for root in runtime_roots
+        for path in root.rglob("*")
+        if path.is_file()
+        and path.suffix in text_suffixes
+        and forbidden in path.read_text(encoding="utf-8", errors="ignore")
+    )
+
+    assert offenders == []
+
+
 def test_approved_plan_content_must_be_exact_clean_commit(tmp_path):
     root = tmp_path / "approved"
     root.mkdir()

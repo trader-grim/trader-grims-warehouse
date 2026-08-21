@@ -36,7 +36,7 @@ write_status() {
 take_snapshot() {
     local reason=$1
     log notice "THERMAL: taking emergency snapshot (reason: ${reason})"
-    /opt/TGW/releases/current/bin/tgw-snapshot >> /opt/TGW/var/log/tgw-snapshot.log 2>&1 \
+    /opt/TGW/current/bin/tgw-snapshot >> /opt/TGW/var/log/tgw-snapshot.log 2>&1 \
         && log notice "THERMAL: snapshot complete" \
         || log err "THERMAL: snapshot failed -- check tgw-snapshot.log"
 }
