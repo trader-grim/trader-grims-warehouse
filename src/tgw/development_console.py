@@ -327,6 +327,7 @@ def resolve_request(
         "lifecycle": lifecycle,
         "source_commit": source_commit,
         "freshness": dict(freshness),
+        "recovery_status": dict(recovery_status),
         "provider_registry_hash": provider_registry_hash,
     }
     authority = AuthorityRequest.create(
@@ -371,6 +372,7 @@ def project_development_request(row: Mapping[str, Any]) -> dict[str, Any] | None
         "lifecycle_hash": lifecycle.get("lifecycle_hash"),
         "source_commit": parameters.get("source_commit"),
         "freshness": parameters.get("freshness"),
+        "recovery_status": parameters.get("recovery_status"),
         "requested_at": row.get("requested_at"),
         "decision": row.get("decision_kind"),
         "execution": {

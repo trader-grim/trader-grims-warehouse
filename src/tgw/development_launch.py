@@ -26,7 +26,8 @@ def _hash(value: Any) -> str:
 def validate_development_launch(parameters: Mapping[str, Any]) -> dict[str, Any]:
     """Validate an immutable lifecycle without selecting a harness."""
     if not isinstance(parameters, Mapping) or set(parameters) != {
-        "schema", "lifecycle", "source_commit", "freshness", "provider_registry_hash",
+        "schema", "lifecycle", "source_commit", "freshness", "recovery_status",
+        "provider_registry_hash",
     }:
         raise DevelopmentLaunchError("development launch parameters are not exact")
     if parameters.get("schema") != "tgw-development-launch/v1":
@@ -44,6 +45,13 @@ def validate_development_launch(parameters: Mapping[str, Any]) -> dict[str, Any]
     freshness_hash = freshness_unsigned.pop("receipt_hash", None)
     if freshness_hash != _hash(freshness_unsigned):
         raise DevelopmentLaunchError("development launch freshness receipt hash is invalid")
+    recovery_status = parameters.get("recovery_status")
+    if (
+        not isinstance(recovery_status, Mapping)
+        or recovery_status.get("schema") != "tgw-w18-fleet-transition-gate/v1"
+        or recovery_status.get("status") != "ACTIVE"
+    ):
+        raise DevelopmentLaunchError("development launch is held by platform recovery")
     lifecycle = parameters.get("lifecycle")
     if not isinstance(lifecycle, Mapping):
         raise DevelopmentLaunchError("development lifecycle is invalid")
@@ -118,6 +126,7 @@ def validate_development_launch(parameters: Mapping[str, Any]) -> dict[str, Any]
         "lifecycle": dict(lifecycle),
         "source_commit": source_commit,
         "freshness": dict(freshness),
+        "recovery_status": dict(recovery_status),
         "provider_registry_hash": registry_hash,
     }
 

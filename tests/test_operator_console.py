@@ -160,6 +160,28 @@ def test_discovery_names_one_backend_and_non_authority_surfaces():
     assert discovery["dynamic_surfaces"] == {
         "available": False, "schema": "tgw-dynamic-surface/v1",
     }
+    assert discovery["recovery_status"] == {
+        "schema": "tgw-w18-fleet-transition-gate/v1",
+        "status": "UNAVAILABLE",
+    }
+
+
+def test_discovery_projects_the_live_fleet_transition_status():
+    app = FastAPI()
+    app.include_router(create_operator_console_router(
+        Store(_row()), current_plan_commit=lambda: "f" * 40,
+        load_solution=lambda _: {}, require_operator=lambda: OPERATOR,
+        require_executor=lambda: EXECUTOR,
+        load_recovery_status=lambda: {
+            "schema": "tgw-w18-fleet-transition-gate/v1",
+            "status": "QUIESCED",
+            "transaction_id": "fleet-transition-1",
+        },
+    ))
+
+    recovery = TestClient(app).get("/api/operator-console/discovery").json()["recovery_status"]
+    assert recovery["status"] == "QUIESCED"
+    assert recovery["transaction_id"] == "fleet-transition-1"
 
 
 def test_dynamic_surface_api_uses_host_auth_and_mounted_controller():

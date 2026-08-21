@@ -154,6 +154,7 @@ def create_operator_console_router(
     require_executor: Callable[[], Any],
     execute_effect: Callable[..., Any] | None = None,
     resolve_development: Callable[[Mapping[str, Any], str], tuple[Mapping[str, Any], AuthorityRequest]] | None = None,
+    load_recovery_status: Callable[[], Mapping[str, Any]] | None = None,
     load_dynamic_surface: Callable[[str], Mapping[str, Any]] | None = None,
     submit_dynamic_surface_decision: Callable[[str, Mapping[str, Any], str], Mapping[str, Any]] | None = None,
 ) -> APIRouter:
@@ -171,6 +172,22 @@ def create_operator_console_router(
     @router.get("/api/operator-console/discovery")
     def discovery(operator_identity: Any = Depends(require_operator)):
         require_authenticated_principal(operator_identity, PrincipalRole.OPERATOR)
+        recovery_status: dict[str, Any] = {
+            "schema": "tgw-w18-fleet-transition-gate/v1",
+            "status": "UNAVAILABLE",
+        }
+        if load_recovery_status is not None:
+            try:
+                candidate = dict(load_recovery_status())
+            except (OSError, ValueError, TypeError) as exc:
+                raise HTTPException(503, "fleet transition status is unavailable") from exc
+            if (
+                candidate.get("schema") != "tgw-w18-fleet-transition-gate/v1"
+                or not isinstance(candidate.get("status"), str)
+                or not candidate["status"]
+            ):
+                raise HTTPException(503, "fleet transition status is invalid")
+            recovery_status = candidate
         return {
             "schema": DISCOVERY_SCHEMA,
             "site": "/form/plan-authority",
@@ -182,6 +199,7 @@ def create_operator_console_router(
                 "available": load_dynamic_surface is not None and submit_dynamic_surface_decision is not None,
                 "schema": "tgw-dynamic-surface/v1",
             },
+            "recovery_status": recovery_status,
             "navigation": NAVIGATION,
             "non_authority_surfaces": NON_AUTHORITY_SURFACES,
         }

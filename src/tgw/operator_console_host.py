@@ -597,6 +597,9 @@ def configured_console_mount(
             recovery_status=recovery_status,
         )
 
+    def load_recovery_status() -> Mapping[str, Any]:
+        return dict(_development_artifacts(config_provider())[-1])
+
     load_dynamic_surface, submit_dynamic_surface_decision = _dynamic_surface_bindings(
         store,
         config_provider,
@@ -610,6 +613,7 @@ def configured_console_mount(
         require_executor=require_executor,
         execute_effect=execute_effect,
         resolve_development=resolve_development,
+        load_recovery_status=load_recovery_status,
         load_dynamic_surface=load_dynamic_surface,
         submit_dynamic_surface_decision=submit_dynamic_surface_decision,
     )

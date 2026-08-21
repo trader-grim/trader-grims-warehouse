@@ -2524,8 +2524,6 @@ def item_action(
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
 
     try:
-        if action in {"ebay_stage", "ebay_publish"}:
-            _normalize_draft_condition_for_provider(json_path)
         if action == "approve":
             # Human approval of AI draft — set status=Ready, no job enqueued
             _apply_patch(json_path, {"status": "Ready"})
@@ -2672,40 +2670,55 @@ def item_action(
                 json_path.parent,
             )
             if not photo_ready:
-                job_id = state_machine.enqueue_job(
-                    queue_name="ebay_upload",
-                    payload={"sku": sku, "reason": "resync_photos_gap", "origin": "operator"},
-                    entity_type="item",
-                    entity_id=sku,
-                    dedupe_key=f"ebay_upload:{sku}",
-                    max_attempts=3,
+                from .workflow.listing_migration import authorize_and_request_item_goal
+                from .workflow.profiles import TGW_EBAY_STAGED
+
+                migration = _cfg.get("workflow_migration")
+                if migration is None and isinstance(_cfg.get("raw"), dict):
+                    migration = _cfg["raw"].get("workflow_migration")
+                migration = migration if isinstance(migration, dict) else {}
+                result, authority_id, authority_created = authorize_and_request_item_goal(
+                    json_path,
+                    TGW_EBAY_STAGED,
+                    operator_identity=operator_identity,
+                    surface="http:item-action:resync-photos",
+                    provider_identity=migration.get("ebay_provider_identity", ""),
+                    scopes=("upload", "stage"),
                 )
+                dispatched = result.dispatched
                 return {
-                    "ok": True,
+                    "ok": dispatched is not None,
                     "sku": sku,
                     "action": "resync_photos",
-                    "upload_queued": True,
-                    "job_id": job_id,
+                    "status": "workflow_dispatched" if dispatched is not None else "held",
+                    "upload_queued": dispatched is not None and dispatched.queue_name == "ebay_upload",
+                    "job_id": dispatched.job_id if dispatched is not None else "",
+                    "graph_id": result.graph.graph_id,
+                    "object_generation": result.graph.object_generation,
+                    "held_external": list(result.held_external),
+                    "operator_gates": list(result.operator_gates),
+                    "authority_id": authority_id,
+                    "authority_created": authority_created,
                     "local_photo_count": local_photo_count,
                     "hosted_count": hosted_count,
                     "photo_fingerprint": photo_fingerprint,
-                    "detail": f"{photo_reason} — upload/synchronization queued; the workflow will re-evaluate after it completes",
+                    "detail": (
+                        f"{photo_reason} — the workflow evaluated the current item "
+                        + ("and dispatched its next treatment" if dispatched is not None else "and held dispatch")
+                    ),
                 }
 
-            # Synchronous (not queued) from here: single item, all photos
-            # already EPS-hosted, operator wants the confirmed count back
-            # immediately, not a "queued" toast.
-            from tgw.ebay.repush import _repush_one
-
-            result = _repush_one(_cfg, sku)
-            if not result.get("ok"):
-                return {"ok": False, "sku": sku, "action": "resync_photos", "detail": result.get("reason", "resync failed")}
+            # A true fingerprint means the current local set, hosted set, and
+            # published image order already agree.  Do not create a second
+            # provider-effect path merely to repeat the same PUT.
             return {
                 "ok": True,
                 "sku": sku,
                 "action": "resync_photos",
-                "submitted_count": result.get("submitted_count"),
-                "confirmed_count": result.get("confirmed_count"),
+                "status": "already_satisfied",
+                "submitted_count": hosted_count,
+                "confirmed_count": hosted_count,
+                "photo_fingerprint": photo_fingerprint,
             }
 
         elif action == "sync_from_ebay":
@@ -2815,215 +2828,6 @@ def item_action(
                     }
                 job_id = result.dispatched.job_id
 
-        elif action == "ebay_draft":
-            migration = _cfg.get("workflow_migration")
-            if migration is None and isinstance(_cfg.get("raw"), dict):
-                migration = _cfg["raw"].get("workflow_migration")
-            migration = migration if isinstance(migration, dict) else {}
-            mode = migration.get(
-                "item_ebay_draft_fanout",
-                migration.get("bundle_downstream", "workflow"),
-            )
-            if mode != "workflow":
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"invalid item_ebay_draft_fanout mode {mode!r}",
-                )
-            _apply_patch(json_path, {"ai_redraft_requested": True})
-            if mode == "workflow":
-                from .workflow.listing_migration import request_item_goal
-                from .workflow.profiles import TGW_EBAY_DRAFTED
-
-                result = request_item_goal(
-                    json_path,
-                    TGW_EBAY_DRAFTED,
-                    origin="operator",
-                    operator_identity=operator_identity,
-                    operator_surface="http:item-action:ebay-draft",
-                )
-                if result.dispatched is None:
-                    return {
-                        "ok": False,
-                        "sku": sku,
-                        "action": action,
-                        "status": "held",
-                        "job_id": "",
-                        "held_external": list(result.held_external),
-                        "operator_gates": list(result.operator_gates),
-                        "ownership_conflicts": list(result.graph.ownership_conflicts),
-                        "reconciliation_gates": list(result.graph.reconciliation_gates),
-                    }
-                job_id = result.dispatched.job_id
-
-        elif action == "ebay_price":
-            migration = _cfg.get("workflow_migration")
-            if migration is None and isinstance(_cfg.get("raw"), dict):
-                migration = _cfg["raw"].get("workflow_migration")
-            migration = migration if isinstance(migration, dict) else {}
-            mode = migration.get(
-                "item_ebay_price_fanout",
-                migration.get("bundle_downstream", "workflow"),
-            )
-            if mode != "workflow":
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"invalid item_ebay_price_fanout mode {mode!r}",
-                )
-            # Clear price sub-fields so the worker runs fresh.  _apply_patch is
-            # a deep merge, so omitting a key does not remove its old value;
-            # explicit nulls are the durable reset representation.
-            _doc = load_item_doc(json_path)
-            _eo = dict(_doc.get("ebay_offer") or {})
-            for _k in ("price", "price_comps", "priced_at", "price_source", "target_price"):
-                _eo[_k] = None
-            _dl = dict(_doc.get("draft_listing") or {})
-            _dl["price"] = None
-            _dl["price_confidence"] = None
-            _apply_patch(json_path, {"ebay_offer": _eo, "draft_listing": _dl})
-            if mode == "workflow":
-                from .workflow.listing_migration import request_item_goal
-                from .workflow.profiles import TGW_EBAY_PRICED
-
-                result = request_item_goal(
-                    json_path,
-                    TGW_EBAY_PRICED,
-                    origin="operator",
-                    operator_identity=operator_identity,
-                    operator_surface="http:item-action:ebay-price",
-                )
-                if result.dispatched is None:
-                    return {
-                        "ok": False,
-                        "sku": sku,
-                        "action": action,
-                        "status": "held",
-                        "job_id": "",
-                        "held_external": list(result.held_external),
-                        "operator_gates": list(result.operator_gates),
-                        "ownership_conflicts": list(result.graph.ownership_conflicts),
-                        "reconciliation_gates": list(result.graph.reconciliation_gates),
-                    }
-                job_id = result.dispatched.job_id
-
-        elif action == "ebay_stage":
-            migration = _cfg.get("workflow_migration")
-            if migration is None and isinstance(_cfg.get("raw"), dict):
-                migration = _cfg["raw"].get("workflow_migration")
-            migration = migration if isinstance(migration, dict) else {}
-            mode = migration.get("item_ebay_stage_fanout", "workflow")
-            if mode != "workflow":
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"invalid item_ebay_stage_fanout mode {mode!r}",
-                )
-            if mode == "workflow":
-                from .workflow.listing_migration import authorize_and_request_item_goal
-                from .workflow.profiles import TGW_EBAY_STAGED
-
-                provider_identity = migration.get("ebay_provider_identity", "")
-                result, authority_id, authority_created = authorize_and_request_item_goal(
-                    json_path,
-                    TGW_EBAY_STAGED,
-                    operator_identity=operator_identity,
-                    surface="http:item-action:ebay-stage",
-                    provider_identity=provider_identity,
-                    scopes=("upload", "stage"),
-                )
-                if result.dispatched is None:
-                    already_satisfied = not any(
-                        (
-                            result.graph.unmet_requirements,
-                            result.graph.explicit_requirements,
-                            result.graph.ownership_conflicts,
-                            result.graph.reconciliation_gates,
-                            result.held_external,
-                            result.operator_gates,
-                        )
-                    )
-                    return {
-                        "ok": already_satisfied,
-                        "sku": sku,
-                        "action": action,
-                        "status": ("already_satisfied" if already_satisfied else "held"),
-                        "job_id": "",
-                        "graph_id": result.graph.graph_id,
-                        "object_generation": result.graph.object_generation,
-                        "held_external": list(result.held_external),
-                        "operator_gates": list(result.operator_gates),
-                        "authority_id": authority_id,
-                        "authority_created": authority_created,
-                    }
-                job_id = result.dispatched.job_id
-                return {
-                    "ok": True,
-                    "sku": sku,
-                    "action": action,
-                    "job_id": job_id,
-                    "status": "workflow_dispatched",
-                    "graph_id": result.graph.graph_id,
-                    "object_generation": result.graph.object_generation,
-                    "authority_id": authority_id,
-                    "authority_created": authority_created,
-                }
-        elif action == "ebay_publish":
-            migration = _cfg.get("workflow_migration")
-            if migration is None and isinstance(_cfg.get("raw"), dict):
-                migration = _cfg["raw"].get("workflow_migration")
-            migration = migration if isinstance(migration, dict) else {}
-            mode = migration.get("ebay_publish_provider_effect", "workflow")
-            if mode != "workflow":
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"invalid ebay_publish_provider_effect mode {mode!r}",
-                )
-            if mode == "workflow":
-                from .workflow.listing_migration import (
-                    authorize_and_dispatch_next_listing_effect,
-                )
-
-                provider_identity = migration.get("ebay_provider_identity", "")
-                result, dispatched, authority_id, authority_created = authorize_and_dispatch_next_listing_effect(
-                    json_path,
-                    operator_identity=operator_identity,
-                    surface="http:item-action:ebay-publish",
-                    provider_identity=provider_identity,
-                )
-                if dispatched is None:
-                    already_satisfied = not any(
-                        (
-                            result.graph.unmet_requirements,
-                            result.graph.explicit_requirements,
-                            result.graph.ownership_conflicts,
-                            result.graph.reconciliation_gates,
-                            result.held_external,
-                            result.operator_gates,
-                        )
-                    )
-                    return {
-                        "ok": already_satisfied,
-                        "sku": sku,
-                        "action": action,
-                        "status": ("already_satisfied" if already_satisfied else "held"),
-                        "job_id": "",
-                        "graph_id": result.graph.graph_id,
-                        "object_generation": result.graph.object_generation,
-                        "held_external": list(result.held_external),
-                        "operator_gates": list(result.operator_gates),
-                        "authority_id": authority_id,
-                        "authority_created": authority_created,
-                    }
-                return {
-                    "ok": True,
-                    "sku": sku,
-                    "action": action,
-                    "job_id": dispatched.job_id,
-                    "status": ("workflow_dispatched" if dispatched.enqueued else "already_queued"),
-                    "treatment_id": dispatched.treatment_id,
-                    "graph_id": result.graph.graph_id,
-                    "object_generation": result.graph.object_generation,
-                    "authority_id": authority_id,
-                    "authority_created": authority_created,
-                }
         else:
             job_id = state_machine.enqueue_job(
                 queue_name=action,
@@ -3422,15 +3226,28 @@ def requeue_job(
     # a fresh, exactly-bound job (or reports a truthful hold).
     action_by_queue = {
         "ai_identify": "ai_identify",
-        "ebay_draft": "ebay_draft",
-        "ebay_upload": "ebay_upload",
-        "ebay_price": "ebay_price",
-        "ebay_stage": "ebay_stage",
-        "ebay_publish": "ebay_publish",
         "ebay_sync": "sync_from_ebay",
         "thumbnail_gen": "thumbnail_gen",
         "catalog_rebuild": "catalog_rebuild",
     }
+    governed_listing_queues = {
+        "ebay_draft", "ebay_upload", "ebay_price", "ebay_stage", "ebay_publish",
+    }
+    if sku and str(row["queue_name"]) in governed_listing_queues:
+        return {
+            "ok": False,
+            "job_id": str(job_id),
+            "new_job_id": "",
+            "queue": str(row["queue_name"]),
+            "status": "held",
+            "hold_code": "CURRENT_OPERATOR_OBJECT_REQUIRED",
+            "detail": (
+                "historical listing jobs cannot be replayed; fetch the current "
+                "published operator object and submit an enabled command"
+            ),
+            "operator_object": f"/api/operator/items/{sku}",
+            "command_endpoint": f"/api/operator/items/{sku}/commands",
+        }
     current_action = action_by_queue.get(str(row["queue_name"])) if sku else None
     if current_action:
         result = item_action(

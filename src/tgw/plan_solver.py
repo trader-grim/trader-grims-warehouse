@@ -131,6 +131,7 @@ class Observation:
     provider: str
     state: str
     evidence: tuple[str, ...] = ()
+    invalidated_by: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -172,9 +173,34 @@ class CapabilityGraph:
                 provider=str(item["provider"]),
                 state=str(item["state"]),
                 evidence=tuple(sorted(str(e) for e in item.get("evidence", ()))),
+                invalidated_by=tuple(sorted(str(e) for e in item.get("invalidated_by", ()))),
             )
             for item in data.get("observations", ())
         )
+        all_evidence = {receipt for observation in observations for receipt in observation.evidence}
+        for observation in observations:
+            if not observation.invalidated_by:
+                continue
+            if observation.state not in {"contradictory", "rejected", "superseded"}:
+                raise PlanResolutionError(
+                    "invalidated_by is permitted only on contradictory, rejected, or superseded observations"
+                )
+            if not observation.evidence:
+                raise PlanResolutionError("an invalidated observation must bind evidence receipts")
+            if any(not receipt.strip() for receipt in (*observation.evidence, *observation.invalidated_by)):
+                raise PlanResolutionError("observation invalidation receipts must be non-empty")
+            self_references = sorted(set(observation.evidence) & set(observation.invalidated_by))
+            if self_references:
+                raise PlanResolutionError(
+                    "observation invalidation cannot use its own evidence as replacement: "
+                    + ", ".join(self_references)
+                )
+            missing = sorted(set(observation.invalidated_by) - all_evidence)
+            if missing:
+                raise PlanResolutionError(
+                    "observation invalidation references unknown replacement evidence: "
+                    + ", ".join(missing)
+                )
         raw_target = data.get("target")
         if not isinstance(raw_target, Mapping):
             raise PlanResolutionError("target is required")
@@ -397,6 +423,12 @@ class ExactCapabilitySolver:
     ) -> dict[str, Any]:
         selected = sorted(winner.selected.values(), key=lambda p: p.id) if winner else []
         observations = {(o.capability, o.provider): o for o in graph.observations}
+        invalidated_receipts = {
+            receipt
+            for observation in graph.observations
+            if observation.invalidated_by
+            for receipt in observation.evidence
+        }
         minimum = STATE_RANK[graph.target.minimum_state]
         satisfied: list[dict[str, Any]] = []
         work_units: list[dict[str, Any]] = []
@@ -413,7 +445,10 @@ class ExactCapabilitySolver:
                             "establishes": [f"{capability}@{graph.target.minimum_state}"],
                             "selected_provider": provider.id,
                             "requires_capabilities": sorted(self._leaf_capabilities(provider.requires)),
-                            "resume_from": list(observation.evidence) if observation else [],
+                            "resume_from": (
+                                sorted(set(observation.evidence) - invalidated_receipts)
+                                if observation else []
+                            ),
                         }
                     )
         if winner is None and graph.catalog_gaps:
@@ -480,8 +515,10 @@ class ExactCapabilitySolver:
             "dispatchable": conformance_verified and not unresolved,
             "rejected_alternatives": rejected,
             "unresolved": unresolved,
-            "reusable_receipts": sorted({e for item in satisfied for e in item["evidence"]}),
-            "invalidated_receipts": [],
+            "reusable_receipts": sorted(
+                {e for item in satisfied for e in item["evidence"]} - invalidated_receipts
+            ),
+            "invalidated_receipts": sorted(invalidated_receipts),
         }
         artifact["solution_hash"] = _hash(artifact)
         return artifact

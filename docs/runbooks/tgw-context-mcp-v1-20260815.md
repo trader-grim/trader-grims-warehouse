@@ -62,9 +62,19 @@ PYTHONPATH=/opt/TGW/tgw-lib/src/trader-grims-warehouse/src
 TGW_CONTEXT_PLAN_ROOT=/opt/TGW/library/approved/<full-approved-commit>
 TGW_CONTEXT_PLAN_REPOSITORY=/opt/TGW/library/plans
 TGW_CONTEXT_PLAN_COMMIT=<full-approved-commit>
+TGW_CONTEXT_PLAN_SOLUTION=sha256:<approved-solution-hash>
 TGW_CONTEXT_SOURCE_ROOT=/opt/TGW/tgw-lib/src/trader-grims-warehouse
 TGW_CONTEXT_RUNTIME_ROOT=/opt/TGW/tgw-lib/var/context
+TGW_CONTEXT_ENVIRONMENT_CATALOG=/etc/tgw/execution-environment-catalog.json
+TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH=sha256:<verified-catalog-hash>
 ```
+
+`TGW_CONTEXT_PLAN_SOLUTION` must be the exact solution bound to the approved
+Plan commit. `TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH` must be computed from the
+installed catalog bytes and must match the signed environment receipt.  An
+operator must never copy either value from conversation text or an unbuilt
+candidate catalog.  The context MCP refuses startup when either binding is
+missing or inconsistent.
 
 Launch command:
 
@@ -87,8 +97,11 @@ codex mcp add tgw-context \
   --env TGW_CONTEXT_PLAN_ROOT=/opt/TGW/library/approved/<full-approved-commit> \
   --env TGW_CONTEXT_PLAN_REPOSITORY=/opt/TGW/library/plans \
   --env TGW_CONTEXT_PLAN_COMMIT=<full-approved-commit> \
+  --env TGW_CONTEXT_PLAN_SOLUTION=sha256:<approved-solution-hash> \
   --env TGW_CONTEXT_SOURCE_ROOT=/opt/TGW/tgw-lib/src/trader-grims-warehouse \
   --env TGW_CONTEXT_RUNTIME_ROOT=/opt/TGW/tgw-lib/var/context \
+  --env TGW_CONTEXT_ENVIRONMENT_CATALOG=/etc/tgw/execution-environment-catalog.json \
+  --env TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH=sha256:<verified-catalog-hash> \
   -- /opt/TGW/tgw-lib/src/trader-grims-warehouse/.venv/bin/python \
   -m tgw.context_mcp_server
 ```
@@ -131,4 +144,3 @@ Run an MCP protocol smoke and confirm the six-tool read-only surface:
 - `tgw_context_plan_source`
 - `tgw_context_runbooks`
 - `tgw_context_code_graph`
-

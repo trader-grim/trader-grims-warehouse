@@ -81,6 +81,74 @@ def test_installed_state_is_reused_and_partial_state_becomes_work():
     ]
 
 
+def test_superseded_observation_invalidates_old_receipts() -> None:
+    document = graph(
+        capabilities=["app@1"],
+        required=["app@1"],
+        providers=[
+            {"id": "app-old", "provides": ["app@1"], "status": "superseded"},
+            {"id": "app-current", "provides": ["app@1"]},
+        ],
+        observations=[
+            {
+                "capability": "app@1",
+                "provider": "app-old",
+                "state": "superseded",
+                "evidence": ["receipt:old-observation"],
+                "invalidated_by": ["receipt:current-observation"],
+            },
+            {
+                "capability": "app@1",
+                "provider": "app-current",
+                "state": "admitted",
+                "evidence": ["receipt:current-observation"],
+            },
+        ],
+    )
+
+    result = solve(document)
+
+    assert result["selected_providers"] == ["app-current"]
+    assert result["reusable_receipts"] == ["receipt:current-observation"]
+    assert result["invalidated_receipts"] == ["receipt:old-observation"]
+
+
+def test_invalidation_edge_requires_bound_replacement_evidence() -> None:
+    document = graph(
+        capabilities=["app@1"],
+        required=["app@1"],
+        providers=[{"id": "app", "provides": ["app@1"]}],
+        observations=[{
+            "capability": "app@1",
+            "provider": "app",
+            "state": "superseded",
+            "evidence": ["receipt:old"],
+            "invalidated_by": ["receipt:missing"],
+        }],
+    )
+
+    with pytest.raises(PlanResolutionError, match="unknown replacement evidence"):
+        solve(document)
+
+
+def test_invalidation_edge_cannot_replace_evidence_with_itself() -> None:
+    document = graph(
+        capabilities=["app@1"],
+        required=["app@1"],
+        providers=[{"id": "app", "provides": ["app@1"]}],
+        observations=[{
+            "capability": "app@1",
+            "provider": "app",
+            "state": "superseded",
+            "evidence": ["receipt:same"],
+            "invalidated_by": ["receipt:same"],
+        }],
+    )
+
+    with pytest.raises(PlanResolutionError, match="own evidence"):
+        solve(document)
+
+
 def test_solution_hash_is_deterministic_across_input_order_and_detects_mutation():
     original = graph(
         capabilities=["b@1", "a@1"],

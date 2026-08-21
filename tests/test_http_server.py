@@ -25,6 +25,7 @@ import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import psycopg2.errors
 import pytest
@@ -1144,6 +1145,10 @@ def test_legacy_provider_actions_have_no_served_ui_or_direct_branch() -> None:
     source = Path(http_server.__file__).read_text(encoding="utf-8")
     for forbidden in (
         'elif action == "ebay_update"',
+        'elif action == "ebay_draft"',
+        'elif action == "ebay_price"',
+        'elif action == "ebay_stage"',
+        'elif action == "ebay_publish"',
         'value="ebay_end_listing"',
         '_abtn("End Listing"',
         "triggerAction('ebay_end_listing'",
@@ -1154,6 +1159,7 @@ def test_legacy_provider_actions_have_no_served_ui_or_direct_branch() -> None:
 def test_resync_photos_queues_upload_for_same_count_but_wrong_photo_set(
     env,
     enqueue_calls,
+    monkeypatch,
 ):
     """Count equality must not bypass upload when the identities differ.
 
@@ -1186,6 +1192,22 @@ def test_resync_photos_queues_upload_for_same_count_but_wrong_photo_set(
             },
         },
     )
+    from tgw.workflow import listing_migration
+
+    dispatched = SimpleNamespace(queue_name="ebay_upload", job_id="workflow-upload-1")
+    graph = SimpleNamespace(graph_id="graph-1", object_generation="generation-1")
+    evaluated = SimpleNamespace(
+        graph=graph,
+        dispatched=dispatched,
+        held_external=(),
+        operator_gates=(),
+    )
+    captured = {}
+    monkeypatch.setattr(
+        listing_migration,
+        "authorize_and_request_item_goal",
+        lambda *args, **kwargs: captured.update(kwargs) or (evaluated, "authority-1", True),
+    )
 
     response = env["client"].post(
         f"/api/items/{sku}/action",
@@ -1200,9 +1222,10 @@ def test_resync_photos_queues_upload_for_same_count_but_wrong_photo_set(
     assert len(body["photo_fingerprint"]) == 64
     assert "1 missing EPS URL" in body["detail"]
     assert "1 stale hosted photo" in body["detail"]
-    upload = next(call["kwargs"] for call in enqueue_calls if call["kwargs"].get("queue_name") == "ebay_upload")
-    assert upload["payload"]["sku"] == sku
-    assert upload["dedupe_key"] == f"ebay_upload:{sku}"
+    assert body["status"] == "workflow_dispatched"
+    assert body["job_id"] == "workflow-upload-1"
+    assert captured["scopes"] == ("upload", "stage")
+    assert not any(call["kwargs"].get("queue_name") == "ebay_upload" for call in enqueue_calls)
 
 
 def test_worker_edit_to_not_yet_live_draft_does_not_auto_enqueue(env, enqueue_calls):
@@ -5489,7 +5512,7 @@ def test_requeue_job_wrong_state(env, monkeypatch):
 
 
 def test_requeue_job_success(env, monkeypatch):
-    """A retired direct listing job cannot be replayed through the old action."""
+    """A retired direct listing job returns the current operator-object hold."""
     rows = [
         {
             "job_id": "dead-job-id-001",
@@ -5518,7 +5541,10 @@ def test_requeue_job_success(env, monkeypatch):
     monkeypatch.setattr(http_server.state_machine, "enqueue_job", _enqueue)
 
     r = env["client"].post("/api/jobs/dead-job-id-001/requeue", headers=AUTH_HEADERS)
-    assert r.status_code == 400
+    assert r.status_code == 200
+    assert r.json()["hold_code"] == "CURRENT_OPERATOR_OBJECT_REQUIRED"
+    assert r.json()["operator_object"] == f"/api/operator/items/{SKU_A}"
+    assert r.json()["command_endpoint"] == f"/api/operator/items/{SKU_A}/commands"
     assert enqueued == {}
 
 

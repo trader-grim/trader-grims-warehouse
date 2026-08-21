@@ -46,6 +46,7 @@ class OperatorConsoleMount:
     # dispatcher) may be mounted here.  ``None`` leaves /consume fail-closed.
     execute_effect: Callable[..., Any] | None = None
     resolve_development: Callable[..., Any] | None = None
+    load_recovery_status: Callable[[], Mapping[str, Any]] | None = None
     load_dynamic_surface: Callable[..., Any] | None = None
     submit_dynamic_surface_decision: Callable[..., Any] | None = None
 
@@ -64,6 +65,7 @@ def mount_operator_console(app: FastAPI, config: OperatorConsoleMount) -> None:
         require_executor=config.require_executor,
         execute_effect=config.execute_effect,
         resolve_development=config.resolve_development,
+        load_recovery_status=config.load_recovery_status,
         load_dynamic_surface=config.load_dynamic_surface,
         submit_dynamic_surface_decision=config.submit_dynamic_surface_decision,
     )

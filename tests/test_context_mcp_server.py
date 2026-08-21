@@ -27,6 +27,18 @@ from tgw.execution_resources import (
 )
 
 
+def test_registration_runbook_binds_every_fail_closed_server_environment() -> None:
+    runbook = Path(__file__).parents[1] / "docs/runbooks/tgw-context-mcp-v1-20260815.md"
+    text = runbook.read_text(encoding="utf-8")
+    for name in (
+        "TGW_CONTEXT_PLAN_SOLUTION",
+        "TGW_CONTEXT_ENVIRONMENT_CATALOG",
+        "TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH",
+    ):
+        assert text.count(name) >= 2
+    assert "unbuilt" in text and "candidate catalog" in text
+
+
 def _git(root: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-C", str(root), *args], check=True, capture_output=True, text=True

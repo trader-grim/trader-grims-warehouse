@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tgw import coding_provision
-from tgw.development_console import resolve_request
+from tgw.development_console import project_development_request, resolve_request
 from tgw.development_launch import DevelopmentLaunchError, validate_development_launch
 from tgw.execution_resources import CARD_RESOURCE_NAMES, issue_harness_retrieval_attestation
 from tgw.operator_console import create_operator_console_router, project_request
@@ -227,6 +227,13 @@ def test_resolved_cards_are_dependency_ordered_and_harness_neutral():
     assert all(card["provider_selection"]["selected_provider"] is None for card in lifecycle["launch_cards"])
     serialized = json.dumps(lifecycle).lower()
     assert all(product not in serialized for product in ("codex", "claude", "aider", "hermes"))
+    assert authority.effect.parameters["recovery_status"] == ACTIVE_GATE
+    projected = project_development_request({
+        "effect_kind": "development-launch",
+        "effect_parameters": authority.effect.parameters,
+    })
+    assert projected is not None
+    assert projected["recovery_status"] == ACTIVE_GATE
     validate_development_launch(authority.effect.parameters)
 
 
