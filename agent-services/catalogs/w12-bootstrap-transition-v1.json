@@ -2,7 +2,7 @@
   "schema": "tgw-plan-provider-catalog/v1",
   "id": "w12-bootstrap-transition-providers@1",
   "plan_id": "PLAN-ACTIVE-AMENDMENT-PROCESS",
-  "plan_commit": "5f9a8ac895511e1bb9bbb72334089bd868e3323f",
+  "plan_commit": "8e19ded9bba312c8e56bc1fa665589fe91af2ac1",
   "profiles": {
     "plan-amendment": {"minimum_state": "reviewed"}
   },
@@ -11,26 +11,27 @@
   ],
   "providers": [
     {
-      "id": "w12-transition-controller-bootstrap",
+      "id": "w12-transition-controller",
       "provides": ["plan.active-amendment-transition@1"],
       "requires": [],
-      "implementation_commit": "82ff670396563c17e10fdf85d053030008927630",
+      "implementation_commit": "0587ca26c806deacdfa4fff794eb05428ba6f3ad",
       "implementation_content": {
-        "src/tgw/plan_transition.py": "sha256:ac3a47efd203e52158fee6d345c6f618b01c479a3571a37614acd7bb4bc9fa7a",
-        "tests/test_plan_transition.py": "sha256:c5bc3298404d62d31c0f621133785f81122592780fd60f330a79f84ac22f0722"
+        "src/tgw/plan_transition.py": "sha256:5752a294093cf3be3f27cae13bdfb9015584d8cf5d97d0387da5dea784b85f96",
+        "tests/test_plan_transition.py": "sha256:c32b91885e12defb3a37d77289a587447d1f545b88796249d216e332d18c0177"
       }
     }
   ],
   "observations": [
     {
       "capability": "plan.active-amendment-transition@1",
-      "provider": "w12-transition-controller-bootstrap",
-      "state": "reviewed",
+      "provider": "w12-transition-controller",
+      "state": "tested",
       "evidence": [
-        "source-commit:82ff670396563c17e10fdf85d053030008927630",
-        "source-content:src/tgw/plan_transition.py:sha256:ac3a47efd203e52158fee6d345c6f618b01c479a3571a37614acd7bb4bc9fa7a",
-        "source-content:tests/test_plan_transition.py:sha256:c5bc3298404d62d31c0f621133785f81122592780fd60f330a79f84ac22f0722",
-        "test:tests/test_plan_transition.py:passed"
+        "source-commit:0587ca26c806deacdfa4fff794eb05428ba6f3ad",
+        "source-content:src/tgw/plan_transition.py:sha256:5752a294093cf3be3f27cae13bdfb9015584d8cf5d97d0387da5dea784b85f96",
+        "source-content:tests/test_plan_transition.py:sha256:c32b91885e12defb3a37d77289a587447d1f545b88796249d216e332d18c0177",
+        "test:tests/test_plan_transition.py:8-passed",
+        "review:pending-deepseek"
       ]
     }
   ]
