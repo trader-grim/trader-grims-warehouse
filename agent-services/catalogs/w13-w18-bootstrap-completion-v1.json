@@ -2,7 +2,7 @@
   "schema": "tgw-plan-provider-catalog/v1",
   "id": "w13-w18-bootstrap-completion-providers@1",
   "plan_id": "PLAN-W13-W18-BOOTSTRAP-COMPLETION",
-  "plan_commit": "8e19ded9bba312c8e56bc1fa665589fe91af2ac1",
+  "plan_commit": "3c9cbe18db929e60eb7562d4c5ec1ccc73cdb3b2",
   "profiles": {
     "reviewed-bootstrap": {"minimum_state": "reviewed"}
   },
@@ -32,10 +32,10 @@
   ],
   "observations": [
     {"capability": "plan.active-amendment-transition@1", "provider": "w12-transition-controller", "state": "tested", "evidence": ["source-commit:0587ca26c806deacdfa4fff794eb05428ba6f3ad", "test:tests/test_plan_transition.py:passed", "review:pending-deepseek"]},
-    {"capability": "coding.pinned-tool-environments@1", "provider": "w15-pinned-environment", "state": "implemented_unverified", "evidence": ["source-commit:0587ca26c806deacdfa4fff794eb05428ba6f3ad", "flake-commit:c1621b8337ee0ad9a305278b956bc85795c14bfb", "test:flake-source-boundaries:13-passed", "hold:governed-tgw-lib-nix-eval-build-pending"]},
-    {"capability": "operations.receipt-inspection@1", "provider": "w15-pinned-environment", "state": "tested", "evidence": ["source-commit:0587ca26c806deacdfa4fff794eb05428ba6f3ad", "flake-commit:c1621b8337ee0ad9a305278b956bc85795c14bfb", "test:full-pytest:5198-passed-16-skipped", "test:flake-source-boundaries:13-passed"]},
+    {"capability": "coding.pinned-tool-environments@1", "provider": "w15-pinned-environment", "state": "implemented_unverified", "evidence": ["source-commit:0587ca26c806deacdfa4fff794eb05428ba6f3ad", "flake-commit:acb3cfc62ccdb0fe028a85f1e06e4f9580f20560", "test:flake-source-boundaries:13-passed", "hold:governed-tgw-lib-nix-eval-build-pending"]},
+    {"capability": "operations.receipt-inspection@1", "provider": "w15-pinned-environment", "state": "tested", "evidence": ["source-commit:0587ca26c806deacdfa4fff794eb05428ba6f3ad", "flake-commit:acb3cfc62ccdb0fe028a85f1e06e4f9580f20560", "test:full-pytest:5198-passed-16-skipped", "test:flake-source-boundaries:13-passed"]},
     {"capability": "governance.mcp-projection-freshness@1", "provider": "w18-revision-synchronous-refresh", "state": "tested", "evidence": ["source-commit:0587ca26c806deacdfa4fff794eb05428ba6f3ad", "test:actor-generation-startup-materialization:passed", "test:full-pytest:5198-passed-16-skipped"]},
-    {"capability": "workflow.quiesce-refresh-restart@1", "provider": "w18-revision-synchronous-refresh", "state": "tested", "evidence": ["source-commit:0587ca26c806deacdfa4fff794eb05428ba6f3ad", "flake-commit:c1621b8337ee0ad9a305278b956bc85795c14bfb", "test:actor-fleet-lifecycle:passed", "test:full-pytest:5198-passed-16-skipped", "test:flake-source-boundaries:13-passed"]},
+    {"capability": "workflow.quiesce-refresh-restart@1", "provider": "w18-revision-synchronous-refresh", "state": "tested", "evidence": ["source-commit:0587ca26c806deacdfa4fff794eb05428ba6f3ad", "flake-commit:acb3cfc62ccdb0fe028a85f1e06e4f9580f20560", "test:actor-fleet-lifecycle:passed", "test:full-pytest:5198-passed-16-skipped", "test:flake-source-boundaries:13-passed"]},
     {"capability": "operator.development-request-console@1", "provider": "w14-development-launch", "state": "tested", "evidence": ["source-commit:0587ca26c806deacdfa4fff794eb05428ba6f3ad", "test:full-pytest:5198-passed-16-skipped"]},
     {"capability": "plan.request-to-closure-resolution@1", "provider": "w14-development-launch", "state": "tested", "evidence": ["source-commit:0587ca26c806deacdfa4fff794eb05428ba6f3ad", "test:full-pytest:5198-passed-16-skipped"]},
     {"capability": "coding.governed-launch-controller@1", "provider": "w14-development-launch", "state": "tested", "evidence": ["source-commit:0587ca26c806deacdfa4fff794eb05428ba6f3ad", "test:full-pytest:5198-passed-16-skipped"]},

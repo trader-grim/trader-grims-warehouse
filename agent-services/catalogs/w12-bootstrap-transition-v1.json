@@ -2,7 +2,7 @@
   "schema": "tgw-plan-provider-catalog/v1",
   "id": "w12-bootstrap-transition-providers@1",
   "plan_id": "PLAN-ACTIVE-AMENDMENT-PROCESS",
-  "plan_commit": "8e19ded9bba312c8e56bc1fa665589fe91af2ac1",
+  "plan_commit": "3c9cbe18db929e60eb7562d4c5ec1ccc73cdb3b2",
   "profiles": {
     "plan-amendment": {"minimum_state": "reviewed"}
   },
