@@ -613,6 +613,40 @@ class ActorFleetProvider:
             )
         return receipts
 
+    def _prepare_context_cache_roots(self, value: Mapping[str, Any]) -> list[str]:
+        base = self.attempt_cache_root.parent / "actors"
+        base.mkdir(mode=0o750, exist_ok=True)
+        if base.is_symlink() or not base.is_dir():
+            raise ActorFleetError("actor Context MCP cache base is unsafe")
+        base.chmod(0o750)
+        if os.geteuid() == 0:
+            os.chown(base, 0, grp.getgrnam(self.actor_group).gr_gid)
+        generation = str(value["successor_generation"]).removeprefix("sha256:")
+        roots: list[str] = []
+        for actor in value["actors"]:
+            account = pwd.getpwnam(actor)
+            actor_root = base / actor
+            generation_root = actor_root / generation
+            cache_root = generation_root / "context-mcp"
+            for directory in (actor_root, generation_root):
+                directory.mkdir(mode=0o711, exist_ok=True)
+                if directory.is_symlink() or not directory.is_dir():
+                    raise ActorFleetError("actor Context MCP cache parent is unsafe")
+                directory.chmod(0o711)
+                if os.geteuid() == 0:
+                    os.chown(directory, 0, account.pw_gid)
+            cache_root.mkdir(mode=0o700, exist_ok=True)
+            if cache_root.is_symlink() or not cache_root.is_dir():
+                raise ActorFleetError("actor Context MCP cache root is unsafe")
+            cache_root.chmod(0o700)
+            if os.geteuid() == 0:
+                os.chown(cache_root, account.pw_uid, account.pw_gid)
+            observed = cache_root.stat(follow_symlinks=False)
+            if observed.st_uid != account.pw_uid or stat.S_IMODE(observed.st_mode) != 0o700:
+                raise ActorFleetError("actor Context MCP cache root ownership differs")
+            roots.append(str(cache_root))
+        return roots
+
     def quiesce(self, request: Mapping[str, Any]) -> dict[str, Any]:
         value = _request(request)
         journal = self._journal(value["transaction_id"])
@@ -652,7 +686,14 @@ class ActorFleetProvider:
         )
         if prepared.get("status") != "PREPARED":
             raise ActorFleetError("complete actor bundle did not prepare")
-        journal.update({"status": "REBUILT", "candidate_release": str(release)})
+        context_cache_roots = self._prepare_context_cache_roots(value)
+        journal.update(
+            {
+                "status": "REBUILT",
+                "candidate_release": str(release),
+                "context_cache_roots": context_cache_roots,
+            }
+        )
         self._save(journal)
         return {"status": "REBUILT", "transaction_id": value["transaction_id"], "candidate_commit": value["revisions"]["source"], "preflight_hash": _hash(prepared)}
 

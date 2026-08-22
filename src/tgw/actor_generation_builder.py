@@ -75,13 +75,36 @@ def _binding_hash(bindings: list[dict[str, str]]) -> str:
     return _hash(sorted(bindings, key=lambda item: item["endpoint"]))
 
 
-def _context_source_identity(path: Path) -> tuple[str, str]:
+def _catalog_git(catalog: Mapping[str, Any], descriptor: Mapping[str, Any], actors: list[str]) -> str:
+    identities: set[tuple[str, str]] = set()
+    for actor in actors:
+        specification = descriptor.get("actors", {}).get(actor)
+        profile = specification.get("profile") if isinstance(specification, Mapping) else None
+        tools = catalog.get("profiles", {}).get(profile, {}).get("tools", [])
+        matches = [item for item in tools if isinstance(item, Mapping) and item.get("name") == "git"]
+        if len(matches) != 1:
+            raise ActorGenerationError(f"catalog-pinned Git is unavailable for actor: {actor}")
+        path, expected_hash = matches[0].get("executable_path"), matches[0].get("executable_sha256")
+        if (
+            not isinstance(path, str)
+            or not path.startswith("/")
+            or not isinstance(expected_hash, str)
+            or _file_hash(Path(path)) != expected_hash
+        ):
+            raise ActorGenerationError(f"catalog-pinned Git identity differs for actor: {actor}")
+        identities.add((path, expected_hash))
+    if len(identities) != 1:
+        raise ActorGenerationError("actor profiles do not share one exact catalog-pinned Git identity")
+    return next(iter(identities))[0]
+
+
+def _context_source_identity(path: Path, git_path: str) -> tuple[str, str]:
     if not path.is_absolute() or not path.is_dir() or path.is_symlink():
         raise ActorGenerationError("actor Context MCP source root is invalid")
 
     def git(*args: str) -> str:
         completed = subprocess.run(
-            ["git", "-c", f"safe.directory={path}", "-C", str(path), *args],
+            [git_path, "-c", f"safe.directory={path}", "-C", str(path), *args],
             check=False,
             capture_output=True,
             text=True,
@@ -151,6 +174,9 @@ def _mcp_registration(
         "TGW_ACTOR_APPROVED_PLAN_ROOT": f"/opt/TGW/library/approved/{plan_commit}",
         "TGW_ACTOR_CONTRACT_PUBLIC_KEY": trusted_public_key,
         "TGW_ACTOR_CONTEXT_RUNTIME_ROOT": "/opt/TGW/tgw-lib/var/context",
+        "TGW_ACTOR_CONTEXT_CACHE_ROOT": (
+            f"/opt/TGW/var/cache/tgw/actors/{actor}/{generation.removeprefix('sha256:')}/context-mcp"
+        ),
         "TGW_ACTOR_CONTEXT_SOURCE_ROOT": context_source_root,
         "TGW_ACTOR_ENVIRONMENT_CATALOG": "/etc/tgw/execution-environment-catalog.json",
         "TGW_ACTOR_EXPECTED_CATALOG_HASH": catalog_hash,
@@ -220,12 +246,13 @@ def build_actor_generation(
     enabled = sorted(actor for actor, value in actors.items() if isinstance(value, Mapping) and value.get("enabled") is True)
     if sorted(descriptor["actors"]) != enabled or not enabled:
         raise ActorGenerationError("actor generation descriptor does not cover every enabled catalog actor")
+    git_path = _catalog_git(catalog, descriptor, enabled)
     source = Path(source_root)
     context_source = Path(context_source_root)
     output = Path(output_root)
     if not source.is_absolute() or not source.is_dir() or source.is_symlink():
         raise ActorGenerationError("actor generation source root is invalid")
-    observed_source_commit, observed_source_tree = _context_source_identity(context_source)
+    observed_source_commit, observed_source_tree = _context_source_identity(context_source, git_path)
     if observed_source_commit != source_commit or observed_source_tree != source_tree:
         raise ActorGenerationError("actor Context MCP source binding is stale or mixed")
     if not output.is_absolute() or output == Path("/tmp") or Path("/tmp") in output.parents or not output.is_dir() or output.is_symlink():

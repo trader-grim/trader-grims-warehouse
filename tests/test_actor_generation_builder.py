@@ -41,6 +41,15 @@ def _context_source(root: Path) -> tuple[Path, str, str]:
     return source, commit, tree
 
 
+def _git_tool() -> dict[str, str]:
+    path = Path(shutil.which("git") or "").resolve(strict=True)
+    return {
+        "name": "git",
+        "executable_path": str(path),
+        "executable_sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
 def test_context_mcp_environment_uses_exact_generated_source_and_platform_bindings(monkeypatch):
     catalog = {"profiles": {"development": {"tools": []}}}
     catalog_hash = "sha256:" + hashlib.sha256(
@@ -48,6 +57,7 @@ def test_context_mcp_environment_uses_exact_generated_source_and_platform_bindin
     ).hexdigest()
     commit, tree = "e" * 40, "d" * 40
     result = {
+        "actor": "fixture",
         "generation": "sha256:" + "1" * 64,
         "plan": {"commit": "f" * 40, "solution_hash": "sha256:" + "2" * 64},
         "source_commit": commit,
@@ -68,11 +78,16 @@ def test_context_mcp_environment_uses_exact_generated_source_and_platform_bindin
         "TGW_ACTOR_PLAN_REPOSITORY": "/opt/TGW/library/plans",
         "TGW_ACTOR_APPROVED_PLAN_ROOT": f"/opt/TGW/library/approved/{result['plan']['commit']}",
         "TGW_ACTOR_CONTEXT_RUNTIME_ROOT": "/opt/TGW/tgw-lib/var/context",
+        "TGW_ACTOR_CONTEXT_CACHE_ROOT": (
+            f"/opt/TGW/var/cache/tgw/actors/fixture/{result['generation'].removeprefix('sha256:')}/context-mcp"
+        ),
         "TGW_ACTOR_ENVIRONMENT_CATALOG": "/etc/tgw/execution-environment-catalog.json",
     }
     monkeypatch.setattr(actor_startup, "_object", lambda _path, _label: catalog)
     monkeypatch.setattr(actor_startup, "_profile_tool", lambda _catalog, _profile, _name: "/nix/store/git/bin/git")
     monkeypatch.setattr(actor_startup, "_context_source_identity", lambda _path, _git: (commit, tree))
+    monkeypatch.setattr(Path, "is_dir", lambda _path: True)
+    monkeypatch.setattr(Path, "is_symlink", lambda _path: False)
 
     activated = actor_startup._context_mcp_environment(
         home=Path("/home/fixture"), result=result, binding=binding, environment=environment
@@ -81,6 +96,7 @@ def test_context_mcp_environment_uses_exact_generated_source_and_platform_bindin
     assert activated["TGW_CONTEXT_SOURCE_ROOT"] == source
     assert activated["TGW_CONTEXT_ENVIRONMENT_CATALOG"] == "/etc/tgw/execution-environment-catalog.json"
     assert activated["GIT_CONFIG_VALUE_0"] == source
+    assert activated["TMPDIR"] == environment["TGW_ACTOR_CONTEXT_CACHE_ROOT"]
 
     monkeypatch.setattr(actor_startup, "_context_source_identity", lambda _path, _git: ("0" * 40, tree))
     with pytest.raises(ActorStartupError, match="source binding"):
@@ -150,7 +166,7 @@ def test_builder_emits_signed_complete_external_generation_consumable_by_materia
                 "required_mcp_endpoints": ["tgw-context"],
             }
         },
-        "profiles": {"development": {"state": "ready-for-preflight"}},
+        "profiles": {"development": {"state": "ready-for-preflight", "tools": [_git_tool()]}},
     }
     catalog_path = tmp_path / "catalog.json"
     catalog_path.write_text(json.dumps(catalog))
@@ -268,6 +284,7 @@ def test_checked_in_descriptor_builds_all_provider_neutral_actor_registrations(d
             "development": {
                 "state": "ready-for-preflight",
                 "broker_capabilities": ["plan-read"],
+                "tools": [_git_tool()],
             }
         },
     }

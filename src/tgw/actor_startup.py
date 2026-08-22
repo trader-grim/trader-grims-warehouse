@@ -222,11 +222,18 @@ def _context_mcp_environment(
     plan_repository = environment.get("TGW_ACTOR_PLAN_REPOSITORY", "")
     approved_plan_root = environment.get("TGW_ACTOR_APPROVED_PLAN_ROOT", "")
     context_runtime_root = environment.get("TGW_ACTOR_CONTEXT_RUNTIME_ROOT", "")
+    context_cache_root = environment.get("TGW_ACTOR_CONTEXT_CACHE_ROOT", "")
     environment_catalog = environment.get("TGW_ACTOR_ENVIRONMENT_CATALOG", "")
+    expected_cache_root = (
+        f"/opt/TGW/var/cache/tgw/actors/{result['actor']}/{str(result['generation']).removeprefix('sha256:')}/context-mcp"
+    )
     if (
         plan_repository != "/opt/TGW/library/plans"
         or approved_plan_root != f"/opt/TGW/library/approved/{result['plan']['commit']}"
         or context_runtime_root != "/opt/TGW/tgw-lib/var/context"
+        or context_cache_root != expected_cache_root
+        or Path(context_cache_root).is_symlink()
+        or not Path(context_cache_root).is_dir()
         or environment_catalog != "/etc/tgw/execution-environment-catalog.json"
         or _hash(_object(Path(environment_catalog), "system environment catalog")) != result["catalog_hash"]
     ):
@@ -240,6 +247,10 @@ def _context_mcp_environment(
         "TGW_CONTEXT_RUNTIME_ROOT": context_runtime_root,
         "TGW_CONTEXT_ENVIRONMENT_CATALOG": environment_catalog,
         "TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH": str(result["catalog_hash"]),
+        "HOME": str(home),
+        "LANG": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "TMPDIR": context_cache_root,
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "safe.directory",
         "GIT_CONFIG_VALUE_0": str(source_root),
@@ -273,7 +284,12 @@ def main() -> int:
         return 73
     if args.context_mcp:
         try:
-            os.environ.update(_context_mcp_environment(home=args.home, result=result, binding=binding, environment=os.environ))
+            context_environment = _context_mcp_environment(
+                home=args.home,
+                result=result,
+                binding=binding,
+                environment=os.environ,
+            )
         except (OSError, ValueError) as exc:
             print(
                 json.dumps(
@@ -282,6 +298,8 @@ def main() -> int:
                 )
             )
             return 73
+        os.environ.clear()
+        os.environ.update(context_environment)
         from tgw.context_mcp_server import main as context_main
 
         context_main()
