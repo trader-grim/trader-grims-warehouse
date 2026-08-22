@@ -113,7 +113,10 @@ def _atomic_replace(path: Path, value: Mapping[str, Any]) -> None:
 
 def trigger_configured_fleet_refresh(config: Mapping[str, Any]) -> dict[str, Any]:
     raw = config.get("fleet_refresh_trigger")
-    required = {"schema", "input_path", "request_root", "state_root", "actors"}
+    required = {
+        "schema", "input_path", "request_root", "state_root",
+        "actor_generation_root", "actors",
+    }
     if (
         not isinstance(raw, Mapping) or set(raw) != required
         or raw.get("schema") != "tgw-fleet-refresh-trigger/v1"
@@ -122,6 +125,9 @@ def trigger_configured_fleet_refresh(config: Mapping[str, Any]) -> dict[str, Any
     input_path = _regular(raw["input_path"], "fleet watched input")
     request_root = _directory(raw["request_root"], "fleet request root")
     state_root = _directory(raw["state_root"], "fleet trigger state root")
+    generation_root = _directory(
+        raw["actor_generation_root"], "actor generation root",
+    )
     actors = raw["actors"]
     if (
         not isinstance(actors, list) or not actors or actors != sorted(set(actors))
@@ -130,14 +136,20 @@ def trigger_configured_fleet_refresh(config: Mapping[str, Any]) -> dict[str, Any
         raise FleetRefreshTriggerError("fleet trigger actors are invalid")
 
     watched, watched_raw = _read_bound_json(input_path, "fleet watched input")
-    if set(watched) != {"schema", "predecessor_generation", "revisions"} or watched.get(
-        "schema"
-    ) != "tgw-w18-fleet-watched-input/v1":
+    if set(watched) != {
+        "schema", "predecessor_generation", "successor_generation", "revisions",
+    } or watched.get("schema") != "tgw-w18-fleet-watched-input/v1":
         raise FleetRefreshTriggerError("fleet watched input fields are not exact")
     predecessor = watched["predecessor_generation"]
+    successor = watched["successor_generation"]
     revisions = watched["revisions"]
     if not isinstance(predecessor, str) or _HASH.fullmatch(predecessor) is None:
         raise FleetRefreshTriggerError("fleet predecessor generation is invalid")
+    if (
+        not isinstance(successor, str) or _HASH.fullmatch(successor) is None
+        or successor == predecessor
+    ):
+        raise FleetRefreshTriggerError("fleet successor generation is invalid")
     if not isinstance(revisions, Mapping) or set(revisions) != _REVISIONS:
         raise FleetRefreshTriggerError("fleet watched revisions are incomplete")
     if _COMMIT.fullmatch(str(revisions["plan"])) is None or _COMMIT.fullmatch(
@@ -148,8 +160,34 @@ def trigger_configured_fleet_refresh(config: Mapping[str, Any]) -> dict[str, Any
         if not isinstance(revisions[name], str) or _HASH.fullmatch(revisions[name]) is None:
             raise FleetRefreshTriggerError(f"fleet watched {name} revision is invalid")
 
-    desired = {"revisions": dict(revisions), "actors": list(actors)}
-    successor = _hash(desired)
+    generation_path = generation_root / successor.removeprefix("sha256:")
+    receipt_path = generation_path / "generation-receipt.json"
+    if (
+        generation_path.is_symlink() or not generation_path.is_dir()
+        or receipt_path.is_symlink() or not receipt_path.is_file()
+    ):
+        raise FleetRefreshTriggerError("fleet successor generation is unavailable")
+    generation_receipt, _receipt_raw = _read_bound_json(
+        receipt_path, "actor generation receipt",
+    )
+    unsigned_generation = dict(generation_receipt)
+    claimed_generation_hash = unsigned_generation.pop("receipt_hash", None)
+    identity = generation_receipt.get("generation_identity")
+    if (
+        generation_receipt.get("schema") != "tgw-actor-generation-receipt/v1"
+        or generation_receipt.get("status") != "PREPARED"
+        or generation_receipt.get("generation") != successor
+        or generation_receipt.get("actors") != actors
+        or claimed_generation_hash != _hash(unsigned_generation)
+        or not isinstance(identity, Mapping)
+        or identity.get("catalog_hash") != revisions["catalog"]
+        or identity.get("plan_commit") != revisions["plan"]
+        or identity.get("solution_hash") != revisions["solution"]
+        or identity.get("source_commit") != revisions["source"]
+    ):
+        raise FleetRefreshTriggerError(
+            "fleet successor generation does not match watched revisions",
+        )
     suffix = successor.removeprefix("sha256:")[:24]
     request_id = f"refresh-{suffix}"
     request = {

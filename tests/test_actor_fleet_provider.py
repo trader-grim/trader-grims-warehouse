@@ -83,6 +83,7 @@ def _fixture(tmp_path, *, admission_expires_at="2026-08-22T00:00:00Z"):
     )
     for path in (state, releases, admissions, generations, workspaces, caches, startup_bindings):
         path.mkdir()
+    state.chmod(0o750)
     startup_bindings.chmod(0o755)
     workspaces.chmod(0o2770)
     caches.chmod(0o2770)
@@ -423,6 +424,38 @@ def test_actor_provider_rejects_manifest_content_drift(durable_path):
     provider.quiesce(request)
     with pytest.raises(ValueError, match="content does not match its manifest"):
         provider.rebuild(request)
+
+
+def test_actor_provider_reverifies_release_before_activation(durable_path):
+    config, request, _destination = _fixture(durable_path)
+    state = {"value": "active"}
+
+    def service(arguments):
+        if arguments[0] == "stop":
+            state["value"] = "inactive"
+        return subprocess.CompletedProcess(arguments, 0, state["value"] + "\n", "")
+
+    provider = ActorFleetProvider(
+        config,
+        service_runner=service,
+        materializer_loader=lambda _: _Materializer(),
+        current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
+    )
+    provider.quiesce(request)
+    rebuilt = provider.rebuild(request)
+    launcher = Path(config["release_root"]) / "candidate/launcher"
+    launcher.chmod(0o644)
+    launcher.write_text("post-rebuild drift\n")
+    launcher.chmod(0o444)
+    with pytest.raises(ValueError, match="content does not match its manifest"):
+        provider.activate(request, rebuilt)
+
+
+def test_actor_provider_rejects_writable_state_root(durable_path):
+    config, _request, _destination = _fixture(durable_path)
+    Path(config["state_root"]).chmod(0o777)
+    with pytest.raises(ValueError, match="state root is not root protected"):
+        ActorFleetProvider(config)
 
 
 def test_actor_provider_http_rejects_auth_and_unbound_invocation(durable_path):

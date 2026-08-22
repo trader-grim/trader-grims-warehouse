@@ -219,6 +219,11 @@ class ActorFleetProvider:
             raise ActorFleetError("actor fleet provider token binding is invalid")
         self.token_sha256 = value["token_sha256"]
         self.state_root = _directory(value["state_root"], "actor fleet state root")
+        state_root_state = self.state_root.stat(follow_symlinks=False)
+        if state_root_state.st_mode & 0o022 or (
+            os.geteuid() == 0 and state_root_state.st_uid != 0
+        ):
+            raise ActorFleetError("actor fleet state root is not root protected")
         self.release_root = _directory(value["release_root"], "actor release root")
         self.admission_root = _directory(value["admission_root"], "actor admission root")
         self.actor_generation_root = _directory(value["actor_generation_root"], "actor generation root")
@@ -304,6 +309,19 @@ class ActorFleetProvider:
 
     def _save(self, journal: Mapping[str, Any]) -> None:
         _atomic(self._journal_path(str(journal["transaction_id"])), journal)
+
+    def _journal_release(self, journal: Mapping[str, Any]) -> Path:
+        raw = journal.get("candidate_release")
+        if not isinstance(raw, str):
+            raise ActorFleetError("actor journal candidate release is unavailable")
+        try:
+            release = Path(raw).resolve(strict=True)
+        except OSError as exc:
+            raise ActorFleetError("actor journal candidate release is unavailable") from exc
+        if release.parent != self.release_root.resolve(strict=True):
+            raise ActorFleetError("actor journal candidate release escapes release root")
+        _verified_release(self.release_root, release)
+        return release
 
     @staticmethod
     def _materializer(release: Path) -> Any:
@@ -492,7 +510,7 @@ class ActorFleetProvider:
         journal = self._journal(value["transaction_id"])
         if journal["status"] != "REBUILT" or rebuilt.get("candidate_commit") != value["revisions"]["source"]:
             raise ActorFleetError("actor activation is not bound to rebuild")
-        release = Path(str(journal["candidate_release"]))
+        release = self._journal_release(journal)
         materializer, bundle, contracts = self._actor_inputs(release, value)
         applied = materializer.materialize_complete_actor_contracts(
             bundle,
@@ -542,7 +560,8 @@ class ActorFleetProvider:
         bindings = [item for item in (journal.get("materialization") or {}).get("bindings", []) if item.get("actor") == actor]
         if not bindings:
             raise ActorFleetError("actor has no materialized contract")
-        _materializer, bundle, contracts = self._actor_inputs(Path(str(journal["candidate_release"])), value)
+        release = self._journal_release(journal)
+        _materializer, bundle, contracts = self._actor_inputs(release, value)
         contract = contracts[actor]
         startup_path = self.startup_binding_root / f"{actor}-startup.json"
         if (
@@ -682,7 +701,7 @@ class ActorFleetProvider:
         journal = self._journal(value["transaction_id"])
         applied = journal.get("materialization")
         if isinstance(applied, dict):
-            release = Path(str(journal.get("candidate_release")))
+            release = self._journal_release(journal)
             self._load_materializer(release).rollback_complete_actor_contracts(applied)
         startup_bindings = journal.get("startup_bindings")
         if isinstance(startup_bindings, list):
