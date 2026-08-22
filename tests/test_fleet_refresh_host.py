@@ -36,7 +36,7 @@ def _config(tmp_path):
     }
 
 
-def test_configured_fleet_controller_runs_exact_request_and_actor_set(tmp_path, monkeypatch):
+def test_configured_fleet_controller_runs_exact_request_and_actor_set(durable_path, monkeypatch):
     events = []
 
     def call(self, step, arguments):
@@ -57,13 +57,13 @@ def test_configured_fleet_controller_runs_exact_request_and_actor_set(tmp_path, 
         return {"status": statuses[step]}
 
     monkeypatch.setattr(_FleetProvider, "call", call)
-    receipt = run_configured_fleet_refresh(_config(tmp_path), "refresh-one")
+    receipt = run_configured_fleet_refresh(_config(durable_path), "refresh-one")
     assert receipt["status"] == "VERIFIED_AND_RESUMED"
     assert events == ["checkpoint", "quiesce", "rebuild", "activate", "restart", "health", "verify-actor", "verify-actor", "resume"]
 
 
-def test_fleet_controller_refuses_unbound_request_or_tmp_root(tmp_path):
-    config = _config(tmp_path)
+def test_fleet_controller_refuses_unbound_request_or_tmp_root(durable_path):
+    config = _config(durable_path)
     with pytest.raises(FleetRefreshHostError, match="unavailable"):
         run_configured_fleet_refresh(config, "unknown")
     config["fleet_refresh"]["receipt_root"] = "/tmp/fleet"

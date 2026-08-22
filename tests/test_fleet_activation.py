@@ -71,25 +71,25 @@ def _refresh_providers(events, *, fail=None, rollback_fail=False):
     }
 
 
-def test_refresh_transaction_orders_full_fleet_and_is_idempotent(tmp_path):
+def test_refresh_transaction_orders_full_fleet_and_is_idempotent(durable_path):
     events = []
     request = _refresh_request()
     providers = _refresh_providers(events)
     receipt = run_fleet_refresh_transaction(
-        request, receipt_root=tmp_path / "receipts", lease_path=tmp_path / "fleet.lock", **providers,
+        request, receipt_root=durable_path / "receipts", lease_path=durable_path / "fleet.lock", **providers,
     )
     assert receipt["status"] == "VERIFIED_AND_RESUMED"
     assert events == ["checkpoint", "quiesce", "rebuild", "activate", "restart", "health", "verify:claude", "verify:codex", "resume"]
     again = run_fleet_refresh_transaction(
-        request, receipt_root=tmp_path / "receipts", lease_path=tmp_path / "fleet.lock", **providers,
+        request, receipt_root=durable_path / "receipts", lease_path=durable_path / "fleet.lock", **providers,
     )
     assert again == receipt
     assert events.count("checkpoint") == 1
 
 
-def test_incomplete_journal_is_preserved_and_requires_explicit_recovery(tmp_path):
+def test_incomplete_journal_is_preserved_and_requires_explicit_recovery(durable_path):
     request = _refresh_request()
-    root = tmp_path / "receipts"
+    root = durable_path / "receipts"
     root.mkdir()
     journal_path = root / f"{request['transaction_id']}.journal.json"
     journal = {
@@ -107,7 +107,7 @@ def test_incomplete_journal_is_preserved_and_requires_explicit_recovery(tmp_path
         run_fleet_refresh_transaction(
             request,
             receipt_root=root,
-            lease_path=tmp_path / "fleet.lock",
+            lease_path=durable_path / "fleet.lock",
             **_refresh_providers(events),
         )
 
@@ -115,10 +115,10 @@ def test_incomplete_journal_is_preserved_and_requires_explicit_recovery(tmp_path
     assert events == []
 
 
-def test_refresh_failure_rolls_whole_fleet_back_and_resumes_predecessor(tmp_path):
+def test_refresh_failure_rolls_whole_fleet_back_and_resumes_predecessor(durable_path):
     events = []
     receipt = run_fleet_refresh_transaction(
-        _refresh_request(), receipt_root=tmp_path / "receipts", lease_path=tmp_path / "fleet.lock",
+        _refresh_request(), receipt_root=durable_path / "receipts", lease_path=durable_path / "fleet.lock",
         **_refresh_providers(events, fail="restart"),
     )
     assert receipt["status"] == "FAILED_ROLLED_BACK"
@@ -126,9 +126,9 @@ def test_refresh_failure_rolls_whole_fleet_back_and_resumes_predecessor(tmp_path
     assert receipt["failure"] == "restart failed"
 
 
-def test_refresh_rollback_failure_leaves_fleet_quiesced(tmp_path):
+def test_refresh_rollback_failure_leaves_fleet_quiesced(durable_path):
     receipt = run_fleet_refresh_transaction(
-        _refresh_request(), receipt_root=tmp_path / "receipts", lease_path=tmp_path / "fleet.lock",
+        _refresh_request(), receipt_root=durable_path / "receipts", lease_path=durable_path / "fleet.lock",
         **_refresh_providers([], fail="health", rollback_fail=True),
     )
     assert receipt["status"] == "FAILED_QUIESCED"
@@ -143,7 +143,7 @@ def test_refresh_rollback_failure_leaves_fleet_quiesced(tmp_path):
     ],
 )
 def test_every_refresh_boundary_failure_is_terminal_and_never_claims_success(
-    tmp_path, boundary,
+    durable_path, boundary,
 ):
     events = []
     request = _refresh_request(
@@ -152,37 +152,37 @@ def test_every_refresh_boundary_failure_is_terminal_and_never_claims_success(
     )
     receipt = run_fleet_refresh_transaction(
         request,
-        receipt_root=tmp_path / "receipts",
-        lease_path=tmp_path / "fleet.lock",
+        receipt_root=durable_path / "receipts",
+        lease_path=durable_path / "fleet.lock",
         **_refresh_providers(events, fail=boundary),
     )
 
     assert receipt["status"] in {"FAILED_ROLLED_BACK", "FAILED_QUIESCED"}
     assert receipt["status"] != "VERIFIED_AND_RESUMED"
     journal = json.loads(
-        (tmp_path / "receipts" / f"refresh-{boundary}.journal.json").read_text()
+        (durable_path / "receipts" / f"refresh-{boundary}.journal.json").read_text()
     )
     assert journal["status"] == receipt["status"]
     assert journal["terminal_receipt_hash"] == receipt["receipt_hash"]
 
 
-def test_refresh_refuses_tmp_receipts_and_incomplete_checkpoint(tmp_path):
+def test_refresh_refuses_tmp_receipts_and_incomplete_checkpoint(durable_path):
     with pytest.raises(FleetActivationError, match="outside /tmp"):
         run_fleet_refresh_transaction(
-            _refresh_request(), receipt_root="/tmp/tgw", lease_path=tmp_path / "fleet.lock",
+            _refresh_request(), receipt_root="/tmp/tgw", lease_path=durable_path / "fleet.lock",
             **_refresh_providers([]),
         )
     providers = _refresh_providers([])
     providers["checkpoint"] = lambda _: {"status": "CHECKPOINTED"}
     receipt = run_fleet_refresh_transaction(
-        _refresh_request(idempotency_key="incomplete"), receipt_root=tmp_path / "receipts",
-        lease_path=tmp_path / "fleet.lock", **providers,
+        _refresh_request(idempotency_key="incomplete"), receipt_root=durable_path / "receipts",
+        lease_path=durable_path / "fleet.lock", **providers,
     )
     assert receipt["status"] == "FAILED_ROLLED_BACK"
     assert "omits live lifecycle state" in receipt["failure"]
 
 
-def test_refresh_requires_exact_successor_disposition_for_every_checkpoint_object(tmp_path):
+def test_refresh_requires_exact_successor_disposition_for_every_checkpoint_object(durable_path):
     events = []
     providers = _refresh_providers(events)
     identity = "sha256:" + "1" * 64
@@ -200,7 +200,7 @@ def test_refresh_requires_exact_successor_disposition_for_every_checkpoint_objec
     )
     receipt = run_fleet_refresh_transaction(
         _refresh_request(idempotency_key="missing-disposition"),
-        receipt_root=tmp_path / "receipts", lease_path=tmp_path / "fleet.lock", **providers,
+        receipt_root=durable_path / "receipts", lease_path=durable_path / "fleet.lock", **providers,
     )
     assert receipt["status"] == "FAILED_ROLLED_BACK"
     assert "does not cover every live_requests checkpoint" in receipt["failure"]

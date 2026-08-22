@@ -1,7 +1,34 @@
 """Shared test helpers and fixtures for TGW test suite."""
 
 import json
+import os
+import shutil
+import tempfile
 from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture
+def durable_path():
+    """A small disposable root for code that correctly rejects ``/tmp``.
+
+    W18 receipts, leases, watched inputs, and refresh state are deliberately
+    required to live on durable storage.  Pytest's built-in ``tmp_path`` is
+    therefore the wrong fixture for those boundaries.  CI may select an exact
+    durable test filesystem with ``TGW_TEST_DURABLE_ROOT``; ``/var/tmp`` is the
+    portable fallback and every per-test directory is removed afterward.
+    """
+
+    base = Path(os.environ.get("TGW_TEST_DURABLE_ROOT", "/var/tmp/tgw-pytest"))
+    if not base.is_absolute() or base == Path("/tmp") or Path("/tmp") in base.parents:
+        raise RuntimeError("TGW_TEST_DURABLE_ROOT must be absolute and outside /tmp")
+    base.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="w18-", dir=base))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root)
 
 
 def make_fake_fence_write(itemdata_root):
