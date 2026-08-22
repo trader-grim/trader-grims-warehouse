@@ -57,7 +57,10 @@ def _config_binding(root: Path) -> dict[str, str]:
 
 def test_live_graph_binds_clean_standalone_commit_and_receiver(tmp_path):
     root = _plan_repo(tmp_path)
-    result = live_plan_graph(root, 'PP-ALPHA-001', receiver='aider', **_binding(root))
+    runtime = tmp_path / 'runtime'
+    result = live_plan_graph(
+        root, 'PP-ALPHA-001', receiver='aider', runtime_root=runtime, **_binding(root),
+    )
     assert result['ok'] is True, result
     assert result['plan_root'] == str(root)
     assert result['plan_commit'] == subprocess.check_output(
@@ -66,6 +69,10 @@ def test_live_graph_binds_clean_standalone_commit_and_receiver(tmp_path):
     assert len(result['source_envelope']) == 64
     assert result['receiver'] == 'aider'
     assert result['detailed_pp_documents']
+    projection = runtime / 'tgw-plan-graph' / result['source_envelope']
+    assert projection.stat().st_mode & 0o777 == 0o555
+    assert all(path.stat().st_mode & 0o777 == 0o444 for path in projection.iterdir())
+    projection.chmod(0o700)
 
 
 def test_live_graph_indexes_execution_work_unit_ids(tmp_path):

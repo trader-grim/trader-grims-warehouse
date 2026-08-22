@@ -716,13 +716,23 @@ def build(corpus: Path, allowlist: Path, output: Path,
             os.replace(output, backup)
         try:
             os.replace(temporary, output)
+            for path in sorted(output.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+                os.chmod(path, 0o555 if path.is_dir() else 0o444)
+            os.chmod(output, 0o555)
         except BaseException:
             if backup is not None:
+                if output.exists():
+                    for path in (output, *(item for item in output.rglob("*") if item.is_dir())):
+                        os.chmod(path, 0o700)
+                    shutil.rmtree(output)
                 os.replace(backup, output)
             raise
         if backup is not None:
+            for path in (backup, *(item for item in backup.rglob("*") if item.is_dir())):
+                os.chmod(path, 0o700)
             shutil.rmtree(backup)
         result["output"] = str(output)
+        result["artifact_access"] = "immutable-public-projection-v1"
         return result
     finally:
         if temporary.exists():
