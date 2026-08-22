@@ -28,6 +28,8 @@ from fastapi import FastAPI, Header, HTTPException
 
 from tgw.admission_recovery import validate_release_admission
 from tgw.config import DEFAULT_CONFIG, load_operational_config
+from tgw.release_installer import ReleaseError
+from tgw.release_installer import verify as verify_release
 
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -69,6 +71,24 @@ def _trusted_public_key(value: Any, label: str) -> bytes:
     if len(raw) != 32:
         raise ActorFleetError(f"{label} must contain one raw Ed25519 public key")
     return raw
+
+
+def _verified_release(release_root: Path, child: Path) -> dict[str, Any]:
+    """Verify an installed immutable release before importing any of its code."""
+    if child.is_symlink() or not child.is_dir():
+        raise ActorFleetError("actor release is not an immutable directory")
+    for path in (child, *child.rglob("*")):
+        observed = path.stat(follow_symlinks=False)
+        relative = path.relative_to(child).as_posix() if path != child else "."
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise ActorFleetError(f"actor release contains an unsafe path: {relative}")
+        if observed.st_mode & 0o022 or (os.geteuid() == 0 and observed.st_uid != 0):
+            raise ActorFleetError(f"actor release is not root protected: {relative}")
+    try:
+        verify_release(release_root.parent, child.name)
+    except (OSError, TypeError, ValueError, ReleaseError) as exc:
+        raise ActorFleetError("actor release content does not match its manifest") from exc
+    return _read_json(child / ".release-manifest.json", "actor release manifest")
 
 
 def _shared_attempt_root(value: Any, label: str, group: grp.struct_group) -> Path:
@@ -304,7 +324,7 @@ class ActorFleetProvider:
         for child in self.release_root.iterdir():
             manifest_path = child / ".release-manifest.json"
             if child.is_dir() and not child.is_symlink() and manifest_path.is_file() and not manifest_path.is_symlink():
-                manifest = _read_json(manifest_path, "actor release manifest")
+                manifest = _verified_release(self.release_root, child)
                 if manifest.get("commit") == request["revisions"]["source"]:
                     matches.append((child.resolve(), manifest))
         if len(matches) != 1:

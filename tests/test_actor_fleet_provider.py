@@ -24,6 +24,9 @@ def durable_path():
     try:
         yield path
     finally:
+        for child in sorted(path.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+            if not child.is_symlink():
+                child.chmod(0o700 if child.is_dir() else 0o600)
         shutil.rmtree(path)
 
 
@@ -74,7 +77,7 @@ class _Materializer:
                 path.unlink()
 
 
-def _fixture(tmp_path):
+def _fixture(tmp_path, *, admission_expires_at="2026-08-22T00:00:00Z"):
     state, releases, admissions, generations, workspaces, caches, startup_bindings = (
         tmp_path / name for name in ("state", "releases", "admissions", "generations", "workspaces", "caches", "startup-bindings")
     )
@@ -90,7 +93,6 @@ def _fixture(tmp_path):
     release = releases / "candidate"
     release.mkdir()
     source_tree = "d" * 40
-    (release / ".release-manifest.json").write_text(json.dumps({"commit": source_commit, "git_tree": source_tree}))
     for name, content in {
         "launcher": "actor launcher\n",
         "bootstrap.json": '{"status":"PASS"}\n',
@@ -162,6 +164,33 @@ def _fixture(tmp_path):
         "mcp": mcp_local,
     }
     (release / "bootstrap.json").write_text(json.dumps({**bootstrap_body, "receipt_hash": _hash(bootstrap_body)}))
+    files = {
+        path.relative_to(release).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(release.rglob("*"))
+        if path.is_file()
+    }
+    content_hash = hashlib.sha256(
+        (json.dumps(dict(sorted(files.items())), sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    (release / ".release-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "tgw-release-manifest-v1",
+                "generation": "candidate",
+                "commit": source_commit,
+                "tree": f"exact-git-archive:{source_commit}",
+                "git_tree": source_tree,
+                "src_root": "src",
+                "archive_sha256": "a" * 64,
+                "content_manifest_sha256": content_hash,
+                "file_count": len(files),
+                "files": files,
+            }
+        )
+    )
+    for path in sorted(release.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        path.chmod(0o555 if path.is_dir() or path.stat().st_mode & 0o111 else 0o444)
+    release.chmod(0o555)
     bootstrap_hash = _file_hash(release / "bootstrap.json")
     contract = {
         "actor": actor,
@@ -236,7 +265,7 @@ def _fixture(tmp_path):
         signing_private_key=admission_key,
         signer_key_id="actor-fixture",
         issued_at="2026-08-21T00:00:00Z",
-        expires_at="2026-08-22T00:00:00Z",
+        expires_at=admission_expires_at,
     )
     (admissions / (admission["receipt_hash"].removeprefix("sha256:") + ".json")).write_text(json.dumps(admission))
     admission_public_key = tmp_path / "release-admission.pub"
@@ -344,6 +373,55 @@ def test_actor_provider_rejects_forged_signed_admission(durable_path):
     )
     provider.quiesce(request)
     with pytest.raises(ValueError, match="admission receipt is not exact"):
+        provider.rebuild(request)
+
+
+def test_actor_provider_rejects_expired_signed_admission(durable_path):
+    config, request, _destination = _fixture(durable_path, admission_expires_at="2026-08-21T11:00:00Z")
+    provider = ActorFleetProvider(
+        config,
+        service_runner=lambda arguments: subprocess.CompletedProcess(arguments, 0, "inactive\n", ""),
+        materializer_loader=lambda _: _Materializer(),
+        current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
+    )
+    provider.quiesce(request)
+    with pytest.raises(ValueError, match="admission receipt is not exact"):
+        provider.rebuild(request)
+
+
+def test_actor_provider_rejects_cross_tree_signed_admission(durable_path):
+    config, request, _destination = _fixture(durable_path)
+    manifest_path = Path(config["release_root"]) / "candidate/.release-manifest.json"
+    manifest_path.chmod(0o644)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["git_tree"] = "c" * 40
+    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.chmod(0o444)
+    provider = ActorFleetProvider(
+        config,
+        service_runner=lambda arguments: subprocess.CompletedProcess(arguments, 0, "inactive\n", ""),
+        materializer_loader=lambda _: _Materializer(),
+        current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
+    )
+    provider.quiesce(request)
+    with pytest.raises(ValueError, match="admission receipt is not exact"):
+        provider.rebuild(request)
+
+
+def test_actor_provider_rejects_manifest_content_drift(durable_path):
+    config, request, _destination = _fixture(durable_path)
+    launcher = Path(config["release_root"]) / "candidate/launcher"
+    launcher.chmod(0o644)
+    launcher.write_text("drifted actor launcher\n")
+    launcher.chmod(0o444)
+    provider = ActorFleetProvider(
+        config,
+        service_runner=lambda arguments: subprocess.CompletedProcess(arguments, 0, "inactive\n", ""),
+        materializer_loader=lambda _: _Materializer(),
+        current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
+    )
+    provider.quiesce(request)
+    with pytest.raises(ValueError, match="content does not match its manifest"):
         provider.rebuild(request)
 
 

@@ -60,6 +60,9 @@ class HostPaths:
     systemd_tmpfiles: Path = Path("/usr/bin/systemd-tmpfiles")
 
 
+_SERVICE = "tgw-actor-fleet-provider.service"
+
+
 def _source(paths: HostPaths) -> tuple[Path, dict[str, Any], dict[Path, Path]]:
     if not paths.current.is_symlink():
         raise ActorHostBootstrapError("selected actor release is unavailable")
@@ -107,6 +110,39 @@ def _snapshot(path: Path) -> dict[str, Any]:
     return {"kind": "absent"}
 
 
+def _snapshot_directory(path: Path) -> dict[str, Any]:
+    if path.is_symlink():
+        raise ActorHostBootstrapError(f"host bootstrap directory is a symlink: {path}")
+    if path.exists():
+        if not path.is_dir():
+            raise ActorHostBootstrapError(f"host bootstrap directory is not a directory: {path}")
+        state = path.stat(follow_symlinks=False)
+        return {
+            "kind": "directory",
+            "mode": stat.S_IMODE(state.st_mode),
+            "uid": state.st_uid,
+            "gid": state.st_gid,
+        }
+    return {"kind": "absent"}
+
+
+def _tmpfiles_directories(path: Path, *, retained: Path) -> tuple[Path, ...]:
+    directories: list[Path] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.split()
+        if len(fields) != 6 or fields[0] != "d":
+            raise ActorHostBootstrapError("actor host tmpfiles declaration is not a bounded directory rule")
+        target = Path(fields[1])
+        if not target.is_absolute() or ".." in target.parts or "%" in fields[1]:
+            raise ActorHostBootstrapError("actor host tmpfiles directory is unsafe")
+        if target != retained and target not in directories:
+            directories.append(target)
+    return tuple(directories)
+
+
 def _atomic_file(path: Path, content: bytes, *, mode: int = 0o644) -> None:
     stage = path.with_name(f".{path.name}.next")
     if stage.exists() or stage.is_symlink():
@@ -133,6 +169,54 @@ def _atomic_file(path: Path, content: bytes, *, mode: int = 0o644) -> None:
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+
+
+def _required(
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]], command: list[str], label: str,
+) -> subprocess.CompletedProcess[str]:
+    result = runner(command)
+    if result.returncode != 0:
+        raise ActorHostBootstrapError(f"actor host bootstrap command failed: {label}")
+    return result
+
+
+def _enablement(
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]], paths: HostPaths,
+) -> dict[str, Any]:
+    result = runner([str(paths.systemctl), "is-enabled", _SERVICE])
+    state = result.stdout.strip()
+    if result.returncode not in {0, 1, 4} or not state:
+        raise ActorHostBootstrapError("actor host service enablement is unavailable")
+    return {
+        "state": state,
+        "enabled": result.returncode == 0 and state in {"enabled", "enabled-runtime", "linked", "linked-runtime", "alias"},
+    }
+
+
+def _activity(
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]], paths: HostPaths,
+) -> dict[str, Any]:
+    result = runner([str(paths.systemctl), "is-active", _SERVICE])
+    state = result.stdout.strip()
+    if result.returncode not in {0, 3, 4} or not state:
+        raise ActorHostBootstrapError("actor host service activity is unavailable")
+    return {"state": state, "active": result.returncode == 0 and state == "active"}
+
+
+def _restore_directory(path: Path, prior: Mapping[str, Any]) -> None:
+    if prior.get("kind") == "absent":
+        if path.exists() or path.is_symlink():
+            if path.is_symlink() or not path.is_dir():
+                raise ActorHostBootstrapError(f"host bootstrap directory changed before rollback: {path}")
+            try:
+                path.rmdir()
+            except OSError as exc:
+                raise ActorHostBootstrapError(f"host bootstrap directory is not empty during rollback: {path}") from exc
+        return
+    if prior.get("kind") != "directory" or path.is_symlink() or not path.is_dir():
+        raise ActorHostBootstrapError(f"host bootstrap directory changed before rollback: {path}")
+    os.chmod(path, int(prior["mode"]))
+    os.chown(path, int(prior["uid"]), int(prior["gid"]))
 
 
 def install_actor_host(
@@ -164,32 +248,38 @@ def install_actor_host(
             or existing.get("installed") != installed
             or claimed_existing != _hash(unsigned_existing)
             or any(not target.is_file() or target.is_symlink() or _file_hash(target) != installed[str(target)] for target in sources)
+            or _enablement(runner, paths)["state"] != "enabled"
         ):
             raise ActorHostBootstrapError("actor host bootstrap operation id collision")
         return existing
-    before = {str(target): _snapshot(target) for target in sources}
-    intended = {
+    directories = _tmpfiles_directories(sources[paths.tmpfiles_config], retained=paths.receipt_root)
+    before = {
+        "files": {str(target): _snapshot(target) for target in sources},
+        "directories": {str(target): _snapshot_directory(target) for target in directories},
+        "service_enablement": _enablement(runner, paths),
+        "service_activity": _activity(runner, paths),
+    }
+    prepared = {
         "schema": "tgw-actor-host-bootstrap-receipt/v1",
         "operation_id": operation_id,
-        "status": "INSTALLED",
+        "status": "PREPARED",
         "release": str(release),
         "commit": manifest["commit"],
         "tree": manifest["git_tree"],
         "before": before,
         "installed": {str(target): _file_hash(source) for target, source in sources.items()},
     }
-    receipt = {**intended, "receipt_hash": _hash(intended)}
+    _atomic_file(receipt_path, _canonical({**prepared, "receipt_hash": _hash(prepared)}) + b"\n", mode=0o640)
     for target, source in sources.items():
         target.parent.mkdir(parents=True, exist_ok=True)
         _atomic_file(target, source.read_bytes())
-    for command in (
-        [str(paths.systemd_tmpfiles), "--create", str(paths.tmpfiles_config)],
-        [str(paths.systemctl), "daemon-reload"],
-        [str(paths.systemctl), "enable", "tgw-actor-fleet-provider.service"],
-    ):
-        result = runner(command)
-        if result.returncode != 0:
-            raise ActorHostBootstrapError(f"actor host bootstrap command failed: {command[1]}")
+    _required(runner, [str(paths.systemd_tmpfiles), "--create", str(paths.tmpfiles_config)], "tmpfiles-create")
+    _required(runner, [str(paths.systemctl), "daemon-reload"], "daemon-reload")
+    _required(runner, [str(paths.systemctl), "enable", _SERVICE], "enable")
+    if not _enablement(runner, paths)["enabled"]:
+        raise ActorHostBootstrapError("actor host service did not become enabled")
+    installed = {**prepared, "status": "INSTALLED"}
+    receipt = {**installed, "receipt_hash": _hash(installed)}
     _atomic_file(receipt_path, _canonical(receipt) + b"\n", mode=0o640)
     return receipt
 
@@ -209,37 +299,85 @@ def rollback_actor_host(
         raise ActorHostBootstrapError("actor host rollback receipt is outside the receipt root")
     unsigned = dict(receipt)
     claimed = unsigned.pop("receipt_hash", None)
-    if receipt.get("schema") != "tgw-actor-host-bootstrap-receipt/v1" or receipt.get("status") != "INSTALLED" or claimed != _hash(unsigned):
+    if receipt.get("schema") != "tgw-actor-host-bootstrap-receipt/v1" or claimed != _hash(unsigned):
         raise ActorHostBootstrapError("actor host rollback receipt is invalid")
+    rollback_path = paths.receipt_root / f"{receipt.get('operation_id')}.rollback.json"
+    if receipt.get("status") == "ROLLED_BACK":
+        existing = _read_json(rollback_path, "actor host rollback receipt")
+        existing_unsigned = dict(existing)
+        existing_hash = existing_unsigned.pop("receipt_hash", None)
+        if existing_hash != _hash(existing_unsigned) or existing.get("source_receipt_hash") != receipt.get("installed_receipt_hash"):
+            raise ActorHostBootstrapError("actor host rollback receipt is invalid")
+        return existing
+    if receipt.get("status") not in {"PREPARED", "INSTALLED"}:
+        raise ActorHostBootstrapError("actor host rollback receipt is invalid")
+    installed_artifact_observed = False
     for raw, expected in receipt["installed"].items():
         target = Path(raw)
-        if not target.is_file() or target.is_symlink() or _file_hash(target) != expected:
+        prior = receipt["before"]["files"][raw]
+        matches_installed = target.is_file() and not target.is_symlink() and _file_hash(target) == expected
+        matches_prior = (
+            prior["kind"] == "absent" and not target.exists() and not target.is_symlink()
+        ) or (
+            prior["kind"] == "symlink" and target.is_symlink() and os.readlink(target) == prior["target"]
+        ) or (
+            prior["kind"] == "file" and target.is_file() and not target.is_symlink()
+            and target.read_bytes() == base64.b64decode(prior["content"], validate=True)
+        )
+        if not (matches_installed or matches_prior):
             raise ActorHostBootstrapError("actor host artifact changed before rollback")
-    stopped = runner([str(paths.systemctl), "stop", "tgw-actor-fleet-provider.service"])
-    if stopped.returncode != 0:
-        raise ActorHostBootstrapError("actor host service did not stop for rollback")
-    for raw, prior in receipt["before"].items():
+        installed_artifact_observed = installed_artifact_observed or matches_installed
+    prior_enablement = receipt["before"]["service_enablement"]
+    prior_activity = receipt["before"]["service_activity"]
+    if installed_artifact_observed:
+        _required(runner, [str(paths.systemctl), "stop", _SERVICE], "stop")
+    if installed_artifact_observed and not prior_enablement["enabled"]:
+        _required(runner, [str(paths.systemctl), "disable", _SERVICE], "disable")
+    for raw, prior in receipt["before"]["files"].items():
         target = Path(raw)
         if prior["kind"] == "absent":
-            target.unlink()
+            if target.exists() or target.is_symlink():
+                target.unlink()
         elif prior["kind"] == "symlink":
-            target.unlink()
+            if target.exists() or target.is_symlink():
+                target.unlink()
             target.symlink_to(prior["target"])
         elif prior["kind"] == "file":
             _atomic_file(target, base64.b64decode(prior["content"], validate=True), mode=int(prior["mode"]))
             os.chown(target, int(prior["uid"]), int(prior["gid"]))
         else:
             raise ActorHostBootstrapError("actor host rollback state is invalid")
-    reloaded = runner([str(paths.systemctl), "daemon-reload"])
-    if reloaded.returncode != 0:
-        raise ActorHostBootstrapError("actor host systemd reload failed after rollback")
+    for raw, prior in sorted(receipt["before"]["directories"].items(), key=lambda item: len(Path(item[0]).parts), reverse=True):
+        _restore_directory(Path(raw), prior)
+    _required(runner, [str(paths.systemctl), "daemon-reload"], "daemon-reload")
+    if prior_enablement["state"] == "enabled":
+        _required(runner, [str(paths.systemctl), "enable", _SERVICE], "enable")
+    elif prior_enablement["state"] == "enabled-runtime":
+        _required(runner, [str(paths.systemctl), "enable", "--runtime", _SERVICE], "enable-runtime")
+    if prior_activity["active"]:
+        _required(runner, [str(paths.systemctl), "start", _SERVICE], "start")
+    if _enablement(runner, paths)["state"] != prior_enablement["state"]:
+        raise ActorHostBootstrapError("actor host service enablement was not restored")
+    if _activity(runner, paths)["state"] != prior_activity["state"]:
+        raise ActorHostBootstrapError("actor host service activity was not restored")
     body = {
         "schema": "tgw-actor-host-bootstrap-rollback/v1",
         "status": "ROLLED_BACK",
         "operation_id": receipt["operation_id"],
-        "source_receipt_hash": receipt["receipt_hash"],
+        "source_receipt_hash": claimed,
+        "restored_service_enablement": prior_enablement,
+        "restored_service_activity": prior_activity,
     }
-    return {**body, "receipt_hash": _hash(body)}
+    rollback = {**body, "receipt_hash": _hash(body)}
+    _atomic_file(rollback_path, _canonical(rollback) + b"\n", mode=0o640)
+    terminal = {
+        **unsigned,
+        "status": "ROLLED_BACK",
+        "installed_receipt_hash": claimed,
+        "rollback_receipt_hash": rollback["receipt_hash"],
+    }
+    _atomic_file(receipt_path, _canonical({**terminal, "receipt_hash": _hash(terminal)}) + b"\n", mode=0o640)
+    return rollback
 
 
 def main() -> int:
