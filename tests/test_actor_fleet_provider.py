@@ -5,6 +5,7 @@ import os
 import pwd
 import shutil
 import subprocess
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,8 +15,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
 from tgw.actor_fleet_provider import (
+    _ACTOR_VERIFICATION_BOOTSTRAP,
+    _ACTOR_VERIFICATION_MAX_INPUT,
     ActorFleetError,
     ActorFleetProvider,
+    _actor_verification_payload,
     _context_registration,
     create_actor_fleet_app,
 )
@@ -52,6 +56,31 @@ def _tree_hash(path):
         digest.update(item.read_bytes())
         digest.update(b"\0")
     return "sha256:" + digest.hexdigest()
+
+
+def _context_proof(actor, value):
+    revisions = value["revisions"]
+    unsigned = {
+        "schema": "tgw-actor-context-mcp-proof/v1",
+        "status": "PASS",
+        "actor": actor,
+        "tools": [
+            "tgw_context_bundle",
+            "tgw_context_code_graph",
+            "tgw_context_onboarding",
+            "tgw_context_plan_graph",
+            "tgw_context_plan_source",
+            "tgw_context_runbooks",
+            "tgw_context_status",
+        ],
+        "plan": revisions["plan"],
+        "solution": revisions["solution"],
+        "source": revisions["source"],
+        "catalog": revisions["catalog"],
+        "onboarding_bundle_sha256": "sha256:" + "8" * 64,
+        "task_bundle_sha256": "sha256:" + "9" * 64,
+    }
+    return {**unsigned, "proof_hash": _hash(unsigned)}
 
 
 @pytest.mark.parametrize(
@@ -191,6 +220,7 @@ def _fixture(tmp_path, *, admission_expires_at="2026-08-22T00:00:00Z"):
         "bootstrap.json": '{"status":"PASS"}\n',
         "mcp.json": '{"endpoint":"tgw-context"}\n',
         "skill/SKILL.md": "bounded plan\n",
+        "src/tgw/actor_fleet_provider.py": "# exact admitted worker source\n",
     }.items():
         path = release / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -411,7 +441,7 @@ def test_actor_provider_holds_on_drifted_attempt_root(durable_path):
         ActorFleetProvider(config)
 
 
-def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_path):
+def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_path, monkeypatch):
     config, request, destination = _fixture(durable_path)
     service_state = {"value": "active"}
 
@@ -428,12 +458,7 @@ def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_pat
         service_runner=service,
         materializer_loader=lambda _: materializer,
         current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
-        actor_context_probe=lambda actor, _path, value: {
-            "schema": "tgw-actor-context-mcp-proof/v1",
-            "status": "PASS",
-            "actor": actor,
-            "proof_hash": _hash({"actor": actor, "source": value["revisions"]["source"]}),
-        },
+        actor_context_probe=lambda actor, _path, value: _context_proof(actor, value),
     )
     assert provider.quiesce(request)["status"] == "QUIESCED"
     rebuilt = provider.rebuild(request)
@@ -445,6 +470,68 @@ def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_pat
     verified = provider.verify_actor(request["actors"][0], request)
     assert verified["status"] == "VERIFIED"
     assert verified["context_mcp_proof_hash"].startswith("sha256:")
+
+    production_provider = ActorFleetProvider(
+        config,
+        service_runner=service,
+        materializer_loader=lambda _: materializer,
+        current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
+    )
+    subprocess_calls = []
+
+    def run_worker(command, **kwargs):
+        subprocess_calls.append((command, kwargs))
+        source_root = Path(config["release_root"]) / "candidate/src"
+        assert command == [
+            sys.executable,
+            "-I",
+            "-s",
+            "-P",
+            "-c",
+            _ACTOR_VERIFICATION_BOOTSTRAP,
+            str(source_root),
+            "--verify-actor-worker",
+        ]
+        assert kwargs["cwd"] == source_root
+        assert kwargs["env"].get("PYTHONPATH") is None
+        assert kwargs["env"]["PYTHONNOUSERSITE"] == "1"
+        assert kwargs["env"]["PYTHONSAFEPATH"] == "1"
+        payload = json.loads(kwargs["input"])
+        proof = _actor_verification_payload(
+            payload["actor"],
+            payload["request"],
+            payload["bindings"],
+            payload["bundle"],
+            payload["contract"],
+            lambda actor, _path, value: _context_proof(actor, value),
+        )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps(proof, sort_keys=True, separators=(",", ":")).encode(),
+            b"",
+        )
+
+    monkeypatch.setattr("tgw.actor_fleet_provider.subprocess.run", run_worker)
+    production_verified = production_provider.verify_actor(request["actors"][0], request)
+    assert production_verified["status"] == "VERIFIED"
+    assert subprocess_calls
+
+    def forged_worker(command, **kwargs):
+        completed = run_worker(command, **kwargs)
+        forged = json.loads(completed.stdout)
+        forged["source"] = "0" * 40
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps(forged, sort_keys=True, separators=(",", ":")).encode(),
+            b"",
+        )
+
+    monkeypatch.setattr("tgw.actor_fleet_provider.subprocess.run", forged_worker)
+    with pytest.raises(ActorFleetError, match="proof differs"):
+        production_provider.verify_actor(request["actors"][0], request)
+
     assert provider.repair(request)["status"] == "REPAIRED"
     assert destination.is_symlink()
     startup = Path(config["startup_binding_root"]) / f"{request['actors'][0]}-startup.json"
@@ -453,6 +540,48 @@ def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_pat
     assert provider.rollback(request)["status"] == "ROLLED_BACK"
     assert not destination.exists()
     assert not startup.exists()
+
+
+@pytest.mark.parametrize(
+    ("worker_input", "reason"),
+    [
+        (b"{}", "input is invalid"),
+        (b"x" * (_ACTOR_VERIFICATION_MAX_INPUT + 1), "input is too large"),
+    ],
+)
+def test_actor_verification_worker_rejects_malformed_or_oversized_input(
+    durable_path, worker_input, reason,
+):
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-s",
+            "-P",
+            "-c",
+            _ACTOR_VERIFICATION_BOOTSTRAP,
+            str(source_root),
+            "--verify-actor-worker",
+        ],
+        input=worker_input,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        cwd=source_root,
+        env={
+            "HOME": str(durable_path),
+            "LANG": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONSAFEPATH": "1",
+            "TMPDIR": str(durable_path),
+        },
+        timeout=20,
+    )
+    assert completed.returncode == 1
+    assert reason in json.loads(completed.stdout)["reason"]
 
 
 def test_actor_provider_rejects_forged_signed_admission(durable_path):

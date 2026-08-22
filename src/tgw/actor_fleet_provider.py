@@ -49,6 +49,12 @@ _CONTEXT_MCP_TOOLS = {
     "tgw_context_code_graph",
     "tgw_context_onboarding",
 }
+_ACTOR_VERIFICATION_MAX_INPUT = 4 * 1024 * 1024
+_ACTOR_VERIFICATION_BOOTSTRAP = (
+    "import runpy,sys;"
+    "sys.path.insert(0,sys.argv.pop(1));"
+    "runpy.run_module('tgw.actor_fleet_provider',run_name='__main__')"
+)
 
 
 class ActorFleetError(ValueError):
@@ -384,7 +390,10 @@ def _actor_verification_payload(
 
 def _actor_verification_worker_main() -> int:
     try:
-        value = json.loads(sys.stdin.buffer.read(4 * 1024 * 1024))
+        raw = sys.stdin.buffer.read(_ACTOR_VERIFICATION_MAX_INPUT + 1)
+        if len(raw) > _ACTOR_VERIFICATION_MAX_INPUT:
+            raise ActorFleetError("actor verification worker input is too large")
+        value = json.loads(raw)
         if not isinstance(value, Mapping) or set(value) != {
             "schema", "actor", "request", "bindings", "bundle", "contract",
         } or value.get("schema") != "tgw-actor-verification-worker-input/v1":
@@ -405,6 +414,68 @@ def _actor_verification_worker_main() -> int:
         proof = {"status": "FAIL", "reason": str(exc)}
     sys.stdout.buffer.write(_canonical(proof))
     return 0 if proof.get("status") == "PASS" else 1
+
+
+def _validate_actor_verification_proof(
+    proof: Mapping[str, Any],
+    *,
+    actor: str,
+    uid: int,
+    request: Mapping[str, Any],
+    bundle: Mapping[str, Any],
+    contract: Mapping[str, Any],
+) -> None:
+    if not isinstance(proof, Mapping):
+        raise ActorFleetError("actor verification proof is invalid")
+    fields = {
+        "status", "uid", "plan", "solution", "source", "catalog", "generation",
+        "profile", "required_capabilities", "context_mcp_proof", "project",
+    }
+    specification = bundle["actors"][actor]
+    environment_binding = next(
+        item for item in specification["bindings"]
+        if item["kind"] == "environment" and item["name"] == "environment-catalog"
+    )
+    environment = _read_json(Path(str(environment_binding["source"])), "actor environment catalog")
+    expected_capabilities = sorted(
+        environment.get("profiles", {}).get(contract.get("profile"), {}).get("broker_capabilities", [])
+    )
+    mcp_proof = proof.get("context_mcp_proof")
+    mcp_fields = {
+        "schema", "status", "actor", "tools", "plan", "solution", "source", "catalog",
+        "onboarding_bundle_sha256", "task_bundle_sha256", "proof_hash",
+    }
+    if not isinstance(mcp_proof, Mapping) or set(mcp_proof) != mcp_fields:
+        raise ActorFleetError("actor Context MCP proof fields are invalid")
+    unsigned_mcp = dict(mcp_proof)
+    claimed_mcp_hash = unsigned_mcp.pop("proof_hash")
+    revisions = request["revisions"]
+    if (
+        set(proof) != fields
+        or proof.get("status") != "PASS"
+        or proof.get("uid") != uid
+        or proof.get("plan") != revisions["plan"]
+        or proof.get("solution") != revisions["solution"]
+        or proof.get("source") != revisions["source"]
+        or proof.get("catalog") != revisions["catalog"]
+        or proof.get("generation") != request["successor_generation"]
+        or proof.get("profile") != contract.get("profile")
+        or proof.get("required_capabilities") != expected_capabilities
+        or proof.get("project") != specification.get("project")
+        or mcp_proof.get("schema") != "tgw-actor-context-mcp-proof/v1"
+        or mcp_proof.get("status") != "PASS"
+        or mcp_proof.get("actor") != actor
+        or mcp_proof.get("tools") != sorted(_CONTEXT_MCP_TOOLS)
+        or mcp_proof.get("plan") != revisions["plan"]
+        or mcp_proof.get("solution") != revisions["solution"]
+        or mcp_proof.get("source") != revisions["source"]
+        or mcp_proof.get("catalog") != revisions["catalog"]
+        or any(_HASH.fullmatch(str(mcp_proof.get(name))) is None for name in (
+            "onboarding_bundle_sha256", "task_bundle_sha256",
+        ))
+        or claimed_mcp_hash != _hash(unsigned_mcp)
+    ):
+        raise ActorFleetError("actor verification proof differs from expected revisions")
 
 
 def _atomic(path: Path, value: Mapping[str, Any], *, mode: int = 0o640) -> None:
@@ -905,20 +976,31 @@ class ActorFleetProvider:
         }
         if self._actor_context_probe is _actor_context_mcp_probe:
             cache_root = self.actor_cache_root / actor / value["successor_generation"].removeprefix("sha256:") / "context-mcp"
+            manifest = _read_json(release / ".release-manifest.json", "actor release manifest")
+            raw_source_root = manifest.get("src_root")
+            if not isinstance(raw_source_root, str) or not raw_source_root or Path(raw_source_root).is_absolute():
+                raise ActorFleetError("actor release source root is invalid")
+            source_root = (release / raw_source_root).resolve(strict=True)
+            if release not in source_root.parents or not source_root.is_dir() or source_root.is_symlink():
+                raise ActorFleetError("actor release source root escapes the admitted release")
             completed = subprocess.run(
-                [sys.executable, "-m", "tgw.actor_fleet_provider", "--verify-actor-worker"],
+                [
+                    sys.executable, "-I", "-s", "-P", "-c", _ACTOR_VERIFICATION_BOOTSTRAP,
+                    str(source_root), "--verify-actor-worker",
+                ],
                 input=_canonical(worker_input),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=60,
                 check=False,
-                cwd=account.pw_dir,
+                cwd=source_root,
                 env={
                     "HOME": account.pw_dir,
                     "LANG": "C.UTF-8",
                     "PATH": "/usr/bin:/bin",
                     "PYTHONDONTWRITEBYTECODE": "1",
-                    "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+                    "PYTHONNOUSERSITE": "1",
+                    "PYTHONSAFEPATH": "1",
                     "TMPDIR": str(cache_root),
                 },
                 user=account.pw_uid,
@@ -935,8 +1017,19 @@ class ActorFleetProvider:
             proof = json.loads(raw)
         except (TypeError, json.JSONDecodeError) as exc:
             raise ActorFleetError(f"actor contract verification failed: {actor}") from exc
-        if worker_status != 0 or proof.get("status") != "PASS" or proof.get("uid") != account.pw_uid:
+        if not isinstance(proof, Mapping):
             raise ActorFleetError(f"actor contract verification failed: {actor}")
+        if worker_status != 0:
+            reason = str(proof.get("reason", "worker refused"))[:240]
+            raise ActorFleetError(f"actor contract verification failed: {actor}: {reason}")
+        _validate_actor_verification_proof(
+            proof,
+            actor=actor,
+            uid=account.pw_uid,
+            request=value,
+            bundle=bundle,
+            contract=contract,
+        )
         journal["status"] = "VERIFYING"
         self._save(journal)
         return {
