@@ -50,6 +50,7 @@ _CONTEXT_MCP_TOOLS = {
     "tgw_context_onboarding",
 }
 _ACTOR_VERIFICATION_MAX_INPUT = 4 * 1024 * 1024
+_CONTEXT_REGISTRATION_MAX_INPUT = 256 * 1024
 _ACTOR_VERIFICATION_BOOTSTRAP = (
     "import runpy,sys;"
     "sys.path.insert(0,sys.argv.pop(1));"
@@ -158,19 +159,40 @@ def _binding_digest(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def _context_registration(path: Path) -> tuple[str, list[str], dict[str, str]]:
+def _context_registration(
+    path: Path,
+    expected_source: Path | None = None,
+) -> tuple[str, list[str], dict[str, str]]:
     """Load one materialized harness registration without harness fallback."""
     try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            if expected_source is not None:
+                observed = os.fstat(descriptor)
+                expected = expected_source.stat(follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(observed.st_mode)
+                    or not stat.S_ISREG(expected.st_mode)
+                    or (observed.st_dev, observed.st_ino) != (expected.st_dev, expected.st_ino)
+                ):
+                    raise ActorFleetError("actor Context MCP binding changed")
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                raw = stream.read(_CONTEXT_REGISTRATION_MAX_INPUT + 1)
+            if len(raw) > _CONTEXT_REGISTRATION_MAX_INPUT:
+                raise ActorFleetError("actor Context MCP registration is too large")
+        finally:
+            os.close(descriptor)
+        content = raw.decode("utf-8")
         if path.suffix == ".toml":
-            value = tomllib.loads(path.read_text(encoding="utf-8"))
+            value = tomllib.loads(content)
             endpoint = value["mcp_servers"]["tgw-context"]
         elif path.suffix in {".yaml", ".yml"}:
-            value = yaml.safe_load(path.read_text(encoding="utf-8"))
+            value = yaml.safe_load(content)
             rows = value[0]["insert"]
             row = next(item for item in rows if item.get("id") == "tgw-context")
             endpoint = row["config"]
         else:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            value = json.loads(content)
             endpoint = value["mcpServers"]["tgw-context"]
     except (
         OSError,
@@ -178,6 +200,7 @@ def _context_registration(path: Path) -> tuple[str, list[str], dict[str, str]]:
         KeyError,
         StopIteration,
         TypeError,
+        UnicodeDecodeError,
         tomllib.TOMLDecodeError,
         json.JSONDecodeError,
         yaml.YAMLError,
@@ -202,10 +225,14 @@ def _context_registration(path: Path) -> tuple[str, list[str], dict[str, str]]:
 def _actor_context_mcp_probe(
     actor: str,
     registration_path: Path,
+    registration_source: Path,
     request: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Exercise the actor's real stdio registration and authoritative tools."""
-    command, args, configured_environment = _context_registration(registration_path)
+    command, args, configured_environment = _context_registration(
+        registration_path,
+        registration_source,
+    )
 
     async def inspect() -> dict[str, Any]:
         actor_home = pwd.getpwnam(actor).pw_dir
@@ -292,7 +319,7 @@ def _actor_verification_payload(
     bindings: list[Mapping[str, Any]],
     bundle: Mapping[str, Any],
     contract: Mapping[str, Any],
-    context_probe: Callable[[str, Path, Mapping[str, Any]], Mapping[str, Any]],
+    context_probe: Callable[[str, Path, Path, Mapping[str, Any]], Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Verify materialized inputs in a fresh process already running as the actor."""
     try:
@@ -367,7 +394,12 @@ def _actor_verification_payload(
         if context_binding is None:
             raise ActorFleetError("actor Context MCP binding is missing")
         mcp_proof = dict(
-            context_probe(actor, Path(str(context_binding["destination"])), request)
+            context_probe(
+                actor,
+                Path(str(context_binding["destination"])),
+                Path(str(context_binding["source"])),
+                request,
+            )
         )
         if mcp_proof.get("status") != "PASS" or mcp_proof.get("actor") != actor:
             raise ActorFleetError("actor Context MCP positive fixture failed")
@@ -536,7 +568,7 @@ class ActorFleetProvider:
         service_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
         materializer_loader: Callable[[Path], Any] | None = None,
         current_time: Callable[[], datetime] | None = None,
-        actor_context_probe: Callable[[str, Path, Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        actor_context_probe: Callable[[str, Path, Path, Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ):
         required = {
             "schema",

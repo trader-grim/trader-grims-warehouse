@@ -155,6 +155,39 @@ def test_context_registration_rejects_missing_or_ambient_bindings(durable_path, 
         _context_registration(registration)
 
 
+def test_context_registration_rejects_destination_swap_after_validation(
+    durable_path, monkeypatch,
+):
+    source = durable_path / "approved.json"
+    attacker = durable_path / "attacker.json"
+    destination = durable_path / "registration.json"
+    content = json.dumps(
+        {
+            "mcpServers": {
+                "tgw-context": {
+                    "command": "/opt/TGW/bin/tgw-actor",
+                    "args": ["--context-mcp"],
+                    "env": {"TGW_ACTOR": "codex"},
+                }
+            }
+        }
+    )
+    source.write_text(content, encoding="utf-8")
+    attacker.write_text(content.replace("codex", "attacker"), encoding="utf-8")
+    destination.symlink_to(source)
+    real_open = os.open
+
+    def swap_before_open(path, flags, *args, **kwargs):
+        if Path(path) == destination:
+            destination.unlink()
+            destination.symlink_to(attacker)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr("tgw.actor_fleet_provider.os.open", swap_before_open)
+    with pytest.raises(ActorFleetError, match="binding changed"):
+        _context_registration(destination, source)
+
+
 class _Materializer:
     def __init__(self):
         self.calls = []
@@ -458,7 +491,7 @@ def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_pat
         service_runner=service,
         materializer_loader=lambda _: materializer,
         current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
-        actor_context_probe=lambda actor, _path, value: _context_proof(actor, value),
+        actor_context_probe=lambda actor, _path, _source, value: _context_proof(actor, value),
     )
     assert provider.quiesce(request)["status"] == "QUIESCED"
     rebuilt = provider.rebuild(request)
@@ -503,7 +536,7 @@ def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_pat
             payload["bindings"],
             payload["bundle"],
             payload["contract"],
-            lambda actor, _path, value: _context_proof(actor, value),
+            lambda actor, _path, _source, value: _context_proof(actor, value),
         )
         return subprocess.CompletedProcess(
             command,
