@@ -112,6 +112,12 @@ def durable_path():
     try:
         yield path
     finally:
+        for directory in sorted(
+            (item for item in path.rglob("*") if item.is_dir()),
+            key=lambda item: len(item.parts),
+            reverse=True,
+        ):
+            directory.chmod(0o700)
         shutil.rmtree(path)
 
 
@@ -207,6 +213,10 @@ def test_builder_emits_signed_complete_external_generation_consumable_by_materia
         freshness_hash="sha256:" + "3" * 64,
     )
     generation_root = output / receipt["generation"].removeprefix("sha256:")
+    assert receipt["generation_identity"]["artifact_access"] == "immutable-public-inputs-v1"
+    assert generation_root.stat().st_mode & 0o777 == 0o555
+    assert all(path.stat().st_mode & 0o777 == 0o555 for path in generation_root.rglob("*") if path.is_dir())
+    assert all(path.stat().st_mode & 0o777 == 0o444 for path in generation_root.rglob("*") if path.is_file())
     bundle = json.loads((generation_root / "bundle.json").read_text())
     contracts = {actor: json.loads((generation_root / "contracts" / f"{actor}.json").read_text())}
     bootstrap = json.loads((generation_root / "bootstrap" / f"{actor}.json").read_text())

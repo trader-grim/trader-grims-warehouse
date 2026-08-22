@@ -265,6 +265,7 @@ def build_actor_generation(
         "solution_hash": solution_hash, "source_commit": source_commit,
         "source_tree": source_tree, "freshness_hash": freshness_hash,
         "context_source_root": str(context_source),
+        "artifact_access": "immutable-public-inputs-v1",
     }
     generation = _hash(generation_body)
     final = output / generation.removeprefix("sha256:")
@@ -413,9 +414,9 @@ def build_actor_generation(
         }
         receipt = {**unsigned_receipt, "receipt_hash": _hash(unsigned_receipt)}
         (stage / "generation-receipt.json").write_bytes(_canonical(receipt) + b"\n")
-        for path in stage.rglob("*"):
-            if path.is_file():
-                os.chmod(path, 0o440)
+        for path in sorted(stage.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+            os.chmod(path, 0o555 if path.is_dir() else 0o444)
+        os.chmod(stage, 0o555)
         os.replace(stage, final)
         directory = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
         try:
