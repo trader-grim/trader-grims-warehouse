@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+import yaml
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 
@@ -232,6 +233,13 @@ def test_checked_in_descriptor_builds_all_provider_neutral_actor_registrations(d
     codex_config = tomllib.loads(Path(codex_binding["source"]).read_text())
     assert codex_config["mcp_servers"]["tgw-context"]["args"] == ["--context-mcp"]
     assert codex_config["mcp_servers"]["tgw-context"]["env"]["TGW_ACTOR_EXPECTED_GENERATION"] == receipt["generation"]
+    deepseek_binding = next(item for item in bundle["actors"]["deepseek"]["bindings"] if item["kind"] == "mcp")
+    deepseek_patch = yaml.safe_load(Path(deepseek_binding["source"]).read_text())
+    deepseek_config = deepseek_patch[0]["insert"][0]["config"]
+    assert deepseek_binding["destination"] == "/home/deepseek/.dsh/tgw-context.patch.yml"
+    assert deepseek_config["command"] == "/home/deepseek/.local/bin/tgw-actor"
+    assert deepseek_config["args"] == ["--context-mcp"]
+    assert deepseek_config["env"]["TGW_ACTOR_EXPECTED_GENERATION"] == receipt["generation"]
 
 
 def test_actor_generation_rejects_content_free_mcp_policy(durable_path):
@@ -250,6 +258,7 @@ def test_actor_generation_rejects_content_free_mcp_policy(durable_path):
             actor="fixture",
             endpoint="tgw-context",
             launcher="/opt/TGW/bin/tgw-actor",
+            actor_home="/home/fixture",
             generation="sha256:" + "1" * 64,
             plan_commit="f" * 40,
             solution_hash="sha256:" + "2" * 64,

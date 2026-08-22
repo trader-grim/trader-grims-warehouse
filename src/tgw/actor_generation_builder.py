@@ -76,6 +76,7 @@ def _binding_hash(bindings: list[dict[str, str]]) -> str:
 
 def _mcp_registration(
     *, policy_path: Path, actor: str, endpoint: str, launcher: str,
+    actor_home: str,
     generation: str, plan_commit: str, solution_hash: str,
     source_commit: str, catalog_hash: str, trusted_public_key: str,
 ) -> bytes:
@@ -141,6 +142,28 @@ def _mcp_registration(
             f"[mcp_servers.{json.dumps(endpoint)}.env]",
         ]
         lines.extend(f"{name} = {json.dumps(value)}" for name, value in sorted(environment.items()))
+        return ("\n".join(lines) + "\n").encode()
+    if policy["harness"] == "deepseek":
+        lines = [
+            "- insert:",
+            f"    - id: {endpoint}",
+            "      name: '@deepseek-ai/dsh-mcp-client'",
+            "      config:",
+            f"        serverName: {endpoint}",
+            "        transport: stdio",
+            f"        command: {json.dumps(launcher)}",
+            "        args: ['--context-mcp']",
+            f"        cwd: {json.dumps(actor_home)}",
+            "        env:",
+        ]
+        lines.extend(f"          {name}: {json.dumps(value)}" for name, value in sorted(environment.items()))
+        lines.extend(
+            [
+                "        failOnStartupError: true",
+                "        reconnect:",
+                "          enabled: false",
+            ]
+        )
         return ("\n".join(lines) + "\n").encode()
     value = {
         "mcpServers": {endpoint: {
@@ -246,12 +269,13 @@ def build_actor_generation(
                 policy_path = (source / registration["source"]).resolve(strict=True)
                 generated = _mcp_registration(
                     policy_path=policy_path, actor=actor, endpoint=registration["name"],
-                    launcher=launcher["destination"], generation=generation,
+                    launcher=launcher["destination"], actor_home=str(home), generation=generation,
                     plan_commit=plan_commit, solution_hash=solution_hash,
                     source_commit=source_commit, catalog_hash=_hash(catalog),
                     trusted_public_key=actor_contract_public_key(key),
                 )
-                suffix = ".toml" if _read_json(policy_path, "MCP registration policy").get("harness") == "codex" else ".json"
+                harness = _read_json(policy_path, "MCP registration policy").get("harness")
+                suffix = {"codex": ".toml", "deepseek": ".yml"}.get(harness, ".json")
                 generated_path = mcp_root / f"{actor}-{registration['name']}{suffix}"
                 generated_path.write_bytes(generated)
                 registration.update({

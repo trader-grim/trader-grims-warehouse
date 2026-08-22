@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/TGW/.venvs/controller/bin/python3
 """Run the actor startup check from its exact materialized release."""
 
 from pathlib import Path

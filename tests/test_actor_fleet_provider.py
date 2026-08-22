@@ -13,7 +13,12 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
-from tgw.actor_fleet_provider import ActorFleetProvider, create_actor_fleet_app
+from tgw.actor_fleet_provider import (
+    ActorFleetError,
+    ActorFleetProvider,
+    _context_registration,
+    create_actor_fleet_app,
+)
 from tgw.admission_recovery import compile_release_admission
 
 
@@ -47,6 +52,78 @@ def _tree_hash(path):
         digest.update(item.read_bytes())
         digest.update(b"\0")
     return "sha256:" + digest.hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("suffix", "content"),
+    [
+        (
+            ".json",
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "tgw-context": {
+                            "command": "/opt/TGW/bin/tgw-actor",
+                            "args": ["--context-mcp"],
+                            "env": {"TGW_ACTOR": "codex"},
+                        }
+                    }
+                }
+            ),
+        ),
+        (
+            ".toml",
+            '[mcp_servers.tgw-context]\ncommand = "/opt/TGW/bin/tgw-actor"\nargs = ["--context-mcp"]\n'
+            '[mcp_servers.tgw-context.env]\nTGW_ACTOR = "codex"\n',
+        ),
+        (
+            ".yml",
+            "- insert:\n"
+            "    - id: tgw-context\n"
+            "      name: '@deepseek-ai/dsh-mcp-client'\n"
+            "      config:\n"
+            "        command: /opt/TGW/bin/tgw-actor\n"
+            "        args: ['--context-mcp']\n"
+            "        env:\n"
+            "          TGW_ACTOR: codex\n",
+        ),
+    ],
+)
+def test_context_registration_loads_harness_native_formats(durable_path, suffix, content):
+    registration = durable_path / f"registration{suffix}"
+    registration.write_text(content, encoding="utf-8")
+
+    assert _context_registration(registration) == (
+        "/opt/TGW/bin/tgw-actor",
+        ["--context-mcp"],
+        {"TGW_ACTOR": "codex"},
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{}",
+        json.dumps({"mcpServers": {"tgw-context": {"command": "tgw-actor", "args": [], "env": {}}}}),
+        json.dumps(
+            {
+                "mcpServers": {
+                    "tgw-context": {
+                        "command": "/opt/TGW/bin/tgw-actor",
+                        "args": ["--context-mcp"],
+                        "env": {"TGW_ACTOR": 7},
+                    }
+                }
+            }
+        ),
+    ],
+)
+def test_context_registration_rejects_missing_or_ambient_bindings(durable_path, content):
+    registration = durable_path / "registration.json"
+    registration.write_text(content, encoding="utf-8")
+
+    with pytest.raises(ActorFleetError, match="registration"):
+        _context_registration(registration)
 
 
 class _Materializer:
@@ -339,6 +416,12 @@ def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_pat
         service_runner=service,
         materializer_loader=lambda _: materializer,
         current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
+        actor_context_probe=lambda actor, _path, value: {
+            "schema": "tgw-actor-context-mcp-proof/v1",
+            "status": "PASS",
+            "actor": actor,
+            "proof_hash": _hash({"actor": actor, "source": value["revisions"]["source"]}),
+        },
     )
     assert provider.quiesce(request)["status"] == "QUIESCED"
     rebuilt = provider.rebuild(request)
@@ -347,7 +430,9 @@ def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_pat
     assert materializer.calls[-1] == (True, True)
     restarted = provider.restart(activated)
     assert provider.health(restarted)["status"] == "HEALTHY"
-    assert provider.verify_actor(request["actors"][0], request)["status"] == "VERIFIED"
+    verified = provider.verify_actor(request["actors"][0], request)
+    assert verified["status"] == "VERIFIED"
+    assert verified["context_mcp_proof_hash"].startswith("sha256:")
     assert provider.repair(request)["status"] == "REPAIRED"
     assert destination.is_symlink()
     startup = Path(config["startup_binding_root"]) / f"{request['actors'][0]}-startup.json"

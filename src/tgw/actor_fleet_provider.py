@@ -20,12 +20,17 @@ import re
 import stat
 import subprocess
 import sys
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+import anyio
 import uvicorn
+import yaml
 from fastapi import FastAPI, Header, HTTPException
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 from tgw.admission_recovery import validate_release_admission
 from tgw.config import DEFAULT_CONFIG, load_operational_config
@@ -35,6 +40,15 @@ from tgw.release_installer import verify as verify_release
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _UNIT = re.compile(r"[A-Za-z0-9_.@-]+\.(?:service|timer)\Z")
+_CONTEXT_MCP_TOOLS = {
+    "tgw_context_status",
+    "tgw_context_bundle",
+    "tgw_context_plan_graph",
+    "tgw_context_plan_source",
+    "tgw_context_runbooks",
+    "tgw_context_code_graph",
+    "tgw_context_onboarding",
+}
 
 
 class ActorFleetError(ValueError):
@@ -138,6 +152,134 @@ def _binding_digest(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _context_registration(path: Path) -> tuple[str, list[str], dict[str, str]]:
+    """Load one materialized harness registration without harness fallback."""
+    try:
+        if path.suffix == ".toml":
+            value = tomllib.loads(path.read_text(encoding="utf-8"))
+            endpoint = value["mcp_servers"]["tgw-context"]
+        elif path.suffix in {".yaml", ".yml"}:
+            value = yaml.safe_load(path.read_text(encoding="utf-8"))
+            rows = value[0]["insert"]
+            row = next(item for item in rows if item.get("id") == "tgw-context")
+            endpoint = row["config"]
+        else:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            endpoint = value["mcpServers"]["tgw-context"]
+    except (
+        OSError,
+        IndexError,
+        KeyError,
+        StopIteration,
+        TypeError,
+        tomllib.TOMLDecodeError,
+        json.JSONDecodeError,
+        yaml.YAMLError,
+    ) as exc:
+        raise ActorFleetError("actor Context MCP registration is invalid") from exc
+    if not isinstance(endpoint, Mapping):
+        raise ActorFleetError("actor Context MCP registration is invalid")
+    command, args, environment = endpoint.get("command"), endpoint.get("args"), endpoint.get("env")
+    if (
+        not isinstance(command, str)
+        or not command.startswith("/")
+        or not isinstance(args, list)
+        or not args
+        or not all(isinstance(arg, str) and arg for arg in args)
+        or not isinstance(environment, Mapping)
+        or not all(isinstance(name, str) and isinstance(raw, str) for name, raw in environment.items())
+    ):
+        raise ActorFleetError("actor Context MCP registration is incomplete")
+    return command, list(args), dict(environment)
+
+
+def _actor_context_mcp_probe(
+    actor: str,
+    registration_path: Path,
+    request: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Exercise the actor's real stdio registration and authoritative tools."""
+    command, args, configured_environment = _context_registration(registration_path)
+
+    async def inspect() -> dict[str, Any]:
+        actor_home = pwd.getpwnam(actor).pw_dir
+        parameters = StdioServerParameters(
+            command=command,
+            args=args,
+            env={
+                "HOME": actor_home,
+                "LANG": "C.UTF-8",
+                "PATH": "/usr/bin:/bin",
+                **configured_environment,
+            },
+        )
+        with anyio.fail_after(30):
+            async with stdio_client(parameters) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    listed = await session.list_tools()
+                    names = {tool.name for tool in listed.tools}
+                    if names != _CONTEXT_MCP_TOOLS:
+                        raise ActorFleetError("actor Context MCP tool surface is incomplete")
+
+                    async def call(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+                        result = await session.call_tool(name, dict(arguments))
+                        if result.isError or len(result.content) != 1 or not hasattr(result.content[0], "text"):
+                            raise ActorFleetError(f"actor Context MCP call failed: {name}")
+                        try:
+                            value = json.loads(result.content[0].text)
+                        except (TypeError, json.JSONDecodeError) as exc:
+                            raise ActorFleetError(f"actor Context MCP result is invalid: {name}") from exc
+                        if not isinstance(value, dict) or value.get("ok") is False:
+                            raise ActorFleetError(f"actor Context MCP result held: {name}")
+                        return value
+
+                    status = await call("tgw_context_status", {})
+                    onboarding = await call("tgw_context_onboarding", {"actor": actor})
+                    bundle = await call(
+                        "tgw_context_bundle",
+                        {
+                            "task": "verify the materialized actor Context MCP binding",
+                            "receiver": actor,
+                            "limit": 12,
+                        },
+                    )
+        revisions = request["revisions"]
+        if (
+            status.get("plan", {}).get("approved_commit") != revisions["plan"]
+            or status.get("plan", {}).get("approved_solution_hash") != revisions["solution"]
+            or status.get("source", {}).get("commit") != revisions["source"]
+            or status.get("environment", {}).get("catalog_hash") != revisions["catalog"]
+            or onboarding.get("actor") != actor
+            or onboarding.get("plan", {}).get("approved_commit") != revisions["plan"]
+            or onboarding.get("source", {}).get("commit") != revisions["source"]
+            or bundle.get("receiver") != actor
+            or bundle.get("status", {}).get("source", {}).get("commit") != revisions["source"]
+            or bundle.get("status", {}).get("environment", {}).get("catalog_hash") != revisions["catalog"]
+        ):
+            raise ActorFleetError("actor Context MCP returned mixed revision bindings")
+        proof = {
+            "schema": "tgw-actor-context-mcp-proof/v1",
+            "status": "PASS",
+            "actor": actor,
+            "tools": sorted(names),
+            "plan": revisions["plan"],
+            "solution": revisions["solution"],
+            "source": revisions["source"],
+            "catalog": revisions["catalog"],
+            "onboarding_bundle_sha256": onboarding.get("bundle_sha256"),
+            "task_bundle_sha256": bundle.get("bundle_sha256"),
+        }
+        return {**proof, "proof_hash": _hash(proof)}
+
+    try:
+        return anyio.run(inspect)
+    except ActorFleetError:
+        raise
+    except Exception as exc:
+        raise ActorFleetError("actor Context MCP positive fixture failed") from exc
+
+
 def _atomic(path: Path, value: Mapping[str, Any], *, mode: int = 0o640) -> None:
     stage = path.with_name(f".{path.name}.next")
     if stage.exists() or stage.is_symlink():
@@ -196,6 +338,7 @@ class ActorFleetProvider:
         service_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
         materializer_loader: Callable[[Path], Any] | None = None,
         current_time: Callable[[], datetime] | None = None,
+        actor_context_probe: Callable[[str, Path, Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ):
         required = {
             "schema",
@@ -268,6 +411,7 @@ class ActorFleetProvider:
         self.contract_public_key = value["contract_public_key"]
         self._run = service_runner or self._run_service
         self._load_materializer = materializer_loader or self._materializer
+        self._actor_context_probe = actor_context_probe or _actor_context_mcp_probe
         self._current_time = current_time or (lambda: datetime.now(timezone.utc))
 
     def authorized(self, authorization: str | None) -> bool:
@@ -658,6 +802,18 @@ class ActorFleetProvider:
                     or profile.get("state") != "ready-for-preflight"
                 ):
                     raise ActorFleetError("actor startup binding is stale or mixed")
+                context_binding = by_kind.get("mcp", {}).get("tgw-context")
+                if context_binding is None:
+                    raise ActorFleetError("actor Context MCP binding is missing")
+                mcp_proof = dict(
+                    self._actor_context_probe(
+                        actor,
+                        Path(context_binding["destination"]),
+                        value,
+                    )
+                )
+                if mcp_proof.get("status") != "PASS" or mcp_proof.get("actor") != actor:
+                    raise ActorFleetError("actor Context MCP positive fixture failed")
                 payload = {
                     "status": "PASS",
                     "uid": os.geteuid(),
@@ -668,6 +824,7 @@ class ActorFleetProvider:
                     "generation": value["successor_generation"],
                     "profile": contract["profile"],
                     "required_capabilities": sorted(profile.get("broker_capabilities", [])),
+                    "context_mcp_proof": mcp_proof,
                 }
             except Exception as exc:
                 payload = {"status": "FAIL", "reason": str(exc)}
@@ -699,6 +856,7 @@ class ActorFleetProvider:
             "catalog": proof["catalog"],
             "profile": proof["profile"],
             "required_capabilities": proof["required_capabilities"],
+            "context_mcp_proof_hash": proof["context_mcp_proof"]["proof_hash"],
             "bindings_hash": _hash(bindings),
             "actor_proof_hash": _hash(proof),
         }
