@@ -50,7 +50,11 @@ def _tree_hash(path):
 
 
 class _Materializer:
+    def __init__(self):
+        self.calls = []
+
     def materialize_complete_actor_contracts(self, bundle, *, source_root, contracts, trusted_contract_public_key, apply=False, replace_existing=False, additional_source_roots=()):
+        self.calls.append((apply, replace_existing))
         bindings = []
         for actor, specification in bundle["actors"].items():
             for raw in specification["bindings"]:
@@ -329,15 +333,18 @@ def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_pat
             service_state["value"] = "active"
         return subprocess.CompletedProcess(arguments, 0, service_state["value"] + "\n", "")
 
+    materializer = _Materializer()
     provider = ActorFleetProvider(
         config,
         service_runner=service,
-        materializer_loader=lambda _: _Materializer(),
+        materializer_loader=lambda _: materializer,
         current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
     )
     assert provider.quiesce(request)["status"] == "QUIESCED"
     rebuilt = provider.rebuild(request)
+    assert materializer.calls[-1] == (False, True)
     activated = provider.activate(request, rebuilt)
+    assert materializer.calls[-1] == (True, True)
     restarted = provider.restart(activated)
     assert provider.health(restarted)["status"] == "HEALTHY"
     assert provider.verify_actor(request["actors"][0], request)["status"] == "VERIFIED"
@@ -456,6 +463,13 @@ def test_actor_provider_rejects_writable_state_root(durable_path):
     Path(config["state_root"]).chmod(0o777)
     with pytest.raises(ValueError, match="state root is not root protected"):
         ActorFleetProvider(config)
+
+
+def test_actor_provider_loads_real_dataclass_materializer():
+    release = Path(__file__).resolve().parents[1]
+    materializer = ActorFleetProvider._materializer(release)
+    assert callable(materializer.materialize_complete_actor_contracts)
+    assert callable(materializer.rollback_complete_actor_contracts)
 
 
 def test_actor_provider_http_rejects_auth_and_unbound_invocation(durable_path):

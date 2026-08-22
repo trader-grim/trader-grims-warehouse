@@ -19,6 +19,7 @@ import pwd
 import re
 import stat
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -332,7 +333,12 @@ class ActorFleetProvider:
         if spec is None or spec.loader is None:
             raise ActorFleetError("candidate actor materializer cannot be loaded")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(spec.name, None)
+            raise
         return module
 
     def _candidate(self, request: Mapping[str, Any]) -> Path:
@@ -497,6 +503,7 @@ class ActorFleetProvider:
             source_root=release,
             contracts=contracts,
             trusted_contract_public_key=self.contract_public_key,
+            replace_existing=True,
             additional_source_roots=(self._generation_root(value),),
         )
         if prepared.get("status") != "PREPARED":
