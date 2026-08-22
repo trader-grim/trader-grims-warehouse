@@ -185,6 +185,8 @@ def _enablement(
 ) -> dict[str, Any]:
     result = runner([str(paths.systemctl), "is-enabled", _SERVICE])
     state = result.stdout.strip()
+    if not state and result.returncode in {1, 4}:
+        state = "disabled" if paths.systemd_unit.exists() or paths.systemd_unit.is_symlink() else "not-found"
     if result.returncode not in {0, 1, 4} or not state:
         raise ActorHostBootstrapError("actor host service enablement is unavailable")
     return {
@@ -198,6 +200,8 @@ def _activity(
 ) -> dict[str, Any]:
     result = runner([str(paths.systemctl), "is-active", _SERVICE])
     state = result.stdout.strip()
+    if not state and result.returncode in {3, 4}:
+        state = "inactive"
     if result.returncode not in {0, 3, 4} or not state:
         raise ActorHostBootstrapError("actor host service activity is unavailable")
     return {"state": state, "active": result.returncode == 0 and state == "active"}
@@ -233,7 +237,9 @@ def install_actor_host(
     release, manifest, sources = _source(paths)
     paths.receipt_root.mkdir(parents=True, exist_ok=True, mode=0o750)
     receipt_path = paths.receipt_root / f"{operation_id}.json"
-    if receipt_path.exists() and not receipt_path.is_symlink():
+    if receipt_path.is_symlink():
+        raise ActorHostBootstrapError("actor host bootstrap receipt path is a symlink")
+    if receipt_path.exists():
         existing = _read_json(receipt_path, "actor host bootstrap receipt")
         installed = {str(target): _file_hash(source) for target, source in sources.items()}
         unsigned_existing = dict(existing)

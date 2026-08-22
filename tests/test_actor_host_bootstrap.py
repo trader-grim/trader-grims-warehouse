@@ -48,11 +48,13 @@ def _fixture(root: Path):
 
 class _HostRunner:
     def __init__(
-        self, managed: Path, *, enabled: bool = False, active: bool = False, fail_once: str | None = None,
+        self, managed: Path, *, enabled: bool = False, active: bool = False, legacy_empty: bool = False,
+        fail_once: str | None = None,
     ):
         self.managed = managed
         self.enabled = enabled
         self.active = active
+        self.legacy_empty = legacy_empty
         self.fail_once = fail_once
         self.commands: list[list[str]] = []
 
@@ -60,9 +62,11 @@ class _HostRunner:
         self.commands.append(arguments)
         action = arguments[1]
         if action == "is-enabled":
-            return subprocess.CompletedProcess(arguments, 0 if self.enabled else 1, "enabled\n" if self.enabled else "disabled\n", "")
+            stdout = "enabled\n" if self.enabled else ("" if self.legacy_empty else "disabled\n")
+            return subprocess.CompletedProcess(arguments, 0 if self.enabled else 1, stdout, "")
         if action == "is-active":
-            return subprocess.CompletedProcess(arguments, 0 if self.active else 3, "active\n" if self.active else "inactive\n", "")
+            stdout = "active\n" if self.active else ("" if self.legacy_empty else "inactive\n")
+            return subprocess.CompletedProcess(arguments, 0 if self.active else 3, stdout, "")
         if self.fail_once == action:
             self.fail_once = None
             return subprocess.CompletedProcess(arguments, 1, "", "fixture failure")
@@ -164,3 +168,29 @@ def test_actor_host_bootstrap_reinstall_holds_if_enablement_drifted(durable_path
 
     with pytest.raises(ActorHostBootstrapError, match="operation id collision"):
         install_actor_host("actor-host-drift", paths=paths, runner=runner, require_root=False)
+
+
+def test_actor_host_bootstrap_accepts_legacy_empty_systemd_state(durable_path):
+    paths, managed = _fixture(durable_path)
+    runner = _HostRunner(managed, legacy_empty=True)
+
+    receipt = install_actor_host("actor-host-legacy", paths=paths, runner=runner, require_root=False)
+    assert receipt["before"]["service_enablement"] == {"state": "not-found", "enabled": False}
+    assert receipt["before"]["service_activity"] == {"state": "inactive", "active": False}
+    assert rollback_actor_host(
+        paths.receipt_root / "actor-host-legacy.json", paths=paths, runner=runner, require_root=False,
+    )["status"] == "ROLLED_BACK"
+
+
+def test_actor_host_bootstrap_rejects_symlinked_receipt_path(durable_path):
+    paths, managed = _fixture(durable_path)
+    paths.receipt_root.mkdir(parents=True)
+    outside = durable_path / "outside-receipt.json"
+    outside.write_text("preserve me\n")
+    (paths.receipt_root / "actor-host-linked.json").symlink_to(outside)
+
+    with pytest.raises(ActorHostBootstrapError, match="receipt path is a symlink"):
+        install_actor_host(
+            "actor-host-linked", paths=paths, runner=_HostRunner(managed), require_root=False,
+        )
+    assert outside.read_text() == "preserve me\n"
