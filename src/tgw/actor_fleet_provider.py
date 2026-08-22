@@ -280,6 +280,133 @@ def _actor_context_mcp_probe(
         raise ActorFleetError("actor Context MCP positive fixture failed") from exc
 
 
+def _actor_verification_payload(
+    actor: str,
+    request: Mapping[str, Any],
+    bindings: list[Mapping[str, Any]],
+    bundle: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    context_probe: Callable[[str, Path, Mapping[str, Any]], Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Verify materialized inputs in a fresh process already running as the actor."""
+    try:
+        for binding in bindings:
+            destination, source = Path(str(binding["destination"])), Path(str(binding["source"]))
+            if not destination.is_symlink() or destination.resolve(strict=False) != source:
+                raise ActorFleetError("actor contract binding changed")
+            if _binding_digest(source) != binding["sha256"]:
+                raise ActorFleetError("actor contract binding content changed")
+        by_kind: dict[str, dict[str, Mapping[str, Any]]] = {}
+        for binding in bindings:
+            by_kind.setdefault(str(binding["kind"]), {})[str(binding["name"])] = binding
+        mcp_bindings = [
+            {
+                "endpoint": name,
+                "source_sha256": binding["sha256"],
+                "destination": binding["destination"],
+            }
+            for name, binding in sorted(by_kind.get("mcp", {}).items())
+        ]
+        environment_binding = by_kind.get("environment", {}).get("environment-catalog")
+        bootstrap_binding = by_kind.get("bootstrap", {}).get("bootstrap-receipt")
+        if environment_binding is None or bootstrap_binding is None:
+            raise ActorFleetError("actor environment or bootstrap binding is missing")
+        environment = _read_json(Path(str(environment_binding["source"])), "actor environment catalog")
+        bootstrap = _read_json(Path(str(bootstrap_binding["source"])), "actor bootstrap receipt")
+        unsigned_bootstrap = dict(bootstrap)
+        claimed_bootstrap = unsigned_bootstrap.pop("receipt_hash", None)
+        local = contract.get("local") if isinstance(contract.get("local"), Mapping) else {}
+        specification = bundle["actors"][actor]
+        profile = environment.get("profiles", {}).get(contract.get("profile"), {})
+        actor_declaration = environment.get("actors", {}).get(actor, {})
+        if (
+            _hash(environment) != contract.get("catalog_hash")
+            or claimed_bootstrap != _hash(unsigned_bootstrap)
+            or bootstrap.get("status") != "READY"
+            or bootstrap.get("actor") != actor
+            or bootstrap.get("generation") != request["successor_generation"]
+            or bootstrap.get("catalog_hash") != request["revisions"]["catalog"]
+            or bootstrap.get("plan")
+            != {
+                "commit": request["revisions"]["plan"],
+                "solution_hash": request["revisions"]["solution"],
+            }
+            or bootstrap.get("code_graph", {}).get("commit") != request["revisions"]["source"]
+            or bootstrap.get("launcher") != local.get("launcher")
+            or bootstrap.get("skills") != local.get("skills")
+            or bootstrap.get("hooks") != local.get("hooks")
+            or bootstrap.get("mcp") != local.get("mcp")
+            or contract.get("plan")
+            != {
+                "commit": request["revisions"]["plan"],
+                "solution_hash": request["revisions"]["solution"],
+            }
+            or contract.get("code_graph", {}).get("commit") != request["revisions"]["source"]
+            or set(by_kind.get("skill", {})) != set(local.get("skills", {}))
+            or set(by_kind.get("hook", {})) != set(local.get("hooks", {}))
+            or set(by_kind.get("mcp", {})) != set(local.get("mcp", {}).get("endpoints", []))
+            or _hash(mcp_bindings) != local.get("mcp", {}).get("binding_hash")
+            or by_kind.get("launcher", {}).get("launcher", {}).get("destination")
+            != local.get("launcher", {}).get("path")
+            or by_kind.get("launcher", {}).get("launcher", {}).get("sha256")
+            != local.get("launcher", {}).get("sha256")
+            or by_kind.get("bootstrap", {}).get("bootstrap-receipt", {}).get("sha256")
+            != local.get("bootstrap_receipt_hash")
+            or actor_declaration.get("enabled") is not True
+            or contract.get("profile") not in actor_declaration.get("permitted_profiles", [])
+            or profile.get("state") != "ready-for-preflight"
+        ):
+            raise ActorFleetError("actor startup binding is stale or mixed")
+        context_binding = by_kind.get("mcp", {}).get("tgw-context")
+        if context_binding is None:
+            raise ActorFleetError("actor Context MCP binding is missing")
+        mcp_proof = dict(
+            context_probe(actor, Path(str(context_binding["destination"])), request)
+        )
+        if mcp_proof.get("status") != "PASS" or mcp_proof.get("actor") != actor:
+            raise ActorFleetError("actor Context MCP positive fixture failed")
+        return {
+            "status": "PASS",
+            "uid": os.geteuid(),
+            "plan": request["revisions"]["plan"],
+            "solution": request["revisions"]["solution"],
+            "source": request["revisions"]["source"],
+            "catalog": request["revisions"]["catalog"],
+            "generation": request["successor_generation"],
+            "profile": contract["profile"],
+            "required_capabilities": sorted(profile.get("broker_capabilities", [])),
+            "context_mcp_proof": mcp_proof,
+            "project": specification["project"],
+        }
+    except Exception as exc:
+        return {"status": "FAIL", "reason": str(exc)}
+
+
+def _actor_verification_worker_main() -> int:
+    try:
+        value = json.loads(sys.stdin.buffer.read(4 * 1024 * 1024))
+        if not isinstance(value, Mapping) or set(value) != {
+            "schema", "actor", "request", "bindings", "bundle", "contract",
+        } or value.get("schema") != "tgw-actor-verification-worker-input/v1":
+            raise ActorFleetError("actor verification worker input is invalid")
+        request = _request(value["request"])
+        actor = str(value["actor"])
+        if actor not in request["actors"] or not isinstance(value["bindings"], list):
+            raise ActorFleetError("actor verification worker binding is invalid")
+        proof = _actor_verification_payload(
+            actor,
+            request,
+            list(value["bindings"]),
+            value["bundle"],
+            value["contract"],
+            _actor_context_mcp_probe,
+        )
+    except Exception as exc:
+        proof = {"status": "FAIL", "reason": str(exc)}
+    sys.stdout.buffer.write(_canonical(proof))
+    return 0 if proof.get("status") == "PASS" else 1
+
+
 def _atomic(path: Path, value: Mapping[str, Any], *, mode: int = 0o640) -> None:
     stage = path.with_name(f".{path.name}.next")
     if stage.exists() or stage.is_symlink():
@@ -762,126 +889,53 @@ class ActorFleetProvider:
             or startup_path.stat(follow_symlinks=False).st_mode & 0o022
         ):
             raise ActorFleetError("actor root-owned startup binding differs from generation")
-        local = contract.get("local") if isinstance(contract.get("local"), Mapping) else {}
         specification = bundle["actors"][actor]
         declared = {(item["kind"], item["name"], item["destination"]): item["sha256"] for item in specification["bindings"]}
         observed = {(item.get("kind"), item.get("name"), item.get("destination")): item.get("sha256") for item in bindings}
         if observed != declared:
             raise ActorFleetError("actor materialization differs from its complete bundle")
         account = pwd.getpwnam(actor)
-        read_fd, write_fd = os.pipe()
-        child = os.fork()
-        if child == 0:  # pragma: no cover - result is asserted in the parent
-            os.close(read_fd)
-            try:
-                if os.geteuid() == 0:
-                    os.initgroups(actor, account.pw_gid)
-                    os.setgid(account.pw_gid)
-                    os.setuid(account.pw_uid)
-                elif os.geteuid() != account.pw_uid:
-                    raise PermissionError("actor provider cannot assume actor identity")
-                for binding in bindings:
-                    destination, source = Path(binding["destination"]), Path(binding["source"])
-                    if not destination.is_symlink() or destination.resolve(strict=False) != source:
-                        raise ActorFleetError("actor contract binding changed")
-                    if _binding_digest(source) != binding["sha256"]:
-                        raise ActorFleetError("actor contract binding content changed")
-                by_kind: dict[str, dict[str, Mapping[str, Any]]] = {}
-                for binding in bindings:
-                    by_kind.setdefault(binding["kind"], {})[binding["name"]] = binding
-                mcp_bindings = [
-                    {
-                        "endpoint": name,
-                        "source_sha256": binding["sha256"],
-                        "destination": binding["destination"],
-                    }
-                    for name, binding in sorted(by_kind.get("mcp", {}).items())
-                ]
-                environment_binding = by_kind.get("environment", {}).get("environment-catalog")
-                bootstrap_binding = by_kind.get("bootstrap", {}).get("bootstrap-receipt")
-                if environment_binding is None or bootstrap_binding is None:
-                    raise ActorFleetError("actor environment or bootstrap binding is missing")
-                environment = _read_json(Path(environment_binding["source"]), "actor environment catalog")
-                bootstrap = _read_json(Path(bootstrap_binding["source"]), "actor bootstrap receipt")
-                unsigned_bootstrap = dict(bootstrap)
-                claimed_bootstrap = unsigned_bootstrap.pop("receipt_hash", None)
-                profile = environment.get("profiles", {}).get(contract.get("profile"), {})
-                actor_declaration = environment.get("actors", {}).get(actor, {})
-                if (
-                    _hash(environment) != contract.get("catalog_hash")
-                    or claimed_bootstrap != _hash(unsigned_bootstrap)
-                    or bootstrap.get("status") != "READY"
-                    or bootstrap.get("actor") != actor
-                    or bootstrap.get("generation") != value["successor_generation"]
-                    or bootstrap.get("catalog_hash") != value["revisions"]["catalog"]
-                    or bootstrap.get("plan")
-                    != {
-                        "commit": value["revisions"]["plan"],
-                        "solution_hash": value["revisions"]["solution"],
-                    }
-                    or bootstrap.get("code_graph", {}).get("commit") != value["revisions"]["source"]
-                    or bootstrap.get("launcher") != local.get("launcher")
-                    or bootstrap.get("skills") != local.get("skills")
-                    or bootstrap.get("hooks") != local.get("hooks")
-                    or bootstrap.get("mcp") != local.get("mcp")
-                    or contract.get("plan")
-                    != {
-                        "commit": value["revisions"]["plan"],
-                        "solution_hash": value["revisions"]["solution"],
-                    }
-                    or contract.get("code_graph", {}).get("commit") != value["revisions"]["source"]
-                    or set(by_kind.get("skill", {})) != set(local.get("skills", {}))
-                    or set(by_kind.get("hook", {})) != set(local.get("hooks", {}))
-                    or set(by_kind.get("mcp", {})) != set(local.get("mcp", {}).get("endpoints", []))
-                    or _hash(mcp_bindings) != local.get("mcp", {}).get("binding_hash")
-                    or by_kind.get("launcher", {}).get("launcher", {}).get("destination") != local.get("launcher", {}).get("path")
-                    or by_kind.get("launcher", {}).get("launcher", {}).get("sha256") != local.get("launcher", {}).get("sha256")
-                    or by_kind.get("bootstrap", {}).get("bootstrap-receipt", {}).get("sha256") != local.get("bootstrap_receipt_hash")
-                    or actor_declaration.get("enabled") is not True
-                    or contract.get("profile") not in actor_declaration.get("permitted_profiles", [])
-                    or profile.get("state") != "ready-for-preflight"
-                ):
-                    raise ActorFleetError("actor startup binding is stale or mixed")
-                context_binding = by_kind.get("mcp", {}).get("tgw-context")
-                if context_binding is None:
-                    raise ActorFleetError("actor Context MCP binding is missing")
-                mcp_proof = dict(
-                    self._actor_context_probe(
-                        actor,
-                        Path(context_binding["destination"]),
-                        value,
-                    )
-                )
-                if mcp_proof.get("status") != "PASS" or mcp_proof.get("actor") != actor:
-                    raise ActorFleetError("actor Context MCP positive fixture failed")
-                payload = {
-                    "status": "PASS",
-                    "uid": os.geteuid(),
-                    "plan": value["revisions"]["plan"],
-                    "solution": value["revisions"]["solution"],
-                    "source": value["revisions"]["source"],
-                    "catalog": value["revisions"]["catalog"],
-                    "generation": value["successor_generation"],
-                    "profile": contract["profile"],
-                    "required_capabilities": sorted(profile.get("broker_capabilities", [])),
-                    "context_mcp_proof": mcp_proof,
-                }
-            except Exception as exc:
-                payload = {"status": "FAIL", "reason": str(exc)}
-            os.write(write_fd, _canonical(payload))
-            os.close(write_fd)
-            os._exit(0 if payload["status"] == "PASS" else 1)
-        os.close(write_fd)
-        raw = b""
-        while chunk := os.read(read_fd, 65536):
-            raw += chunk
-        os.close(read_fd)
-        _pid, wait_status = os.waitpid(child, 0)
+        worker_input = {
+            "schema": "tgw-actor-verification-worker-input/v1",
+            "actor": actor,
+            "request": value,
+            "bindings": bindings,
+            "bundle": bundle,
+            "contract": contract,
+        }
+        if self._actor_context_probe is _actor_context_mcp_probe:
+            cache_root = self.actor_cache_root / actor / value["successor_generation"].removeprefix("sha256:") / "context-mcp"
+            completed = subprocess.run(
+                [sys.executable, "-m", "tgw.actor_fleet_provider", "--verify-actor-worker"],
+                input=_canonical(worker_input),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60,
+                check=False,
+                cwd=account.pw_dir,
+                env={
+                    "HOME": account.pw_dir,
+                    "LANG": "C.UTF-8",
+                    "PATH": "/usr/bin:/bin",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+                    "TMPDIR": str(cache_root),
+                },
+                user=account.pw_uid,
+                group=account.pw_gid,
+                extra_groups=os.getgrouplist(actor, account.pw_gid),
+            )
+            raw, worker_status = completed.stdout, completed.returncode
+        else:
+            proof = _actor_verification_payload(
+                actor, value, bindings, bundle, contract, self._actor_context_probe,
+            )
+            raw, worker_status = _canonical(proof), 0 if proof.get("status") == "PASS" else 1
         try:
             proof = json.loads(raw)
         except (TypeError, json.JSONDecodeError) as exc:
             raise ActorFleetError(f"actor contract verification failed: {actor}") from exc
-        if wait_status != 0 or proof.get("status") != "PASS" or proof.get("uid") != account.pw_uid:
+        if worker_status != 0 or proof.get("status") != "PASS" or proof.get("uid") != account.pw_uid:
             raise ActorFleetError(f"actor contract verification failed: {actor}")
         journal["status"] = "VERIFYING"
         self._save(journal)
@@ -1007,6 +1061,10 @@ def create_actor_fleet_app(config: Mapping[str, Any], **provider_kwargs: Any) ->
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--verify-actor-worker"]:
+        return _actor_verification_worker_main()
+    if sys.argv[1:]:
+        raise ActorFleetError("actor fleet provider arguments are invalid")
     config = load_operational_config(Path(os.environ.get("TGW_CONFIG", str(DEFAULT_CONFIG))))
     host = os.environ.get("TGW_ACTOR_FLEET_HOST", "127.0.0.1")
     port = int(os.environ.get("TGW_ACTOR_FLEET_PORT", "7556"))
