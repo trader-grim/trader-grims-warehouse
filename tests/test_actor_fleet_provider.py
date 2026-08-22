@@ -159,12 +159,23 @@ class _Materializer:
 
 
 def _fixture(tmp_path, *, admission_expires_at="2026-08-22T00:00:00Z"):
-    state, releases, admissions, generations, workspaces, caches, startup_bindings = (
-        tmp_path / name for name in ("state", "releases", "admissions", "generations", "workspaces", "caches", "startup-bindings")
+    state, releases, admissions, generations, workspaces, caches, actor_caches, startup_bindings = (
+        tmp_path / name
+        for name in (
+            "state",
+            "releases",
+            "admissions",
+            "generations",
+            "workspaces",
+            "caches",
+            "actor-caches",
+            "startup-bindings",
+        )
     )
-    for path in (state, releases, admissions, generations, workspaces, caches, startup_bindings):
+    for path in (state, releases, admissions, generations, workspaces, caches, actor_caches, startup_bindings):
         path.mkdir()
     state.chmod(0o750)
+    actor_caches.chmod(0o750)
     startup_bindings.chmod(0o755)
     workspaces.chmod(0o2770)
     caches.chmod(0o2770)
@@ -368,6 +379,7 @@ def _fixture(tmp_path, *, admission_expires_at="2026-08-22T00:00:00Z"):
         "actor_group": actor_group,
         "attempt_workspace_root": str(workspaces),
         "attempt_cache_root": str(caches),
+        "actor_cache_root": str(actor_caches),
         "systemctl_path": str(systemctl),
         "managed_services": ["tgw-coding-provision-pull.timer"],
         "quiescence_units": ["tgw-coding-provision-pull.service"],

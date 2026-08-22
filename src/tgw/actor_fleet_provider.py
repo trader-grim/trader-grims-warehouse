@@ -355,6 +355,7 @@ class ActorFleetProvider:
             "actor_group",
             "attempt_workspace_root",
             "attempt_cache_root",
+            "actor_cache_root",
             "startup_binding_root",
         }
         if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != "tgw-actor-fleet-provider/v1":
@@ -397,6 +398,10 @@ class ActorFleetProvider:
             "actor attempt cache root",
             actor_group,
         )
+        self.actor_cache_root = _directory(value["actor_cache_root"], "actor Context MCP cache root")
+        actor_cache_state = self.actor_cache_root.stat(follow_symlinks=False)
+        if actor_cache_state.st_mode & 0o022 or (os.geteuid() == 0 and actor_cache_state.st_uid != 0):
+            raise ActorFleetError("actor Context MCP cache root is not root protected")
         self.systemctl = _regular(value["systemctl_path"], "systemctl executable")
         services = value.get("managed_services")
         if not isinstance(services, list) or not services or services != sorted(set(services)) or any(not isinstance(unit, str) or _UNIT.fullmatch(unit) is None for unit in services):
@@ -614,13 +619,7 @@ class ActorFleetProvider:
         return receipts
 
     def _prepare_context_cache_roots(self, value: Mapping[str, Any]) -> list[str]:
-        base = self.attempt_cache_root.parent / "actors"
-        base.mkdir(mode=0o750, exist_ok=True)
-        if base.is_symlink() or not base.is_dir():
-            raise ActorFleetError("actor Context MCP cache base is unsafe")
-        base.chmod(0o750)
-        if os.geteuid() == 0:
-            os.chown(base, 0, grp.getgrnam(self.actor_group).gr_gid)
+        base = self.actor_cache_root
         generation = str(value["successor_generation"]).removeprefix("sha256:")
         roots: list[str] = []
         for actor in value["actors"]:
