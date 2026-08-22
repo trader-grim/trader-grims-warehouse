@@ -19,12 +19,14 @@ import pwd
 import re
 import stat
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException
 
+from tgw.admission_recovery import validate_release_admission
 from tgw.config import DEFAULT_CONFIG, load_operational_config
 
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -56,6 +58,17 @@ def _regular(value: Any, label: str) -> Path:
     if not path.is_absolute() or path == Path("/tmp") or Path("/tmp") in path.parents or not path.is_file() or path.is_symlink():
         raise ActorFleetError(f"{label} is unavailable")
     return path
+
+
+def _trusted_public_key(value: Any, label: str) -> bytes:
+    path = _regular(value, label)
+    observed = path.stat(follow_symlinks=False)
+    if observed.st_mode & 0o022 or (os.geteuid() == 0 and observed.st_uid != 0):
+        raise ActorFleetError(f"{label} is not root protected")
+    raw = path.read_bytes()
+    if len(raw) != 32:
+        raise ActorFleetError(f"{label} must contain one raw Ed25519 public key")
+    return raw
 
 
 def _shared_attempt_root(value: Any, label: str, group: grp.struct_group) -> Path:
@@ -161,6 +174,7 @@ class ActorFleetProvider:
         *,
         service_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
         materializer_loader: Callable[[Path], Any] | None = None,
+        current_time: Callable[[], datetime] | None = None,
     ):
         required = {
             "schema",
@@ -169,6 +183,7 @@ class ActorFleetProvider:
             "release_root",
             "admission_root",
             "actor_generation_root",
+            "admission_public_key",
             "contract_public_key",
             "systemctl_path",
             "managed_services",
@@ -187,6 +202,10 @@ class ActorFleetProvider:
         self.release_root = _directory(value["release_root"], "actor release root")
         self.admission_root = _directory(value["admission_root"], "actor admission root")
         self.actor_generation_root = _directory(value["actor_generation_root"], "actor generation root")
+        self.admission_public_key = _trusted_public_key(
+            value["admission_public_key"],
+            "actor release admission public key",
+        )
         self.startup_binding_root = _directory(
             value["startup_binding_root"],
             "actor startup binding root",
@@ -223,6 +242,7 @@ class ActorFleetProvider:
         self.contract_public_key = value["contract_public_key"]
         self._run = service_runner or self._run_service
         self._load_materializer = materializer_loader or self._materializer
+        self._current_time = current_time or (lambda: datetime.now(timezone.utc))
 
     def authorized(self, authorization: str | None) -> bool:
         if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
@@ -280,29 +300,31 @@ class ActorFleetProvider:
     def _candidate(self, request: Mapping[str, Any]) -> Path:
         admission_hash = request["revisions"]["admission"]
         admission = _read_json(self.admission_root / (admission_hash.removeprefix("sha256:") + ".json"), "actor admission receipt")
-        unsigned = dict(admission)
-        claimed = unsigned.pop("receipt_hash", None)
-        candidate = admission.get("candidate") if isinstance(admission.get("candidate"), Mapping) else {}
-        plan = admission.get("plan") if isinstance(admission.get("plan"), Mapping) else {}
-        if (
-            claimed != admission_hash
-            or _hash(unsigned) != admission_hash
-            or admission.get("status") != "ADMITTED"
-            or candidate.get("commit") != request["revisions"]["source"]
-            or plan.get("commit") != request["revisions"]["plan"]
-            or plan.get("solution_hash") != request["revisions"]["solution"]
-        ):
-            raise ActorFleetError("actor admission receipt is not exact")
         matches = []
         for child in self.release_root.iterdir():
             manifest_path = child / ".release-manifest.json"
             if child.is_dir() and not child.is_symlink() and manifest_path.is_file() and not manifest_path.is_symlink():
                 manifest = _read_json(manifest_path, "actor release manifest")
                 if manifest.get("commit") == request["revisions"]["source"]:
-                    matches.append(child.resolve())
+                    matches.append((child.resolve(), manifest))
         if len(matches) != 1:
             raise ActorFleetError("exact admitted actor release is unavailable or ambiguous")
-        return matches[0]
+        release, manifest = matches[0]
+        if admission.get("receipt_hash") != admission_hash:
+            raise ActorFleetError("actor admission receipt hash is not exact")
+        try:
+            validate_release_admission(
+                admission,
+                candidate_commit=request["revisions"]["source"],
+                candidate_tree=str(manifest.get("git_tree", "")),
+                trusted_public_key=self.admission_public_key,
+                current_time=self._current_time().astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                current_plan_commit=request["revisions"]["plan"],
+                current_solution_hash=request["revisions"]["solution"],
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise ActorFleetError("actor admission receipt is not exact") from exc
+        return release
 
     def _generation_root(self, request: Mapping[str, Any]) -> Path:
         root = self.actor_generation_root / request["successor_generation"].removeprefix("sha256:")

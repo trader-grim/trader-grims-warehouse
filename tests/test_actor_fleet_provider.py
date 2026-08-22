@@ -6,12 +6,15 @@ import pwd
 import shutil
 import subprocess
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
 from tgw.actor_fleet_provider import ActorFleetProvider, create_actor_fleet_app
+from tgw.admission_recovery import compile_release_admission
 
 
 @pytest.fixture
@@ -86,7 +89,8 @@ def _fixture(tmp_path):
     solution = "sha256:" + "1" * 64
     release = releases / "candidate"
     release.mkdir()
-    (release / ".release-manifest.json").write_text(json.dumps({"commit": source_commit}))
+    source_tree = "d" * 40
+    (release / ".release-manifest.json").write_text(json.dumps({"commit": source_commit, "git_tree": source_tree}))
     for name, content in {
         "launcher": "actor launcher\n",
         "bootstrap.json": '{"status":"PASS"}\n',
@@ -150,7 +154,7 @@ def _fixture(tmp_path):
         "generation": generation_hash,
         "catalog_hash": catalog,
         "plan": {"commit": plan_commit, "solution_hash": solution},
-        "code_graph": {"commit": source_commit, "tree": "d" * 40, "freshness_hash": "sha256:" + "3" * 64},
+        "code_graph": {"commit": source_commit, "tree": source_tree, "freshness_hash": "sha256:" + "3" * 64},
         "declared_policy_hash": "sha256:" + "4" * 64,
         "launcher": launcher_local,
         "skills": {"tgw-plan": skill_hash},
@@ -208,14 +212,36 @@ def _fixture(tmp_path):
         },
     }
     (generation / "generation-receipt.json").write_text(json.dumps({**receipt_unsigned, "receipt_hash": _hash(receipt_unsigned)}))
-    admission_unsigned = {
-        "schema": "tgw-w16-release-admission-receipt/v1",
-        "status": "ADMITTED",
-        "candidate": {"commit": source_commit},
-        "plan": {"commit": plan_commit, "solution_hash": solution},
-    }
-    admission = {**admission_unsigned, "receipt_hash": _hash(admission_unsigned)}
+    admission_key = Ed25519PrivateKey.generate()
+    admission = compile_release_admission(
+        request={
+            "schema": "tgw-w16-release-admission-request/v1",
+            "request_id": "actor-fleet-fixture",
+            "candidate": {"commit": source_commit, "tree": source_tree},
+            "plan": {"commit": plan_commit, "solution_hash": solution},
+            "environment": {"catalog_hash": catalog, "receipt_hash": "sha256:" + "5" * 64},
+            "review": {
+                "status": "PASS",
+                "candidate_commit": source_commit,
+                "solution_hash": solution,
+                "receipt_hash": "sha256:" + "6" * 64,
+            },
+            "admission": {
+                "status": "PASS",
+                "candidate_commit": source_commit,
+                "solution_hash": solution,
+                "receipt_hash": "sha256:" + "7" * 64,
+            },
+        },
+        signing_private_key=admission_key,
+        signer_key_id="actor-fixture",
+        issued_at="2026-08-21T00:00:00Z",
+        expires_at="2026-08-22T00:00:00Z",
+    )
     (admissions / (admission["receipt_hash"].removeprefix("sha256:") + ".json")).write_text(json.dumps(admission))
+    admission_public_key = tmp_path / "release-admission.pub"
+    admission_public_key.write_bytes(admission_key.public_key().public_bytes_raw())
+    admission_public_key.chmod(0o444)
     systemctl = tmp_path / "systemctl"
     systemctl.write_text("fixture\n")
     config = {
@@ -225,6 +251,7 @@ def _fixture(tmp_path):
         "release_root": str(releases),
         "admission_root": str(admissions),
         "actor_generation_root": str(generations),
+        "admission_public_key": str(admission_public_key),
         "contract_public_key": "fixture-key",
         "startup_binding_root": str(startup_bindings),
         "actor_group": actor_group,
@@ -272,7 +299,12 @@ def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_pat
             service_state["value"] = "active"
         return subprocess.CompletedProcess(arguments, 0, service_state["value"] + "\n", "")
 
-    provider = ActorFleetProvider(config, service_runner=service, materializer_loader=lambda _: _Materializer())
+    provider = ActorFleetProvider(
+        config,
+        service_runner=service,
+        materializer_loader=lambda _: _Materializer(),
+        current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
+    )
     assert provider.quiesce(request)["status"] == "QUIESCED"
     rebuilt = provider.rebuild(request)
     activated = provider.activate(request, rebuilt)
@@ -289,12 +321,39 @@ def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_pat
     assert not startup.exists()
 
 
+def test_actor_provider_rejects_forged_signed_admission(durable_path):
+    config, request, _destination = _fixture(durable_path)
+    admission_path = Path(config["admission_root"]) / (
+        request["revisions"]["admission"].removeprefix("sha256:") + ".json"
+    )
+    admission = json.loads(admission_path.read_text())
+    admission["signature"] = "A" + admission["signature"][1:]
+    admission_path.write_text(json.dumps(admission))
+    state = {"value": "active"}
+
+    def service(arguments):
+        if arguments[0] == "stop":
+            state["value"] = "inactive"
+        return subprocess.CompletedProcess(arguments, 0, state["value"] + "\n", "")
+
+    provider = ActorFleetProvider(
+        config,
+        service_runner=service,
+        materializer_loader=lambda _: _Materializer(),
+        current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
+    )
+    provider.quiesce(request)
+    with pytest.raises(ValueError, match="admission receipt is not exact"):
+        provider.rebuild(request)
+
+
 def test_actor_provider_http_rejects_auth_and_unbound_invocation(durable_path):
     config, request, _destination = _fixture(durable_path)
     app = create_actor_fleet_app(
         {"actor_fleet_provider": config},
         materializer_loader=lambda _: _Materializer(),
         service_runner=lambda args: subprocess.CompletedProcess(args, 0, "inactive\n", ""),
+        current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
     )
     client = TestClient(app)
     invocation = {"schema": "tgw-actor-fleet-provider-invocation/v1", "step": "quiesce", "arguments": [request]}

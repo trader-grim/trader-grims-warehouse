@@ -57,8 +57,8 @@ def _config(tmp_path):
     }
 
 
-def test_standalone_recovery_host_claims_before_fixed_provider(tmp_path, monkeypatch):
-    config = _config(tmp_path)
+def test_standalone_recovery_host_claims_before_fixed_provider(durable_path, monkeypatch):
+    config = _config(durable_path)
     calls = []
     monkeypatch.setattr(
         _ConfiguredRecoveryProvider, "invoke",
@@ -83,12 +83,12 @@ def test_standalone_recovery_host_claims_before_fixed_provider(tmp_path, monkeyp
     assert second.status_code == 409 and len(calls) == 1
 
 
-def test_recovery_host_refuses_tmp_and_renderer_drift(tmp_path):
-    config = _config(tmp_path)
+def test_recovery_host_refuses_tmp_and_renderer_drift(durable_path):
+    config = _config(durable_path)
     config["platform_recovery"]["receipt_root"] = "/tmp/recovery"
     with pytest.raises(RecoveryHostError, match="outside /tmp"):
         configured_recovery_mount(config)
-    config = _config(tmp_path / "other")
+    config = _config(durable_path / "other")
     config["platform_recovery"]["renderer_sha256"] = "sha256:" + "0" * 64
     with pytest.raises(RecoveryHostError, match="renderer"):
         configured_recovery_mount(config)

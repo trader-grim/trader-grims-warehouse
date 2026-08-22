@@ -2,6 +2,8 @@
 Description=TGW bounded actor-fleet provider
 After=network-online.target local-fs.target
 Wants=network-online.target
+ConditionPathExists=/opt/TGW/tgw-lib/actor-runtime/current/src/tgw/actor_fleet_provider.py
+ConditionPathExists=/opt/TGW/tgw-lib/config/tgw-governed-actor-control.json
 
 [Service]
 Type=simple
@@ -10,7 +12,7 @@ Group=tgw-coders
 WorkingDirectory=/opt/TGW/tgw-lib
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-Environment=PYTHONPATH=/opt/TGW/tgw-lib/current/src
+Environment=PYTHONPATH=/opt/TGW/tgw-lib/actor-runtime/current/src
 Environment=TGW_CONFIG=/opt/TGW/tgw-lib/config/tgw-governed-actor-control.json
 Environment=TGW_ACTOR_FLEET_HOST=100.68.223.70
 Environment=TGW_ACTOR_FLEET_PORT=7556
@@ -26,6 +28,7 @@ PrivateTmp=yes
 ProtectHome=read-only
 ProtectSystem=strict
 ReadWritePaths=/opt/TGW/tgw-lib/var/fleet /opt/TGW/w/attempts /opt/TGW/var/cache/tgw/attempts /etc/tgw/actors /home/codex /home/claude /home/deepseek
+ReadOnlyPaths=/opt/TGW/tgw-lib/actor-runtime/current
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
