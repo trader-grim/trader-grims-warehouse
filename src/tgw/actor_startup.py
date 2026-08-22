@@ -8,8 +8,9 @@ import json
 import os
 import pwd
 import re
+import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from tgw.actor_contract import ActorContractError, verify_signed_actor_contract
 
@@ -75,6 +76,39 @@ def _protected_actor_link(path: Path) -> None:
     observed = target.stat()
     if observed.st_uid != 0 or observed.st_mode & 0o022:
         raise ActorStartupError(f"actor startup source is actor-writable: {path}")
+
+
+def _profile_tool(catalog: Mapping[str, Any], profile: str, name: str) -> str:
+    tools = catalog.get("profiles", {}).get(profile, {}).get("tools", [])
+    matches = [item for item in tools if isinstance(item, Mapping) and item.get("name") == name]
+    if len(matches) != 1:
+        raise ActorStartupError(f"catalog-pinned {name} tool is unavailable")
+    path, expected_hash = matches[0].get("executable_path"), matches[0].get("executable_sha256")
+    if not isinstance(path, str) or not path.startswith("/") or _file_hash(Path(path)) != expected_hash:
+        raise ActorStartupError(f"catalog-pinned {name} tool identity differs")
+    return path
+
+
+def _context_source_identity(path: Path, git: str) -> tuple[str, str]:
+    if not path.is_absolute() or not path.is_dir() or path.is_symlink():
+        raise ActorStartupError("actor Context MCP source root is invalid")
+
+    def inspect(*args: str) -> str:
+        completed = subprocess.run(
+            [git, "-c", f"safe.directory={path}", "-C", str(path), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode:
+            raise ActorStartupError("actor Context MCP source root is not an exact Git source")
+        return completed.stdout.strip()
+
+    commit = inspect("rev-parse", "HEAD")
+    tree = inspect("rev-parse", "HEAD^{tree}")
+    if _COMMIT.fullmatch(commit) is None or _COMMIT.fullmatch(tree) is None or inspect("status", "--porcelain=v1"):
+        raise ActorStartupError("actor Context MCP source root is stale or dirty")
+    return commit, tree
 
 
 def attest_actor_startup(
@@ -155,6 +189,7 @@ def attest_actor_startup(
         "generation": expected_generation,
         "plan": expected_plan,
         "source_commit": expected_source_commit,
+        "source_tree": contract["code_graph"]["tree"],
         "catalog_hash": expected_catalog_hash,
         "profile": contract["profile"],
         "contract_receipt_hash": contract["receipt_hash"],
@@ -163,6 +198,53 @@ def attest_actor_startup(
         "fallback": "FORBIDDEN",
     }
     return {**body, "attestation_hash": _hash(body)}
+
+
+def _context_mcp_environment(
+    *, home: Path, result: Mapping[str, Any], binding: Mapping[str, str], environment: Mapping[str, str]
+) -> dict[str, str]:
+    required_environment = {
+        "TGW_ACTOR_CONTRACT_PUBLIC_KEY": binding["trusted_public_key"],
+        "TGW_ACTOR_EXPECTED_GENERATION": result["generation"],
+        "TGW_ACTOR_EXPECTED_PLAN_COMMIT": result["plan"]["commit"],
+        "TGW_ACTOR_EXPECTED_PLAN_SOLUTION": result["plan"]["solution_hash"],
+        "TGW_ACTOR_EXPECTED_SOURCE_COMMIT": result["source_commit"],
+        "TGW_ACTOR_EXPECTED_CATALOG_HASH": result["catalog_hash"],
+    }
+    if any(environment.get(name) != value for name, value in required_environment.items()):
+        raise ActorStartupError("actor MCP registration environment is stale or mixed")
+    source_root = Path(environment.get("TGW_ACTOR_CONTEXT_SOURCE_ROOT", ""))
+    catalog = _object(home / ".tgw" / "execution-environment-catalog.json", "actor environment catalog")
+    git = _profile_tool(catalog, str(result["profile"]), "git")
+    source_commit, source_tree = _context_source_identity(source_root, git)
+    if source_commit != result["source_commit"] or source_tree != result["source_tree"]:
+        raise ActorStartupError("actor Context MCP source binding is stale or mixed")
+    plan_repository = environment.get("TGW_ACTOR_PLAN_REPOSITORY", "")
+    approved_plan_root = environment.get("TGW_ACTOR_APPROVED_PLAN_ROOT", "")
+    context_runtime_root = environment.get("TGW_ACTOR_CONTEXT_RUNTIME_ROOT", "")
+    environment_catalog = environment.get("TGW_ACTOR_ENVIRONMENT_CATALOG", "")
+    if (
+        plan_repository != "/opt/TGW/library/plans"
+        or approved_plan_root != f"/opt/TGW/library/approved/{result['plan']['commit']}"
+        or context_runtime_root != "/opt/TGW/tgw-lib/var/context"
+        or environment_catalog != "/etc/tgw/execution-environment-catalog.json"
+        or _hash(_object(Path(environment_catalog), "system environment catalog")) != result["catalog_hash"]
+    ):
+        raise ActorStartupError("actor Context MCP platform binding is stale or mixed")
+    return {
+        "TGW_CONTEXT_PLAN_COMMIT": str(result["plan"]["commit"]),
+        "TGW_CONTEXT_PLAN_SOLUTION": str(result["plan"]["solution_hash"]),
+        "TGW_CONTEXT_PLAN_REPOSITORY": plan_repository,
+        "TGW_CONTEXT_PLAN_ROOT": approved_plan_root,
+        "TGW_CONTEXT_SOURCE_ROOT": str(source_root),
+        "TGW_CONTEXT_RUNTIME_ROOT": context_runtime_root,
+        "TGW_CONTEXT_ENVIRONMENT_CATALOG": environment_catalog,
+        "TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH": str(result["catalog_hash"]),
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": str(source_root),
+        "PATH": f"{Path(git).parent}:/usr/bin:/bin",
+    }
 
 
 def main() -> int:
@@ -190,28 +272,16 @@ def main() -> int:
         print(json.dumps({"schema": "tgw-actor-startup-attestation/v1", "status": "HOLD", "reason": str(exc)}, sort_keys=True))
         return 73
     if args.context_mcp:
-        source_root = Path(__file__).resolve().parents[2]
-        os.environ.update(
-            {
-                "TGW_CONTEXT_PLAN_COMMIT": result["plan"]["commit"],
-                "TGW_CONTEXT_PLAN_SOLUTION": result["plan"]["solution_hash"],
-                "TGW_CONTEXT_PLAN_REPOSITORY": os.environ.get(
-                    "TGW_ACTOR_PLAN_REPOSITORY",
-                    "/opt/TGW/library/plans",
-                ),
-                "TGW_CONTEXT_PLAN_ROOT": os.environ.get(
-                    "TGW_ACTOR_APPROVED_PLAN_ROOT",
-                    f"/opt/TGW/library/approved/{result['plan']['commit']}",
-                ),
-                "TGW_CONTEXT_SOURCE_ROOT": str(source_root),
-                "TGW_CONTEXT_RUNTIME_ROOT": os.environ.get(
-                    "TGW_ACTOR_CONTEXT_RUNTIME_ROOT",
-                    "/opt/TGW/tgw-lib/var/context",
-                ),
-                "TGW_CONTEXT_ENVIRONMENT_CATALOG": str(args.home / ".tgw" / "execution-environment-catalog.json"),
-                "TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH": result["catalog_hash"],
-            }
-        )
+        try:
+            os.environ.update(_context_mcp_environment(home=args.home, result=result, binding=binding, environment=os.environ))
+        except (OSError, ValueError) as exc:
+            print(
+                json.dumps(
+                    {"schema": "tgw-actor-startup-attestation/v1", "status": "HOLD", "reason": str(exc)},
+                    sort_keys=True,
+                )
+            )
+            return 73
         from tgw.context_mcp_server import main as context_main
 
         context_main()

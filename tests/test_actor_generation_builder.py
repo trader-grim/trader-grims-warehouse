@@ -1,7 +1,9 @@
+import hashlib
 import json
 import os
 import pwd
 import shutil
+import subprocess
 import sys
 import tomllib
 import uuid
@@ -12,12 +14,79 @@ import yaml
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 
+from tgw import actor_startup
 from tgw.actor_generation_builder import build_actor_generation
 from tgw.actor_startup import ActorStartupError, attest_actor_startup
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "agent-services"))
 from installers.materialize import materialize_complete_actor_contracts  # noqa: E402
+
+
+def _context_source(root: Path) -> tuple[Path, str, str]:
+    source = root / "context-source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "TGW fixture"], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.email", "fixture@example.invalid"], check=True)
+    (source / "source.txt").write_text("exact actor Context MCP source\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "add", "source.txt"], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    commit = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    return source, commit, tree
+
+
+def test_context_mcp_environment_uses_exact_generated_source_and_platform_bindings(monkeypatch):
+    catalog = {"profiles": {"development": {"tools": []}}}
+    catalog_hash = "sha256:" + hashlib.sha256(
+        json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    commit, tree = "e" * 40, "d" * 40
+    result = {
+        "generation": "sha256:" + "1" * 64,
+        "plan": {"commit": "f" * 40, "solution_hash": "sha256:" + "2" * 64},
+        "source_commit": commit,
+        "source_tree": tree,
+        "catalog_hash": catalog_hash,
+        "profile": "development",
+    }
+    binding = {"trusted_public_key": "public-key"}
+    source = "/opt/TGW/w/actors/fixture/exact-source"
+    environment = {
+        "TGW_ACTOR_CONTRACT_PUBLIC_KEY": "public-key",
+        "TGW_ACTOR_EXPECTED_GENERATION": result["generation"],
+        "TGW_ACTOR_EXPECTED_PLAN_COMMIT": result["plan"]["commit"],
+        "TGW_ACTOR_EXPECTED_PLAN_SOLUTION": result["plan"]["solution_hash"],
+        "TGW_ACTOR_EXPECTED_SOURCE_COMMIT": commit,
+        "TGW_ACTOR_EXPECTED_CATALOG_HASH": catalog_hash,
+        "TGW_ACTOR_CONTEXT_SOURCE_ROOT": source,
+        "TGW_ACTOR_PLAN_REPOSITORY": "/opt/TGW/library/plans",
+        "TGW_ACTOR_APPROVED_PLAN_ROOT": f"/opt/TGW/library/approved/{result['plan']['commit']}",
+        "TGW_ACTOR_CONTEXT_RUNTIME_ROOT": "/opt/TGW/tgw-lib/var/context",
+        "TGW_ACTOR_ENVIRONMENT_CATALOG": "/etc/tgw/execution-environment-catalog.json",
+    }
+    monkeypatch.setattr(actor_startup, "_object", lambda _path, _label: catalog)
+    monkeypatch.setattr(actor_startup, "_profile_tool", lambda _catalog, _profile, _name: "/nix/store/git/bin/git")
+    monkeypatch.setattr(actor_startup, "_context_source_identity", lambda _path, _git: (commit, tree))
+
+    activated = actor_startup._context_mcp_environment(
+        home=Path("/home/fixture"), result=result, binding=binding, environment=environment
+    )
+
+    assert activated["TGW_CONTEXT_SOURCE_ROOT"] == source
+    assert activated["TGW_CONTEXT_ENVIRONMENT_CATALOG"] == "/etc/tgw/execution-environment-catalog.json"
+    assert activated["GIT_CONFIG_VALUE_0"] == source
+
+    monkeypatch.setattr(actor_startup, "_context_source_identity", lambda _path, _git: ("0" * 40, tree))
+    with pytest.raises(ActorStartupError, match="source binding"):
+        actor_startup._context_mcp_environment(
+            home=Path("/home/fixture"), result=result, binding=binding, environment=environment
+        )
 
 
 @pytest.fixture
@@ -32,6 +101,7 @@ def durable_path():
 
 def test_builder_emits_signed_complete_external_generation_consumable_by_materializer(durable_path):
     tmp_path = durable_path
+    context_source, source_commit, source_tree = _context_source(tmp_path)
     actor = pwd.getpwuid(os.getuid()).pw_name
     source = tmp_path / "release"
     output = tmp_path / "generations"
@@ -111,12 +181,13 @@ def test_builder_emits_signed_complete_external_generation_consumable_by_materia
         catalog_path=catalog_path,
         descriptor_path=descriptor_path,
         source_root=source,
+        context_source_root=context_source,
         output_root=output,
         signing_key_path=key_path,
         plan_commit="f" * 40,
         solution_hash="sha256:" + "2" * 64,
-        source_commit="e" * 40,
-        source_tree="d" * 40,
+        source_commit=source_commit,
+        source_tree=source_tree,
         freshness_hash="sha256:" + "3" * 64,
     )
     generation_root = output / receipt["generation"].removeprefix("sha256:")
@@ -125,7 +196,7 @@ def test_builder_emits_signed_complete_external_generation_consumable_by_materia
     bootstrap = json.loads((generation_root / "bootstrap" / f"{actor}.json").read_text())
     assert bootstrap["status"] == "READY"
     assert bootstrap["plan"] == {"commit": "f" * 40, "solution_hash": "sha256:" + "2" * 64}
-    assert bootstrap["code_graph"]["commit"] == "e" * 40
+    assert bootstrap["code_graph"]["commit"] == source_commit
     mcp_binding = next(item for item in bundle["actors"][actor]["bindings"] if item["kind"] == "mcp")
     registration = json.loads(Path(mcp_binding["source"]).read_text())
     registration_env = registration["mcpServers"]["tgw-context"]["env"]
@@ -150,7 +221,7 @@ def test_builder_emits_signed_complete_external_generation_consumable_by_materia
         expected_generation=receipt["generation"],
         expected_plan_commit="f" * 40,
         expected_solution_hash="sha256:" + "2" * 64,
-        expected_source_commit="e" * 40,
+        expected_source_commit=source_commit,
         expected_catalog_hash=receipt["generation_identity"]["catalog_hash"],
     )
     assert attestation["status"] == "PASS"
@@ -171,12 +242,13 @@ def test_builder_emits_signed_complete_external_generation_consumable_by_materia
             catalog_path=catalog_path,
             descriptor_path=descriptor_path,
             source_root=source,
+            context_source_root=context_source,
             output_root=output,
             signing_key_path=key_path,
             plan_commit="f" * 40,
             solution_hash="sha256:" + "2" * 64,
-            source_commit="e" * 40,
-            source_tree="d" * 40,
+            source_commit=source_commit,
+            source_tree=source_tree,
             freshness_hash="sha256:" + "3" * 64,
         )
         == receipt
@@ -185,6 +257,7 @@ def test_builder_emits_signed_complete_external_generation_consumable_by_materia
 
 def test_checked_in_descriptor_builds_all_provider_neutral_actor_registrations(durable_path):
     tmp_path = durable_path
+    context_source, source_commit, source_tree = _context_source(tmp_path)
     output = tmp_path / "generations"
     output.mkdir()
     catalog = {
@@ -218,12 +291,13 @@ def test_checked_in_descriptor_builds_all_provider_neutral_actor_registrations(d
         catalog_path=catalog_path,
         descriptor_path=ROOT / "config/environment/actor-generation-descriptor-v1.json",
         source_root=ROOT,
+        context_source_root=context_source,
         output_root=output,
         signing_key_path=key_path,
         plan_commit="f" * 40,
         solution_hash="sha256:" + "2" * 64,
-        source_commit="e" * 40,
-        source_tree="d" * 40,
+        source_commit=source_commit,
+        source_tree=source_tree,
         freshness_hash="sha256:" + "3" * 64,
     )
     generation = output / receipt["generation"].removeprefix("sha256:")
@@ -259,6 +333,7 @@ def test_actor_generation_rejects_content_free_mcp_policy(durable_path):
             endpoint="tgw-context",
             launcher="/opt/TGW/bin/tgw-actor",
             actor_home="/home/fixture",
+            context_source_root="/opt/TGW/w/actors/fixture/source",
             generation="sha256:" + "1" * 64,
             plan_commit="f" * 40,
             solution_hash="sha256:" + "2" * 64,

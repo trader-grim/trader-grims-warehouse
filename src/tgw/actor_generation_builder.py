@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -74,9 +75,31 @@ def _binding_hash(bindings: list[dict[str, str]]) -> str:
     return _hash(sorted(bindings, key=lambda item: item["endpoint"]))
 
 
+def _context_source_identity(path: Path) -> tuple[str, str]:
+    if not path.is_absolute() or not path.is_dir() or path.is_symlink():
+        raise ActorGenerationError("actor Context MCP source root is invalid")
+
+    def git(*args: str) -> str:
+        completed = subprocess.run(
+            ["git", "-c", f"safe.directory={path}", "-C", str(path), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode:
+            raise ActorGenerationError("actor Context MCP source root is not an exact Git source")
+        return completed.stdout.strip()
+
+    commit = git("rev-parse", "HEAD")
+    tree = git("rev-parse", "HEAD^{tree}")
+    if _COMMIT.fullmatch(commit) is None or _COMMIT.fullmatch(tree) is None or git("status", "--porcelain=v1"):
+        raise ActorGenerationError("actor Context MCP source root is stale or dirty")
+    return commit, tree
+
+
 def _mcp_registration(
     *, policy_path: Path, actor: str, endpoint: str, launcher: str,
-    actor_home: str,
+    actor_home: str, context_source_root: str,
     generation: str, plan_commit: str, solution_hash: str,
     source_commit: str, catalog_hash: str, trusted_public_key: str,
 ) -> bytes:
@@ -125,13 +148,18 @@ def _mcp_registration(
     ):
         raise ActorGenerationError(f"MCP registration policy is invalid: {actor}:{endpoint}")
     environment = {
+        "TGW_ACTOR_APPROVED_PLAN_ROOT": f"/opt/TGW/library/approved/{plan_commit}",
         "TGW_ACTOR_CONTRACT_PUBLIC_KEY": trusted_public_key,
+        "TGW_ACTOR_CONTEXT_RUNTIME_ROOT": "/opt/TGW/tgw-lib/var/context",
+        "TGW_ACTOR_CONTEXT_SOURCE_ROOT": context_source_root,
+        "TGW_ACTOR_ENVIRONMENT_CATALOG": "/etc/tgw/execution-environment-catalog.json",
         "TGW_ACTOR_EXPECTED_CATALOG_HASH": catalog_hash,
         "TGW_ACTOR_EXPECTED_GENERATION": generation,
         "TGW_ACTOR_EXPECTED_PLAN_COMMIT": plan_commit,
         "TGW_ACTOR_EXPECTED_PLAN_SOLUTION": solution_hash,
         "TGW_ACTOR_EXPECTED_SOURCE_COMMIT": source_commit,
         "TGW_ACTOR_MCP_POLICY_HASH": _file_hash(policy_path),
+        "TGW_ACTOR_PLAN_REPOSITORY": "/opt/TGW/library/plans",
     }
     if policy["harness"] == "codex":
         lines = [
@@ -176,7 +204,7 @@ def _mcp_registration(
 
 def build_actor_generation(
     *, catalog_path: str | Path, descriptor_path: str | Path, source_root: str | Path,
-    output_root: str | Path, signing_key_path: str | Path, plan_commit: str,
+    context_source_root: str | Path, output_root: str | Path, signing_key_path: str | Path, plan_commit: str,
     solution_hash: str, source_commit: str, source_tree: str, freshness_hash: str,
 ) -> dict[str, Any]:
     """Compile, sign and atomically retain one content-bound actor generation."""
@@ -193,9 +221,13 @@ def build_actor_generation(
     if sorted(descriptor["actors"]) != enabled or not enabled:
         raise ActorGenerationError("actor generation descriptor does not cover every enabled catalog actor")
     source = Path(source_root)
+    context_source = Path(context_source_root)
     output = Path(output_root)
     if not source.is_absolute() or not source.is_dir() or source.is_symlink():
         raise ActorGenerationError("actor generation source root is invalid")
+    observed_source_commit, observed_source_tree = _context_source_identity(context_source)
+    if observed_source_commit != source_commit or observed_source_tree != source_tree:
+        raise ActorGenerationError("actor Context MCP source binding is stale or mixed")
     if not output.is_absolute() or output == Path("/tmp") or Path("/tmp") in output.parents or not output.is_dir() or output.is_symlink():
         raise ActorGenerationError("actor generation output root is not durable")
     key = _signing_key(Path(signing_key_path))
@@ -205,6 +237,7 @@ def build_actor_generation(
         "descriptor_hash": _hash(descriptor), "plan_commit": plan_commit,
         "solution_hash": solution_hash, "source_commit": source_commit,
         "source_tree": source_tree, "freshness_hash": freshness_hash,
+        "context_source_root": str(context_source),
     }
     generation = _hash(generation_body)
     final = output / generation.removeprefix("sha256:")
@@ -269,7 +302,8 @@ def build_actor_generation(
                 policy_path = (source / registration["source"]).resolve(strict=True)
                 generated = _mcp_registration(
                     policy_path=policy_path, actor=actor, endpoint=registration["name"],
-                    launcher=launcher["destination"], actor_home=str(home), generation=generation,
+                    launcher=launcher["destination"], actor_home=str(home),
+                    context_source_root=str(context_source), generation=generation,
                     plan_commit=plan_commit, solution_hash=solution_hash,
                     source_commit=source_commit, catalog_hash=_hash(catalog),
                     trusted_public_key=actor_contract_public_key(key),
@@ -375,6 +409,7 @@ def main() -> int:
     parser.add_argument("--catalog", required=True, type=Path)
     parser.add_argument("--descriptor", required=True, type=Path)
     parser.add_argument("--source-root", required=True, type=Path)
+    parser.add_argument("--context-source-root", required=True, type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--signing-key", required=True, type=Path)
     parser.add_argument("--plan-commit", required=True)
@@ -386,7 +421,8 @@ def main() -> int:
     try:
         receipt = build_actor_generation(
             catalog_path=args.catalog, descriptor_path=args.descriptor,
-            source_root=args.source_root, output_root=args.output_root,
+            source_root=args.source_root, context_source_root=args.context_source_root,
+            output_root=args.output_root,
             signing_key_path=args.signing_key, plan_commit=args.plan_commit,
             solution_hash=args.solution_hash, source_commit=args.source_commit,
             source_tree=args.source_tree, freshness_hash=args.freshness_hash,
