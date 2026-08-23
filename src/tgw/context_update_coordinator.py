@@ -33,6 +33,7 @@ import os
 import pwd
 import re
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -599,7 +600,18 @@ def _git_call(
             "-c", "core.fsmonitor=false",
             "-c", "core.hooksPath=/dev/null",
             "-c", "maintenance.auto=false",
-            *arguments,
+            arguments[0],
+            "--upload-pack=" + " ".join(
+                (
+                    shlex.quote(str(paths.git)),
+                    "-c",
+                    shlex.quote(
+                        f"safe.directory={paths.source_repository / '.git'}"
+                    ),
+                    "upload-pack",
+                )
+            ),
+            *arguments[1:],
         ]
     return _required(runner, command, label)
 
