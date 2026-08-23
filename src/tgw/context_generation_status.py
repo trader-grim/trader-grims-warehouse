@@ -821,9 +821,166 @@ def _verify_actor_generation(
     claimed = _verified_hashed_record(
         receipt, "receipt_hash", "active actor generation receipt"
     )
-    if receipt.get("generation") != generation or receipt.get("status") != "PREPARED":
+    bundle = _protected_json(
+        root / "bundle.json", "active actor generation bundle", trusted_uid,
+    )
+    actors = bundle.get("actors")
+    receipt_actors = receipt.get("actors")
+    if (
+        receipt.get("generation") != generation
+        or receipt.get("status") != "PREPARED"
+        or bundle.get("schema") != "tgw-complete-actor-contract-bundle/v1"
+        or bundle.get("generation") != generation
+        or receipt.get("bundle_hash") != _hash(bundle)
+        or not isinstance(actors, Mapping)
+        or not isinstance(receipt_actors, list)
+        or len(receipt_actors) != len(set(receipt_actors))
+        or set(receipt_actors) != set(_INSTRUCTION_ENTRY_POINTS)
+        or set(actors) != set(_INSTRUCTION_ENTRY_POINTS)
+    ):
         raise ContextGenerationStatusError("active actor generation receipt differs")
-    return {"generation": generation, "receipt_hash": claimed}
+    instructions: dict[str, dict[str, str]] = {}
+    for actor, expected_path in _INSTRUCTION_ENTRY_POINTS.items():
+        specification = actors.get(actor)
+        bindings = (
+            specification.get("bindings")
+            if isinstance(specification, Mapping) else None
+        )
+        if not isinstance(bindings, list):
+            raise ContextGenerationStatusError(
+                "active actor generation instruction binding is absent"
+            )
+        instruction_rows = [
+            item for item in bindings
+            if isinstance(item, Mapping) and item.get("kind") == "instruction"
+        ]
+        if len(instruction_rows) != 1:
+            raise ContextGenerationStatusError(
+                "active actor generation has missing or additional instructions"
+            )
+        instruction = instruction_rows[0]
+        expected_keys = {
+            "kind", "name", "capability", "source", "destination", "sha256",
+        }
+        if (
+            set(instruction) != expected_keys
+            or instruction.get("name") != "agent-entry-point"
+            or instruction.get("capability") != "agent-entry-point"
+            or instruction.get("source") != "AGENTS.md"
+            or instruction.get("destination") != expected_path
+            or _HASH.fullmatch(str(instruction.get("sha256", ""))) is None
+        ):
+            raise ContextGenerationStatusError(
+                "active actor generation instruction binding differs"
+            )
+        instructions[actor] = {
+            "path": expected_path,
+            "sha256": str(instruction["sha256"]),
+        }
+    return {
+        "generation": generation,
+        "receipt_hash": claimed,
+        "instructions": instructions,
+        "instructions_sha256": _hash(instructions),
+    }
+
+
+def _stable_instruction_bytes(
+    path: Path, trusted_uid: int,
+) -> tuple[bytes, str]:
+    """Read one native instruction without trusting its actor-writable parent."""
+
+    try:
+        link_before = path.lstat()
+    except FileNotFoundError as exc:
+        raise ContextGenerationStatusError("MISSING") from exc
+    except OSError as exc:
+        raise ContextGenerationStatusError("UNAVAILABLE") from exc
+
+    if not stat.S_ISLNK(link_before.st_mode):
+        raise ContextGenerationStatusError(
+            "UNBOUND_COPY" if stat.S_ISREG(link_before.st_mode) else "UNSAFE_TYPE"
+        )
+    if link_before.st_uid != trusted_uid or link_before.st_nlink != 1:
+        raise ContextGenerationStatusError("UNSAFE_LINK")
+    try:
+        link_text = os.readlink(path)
+        read_path = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ContextGenerationStatusError("BROKEN_LINK") from exc
+
+    try:
+        descriptor = os.open(
+            read_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        try:
+            before = os.fstat(descriptor)
+            raw = bytearray()
+            maximum = 1024 * 1024
+            while len(raw) <= maximum:
+                chunk = os.read(
+                    descriptor, min(1024 * 1024, maximum + 1 - len(raw))
+                )
+                if not chunk:
+                    break
+                raw.extend(chunk)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        link_after = path.lstat()
+    except FileNotFoundError as exc:
+        raise ContextGenerationStatusError("MISSING") from exc
+    except OSError as exc:
+        raise ContextGenerationStatusError("UNAVAILABLE") from exc
+
+    def identity(value: os.stat_result) -> tuple[int, ...]:
+        return (
+            value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
+            value.st_mode, value.st_uid, value.st_gid, value.st_nlink,
+        )
+
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != trusted_uid
+        or before.st_nlink != 1
+        or before.st_mode & 0o022
+        or len(raw) > 1024 * 1024
+        or identity(before) != identity(after)
+        or identity(link_before) != identity(link_after)
+        or (
+            os.readlink(path) != link_text
+        )
+    ):
+        raise ContextGenerationStatusError("UNSAFE_OR_CHANGED")
+    return bytes(raw), "SYMLINK"
+
+
+def _instruction_readback(
+    expected: Mapping[str, str],
+    trusted_uid: int,
+) -> dict[str, Any]:
+    path = Path(expected["path"])
+    expected_sha256 = expected["sha256"]
+    try:
+        raw, materialization = _stable_instruction_bytes(path, trusted_uid)
+    except ContextGenerationStatusError as exc:
+        return {
+            "path": str(path),
+            "sha256": expected_sha256,
+            "observed_sha256": None,
+            "readback_state": str(exc),
+            "materialization": None,
+        }
+    observed_sha256 = "sha256:" + hashlib.sha256(raw).hexdigest()
+    return {
+        "path": str(path),
+        "sha256": expected_sha256,
+        "observed_sha256": observed_sha256,
+        "readback_state": (
+            "CURRENT" if observed_sha256 == expected_sha256 else "WRONG_HASH"
+        ),
+        "materialization": materialization,
+    }
 
 
 def _verify_selected_release(
@@ -846,11 +1003,6 @@ def _verify_selected_release(
         release / ".release-manifest.json", "selected release manifest", trusted_uid
     )
     manifest_hash = _hash(manifest)
-    if (
-        manifest.get("commit") != revisions.get("source_commit")
-        or manifest.get("git_tree") != revisions.get("source_tree")
-    ):
-        raise ContextGenerationStatusError("selected release source differs")
     if not isinstance(selected_projection, Mapping):
         raise ContextGenerationStatusError("active selected release projection is absent")
     if any(
@@ -863,11 +1015,17 @@ def _verify_selected_release(
         "generation"
     ) != target.parts[1]:
         raise ContextGenerationStatusError("selected release projection differs")
+    target_selected = (
+        manifest.get("commit") == revisions.get("source_commit")
+        and manifest.get("git_tree") == revisions.get("source_tree")
+    )
     return {
+        "path": str(release),
         "generation": target.parts[1],
         "commit": manifest["commit"],
         "tree": manifest["git_tree"],
         "manifest_sha256": manifest_hash,
+        "state": "CURRENT" if target_selected else "UPDATE_PENDING",
     }
 
 
@@ -971,6 +1129,10 @@ def verify_generation_status(
         actor_generation_status = _verify_actor_generation(
             paths, target_generation, trusted_uid
         )
+        instruction_status = {
+            actor: _instruction_readback(expected, trusted_uid)
+            for actor, expected in actor_generation_status["instructions"].items()
+        }
         selected_release_status = _verify_selected_release(
             paths,
             revisions,
@@ -987,17 +1149,27 @@ def verify_generation_status(
         )
         transaction_projection_hash = inner_hash
         actor_verifications = transaction.get("actor_verifications")
+        verified_actor_rows = {
+            str(item.get("actor")): item
+            for item in actor_verifications or []
+            if isinstance(item, Mapping)
+        }
         if (
             not isinstance(actor_verifications, list)
             or state == "CURRENT" and (
                 not actor_verifications
-                or {str(item.get("actor")) for item in actor_verifications if isinstance(item, Mapping)}
-                != set(transaction.get("actors", []))
+                or len(actor_verifications) != len(verified_actor_rows)
+                or set(verified_actor_rows) != set(transaction.get("actors", []))
+                or set(verified_actor_rows) != set(
+                    actor_generation_status["instructions"]
+                )
                 or any(
                     _HASH.fullmatch(str(item.get("primary_real_store_semantic_sha256", ""))) is None
                     or _HASH.fullmatch(str(item.get("instruction_entry_point_sha256", ""))) is None
                     or item.get("instruction_entry_point_path")
-                    != _INSTRUCTION_ENTRY_POINTS.get(str(item.get("actor")))
+                    != actor_generation_status["instructions"][str(item.get("actor"))]["path"]
+                    or item.get("instruction_entry_point_sha256")
+                    != actor_generation_status["instructions"][str(item.get("actor"))]["sha256"]
                     for item in actor_verifications if isinstance(item, Mapping)
                 )
             )
@@ -1033,15 +1205,6 @@ def verify_generation_status(
             or _HASH.fullmatch(str(transaction.get("coordinator_binding_sha256", ""))) is None
         ):
             raise ContextGenerationStatusError("active admission or cold-handoff evidence is incomplete")
-        instruction_status = {
-            str(item["actor"]): {
-                "path": str(item["instruction_entry_point_path"]),
-                "sha256": str(item["instruction_entry_point_sha256"]),
-            }
-            for item in actor_verifications
-            if isinstance(item, Mapping)
-            and item.get("actor") in _INSTRUCTION_ENTRY_POINTS
-        }
         evidence_health = "VERIFIED"
     elif projection.get("state") in {"ACTIVE", "TERMINAL"}:
         raise ContextGenerationStatusError("fleet transaction projection is absent")
@@ -1057,6 +1220,17 @@ def verify_generation_status(
     aggregate = state
     if plan_status is not None and plan_status["state"] == "UPDATE_PENDING" and state == "CURRENT":
         aggregate = "UPDATE_PENDING"
+    if state == "CURRENT" and any(
+        item.get("readback_state") != "CURRENT"
+        for item in instruction_status.values()
+    ):
+        aggregate = "MIXED"
+    if (
+        state == "CURRENT"
+        and selected_release_status is not None
+        and selected_release_status.get("state") != "CURRENT"
+    ):
+        aggregate = "MIXED"
     instruction_status_sha256 = _hash(instruction_status)
     line = (
         f"TGW Context generation: client=INDEPENDENT fleet={state} "
