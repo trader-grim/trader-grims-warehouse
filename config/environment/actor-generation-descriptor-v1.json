@@ -32,7 +32,7 @@
       "bindings": [
         {"kind": "skill", "name": "tgw-plan", "source": "agent-services/skills/tgw-plan", "destination": "/home/deepseek/.dsh/skills/tgw-plan"},
         {"kind": "skill", "name": "tgw-review", "source": "agent-services/skills/tgw-review", "destination": "/home/deepseek/.dsh/skills/tgw-review"},
-        {"kind": "mcp", "name": "tgw-context", "source": "agent-services/harnesses/deepseek/tgw-context-policy.json", "destination": "/home/deepseek/.dsh/tgw-context.patch.yml"},
+        {"kind": "mcp", "name": "tgw-context", "source": "agent-services/harnesses/deepseek/tgw-context-policy.json", "destination": "/home/deepseek/.dsh/cordis.patch.yml"},
         {"kind": "launcher", "name": "launcher", "source": "scripts/tgw_actor_startup.py", "destination": "/home/deepseek/.local/bin/tgw-actor"},
         {"kind": "bootstrap", "name": "bootstrap-receipt", "source": "agent-services/actor-bootstrap/bootstrap-policy-v1.json", "destination": "/home/deepseek/.tgw/bootstrap.json"}
       ]

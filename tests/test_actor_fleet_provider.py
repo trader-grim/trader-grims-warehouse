@@ -19,6 +19,7 @@ from tgw.actor_fleet_provider import (
     _ACTOR_VERIFICATION_MAX_INPUT,
     ActorFleetError,
     ActorFleetProvider,
+    _actor_context_process_inventory,
     _actor_verification_payload,
     _context_registration,
     create_actor_fleet_app,
@@ -186,6 +187,38 @@ def test_context_registration_rejects_destination_swap_after_validation(
     monkeypatch.setattr("tgw.actor_fleet_provider.os.open", swap_before_open)
     with pytest.raises(ActorFleetError, match="binding changed"):
         _context_registration(destination, source)
+
+
+def test_live_process_inventory_distinguishes_stable_and_direct_context_children(durable_path):
+    actor = pwd.getpwuid(os.getuid()).pw_name
+    proc_root = durable_path / "proc"
+    proc_root.mkdir()
+
+    def process(pid, arguments, environment):
+        root = proc_root / str(pid)
+        root.mkdir()
+        (root / "status").write_text(f"Uid:\t{os.getuid()} {os.getuid()} {os.getuid()} {os.getuid()}\nPPid:\t77\n")
+        (root / "stat").write_text(f"{pid} (context mcp) S " + "0 " * 18 + f"{pid * 10}\n")
+        (root / "cmdline").write_bytes(b"\0".join(item.encode() for item in arguments) + b"\0")
+        (root / "environ").write_bytes(b"\0".join(f"{key}={value}".encode() for key, value in environment.items()) + b"\0")
+
+    process(
+        101,
+        ["/opt/python", f"/home/{actor}/.local/bin/tgw-actor", "--context-mcp"],
+        {"TGW_CONTEXT_GENERATION": "sha256:" + "1" * 64, "TGW_CONTEXT_STARTUP_BINDING": "/etc/tgw/actors/x"},
+    )
+    process(
+        102,
+        ["/opt/python", "-m", "tgw.context_mcp_server"],
+        {"TGW_CONTEXT_PLAN_COMMIT": "f" * 40},
+    )
+
+    inventory = _actor_context_process_inventory([actor], proc_root=proc_root)
+
+    assert [(item["pid"], item["stable_launcher"], item["guarded"]) for item in inventory] == [
+        (101, True, True),
+        (102, False, False),
+    ]
 
 
 class _Materializer:
@@ -394,6 +427,8 @@ def _fixture(tmp_path, *, admission_expires_at="2026-08-22T00:00:00Z"):
             "plan_commit": plan_commit,
             "solution_hash": solution,
             "source_commit": source_commit,
+            "source_tree": source_tree,
+            "context_source_root": str(release),
         },
     }
     (generation / "generation-receipt.json").write_text(json.dumps({**receipt_unsigned, "receipt_hash": _hash(receipt_unsigned)}))
@@ -467,6 +502,113 @@ def _fixture(tmp_path, *, admission_expires_at="2026-08-22T00:00:00Z"):
     return config, request, destination
 
 
+def _live_process(request, fixture_root, *, pid, stable=True, current=False):
+    revisions = request["revisions"]
+    return {
+        "actor": request["actors"][0],
+        "pid": pid,
+        "ppid": 7,
+        "start_time": pid * 10,
+        "stable_launcher": stable,
+        "guarded": current,
+        "startup_binding": (
+            str(fixture_root / "startup-bindings" / f"{request['actors'][0]}-startup.json")
+            if current else ""
+        ),
+        "generation": request["successor_generation"] if current else request["predecessor_generation"],
+        "plan": revisions["plan"] if current else "0" * 40,
+        "solution": revisions["solution"] if current else "sha256:" + "0" * 64,
+        "source_commit": revisions["source"] if current else "1" * 40,
+        "source_tree": "d" * 40 if current else "2" * 40,
+        "source_root": str(fixture_root / "releases/candidate") if current else "/predecessor/source",
+        "catalog": revisions["catalog"] if current else "sha256:" + "1" * 64,
+    }
+
+
+def _restart_only_provider(durable_path, inventories, *, restarter=None):
+    config, request, _destination = _fixture(durable_path)
+    if callable(inventories):
+        inventories = inventories(request)
+    service = lambda arguments: subprocess.CompletedProcess(arguments, 0, "active\n", "")
+    sequence = iter(inventories)
+    provider = ActorFleetProvider(
+        config,
+        service_runner=service,
+        actor_context_process_inventory=lambda _actors: next(sequence),
+        actor_context_process_restarter=restarter,
+    )
+    provider._save(
+        {
+            "schema": "tgw-actor-fleet-journal/v1",
+            "transaction_id": request["transaction_id"],
+            "status": "ACTIVATED",
+            "request": request,
+            "candidate_release": None,
+            "materialization": None,
+        }
+    )
+    activated = {
+        "status": "ACTIVATED",
+        "transaction_id": request["transaction_id"],
+        "generation": request["successor_generation"],
+    }
+    return provider, request, activated
+
+
+def test_actor_restart_requires_harness_restart_for_direct_context_child(durable_path):
+    provider, _request_value, activated = _restart_only_provider(
+        durable_path,
+        lambda request: [[_live_process(request, durable_path, pid=41001, stable=False, current=False)]],
+    )
+
+    with pytest.raises(ActorFleetError, match="requires harness restart"):
+        provider.restart(activated)
+
+
+def test_actor_restart_rejects_vacuous_empty_live_proof(durable_path):
+    provider, _request_value, activated = _restart_only_provider(
+        durable_path,
+        lambda request: [[_live_process(request, durable_path, pid=41002, stable=True, current=False)], []],
+        restarter=lambda _processes: [41002],
+    )
+
+    with pytest.raises(ActorFleetError, match="did not converge"):
+        provider.restart(activated)
+
+
+def test_actor_restart_requires_successor_and_is_retryable_when_already_current(durable_path):
+    restarted = []
+
+    def restarter(processes):
+        restarted.append([item["pid"] for item in processes])
+        return [item["pid"] for item in processes]
+
+    provider, request, activated = _restart_only_provider(
+        durable_path,
+        lambda request: [
+            [_live_process(request, durable_path, pid=41003, stable=True, current=False)],
+            [_live_process(request, durable_path, pid=41004, stable=True, current=True)],
+            [_live_process(request, durable_path, pid=41004, stable=True, current=True)],
+        ],
+        restarter=restarter,
+    )
+    successor = _live_process(request, durable_path, pid=41004, stable=True, current=True)
+    result = provider.restart(activated)
+    assert result["status"] == "RESTARTED"
+    assert restarted == [[41003]]
+    assert provider.health(result)["status"] == "HEALTHY"
+
+    # A retry after the harness has already converged does not disconnect it.
+    journal = provider._journal(request["transaction_id"])
+    journal["status"] = "ACTIVATED"
+    provider._save(journal)
+    retry_inventory = iter([[successor], [successor]])
+    provider._actor_context_process_inventory = lambda _actors: next(retry_inventory)
+    retry = provider.restart(activated)
+    assert retry["status"] == "RESTARTED"
+    assert restarted[-1] == []
+
+
 def test_actor_provider_holds_on_drifted_attempt_root(durable_path):
     config, _request, _destination = _fixture(durable_path)
     Path(config["attempt_cache_root"]).chmod(0o750)
@@ -492,6 +634,8 @@ def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_pat
         materializer_loader=lambda _: materializer,
         current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
         actor_context_probe=lambda actor, _path, _source, value: _context_proof(actor, value),
+        actor_context_process_inventory=lambda _actors: [],
+        actor_context_process_restarter=lambda _processes: [],
     )
     assert provider.quiesce(request)["status"] == "QUIESCED"
     rebuilt = provider.rebuild(request)
@@ -509,6 +653,8 @@ def test_actor_provider_materializes_verifies_repairs_and_rolls_back(durable_pat
         service_runner=service,
         materializer_loader=lambda _: materializer,
         current_time=lambda: datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
+        actor_context_process_inventory=lambda _actors: [],
+        actor_context_process_restarter=lambda _processes: [],
     )
     subprocess_calls = []
 

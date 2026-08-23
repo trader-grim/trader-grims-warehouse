@@ -62,10 +62,15 @@ def _startup_binding(path: Path, actor: str) -> dict[str, str]:
         "expected_plan_commit",
         "expected_solution_hash",
         "expected_source_commit",
+        "expected_source_tree",
+        "context_source_root",
         "expected_catalog_hash",
     }
-    if set(value) != required or value.get("schema") != "tgw-actor-startup-binding/v1" or value.get("actor") != actor:
+    if set(value) != required or value.get("schema") != "tgw-actor-startup-binding/v2" or value.get("actor") != actor:
         raise ActorStartupError("actor startup binding is invalid")
+    source_root = Path(str(value.get("context_source_root", "")))
+    if not source_root.is_absolute() or _COMMIT.fullmatch(str(value.get("expected_source_tree", ""))) is None:
+        raise ActorStartupError("actor startup source binding is invalid")
     return {key: str(raw) for key, raw in value.items()}
 
 
@@ -201,40 +206,33 @@ def attest_actor_startup(
 
 
 def _context_mcp_environment(
-    *, home: Path, result: Mapping[str, Any], binding: Mapping[str, str], environment: Mapping[str, str]
+    *, home: Path, result: Mapping[str, Any], binding: Mapping[str, str], binding_path: Path
 ) -> dict[str, str]:
-    required_environment = {
-        "TGW_ACTOR_CONTRACT_PUBLIC_KEY": binding["trusted_public_key"],
-        "TGW_ACTOR_EXPECTED_GENERATION": result["generation"],
-        "TGW_ACTOR_EXPECTED_PLAN_COMMIT": result["plan"]["commit"],
-        "TGW_ACTOR_EXPECTED_PLAN_SOLUTION": result["plan"]["solution_hash"],
-        "TGW_ACTOR_EXPECTED_SOURCE_COMMIT": result["source_commit"],
-        "TGW_ACTOR_EXPECTED_CATALOG_HASH": result["catalog_hash"],
-    }
-    if any(environment.get(name) != value for name, value in required_environment.items()):
-        raise ActorStartupError("actor MCP registration environment is stale or mixed")
-    source_root = Path(environment.get("TGW_ACTOR_CONTEXT_SOURCE_ROOT", ""))
+    # Harnesses cache MCP configuration for the lifetime of the client process.
+    # Generation-specific values therefore cannot be trusted from the inherited
+    # registration environment.  The root-owned startup record is the sole
+    # mutable cutover pointer; every new launcher invocation derives from it.
+    source_root = Path(binding["context_source_root"])
     catalog = _object(home / ".tgw" / "execution-environment-catalog.json", "actor environment catalog")
     git = _profile_tool(catalog, str(result["profile"]), "git")
     source_commit, source_tree = _context_source_identity(source_root, git)
-    if source_commit != result["source_commit"] or source_tree != result["source_tree"]:
+    if (
+        source_commit != result["source_commit"]
+        or source_tree != result["source_tree"]
+        or source_tree != binding["expected_source_tree"]
+    ):
         raise ActorStartupError("actor Context MCP source binding is stale or mixed")
-    plan_repository = environment.get("TGW_ACTOR_PLAN_REPOSITORY", "")
-    approved_plan_root = environment.get("TGW_ACTOR_APPROVED_PLAN_ROOT", "")
-    context_runtime_root = environment.get("TGW_ACTOR_CONTEXT_RUNTIME_ROOT", "")
-    context_cache_root = environment.get("TGW_ACTOR_CONTEXT_CACHE_ROOT", "")
-    environment_catalog = environment.get("TGW_ACTOR_ENVIRONMENT_CATALOG", "")
+    plan_repository = "/opt/TGW/library/plans"
+    approved_plan_root = f"/opt/TGW/library/approved/{result['plan']['commit']}"
+    context_runtime_root = "/opt/TGW/tgw-lib/var/context"
+    environment_catalog = "/etc/tgw/execution-environment-catalog.json"
     expected_cache_root = (
         f"/opt/TGW/var/cache/tgw/actors/{result['actor']}/{str(result['generation']).removeprefix('sha256:')}/context-mcp"
     )
+    context_cache_root = expected_cache_root
     if (
-        plan_repository != "/opt/TGW/library/plans"
-        or approved_plan_root != f"/opt/TGW/library/approved/{result['plan']['commit']}"
-        or context_runtime_root != "/opt/TGW/tgw-lib/var/context"
-        or context_cache_root != expected_cache_root
-        or Path(context_cache_root).is_symlink()
+        Path(context_cache_root).is_symlink()
         or not Path(context_cache_root).is_dir()
-        or environment_catalog != "/etc/tgw/execution-environment-catalog.json"
         or _hash(_object(Path(environment_catalog), "system environment catalog")) != result["catalog_hash"]
     ):
         raise ActorStartupError("actor Context MCP platform binding is stale or mixed")
@@ -247,6 +245,11 @@ def _context_mcp_environment(
         "TGW_CONTEXT_RUNTIME_ROOT": context_runtime_root,
         "TGW_CONTEXT_ENVIRONMENT_CATALOG": environment_catalog,
         "TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH": str(result["catalog_hash"]),
+        "TGW_CONTEXT_ACTOR": str(result["actor"]),
+        "TGW_CONTEXT_GENERATION": str(result["generation"]),
+        "TGW_CONTEXT_SOURCE_COMMIT": str(result["source_commit"]),
+        "TGW_CONTEXT_SOURCE_TREE": str(result["source_tree"]),
+        "TGW_CONTEXT_STARTUP_BINDING": str(binding_path),
         "HOME": str(home),
         "LANG": "C.UTF-8",
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -288,7 +291,7 @@ def main() -> int:
                 home=args.home,
                 result=result,
                 binding=binding,
-                environment=os.environ,
+                binding_path=binding_path,
             )
         except (OSError, ValueError) as exc:
             print(

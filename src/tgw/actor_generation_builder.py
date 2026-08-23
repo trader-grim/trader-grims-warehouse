@@ -122,9 +122,7 @@ def _context_source_identity(path: Path, git_path: str) -> tuple[str, str]:
 
 def _mcp_registration(
     *, policy_path: Path, actor: str, endpoint: str, launcher: str,
-    actor_home: str, context_source_root: str,
-    generation: str, plan_commit: str, solution_hash: str,
-    source_commit: str, catalog_hash: str, trusted_public_key: str,
+    actor_home: str,
 ) -> bytes:
     policy = _read_json(policy_path, f"MCP registration policy {actor}:{endpoint}")
     expected_fields = {
@@ -170,22 +168,13 @@ def _mcp_registration(
         }
     ):
         raise ActorGenerationError(f"MCP registration policy is invalid: {actor}:{endpoint}")
+    # This table is deliberately generation-invariant.  Codex, Claude, and
+    # Deepseek retain their MCP tables in long-lived client processes.  The
+    # stable launcher resolves the current root-owned actor startup binding at
+    # each child start instead of inheriting a cached Plan/source generation.
     environment = {
-        "TGW_ACTOR_APPROVED_PLAN_ROOT": f"/opt/TGW/library/approved/{plan_commit}",
-        "TGW_ACTOR_CONTRACT_PUBLIC_KEY": trusted_public_key,
-        "TGW_ACTOR_CONTEXT_RUNTIME_ROOT": "/opt/TGW/tgw-lib/var/context",
-        "TGW_ACTOR_CONTEXT_CACHE_ROOT": (
-            f"/opt/TGW/var/cache/tgw/actors/{actor}/{generation.removeprefix('sha256:')}/context-mcp"
-        ),
-        "TGW_ACTOR_CONTEXT_SOURCE_ROOT": context_source_root,
-        "TGW_ACTOR_ENVIRONMENT_CATALOG": "/etc/tgw/execution-environment-catalog.json",
-        "TGW_ACTOR_EXPECTED_CATALOG_HASH": catalog_hash,
-        "TGW_ACTOR_EXPECTED_GENERATION": generation,
-        "TGW_ACTOR_EXPECTED_PLAN_COMMIT": plan_commit,
-        "TGW_ACTOR_EXPECTED_PLAN_SOLUTION": solution_hash,
-        "TGW_ACTOR_EXPECTED_SOURCE_COMMIT": source_commit,
-        "TGW_ACTOR_MCP_POLICY_HASH": _file_hash(policy_path),
-        "TGW_ACTOR_PLAN_REPOSITORY": "/opt/TGW/library/plans",
+        "TGW_ACTOR_CONTEXT_ENDPOINT": endpoint,
+        "TGW_ACTOR_CONTEXT_REGISTRATION": "stable-launcher-v1",
     }
     if policy["harness"] == "codex":
         lines = [
@@ -331,10 +320,6 @@ def build_actor_generation(
                 generated = _mcp_registration(
                     policy_path=policy_path, actor=actor, endpoint=registration["name"],
                     launcher=launcher["destination"], actor_home=str(home),
-                    context_source_root=str(context_source), generation=generation,
-                    plan_commit=plan_commit, solution_hash=solution_hash,
-                    source_commit=source_commit, catalog_hash=_hash(catalog),
-                    trusted_public_key=actor_contract_public_key(key),
                 )
                 harness = _read_json(policy_path, "MCP registration policy").get("harness")
                 suffix = {"codex": ".toml", "deepseek": ".yml"}.get(harness, ".json")

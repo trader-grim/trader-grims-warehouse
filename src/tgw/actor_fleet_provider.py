@@ -17,6 +17,8 @@ import json
 import os
 import pwd
 import re
+import select
+import signal
 import stat
 import subprocess
 import sys
@@ -220,6 +222,124 @@ def _context_registration(
     ):
         raise ActorFleetError("actor Context MCP registration is incomplete")
     return command, list(args), dict(environment)
+
+
+def _actor_context_process_inventory(
+    actors: list[str],
+    *,
+    proc_root: Path = Path("/proc"),
+) -> list[dict[str, Any]]:
+    """Return every live Context MCP child owned by a registered actor."""
+    actor_by_uid = {pwd.getpwnam(actor).pw_uid: actor for actor in actors}
+    inventory: list[dict[str, Any]] = []
+    for process_root in proc_root.iterdir():
+        if not process_root.name.isdigit() or not process_root.is_dir():
+            continue
+        try:
+            status_rows = process_root.joinpath("status").read_text(encoding="utf-8").splitlines()
+            status = {
+                row.split(":", 1)[0]: row.split(":", 1)[1].strip()
+                for row in status_rows
+                if ":" in row
+            }
+            uid = int(status["Uid"].split()[0])
+            actor = actor_by_uid.get(uid)
+            if actor is None:
+                continue
+            arguments = [
+                raw.decode("utf-8", errors="replace")
+                for raw in process_root.joinpath("cmdline").read_bytes().split(b"\0")
+                if raw
+            ]
+            direct = any(
+                arguments[index:index + 2] == ["-m", "tgw.context_mcp_server"]
+                for index in range(max(0, len(arguments) - 1))
+            )
+            stable_launcher = (
+                "--context-mcp" in arguments
+                and f"/home/{actor}/.local/bin/tgw-actor" in arguments
+            )
+            actor_launcher = "--context-mcp" in arguments and any(
+                Path(argument).name in {"tgw-actor", "tgw_actor_startup.py"}
+                for argument in arguments
+            )
+            if not direct and not actor_launcher:
+                continue
+            raw_stat = process_root.joinpath("stat").read_text(encoding="utf-8")
+            # The executable name is parenthesized and may contain spaces; the
+            # start-time field is field 22, or index 19 after the final ') '.
+            start_time = int(raw_stat.rsplit(") ", 1)[1].split()[19])
+            environment = {}
+            for row in process_root.joinpath("environ").read_bytes().split(b"\0"):
+                if b"=" in row:
+                    name, raw = row.split(b"=", 1)
+                    environment[name.decode(errors="replace")] = raw.decode(errors="replace")
+            inventory.append(
+                {
+                    "actor": actor,
+                    "pid": int(process_root.name),
+                    "ppid": int(status.get("PPid", "0")),
+                    "start_time": start_time,
+                    "stable_launcher": stable_launcher,
+                    "guarded": bool(environment.get("TGW_CONTEXT_STARTUP_BINDING")),
+                    "startup_binding": environment.get("TGW_CONTEXT_STARTUP_BINDING", ""),
+                    "generation": environment.get("TGW_CONTEXT_GENERATION", ""),
+                    "plan": environment.get("TGW_CONTEXT_PLAN_COMMIT", ""),
+                    "solution": environment.get("TGW_CONTEXT_PLAN_SOLUTION", ""),
+                    "source_commit": environment.get("TGW_CONTEXT_SOURCE_COMMIT", ""),
+                    "source_tree": environment.get("TGW_CONTEXT_SOURCE_TREE", ""),
+                    "source_root": environment.get("TGW_CONTEXT_SOURCE_ROOT", ""),
+                    "catalog": environment.get("TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH", ""),
+                }
+            )
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except (KeyError, OSError, ValueError) as exc:
+            raise ActorFleetError(f"actor Context MCP live-process inspection failed: {process_root.name}") from exc
+    return sorted(inventory, key=lambda item: (item["actor"], item["pid"]))
+
+
+def _restart_actor_context_processes(processes: list[Mapping[str, Any]]) -> list[int]:
+    """Restart only stable-launcher MCP children; a direct child needs its harness restarted."""
+    unstable = [item for item in processes if item.get("stable_launcher") is not True]
+    if unstable:
+        identities = ",".join(f"{item.get('actor')}:{item.get('pid')}" for item in unstable)
+        raise ActorFleetError(f"active actor Context MCP requires harness restart: {identities}")
+    pids = sorted({int(item["pid"]) for item in processes})
+    descriptors: dict[int, int] = {}
+    poller = select.poll()
+    try:
+        for process in processes:
+            pid = int(process["pid"])
+            descriptor: int | None = None
+            try:
+                descriptor = os.pidfd_open(pid)
+                raw_stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+                observed_start = int(raw_stat.rsplit(") ", 1)[1].split()[19])
+                if observed_start != process.get("start_time"):
+                    raise ActorFleetError("actor Context MCP process identity changed before restart")
+                signal.pidfd_send_signal(descriptor, signal.SIGTERM)
+            except (FileNotFoundError, ProcessLookupError):
+                if descriptor is not None:
+                    os.close(descriptor)
+                continue
+            except Exception:
+                if descriptor is not None:
+                    os.close(descriptor)
+                raise
+            assert descriptor is not None
+            descriptors[descriptor] = pid
+            poller.register(descriptor, select.POLLIN)
+        for descriptor, _event in poller.poll(5000):
+            if descriptor in descriptors:
+                os.close(descriptor)
+                descriptors.pop(descriptor)
+        if descriptors:
+            raise ActorFleetError("actor Context MCP child restart did not complete")
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+    return pids
 
 
 def _actor_context_mcp_probe(
@@ -569,6 +689,8 @@ class ActorFleetProvider:
         materializer_loader: Callable[[Path], Any] | None = None,
         current_time: Callable[[], datetime] | None = None,
         actor_context_probe: Callable[[str, Path, Path, Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        actor_context_process_inventory: Callable[[list[str]], list[dict[str, Any]]] | None = None,
+        actor_context_process_restarter: Callable[[list[Mapping[str, Any]]], list[int]] | None = None,
     ):
         required = {
             "schema",
@@ -647,6 +769,8 @@ class ActorFleetProvider:
         self._run = service_runner or self._run_service
         self._load_materializer = materializer_loader or self._materializer
         self._actor_context_probe = actor_context_probe or _actor_context_mcp_probe
+        self._actor_context_process_inventory = actor_context_process_inventory or _actor_context_process_inventory
+        self._actor_context_process_restarter = actor_context_process_restarter or _restart_actor_context_processes
         self._current_time = current_time or (lambda: datetime.now(timezone.utc))
 
     def authorized(self, authorization: str | None) -> bool:
@@ -689,6 +813,34 @@ class ActorFleetProvider:
 
     def _save(self, journal: Mapping[str, Any]) -> None:
         _atomic(self._journal_path(str(journal["transaction_id"])), journal)
+
+    def _current_context_processes(
+        self,
+        processes: list[Mapping[str, Any]],
+        request: Mapping[str, Any],
+    ) -> bool:
+        revisions = request["revisions"]
+        source_bindings = {
+            actor: self._startup_binding(actor, request)
+            for actor in request["actors"]
+        }
+        return all(
+            str(item.get("actor")) in source_bindings
+            and item.get("stable_launcher") is True
+            and item.get("guarded") is True
+            and item.get("startup_binding")
+            == str(self.startup_binding_root / f"{item.get('actor')}-startup.json")
+            and item.get("generation") == request["successor_generation"]
+            and item.get("plan") == revisions["plan"]
+            and item.get("solution") == revisions["solution"]
+            and item.get("source_commit") == revisions["source"]
+            and item.get("source_tree")
+            == source_bindings[str(item.get("actor"))]["expected_source_tree"]
+            and item.get("source_root")
+            == source_bindings[str(item.get("actor"))]["context_source_root"]
+            and item.get("catalog") == revisions["catalog"]
+            for item in processes
+        )
 
     def _journal_release(self, journal: Mapping[str, Any]) -> Path:
         raw = journal.get("candidate_release")
@@ -802,14 +954,31 @@ class ActorFleetProvider:
         return self._load_materializer(release), bundle, contracts
 
     def _startup_binding(self, actor: str, request: Mapping[str, Any]) -> dict[str, str]:
+        receipt = _read_json(
+            self._generation_root(request) / "generation-receipt.json",
+            "actor generation receipt",
+        )
+        identity = receipt.get("generation_identity")
+        source_root = Path(str(identity.get("context_source_root", ""))) if isinstance(identity, Mapping) else Path()
+        source_tree = str(identity.get("source_tree", "")) if isinstance(identity, Mapping) else ""
+        if (
+            not source_root.is_absolute()
+            or not source_root.is_dir()
+            or source_root.is_symlink()
+            or _COMMIT.fullmatch(source_tree) is None
+            or identity.get("source_commit") != request["revisions"]["source"]
+        ):
+            raise ActorFleetError("actor generation Context source binding is invalid")
         return {
-            "schema": "tgw-actor-startup-binding/v1",
+            "schema": "tgw-actor-startup-binding/v2",
             "actor": actor,
             "trusted_public_key": self.contract_public_key,
             "expected_generation": str(request["successor_generation"]),
             "expected_plan_commit": str(request["revisions"]["plan"]),
             "expected_solution_hash": str(request["revisions"]["solution"]),
             "expected_source_commit": str(request["revisions"]["source"]),
+            "expected_source_tree": source_tree,
+            "context_source_root": str(source_root),
             "expected_catalog_hash": str(request["revisions"]["catalog"]),
         }
 
@@ -959,19 +1128,67 @@ class ActorFleetProvider:
         journal = self._journal(str(activated.get("transaction_id")))
         if journal["status"] != "ACTIVATED" or activated.get("generation") != journal["request"]["successor_generation"]:
             raise ActorFleetError("actor restart is not bound to activation")
+        request = _request(journal["request"])
+        before = self._actor_context_process_inventory(request["actors"])
+        current_before = [item for item in before if self._current_context_processes([item], request)]
+        stale_before = [item for item in before if item not in current_before]
+        restarted_pids = self._actor_context_process_restarter(stale_before)
         self._service("restart", expected="active")
+        after = self._actor_context_process_inventory(request["actors"])
+        restarted_actors = {str(item["actor"]) for item in stale_before}
+        successor_actors = {
+            str(item["actor"])
+            for item in after
+            if item.get("pid") not in restarted_pids
+            and self._current_context_processes([item], request)
+        }
+        if (
+            any(item.get("pid") in restarted_pids for item in after)
+            or not self._current_context_processes(after, request)
+            or not restarted_actors.issubset(successor_actors)
+        ):
+            raise ActorFleetError("actor Context MCP live processes did not converge after restart")
+        process_restart = {
+            "schema": "tgw-actor-context-process-restart/v1",
+            "before": before,
+            "restarted_pids": restarted_pids,
+            "after": after,
+        }
         journal["status"] = "RESTARTED"
+        journal["context_process_restart"] = process_restart
         self._save(journal)
-        return {"status": "RESTARTED", "transaction_id": journal["transaction_id"], "services": self.services}
+        return {
+            "status": "RESTARTED",
+            "transaction_id": journal["transaction_id"],
+            "services": self.services,
+            "context_process_restart_hash": _hash(process_restart),
+        }
 
     def health(self, restarted: Mapping[str, Any]) -> dict[str, Any]:
         journal = self._journal(str(restarted.get("transaction_id")))
         if journal["status"] != "RESTARTED":
             raise ActorFleetError("actor health is not bound to restart")
         self._service("is-active", expected="active")
+        request = _request(journal["request"])
+        processes = self._actor_context_process_inventory(request["actors"])
+        restart_proof = journal.get("context_process_restart")
+        required_actors = {
+            str(item["actor"])
+            for item in restart_proof.get("before", [])
+            if item.get("pid") in set(restart_proof.get("restarted_pids", []))
+        } if isinstance(restart_proof, Mapping) else set()
+        live_actors = {str(item["actor"]) for item in processes}
+        if not self._current_context_processes(processes, request) or not required_actors.issubset(live_actors):
+            raise ActorFleetError("actor Context MCP live process binding is stale or mixed")
         journal["status"] = "HEALTHY"
+        journal["context_process_health"] = processes
         self._save(journal)
-        return {"status": "HEALTHY", "transaction_id": journal["transaction_id"], "services": self.services}
+        return {
+            "status": "HEALTHY",
+            "transaction_id": journal["transaction_id"],
+            "services": self.services,
+            "context_processes_hash": _hash(processes),
+        }
 
     def verify_actor(self, actor: str, request: Mapping[str, Any]) -> dict[str, Any]:
         value = _request(request)
@@ -1062,6 +1279,9 @@ class ActorFleetProvider:
             bundle=bundle,
             contract=contract,
         )
+        live_processes = self._actor_context_process_inventory(value["actors"])
+        if not self._current_context_processes(live_processes, value):
+            raise ActorFleetError("actor verification found stale live Context MCP process")
         journal["status"] = "VERIFYING"
         self._save(journal)
         return {
@@ -1078,6 +1298,7 @@ class ActorFleetProvider:
             "context_mcp_proof_hash": proof["context_mcp_proof"]["proof_hash"],
             "bindings_hash": _hash(bindings),
             "actor_proof_hash": _hash(proof),
+            "live_context_processes_hash": _hash(live_processes),
         }
 
     def rollback(self, request: Mapping[str, Any]) -> dict[str, Any]:

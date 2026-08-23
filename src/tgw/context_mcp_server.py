@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from functools import lru_cache
@@ -122,7 +123,49 @@ def _approved_solution() -> str:
     return solution
 
 
+def _current_actor_startup_binding() -> dict[str, str] | None:
+    """Fail closed when this long-lived MCP child predates fleet cutover."""
+    raw_path = os.environ.get("TGW_CONTEXT_STARTUP_BINDING", "")
+    if not raw_path:
+        return None
+    path = Path(raw_path)
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise ContextError("actor startup binding is unavailable")
+    observed = path.stat(follow_symlinks=False)
+    if observed.st_uid != 0 or observed.st_mode & 0o022 or not stat.S_ISREG(observed.st_mode):
+        raise ContextError("actor startup binding is not root-owned and immutable")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ContextError("actor startup binding is invalid") from exc
+    required = {
+        "schema", "actor", "trusted_public_key", "expected_generation",
+        "expected_plan_commit", "expected_solution_hash",
+        "expected_source_commit", "expected_source_tree",
+        "context_source_root", "expected_catalog_hash",
+    }
+    expected = {
+        "schema": "tgw-actor-startup-binding/v2",
+        "actor": os.environ.get("TGW_CONTEXT_ACTOR", ""),
+        "expected_generation": os.environ.get("TGW_CONTEXT_GENERATION", ""),
+        "expected_plan_commit": os.environ.get("TGW_CONTEXT_PLAN_COMMIT", ""),
+        "expected_solution_hash": os.environ.get("TGW_CONTEXT_PLAN_SOLUTION", ""),
+        "expected_source_commit": os.environ.get("TGW_CONTEXT_SOURCE_COMMIT", ""),
+        "expected_source_tree": os.environ.get("TGW_CONTEXT_SOURCE_TREE", ""),
+        "context_source_root": os.environ.get("TGW_CONTEXT_SOURCE_ROOT", ""),
+        "expected_catalog_hash": os.environ.get("TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH", ""),
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != required
+        or any(value.get(name) != expected_value for name, expected_value in expected.items())
+    ):
+        raise ContextError("actor Context MCP process is stale after fleet cutover")
+    return {name: str(raw) for name, raw in value.items()}
+
+
 def _bindings() -> dict[str, Any]:
+    startup_binding = _current_actor_startup_binding()
     plan_root = _path_env("TGW_CONTEXT_PLAN_ROOT", "/opt/TGW/tgw-lib/runtime/approved-plan")
     plan_repository = _path_env("TGW_CONTEXT_PLAN_REPOSITORY", "/opt/TGW/library/plans")
     source_root = _path_env(
@@ -171,7 +214,15 @@ def _bindings() -> dict[str, Any]:
         raise ContextError("canonical Plan evidence HEAD does not descend from the approved Plan")
     source_commit = _git(source_root, "rev-parse", "HEAD^{commit}")
     assert isinstance(source_commit, str)
+    source_tree = _git(source_root, "rev-parse", f"{source_commit}^{{tree}}")
+    assert isinstance(source_tree, str)
     source_status = _git(source_root, "status", "--porcelain=v1", "--untracked-files=all")
+    if startup_binding is not None and (
+        source_commit != startup_binding["expected_source_commit"]
+        or source_tree != startup_binding["expected_source_tree"]
+        or source_status
+    ):
+        raise ContextError("actor Context MCP source is stale or dirty after fleet cutover")
     return {
         "plan_root": plan_root,
         "plan_repository": plan_repository,
@@ -182,7 +233,7 @@ def _bindings() -> dict[str, Any]:
         "plan_repository_tree": _git(plan_repository, "rev-parse", f"{evidence_head}^{{tree}}"),
         "source_root": source_root,
         "source_commit": source_commit,
-        "source_tree": _git(source_root, "rev-parse", f"{source_commit}^{{tree}}"),
+        "source_tree": source_tree,
         "source_worktree_clean": not bool(source_status),
         "source_status_sha256": _sha(str(source_status).encode()),
         "runtime_root": runtime_root,

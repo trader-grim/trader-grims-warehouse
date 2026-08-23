@@ -65,7 +65,11 @@ def test_context_mcp_environment_uses_exact_generated_source_and_platform_bindin
         "catalog_hash": catalog_hash,
         "profile": "development",
     }
-    binding = {"trusted_public_key": "public-key"}
+    binding = {
+        "trusted_public_key": "public-key",
+        "context_source_root": "/opt/TGW/w/actors/fixture/exact-source",
+        "expected_source_tree": tree,
+    }
     source = "/opt/TGW/w/actors/fixture/exact-source"
     environment = {
         "TGW_ACTOR_CONTRACT_PUBLIC_KEY": "public-key",
@@ -88,20 +92,27 @@ def test_context_mcp_environment_uses_exact_generated_source_and_platform_bindin
     monkeypatch.setattr(actor_startup, "_context_source_identity", lambda _path, _git: (commit, tree))
     monkeypatch.setattr(Path, "is_dir", lambda _path: True)
     monkeypatch.setattr(Path, "is_symlink", lambda _path: False)
+    monkeypatch.setenv("TGW_ACTOR_EXPECTED_GENERATION", "sha256:" + "9" * 64)
 
     activated = actor_startup._context_mcp_environment(
-        home=Path("/home/fixture"), result=result, binding=binding, environment=environment
+        home=Path("/home/fixture"), result=result, binding=binding,
+        binding_path=Path("/etc/tgw/actors/fixture-startup.json"),
     )
 
     assert activated["TGW_CONTEXT_SOURCE_ROOT"] == source
     assert activated["TGW_CONTEXT_ENVIRONMENT_CATALOG"] == "/etc/tgw/execution-environment-catalog.json"
     assert activated["GIT_CONFIG_VALUE_0"] == source
     assert activated["TMPDIR"] == environment["TGW_ACTOR_CONTEXT_CACHE_ROOT"]
+    assert activated["TGW_CONTEXT_GENERATION"] == result["generation"]
+    assert activated["TGW_CONTEXT_SOURCE_COMMIT"] == commit
+    assert activated["TGW_CONTEXT_SOURCE_TREE"] == tree
+    assert activated["TGW_CONTEXT_STARTUP_BINDING"] == "/etc/tgw/actors/fixture-startup.json"
 
     monkeypatch.setattr(actor_startup, "_context_source_identity", lambda _path, _git: ("0" * 40, tree))
     with pytest.raises(ActorStartupError, match="source binding"):
         actor_startup._context_mcp_environment(
-            home=Path("/home/fixture"), result=result, binding=binding, environment=environment
+            home=Path("/home/fixture"), result=result, binding=binding,
+            binding_path=Path("/etc/tgw/actors/fixture-startup.json"),
         )
 
 
@@ -227,8 +238,29 @@ def test_builder_emits_signed_complete_external_generation_consumable_by_materia
     registration = json.loads(Path(mcp_binding["source"]).read_text())
     registration_env = registration["mcpServers"]["tgw-context"]["env"]
     assert registration["tgw"]["fallback"] == "forbidden"
-    assert registration_env["TGW_ACTOR_EXPECTED_GENERATION"] == receipt["generation"]
-    assert registration_env["TGW_ACTOR_EXPECTED_PLAN_COMMIT"] == "f" * 40
+    assert registration_env == {
+        "TGW_ACTOR_CONTEXT_ENDPOINT": "tgw-context",
+        "TGW_ACTOR_CONTEXT_REGISTRATION": "stable-launcher-v1",
+    }
+    successor = build_actor_generation(
+        catalog_path=catalog_path,
+        descriptor_path=descriptor_path,
+        source_root=source,
+        context_source_root=context_source,
+        output_root=output,
+        signing_key_path=key_path,
+        plan_commit="a" * 40,
+        solution_hash="sha256:" + "4" * 64,
+        source_commit=source_commit,
+        source_tree=source_tree,
+        freshness_hash="sha256:" + "5" * 64,
+    )
+    successor_root = output / successor["generation"].removeprefix("sha256:")
+    successor_bundle = json.loads((successor_root / "bundle.json").read_text())
+    successor_mcp = next(
+        item for item in successor_bundle["actors"][actor]["bindings"] if item["kind"] == "mcp"
+    )
+    assert Path(successor_mcp["source"]).read_bytes() == Path(mcp_binding["source"]).read_bytes()
     applied = materialize_complete_actor_contracts(
         bundle,
         source_root=source,
@@ -333,14 +365,20 @@ def test_checked_in_descriptor_builds_all_provider_neutral_actor_registrations(d
     codex_binding = next(item for item in bundle["actors"]["codex"]["bindings"] if item["kind"] == "mcp")
     codex_config = tomllib.loads(Path(codex_binding["source"]).read_text())
     assert codex_config["mcp_servers"]["tgw-context"]["args"] == ["--context-mcp"]
-    assert codex_config["mcp_servers"]["tgw-context"]["env"]["TGW_ACTOR_EXPECTED_GENERATION"] == receipt["generation"]
+    assert codex_config["mcp_servers"]["tgw-context"]["env"] == {
+        "TGW_ACTOR_CONTEXT_ENDPOINT": "tgw-context",
+        "TGW_ACTOR_CONTEXT_REGISTRATION": "stable-launcher-v1",
+    }
     deepseek_binding = next(item for item in bundle["actors"]["deepseek"]["bindings"] if item["kind"] == "mcp")
     deepseek_patch = yaml.safe_load(Path(deepseek_binding["source"]).read_text())
     deepseek_config = deepseek_patch[0]["insert"][0]["config"]
-    assert deepseek_binding["destination"] == "/home/deepseek/.dsh/tgw-context.patch.yml"
+    assert deepseek_binding["destination"] == "/home/deepseek/.dsh/cordis.patch.yml"
     assert deepseek_config["command"] == "/home/deepseek/.local/bin/tgw-actor"
     assert deepseek_config["args"] == ["--context-mcp"]
-    assert deepseek_config["env"]["TGW_ACTOR_EXPECTED_GENERATION"] == receipt["generation"]
+    assert deepseek_config["env"] == {
+        "TGW_ACTOR_CONTEXT_ENDPOINT": "tgw-context",
+        "TGW_ACTOR_CONTEXT_REGISTRATION": "stable-launcher-v1",
+    }
 
 
 def test_actor_generation_rejects_content_free_mcp_policy(durable_path):
@@ -360,11 +398,4 @@ def test_actor_generation_rejects_content_free_mcp_policy(durable_path):
             endpoint="tgw-context",
             launcher="/opt/TGW/bin/tgw-actor",
             actor_home="/home/fixture",
-            context_source_root="/opt/TGW/w/actors/fixture/source",
-            generation="sha256:" + "1" * 64,
-            plan_commit="f" * 40,
-            solution_hash="sha256:" + "2" * 64,
-            source_commit="e" * 40,
-            catalog_hash="sha256:" + "3" * 64,
-            trusted_public_key="fixture",
         )

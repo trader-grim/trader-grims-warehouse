@@ -221,6 +221,64 @@ def test_fail_closed_path_and_materialization_checks_and_read_only_surface(bound
     assert payload["ok"] is False
 
 
+def test_long_lived_actor_context_process_holds_when_root_binding_changes(tmp_path, monkeypatch):
+    actor = "codex"
+    generation = "sha256:" + "1" * 64
+    plan = "f" * 40
+    solution = "sha256:" + "2" * 64
+    source_commit = "e" * 40
+    source_tree = "d" * 40
+    catalog = "sha256:" + "3" * 64
+    source_root = str(tmp_path / "source")
+    binding_path = tmp_path / "codex-startup.json"
+    binding = {
+        "schema": "tgw-actor-startup-binding/v2",
+        "actor": actor,
+        "trusted_public_key": "fixture",
+        "expected_generation": generation,
+        "expected_plan_commit": plan,
+        "expected_solution_hash": solution,
+        "expected_source_commit": source_commit,
+        "expected_source_tree": source_tree,
+        "context_source_root": source_root,
+        "expected_catalog_hash": catalog,
+    }
+    binding_path.write_text(json.dumps(binding), encoding="utf-8")
+    binding_path.chmod(0o444)
+    real_stat = Path.stat
+
+    def root_owned_stat(path, *args, **kwargs):
+        observed = real_stat(path, *args, **kwargs)
+        if path == binding_path:
+            values = list(observed)
+            values[4] = 0
+            return os.stat_result(values)
+        return observed
+
+    monkeypatch.setattr(Path, "stat", root_owned_stat)
+    for name, value in {
+        "TGW_CONTEXT_STARTUP_BINDING": str(binding_path),
+        "TGW_CONTEXT_ACTOR": actor,
+        "TGW_CONTEXT_GENERATION": generation,
+        "TGW_CONTEXT_PLAN_COMMIT": plan,
+        "TGW_CONTEXT_PLAN_SOLUTION": solution,
+        "TGW_CONTEXT_SOURCE_COMMIT": source_commit,
+        "TGW_CONTEXT_SOURCE_TREE": source_tree,
+        "TGW_CONTEXT_SOURCE_ROOT": source_root,
+        "TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH": catalog,
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    assert context._current_actor_startup_binding()["expected_generation"] == generation
+
+    binding_path.chmod(0o644)
+    binding["expected_generation"] = "sha256:" + "9" * 64
+    binding_path.write_text(json.dumps(binding), encoding="utf-8")
+    binding_path.chmod(0o444)
+    with pytest.raises(context.ContextError, match="stale after fleet cutover"):
+        context._current_actor_startup_binding()
+
+
 def test_status_rejects_a_stale_environment_catalog_binding(bound_context, monkeypatch):
     monkeypatch.setenv("TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH", "sha256:" + "0" * 64)
     with pytest.raises(context.ContextError, match="catalog hash"):
