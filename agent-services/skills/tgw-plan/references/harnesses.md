@@ -4,7 +4,7 @@ The canonical skill package is `agent-services/skills/tgw-plan` in the admitted 
 source tree. Adapters expose that exact package; they do not fork its policy.
 
 - Codex interactive: `${CODEX_HOME}/skills/tgw-plan`, normally a symlink.
-- Claude project: `.claude/skills/tgw-plan`, symlink or release-materialized copy.
+- Claude interactive: `${HOME}/.claude/skills/tgw-plan`, normally a signed-generation materialization.
 - Hermes/Tigwa: `${HERMES_HOME}/skills/tgw-plan`, symlink or thin loader when external
   symlinks are unsupported.
 - Isolated workers: receive a compact execution card. Install the full skill only for

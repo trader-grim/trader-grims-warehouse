@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import secrets
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -34,9 +35,9 @@ def _durable_path(value: str | Path, label: str) -> Path:
 
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
-    staged = path.with_name(f".{path.name}.next")
-    if staged.exists() or staged.is_symlink():
-        raise FleetActivationError(f"stale receipt staging path exists: {staged}")
+    staged = path.with_name(
+        f".{path.name}.next-{os.getpid()}-{secrets.token_hex(8)}"
+    )
     descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
     try:
         with os.fdopen(descriptor, "wb") as handle:
@@ -266,17 +267,41 @@ def run_fleet_refresh_transaction(
         raise FleetActivationError("fleet refresh does not change generation")
     if not isinstance(value["revisions"], Mapping) or not value["revisions"]:
         raise FleetActivationError("fleet revisions are invalid")
-    required_revisions = {"plan", "solution", "source", "catalog", "bootstrap", "broker_policy", "admission"}
+    required_revisions = {
+        "plan", "solution", "evidence_plan", "evidence_tree", "source",
+        "source_tree", "current_plan_sources", "catalog", "bootstrap",
+        "broker_policy", "review", "admission",
+    }
     if set(value["revisions"]) != required_revisions:
         raise FleetActivationError("fleet revisions are incomplete")
-    for field in ("plan", "source"):
+    git_revisions = {
+        "plan", "evidence_plan", "evidence_tree", "source", "source_tree"
+    }
+    for field in git_revisions:
         revision = value["revisions"][field]
         if not isinstance(revision, str) or len(revision) != 40 or any(character not in "0123456789abcdef" for character in revision):
             raise FleetActivationError(f"fleet {field} revision is invalid")
-    for field in required_revisions - {"plan", "source"}:
+    for field in required_revisions - git_revisions - {"current_plan_sources"}:
         revision = value["revisions"][field]
         if not isinstance(revision, str) or not revision.startswith("sha256:") or len(revision) != 71:
             raise FleetActivationError(f"fleet {field} revision is invalid")
+    current_sources = value["revisions"].get("current_plan_sources")
+    if (
+        not isinstance(current_sources, Mapping)
+        or set(current_sources) != {
+            "plan/execution/AMENDMENT-20260823-MCP-LIVE-CLIENT-CONVERGENCE.yaml",
+            "pp/PP-ACTOR-MCP-BOUNDARY-001.md",
+            "plan/execution/targets/W19-W21-MCP-ONLY-ACTOR-HARDENING-v1.yaml",
+            "plan/execution/ACTIVE-PLAN-AMENDMENT-PROCESS-v1.yaml",
+        }
+        or any(
+            not isinstance(item, str)
+            or not item.startswith("sha256:")
+            or len(item) != 71
+            for item in current_sources.values()
+        )
+    ):
+        raise FleetActivationError("fleet current Plan revisions are invalid")
     actors = value["actors"]
     if (
         not isinstance(actors, list) or not actors or actors != sorted(set(actors))
@@ -325,80 +350,241 @@ def run_fleet_refresh_transaction(
                 raise FleetActivationError(
                     "existing fleet refresh journal binding differs"
                 )
-            raise FleetActivationError(
-                "incomplete fleet refresh journal requires explicit recovery"
-            )
-        journal: dict[str, Any] = {
-            "schema": "tgw-w18-fleet-refresh-journal/v1", "request_hash": request_hash,
-            "request": value, "status": "STARTED", "steps": [],
-        }
-        _atomic_json(journal_path, journal)
-        checkpoint_receipt: dict[str, Any] | None = None
-        try:
-            observed_checkpoint = _step("checkpoint", checkpoint, value, expected="CHECKPOINTED")
-            _validate_checkpoint(observed_checkpoint)
-            checkpoint_receipt = observed_checkpoint
-            journal["steps"].append({"name": "checkpoint", "receipt": checkpoint_receipt})
-            journal["status"] = "CHECKPOINTED"
-            _atomic_json(journal_path, journal)
-            quiesce_receipt = _step("quiesce", quiesce, checkpoint_receipt, expected="QUIESCED")
-            journal["steps"].append({"name": "quiesce", "receipt": quiesce_receipt})
-            journal["status"] = "QUIESCED"
-            _atomic_json(journal_path, journal)
-            rebuilt = _step("rebuild", rebuild, value, expected="REBUILT")
-            journal["steps"].append({"name": "rebuild", "receipt": rebuilt})
-            activated = _step("activate", activate, value, rebuilt, expected="ACTIVATED")
-            journal["steps"].append({"name": "activate", "receipt": activated})
-            restarted = _step("restart", restart, activated, expected="RESTARTED")
-            journal["steps"].append({"name": "restart", "receipt": restarted})
-            healthy = _step("health", health, restarted, expected="HEALTHY")
-            journal["steps"].append({"name": "health", "receipt": healthy})
-            actor_receipts = []
-            for actor in actors:
-                verified = _step(f"actor verification {actor}", verify_actor, actor, value, expected="VERIFIED")
-                if verified.get("actor") != actor or verified.get("generation") != value["successor_generation"]:
-                    raise FleetActivationError(f"actor contract verification mismatch: {actor}")
-                actor_receipts.append(verified)
-            journal["steps"].append({"name": "actor-verification", "receipts": actor_receipts})
-            resumed = _step("resume", resume, checkpoint_receipt, value, expected="RESUMED")
-            _validate_resume(checkpoint_receipt, resumed)
-            journal["steps"].append({"name": "resume", "receipt": resumed})
-            unsigned = {
-                "schema": "tgw-w18-fleet-refresh-receipt/v1", "request_hash": request_hash,
-                "transaction_id": value["transaction_id"], "idempotency_key": value["idempotency_key"],
-                "predecessor_generation": value["predecessor_generation"],
-                "successor_generation": value["successor_generation"], "status": "VERIFIED_AND_RESUMED",
-                "steps": journal["steps"], "rollback": None,
+            journal = dict(existing_journal)
+        else:
+            journal = {
+                "schema": "tgw-w18-fleet-refresh-journal/v1",
+                "request_hash": request_hash, "request": value,
+                "status": "STARTED", "steps": [], "actor_receipts": {},
             }
-        except Exception as original:
-            journal["status"], journal["failure"] = "ROLLBACK_REQUIRED", str(original)
             _atomic_json(journal_path, journal)
+
+        def saved_receipt(name: str) -> dict[str, Any] | None:
+            for record in reversed(journal["steps"]):
+                if record.get("name") == name and isinstance(record.get("receipt"), Mapping):
+                    return dict(record["receipt"])
+            return None
+
+        def persist_step(name: str, receipt: Mapping[str, Any], status: str) -> dict[str, Any]:
+            observed = dict(receipt)
+            journal["steps"].append({"name": name, "receipt": observed})
+            journal["status"] = status
+            _atomic_json(journal_path, journal)
+            return observed
+
+        def waiting(direction: str, observed: Mapping[str, Any]) -> dict[str, Any]:
+            return {
+                "schema": "tgw-w18-fleet-refresh-wait/v1",
+                "status": "RESTART_REQUIRED",
+                "lifecycle": "WAIT_EXTERNAL_RESTART",
+                "direction": direction,
+                "request_hash": request_hash,
+                "transaction_id": value["transaction_id"],
+                "idempotency_key": value["idempotency_key"],
+                "pending": observed.get("pending", []),
+            }
+
+        def terminal(unsigned: dict[str, Any]) -> dict[str, Any]:
+            receipt = {**unsigned, "receipt_hash": _value_hash(unsigned)}
+            _atomic_json(receipt_path, receipt)
+            journal["status"] = receipt["status"]
+            journal["terminal_receipt_hash"] = receipt["receipt_hash"]
+            _atomic_json(journal_path, journal)
+            return receipt
+
+        checkpoint_receipt = saved_receipt("checkpoint")
+
+        def continue_rollback() -> dict[str, Any]:
+            nonlocal checkpoint_receipt
             try:
-                rolled_back = _step("rollback", rollback, value, journal, expected="ROLLED_BACK")
+                observed = rollback(value, journal)
+                if not isinstance(observed, Mapping):
+                    raise FleetActivationError("fleet rollback returned an invalid receipt")
+                if observed.get("status") == "RESTART_REQUIRED":
+                    persist_step("rollback-wait", observed, "ROLLBACK_RESTART_REQUIRED")
+                    return waiting("rollback", observed)
+                if observed.get("status") != "ROLLED_BACK":
+                    raise FleetActivationError("fleet rollback did not report ROLLED_BACK")
+                rolled_back = persist_step("rollback", observed, "ROLLED_BACK")
                 rollback_resume = None
                 if checkpoint_receipt is not None:
+                    rollback_request = {
+                        **value,
+                        "successor_generation": value["predecessor_generation"],
+                    }
                     rollback_resume = _step(
                         "rollback resume", resume, checkpoint_receipt,
-                        {**value, "successor_generation": value["predecessor_generation"]}, expected="RESUMED",
+                        rollback_request, expected="RESUMED",
                     )
                     _validate_resume(checkpoint_receipt, rollback_resume)
-                status = "FAILED_ROLLED_BACK"
-                rollback_receipt = {"rollback": rolled_back, "resume": rollback_resume}
+                    persist_step("rollback-resume", rollback_resume, "ROLLBACK_RESUMED")
+                return terminal(
+                    {
+                        "schema": "tgw-w18-fleet-refresh-receipt/v1",
+                        "request_hash": request_hash,
+                        "transaction_id": value["transaction_id"],
+                        "idempotency_key": value["idempotency_key"],
+                        "predecessor_generation": value["predecessor_generation"],
+                        "successor_generation": value["successor_generation"],
+                        "status": "FAILED_ROLLED_BACK",
+                        "steps": journal["steps"],
+                        "failure": journal.get("failure", "fleet refresh failed"),
+                        "rollback": {"rollback": rolled_back, "resume": rollback_resume},
+                    }
+                )
             except Exception as rollback_error:
-                status = "FAILED_QUIESCED"
-                rollback_receipt = {"status": "FAILED", "reason": str(rollback_error)}
-            unsigned = {
-                "schema": "tgw-w18-fleet-refresh-receipt/v1", "request_hash": request_hash,
-                "transaction_id": value["transaction_id"], "idempotency_key": value["idempotency_key"],
-                "predecessor_generation": value["predecessor_generation"],
-                "successor_generation": value["successor_generation"], "status": status,
-                "steps": journal["steps"], "failure": str(original), "rollback": rollback_receipt,
-            }
-        receipt = {**unsigned, "receipt_hash": _value_hash(unsigned)}
-        _atomic_json(receipt_path, receipt)
-        journal["status"], journal["terminal_receipt_hash"] = receipt["status"], receipt["receipt_hash"]
-        _atomic_json(journal_path, journal)
-        return receipt
+                errors = list(journal.get("rollback_errors", []))
+                errors.append(str(rollback_error))
+                journal["rollback_errors"] = errors
+                journal["status"] = "ROLLBACK_REQUIRED"
+                _atomic_json(journal_path, journal)
+                return {
+                    "schema": "tgw-w18-fleet-refresh-wait/v1",
+                    "status": "ROLLBACK_REQUIRED",
+                    "lifecycle": "HOLD_QUIESCED_RETRYABLE",
+                    "direction": "rollback",
+                    "request_hash": request_hash,
+                    "transaction_id": value["transaction_id"],
+                    "idempotency_key": value["idempotency_key"],
+                    "reason": str(rollback_error),
+                }
+
+        if journal["status"] in {"ROLLBACK_REQUIRED", "ROLLBACK_RESTART_REQUIRED"}:
+            return continue_rollback()
+
+        try:
+            if journal["status"] == "STARTED":
+                observed_checkpoint = _step(
+                    "checkpoint", checkpoint, value, expected="CHECKPOINTED"
+                )
+                _validate_checkpoint(observed_checkpoint)
+                checkpoint_receipt = persist_step(
+                    "checkpoint", observed_checkpoint, "CHECKPOINTED"
+                )
+            if checkpoint_receipt is None:
+                raise FleetActivationError("fleet checkpoint receipt is unavailable")
+            if journal["status"] == "CHECKPOINTED":
+                persist_step(
+                    "quiesce",
+                    _step(
+                        "quiesce", quiesce, checkpoint_receipt,
+                        expected="QUIESCED",
+                    ),
+                    "QUIESCED",
+                )
+            if journal["status"] == "QUIESCED":
+                persist_step(
+                    "rebuild", _step("rebuild", rebuild, value, expected="REBUILT"),
+                    "REBUILT",
+                )
+            if journal["status"] == "REBUILT":
+                rebuilt = saved_receipt("rebuild")
+                if rebuilt is None:
+                    raise FleetActivationError("fleet rebuild receipt is unavailable")
+                persist_step(
+                    "activate",
+                    _step("activate", activate, value, rebuilt, expected="ACTIVATED"),
+                    "ACTIVATED",
+                )
+            if journal["status"] in {"ACTIVATED", "RESTART_REQUIRED"}:
+                activated = saved_receipt("activate")
+                if activated is None:
+                    raise FleetActivationError("fleet activation receipt is unavailable")
+                observed_restart = restart(activated)
+                if not isinstance(observed_restart, Mapping):
+                    raise FleetActivationError("fleet restart returned an invalid receipt")
+                if observed_restart.get("status") == "RESTART_REQUIRED":
+                    persist_step(
+                        "restart-wait", observed_restart, "RESTART_REQUIRED"
+                    )
+                    return waiting("successor", observed_restart)
+                if observed_restart.get("status") != "RESTARTED":
+                    raise FleetActivationError("fleet restart did not report RESTARTED")
+                persist_step("restart", observed_restart, "RESTARTED")
+            if journal["status"] == "RESTARTED":
+                restarted = saved_receipt("restart")
+                if restarted is None:
+                    raise FleetActivationError("fleet restart receipt is unavailable")
+                observed_health = health(restarted)
+                if not isinstance(observed_health, Mapping):
+                    raise FleetActivationError("fleet health returned an invalid receipt")
+                if observed_health.get("status") == "RESTART_REQUIRED":
+                    journal["actor_receipts"] = {}
+                    persist_step(
+                        "health-wait", observed_health, "RESTART_REQUIRED"
+                    )
+                    return waiting("successor", observed_health)
+                if observed_health.get("status") != "HEALTHY":
+                    raise FleetActivationError("fleet health did not report HEALTHY")
+                persist_step("health", observed_health, "HEALTHY")
+            if journal["status"] in {"HEALTHY", "VERIFYING"}:
+                actor_receipts = dict(journal.get("actor_receipts", {}))
+                for actor in actors:
+                    if actor in actor_receipts:
+                        continue
+                    observed_verification = verify_actor(actor, value)
+                    if not isinstance(observed_verification, Mapping):
+                        raise FleetActivationError(
+                            f"actor verification {actor} returned an invalid receipt"
+                        )
+                    if observed_verification.get("status") == "RESTART_REQUIRED":
+                        journal["actor_receipts"] = {}
+                        persist_step(
+                            "verification-wait", observed_verification,
+                            "RESTART_REQUIRED",
+                        )
+                        return waiting("successor", observed_verification)
+                    if observed_verification.get("status") != "VERIFIED":
+                        raise FleetActivationError(
+                            f"actor verification {actor} did not report VERIFIED"
+                        )
+                    verified = dict(observed_verification)
+                    if (
+                        verified.get("actor") != actor
+                        or verified.get("generation") != value["successor_generation"]
+                    ):
+                        raise FleetActivationError(
+                            f"actor contract verification mismatch: {actor}"
+                        )
+                    actor_receipts[actor] = verified
+                    journal["actor_receipts"] = actor_receipts
+                    journal["status"] = "VERIFYING"
+                    _atomic_json(journal_path, journal)
+                journal["steps"].append(
+                    {
+                        "name": "actor-verification",
+                        "receipts": [actor_receipts[actor] for actor in actors],
+                    }
+                )
+                journal["status"] = "VERIFIED"
+                _atomic_json(journal_path, journal)
+            if journal["status"] == "VERIFIED":
+                resumed = _step(
+                    "resume", resume, checkpoint_receipt, value, expected="RESUMED"
+                )
+                _validate_resume(checkpoint_receipt, resumed)
+                persist_step("resume", resumed, "RESUMED")
+            if journal["status"] != "RESUMED":
+                raise FleetActivationError(
+                    f"fleet refresh cannot resume from {journal['status']}"
+                )
+            return terminal(
+                {
+                    "schema": "tgw-w18-fleet-refresh-receipt/v1",
+                    "request_hash": request_hash,
+                    "transaction_id": value["transaction_id"],
+                    "idempotency_key": value["idempotency_key"],
+                    "predecessor_generation": value["predecessor_generation"],
+                    "successor_generation": value["successor_generation"],
+                    "status": "VERIFIED_AND_RESUMED",
+                    "steps": journal["steps"], "rollback": None,
+                }
+            )
+        except Exception as original:
+            journal["status"] = "ROLLBACK_REQUIRED"
+            journal["failure"] = str(original)
+            _atomic_json(journal_path, journal)
+            return continue_rollback()
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)

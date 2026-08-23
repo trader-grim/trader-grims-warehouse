@@ -9,20 +9,36 @@ Use the standalone Plan as canonical intent and the capability resolver as execu
 authority. Default to the approved Plan as the execution root. Use a PP or Todo root
 only when the operator explicitly narrows execution.
 
+## Establish session generation
+
+Before any Plan-role work on the first use in an ordinary harness session, call the
+installed `tgw_context_status` tool with no arguments. Surface its exact
+`generation_status.line` to the operator before reading or resolving Plan work. A
+`CURRENT` result permits the role to proceed under its bound evidence. An
+`UPDATE_PENDING`, `RESTART_REQUIRED`, `MIXED`, or `HOLD` result constrains claims and
+actor-side effects to that reported state; it never blocks, delays, or overrides an
+explicit owner command. If the status call is unavailable or malformed, hold governed
+Plan dispatch and report the missing binding rather than substituting launcher stderr,
+conversation memory, or a filesystem guess.
+
 ## Establish the binding
 
-1. Resolve the Plan root through the registered execution environment. Require it to
-   identify `/opt/TGW/library/plans` or a declared successor.
-2. Run `scripts/verify_plan_root.py <root> <approved-ref> <approved-solution-hash>` and record the immutable
-   approved commit separately from the repository's evidence/history HEAD. Never
-   silently move the approved ref when evidence is committed.
-3. Read these canonical files completely before changing or launching Plan work:
-   - `plan/SPEC-plan-capability-graph-v2.md`
-   - the selected Plan or PP;
-   - its machine execution graph, when present; and
-   - relevant observations, supersession records, and reconciliation evidence.
-4. Refuse embedded source-tree Plan copies, conversation memory, worktrees, releases,
-   or archives as fallback authority. Use them only as reconciliation evidence.
+1. Call `tgw_context_bundle` for the actual Plan task and require its exact approved
+   Plan, solution, evidence-head Plan/tree, source/tree, catalog, and generation
+   binding to agree with `tgw_context_status`.
+2. Resolve the selected root and capability closure with `tgw_context_plan_graph`.
+   Keep the immutable approved Plan and the current evidence head distinct; never
+   silently move the approved ref when evidence advances.
+3. Retrieve each required Plan, PP, target, process, or amendment source through
+   `tgw_context_plan_source`, choosing its exact `approved-plan` or `current-plan`
+   authority. Use `tgw_context_runbooks` only for admitted runbook paths. Require each
+   response's authority, commit, tree, confined path, blob/content hash, and complete
+   paginated content to match the bundle before using it.
+4. Refuse direct filesystem or Git reads, embedded source-tree Plan copies,
+   conversation memory, worktrees, releases, archives, and local verification scripts
+   as Plan authority or fallback. A separately routed implementation or recovery card
+   may authorize bounded source/filesystem inspection as implementation evidence; it
+   never changes or reconstructs Plan authority.
 
 ## Select the root
 
@@ -35,9 +51,13 @@ only when the operator explicitly narrows execution.
 
 ## Reconcile before planning new work
 
-Search admitted source, dirty and orphaned worktrees, archives, immutable releases,
-runtime bindings, receipts, and unreachable Git evidence before classifying a provider
-as absent. Compare semantics and evidence, not filenames, branch names, or age. Keep
+Use the authority-bound bundle and Plan graph to enumerate admitted implementation,
+runtime, receipt, supersession, and reconciliation evidence before classifying a
+provider as absent. Retrieve cited Plan/runbook material only through the bounded
+Context tools above. When the graph routes a separate implementation or recovery
+capability, that card may inspect its exact admitted source and bounded recovery
+locations; never search arbitrary files, worktrees, archives, or Git history from the
+Plan role. Compare semantics and evidence, not filenames, branch names, or age. Keep
 design, implementation, test, review, admission, deployment, live, and operator-
 acceptance evidence separate.
 

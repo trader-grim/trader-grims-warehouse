@@ -5,10 +5,10 @@ import pytest
 
 from tgw.fleet_activation import (
     FleetActivationError,
+    _value_hash,
     apply_fleet_configuration,
     rollback_fleet_configuration,
     run_fleet_refresh_transaction,
-    _value_hash,
 )
 
 
@@ -23,8 +23,23 @@ def _refresh_request(**updates):
         "successor_generation": "sha256:" + "b" * 64,
         "revisions": {
             "plan": "f" * 40, "solution": "sha256:" + "1" * 64,
-            "source": "e" * 40, "catalog": "sha256:" + "c" * 64,
+            "evidence_plan": "9" * 40, "evidence_tree": "8" * 40,
+            "source": "e" * 40, "source_tree": "d" * 40,
+            "current_plan_sources": {
+                "plan/execution/AMENDMENT-20260823-MCP-LIVE-CLIENT-CONVERGENCE.yaml": (
+                    "sha256:" + "5" * 64
+                ),
+                "pp/PP-ACTOR-MCP-BOUNDARY-001.md": "sha256:" + "6" * 64,
+                "plan/execution/targets/W19-W21-MCP-ONLY-ACTOR-HARDENING-v1.yaml": (
+                    "sha256:" + "7" * 64
+                ),
+                "plan/execution/ACTIVE-PLAN-AMENDMENT-PROCESS-v1.yaml": (
+                    "sha256:" + "8" * 64
+                ),
+            },
+            "catalog": "sha256:" + "c" * 64,
             "bootstrap": "sha256:" + "2" * 64, "broker_policy": "sha256:" + "3" * 64,
+            "review": "sha256:" + "5" * 64,
             "admission": "sha256:" + "4" * 64,
         },
         "actors": ["claude", "codex"],
@@ -87,32 +102,47 @@ def test_refresh_transaction_orders_full_fleet_and_is_idempotent(durable_path):
     assert events.count("checkpoint") == 1
 
 
-def test_incomplete_journal_is_preserved_and_requires_explicit_recovery(durable_path):
+def test_incomplete_journal_resumes_from_last_durable_successful_step(durable_path):
     request = _refresh_request()
     root = durable_path / "receipts"
     root.mkdir()
     journal_path = root / f"{request['transaction_id']}.journal.json"
+    checkpoint = {
+        "status": "CHECKPOINTED",
+        "live_requests": [],
+        "role_leases": [],
+        "rendered_surfaces": [],
+        "continuations": [],
+    }
     journal = {
         "schema": "tgw-w18-fleet-refresh-journal/v1",
         "request_hash": _value_hash(request),
         "request": request,
         "status": "QUIESCED",
-        "steps": [{"name": "checkpoint"}, {"name": "quiesce"}],
+        "steps": [
+            {"name": "checkpoint", "receipt": checkpoint},
+            {"name": "quiesce", "receipt": {"status": "QUIESCED"}},
+        ],
+        "actor_receipts": {},
     }
     journal_path.write_text(json.dumps(journal, sort_keys=True) + "\n")
-    before = journal_path.read_bytes()
     events = []
 
-    with pytest.raises(FleetActivationError, match="explicit recovery"):
-        run_fleet_refresh_transaction(
-            request,
-            receipt_root=root,
-            lease_path=durable_path / "fleet.lock",
-            **_refresh_providers(events),
-        )
+    receipt = run_fleet_refresh_transaction(
+        request,
+        receipt_root=root,
+        lease_path=durable_path / "fleet.lock",
+        **_refresh_providers(events),
+    )
 
-    assert journal_path.read_bytes() == before
-    assert events == []
+    assert receipt["status"] == "VERIFIED_AND_RESUMED"
+    assert events == [
+        "rebuild", "activate", "restart", "health",
+        "verify:claude", "verify:codex", "resume",
+    ]
+    completed = json.loads(journal_path.read_text())
+    assert completed["status"] == "VERIFIED_AND_RESUMED"
+    assert completed["terminal_receipt_hash"] == receipt["receipt_hash"]
 
 
 def test_refresh_failure_rolls_whole_fleet_back_and_resumes_predecessor(durable_path):
@@ -126,13 +156,32 @@ def test_refresh_failure_rolls_whole_fleet_back_and_resumes_predecessor(durable_
     assert receipt["failure"] == "restart failed"
 
 
-def test_refresh_rollback_failure_leaves_fleet_quiesced(durable_path):
+def test_refresh_rollback_failure_is_retryable_from_durable_rollback_required(
+    durable_path,
+):
+    request = _refresh_request()
+    receipt_root = durable_path / "receipts"
     receipt = run_fleet_refresh_transaction(
-        _refresh_request(), receipt_root=durable_path / "receipts", lease_path=durable_path / "fleet.lock",
+        request, receipt_root=receipt_root, lease_path=durable_path / "fleet.lock",
         **_refresh_providers([], fail="health", rollback_fail=True),
     )
-    assert receipt["status"] == "FAILED_QUIESCED"
-    assert receipt["rollback"]["status"] == "FAILED"
+    assert receipt["status"] == "ROLLBACK_REQUIRED"
+    assert receipt["lifecycle"] == "HOLD_QUIESCED_RETRYABLE"
+    journal_path = receipt_root / f"{request['transaction_id']}.journal.json"
+    journal = json.loads(journal_path.read_text())
+    assert journal["status"] == "ROLLBACK_REQUIRED"
+    assert journal["rollback_errors"] == ["fleet rollback did not report ROLLED_BACK"]
+
+    retry_events = []
+    recovered = run_fleet_refresh_transaction(
+        request,
+        receipt_root=receipt_root,
+        lease_path=durable_path / "fleet.lock",
+        **_refresh_providers(retry_events),
+    )
+    assert recovered["status"] == "FAILED_ROLLED_BACK"
+    assert retry_events == ["rollback", "resume"]
+    assert json.loads(journal_path.read_text())["status"] == "FAILED_ROLLED_BACK"
 
 
 @pytest.mark.parametrize(
@@ -157,13 +206,17 @@ def test_every_refresh_boundary_failure_is_terminal_and_never_claims_success(
         **_refresh_providers(events, fail=boundary),
     )
 
-    assert receipt["status"] in {"FAILED_ROLLED_BACK", "FAILED_QUIESCED"}
-    assert receipt["status"] != "VERIFIED_AND_RESUMED"
+    expected = "ROLLBACK_REQUIRED" if boundary == "resume" else "FAILED_ROLLED_BACK"
+    assert receipt["status"] == expected
     journal = json.loads(
         (durable_path / "receipts" / f"refresh-{boundary}.journal.json").read_text()
     )
     assert journal["status"] == receipt["status"]
-    assert journal["terminal_receipt_hash"] == receipt["receipt_hash"]
+    if boundary == "resume":
+        assert receipt["lifecycle"] == "HOLD_QUIESCED_RETRYABLE"
+        assert "terminal_receipt_hash" not in journal
+    else:
+        assert journal["terminal_receipt_hash"] == receipt["receipt_hash"]
 
 
 def test_refresh_refuses_tmp_receipts_and_incomplete_checkpoint(durable_path):

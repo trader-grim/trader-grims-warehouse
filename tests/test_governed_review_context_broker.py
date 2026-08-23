@@ -460,6 +460,9 @@ def test_mcp_uses_privileged_broker_and_controller_reads_exact_service_origin(
                 AssertionError("governed mode must not read local Plan/source")
             ),
         )
+        monkeypatch.setattr(
+            context_mcp_server, "_per_call_guard", lambda: {},
+        )
         tool_result = json.loads(context_mcp_server.governed_review_context_bundle(
             "review exact candidate", receiver="claude", challenge=challenge,
             card_json=json.dumps(card), handoff_hash=handoff_hash,

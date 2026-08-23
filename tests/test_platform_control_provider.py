@@ -91,9 +91,17 @@ def _fixture(tmp_path):
         "successor_generation": "sha256:" + "b" * 64,
         "revisions": {
             "plan": "f" * 40, "solution": "sha256:" + "1" * 64,
-            "source": "e" * 40, "catalog": "sha256:" + "2" * 64,
+            "evidence_plan": "d" * 40, "evidence_tree": "c" * 40,
+            "source": "e" * 40, "source_tree": "b" * 40,
+            "current_plan_sources": {
+                "plan/execution/AMENDMENT-20260823-MCP-LIVE-CLIENT-CONVERGENCE.yaml": "sha256:" + "6" * 64,
+                "pp/PP-ACTOR-MCP-BOUNDARY-001.md": "sha256:" + "7" * 64,
+                "plan/execution/targets/W19-W21-MCP-ONLY-ACTOR-HARDENING-v1.yaml": "sha256:" + "8" * 64,
+                "plan/execution/ACTIVE-PLAN-AMENDMENT-PROCESS-v1.yaml": "sha256:" + "9" * 64,
+            },
+            "catalog": "sha256:" + "2" * 64,
             "bootstrap": "sha256:" + "3" * 64, "broker_policy": "sha256:" + "4" * 64,
-            "admission": "sha256:" + "5" * 64,
+            "review": "sha256:" + "a" * 64, "admission": "sha256:" + "5" * 64,
         },
         "actors": ["codex"],
     }

@@ -28,10 +28,6 @@ def test_active_navigation_and_operator_docs_do_not_name_legacy_plan_authority()
         ROOT / ".aider.conf.yml",
         ROOT / ".claude" / "settings.local.json",
         ROOT / ".claude" / "agents" / "tgw-coder.md",
-        ROOT / ".claude" / "skills" / "tgw-exit" / "SKILL.md",
-        ROOT / ".claude" / "skills" / "tgw-packet" / "SKILL.md",
-        ROOT / ".claude" / "skills" / "tgw-plan-maintain" / "SKILL.md",
-        ROOT / ".claude" / "skills" / "tgw-runner-review" / "SKILL.md",
         ROOT / "etc" / "interfaces" / "claude" / "project-settings.local.json",
         ROOT / "scripts" / "requeue_deadletter.py",
         ROOT / "config" / "environment" / "registry.yaml",
@@ -45,3 +41,23 @@ def test_active_navigation_and_operator_docs_do_not_name_legacy_plan_authority()
     ]
     assert offenders == []
     assert not (ROOT / "docs" / "TGW-Plan-Vault").exists()
+
+
+def test_claude_project_surfaces_cannot_shadow_signed_fleet_instructions():
+    redirect = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    assert redirect.count("\n") <= 4
+    assert "/home/claude/.claude/CLAUDE.md" in redirect
+    assert "docs/TGW-Plan-Vault" not in redirect
+    assert "SessionStart" not in (ROOT / ".claude/settings.json").read_text(
+        encoding="utf-8"
+    )
+    for skill in (
+        "tgw-plan",
+        "tgw-plan-maintain",
+        "tgw-packet",
+        "tgw-pr-review",
+        "tgw-runner-review",
+        "tgw-exit",
+        "tgw-mailbox-send",
+    ):
+        assert not (ROOT / ".claude/skills" / skill / "SKILL.md").exists()

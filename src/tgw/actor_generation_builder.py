@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import re
-import subprocess
+import secrets
+import stat
 from pathlib import Path
 from typing import Any, Mapping
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tgw.actor_contract import actor_contract_public_key, compile_actor_contract, sign_actor_contract
+from tgw.context_source_guard import ContextSourceGuardError, validate_context_source
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_STAGE_NAME = re.compile(r"\.([0-9a-f]{64})\.next-[0-9]+-[0-9a-f]{16}\Z")
+_STABLE_CONTEXT_LAUNCHER = "/opt/TGW/tgw-lib/bin/tgw-actor"
 
 
 class ActorGenerationError(ValueError):
@@ -60,6 +65,49 @@ def _read_json(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(
+        path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
+    stage = path.with_name(
+        f".{path.name}.next-{os.getpid()}-{secrets.token_hex(8)}"
+    )
+    descriptor = os.open(
+        stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(_canonical(value) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(stage, path)
+        _fsync_directory(path.parent)
+    finally:
+        if stage.exists() and not stage.is_symlink():
+            stage.unlink()
+
+
+def _owned_stage_nodes(stage: Path) -> list[Path]:
+    if stage.is_symlink() or not stage.is_dir():
+        raise ActorGenerationError("actor generation stage is unsafe")
+    nodes = [stage, *stage.rglob("*")]
+    for node in nodes:
+        observed = node.lstat()
+        if node.is_symlink() or observed.st_uid != os.geteuid() or not (
+            stat.S_ISDIR(observed.st_mode) or stat.S_ISREG(observed.st_mode)
+        ):
+            raise ActorGenerationError("actor generation stage contains unsafe state")
+    return nodes
+
+
 def _signing_key(path: Path) -> Ed25519PrivateKey:
     if not path.is_file() or path.is_symlink():
         raise ActorGenerationError("actor contract signing key is unavailable")
@@ -73,6 +121,193 @@ def _signing_key(path: Path) -> Ed25519PrivateKey:
 
 def _binding_hash(bindings: list[dict[str, str]]) -> str:
     return _hash(sorted(bindings, key=lambda item: item["endpoint"]))
+
+
+def _stage_manifest(stage: Path) -> str:
+    digest = hashlib.sha256()
+    for node in sorted(
+        _owned_stage_nodes(stage),
+        key=lambda item: item.relative_to(stage).as_posix(),
+    ):
+        relative = "." if node == stage else node.relative_to(stage).as_posix()
+        observed = node.lstat()
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        digest.update(str(stat.S_IMODE(observed.st_mode)).encode())
+        digest.update(b"\0")
+        if stat.S_ISREG(observed.st_mode):
+            digest.update(node.read_bytes())
+            digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
+def _remove_owned_stage(stage: Path, *, expected_device: int, expected_inode: int) -> None:
+    observed = stage.lstat()
+    if observed.st_dev != expected_device or observed.st_ino != expected_inode:
+        raise ActorGenerationError("actor generation stage identity changed")
+    nodes = _owned_stage_nodes(stage)
+    for node in sorted(nodes[1:], key=lambda item: len(item.parts), reverse=True):
+        if node.is_dir():
+            os.chmod(node, 0o700, follow_symlinks=False)
+            node.rmdir()
+        else:
+            node.unlink()
+    os.chmod(stage, 0o700, follow_symlinks=False)
+    stage.rmdir()
+
+
+def _validate_complete_generation(
+    stage: Path,
+    *,
+    final: Path,
+    generation: str,
+    generation_body: Mapping[str, Any],
+) -> dict[str, Any]:
+    nodes = _owned_stage_nodes(stage)
+    if any(node.lstat().st_mode & 0o022 for node in nodes):
+        raise ActorGenerationError("actor generation completed stage is writable")
+    receipt = _read_json(stage / "generation-receipt.json", "actor generation stage")
+    unsigned = dict(receipt)
+    claimed_hash = unsigned.pop("receipt_hash", None)
+    if (
+        receipt.get("schema") != "tgw-actor-generation-receipt/v1"
+        or receipt.get("status") != "PREPARED"
+        or receipt.get("generation") != generation
+        or receipt.get("generation_identity") != generation_body
+        or claimed_hash != _hash(unsigned)
+        or not isinstance(receipt.get("actors"), list)
+        or not isinstance(receipt.get("contract_receipt_hashes"), Mapping)
+    ):
+        raise ActorGenerationError("actor generation completed stage receipt differs")
+    bundle = _read_json(stage / "bundle.json", "actor generation stage bundle")
+    if (
+        bundle.get("schema") != "tgw-complete-actor-contract-bundle/v1"
+        or bundle.get("generation") != generation
+        or _hash(bundle) != receipt.get("bundle_hash")
+        or sorted(bundle.get("actors", {})) != receipt["actors"]
+    ):
+        raise ActorGenerationError("actor generation completed stage bundle differs")
+    expected_files = {
+        Path("generation-receipt.json"), Path("bundle.json"),
+        Path("environment-catalog.json"),
+    }
+    for actor, specification in bundle["actors"].items():
+        if not isinstance(specification, Mapping) or not isinstance(
+            specification.get("bindings"), list
+        ):
+            raise ActorGenerationError("actor generation completed stage actor differs")
+        contract = _read_json(stage / "contracts" / f"{actor}.json", "actor contract")
+        if contract.get("receipt_hash") != receipt["contract_receipt_hashes"].get(actor):
+            raise ActorGenerationError("actor generation completed stage contract differs")
+        expected_files.add(Path("contracts") / f"{actor}.json")
+        for binding in specification["bindings"]:
+            if not isinstance(binding, Mapping):
+                raise ActorGenerationError("actor generation completed stage binding differs")
+            source = Path(str(binding.get("source")))
+            if source == final or final not in source.parents:
+                continue
+            relative = source.relative_to(final)
+            materialized = stage / relative
+            if _file_hash(materialized) != binding.get("sha256"):
+                raise ActorGenerationError("actor generation completed stage content differs")
+            expected_files.add(relative)
+    observed_files = {
+        node.relative_to(stage)
+        for node in nodes if node != stage and node.is_file()
+    }
+    if observed_files != expected_files:
+        raise ActorGenerationError("actor generation completed stage contains extra state")
+    return receipt
+
+
+def _reconcile_generation_stages(
+    output: Path,
+    *,
+    final: Path,
+    generation: str,
+    generation_body: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    generation_hex = generation.removeprefix("sha256:")
+    candidates = sorted(
+        item for item in output.iterdir()
+        if _STAGE_NAME.fullmatch(item.name)
+        and _STAGE_NAME.fullmatch(item.name).group(1) == generation_hex
+    )
+    if not candidates:
+        return None
+    reconciliation_path = output / f".{generation_hex}.reconciliation.json"
+    reconciliation = (
+        _read_json(reconciliation_path, "actor generation reconciliation")
+        if reconciliation_path.exists() and not reconciliation_path.is_symlink()
+        else {
+            "schema": "tgw-actor-generation-reconciliation/v1",
+            "generation": generation,
+            "generation_identity_hash": _hash(generation_body),
+            "stages": {},
+        }
+    )
+    if (
+        reconciliation.get("schema") != "tgw-actor-generation-reconciliation/v1"
+        or reconciliation.get("generation") != generation
+        or reconciliation.get("generation_identity_hash") != _hash(generation_body)
+        or not isinstance(reconciliation.get("stages"), dict)
+    ):
+        raise ActorGenerationError("actor generation reconciliation binding differs")
+    complete: tuple[Path, dict[str, Any]] | None = None
+    for candidate in candidates:
+        try:
+            receipt = _validate_complete_generation(
+                candidate,
+                final=final,
+                generation=generation,
+                generation_body=generation_body,
+            )
+        except (ActorGenerationError, OSError, ValueError):
+            receipt = None
+        if receipt is not None:
+            if complete is not None:
+                raise ActorGenerationError("multiple complete actor generation stages exist")
+            complete = (candidate, receipt)
+            continue
+        observed = candidate.lstat()
+        recorded = reconciliation["stages"].get(candidate.name)
+        if recorded is None:
+            recorded = {
+                "device": observed.st_dev,
+                "inode": observed.st_ino,
+                "manifest_sha256": _stage_manifest(candidate),
+                "status": "REMOVE_INTENT",
+            }
+            reconciliation["stages"][candidate.name] = recorded
+            _atomic_json(reconciliation_path, reconciliation)
+        elif (
+            not isinstance(recorded, Mapping)
+            or recorded.get("device") != observed.st_dev
+            or recorded.get("inode") != observed.st_ino
+            or recorded.get("status") not in {"REMOVE_INTENT", "REMOVED"}
+        ):
+            raise ActorGenerationError("actor generation abandoned stage identity differs")
+        if recorded.get("status") == "REMOVED":
+            raise ActorGenerationError("actor generation removed stage reappeared")
+        _remove_owned_stage(
+            candidate,
+            expected_device=observed.st_dev,
+            expected_inode=observed.st_ino,
+        )
+        recorded["status"] = "REMOVED"
+        reconciliation["stages"][candidate.name] = dict(recorded)
+        _atomic_json(reconciliation_path, reconciliation)
+        _fsync_directory(output)
+    if complete is None:
+        return None
+    candidate, receipt = complete
+    if any(item.exists() for item in candidates if item != candidate):
+        raise ActorGenerationError("actor generation abandoned stages remain")
+    if final.exists() or final.is_symlink():
+        raise ActorGenerationError("actor generation identity collision")
+    os.rename(candidate, final)
+    _fsync_directory(output)
+    return receipt
 
 
 def _catalog_git(catalog: Mapping[str, Any], descriptor: Mapping[str, Any], actors: list[str]) -> str:
@@ -99,24 +334,10 @@ def _catalog_git(catalog: Mapping[str, Any], descriptor: Mapping[str, Any], acto
 
 
 def _context_source_identity(path: Path, git_path: str) -> tuple[str, str]:
-    if not path.is_absolute() or not path.is_dir() or path.is_symlink():
-        raise ActorGenerationError("actor Context MCP source root is invalid")
-
-    def git(*args: str) -> str:
-        completed = subprocess.run(
-            [git_path, "-c", f"safe.directory={path}", "-C", str(path), *args],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode:
-            raise ActorGenerationError("actor Context MCP source root is not an exact Git source")
-        return completed.stdout.strip()
-
-    commit = git("rev-parse", "HEAD")
-    tree = git("rev-parse", "HEAD^{tree}")
-    if _COMMIT.fullmatch(commit) is None or _COMMIT.fullmatch(tree) is None or git("status", "--porcelain=v1"):
-        raise ActorGenerationError("actor Context MCP source root is stale or dirty")
+    try:
+        _root, commit, tree = validate_context_source(path, git_path)
+    except ContextSourceGuardError as exc:
+        raise ActorGenerationError(str(exc)) from exc
     return commit, tree
 
 
@@ -157,7 +378,9 @@ def _mcp_registration(
             or not isinstance(contract.get("arguments"), Mapping)
             for name, contract in allowed_tools.items()
         )
-        or policy.get("write_effects") != "none"
+        or policy.get("write_effects")
+        != "only a credential-free self-process/active-obligation confirmation receipt"
+        or "tgw_context_confirm_rebind" not in allowed_tools
         or policy.get("unregistered_tools") != "forbidden"
         or policy.get("stale_or_mixed_binding") != "hold"
         or not isinstance(proposal_only, Mapping)
@@ -217,7 +440,7 @@ def _mcp_registration(
     return _canonical(value) + b"\n"
 
 
-def build_actor_generation(
+def _build_actor_generation_locked(
     *, catalog_path: str | Path, descriptor_path: str | Path, source_root: str | Path,
     context_source_root: str | Path, output_root: str | Path, signing_key_path: str | Path, plan_commit: str,
     solution_hash: str, source_commit: str, source_tree: str, freshness_hash: str,
@@ -259,13 +482,27 @@ def build_actor_generation(
     generation = _hash(generation_body)
     final = output / generation.removeprefix("sha256:")
     if final.exists() or final.is_symlink():
-        receipt = _read_json(final / "generation-receipt.json", "existing actor generation")
-        if receipt.get("generation") != generation or receipt.get("generation_identity") != generation_body:
-            raise ActorGenerationError("actor generation identity collision")
-        return receipt
-    stage = output / ("." + generation.removeprefix("sha256:") + ".next")
-    if stage.exists() or stage.is_symlink():
-        raise ActorGenerationError("stale actor generation staging directory exists")
+        try:
+            return _validate_complete_generation(
+                final,
+                final=final,
+                generation=generation,
+                generation_body=generation_body,
+            )
+        except (OSError, ValueError) as exc:
+            raise ActorGenerationError("actor generation identity collision") from exc
+    resumed = _reconcile_generation_stages(
+        output,
+        final=final,
+        generation=generation,
+        generation_body=generation_body,
+    )
+    if resumed is not None:
+        return resumed
+    stage = output / (
+        "." + generation.removeprefix("sha256:")
+        + f".next-{os.getpid()}-{secrets.token_hex(8)}"
+    )
     stage.mkdir(mode=0o750)
     try:
         contracts_root = stage / "contracts"
@@ -285,9 +522,42 @@ def build_actor_generation(
             if not home.is_absolute() or not project.is_absolute() or not isinstance(specification["bindings"], list):
                 raise ActorGenerationError(f"actor generation roots or bindings are invalid: {actor}")
             compiled_bindings: list[dict[str, str]] = []
-            observed: dict[str, dict[str, str]] = {"skill": {}, "hook": {}, "mcp": {}, "launcher": {}, "bootstrap": {}}
+            observed: dict[str, dict[str, str]] = {
+                "instruction": {}, "skill": {}, "hook": {}, "mcp": {},
+                "launcher": {}, "bootstrap": {},
+            }
+            binding_names: dict[str, set[str]] = {
+                "instruction": set(), "skill": set(), "hook": set(), "mcp": set(),
+                "launcher": set(), "bootstrap": set(),
+            }
             for raw in specification["bindings"]:
-                if not isinstance(raw, Mapping) or set(raw) != {"kind", "name", "source", "destination"}:
+                if (
+                    not isinstance(raw, Mapping)
+                    or set(raw) not in (
+                        {"kind", "name", "source", "destination"},
+                        {"kind", "name", "source", "destination", "endpoint"},
+                        {"kind", "name", "source", "destination", "capability"},
+                    )
+                    or ("endpoint" in raw and raw.get("kind") != "mcp")
+                    or (
+                        "capability" in raw
+                        and raw.get("kind") not in {"instruction", "skill"}
+                    )
+                    or (
+                        "endpoint" in raw
+                        and (
+                            not isinstance(raw.get("endpoint"), str)
+                            or not raw.get("endpoint")
+                        )
+                    )
+                    or (
+                        "capability" in raw
+                        and (
+                            not isinstance(raw.get("capability"), str)
+                            or not raw.get("capability")
+                        )
+                    )
+                ):
                     raise ActorGenerationError(f"actor generation binding is invalid: {actor}")
                 kind, name = raw["kind"], raw["name"]
                 relative = Path(str(raw["source"]))
@@ -298,13 +568,42 @@ def build_actor_generation(
                 if source.resolve() != resolved and source.resolve() not in resolved.parents:
                     raise ActorGenerationError(f"actor generation binding escapes source: {actor}")
                 digest = _tree_hash(resolved) if resolved.is_dir() else _file_hash(resolved)
-                if name in observed[kind]:
+                if name in binding_names[kind]:
                     raise ActorGenerationError(f"actor generation binding is duplicated: {actor}:{name}")
-                observed[kind][name] = digest
-                compiled_bindings.append({
+                binding_names[kind].add(name)
+                if kind != "mcp":
+                    capability = str(raw.get("capability", name))
+                    if kind == "instruction" and (
+                        name != "agent-entry-point"
+                        or capability != "agent-entry-point"
+                        or relative != Path("AGENTS.md")
+                        or not resolved.is_file()
+                    ):
+                        raise ActorGenerationError(
+                            f"actor generation instruction binding is invalid: {actor}"
+                        )
+                    previous_capability = observed[kind].get(capability)
+                    if previous_capability is not None and previous_capability != digest:
+                        raise ActorGenerationError(
+                            f"actor capability materializations differ: {actor}:{capability}"
+                        )
+                    observed[kind][capability] = digest
+                compiled = {
                     "kind": kind, "name": name, "source": relative.as_posix(),
                     "destination": str(destination), "sha256": digest,
-                })
+                }
+                if "endpoint" in raw:
+                    compiled["endpoint"] = str(raw["endpoint"])
+                if "capability" in raw:
+                    compiled["capability"] = str(raw["capability"])
+                compiled_bindings.append(compiled)
+            if (
+                binding_names["instruction"] != {"agent-entry-point"}
+                or set(observed["instruction"]) != {"agent-entry-point"}
+            ):
+                raise ActorGenerationError(
+                    f"actor generation instruction entry point is incomplete: {actor}"
+                )
             environment_destination = home / ".tgw" / "execution-environment-catalog.json"
             catalog_file_hash = "sha256:" + hashlib.sha256(catalog_bytes).hexdigest()
             compiled_bindings.append({
@@ -317,9 +616,11 @@ def build_actor_generation(
             launcher = next(item for item in compiled_bindings if item["kind"] == "launcher")
             for registration in [item for item in compiled_bindings if item["kind"] == "mcp"]:
                 policy_path = (source / registration["source"]).resolve(strict=True)
+                endpoint = registration.get("endpoint", registration["name"])
                 generated = _mcp_registration(
-                    policy_path=policy_path, actor=actor, endpoint=registration["name"],
-                    launcher=launcher["destination"], actor_home=str(home),
+                    policy_path=policy_path, actor=actor,
+                    endpoint=endpoint,
+                    launcher=_STABLE_CONTEXT_LAUNCHER, actor_home=str(home),
                 )
                 harness = _read_json(policy_path, "MCP registration policy").get("harness")
                 suffix = {"codex": ".toml", "deepseek": ".yml"}.get(harness, ".json")
@@ -328,13 +629,29 @@ def build_actor_generation(
                 registration.update({
                     "source": str(final / "mcp" / generated_path.name),
                     "sha256": "sha256:" + hashlib.sha256(generated).hexdigest(),
+                    "endpoint": endpoint,
                 })
-                observed["mcp"][registration["name"]] = registration["sha256"]
+                previous = observed["mcp"].get(endpoint)
+                if previous is not None and previous != registration["sha256"]:
+                    raise ActorGenerationError(
+                        f"actor MCP endpoint materializations differ: {actor}:{endpoint}"
+                    )
+                observed["mcp"][endpoint] = registration["sha256"]
             mcp_bindings = [{
-                "endpoint": item["name"], "source_sha256": item["sha256"], "destination": item["destination"],
+                "endpoint": item["endpoint"], "source_sha256": item["sha256"], "destination": item["destination"],
             } for item in compiled_bindings if item["kind"] == "mcp"]
             declared_bootstrap = next(item for item in compiled_bindings if item["kind"] == "bootstrap")
             compiled_bindings.remove(declared_bootstrap)
+            instruction = next(
+                item for item in compiled_bindings
+                if item["kind"] == "instruction"
+            )
+            instructions = {
+                "agent-entry-point": {
+                    "path": instruction["destination"],
+                    "sha256": instruction["sha256"],
+                }
+            }
             bootstrap_body = {
                 "schema": "tgw-actor-bootstrap-receipt/v1", "status": "READY",
                 "actor": actor, "profile": str(specification["profile"]),
@@ -346,6 +663,7 @@ def build_actor_generation(
                 },
                 "declared_policy_hash": declared_bootstrap["sha256"],
                 "launcher": {"path": launcher["destination"], "sha256": launcher["sha256"]},
+                "instructions": instructions,
                 "skills": observed["skill"], "hooks": observed["hook"],
                 "mcp": {
                     "endpoints": sorted(observed["mcp"]),
@@ -402,19 +720,75 @@ def build_actor_generation(
         for path in sorted(stage.rglob("*"), key=lambda item: len(item.parts), reverse=True):
             os.chmod(path, 0o555 if path.is_dir() else 0o444)
         os.chmod(stage, 0o555)
-        os.replace(stage, final)
-        directory = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        for path in sorted(
+            (item for item in stage.rglob("*") if item.is_file()),
+            key=lambda item: item.relative_to(stage).as_posix(),
+        ):
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        for path in sorted(
+            (item for item in stage.rglob("*") if item.is_dir()),
+            key=lambda item: len(item.parts), reverse=True,
+        ):
+            _fsync_directory(path)
+        _fsync_directory(stage)
+        if final.exists() or final.is_symlink():
+            raise ActorGenerationError("actor generation identity collision")
+        os.rename(stage, final)
+        _fsync_directory(output)
         return receipt
     except Exception:
-        if stage.exists() and not stage.is_symlink():
-            for path in sorted(stage.rglob("*"), reverse=True):
-                path.rmdir() if path.is_dir() else path.unlink()
-            stage.rmdir()
+        # Leave only this exact-name, owner-bound stage for the next locked
+        # invocation.  Reconciliation records its identity and manifest
+        # durably before removing or resuming it.
         raise
+
+
+def build_actor_generation(
+    *, catalog_path: str | Path, descriptor_path: str | Path,
+    source_root: str | Path, context_source_root: str | Path,
+    output_root: str | Path, signing_key_path: str | Path, plan_commit: str,
+    solution_hash: str, source_commit: str, source_tree: str,
+    freshness_hash: str,
+) -> dict[str, Any]:
+    """Serialize generation construction and reconcile crash-stale stages."""
+    output = Path(output_root)
+    if (
+        not output.is_absolute()
+        or output == Path("/tmp")
+        or Path("/tmp") in output.parents
+        or not output.is_dir()
+        or output.is_symlink()
+        or output.resolve(strict=True) != output
+    ):
+        raise ActorGenerationError("actor generation output root is not durable")
+    lock_path = output / ".actor-generation-build.lock"
+    descriptor = os.open(
+        lock_path,
+        os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        return _build_actor_generation_locked(
+            catalog_path=catalog_path,
+            descriptor_path=descriptor_path,
+            source_root=source_root,
+            context_source_root=context_source_root,
+            output_root=output,
+            signing_key_path=signing_key_path,
+            plan_commit=plan_commit,
+            solution_hash=solution_hash,
+            source_commit=source_commit,
+            source_tree=source_tree,
+            freshness_hash=freshness_hash,
+        )
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def main() -> int:

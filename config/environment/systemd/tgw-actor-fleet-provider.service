@@ -12,13 +12,12 @@ Group=tgw-coders
 WorkingDirectory=/opt/TGW/tgw-lib
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-Environment=PYTHONPATH=/opt/TGW/tgw-lib/actor-runtime/current/src
 Environment=TGW_CONFIG=/opt/TGW/tgw-lib/config/tgw-governed-actor-control.json
 Environment=TGW_ACTOR_FLEET_HOST=100.68.223.70
 Environment=TGW_ACTOR_FLEET_PORT=7556
-Environment=TMPDIR=/opt/TGW/tgw-lib/var/fleet
+Environment=TMPDIR=/var/cache/tgw/actor-fleet-provider
 EnvironmentFile=-/etc/tgw/actor-fleet.env
-ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.actor_fleet_provider
+ExecStart=/nix/store/gjnsqc3c5gbcsqxn3fwgsqvj5mfgsjx8-tgw-runtime-launch/bin/tgw-runtime-launch --tgw-root /opt/TGW/tgw-lib/actor-runtime --require-root-owned --module tgw.actor_fleet_provider --entrypoint main
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
@@ -27,14 +26,14 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=read-only
 ProtectSystem=strict
-ReadWritePaths=/opt/TGW/tgw-lib/var/fleet /opt/TGW/w/attempts /opt/TGW/var/cache/tgw/attempts /opt/TGW/var/cache/tgw/actors /etc/tgw/actors /home/codex /home/claude /home/deepseek
+ReadWritePaths=/var/lib/tgw/actor-fleet /var/cache/tgw/actor-fleet-provider /opt/TGW/w/attempts /opt/TGW/var/cache/tgw/attempts /opt/TGW/var/cache/tgw/actors /etc/tgw/actors /home/codex /home/claude /home/deepseek
 ReadOnlyPaths=/opt/TGW/tgw-lib/actor-runtime/current
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
-AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID CAP_SYS_PTRACE
+AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID CAP_SYS_PTRACE
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 

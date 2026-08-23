@@ -8,6 +8,29 @@ import pytest
 from tgw.actor_host_bootstrap import ActorHostBootstrapError, HostPaths, install_actor_host, rollback_actor_host
 
 
+def test_actor_fleet_unit_grants_inspection_but_not_process_kill_capability():
+    unit = (
+        Path(__file__).resolve().parents[1]
+        / "config/environment/systemd/tgw-actor-fleet-provider.service"
+    ).read_text()
+    for directive in ("CapabilityBoundingSet", "AmbientCapabilities"):
+        line = next(
+            row for row in unit.splitlines() if row.startswith(f"{directive}=")
+        )
+        capabilities = set(line.split("=", 1)[1].split())
+        assert capabilities & {"CAP_SYS_PTRACE", "CAP_KILL"} == {
+            "CAP_SYS_PTRACE",
+        }
+    assert "Environment=PYTHONPATH=" not in unit
+    assert (
+        "ExecStart=/nix/store/gjnsqc3c5gbcsqxn3fwgsqvj5mfgsjx8-"
+        "tgw-runtime-launch/bin/tgw-runtime-launch "
+        "--tgw-root /opt/TGW/tgw-lib/actor-runtime --require-root-owned "
+        "--module tgw.actor_fleet_provider --entrypoint main"
+    ) in unit
+    assert "/opt/TGW/.venvs/controller" not in unit
+
+
 def _fixture(root: Path):
     release = root / "release"
     managed = root / "managed"

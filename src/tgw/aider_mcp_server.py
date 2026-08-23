@@ -165,10 +165,7 @@ def _slugify_task_slug(task_slug: str) -> tuple[str, str | None]:
 
 
 def _build_preflight_context(work_dir: Path) -> str:
-    """Surface the same class of Plan Vault awareness Claude's own sessions
-    get automatically from `.claude/hooks/session-start-briefing.py`
-    (SessionStart hook) — inbox file count/names + `tgw plan check`
-    warnings — into an Aider task's initial prompt.
+    """Surface bounded Plan checks into an Aider coding task's initial prompt.
 
     Best-effort: any failure here degrades to a short note rather than
     blocking the task (this is context, not a gate).

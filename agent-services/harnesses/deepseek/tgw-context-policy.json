@@ -8,14 +8,15 @@
   "harness_identity_grants_role": false,
   "allowed_tools": {
     "tgw_context_status": {"arguments": {}},
+    "tgw_context_confirm_rebind": {"arguments": {"transaction_id": {"pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"}, "direction": {"enum": ["successor", "rollback"]}, "obligation_id": {"pattern": "^sha256:[0-9a-f]{64}$"}}},
     "tgw_context_bundle": {"arguments": {"task": {"max_length": 1000}, "receiver": {"enum": ["codex", "claude", "deepseek"]}, "limit": {"minimum": 1, "maximum": 100}}},
     "tgw_context_plan_graph": {"arguments": {"task": {"max_length": 1000}, "receiver": {"enum": ["codex", "claude", "deepseek"]}, "operation": {"enum": ["brief", "resolve", "status"]}, "limit": {"minimum": 1, "maximum": 100}}},
-    "tgw_context_plan_source": {"arguments": {"path": {"prefixes": ["plan/", "pp/", "reference/"], "absolute": false, "parent_segments": false}, "start_line": {"minimum": 1}, "max_lines": {"minimum": 1, "maximum": 250}}},
+    "tgw_context_plan_source": {"arguments": {"path": {"prefixes": ["plan/", "pp/", "reference/"], "absolute": false, "parent_segments": false}, "start_line": {"minimum": 1}, "max_lines": {"minimum": 1, "maximum": 250}, "authority": {"enum": ["approved-plan", "current-plan"]}}},
     "tgw_context_runbooks": {"arguments": {"query": {"max_length": 1000}, "path": {"prefixes": ["reference/runbooks/", "docs/runbooks/"], "absolute": false, "parent_segments": false}, "start_line": {"minimum": 1}, "max_lines": {"minimum": 1, "maximum": 250}, "limit": {"minimum": 1, "maximum": 100}, "authority": {"enum": ["all", "current-plan", "approved-plan", "application"]}}},
     "tgw_context_onboarding": {"arguments": {"actor": {"pattern": "^[a-z][a-z0-9_-]{0,63}$"}}},
     "tgw_context_code_graph": {"arguments": {"operation": {"enum": ["status", "query", "capabilities"]}, "query": {"max_length": 1000}, "limit": {"minimum": 1, "maximum": 100}}}
   },
-  "write_effects": "none",
+  "write_effects": "only a credential-free self-process/active-obligation confirmation receipt",
   "unregistered_tools": "forbidden",
   "stale_or_mixed_binding": "hold",
   "proposal_only": {"on_missing_capability": true, "has_effect_authority": false, "recipient": "orchestrator"}

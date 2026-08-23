@@ -1,0 +1,39 @@
+[Unit]
+Description=TGW credential-safe Context confirmation relay
+After=network-online.target tgw-actor-fleet-provider.service
+Wants=network-online.target
+Requires=tgw-actor-fleet-provider.service
+ConditionPathExists=/opt/TGW/tgw-lib/actor-runtime/current/src/tgw/context_confirmation_relay.py
+
+[Service]
+Type=simple
+User=root
+Group=tgw-coders
+WorkingDirectory=/opt/TGW/tgw-lib
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=TGW_ACTOR_FLEET_ENDPOINT=http://100.68.223.70:7556
+EnvironmentFile=/etc/tgw/actor-fleet.env
+ExecStart=/usr/bin/python3 -I -s -P /opt/TGW/tgw-lib/actor-runtime/current/src/tgw/context_confirmation_relay.py
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=tgw
+RuntimeDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/run/tgw
+ReadOnlyPaths=/usr/bin/python3 /opt/TGW/tgw-lib/actor-runtime/current /etc/tgw/actor-fleet.env
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_SYS_PTRACE
+AmbientCapabilities=CAP_SYS_PTRACE
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

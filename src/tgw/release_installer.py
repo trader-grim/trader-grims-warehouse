@@ -8,6 +8,7 @@ durable intent before the atomic symlink replacement.
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import hashlib
 import json
@@ -21,6 +22,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, Mapping
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from tgw.admission_recovery import (
     AdmissionRecoveryError,
@@ -42,8 +45,23 @@ class ReleaseError(RuntimeError):
     """A release could not be safely materialized or selected."""
 
 
+class OwnerDirectEvidenceError(ValueError):
+    """An owner-direct integrity receipt is malformed or mismatched."""
+
+
 def _canonical(value: Any) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _canonical_object(value: Any) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False,
+    ).encode()
+
+
+def _object_hash(value: Any) -> str:
+    return "sha256:" + hashlib.sha256(_canonical_object(value)).hexdigest()
 
 
 def _digest(path: Path) -> str:
@@ -474,6 +492,7 @@ def _select(
     operation_id: str,
     rollback_of: str | None = None,
     evidence_validator: Callable[[Mapping[str, Any]], None] | None = None,
+    evidence_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """CAS-select an already materialized release and durably receipt it."""
     generation = _generation(generation)
@@ -493,6 +512,8 @@ def _select(
                     previous.get("previous_generation") == expected_current
                     and previous.get("selected_generation") == generation
                     and previous.get("rollback_of") == rollback_of
+                    and previous.get("evidence_identity")
+                    == (dict(evidence_identity) if evidence_identity is not None else None)
                     and receipt_path.exists()
                     and _read_json(receipt_path) == previous
                     and current_generation(root) == generation
@@ -522,6 +543,8 @@ def _select(
         }
         if rollback_of is not None:
             intent["rollback_of"] = rollback_of
+        if evidence_identity is not None:
+            intent["evidence_identity"] = dict(evidence_identity)
         if operation_path.exists() and _read_json(operation_path) != intent:
             raise ReleaseError("operation id collision")
         if not operation_path.exists():
@@ -626,6 +649,153 @@ def select(
     except (AdmissionRecoveryError, KeyError) as exc:
         record_refusal(root, generation, operation_id, reason="invalid-admission-evidence")
         raise ReleaseError(f"release admission refused: {exc}") from exc
+
+
+def select_owner_directed(
+    root: Path,
+    generation: str,
+    *,
+    expected_current: str | None,
+    operation_id: str,
+    admission_receipt: Mapping[str, Any],
+    environment_preflight_receipt: Mapping[str, Any],
+    admission_public_key: bytes,
+    environment_public_key: bytes,
+    current_plan_commit: str,
+    current_solution_hash: str,
+    current_time: str | Callable[[], str],
+) -> dict[str, Any]:
+    """CAS-select one exact owner-directed candidate without review masquerade."""
+
+    def validate_evidence(manifest: Mapping[str, Any]) -> None:
+        evidence_time = current_time() if callable(current_time) else current_time
+        fields = {
+            "schema", "request_id", "authority_mode", "authority_evidence",
+            "candidate", "plan", "environment", "status", "activation",
+            "operator_authentication", "issued_at", "expires_at",
+            "signer_key_id", "receipt_hash", "signature",
+        }
+        authority_fields = {
+            "schema", "authority_mode", "source_label", "observed_at",
+            "directive_sha256", "review_disposition", "integrity_semantics",
+            "authority_evidence_sha256",
+        }
+        if (
+            set(admission_receipt) != fields
+            or admission_receipt.get("schema")
+            != "tgw-context-owner-directed-admission/v1"
+            or admission_receipt.get("authority_mode") != "OWNER_DIRECT"
+            or admission_receipt.get("status") != "ADMITTED_OWNER_DIRECT"
+            or admission_receipt.get("activation") != "declarative-only"
+            or admission_receipt.get("operator_authentication")
+            != "NOT_PERFORMED_NOT_REQUIRED"
+            or admission_receipt.get("signer_key_id")
+            != "tgw-release-admission"
+            or admission_receipt.get("candidate")
+            != {"commit": manifest.get("commit"), "tree": manifest.get("git_tree")}
+            or admission_receipt.get("plan")
+            != {
+                "commit": current_plan_commit,
+                "solution_hash": current_solution_hash,
+            }
+            or not isinstance(admission_receipt.get("authority_evidence"), Mapping)
+            or set(admission_receipt["authority_evidence"]) != authority_fields
+        ):
+            raise OwnerDirectEvidenceError("owner-directed admission binding differs")
+        authority = dict(admission_receipt["authority_evidence"])
+        authority_hash = authority.pop("authority_evidence_sha256", None)
+        disposition = authority.get("review_disposition")
+        disposition_unsigned = (
+            dict(disposition) if isinstance(disposition, Mapping) else {}
+        )
+        disposition_hash = disposition_unsigned.pop("disposition_sha256", None)
+        if (
+            authority.get("schema")
+            != "tgw-context-owner-directive-summary/v1"
+            or authority.get("authority_mode") != "OWNER_DIRECT"
+            or authority.get("integrity_semantics")
+            != "PLATFORM_SIGNATURE_IS_NOT_OPERATOR_AUTHENTICATION"
+            or not isinstance(authority.get("source_label"), str)
+            or not re.fullmatch(r"operator-(?:conversation|console)", authority["source_label"])
+            or not isinstance(authority.get("observed_at"), str)
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(authority.get("directive_sha256", ""))
+            )
+            or disposition_unsigned
+            != {
+                "schema": "tgw-context-review-disposition/v1",
+                "authority_mode": "OWNER_DIRECT",
+                "disposition": "NOT_APPLICABLE_OWNER_DIRECT",
+                "directive_sha256": authority.get("directive_sha256"),
+                "candidate": admission_receipt.get("candidate"),
+                "plan": admission_receipt.get("plan"),
+                "basis": "EXPLICIT_OWNER_DIRECTIVE",
+            }
+            or disposition_hash != _object_hash(disposition_unsigned)
+            or authority_hash != _object_hash(authority)
+        ):
+            raise OwnerDirectEvidenceError("owner directive summary differs")
+        signed = dict(admission_receipt)
+        signature_text = signed.pop("signature", None)
+        unsigned = dict(signed)
+        receipt_hash = unsigned.pop("receipt_hash", None)
+        try:
+            issued = datetime.fromisoformat(
+                str(admission_receipt["issued_at"]).replace("Z", "+00:00")
+            )
+            expires = datetime.fromisoformat(
+                str(admission_receipt["expires_at"]).replace("Z", "+00:00")
+            )
+            observed = datetime.fromisoformat(str(evidence_time).replace("Z", "+00:00"))
+            signature = base64.b64decode(str(signature_text), validate=True)
+            key = Ed25519PublicKey.from_public_bytes(admission_public_key)
+            key.verify(signature, _canonical_object(signed))
+        except (TypeError, ValueError, KeyError) as exc:
+            raise OwnerDirectEvidenceError(
+                "owner-directed admission signature differs"
+            ) from exc
+        if (
+            any(item.tzinfo is None or item.utcoffset() is None for item in (issued, expires, observed))
+            or not issued <= observed < expires
+            or receipt_hash != _object_hash(unsigned)
+        ):
+            raise OwnerDirectEvidenceError("owner-directed admission identity differs")
+        environment = admission_receipt.get("environment")
+        if not isinstance(environment, Mapping):
+            raise OwnerDirectEvidenceError("owner-directed environment binding differs")
+        validate_environment_preflight_for_admission(
+            environment_preflight_receipt,
+            catalog_hash=str(environment.get("catalog_hash", "")),
+            receipt_hash=str(environment.get("receipt_hash", "")),
+            trusted_public_key=environment_public_key,
+            current_time=str(evidence_time),
+        )
+
+    try:
+        manifest = _read_json(
+            root / "releases" / _generation(generation) / ".release-manifest.json"
+        )
+        validate_evidence(manifest)
+        authority = admission_receipt["authority_evidence"]
+        return _select(
+            root,
+            generation,
+            expected_current=expected_current,
+            operation_id=operation_id,
+            evidence_validator=validate_evidence,
+            evidence_identity={
+                "authority_mode": "OWNER_DIRECT",
+                "authority_evidence_sha256": authority[
+                    "authority_evidence_sha256"
+                ],
+                "admission_receipt_sha256": admission_receipt["receipt_hash"],
+            },
+        )
+    except (AdmissionRecoveryError, KeyError, OwnerDirectEvidenceError) as exc:
+        record_refusal(
+            root, generation, operation_id, reason="invalid-owner-direct-evidence"
+        )
+        raise ReleaseError(f"owner-directed release selection refused: {exc}") from exc
 
 
 def rollback(

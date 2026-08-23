@@ -8,6 +8,18 @@ description: Independently review an exact TGW source candidate, branch, commit,
 Review one exact candidate. Treat review as an evidence-producing role, never as
 authority to merge, install, deploy, approve, or repair the candidate.
 
+## Establish session generation
+
+Before independent or diagnostic review work on the first use in an ordinary harness
+session, call the installed `tgw_context_status` tool with no arguments. Surface its
+exact `generation_status.line` before retrieving review context. A `CURRENT` result
+permits the role to proceed under its bound evidence. An `UPDATE_PENDING`,
+`RESTART_REQUIRED`, `MIXED`, or `HOLD` result constrains review claims to the reported
+generation and prevents an admitting verdict until exact current evidence is restored;
+it never blocks, delays, or overrides an explicit owner command. If the status call is
+unavailable or malformed, governed review is `HOLD`; never substitute launcher stderr,
+conversation memory, or a filesystem guess.
+
 ## Classify the review
 
 Choose one mode before inspecting code:
@@ -27,7 +39,10 @@ separate checks.
 
 ## Establish exact context
 
-1. Call `tgw_context_bundle` with the actual review task.
+1. Call `tgw_context_bundle` with the actual review task. For governed review,
+   supply the execution card's complete challenge, canonical card JSON, handoff
+   hash, resource-receipt hash, skill-contract hash, and grant JSON; retrieve
+   candidate and base only from the returned `registered_resources`.
 2. Verify its approved Plan commit, source commit/tree, and CodeGraph freshness
    hash. Retrieve the cited Plan and runbook chunks needed for this review.
 3. For a governed review, exact-compare the bundle with the execution card.
@@ -37,9 +52,10 @@ separate checks.
    execution identity and clean context with no unrecorded private reasoning or
    mutable implementation work state. Same-vendor review is allowed only when
    the execution identities and contexts are independent.
-5. Inspect the exact candidate and its bound base. Never assume that the base is
-   named `main`, that the current checkout is the candidate, or that a Todo/PP
-   completion implies parent Plan completion.
+5. Inspect only the exact candidate and base furnished by the execution card and its
+   admitted inspection tool or source binding. Never discover or substitute a local
+   checkout, assume that the base is named `main`, or infer that a Todo/PP completion
+   implies parent Plan completion.
 
 ## Review the candidate
 

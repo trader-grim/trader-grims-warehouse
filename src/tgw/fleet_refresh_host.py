@@ -107,7 +107,10 @@ class _FleetProvider:
             or result.get("provider_id") != "tgw-fleet-refresh-provider@1"
             or result.get("step") != step or result.get("invocation_hash") != invocation_hash
             or not isinstance(result.get("result"), Mapping)
-            or result["result"].get("status") not in {expected, "FAILED"}
+            or result["result"].get("status") not in {
+                expected, "FAILED",
+                *( {"RESTART_REQUIRED"} if step in {"restart", "rollback"} else set() ),
+            }
         ):
             raise FleetRefreshHostError("fleet provider response is invalid")
         return dict(result["result"])

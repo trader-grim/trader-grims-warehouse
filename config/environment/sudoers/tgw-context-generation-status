@@ -1,0 +1,3 @@
+# Read-only, credential-free independent Context generation verification.
+%tgw-coders ALL=(root) NOPASSWD: /opt/TGW/tgw-lib/bin/tgw-context-generation-status
+%tgw-coders ALL=(root) NOPASSWD: /opt/TGW/tgw-lib/bin/tgw-context-generation-status --json

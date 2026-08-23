@@ -8,14 +8,26 @@ import json
 import os
 import pwd
 import re
+import stat
 import subprocess
+import sys
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, NoReturn
 
 from tgw.actor_contract import ActorContractError, verify_signed_actor_contract
+from tgw.context_source_guard import (
+    ContextSourceGuardError,
+    closed_git_environment,
+    validate_context_source,
+)
 
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+_INSTRUCTION_ENTRY_POINTS = {
+    "claude": Path(".claude/CLAUDE.md"),
+    "codex": Path(".codex/AGENTS.md"),
+    "deepseek": Path(".dsh/AGENTS.md"),
+}
 
 
 class ActorStartupError(ValueError):
@@ -65,11 +77,22 @@ def _startup_binding(path: Path, actor: str) -> dict[str, str]:
         "expected_source_tree",
         "context_source_root",
         "expected_catalog_hash",
+        "fleet_convergence_path",
+        "stable_launcher_path",
     }
-    if set(value) != required or value.get("schema") != "tgw-actor-startup-binding/v2" or value.get("actor") != actor:
+    if set(value) != required or value.get("schema") != "tgw-actor-startup-binding/v3" or value.get("actor") != actor:
         raise ActorStartupError("actor startup binding is invalid")
     source_root = Path(str(value.get("context_source_root", "")))
-    if not source_root.is_absolute() or _COMMIT.fullmatch(str(value.get("expected_source_tree", ""))) is None:
+    if (
+        not source_root.is_absolute()
+        or source_root == Path("/tmp")
+        or Path("/tmp") in source_root.parents
+        or source_root == Path("/opt/TGW/var/tmp")
+        or Path("/opt/TGW/var/tmp") in source_root.parents
+        or _COMMIT.fullmatch(str(value.get("expected_source_tree", ""))) is None
+        or not Path(str(value.get("fleet_convergence_path", ""))).is_absolute()
+        or not Path(str(value.get("stable_launcher_path", ""))).is_absolute()
+    ):
         raise ActorStartupError("actor startup source binding is invalid")
     return {key: str(raw) for key, raw in value.items()}
 
@@ -81,6 +104,60 @@ def _protected_actor_link(path: Path) -> None:
     observed = target.stat()
     if observed.st_uid != 0 or observed.st_mode & 0o022:
         raise ActorStartupError(f"actor startup source is actor-writable: {path}")
+
+
+def _instruction_entry_point(
+    root: Path,
+    actor: str,
+    bootstrap: Mapping[str, Any],
+    *,
+    require_protected_source: bool,
+) -> dict[str, str]:
+    relative = _INSTRUCTION_ENTRY_POINTS.get(actor)
+    instructions = bootstrap.get("instructions")
+    if relative is None or not isinstance(instructions, Mapping) or set(instructions) != {
+        "agent-entry-point"
+    }:
+        raise ActorStartupError("actor instruction entry point is missing")
+    raw = instructions["agent-entry-point"]
+    destination = root / relative
+    if (
+        not isinstance(raw, Mapping)
+        or set(raw) != {"path", "sha256"}
+        or raw.get("path") != str(destination)
+        or _HASH.fullmatch(str(raw.get("sha256", ""))) is None
+        or not destination.is_symlink()
+        or _file_hash(destination) != raw.get("sha256")
+    ):
+        raise ActorStartupError("actor instruction entry point differs from generation")
+    if require_protected_source:
+        _protected_actor_link(destination)
+    return {"path": str(destination), "sha256": str(raw["sha256"])}
+
+
+def _protected_stable_launcher(path: Path) -> None:
+    """Require a root-owned launcher entry in a non-actor-writable parent."""
+
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise ActorStartupError("root stable Context launcher is unavailable")
+    entry = path.lstat()
+    parent = path.parent.stat(follow_symlinks=False)
+    target = path.resolve(strict=True)
+    observed = target.stat(follow_symlinks=False)
+    if (
+        entry.st_uid != 0
+        or entry.st_mode & 0o022
+        or entry.st_nlink != 1
+        or not stat.S_ISREG(entry.st_mode)
+        or path.parent.is_symlink()
+        or path.parent.resolve(strict=True) != path.parent
+        or parent.st_uid != 0
+        or parent.st_mode & 0o022
+        or observed.st_uid != 0
+        or observed.st_mode & 0o022
+        or not target.is_file()
+    ):
+        raise ActorStartupError("root stable Context launcher is not protected")
 
 
 def _profile_tool(catalog: Mapping[str, Any], profile: str, name: str) -> str:
@@ -95,24 +172,10 @@ def _profile_tool(catalog: Mapping[str, Any], profile: str, name: str) -> str:
 
 
 def _context_source_identity(path: Path, git: str) -> tuple[str, str]:
-    if not path.is_absolute() or not path.is_dir() or path.is_symlink():
-        raise ActorStartupError("actor Context MCP source root is invalid")
-
-    def inspect(*args: str) -> str:
-        completed = subprocess.run(
-            [git, "-c", f"safe.directory={path}", "-C", str(path), *args],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode:
-            raise ActorStartupError("actor Context MCP source root is not an exact Git source")
-        return completed.stdout.strip()
-
-    commit = inspect("rev-parse", "HEAD")
-    tree = inspect("rev-parse", "HEAD^{tree}")
-    if _COMMIT.fullmatch(commit) is None or _COMMIT.fullmatch(tree) is None or inspect("status", "--porcelain=v1"):
-        raise ActorStartupError("actor Context MCP source root is stale or dirty")
+    try:
+        _root, commit, tree = validate_context_source(path, git)
+    except ContextSourceGuardError as exc:
+        raise ActorStartupError(str(exc)) from exc
     return commit, tree
 
 
@@ -186,6 +249,12 @@ def attest_actor_startup(
         or profile.get("state") != "ready-for-preflight"
     ):
         raise ActorStartupError("actor startup binding is stale or mixed")
+    instruction_entry_point = _instruction_entry_point(
+        root,
+        actor,
+        bootstrap,
+        require_protected_source=require_protected_sources,
+    )
     body = {
         "schema": "tgw-actor-startup-attestation/v1",
         "status": "PASS",
@@ -199,6 +268,7 @@ def attest_actor_startup(
         "profile": contract["profile"],
         "contract_receipt_hash": contract["receipt_hash"],
         "bootstrap_receipt_hash": bootstrap["receipt_hash"],
+        "instruction_entry_point": instruction_entry_point,
         "required_capabilities": sorted(profile.get("broker_capabilities", [])),
         "fallback": "FORBIDDEN",
     }
@@ -246,13 +316,18 @@ def _context_mcp_environment(
         "TGW_CONTEXT_ENVIRONMENT_CATALOG": environment_catalog,
         "TGW_CONTEXT_ENVIRONMENT_CATALOG_HASH": str(result["catalog_hash"]),
         "TGW_CONTEXT_ACTOR": str(result["actor"]),
+        "TGW_CONTEXT_ENDPOINT": "tgw-context",
+        "TGW_CONTEXT_PROFILE": str(result["profile"]),
         "TGW_CONTEXT_GENERATION": str(result["generation"]),
         "TGW_CONTEXT_SOURCE_COMMIT": str(result["source_commit"]),
         "TGW_CONTEXT_SOURCE_TREE": str(result["source_tree"]),
         "TGW_CONTEXT_STARTUP_BINDING": str(binding_path),
+        "TGW_CONTEXT_FLEET_CONVERGENCE": binding["fleet_convergence_path"],
         "HOME": str(home),
         "LANG": "C.UTF-8",
         "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
         "TMPDIR": context_cache_root,
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "safe.directory",
@@ -261,13 +336,199 @@ def _context_mcp_environment(
     }
 
 
+def _exec_context_mcp_runtime(
+    *,
+    home: Path,
+    actor: str,
+    source_root: Path,
+    environment: Mapping[str, str],
+) -> NoReturn:
+    """Cross execve into exact candidate bytes with a stable launcher argv identity."""
+
+    stable_launcher = Path(str(environment["TGW_CONTEXT_STABLE_LAUNCHER"]))
+    _protected_stable_launcher(stable_launcher)
+    candidate_launcher = Path(environment["TGW_CONTEXT_RUNTIME_ENTRYPOINT"])
+    executable = Path(sys.executable).resolve(strict=True)
+    if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ActorStartupError("actor Context Python runtime is unavailable")
+    arguments = [
+        str(executable),
+        "-I",
+        "-s",
+        "-P",
+        str(candidate_launcher),
+        "--context-mcp-runtime",
+        "--context-mcp",
+        "--context-mcp-stable-launcher",
+        str(stable_launcher),
+    ]
+    os.execve(executable, arguments, dict(environment))
+    raise AssertionError("execve returned")
+
+
+def _git_blob(source_root: Path, git: str, commit: str, path: str) -> bytes:
+    completed = subprocess.run(
+        [
+            git, "-c", f"safe.directory={source_root}",
+            "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+            "-C", str(source_root), "show", f"{commit}:{path}",
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        env=closed_git_environment(git),
+    )
+    if completed.returncode:
+        raise ActorStartupError(f"exact candidate runtime blob is unavailable: {path}")
+    return completed.stdout
+
+
+def _runtime_identity_environment(
+    *,
+    home: Path,
+    result: Mapping[str, Any],
+    binding: Mapping[str, str],
+    context_environment: Mapping[str, str],
+) -> dict[str, str]:
+    source_root = Path(binding["context_source_root"])
+    catalog = _object(home / ".tgw" / "execution-environment-catalog.json", "actor environment catalog")
+    git = _profile_tool(catalog, str(result["profile"]), "git")
+    paths = {
+        "TGW_CONTEXT_RUNTIME_ENTRYPOINT": source_root / "scripts" / "tgw_actor_startup.py",
+        "TGW_CONTEXT_RUNTIME_MODULE": source_root / "src" / "tgw" / "actor_startup.py",
+        "TGW_CONTEXT_RUNTIME_CONTEXT_MODULE": source_root / "src" / "tgw" / "context_mcp_server.py",
+    }
+    git_paths = {
+        "TGW_CONTEXT_RUNTIME_ENTRYPOINT": "scripts/tgw_actor_startup.py",
+        "TGW_CONTEXT_RUNTIME_MODULE": "src/tgw/actor_startup.py",
+        "TGW_CONTEXT_RUNTIME_CONTEXT_MODULE": "src/tgw/context_mcp_server.py",
+    }
+    identity = dict(context_environment)
+    for name, path in paths.items():
+        if path.is_symlink() or not path.is_file():
+            raise ActorStartupError("exact candidate Context runtime is unavailable")
+        raw = path.read_bytes()
+        if raw != _git_blob(source_root, git, str(result["source_commit"]), git_paths[name]):
+            raise ActorStartupError("exact candidate Context runtime differs from Git")
+        identity[name] = str(path)
+        identity[name + "_SHA256"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+    stable_launcher = Path(binding["stable_launcher_path"])
+    _protected_stable_launcher(stable_launcher)
+    stable_raw = stable_launcher.resolve(strict=True).read_bytes()
+    if stable_raw != _git_blob(
+        source_root, git, str(result["source_commit"]), "scripts/tgw_actor_startup.py"
+    ):
+        raise ActorStartupError("materialized stable launcher differs from exact candidate")
+    executable = Path(sys.executable).resolve(strict=True)
+    executable_state = executable.stat(follow_symlinks=False)
+    identity.update(
+        {
+            "TGW_CONTEXT_STABLE_LAUNCHER": str(stable_launcher),
+            "TGW_CONTEXT_STABLE_LAUNCHER_SHA256": "sha256:" + hashlib.sha256(stable_raw).hexdigest(),
+            "TGW_CONTEXT_RUNTIME_EXECUTABLE": str(executable),
+            "TGW_CONTEXT_RUNTIME_EXECUTABLE_SHA256": "sha256:" + hashlib.sha256(executable.read_bytes()).hexdigest(),
+            "TGW_CONTEXT_RUNTIME_EXECUTABLE_DEVICE": str(executable_state.st_dev),
+            "TGW_CONTEXT_RUNTIME_EXECUTABLE_INODE": str(executable_state.st_ino),
+        }
+    )
+    return identity
+
+
+def _generation_status_line(binding: Mapping[str, str]) -> str:
+    """Read the root-provider one-line status without trusting an MCP child."""
+    path = Path(binding["fleet_convergence_path"])
+    hold = (
+        "TGW Context generation: client=CURRENT fleet=HOLD aggregate=HOLD "
+        f"gen={binding['expected_generation'].removeprefix('sha256:')[:12]} "
+        f"approved={binding['expected_plan_commit'][:12]} evidence=unknown "
+        f"source={binding['expected_source_commit'][:12]} instructions=unknown "
+        "tx=unknown pending=unknown"
+    )
+    try:
+        if not path.is_absolute() or path.is_symlink() or not path.is_file():
+            return hold
+        observed = path.stat(follow_symlinks=False)
+        if observed.st_uid != 0 or observed.st_mode & 0o022 or observed.st_size > 2_000_000:
+            return hold
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            return hold
+        unsigned = dict(value)
+        claimed = unsigned.pop("projection_sha256", None)
+        status = value.get("generation_status")
+        transaction = value.get("transaction")
+        if (
+            claimed != _hash(unsigned)
+            or status not in {
+                "CURRENT", "UPDATE_PENDING", "RESTART_REQUIRED", "MIXED", "HOLD"
+            }
+            or (
+                isinstance(transaction, Mapping)
+                and transaction.get("target_generation")
+                != binding["expected_generation"]
+            )
+        ):
+            return hold
+        pending = (
+            sum(
+                len(item.get("pending_reasons", []))
+                for item in transaction.get("obligations", [])
+                if isinstance(item, Mapping)
+            ) + len(transaction.get("global_pending", []))
+            if isinstance(transaction, Mapping) else 0
+        )
+        revisions = (
+            transaction.get("target_revisions", {})
+            if isinstance(transaction, Mapping) else {}
+        )
+        transaction_id = (
+            str(transaction.get("transaction_id", "none"))
+            if isinstance(transaction, Mapping) else "none"
+        )
+        generation = binding["expected_generation"].removeprefix("sha256:")[:12]
+        actor_verification = next(
+            (
+                item
+                for item in transaction.get("actor_verifications", [])
+                if isinstance(item, Mapping)
+                and item.get("actor") == binding["actor"]
+            ),
+            None,
+        ) if isinstance(transaction, Mapping) else None
+        instruction_hash = (
+            str(actor_verification.get("instruction_entry_point_sha256", ""))
+            if isinstance(actor_verification, Mapping) else ""
+        )
+        if status == "CURRENT" and _HASH.fullmatch(instruction_hash) is None:
+            return hold
+        return (
+            f"TGW Context generation: client=CURRENT fleet={status} "
+            f"aggregate={status} gen={generation} "
+            f"approved={str(revisions.get('approved_plan', binding['expected_plan_commit']))[:12]} "
+            f"evidence={str(revisions.get('evidence_plan', 'unknown'))[:12]} "
+            f"source={str(revisions.get('source_commit', binding['expected_source_commit']))[:12]} "
+            f"instructions={instruction_hash.removeprefix('sha256:')[:12] or 'pending'} "
+            f"tx={transaction_id} pending={pending}"
+        )
+    except (OSError, ValueError, json.JSONDecodeError):
+        return hold
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="tgw-actor-startup")
     parser.add_argument("--home", type=Path, default=Path.home())
     parser.add_argument("--actor", default=pwd.getpwuid(os.geteuid()).pw_name)
     parser.add_argument("--binding", type=Path)
     parser.add_argument("--context-mcp", action="store_true")
+    parser.add_argument("--context-mcp-runtime", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--context-mcp-stable-launcher", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if (
+        (args.context_mcp_runtime and not args.context_mcp)
+        or (args.context_mcp_stable_launcher and not args.context_mcp_runtime)
+    ):
+        raise ActorStartupError("actor Context runtime mode is incomplete")
     try:
         binding_path = args.binding or Path(f"/etc/tgw/actors/{args.actor}-startup.json")
         binding = _startup_binding(binding_path, args.actor)
@@ -293,6 +554,12 @@ def main() -> int:
                 binding=binding,
                 binding_path=binding_path,
             )
+            context_environment = _runtime_identity_environment(
+                home=args.home,
+                result=result,
+                binding=binding,
+                context_environment=context_environment,
+            )
         except (OSError, ValueError) as exc:
             print(
                 json.dumps(
@@ -301,12 +568,70 @@ def main() -> int:
                 )
             )
             return 73
-        os.environ.clear()
-        os.environ.update(context_environment)
-        from tgw.context_mcp_server import main as context_main
+        if args.context_mcp_runtime:
+            if dict(os.environ) != context_environment:
+                print(
+                    json.dumps(
+                        {
+                            "schema": "tgw-actor-startup-attestation/v1",
+                            "status": "HOLD",
+                            "reason": "exec-visible actor Context environment differs from re-attestation",
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 73
+            if Path(sys.argv[0]).resolve(strict=True) != Path(context_environment["TGW_CONTEXT_RUNTIME_ENTRYPOINT"]):
+                print(
+                    json.dumps(
+                        {
+                            "schema": "tgw-actor-startup-attestation/v1",
+                            "status": "HOLD",
+                            "reason": "loaded actor Context entrypoint differs from exact candidate",
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 73
+            if (
+                args.context_mcp_stable_launcher
+                != context_environment["TGW_CONTEXT_STABLE_LAUNCHER"]
+            ):
+                print(
+                    json.dumps(
+                        {
+                            "schema": "tgw-actor-startup-attestation/v1",
+                            "status": "HOLD",
+                            "reason": "exec-visible stable launcher identity differs",
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 73
+            from tgw.context_mcp_server import main as context_main
 
-        context_main()
-        return 0
+            context_main()
+            return 0
+        print(
+            _generation_status_line(binding),
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            _exec_context_mcp_runtime(
+                home=args.home,
+                actor=args.actor,
+                source_root=Path(binding["context_source_root"]),
+                environment=context_environment,
+            )
+        except (OSError, ValueError) as exc:
+            print(
+                json.dumps(
+                    {"schema": "tgw-actor-startup-attestation/v1", "status": "HOLD", "reason": str(exc)},
+                    sort_keys=True,
+                )
+            )
+            return 73
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 

@@ -84,9 +84,21 @@ class _ActorFleetClient:
     """Exact client for the separately hosted ``tgw-lib`` actor provider."""
 
     _EXPECTED = {
-        "quiesce": "QUIESCED", "rebuild": "REBUILT", "activate": "ACTIVATED",
-        "restart": "RESTARTED", "health": "HEALTHY", "verify-actor": "VERIFIED",
-        "rollback": "ROLLED_BACK", "repair": "REPAIRED",
+        "bind-coordinator": {"COORDINATOR_BOUND"},
+        "quiesce": {"QUIESCED"}, "rebuild": {"REBUILT"},
+        "activate": {"ACTIVATED"},
+        "restart": {"RESTARTED", "RESTART_REQUIRED"},
+        "health": {"HEALTHY", "RESTART_REQUIRED"},
+        "verify-actor": {"VERIFIED", "RESTART_REQUIRED"},
+        "confirm-context-rebind": {"CONFIRMED", "RETRY_REQUIRED"},
+        "generation-status": {
+            "CURRENT", "UPDATE_PENDING", "RESTART_REQUIRED", "MIXED", "HOLD"
+        },
+        "nonterminal-transactions": {"NONTERMINAL_INVENTORY"},
+        "supersede-transactions": {"SUPERSEDED"},
+        "record-context-parent-transition": {"TRANSITION_RECORDED"},
+        "rollback": {"ROLLED_BACK", "RESTART_REQUIRED"},
+        "repair": {"REPAIRED"},
     }
 
     def __init__(self, value: Mapping[str, Any]):
@@ -148,7 +160,8 @@ class _ActorFleetClient:
             or result.get("schema") != "tgw-actor-fleet-provider-response/v1"
             or result.get("provider_id") != "tgw-actor-fleet-provider@1"
             or result.get("step") != step or result.get("invocation_hash") != invocation_hash
-            or not isinstance(result.get("result"), Mapping) or result["result"].get("status") != expected
+            or not isinstance(result.get("result"), Mapping)
+            or result["result"].get("status") not in expected
         ):
             raise PlatformControlError("actor fleet provider response is invalid")
         return dict(result["result"])
@@ -257,14 +270,39 @@ class PlatformControlProvider:
         if not isinstance(value, Mapping) or set(value) != fields or value.get("schema") != "tgw-w18-fleet-refresh-request/v1":
             raise PlatformControlError("fleet provider request is invalid")
         revisions = value.get("revisions")
-        required_revisions = {"plan", "solution", "source", "catalog", "bootstrap", "broker_policy", "admission"}
+        required_revisions = {
+            "plan", "solution", "evidence_plan", "evidence_tree", "source",
+            "source_tree", "current_plan_sources", "catalog", "bootstrap",
+            "broker_policy", "review", "admission",
+        }
         if not isinstance(revisions, Mapping) or set(revisions) != required_revisions:
             raise PlatformControlError("fleet provider revisions are incomplete")
-        if _COMMIT.fullmatch(str(revisions["plan"])) is None or _COMMIT.fullmatch(str(revisions["source"])) is None:
+        git_revisions = {
+            "plan", "evidence_plan", "evidence_tree", "source", "source_tree"
+        }
+        if any(
+            _COMMIT.fullmatch(str(revisions[field])) is None
+            for field in git_revisions
+        ):
             raise PlatformControlError("fleet provider Git revisions are invalid")
-        for field in required_revisions - {"plan", "source"}:
+        for field in required_revisions - git_revisions - {"current_plan_sources"}:
             if not isinstance(revisions[field], str) or _HASH.fullmatch(revisions[field]) is None:
                 raise PlatformControlError("fleet provider content revisions are invalid")
+        current_sources = revisions.get("current_plan_sources")
+        if (
+            not isinstance(current_sources, Mapping)
+            or set(current_sources) != {
+                "plan/execution/AMENDMENT-20260823-MCP-LIVE-CLIENT-CONVERGENCE.yaml",
+                "pp/PP-ACTOR-MCP-BOUNDARY-001.md",
+                "plan/execution/targets/W19-W21-MCP-ONLY-ACTOR-HARDENING-v1.yaml",
+                "plan/execution/ACTIVE-PLAN-AMENDMENT-PROCESS-v1.yaml",
+            }
+            or any(
+                _HASH.fullmatch(str(item)) is None
+                for item in current_sources.values()
+            )
+        ):
+            raise PlatformControlError("fleet provider current Plan revisions are invalid")
         actors = value.get("actors")
         if not isinstance(actors, list) or not actors or actors != sorted(set(actors)) or any(not isinstance(actor, str) or not actor for actor in actors):
             raise PlatformControlError("fleet provider actor set is invalid")
@@ -346,10 +384,28 @@ class PlatformControlProvider:
 
     def restart(self, activated: Mapping[str, Any]) -> dict[str, Any]:
         journal = self._journal(str(activated.get("transaction_id")))
-        if journal["status"] != "ACTIVATED" or activated.get("generation") != journal["request"]["successor_generation"]:
+        if journal["status"] not in {"ACTIVATED", "RESTART_REQUIRED"} or activated.get("generation") != journal["request"]["successor_generation"]:
             raise PlatformControlError("platform restart is not bound to activation")
-        self._service("restart", expected="active")
+        if journal.get("platform_restart_intent") is not True:
+            journal["platform_restart_intent"] = True
+            self._save(journal)
+        if journal.get("platform_restart_completed") is not True:
+            self._service("restart", expected="active")
+            journal["platform_restart_completed"] = True
+            self._save(journal)
         actor_receipt = self.actor.call("restart", [activated])
+        if actor_receipt.get("status") == "RESTART_REQUIRED":
+            journal["status"] = "RESTART_REQUIRED"
+            journal["actor_restart_wait"] = actor_receipt
+            self._save(journal)
+            return {
+                "status": "RESTART_REQUIRED",
+                "lifecycle": "WAIT_EXTERNAL_RESTART",
+                "transaction_id": journal["transaction_id"],
+                "actor_receipt_hash": _hash(actor_receipt),
+            }
+        if actor_receipt.get("status") != "RESTARTED":
+            raise PlatformControlError("actor restart did not converge")
         journal["status"] = "RESTARTED"
         journal["steps"].append({"name": "actor-restart", "receipt_hash": _hash(actor_receipt)})
         self._save(journal)
@@ -396,7 +452,10 @@ class PlatformControlProvider:
     def rollback(self, request: Mapping[str, Any], _controller_journal: Mapping[str, Any]) -> dict[str, Any]:
         value = self._request(request)
         journal = self._journal(value["transaction_id"])
-        allowed = {"QUIESCED", "REBUILT", "ACTIVATED", "RESTARTED", "HEALTHY", "VERIFYING"}
+        allowed = {
+            "QUIESCED", "REBUILT", "ACTIVATED", "RESTARTED", "HEALTHY",
+            "VERIFYING", "RESTART_REQUIRED", "ROLLBACK_RESTART_REQUIRED",
+        }
         if journal["status"] not in allowed:
             raise PlatformControlError(
                 f"platform rollback is not legal from {journal['status']}"
@@ -406,10 +465,26 @@ class PlatformControlProvider:
             or _controller_journal.get("schema") != "tgw-w18-fleet-refresh-journal/v1"
             or _controller_journal.get("request") != value
             or _controller_journal.get("request_hash") != _hash(value)
-            or _controller_journal.get("status") != "ROLLBACK_REQUIRED"
+            or _controller_journal.get("status") not in {
+                "ROLLBACK_REQUIRED", "ROLLBACK_RESTART_REQUIRED"
+            }
         ):
             raise PlatformControlError("platform rollback is not controller-bound")
         actor_receipt = self.actor.call("rollback", [value])
+        if actor_receipt.get("status") == "RESTART_REQUIRED":
+            journal["status"] = "ROLLBACK_RESTART_REQUIRED"
+            journal["actor_rollback_wait"] = actor_receipt
+            self._gate(status="QUIESCED", request=value)
+            self._save(journal)
+            return {
+                "status": "RESTART_REQUIRED",
+                "lifecycle": "WAIT_EXTERNAL_RESTART",
+                "direction": "rollback",
+                "transaction_id": value["transaction_id"],
+                "actor_receipt_hash": _hash(actor_receipt),
+            }
+        if actor_receipt.get("status") != "ROLLED_BACK":
+            raise PlatformControlError("actor rollback did not converge")
         self._service("restart", expected="active")
         journal["status"] = "ROLLED_BACK"
         journal["steps"].append({"name": "actor-rollback", "receipt_hash": _hash(actor_receipt)})

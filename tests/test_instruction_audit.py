@@ -15,12 +15,17 @@ def test_real_instruction_inventory_is_hashed_classified_and_inert():
     result = audit_instructions(ROOT, load_registry(REGISTRY), observed_at="2026-08-11T09:05:00-07:00")
     paths = {item["path"] for item in result["sources"]}
     assert {"AGENTS.md", "CLAUDE.md", ".claude/agents/nix-flake-maintainer.md"} <= paths
+    claude = next(item for item in result["sources"] if item["path"] == "CLAUDE.md")
+    assert "authority:claude-code" in claude["scopes"]
+    redirect = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    assert len(redirect.splitlines()) <= 3
+    assert "/home/claude/.claude/CLAUDE.md" in redirect
     assert not any(path.startswith("docs/TGW-Plan-Vault/") for path in paths)
     assert "docs/runbooks/three-repository-boundary-v3-20260815.md" in paths
     assert all(item["sha256"].startswith("sha256:") for item in result["sources"])
     assert result["commands_executed_from_sources"] is False
     assert result["source_files_modified"] is False
-    assert any(item["code"] == "retired-host-reference" for item in result["findings"])
+    assert not any(item["code"] == "retired-host-reference" for item in result["findings"])
     assert not any(item["code"] == "obsolete-maintainer-profile-present" for item in result["findings"])
 
 

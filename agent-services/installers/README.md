@@ -8,13 +8,12 @@ matrix is conflict-free.
 | Target | Shared skill | Promptcraft |
 |---|---|---|
 | Codex | `${HOME}/.codex/skills/tgw-plan` | `${HOME}/.codex/providers/promptcraft` |
-| Claude | `${PROJECT}/.claude/skills/tgw-plan` | `${PROJECT}/.claude/providers/promptcraft` |
+| Claude | `${HOME}/.claude/skills/tgw-plan` | `${HOME}/.claude/providers/promptcraft` |
 | Hermes | `${HOME}/.hermes/skills/tgw-plan` | `${HOME}/.hermes/providers/promptcraft` |
 | Isolated worker | not installed | `${PROJECT}/.tgw-worker/bin/promptcraft-handoff` only |
 
-An existing noncanonical Claude skill is reported as `HELD_LEGACY` and is never
-overwritten. Other conflicts hold the complete matrix. Every report includes the
-canonical content digest used for verification.
+Existing noncanonical files hold the complete matrix and are never overwritten.
+Every report includes the canonical content digest used for verification.
 
 ```bash
 agent-services/installers/materialize-agent-services codex \
