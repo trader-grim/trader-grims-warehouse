@@ -22,6 +22,7 @@ import signal
 import stat
 import subprocess
 import sys
+import time
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -330,10 +331,18 @@ def _restart_actor_context_processes(processes: list[Mapping[str, Any]]) -> list
             assert descriptor is not None
             descriptors[descriptor] = pid
             poller.register(descriptor, select.POLLIN)
-        for descriptor, _event in poller.poll(5000):
-            if descriptor in descriptors:
-                os.close(descriptor)
-                descriptors.pop(descriptor)
+        deadline = time.monotonic() + 5
+        while descriptors:
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            if remaining_ms == 0:
+                break
+            events = poller.poll(remaining_ms)
+            if not events:
+                break
+            for descriptor, _event in events:
+                if descriptor in descriptors:
+                    os.close(descriptor)
+                    descriptors.pop(descriptor)
         if descriptors:
             raise ActorFleetError("actor Context MCP child restart did not complete")
     finally:
