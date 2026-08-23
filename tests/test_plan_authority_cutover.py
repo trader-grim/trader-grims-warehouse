@@ -48,9 +48,10 @@ def test_claude_project_surfaces_cannot_shadow_signed_fleet_instructions():
     assert redirect.count("\n") <= 4
     assert "/home/claude/.claude/CLAUDE.md" in redirect
     assert "docs/TGW-Plan-Vault" not in redirect
-    assert "SessionStart" not in (ROOT / ".claude/settings.json").read_text(
-        encoding="utf-8"
-    )
+    settings = (ROOT / ".claude/settings.json").read_text(encoding="utf-8")
+    assert "SessionStart" not in settings
+    assert "/opt/TGW/src" not in settings
+    assert settings.count("${CLAUDE_PROJECT_DIR}/.claude/hooks/") == 4
     for skill in (
         "tgw-plan",
         "tgw-plan-maintain",

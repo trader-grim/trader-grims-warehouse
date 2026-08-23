@@ -11,5 +11,53 @@
       "nixos-rebuild list-generations, readlink /run/current-system — read-only inspection of already-applied generations, always allow",
       "ssh to the registry-resolved tgw-prod host for read-only diagnostics (journalctl, systemctl status, git status/diff/log, D-Bus property/method reads, ps) — no retired or unregistered host names"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/flake-guard.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking flake-mutation guardrail..."
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/worktree-guard.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking worktree-isolation guardrail..."
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/app-code-guard.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking app-code branch-per-task guardrail..."
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/trace-immutability-guard.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking trace-immutability guardrail..."
+          }
+        ]
+      }
+    ]
   }
 }
