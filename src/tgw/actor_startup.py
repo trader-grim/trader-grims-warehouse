@@ -348,7 +348,10 @@ def _exec_context_mcp_runtime(
     stable_launcher = Path(str(environment["TGW_CONTEXT_STABLE_LAUNCHER"]))
     _protected_stable_launcher(stable_launcher)
     candidate_launcher = Path(environment["TGW_CONTEXT_RUNTIME_ENTRYPOINT"])
-    executable = Path(sys.executable).resolve(strict=True)
+    # Preserve the virtual-environment entry path.  Resolving its interpreter
+    # symlink before exec discards pyvenv.cfg discovery and therefore the MCP
+    # runtime dependencies installed in that environment.
+    executable = Path(sys.executable)
     if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
         raise ActorStartupError("actor Context Python runtime is unavailable")
     arguments = [
@@ -420,8 +423,10 @@ def _runtime_identity_environment(
         source_root, git, str(result["source_commit"]), "scripts/tgw_actor_startup.py"
     ):
         raise ActorStartupError("materialized stable launcher differs from exact candidate")
-    executable = Path(sys.executable).resolve(strict=True)
-    executable_state = executable.stat(follow_symlinks=False)
+    executable = Path(sys.executable)
+    if not executable.is_absolute():
+        raise ActorStartupError("actor Context Python runtime is unavailable")
+    executable_state = executable.resolve(strict=True).stat(follow_symlinks=False)
     identity.update(
         {
             "TGW_CONTEXT_STABLE_LAUNCHER": str(stable_launcher),

@@ -275,7 +275,7 @@ def test_context_runtime_crosses_real_execve_into_exact_candidate(tmp_path):
 
     assert process.returncode == 0, stderr
     payload = json.loads(stdout)
-    executable = str(Path(sys.executable).resolve(strict=True))
+    executable = sys.executable
     runtime_arguments = [
         "--context-mcp-runtime",
         "--context-mcp",
