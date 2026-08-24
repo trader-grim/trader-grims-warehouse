@@ -165,6 +165,20 @@ def verify_direct_development_luet(
     return observed
 
 
+def verify_direct_development_solution(
+    solution: Mapping[str, Any],
+    *,
+    binding_path: Path | str = _DIRECT_DEVELOPMENT_BINDING,
+) -> None:
+    """Require the resolved closure to retain the binding's exact Plan identity."""
+    binding = load_direct_development_luet_binding(binding_path)
+    if (
+        solution.get("plan_commit") != binding.plan_commit
+        or solution.get("solution_hash") != binding.plan_solution_hash
+    ):
+        raise ValueError("resolved solution does not match the direct-development binding")
+
+
 def _package_name(identity: str) -> str:
     readable = re.sub(r"[^a-z0-9]+", "-", identity.lower()).strip("-")[:40]
     digest = hashlib.sha256(identity.encode()).hexdigest()[:12]

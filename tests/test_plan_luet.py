@@ -8,6 +8,7 @@ from tgw.plan_luet import (
     conform,
     load_direct_development_luet_binding,
     verify_direct_development_luet,
+    verify_direct_development_solution,
 )
 from tgw.plan_solver import solve
 
@@ -117,6 +118,16 @@ def test_direct_development_binding_rejects_wrong_executable(tmp_path):
         verify_direct_development_luet(
             wrong,
             plan_commit="058e2f980201cc78245358e4901cf007063f2c29",
+        )
+
+
+def test_direct_development_binding_rejects_a_tampered_solution_identity():
+    with pytest.raises(ValueError, match="resolved solution"):
+        verify_direct_development_solution(
+            {
+                "plan_commit": "058e2f980201cc78245358e4901cf007063f2c29",
+                "solution_hash": "sha256:" + "0" * 64,
+            },
         )
 
 

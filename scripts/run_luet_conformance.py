@@ -16,7 +16,9 @@ from tgw.plan_catalog import compose_catalog
 from tgw.plan_luet import (
     conform,
     verify_direct_development_luet,
+    verify_direct_development_solution,
 )
+from tgw.plan_solver import solve
 
 CATALOG_PATH = "agent-services/catalogs/governed-execution-platform-v1.json"
 EXECUTION_PATH = "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml"
@@ -106,6 +108,9 @@ def main() -> int:
     )
     binary_hash = verify_direct_development_luet(args.luet, plan_commit=approved_plan_commit)
     result = conform(graph, luet_binary=args.luet, expected_plan_commit=approved_plan_commit)
+    verify_direct_development_solution(
+        solve(graph, expected_plan_commit=approved_plan_commit, conformance_result=result),
+    )
     receipt = create_luet_conformance_receipt(
         result, graph=graph, plan_commit=approved_plan_commit,
         source_commit=commit, source_tree=tree, binary_sha256=binary_hash,
