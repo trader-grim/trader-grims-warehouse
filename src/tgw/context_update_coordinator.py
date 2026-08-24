@@ -793,33 +793,7 @@ def retain_source(
 
 
 def _refresh_catalog(source: Path, retained: Path, commit: str) -> dict[str, Any]:
-    catalog_source = source
-    if source.is_symlink():
-        try:
-            target = source.resolve(strict=True)
-            link = source.lstat()
-            observed = target.stat(follow_symlinks=False)
-        except OSError as exc:
-            raise ContextUpdateCoordinatorError(
-                "installed environment catalog is unavailable"
-            ) from exc
-        if (
-            link.st_uid != 0
-            or target.parent != Path("/nix/store")
-            or target.is_symlink()
-            or not stat.S_ISREG(observed.st_mode)
-            or observed.st_uid != 0
-            or observed.st_mode & 0o022
-        ):
-            raise ContextUpdateCoordinatorError(
-                "installed environment catalog link is unsafe"
-            )
-        catalog_source = target
-    catalog = _read_json(
-        catalog_source,
-        "installed environment catalog",
-        maximum=4 * 1024 * 1024,
-    )
+    catalog = _read_json(source, "installed environment catalog", maximum=4 * 1024 * 1024)
     if catalog.get("schema") != "tgw-execution-environment-catalog/v3":
         raise ContextUpdateCoordinatorError("environment catalog schema differs")
     flake = catalog.get("flake_lock")
