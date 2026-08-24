@@ -95,10 +95,11 @@ def fixture_enqueue(run_id: object, enqueue_fn: Callable[..., str] | None = None
     """Adapt the foreman's ordinary treatment dispatch into this fixture queue."""
     run_id = validate_fixture_run_id(run_id)
     real_enqueue = enqueue_fn or state_machine.enqueue_job
-    queue_name = fixture_queue_name(run_id)
+    fixture_queue = fixture_queue_name(run_id)
 
-    def enqueue(requested_queue: str, payload: dict[str, Any], **kwargs: Any) -> str:
-        if requested_queue != "codex-implement":
+    def enqueue(queue_name: str, payload: dict[str, Any], **kwargs: Any) -> str:
+        """Accept the normal scheduler enqueue signature and isolate its target."""
+        if queue_name != "codex-implement":
             raise FixtureIsolationError("fixture foreman may dispatch only codex-implement")
         binding = validate_plan_binding(payload.get("plan_binding"), todo_id=payload.get("todo_id"))
         if binding.get("fixture_run_id") != run_id:
@@ -117,7 +118,7 @@ def fixture_enqueue(run_id: object, enqueue_fn: Callable[..., str] | None = None
         if not kwargs.get("dedupe_key"):
             raise FixtureIsolationError("fixture job has no dedupe key")
         return real_enqueue(
-            queue_name, durable_payload, entity_type="coding_task",
+            fixture_queue, durable_payload, entity_type="coding_task",
             entity_id=str(payload.get("object_id") or payload.get("worktree") or ""),
             handler_family="fixture-codex-implement", dedupe_key=durable_key,
         )

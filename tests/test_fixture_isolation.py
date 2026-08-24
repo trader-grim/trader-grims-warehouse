@@ -56,7 +56,7 @@ def test_fixture_dispatch_uses_namespaced_queue_and_preserves_binding():
         "selected_provider": "codex-local-runner", "adapter_treatment_id": "codex-implement",
         "adapter_queue_name": "codex-implement",
     }
-    assert enqueue("codex-implement", payload, dedupe_key="graph-id") == "fixture-job"
+    assert enqueue(queue_name="codex-implement", payload=payload, dedupe_key="graph-id") == "fixture-job"
     args, kwargs = calls[0]
     assert args[0] == fixture_queue_name(RUN_ID)
     assert args[1]["plan_binding"] == _binding()
