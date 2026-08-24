@@ -10,7 +10,8 @@
   "development_model": {
     "worker_accounts": ["codex", "claude", "deepseek"],
     "shared_group": "tgw-coders",
-    "shared_mcp_command": "/opt/TGW/tgw-lib/bin/tgw-context-mcp"
+    "shared_mcp_command": "/opt/TGW/tgw-lib/bin/tgw-context-mcp",
+    "actor_source": "Linux account running the MCP process"
   },
   "plan": {
     "approved_commit": "058e2f980201cc78245358e4901cf007063f2c29",
@@ -21,7 +22,7 @@
   "completed": [
     "Installed /opt/TGW/tgw-lib/bin/tgw-context-mcp as the shared Debian MCP command.",
     "Registered the same command in the real Codex, Claude, and DeepSeek harness stores.",
-    "Verified status, Plan source, Plan Graph, CodeGraph, and the seven original context tools as all three Linux accounts.",
+    "Verified status, Plan source, Plan Graph, CodeGraph, and current-task retrieval as all three Linux accounts.",
     "Preserved the concise startup instruction and the simpler installed tgw-plan and tgw-review skills."
   ],
   "next": [

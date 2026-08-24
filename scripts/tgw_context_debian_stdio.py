@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
+import pwd
 import socket
 import stat
 import sys
@@ -19,11 +19,18 @@ SERVER_SOURCE = Path(
 CONTEXT_SOURCE = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
 CATALOG = Path("/opt/TGW/tgw-lib/config/tgw-context-debian-v1.json")
 CURRENT_TASK = Path("/opt/TGW/tgw-lib/config/tgw-context-current-task.json")
+HARNESS_ACTORS = frozenset({"codex", "claude", "deepseek"})
 
 
-def _current_task(actor: str) -> str:
-    if actor and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", actor) is None:
-        raise ValueError("actor must be a canonical Linux account name")
+def _harness_actor() -> str:
+    actor = pwd.getpwuid(os.geteuid()).pw_name
+    if actor not in HARNESS_ACTORS:
+        raise ValueError("MCP process account is not a registered TGW harness actor")
+    return actor
+
+
+def _current_task() -> str:
+    actor = _harness_actor()
     observed = CURRENT_TASK.stat(follow_symlinks=False)
     if (
         CURRENT_TASK.is_symlink()
@@ -39,7 +46,8 @@ def _current_task(actor: str) -> str:
         raise ValueError("current TGW task record is invalid")
     result = {
         **value,
-        "receiver": actor or None,
+        "actor": actor,
+        "receiver": actor,
         "record_path": str(CURRENT_TASK),
         "record_sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
     }
@@ -78,9 +86,9 @@ def main() -> None:
     from tgw.context_mcp_server import main as context_main, mcp
 
     @mcp.tool()
-    def tgw_context_current_task(actor: str = "") -> str:
-        """Return the root-owned current TGW task handoff for a declared actor."""
-        return _current_task(actor)
+    def tgw_context_current_task() -> str:
+        """Return the current TGW task bound to this Linux harness actor."""
+        return _current_task()
 
     context_main()
 
