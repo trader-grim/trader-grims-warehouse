@@ -17,6 +17,7 @@ from tgw.development.foreman import ForemanConfig, tick
 from tgw.development.plan_todo_bridge import bind_leaf
 from tgw.development.plan_binding import execution_root_hash
 from tgw.plan_execution_card import build_execution_card
+from tgw.plan_execution_resources import ENVELOPE_SCHEMA, envelope_hash
 from tgw.plan_solver import solve
 from tgw.workflow import compile_solution_runtime
 
@@ -92,7 +93,7 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
     bound = bind_leaf(
         compiled, solution=plan.solution, treatment_id=ready.treatment_id,
         source_commit=candidate_commit, worktree_identity=run_id, agent="codex",
-        execution_card=_fixture_execution_card(compiled, plan.solution, ready.treatment_id, candidate_commit), create_todo=create,
+        execution_envelope=_fixture_execution_envelope(compiled, plan.solution, ready.treatment_id, candidate_commit), create_todo=create,
         list_todos=lambda: list_fixture_todos(run_id),
         allocate_worktree=allocate,
         set_status_note=lambda todo_id, note: todo_set_status_note(todo_id, note, suppress_plan_render=True),
@@ -134,15 +135,15 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
             "coding_execution": receipt["execution_envelope"], "receipt": receipt,
             "database_binding": database_binding,
             "cleanup": lambda: cleanup_fixture_run(run_id, canonical_worktree_root=canonical_root, repository_root=source_root)}
-def _fixture_execution_card(compiled, solution: Mapping[str, Any], treatment_id: str, source_commit: str) -> dict[str, Any]:
+def _fixture_execution_envelope(compiled, solution: Mapping[str, Any], treatment_id: str, source_commit: str) -> dict[str, Any]:
     root = {"schema": "tgw-execution-root/v1", "kind": "plan", "plan_id": "fixture",
             "profile": "implementation", "plan_commit": source_commit}
     root["identity_hash"] = execution_root_hash(root)
-    resources = {name: {"ref": f"fixture:{name}", "hash": "sha256:" + "0" * 64} for name in (
+    resources = {name: {"ref": f"mcp:tgw-context/fixture/{name}", "hash": "sha256:" + "0" * 64} for name in (
         "plan_input", "plan_commit", "plan_graph", "codegraph_snapshot", "source_tree",
         "execution_environment", "authority_conditions", "candidate_evidence", "receipt_sink",
     )}
-    return build_execution_card(
+    card = build_execution_card(
         compiled=compiled, solution=solution,
         execution_graph={"plan_id": "fixture", "work_units": [{"id": "fixture", "title": "Fixture proof",
             "establishes": ["fixture.code@1"], "acceptance": ["fixture receipt"]}, {"id": "promptcraft", "title": "Promptcraft",
@@ -150,3 +151,9 @@ def _fixture_execution_card(compiled, solution: Mapping[str, Any], treatment_id:
         treatment_id=treatment_id, source_commit=source_commit, source_tree=source_commit,
         resources=resources, environment={"id": "fixture"}, execution_root=root,
     )
+    unsigned = {
+        "schema": ENVELOPE_SCHEMA, "card": card, "resources": card["resources"],
+        "context": {"service": "tgw-context", "status_hash": "sha256:" + "0" * 64},
+        "receiver": {"capability": "promptcraft.receiver-profiles@1", "provider": "recovered-promptcraft", "handoff": {"adapter": "promptcraft-card-handoff", "schema": "tgw-launcher-handoff/v1"}},
+    }
+    return {**unsigned, "envelope_hash": envelope_hash(unsigned)}

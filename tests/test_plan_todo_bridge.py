@@ -1,6 +1,7 @@
 from tgw.development.plan_todo_bridge import PlanTodoBridgeError, bind_leaf as _bind_leaf
 from tgw.development.plan_binding import execution_root_hash
 from tgw.plan_execution_card import PlanExecutionCardError, build_execution_card
+from tgw.plan_execution_resources import ENVELOPE_SCHEMA, envelope_hash
 from tgw.plan_solver import solve
 from tgw.workflow import compile_solution_runtime
 from unittest.mock import MagicMock, patch
@@ -35,16 +36,20 @@ def bind_leaf(compiled, **kwargs):
         "id": "W-test", "title": "Test Plan work", "establishes": [capability],
         "acceptance": ["test acceptance"],
     }, {"id": "W-promptcraft", "title": "Recover Promptcraft", "establishes": ["promptcraft.receiver-profiles@1"], "acceptance": ["Promptcraft bound"]}]}
-    resources = {name: {"ref": f"test:{name}", "hash": "sha256:" + "1" * 64} for name in (
+    resources = {name: {"ref": f"mcp:tgw-context/test/{name}", "hash": "sha256:" + "1" * 64} for name in (
         "plan_input", "plan_commit", "plan_graph", "codegraph_snapshot", "source_tree",
         "execution_environment", "authority_conditions", "candidate_evidence", "receipt_sink",
     )}
     try:
-        kwargs["execution_card"] = build_execution_card(
+        card = build_execution_card(
             compiled=compiled, solution=kwargs["solution"], execution_graph=graph,
             treatment_id=kwargs["treatment_id"], source_commit=kwargs["source_commit"],
             source_tree="b" * 40, resources=resources, environment={"id": "test"}, execution_root=root,
         )
+        unsigned = {"schema": ENVELOPE_SCHEMA, "card": card, "resources": card["resources"],
+                    "context": {"service": "tgw-context", "status_hash": "sha256:" + "1" * 64},
+                    "receiver": {"capability": "promptcraft.receiver-profiles@1", "provider": "recovered-promptcraft", "handoff": {"adapter": "promptcraft-card-handoff", "schema": "tgw-launcher-handoff/v1"}}}
+        kwargs["execution_envelope"] = {**unsigned, "envelope_hash": envelope_hash(unsigned)}
     except PlanExecutionCardError as exc:
         raise PlanTodoBridgeError("Plan solution integrity check failed") from exc
     return _bind_leaf(compiled, **kwargs)

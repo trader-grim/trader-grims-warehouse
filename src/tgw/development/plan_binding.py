@@ -80,11 +80,25 @@ def validate_plan_binding(value: object, *, todo_id: int | None = None) -> dict[
         raise MalformedPlanBindingError(f"{label} has malformed Plan binding")
     # Imported lazily to avoid making the light-weight Todo parser import the
     # full solver/bridge graph unless the Todo actually claims Plan execution.
-    from tgw.plan_execution_card import PlanExecutionCardError, validate_execution_card
-    try:
-        card = validate_execution_card(binding["execution_card"])
-    except PlanExecutionCardError as exc:
-        raise MalformedPlanBindingError(f"{label} has malformed Plan execution card") from exc
+    if "execution_envelope" in binding:
+        from tgw.plan_execution_resources import PlanExecutionResourceError, validate_execution_envelope
+        try:
+            envelope = validate_execution_envelope(binding["execution_envelope"])
+        except PlanExecutionResourceError as exc:
+            raise MalformedPlanBindingError(f"{label} has malformed Plan execution envelope") from exc
+        card = envelope["card"]
+        if binding["execution_card"] != card:
+            raise MalformedPlanBindingError(f"{label} Plan execution card does not match its envelope")
+        binding["execution_envelope"] = envelope
+    else:
+        # Existing persisted Plan Todos predate the resource-envelope compiler.
+        # They are parsed explicitly for compatibility; ``bind_leaf`` itself
+        # never creates one without the fully bound envelope.
+        from tgw.plan_execution_card import PlanExecutionCardError, validate_execution_card
+        try:
+            card = validate_execution_card(binding["execution_card"])
+        except PlanExecutionCardError as exc:
+            raise MalformedPlanBindingError(f"{label} has malformed Plan execution card") from exc
     if (
         card["plan"]["commit"] != binding["plan_commit"]
         or card["solution"]["hash"] != binding["solution_hash"]
