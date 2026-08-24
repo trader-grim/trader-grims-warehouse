@@ -100,6 +100,19 @@ def _authorize_execution(document: dict[str, Any], location: dict[str, Any], sna
         "agent": agent.strip().lower(),
         "body": body.strip(),
     }
+    note = todo.get("status_note")
+    if isinstance(note, str):
+        try:
+            binding = json.loads(note)
+        except ValueError:
+            binding = None
+        if isinstance(binding, dict) and binding.get("schema") == "tgw-plan-coding-todo/v1":
+            payload_binding = document.get("plan_binding")
+            if payload_binding is not None and payload_binding != binding:
+                raise HardFailure("coding payload Plan binding differs from canonical Todo")
+            task_spec["plan_binding"] = binding
+    elif document.get("plan_binding") is not None:
+        raise HardFailure("coding payload has Plan binding but canonical Todo does not")
     try:
         snapshot = deserialize_snapshot(snapshot_claim)
     except ValueError as exc:

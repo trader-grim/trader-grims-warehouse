@@ -8,6 +8,7 @@ again is safe: same generation → same graph_id → skipped (idempotent).
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -80,6 +81,7 @@ class TodoRecord:
     priority: int | None
     body: str
     worktree: str = ""
+    plan_binding: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +217,17 @@ def _default_fetch_open_todos() -> list[TodoRecord]:
             for row in cur.fetchall():
                 todo_id, agent, priority, body, status_note = row
                 worktree = _extract_worktree(status_note or "") or _extract_worktree(body)
+                plan_binding = None
+                if status_note:
+                    try:
+                        parsed = json.loads(status_note)
+                    except (TypeError, ValueError):
+                        parsed = None
+                    if isinstance(parsed, dict) and parsed.get("schema") == "tgw-plan-coding-todo/v1":
+                        required = {"plan_commit", "solution_hash", "closure_hash", "capability", "treatment_id", "idempotency_key", "worktree", "worktree_identity"}
+                        if not required.issubset(parsed) or not all(isinstance(parsed[key], str) and parsed[key] for key in required - {"worktree_identity"}) or not isinstance(parsed["worktree_identity"], dict):
+                            raise ValueError(f"Todo {todo_id} has malformed Plan binding")
+                        plan_binding = parsed
                 todos.append(
                     TodoRecord(
                         todo_id=todo_id,
@@ -222,6 +235,7 @@ def _default_fetch_open_todos() -> list[TodoRecord]:
                         priority=priority,
                         body=body or "",
                         worktree=worktree,
+                        plan_binding=plan_binding,
                     )
                 )
     except Exception:
@@ -425,6 +439,7 @@ def tick(
                     "todo_priority": chosen.todo.priority,
                     "todo_agent": chosen.todo.agent,
                     "worktree": chosen.todo.worktree,
+                    **({"plan_binding": chosen.todo.plan_binding} if chosen.todo.plan_binding is not None else {}),
                 },
                 enqueue_fn=enqueue_fn,
                 coding_config=cfg.coding_config,
