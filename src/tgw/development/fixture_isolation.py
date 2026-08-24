@@ -160,26 +160,34 @@ def cleanup_fixture_run(
     """
     run_id = validate_fixture_run_id(run_id)
     queue_name, source = fixture_queue_name(run_id), fixture_todo_source(run_id)
-    with state_machine._conn() as con, con.cursor() as cur:
-        cur.execute("DELETE FROM queue_jobs WHERE queue_name = %s AND payload_json->>'fixture_run_id' = %s", (queue_name, run_id))
-        jobs = cur.rowcount
-    from tgw.todo import _conn
-    with _conn() as con, con.cursor() as cur:
-        cur.execute("DELETE FROM todo_items WHERE source = %s", (source,))
-        todos = cur.rowcount
     canonical_root = Path(canonical_worktree_root).resolve()
     repository = Path(repository_root).resolve()
     root = fixture_worktree_root(canonical_root, run_id)
     removed = 0
-    if root.exists():
-        for worktree in sorted(root.iterdir()):
-            if not worktree.is_dir() or worktree.parent != root:
-                raise FixtureIsolationError("fixture cleanup found an unsafe worktree target")
-            subprocess.run(["git", "-C", str(repository), "worktree", "remove", "--force", str(worktree)], check=True)
-            removed += 1
-        root.rmdir()
-        try:
-            root.parent.rmdir()
-        except OSError:
-            pass
+    jobs = todos = 0
+    database_error: Exception | None = None
+    try:
+        with state_machine._conn() as con, con.cursor() as cur:
+            cur.execute("DELETE FROM queue_jobs WHERE queue_name = %s AND payload_json->>'fixture_run_id' = %s", (queue_name, run_id))
+            jobs = cur.rowcount
+        from tgw.todo import _conn
+        with _conn() as con, con.cursor() as cur:
+            cur.execute("DELETE FROM todo_items WHERE source = %s", (source,))
+            todos = cur.rowcount
+    except Exception as exc:
+        database_error = exc
+    finally:
+        if root.exists():
+            for worktree in sorted(root.iterdir()):
+                if not worktree.is_dir() or worktree.parent != root:
+                    raise FixtureIsolationError("fixture cleanup found an unsafe worktree target")
+                subprocess.run(["git", "-C", str(repository), "worktree", "remove", "--force", str(worktree)], check=True)
+                removed += 1
+            root.rmdir()
+            try:
+                root.parent.rmdir()
+            except OSError:
+                pass
+    if database_error is not None:
+        raise FixtureIsolationError("fixture database cleanup could not be verified") from database_error
     return {"jobs": jobs, "todos": todos, "worktrees": removed}

@@ -1,8 +1,10 @@
+from contextlib import contextmanager
+
 import pytest
 
 from tgw.development.fixture_isolation import (
     FixtureIsolationError, create_fixture_todo, fixture_enqueue, fixture_queue_name,
-    fixture_worktree_root, run_fixture_job_once, validate_fixture_run_id,
+    fixture_worktree_root, run_fixture_job_once, validate_fixture_run_id, cleanup_fixture_run,
 )
 from tgw.workers.coding import CodingWorker
 
@@ -59,3 +61,19 @@ def test_fixture_worker_refuses_cross_namespace_job(monkeypatch):
     monkeypatch.setattr("tgw.development.fixture_isolation.state_machine.get_job", lambda _job: {"queue_name": "codex-implement", "payload_json": {}})
     with pytest.raises(FixtureIsolationError, match="outside its exact queue"):
         run_fixture_job_once(RUN_ID, job_id="any", config={"coding": {}}, launcher=lambda *_: {})
+
+
+def test_cleanup_removes_only_exact_empty_namespace_when_database_is_unavailable(monkeypatch, tmp_path):
+    root = tmp_path / "fixture-runs" / RUN_ID
+    root.mkdir(parents=True)
+
+    @contextmanager
+    def unavailable():
+        raise RuntimeError("database unavailable")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("tgw.development.fixture_isolation.fixture_worktree_root", lambda *_: root)
+    monkeypatch.setattr("tgw.development.fixture_isolation.state_machine._conn", unavailable)
+    with pytest.raises(FixtureIsolationError, match="cleanup could not be verified"):
+        cleanup_fixture_run(RUN_ID, canonical_worktree_root="/configured", repository_root="/repository")
+    assert not root.exists()

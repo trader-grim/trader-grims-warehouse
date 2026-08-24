@@ -62,6 +62,9 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
     fixture_root = fixture_worktree_root(canonical_root, run_id)
     if fixture_root.exists() and any(fixture_root.iterdir()):
         raise ValueError("fixture run root must be empty")
+    # Prove the exact fixture namespace is reachable before allocating a
+    # directory beneath the canonical root.
+    list_fixture_todos(run_id)
     fixture_root.mkdir(parents=True, exist_ok=True)
     imported = [
         __import__("tgw.development.plan_todo_bridge", fromlist=["x"]).__file__,
