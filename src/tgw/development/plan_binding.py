@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 from typing import Any, Mapping
 
 
 PLAN_BINDING_SCHEMA = "tgw-plan-coding-todo/v1"
+EXECUTION_ROOT_SCHEMA = "tgw-execution-root/v1"
 _REQUIRED_STRINGS = frozenset({
     "plan_commit", "solution_hash", "closure_hash", "capability",
     "treatment_id", "idempotency_key", "worktree",
@@ -15,6 +18,51 @@ _REQUIRED_STRINGS = frozenset({
 
 class MalformedPlanBindingError(ValueError):
     """A Todo identifies itself as Plan-bound but cannot be executed safely."""
+
+
+def _canonical(value: Mapping[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def execution_root_hash(value: Mapping[str, Any]) -> str:
+    """Return the content address of one typed execution-root identity."""
+    unsigned = dict(value)
+    unsigned.pop("identity_hash", None)
+    return "sha256:" + hashlib.sha256(_canonical(unsigned).encode()).hexdigest()
+
+
+def validate_execution_root(value: object) -> dict[str, Any]:
+    """Validate the selected Plan, PP, or canonical Todo execution root."""
+    if not isinstance(value, Mapping) or value.get("schema") != EXECUTION_ROOT_SCHEMA:
+        raise MalformedPlanBindingError("Plan binding has malformed execution root")
+    root = dict(value)
+    kind = root.get("kind")
+    if kind == "plan":
+        allowed = {"schema", "kind", "plan_id", "profile", "plan_commit", "identity_hash"}
+        valid = (
+            isinstance(root.get("plan_id"), str) and bool(root["plan_id"])
+            and isinstance(root.get("profile"), str) and bool(root["profile"])
+            and isinstance(root.get("plan_commit"), str) and bool(root["plan_commit"])
+        )
+    elif kind == "pp":
+        allowed = {"schema", "kind", "pp_ref", "identity_hash"}
+        valid = (
+            isinstance(root.get("pp_ref"), str)
+            and bool(re.fullmatch(r"PP-[A-Z0-9][A-Z0-9_-]*", root["pp_ref"]))
+        )
+    elif kind == "todo":
+        allowed = {"schema", "kind", "todo_id", "identity_hash"}
+        valid = isinstance(root.get("todo_id"), int) and root["todo_id"] > 0
+    else:
+        allowed = set()
+        valid = False
+    if (
+        not valid
+        or set(root) != allowed
+        or root.get("identity_hash") != execution_root_hash(root)
+    ):
+        raise MalformedPlanBindingError("Plan binding has malformed execution root")
+    return root
 
 
 def validate_plan_binding(value: object, *, todo_id: int | None = None) -> dict[str, Any]:
@@ -29,6 +77,13 @@ def validate_plan_binding(value: object, *, todo_id: int | None = None) -> dict[
         or not isinstance(binding.get("worktree_identity"), dict)
     ):
         raise MalformedPlanBindingError(f"{label} has malformed Plan binding")
+    try:
+        root = validate_execution_root(binding.get("execution_root"))
+    except MalformedPlanBindingError as exc:
+        raise MalformedPlanBindingError(f"{label} has malformed Plan binding: {exc}") from exc
+    if root["kind"] == "plan" and root["plan_commit"] != binding["plan_commit"]:
+        raise MalformedPlanBindingError(f"{label} Plan root does not match Plan binding")
+    binding["execution_root"] = root
     if "supersedes_todo_id" in binding and (
         not isinstance(binding["supersedes_todo_id"], int)
         or binding["supersedes_todo_id"] <= 0

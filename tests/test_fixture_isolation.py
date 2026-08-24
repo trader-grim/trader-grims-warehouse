@@ -7,12 +7,18 @@ from tgw.development.fixture_isolation import (
     fixture_worktree_root, run_fixture_job_once, validate_fixture_run_id, cleanup_fixture_run,
 )
 from tgw.workers.coding import CodingWorker
+from tgw.development.plan_binding import execution_root_hash
 
 
 RUN_ID = "fixture-local-spine-001"
 
 
 def _binding():
+    root = {
+        "schema": "tgw-execution-root/v1", "kind": "plan",
+        "plan_id": "fixture", "profile": "implementation", "plan_commit": "a" * 40,
+    }
+    root["identity_hash"] = execution_root_hash(root)
     return {
         "schema": "tgw-plan-coding-todo/v1", "plan_commit": "a" * 40,
         "solution_hash": "sha256:solution", "closure_hash": "sha256:closure",
@@ -20,6 +26,7 @@ def _binding():
         "source_commit": "a" * 40, "requested_worktree_identity": RUN_ID,
         "idempotency_key": "sha256:key", "worktree": "/configured/fixture",
         "worktree_identity": {"worktree": "/configured/fixture"}, "fixture_run_id": RUN_ID,
+        "execution_root": root,
     }
 
 
