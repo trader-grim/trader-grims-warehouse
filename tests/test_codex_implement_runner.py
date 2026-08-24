@@ -71,11 +71,17 @@ def test_runner_uses_noninteractive_workspace_write_without_approval_gate(
         assert (ephemeral_home / "auth.json").stat().st_mode & 0o777 == 0o600
         config = ephemeral_home / "config.toml"
         assert config.stat().st_mode & 0o777 == 0o600
-        assert config.read_text(encoding="utf-8") == (
+        expected = (
             "[mcp_servers.tgw-context]\n"
             'command = "/opt/TGW/tgw-lib/bin/tgw-context-mcp"\n'
             "args = []\n"
         )
+        expected += "".join(
+            f"\n[mcp_servers.tgw-context.tools.{tool}]\n"
+            'approval_mode = "approve"\n'
+            for tool in codex_implement._CONTEXT_TOOLS
+        )
+        assert config.read_text(encoding="utf-8") == expected
         Path(command[command.index("-o") + 1]).write_text(
             json.dumps({"status": "blocked", "summary": "bounded", "tests": []}),
             encoding="utf-8",

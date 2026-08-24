@@ -35,6 +35,16 @@ _FINAL_SCHEMA = {
 }
 
 _CONTEXT_MCP = Path("/opt/TGW/tgw-lib/bin/tgw-context-mcp")
+_CONTEXT_TOOLS = (
+    "tgw_context_code_graph",
+    "tgw_context_bundle",
+    "tgw_context_plan_graph",
+    "tgw_context_plan_source",
+    "tgw_context_current_task",
+    "tgw_context_status",
+    "tgw_context_onboarding",
+    "tgw_context_runbooks",
+)
 
 
 def _write_isolated_config(codex_home: Path) -> None:
@@ -42,12 +52,19 @@ def _write_isolated_config(codex_home: Path) -> None:
     if not _CONTEXT_MCP.is_file() or not os.access(_CONTEXT_MCP, os.X_OK):
         raise HardFailure("local tgw-context MCP is unavailable")
     config = codex_home / "config.toml"
-    config.write_text(
-        "[mcp_servers.tgw-context]\n"
-        f"command = {json.dumps(str(_CONTEXT_MCP))}\n"
+    lines = [
+        "[mcp_servers.tgw-context]\n",
+        f"command = {json.dumps(str(_CONTEXT_MCP))}\n",
         "args = []\n",
-        encoding="utf-8",
-    )
+    ]
+    for tool in _CONTEXT_TOOLS:
+        lines.extend(
+            (
+                f"\n[mcp_servers.tgw-context.tools.{tool}]\n",
+                'approval_mode = "approve"\n',
+            )
+        )
+    config.write_text("".join(lines), encoding="utf-8")
     config.chmod(0o600)
 
 
