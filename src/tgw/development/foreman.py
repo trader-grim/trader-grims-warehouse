@@ -9,12 +9,17 @@ again is safe: same generation → same graph_id → skipped (idempotent).
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 from tgw.development.coding_snapshot import build_coding_snapshot
-from tgw.development.plan_binding import MalformedPlanBindingError, parse_plan_binding
+from tgw.development.plan_binding import (
+    MalformedPlanBindingError,
+    parse_plan_binding,
+    validate_plan_binding,
+)
 from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
 from tgw.development.treatments import CODING_TREATMENTS
 from tgw.workers.coding import validated_coding_worktree
@@ -38,6 +43,10 @@ EVALUATOR_VERSION = "foreman/v1"
 # Active job states — if a job for the same treatment identity is in any of these
 # states, the todo should be skipped (already dispatched).
 _ACTIVE_JOB_STATES = frozenset({"queued", "leased", "running", "retry_wait"})
+_TERMINAL_JOB_STATES = frozenset(
+    {"succeeded", "failed", "dead_letter", "cancelled"}
+)
+_SOURCE_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +198,7 @@ def _has_terminal_job(
                        AND state = ANY(%s::queue_job_state[])
                      LIMIT 1
                 """,
-                (dedupe_key, ["succeeded", "failed", "dead_letter"]),
+                (dedupe_key, list(_TERMINAL_JOB_STATES)),
             )
             return cur.fetchone() is not None
     except Exception:
@@ -329,6 +338,29 @@ def tick(
             result = replace(result, skipped_no_worktree=result.skipped_no_worktree + 1)
             continue
 
+        # Only the typed binding emitted by the Luet Plan-to-Todo bridge may
+        # enter the executable coding lane.  Legacy/free-text Todos remain
+        # visible to their owners but can never cause implementation effects.
+        try:
+            binding = validate_plan_binding(
+                todo.plan_binding,
+                todo_id=todo.todo_id,
+            )
+            if _SOURCE_COMMIT.fullmatch(binding["source_commit"]) is None:
+                raise MalformedPlanBindingError(
+                    f"Todo {todo.todo_id} has malformed source commit"
+                )
+        except MalformedPlanBindingError:
+            log.warning(
+                "refusing unbound or malformed coding Todo %d",
+                todo.todo_id,
+            )
+            result = replace(
+                result,
+                refused_plan_binding=result.refused_plan_binding + 1,
+            )
+            continue
+
         try:
             # This proof must precede all snapshot work: snapshot checks run
             # pytest/ruff in the candidate directory.  Never trust the
@@ -338,12 +370,7 @@ def tick(
                 todo.worktree,
                 cfg.coding_config,
             )
-            implementation_baseline = None
-            binding = todo.plan_binding
-            if binding is not None:
-                if not isinstance(binding, dict) or not isinstance(binding.get("source_commit"), str):
-                    raise ValueError("Plan-bound Todo lacks its source commit")
-                implementation_baseline = binding["source_commit"]
+            implementation_baseline = binding["source_commit"]
             if cfg.fixture_implementation_baseline_commit is not None:
                 if not isinstance(binding, dict) or not binding.get("fixture_run_id"):
                     raise ValueError("fixture implementation baseline requires a fixture-bound Todo")
@@ -364,7 +391,11 @@ def tick(
             result = replace(result, errors=result.errors + 1)
             continue
 
-        canonical_todo = replace(todo, worktree=str(worktree))
+        canonical_todo = replace(
+            todo,
+            worktree=str(worktree),
+            plan_binding=binding,
+        )
 
         try:
             graph = evaluate(

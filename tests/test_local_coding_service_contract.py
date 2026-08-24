@@ -43,6 +43,7 @@ def test_database_roles_are_peer_named_and_narrowly_scoped() -> None:
     assert "ALTER ROLE codex LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE" in sql
     assert "GRANT tgw_coding TO db, codex" in sql
     assert "public.todo_items, public.queue_jobs" in sql
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE" in sql
     assert "ALL TABLES" not in sql
     assert "ALTER DEFAULT PRIVILEGES" not in sql
     assert "tgw-prod" not in sql

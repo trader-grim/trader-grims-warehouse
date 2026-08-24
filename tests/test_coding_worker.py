@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,7 +18,11 @@ from tgw.development.coding_snapshot import _CHECKERS, build_coding_snapshot
 from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
 from tgw.development.treatments import CODING_TREATMENTS
 from tgw.queue.worker_base import HardFailure
-from tgw.workers.coding import CodingWorker, receipt_path_for_treatment
+from tgw.workers.coding import (
+    CodingWorker,
+    _run_bounded_process_group,
+    receipt_path_for_treatment,
+)
 from tgw.workflow_kernel.contracts import (
     EffectClass,
     FingerprintResult,
@@ -77,6 +82,30 @@ def test_coding_worker_lease_outlives_bounded_launcher_timeout(tmp_path):
     )
 
     assert worker.lease_seconds == 2700
+
+
+def test_bounded_launcher_timeout_kills_descendant_process_group(tmp_path):
+    marker = tmp_path / "descendant-survived"
+    child = (
+        "import pathlib,sys,time; "
+        "time.sleep(0.8); "
+        "pathlib.Path(sys.argv[1]).write_text('survived')"
+    )
+    parent = (
+        "import subprocess,sys,time; "
+        "subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[1]]); "
+        "time.sleep(30)"
+    )
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_bounded_process_group(
+            [sys.executable, "-c", parent, str(marker), child],
+            cwd=tmp_path,
+            env={},
+            timeout=0.2,
+        )
+
+    time.sleep(1)
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize("queue_name", ("workflow_evaluate", "ebay_publish", "ai_identify"))
@@ -471,7 +500,7 @@ def test_configured_worker_launches_candidate_bytes_not_runtime_release(tmp_path
             stderr="",
         )
 
-    monkeypatch.setattr("tgw.workers.coding.subprocess.run", run)
+    monkeypatch.setattr("tgw.workers.coding._run_bounded_process_group", run)
     worker._launch_configured_command("controller-verify", {}, tmp_path)
 
     assert observed["env"]["TGW_CODING_WORKTREE_SRC"] == str(tmp_path / "src")

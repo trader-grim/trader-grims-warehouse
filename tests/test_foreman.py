@@ -19,6 +19,7 @@ from tgw.development.foreman import (
     _has_terminal_job,
     tick,
 )
+from tgw.development.plan_binding import execution_root_hash
 from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
 from tgw.development.treatments import CODING_TREATMENTS
 from tgw.workflow_kernel.contracts import (
@@ -69,6 +70,12 @@ def test_database_job_state_checks_cast_text_arrays_to_queue_enum(monkeypatch):
     assert _has_terminal_job("graph") is False
     assert len(executed) == 2
     assert all("ANY(%s::queue_job_state[])" in sql for sql, _params in executed)
+    assert set(executed[1][1][1]) == {
+        "succeeded",
+        "failed",
+        "dead_letter",
+        "cancelled",
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -129,7 +136,7 @@ def test_plan_bound_todo_uses_bound_source_as_uncommitted_implementation_baselin
         1,
         "implement",
         "/tmp/worktree-1",
-        {"source_commit": baseline},
+        _plan_binding(17, "/tmp/worktree-1", source_commit=baseline),
     )
     snapshot = _snapshot(assertions=_implemented())
     with (
@@ -184,14 +191,73 @@ def _graph(
     )
 
 
-def _todo(todo_id=1, worktree="/tmp/worktree-1", body="worktree: /tmp/worktree-1"):
+def _plan_binding(
+    todo_id: int,
+    worktree: str,
+    *,
+    source_commit: str = "a" * 40,
+):
+    plan_commit = "b" * 40
+    root = {
+        "schema": "tgw-execution-root/v1",
+        "kind": "plan",
+        "plan_id": "test-plan",
+        "profile": "implementation",
+        "plan_commit": plan_commit,
+    }
+    root["identity_hash"] = execution_root_hash(root)
+    return {
+        "schema": "tgw-plan-coding-todo/v1",
+        "plan_commit": plan_commit,
+        "solution_hash": "sha256:" + "c" * 64,
+        "closure_hash": "sha256:" + "d" * 64,
+        "capability": "test.code@1",
+        "treatment_id": "codex-implement",
+        "source_commit": source_commit,
+        "idempotency_key": f"test-todo-{todo_id}",
+        "worktree": worktree,
+        "worktree_identity": {"worktree": worktree},
+        "execution_root": root,
+    }
+
+
+def _todo(
+    todo_id=1,
+    worktree="/tmp/worktree-1",
+    body="worktree: /tmp/worktree-1",
+    *,
+    priority=100,
+):
     return TodoRecord(
         todo_id=todo_id,
         agent="test-agent",
-        priority=100,
+        priority=priority,
         body=body,
         worktree=worktree,
+        plan_binding=_plan_binding(todo_id, worktree),
     )
+
+
+def test_tick_refuses_unbound_todo_before_snapshot_or_dispatch():
+    todo = TodoRecord(
+        todo_id=99,
+        agent="legacy",
+        priority=1,
+        body="implement",
+        worktree="/tmp/worktree-1",
+    )
+    with (
+        patch("tgw.development.foreman.build_coding_snapshot") as snapshot,
+        patch("tgw.development.foreman.evaluate") as evaluator,
+        patch("tgw.development.foreman.dispatch_treatment") as dispatch,
+    ):
+        result = tick(fetch_todos=lambda: [todo])
+
+    assert result.refused_plan_binding == 1
+    assert result.errors == 0
+    snapshot.assert_not_called()
+    evaluator.assert_not_called()
+    dispatch.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -521,8 +587,8 @@ def test_tick_multiple_todos_dispatches_exactly_one():
 
 def test_tick_admits_most_urgent_eligible_todo():
     """Admission considers all evaluated todos, not caller ordering."""
-    less_urgent = TodoRecord(2, "test-agent", 90, "implement", "/tmp/wt-later")
-    urgent = TodoRecord(1, "test-agent", 10, "implement", "/tmp/wt-urgent")
+    less_urgent = _todo(2, "/tmp/wt-later", "implement", priority=90)
+    urgent = _todo(1, "/tmp/wt-urgent", "implement", priority=10)
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(return_value="job-urgent")
 
@@ -555,8 +621,8 @@ def test_tick_admits_most_urgent_eligible_todo():
 
 def test_tick_equal_priority_orders_by_todo_id_then_treatment_identity():
     """The global admission key includes a stable todo tie-breaker."""
-    first = TodoRecord(1, "test-agent", 10, "implement", "/tmp/wt-z")
-    second = TodoRecord(2, "test-agent", 10, "implement", "/tmp/wt-a")
+    first = _todo(1, "/tmp/wt-z", "implement", priority=10)
+    second = _todo(2, "/tmp/wt-a", "implement", priority=10)
     zeta = TreatmentDisposition("zeta", "1", ("ready",))
     alpha = TreatmentDisposition("alpha", "1", ("ready",))
     enqueue = MagicMock(return_value="job-alpha")
@@ -584,8 +650,8 @@ def test_tick_equal_priority_orders_by_todo_id_then_treatment_identity():
 
 def test_tick_null_priority_is_last():
     """A missing priority has the documented value 999, after real priorities."""
-    missing = TodoRecord(1, "test-agent", None, "implement", "/tmp/wt-missing")
-    real = TodoRecord(2, "test-agent", 20, "implement", "/tmp/wt-real")
+    missing = _todo(1, "/tmp/wt-missing", "implement", priority=None)
+    real = _todo(2, "/tmp/wt-real", "implement", priority=20)
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(return_value="job-real")
     with (
@@ -748,8 +814,8 @@ def test_real_evaluator_dispatches_stitch_after_review_and_verification():
 
 
 def test_tick_dispatch_failure_continues_to_lower_priority_todo():
-    first = TodoRecord(1, "test-agent", 1, "implement", "/tmp/first")
-    second = TodoRecord(2, "test-agent", 5, "implement", "/tmp/second")
+    first = _todo(1, "/tmp/first", "implement", priority=1)
+    second = _todo(2, "/tmp/second", "implement", priority=5)
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(side_effect=[RuntimeError("queue unavailable"), "second-job"])
     with (
@@ -778,8 +844,8 @@ def test_tick_duplicate_dispatch_is_not_an_error_and_continues():
     class DuplicateKey(Exception):
         pgcode = "23505"
 
-    first = TodoRecord(1, "test-agent", 1, "implement", "/tmp/first")
-    second = TodoRecord(2, "test-agent", 5, "implement", "/tmp/second")
+    first = _todo(1, "/tmp/first", "implement", priority=1)
+    second = _todo(2, "/tmp/second", "implement", priority=5)
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(side_effect=[DuplicateKey(), "second-job"])
     with (
@@ -805,8 +871,8 @@ def test_tick_duplicate_dispatch_is_not_an_error_and_continues():
 
 
 def test_tick_terminal_graph_is_durably_skipped_and_does_not_starve_next_todo():
-    first = TodoRecord(1, "test-agent", 1, "implement", "/tmp/first")
-    second = TodoRecord(2, "test-agent", 5, "implement", "/tmp/second")
+    first = _todo(1, "/tmp/first", "implement", priority=1)
+    second = _todo(2, "/tmp/second", "implement", priority=5)
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(return_value="second-job")
     with (
@@ -846,7 +912,7 @@ def test_tick_rejects_outside_root_before_snapshot_or_dispatch(tmp_path, monkeyp
     evil.mkdir()
     marker = tmp_path / "conftest-executed"
     (evil / "conftest.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran')\n")
-    todo = TodoRecord(1731, "test-agent", 1, f"worktree: {evil}", str(evil))
+    todo = _todo(1731, str(evil), f"worktree: {evil}", priority=1)
     result = tick(
         config=ForemanConfig(coding_config={"worktree_root": str(tmp_path / "canonical"), "repository_root": str(tmp_path / "repository")}),
         fetch_todos=lambda: [todo],

@@ -24,7 +24,7 @@ GRANT tgw_coding TO db, codex;
 GRANT CONNECT ON DATABASE tgw_lib_dev_state_machine TO tgw_coding;
 GRANT USAGE ON SCHEMA public TO tgw_coding;
 
-GRANT SELECT, INSERT, UPDATE
+GRANT SELECT, INSERT, UPDATE, DELETE
     ON TABLE public.todo_items, public.queue_jobs
     TO tgw_coding;
 GRANT SELECT, INSERT

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -52,6 +53,52 @@ _VALID_OUTCOMES = frozenset(
         OUTCOME_CONFLICT,
     }
 )
+
+
+def _run_bounded_process_group(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: int | float,
+) -> subprocess.CompletedProcess[str]:
+    """Run one launcher and terminate its complete descendant group on timeout."""
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout,
+            output=stdout,
+            stderr=stderr,
+        ) from exc
+    return subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout,
+        stderr,
+    )
 
 
 def validated_coding_worktree(
@@ -161,12 +208,9 @@ class CodingWorker(QueueWorker):
         if not command:
             raise HardFailure(f"coding.commands.{treatment_id} is empty")
         try:
-            completed = subprocess.run(
+            completed = _run_bounded_process_group(
                 command,
                 cwd=worktree,
-                check=False,
-                text=True,
-                capture_output=True,
                 timeout=self._timeout_seconds(),
                 env={
                     **os.environ,
