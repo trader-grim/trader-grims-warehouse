@@ -1,0 +1,38 @@
+{
+  "schema": "tgw-current-task/v1",
+  "id": "operator-context-sync-20260823",
+  "status": "ACTIVE_HANDOFF_READY",
+  "objective": "Provide one shared Debian tgw-context MCP, Plan Graph, CodeGraph, tgw-plan skill, tgw-review skill, and concise startup instruction to Codex, Claude, and DeepSeek on tgw-lib.",
+  "systems": {
+    "development": "tgw-lib",
+    "production": "tgw-prod"
+  },
+  "development_model": {
+    "worker_accounts": ["codex", "claude", "deepseek"],
+    "shared_group": "tgw-coders",
+    "shared_mcp_command": "/opt/TGW/tgw-lib/bin/tgw-context-mcp"
+  },
+  "plan": {
+    "approved_commit": "058e2f980201cc78245358e4901cf007063f2c29",
+    "approved_solution_hash": "sha256:ecce15aad2699492c0c5577bff1af7005ffbbec6ae6166b325b34c1cc7e70e9f",
+    "evidence_commit": "74e21cca015699b4b237b872c83d97bcddfd4fd1",
+    "amendment": "plan/execution/AMENDMENT-20260823-MCP-LIVE-CLIENT-CONVERGENCE.yaml"
+  },
+  "completed": [
+    "Installed /opt/TGW/tgw-lib/bin/tgw-context-mcp as the shared Debian MCP command.",
+    "Registered the same command in the real Codex, Claude, and DeepSeek harness stores.",
+    "Verified status, Plan source, Plan Graph, CodeGraph, and the seven original context tools as all three Linux accounts.",
+    "Preserved the concise startup instruction and the simpler installed tgw-plan and tgw-review skills."
+  ],
+  "next": [
+    "Verify this handoff from a clean ordinary harness session.",
+    "Reconcile and remove obsolete actor-generation, fleet-gate, and Nix-coupled context bootstrap machinery from the development path.",
+    "Return to the tgw-lib web UI development task after operator acceptance of the clean-session handoff."
+  ],
+  "web_ui_resume": {
+    "development_host": "tgw-lib",
+    "live_observation": "The installed item-page checkpoint still renders eBay category, secondary eBay category, and condition incorrectly.",
+    "scope": "Continue item-page development on tgw-lib; production deployment is a separate explicit step."
+  },
+  "operator_acceptance": "PENDING"
+}
