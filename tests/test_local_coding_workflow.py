@@ -53,6 +53,25 @@ def test_local_config_has_no_remote_or_authority_dependency(tmp_path: Path) -> N
     assert "worker_identity" not in config["coding"]
 
 
+def test_local_git_probe_trusts_only_the_exact_repository(tmp_path: Path, monkeypatch) -> None:
+    completed = subprocess.CompletedProcess([], 0, "head\n", "")
+    observed = {}
+
+    def run(command, **kwargs):
+        observed["command"] = command
+        observed.update(kwargs)
+        return completed
+
+    monkeypatch.setattr(local_workflow.subprocess, "run", run)
+
+    assert local_workflow._git(tmp_path, "rev-parse", "HEAD") == "head"
+    assert observed["command"] == [
+            "git", "-c", f"safe.directory={tmp_path.resolve()}",
+            "rev-parse", "HEAD",
+    ]
+    assert observed["cwd"] == tmp_path
+
+
 def test_allocate_worktree_uses_one_group_workshop_and_is_idempotent(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     worktrees = tmp_path / "worktrees"

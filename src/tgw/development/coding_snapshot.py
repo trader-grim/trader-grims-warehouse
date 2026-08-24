@@ -128,7 +128,10 @@ def _git(
     """Run a git command in the worktree, returning (exit_code, stdout, stderr)."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(worktree), *args],
+            [
+                "git", "-c", f"safe.directory={worktree.resolve()}",
+                "-C", str(worktree), *args,
+            ],
             capture_output=True,
             text=True,
             timeout=timeout,

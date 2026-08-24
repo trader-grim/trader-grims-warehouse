@@ -40,7 +40,8 @@ class LocalCodingWorkflowError(RuntimeError):
 
 def _git(repository: Path, *args: str) -> str:
     result = subprocess.run(
-        ["git", *args], cwd=repository, check=False, text=True, capture_output=True,
+        ["git", "-c", f"safe.directory={repository.resolve()}", *args],
+        cwd=repository, check=False, text=True, capture_output=True,
     )
     if result.returncode:
         raise LocalCodingWorkflowError(f"Git command failed: {result.stderr[-500:]}")
@@ -143,7 +144,10 @@ def allocate_worktree(
     created = False
     if not worktree.exists() and not worktree.is_symlink():
         added = subprocess.run(
-            ["git", "worktree", "add", "-b", branch, str(worktree), source_commit],
+            [
+                "git", "-c", f"safe.directory={repository.resolve()}",
+                "worktree", "add", "-b", branch, str(worktree), source_commit,
+            ],
             cwd=repository, check=False, text=True, capture_output=True,
         )
         if added.returncode:

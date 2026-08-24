@@ -96,6 +96,27 @@ def _goal(*conditions: str) -> GoalProfile:
 # ---------------------------------------------------------------------------
 
 class TestGitHelpers:
+    def test_git_probe_trusts_only_the_exact_worktree(self, tmp_path):
+        completed = subprocess.CompletedProcess(
+            [], 0, "a" * 40 + "\n", "",
+        )
+        with patch(
+            "tgw.development.coding_snapshot.subprocess.run",
+            return_value=completed,
+        ) as run:
+            assert _git_rev_parse(tmp_path, "HEAD") == "a" * 40
+
+        assert run.call_args.args[0] == [
+            "git",
+            "-c",
+            f"safe.directory={tmp_path.resolve()}",
+            "-C",
+            str(tmp_path),
+            "rev-parse",
+            "--verify",
+            "HEAD",
+        ]
+
     def test_rev_parse_returns_sha_in_repo(self, tmp_path):
         _git_init(tmp_path)
         _git_commit(tmp_path, "initial", allow_empty=True)

@@ -19,7 +19,7 @@ class ControllerVerificationError(RuntimeError):
 
 def _git_paths(cwd: Path, *args: str) -> tuple[str, ...]:
     completed = subprocess.run(
-        ["git", *args],
+        ["git", "-c", f"safe.directory={cwd.resolve()}", *args],
         cwd=cwd,
         check=False,
         capture_output=True,
@@ -32,7 +32,7 @@ def _git_paths(cwd: Path, *args: str) -> tuple[str, ...]:
 
 def _git_text(cwd: Path, *args: str) -> str:
     completed = subprocess.run(
-        ["git", *args],
+        ["git", "-c", f"safe.directory={cwd.resolve()}", *args],
         cwd=cwd,
         check=False,
         text=True,

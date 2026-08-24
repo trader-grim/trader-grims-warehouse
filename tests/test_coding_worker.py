@@ -458,6 +458,29 @@ def test_controller_verify_runner_emits_attested_success_only_after_pytest_and_r
     assert all(kwargs["env"]["PYTHONPATH"] == "/claimed/worktree/src:/immutable/worker/release/src" for _command, kwargs in calls)
 
 
+def test_controller_git_probe_trusts_only_the_exact_worktree(tmp_path, monkeypatch):
+    from tgw.workers import controller_verify
+
+    observed = {}
+
+    def run(command, **kwargs):
+        observed["command"] = command
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="head\n", stderr="")
+
+    monkeypatch.setattr(controller_verify.subprocess, "run", run)
+
+    assert controller_verify._git_text(tmp_path, "rev-parse", "HEAD") == "head"
+    assert observed["command"] == [
+        "git",
+        "-c",
+        f"safe.directory={tmp_path.resolve()}",
+        "rev-parse",
+        "HEAD",
+    ]
+    assert observed["cwd"] == tmp_path
+
+
 def test_controller_verify_runner_does_not_establish_conditions_when_a_check_fails(monkeypatch, capsys):
     from tgw.workers import controller_verify
 
