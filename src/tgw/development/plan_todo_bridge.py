@@ -33,6 +33,7 @@ def bind_leaf(
     list_todos: Callable[[], list[Mapping[str, Any]]],
     allocate_worktree: Callable[[int, str, str], Mapping[str, Any]],
     set_status_note: Callable[[int, str], Any],
+    fixture_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Create/retrieve a Todo and its existing request-bound worktree.
 
@@ -53,6 +54,8 @@ def bind_leaf(
         "capability": capability, "treatment_id": treatment_id, "source_commit": source_commit,
         "requested_worktree_identity": worktree_identity,
     }
+    if fixture_run_id is not None:
+        binding["fixture_run_id"] = fixture_run_id
     binding["idempotency_key"] = _key(binding)
     supersedes_todo_id = None
     for row in list_todos():

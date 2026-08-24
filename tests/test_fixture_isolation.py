@@ -1,0 +1,61 @@
+import pytest
+
+from tgw.development.fixture_isolation import (
+    FixtureIsolationError, create_fixture_todo, fixture_enqueue, fixture_queue_name,
+    fixture_worktree_root, run_fixture_job_once, validate_fixture_run_id,
+)
+from tgw.workers.coding import CodingWorker
+
+
+RUN_ID = "fixture-local-spine-001"
+
+
+def _binding():
+    return {
+        "schema": "tgw-plan-coding-todo/v1", "plan_commit": "a" * 40,
+        "solution_hash": "sha256:solution", "closure_hash": "sha256:closure",
+        "capability": "fixture.code@1", "treatment_id": "codex-implement",
+        "source_commit": "a" * 40, "requested_worktree_identity": RUN_ID,
+        "idempotency_key": "sha256:key", "worktree": "/configured/fixture",
+        "worktree_identity": {"worktree": "/configured/fixture"}, "fixture_run_id": RUN_ID,
+    }
+
+
+def test_fixture_id_and_worktree_namespace_are_exact():
+    assert validate_fixture_run_id(RUN_ID) == RUN_ID
+    assert fixture_queue_name(RUN_ID) == "tgw-fixture-codex-implement:" + RUN_ID
+    assert str(fixture_worktree_root("/opt/TGW/var/worktrees", RUN_ID)).endswith("fixture-runs/" + RUN_ID)
+    for invalid in ("fixture-x", "fixture-../../bad", "codex-implement", "fixture-Uppercase"):
+        with pytest.raises(FixtureIsolationError):
+            validate_fixture_run_id(invalid)
+
+
+def test_fixture_todo_uses_real_adapter_without_plan_render(monkeypatch):
+    observed = {}
+    monkeypatch.setattr("tgw.todo.todo_add", lambda *args, **kwargs: observed.update(args=args, kwargs=kwargs) or {"id": 1})
+    assert create_fixture_todo(RUN_ID, agent="codex", body="fixture", priority=1)["id"] == 1
+    assert observed["kwargs"]["source"] == "tgw-fixture:" + RUN_ID
+    assert observed["kwargs"]["suppress_plan_render"] is True
+
+
+def test_fixture_dispatch_uses_namespaced_queue_and_preserves_binding():
+    calls = []
+    enqueue = fixture_enqueue(RUN_ID, lambda *args, **kwargs: calls.append((args, kwargs)) or "fixture-job")
+    payload = {"todo_id": 7, "treatment_id": "codex-implement", "object_id": "/configured/fixture", "plan_binding": _binding()}
+    assert enqueue("codex-implement", payload, dedupe_key="graph-id") == "fixture-job"
+    args, kwargs = calls[0]
+    assert args[0] == fixture_queue_name(RUN_ID)
+    assert args[1]["plan_binding"] == _binding()
+    assert args[1]["fixture_run_id"] == RUN_ID
+    assert kwargs["dedupe_key"] == "fixture:" + RUN_ID + ":graph-id"
+
+
+def test_ordinary_coding_worker_rejects_fixture_queue():
+    with pytest.raises(ValueError, match="unsupported coding queue"):
+        CodingWorker(fixture_queue_name(RUN_ID), {"coding": {}})
+
+
+def test_fixture_worker_refuses_cross_namespace_job(monkeypatch):
+    monkeypatch.setattr("tgw.development.fixture_isolation.state_machine.get_job", lambda _job: {"queue_name": "codex-implement", "payload_json": {}})
+    with pytest.raises(FixtureIsolationError, match="outside its exact queue"):
+        run_fixture_job_once(RUN_ID, job_id="any", config={"coding": {}}, launcher=lambda *_: {})

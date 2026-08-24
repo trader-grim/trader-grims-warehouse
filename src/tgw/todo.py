@@ -166,6 +166,8 @@ def todo_add(
     depends_on: Optional[List[int]] = None,
     plan_anchor: Optional[str] = None,
     reasoning: str = 'normal',
+    *,
+    suppress_plan_render: bool = False,
 ) -> Dict[str, Any]:
     # Angle-bracket placeholders (e.g. <filename>) are misread by aider as
     # file directives and can create garbage files.  Warn so the author can
@@ -182,7 +184,8 @@ def todo_add(
                 (agent, priority, body, source, pp_ref, depends_on or [], plan_anchor, reasoning),
             )
             new_id = cur.fetchone()[0]
-    _enqueue_plan_render('todo_add')
+    if not suppress_plan_render:
+        _enqueue_plan_render('todo_add')
     result: Dict[str, Any] = {'ok': True, 'id': new_id, 'agent': agent, 'priority': priority,
                                'body': body, 'pp_ref': pp_ref, 'depends_on': depends_on or [],
                                'plan_anchor': plan_anchor, 'reasoning': reasoning}
@@ -265,7 +268,9 @@ def todo_update(item_id: int, body: str) -> Dict[str, Any]:
     return {'ok': True, 'id': row[0], 'agent': row[1], 'body': body}
 
 
-def todo_set_status_note(item_id: int, note: str) -> Dict[str, Any]:
+def todo_set_status_note(
+    item_id: int, note: str, *, suppress_plan_render: bool = False,
+) -> Dict[str, Any]:
     """Record a progress/dispatch note without touching ``body`` (todo #1384:
     the tgw-coder dispatch step was overwriting the original finding text
     with a generic 'in progress: tgw-coder' placeholder via todo_update)."""
@@ -279,7 +284,8 @@ def todo_set_status_note(item_id: int, note: str) -> Dict[str, Any]:
             row = cur.fetchone()
     if row is None:
         return {'ok': False, 'error': f'item {item_id} not found or already done'}
-    _enqueue_plan_render('todo_set_status_note')
+    if not suppress_plan_render:
+        _enqueue_plan_render('todo_set_status_note')
     return {'ok': True, 'id': row[0], 'agent': row[1], 'body': row[2], 'status_note': note}
 
 
