@@ -1,13 +1,19 @@
 from pathlib import Path
 import subprocess
+from unittest.mock import patch
 
 from tgw.development.fixture_workflow_proof import run_fixture_proof
+from tgw.development.provider_dispatch import ProviderAdapter
 
 
 def test_fixture_proof_runs_only_isolated_plan_bound_coding_path(tmp_path):
     source = Path(__file__).resolve().parents[1]
     commit = __import__("subprocess").check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-    result = run_fixture_proof(source_root=source, fixture_root=tmp_path / "fixture", candidate_commit=commit)
+    with patch(
+        "tgw.development.foreman.resolve_implementation_adapter",
+        return_value=ProviderAdapter("implementation", "codex-local-runner", "codex-implement", "codex-implement"),
+    ):
+        result = run_fixture_proof(source_root=source, fixture_root=tmp_path / "fixture", candidate_commit=commit)
     try:
         binding = result["plan_bound_todo"]["binding"]
         assert result["coding_request"]["payload"]["plan_binding"] == binding

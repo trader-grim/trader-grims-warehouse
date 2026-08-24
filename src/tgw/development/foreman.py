@@ -60,6 +60,9 @@ class ForemanConfig:
     coding_config: dict[str, Any] = field(default_factory=dict)
     provider_registry_path: str | None = None
     provider_adapters: dict[str, str] | None = None
+    # A fixture may prove its clean allocated worktree is genuinely unimplemented
+    # against its bound source commit.  Ordinary Todos never consume this field.
+    fixture_implementation_baseline_commit: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +337,17 @@ def tick(
             worktree = validated_coding_worktree(
                 todo.worktree, todo.worktree, cfg.coding_config,
             )
+            fixture_baseline = None
+            if cfg.fixture_implementation_baseline_commit is not None:
+                binding = todo.plan_binding
+                if not isinstance(binding, dict) or not binding.get("fixture_run_id"):
+                    raise ProviderDispatchError("fixture implementation baseline requires a fixture-bound Todo")
+                if binding.get("source_commit") != cfg.fixture_implementation_baseline_commit:
+                    raise ProviderDispatchError("fixture implementation baseline disagrees with Plan binding")
+                fixture_baseline = cfg.fixture_implementation_baseline_commit
             snapshot = build_coding_snapshot(
                 worktree, cfg.goal_profile, cfg.treatments,
+                implementation_baseline_commit=fixture_baseline,
             )
         except Exception:
             log.exception(

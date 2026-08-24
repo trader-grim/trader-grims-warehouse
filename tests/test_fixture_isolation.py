@@ -50,7 +50,12 @@ def test_fixture_todo_uses_real_adapter_without_plan_render(monkeypatch):
 def test_fixture_dispatch_uses_namespaced_queue_and_preserves_binding():
     calls = []
     enqueue = fixture_enqueue(RUN_ID, lambda *args, **kwargs: calls.append((args, kwargs)) or "fixture-job")
-    payload = {"todo_id": 7, "treatment_id": "codex-implement", "object_id": "/configured/fixture", "plan_binding": _binding()}
+    payload = {
+        "todo_id": 7, "treatment_id": "codex-implement", "object_id": "/configured/fixture",
+        "plan_binding": _binding(), "coding_role": "implementation",
+        "selected_provider": "codex-local-runner", "adapter_treatment_id": "codex-implement",
+        "adapter_queue_name": "codex-implement",
+    }
     assert enqueue("codex-implement", payload, dedupe_key="graph-id") == "fixture-job"
     args, kwargs = calls[0]
     assert args[0] == fixture_queue_name(RUN_ID)

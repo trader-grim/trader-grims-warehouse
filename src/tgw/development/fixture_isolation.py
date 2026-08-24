@@ -105,6 +105,13 @@ def fixture_enqueue(run_id: object, enqueue_fn: Callable[..., str] | None = None
             raise FixtureIsolationError("fixture job Plan binding crosses fixture namespace")
         if payload.get("treatment_id") != "codex-implement":
             raise FixtureIsolationError("fixture job has wrong treatment")
+        if (
+            payload.get("coding_role") != "implementation"
+            or payload.get("selected_provider") != "codex-local-runner"
+            or payload.get("adapter_treatment_id") != "codex-implement"
+            or payload.get("adapter_queue_name") != "codex-implement"
+        ):
+            raise FixtureIsolationError("fixture job lacks the W07 implementation adapter binding")
         durable_payload = dict(payload, fixture_run_id=run_id)
         durable_key = f"fixture:{run_id}:{kwargs.get('dedupe_key', '')}"
         if not kwargs.get("dedupe_key"):

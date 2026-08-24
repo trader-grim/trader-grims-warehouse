@@ -98,7 +98,10 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
     )
     record = fixture_todo_record(run_id, bound["todo_id"])
     outcome = tick(
-        config=ForemanConfig(coding_config=proof_coding), todo_ids={record.todo_id},
+        config=ForemanConfig(
+            coding_config=proof_coding,
+            fixture_implementation_baseline_commit=candidate_commit,
+        ), todo_ids={record.todo_id},
         fetch_todos=lambda: [record], enqueue_fn=fixture_enqueue(run_id),
     )
     if outcome.dispatched != 1:
@@ -114,6 +117,12 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
     binding = bound["binding"]
     if receipt.get("execution_envelope", {}).get("plan_binding") != binding:
         raise RuntimeError("fixture receipt lost Plan binding")
+    if (
+        receipt.get("coding_role") != "implementation"
+        or receipt.get("selected_provider") != "codex-local-runner"
+        or receipt.get("adapter_queue_name") != "codex-implement"
+    ):
+        raise RuntimeError("fixture receipt lost W07 role/provider adapter binding")
     return {"plan_solution": asdict(plan), "ready_leaf": asdict(ready), "plan_bound_todo": bound,
             "coding_request": {"job_id": job_id}, "allocated_worktree": binding["worktree_identity"],
             "coding_execution": receipt["execution_envelope"], "receipt": receipt,
