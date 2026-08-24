@@ -15,7 +15,7 @@ from tgw.logging import announce_script_run
 from tgw.plan_catalog import compose_catalog
 from tgw.plan_luet import (
     conform,
-    verify_pinned_luet_binary,
+    verify_direct_development_luet,
 )
 
 CATALOG_PATH = "agent-services/catalogs/governed-execution-platform-v1.json"
@@ -104,7 +104,7 @@ def main() -> int:
     commit, tree, input_graph, graph, approved_plan_commit = _bound_candidate_catalog(
         repository, args.candidate, plan_repository=plan_repository, approved_ref=args.plan_approved_ref,
     )
-    binary_hash = verify_pinned_luet_binary(args.luet)
+    binary_hash = verify_direct_development_luet(args.luet, plan_commit=approved_plan_commit)
     result = conform(graph, luet_binary=args.luet, expected_plan_commit=approved_plan_commit)
     receipt = create_luet_conformance_receipt(
         result, graph=graph, plan_commit=approved_plan_commit,

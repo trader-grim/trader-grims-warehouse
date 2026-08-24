@@ -1,0 +1,11 @@
+{
+  "schema": "tgw-direct-development-luet-binding/v1",
+  "id": "tgw-lib-direct-development-luet@1",
+  "executable_path": "/opt/TGW/var/cache/tgw/t/operator-command-plan-20260823-99b32a9/luet",
+  "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
+  "version": "0.9.26",
+  "version_output": "luet version 0.9.26-g",
+  "invocation": ["--version"],
+  "plan_commit": "058e2f980201cc78245358e4901cf007063f2c29",
+  "plan_solution_hash": "sha256:ecce15aad2699492c0c5577bff1af7005ffbbec6ae6166b325b34c1cc7e70e9f"
+}

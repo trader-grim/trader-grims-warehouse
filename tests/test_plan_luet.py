@@ -1,8 +1,14 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
-from tgw.plan_luet import LUET_REVISION, LUET_VERSION, conform
+from tgw.plan_luet import (
+    LUET_VERSION,
+    conform,
+    load_direct_development_luet_binding,
+    verify_direct_development_luet,
+)
 from tgw.plan_solver import solve
 
 COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
@@ -85,12 +91,33 @@ def _key(reference):
     return reference["category"], reference["name"], str(reference["version"])
 
 
-def test_pin_is_exact_and_nix_source_records_same_revision():
-    expression = Path("nix/luet.nix").read_text()
+def test_direct_development_binding_is_exact_and_is_not_nix_metadata():
+    binding = load_direct_development_luet_binding()
+
     assert LUET_VERSION == "0.9.26"
-    assert LUET_REVISION in expression
-    assert "sha256-wN2VRYsPdF88Cj73ONh7AYTtowjp/X+EtDzOUYTCLCI=" in expression
-    assert "vendorHash = null" in expression
+    assert binding.executable_path == Path("/opt/TGW/var/cache/tgw/t/operator-command-plan-20260823-99b32a9/luet")
+    assert binding.plan_commit == "058e2f980201cc78245358e4901cf007063f2c29"
+    assert "nix" not in binding.executable_path.name
+
+
+def test_direct_development_binding_rejects_nix_metadata(tmp_path):
+    binding = tmp_path / "binding.json"
+    binding.write_text(Path("nix/luet.nix").read_text())
+
+    with pytest.raises(ValueError, match="binding"):
+        load_direct_development_luet_binding(binding)
+
+
+def test_direct_development_binding_rejects_wrong_executable(tmp_path):
+    wrong = tmp_path / "luet"
+    wrong.write_text("#!/bin/sh\necho 'luet version 0.9.26-g'\n")
+    wrong.chmod(0o755)
+
+    with pytest.raises(ValueError, match="direct-development binding"):
+        verify_direct_development_luet(
+            wrong,
+            plan_commit="058e2f980201cc78245358e4901cf007063f2c29",
+        )
 
 
 def test_representable_unique_closure_agrees_with_native(tmp_path):

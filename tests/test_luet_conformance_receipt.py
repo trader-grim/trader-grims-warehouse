@@ -46,5 +46,5 @@ def test_operational_binary_pin_rejects_a_version_compatible_wrong_executable(tm
     binary = tmp_path / "luet"
     binary.write_text("#!/bin/sh\necho 'luet version 0.9.26'\n")
     binary.chmod(0o755)
-    with pytest.raises(ValueError, match="pinned executable hash"):
+    with pytest.raises(ValueError, match="direct-development binding"):
         verify_pinned_luet_binary(binary)

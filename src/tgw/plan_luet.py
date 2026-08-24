@@ -16,22 +16,80 @@ import os
 import re
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from tgw.plan_solver import CapabilityGraph, PlanResolutionError, Requirement, solve
 
-LUET_VERSION = "0.9.26"
 LUET_REVISION = "48f17dbc7a9edb94b1415a2eeeac4e5c2d45f5d3"
-PROVIDER_ID = f"luet-pinned-{LUET_VERSION}@1"
-# Exact executable produced by nix/luet.nix at LUET_REVISION.  Keep this in
-# lockstep with the flake-owned environment catalog; a different binary must
-# hold resolution rather than silently becoming a second conformance provider.
-PINNED_LUET_BINARY_SHA256 = "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87"
+_DIRECT_DEVELOPMENT_BINDING = (
+    Path(__file__).resolve().parents[2]
+    / "agent-services/catalogs/direct-development-luet-v1.json"
+)
 _VERSION = "1.0"
 _PROVIDER_CATEGORY = "tgw-provider"
 _CAPABILITY_CATEGORY = "tgw-capability"
 _SELECTOR_CATEGORY = "tgw-selector"
+
+
+@dataclass(frozen=True)
+class DirectDevelopmentLuetBinding:
+    executable_path: Path
+    sha256: str
+    version: str
+    version_output: str
+    invocation: tuple[str, ...]
+    plan_commit: str
+    plan_solution_hash: str
+
+
+def load_direct_development_luet_binding(
+    path: Path | str = _DIRECT_DEVELOPMENT_BINDING,
+) -> DirectDevelopmentLuetBinding:
+    """Load the source-owned, non-Nix binding for direct-development Luet."""
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("direct-development Luet binding is unavailable") from exc
+    required = {
+        "schema", "id", "executable_path", "sha256", "version", "version_output",
+        "invocation", "plan_commit", "plan_solution_hash",
+    }
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != required
+        or value.get("schema") != "tgw-direct-development-luet-binding/v1"
+        or value.get("id") != "tgw-lib-direct-development-luet@1"
+        or not isinstance(value.get("executable_path"), str)
+        or not value["executable_path"].startswith("/opt/TGW/")
+        or not isinstance(value.get("sha256"), str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["sha256"])
+        or not isinstance(value.get("version"), str)
+        or not isinstance(value.get("version_output"), str)
+        or not isinstance(value.get("invocation"), list)
+        or value["invocation"] != ["--version"]
+        or not isinstance(value.get("plan_commit"), str)
+        or not re.fullmatch(r"[0-9a-f]{40}", value["plan_commit"])
+        or not isinstance(value.get("plan_solution_hash"), str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["plan_solution_hash"])
+    ):
+        raise ValueError("direct-development Luet binding is invalid")
+    return DirectDevelopmentLuetBinding(
+        executable_path=Path(value["executable_path"]),
+        sha256=value["sha256"],
+        version=value["version"],
+        version_output=value["version_output"],
+        invocation=tuple(value["invocation"]),
+        plan_commit=value["plan_commit"],
+        plan_solution_hash=value["plan_solution_hash"],
+    )
+
+
+_BINDING = load_direct_development_luet_binding()
+LUET_VERSION = _BINDING.version
+PROVIDER_ID = f"luet-pinned-{LUET_VERSION}@1"
+PINNED_LUET_BINARY_SHA256 = _BINDING.sha256
 
 
 def normalize_conformance_graph(document: Mapping[str, Any]) -> dict[str, Any]:
@@ -81,15 +139,29 @@ def pinned_luet_binary_sha256(binary: Path | str) -> str:
 
 
 def verify_pinned_luet_binary(binary: Path | str) -> str:
-    """Fail before resolution if the explicitly supplied Luet is not the pin."""
+    """Compatibility wrapper for the source-owned direct-development binding."""
+    return verify_direct_development_luet(binary, plan_commit=_BINDING.plan_commit)
+
+
+def verify_direct_development_luet(
+    binary: Path | str,
+    *,
+    plan_commit: str,
+    binding_path: Path | str = _DIRECT_DEVELOPMENT_BINDING,
+) -> str:
+    """Fail closed unless this is the exact source-bound development executable."""
+    binding = load_direct_development_luet_binding(binding_path)
+    if plan_commit != binding.plan_commit:
+        raise ValueError("direct-development Luet binding does not match the approved Plan commit")
     observed = pinned_luet_binary_sha256(binary)
-    if observed != PINNED_LUET_BINARY_SHA256:
-        raise ValueError("Luet binary does not match the pinned executable hash")
+    target = Path(binary).resolve(strict=True)
+    if target != binding.executable_path.resolve(strict=True) or observed != binding.sha256:
+        raise ValueError("Luet binary does not match the direct-development binding")
     version = subprocess.run(
-        [str(binary), "--version"], check=False, capture_output=True, text=True, timeout=10,
+        [str(target), *binding.invocation], check=False, capture_output=True, text=True, timeout=10,
     )
-    if version.returncode or f"luet version {LUET_VERSION}" not in (version.stdout + version.stderr).lower():
-        raise ValueError("Luet binary does not report the pinned version")
+    if version.returncode or binding.version_output not in (version.stdout + version.stderr).lower():
+        raise ValueError("Luet binary does not report the direct-development binding version")
     return observed
 
 
