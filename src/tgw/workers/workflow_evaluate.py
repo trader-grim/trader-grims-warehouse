@@ -12,7 +12,7 @@ from tgw.errors import TreatmentFailure
 from tgw.item_mutation import item_generation
 from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
-from tgw.workflow.evaluator import evaluate
+from tgw.workflow_kernel.evaluator import evaluate
 from tgw.workflow.item_snapshot import build_item_snapshot
 from tgw.workflow.operator_authority import (
     get_authority,
@@ -22,7 +22,7 @@ from tgw.workflow.profiles import (
     TGW_EBAY_LEGACY_STAGE_ONBOARDED,
     get_profile,
 )
-from tgw.workflow.scheduler import dispatch_treatment
+from tgw.workflow_kernel.scheduler import dispatch_treatment
 from tgw.workflow.treatments import LEGACY_STAGE_ONBOARDING_TREATMENTS, TGW_TREATMENTS
 
 QUEUE_NAME = "workflow_evaluate"
@@ -405,7 +405,22 @@ def evaluate_event(
 
 
 class WorkflowEvaluateWorker(QueueWorker):
+    def __init__(self, queue_name: str, config: dict[str, Any]) -> None:
+        if queue_name != QUEUE_NAME:
+            raise ValueError("listing workflow worker may only claim workflow_evaluate")
+        super().__init__(queue_name, config)
+
     def handle(self, job: dict[str, Any]) -> dict[str, Any]:
+        if job.get("entity_type") != "item" or not str(job.get("entity_id") or "").strip():
+            raise TreatmentFailure(
+                "listing workflow rejects non-item work",
+                _receipt(
+                    "failed",
+                    reason_code="NON_ITEM_JOB",
+                    entity_type=job.get("entity_type"),
+                    entity_id=job.get("entity_id"),
+                ),
+            )
         return evaluate_event(job, self.config)
 
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from tgw.workflow.contracts import (  # noqa: E402
+from tgw.workflow_kernel.contracts import (  # noqa: E402
     FingerprintResult,
     GoalProfile,
     ObjectSnapshot,

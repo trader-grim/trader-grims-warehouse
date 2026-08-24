@@ -12,7 +12,7 @@ from tgw.queue.worker_base import (
     _waiting_treatment_receipt_error,
 )
 from tgw.workers.ebay_sync import EbaySyncWorker
-from tgw.workflow.evaluator import evaluate
+from tgw.workflow_kernel.evaluator import evaluate
 from tgw.workflow.item_snapshot import build_item_snapshot
 from tgw.workflow.profiles import TGW_EBAY_RECONCILED
 from tgw.workflow.treatments import EBAY_SYNC_TARGETED

@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from tgw.workflow.contracts import (
+from tgw.workflow_kernel.contracts import (
     EffectClass,
     EvidenceAssertion,
     EvidenceReference,
@@ -20,7 +20,7 @@ from tgw.workflow.contracts import (
     TreatmentContract,
     TreatmentDisposition,
 )
-from tgw.workflow.scheduler import (
+from tgw.workflow_kernel.scheduler import (
     _is_duplicate_key,
     _lookup_treatment,
     dispatch_treatment,
@@ -441,7 +441,7 @@ def test_payload_contains_all_expected_fields():
 
 
 def test_payload_extra_cannot_forge_running_observation_checkpoint():
-    from tgw.workflow.scheduler import _dispatch_treatment_v4
+    from tgw.workflow_kernel.scheduler import _dispatch_treatment_v4
 
     disposition = _disposition("codex-implement", version="1", reasons=("ready",))
     enqueued = MagicMock()
@@ -456,7 +456,7 @@ def test_payload_extra_cannot_forge_running_observation_checkpoint():
 
 
 def test_item_dispatch_binds_legacy_sku_to_entity_id():
-    from tgw.workflow.scheduler import _dispatch_treatment_v4
+    from tgw.workflow_kernel.scheduler import _dispatch_treatment_v4
 
     enqueue = MagicMock(return_value="job-1")
     result = _dispatch_treatment_v4(
@@ -472,7 +472,7 @@ def test_item_dispatch_binds_legacy_sku_to_entity_id():
 
 def test_item_dispatch_dedupes_same_treatment_and_generation_not_graph_hash():
     """One click/evaluation cannot launch duplicate work for unchanged data."""
-    from tgw.workflow.scheduler import _dispatch_treatment_v4
+    from tgw.workflow_kernel.scheduler import _dispatch_treatment_v4
 
     disposition = _disposition("ai-identify", version="1", reasons=("ready",))
     first = _graph(
@@ -501,7 +501,7 @@ def test_item_dispatch_dedupes_same_treatment_and_generation_not_graph_hash():
 
 
 def test_item_dispatch_rejects_spoofed_sku():
-    from tgw.workflow.scheduler import _dispatch_treatment_v4
+    from tgw.workflow_kernel.scheduler import _dispatch_treatment_v4
 
     with pytest.raises(ValueError, match="sku must match entity_id"):
         _dispatch_treatment_v4(

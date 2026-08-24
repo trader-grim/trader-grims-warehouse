@@ -19,17 +19,19 @@ from tgw.workflow import (
 from tgw.workflow.treatments import (
     AI_IDENTIFY,
     ALL_TREATMENTS,
-    CLAUDE_REVIEW,
-    CODEX_IMPLEMENT,
-    CODING_TREATMENTS,
-    CONTROLLER_VERIFY,
     EBAY_DRAFT,
     EBAY_PUBLISH,
     EBAY_STAGE,
     EBAY_UPLOAD,
-    HERMES_STITCH,
     NORMALIZE_CONDITION,
     TGW_TREATMENTS,
+)
+from tgw.development.treatments import (
+    CLAUDE_REVIEW,
+    CODEX_IMPLEMENT,
+    CODING_TREATMENTS,
+    CONTROLLER_VERIFY,
+    HERMES_STITCH,
 )
 
 # ── Known condition universe ───────────────────────────────────────────────
@@ -108,10 +110,10 @@ def _evaluate(assertions, treatments, *, generation="3", ambiguities=()):
 
 
 def test_treatment_count():
-    """12 total treatments: 4 coding + 8 TGW."""
+    """Business and coding treatment registries are separate."""
     assert len(CODING_TREATMENTS) == 4
     assert len(TGW_TREATMENTS) == 8
-    assert len(ALL_TREATMENTS) == 12
+    assert len(ALL_TREATMENTS) == 8
 
 
 def test_unique_identity_version_pairs():

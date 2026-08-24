@@ -1,6 +1,6 @@
 """Pure, domain-neutral workflow convergence kernel."""
 
-from .contracts import (
+from tgw.workflow_kernel.contracts import (
     EffectClass,
     EvidenceAssertion,
     EvidenceReference,
@@ -15,7 +15,7 @@ from .contracts import (
     TreatmentDisposition,
     TreatmentReceipt,
 )
-from .evaluator import evaluate
+from tgw.workflow_kernel.evaluator import evaluate
 from .foundation import (
     FoundationDispatchBinding,
     FoundationIntegrationReceipt,

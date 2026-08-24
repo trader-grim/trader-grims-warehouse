@@ -27,9 +27,9 @@ from tgw.config import (
     validate_worker_execution_config,
 )
 from tgw.errors import HardFailure, TreatmentFailure
-from tgw.workflow.coding_snapshot import build_coding_snapshot, serialize_snapshot
-from tgw.workflow.profiles import CODING_READY_FOR_IMPLEMENTATION
-from tgw.workflow.treatments import CODING_TREATMENTS
+from tgw.development.coding_snapshot import build_coding_snapshot, serialize_snapshot
+from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
+from tgw.development.treatments import CODING_TREATMENTS
 
 
 def _coding(config: dict[str, Any]) -> dict[str, Any]:

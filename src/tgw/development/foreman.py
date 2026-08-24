@@ -14,17 +14,17 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from tgw.workers.coding import validated_coding_worktree
-from tgw.workflow.coding_snapshot import build_coding_snapshot
-from tgw.workflow.contracts import (
+from tgw.development.coding_snapshot import build_coding_snapshot
+from tgw.workflow_kernel.contracts import (
     GoalProfile,
     RuntimeWorkGraph,
     TreatmentContract,
     TreatmentDisposition,
 )
-from tgw.workflow.evaluator import evaluate
-from tgw.workflow.profiles import CODING_READY_FOR_IMPLEMENTATION
-from tgw.workflow.scheduler import DispatchResult, dispatch_treatment
-from tgw.workflow.treatments import CODING_TREATMENTS
+from tgw.workflow_kernel.evaluator import evaluate
+from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
+from tgw.workflow_kernel.scheduler import DispatchResult, dispatch_treatment
+from tgw.development.treatments import CODING_TREATMENTS
 
 log = logging.getLogger(__name__)
 

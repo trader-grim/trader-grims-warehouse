@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from tgw.queue.worker_base import HardFailure, QueueWorker
-from tgw.workflow.contracts import (
+from tgw.workflow_kernel.contracts import (
     OUTCOME_CONFLICT,
     OUTCOME_FAILED,
     OUTCOME_PARTIAL,
@@ -298,7 +298,7 @@ class CodingWorker(QueueWorker):
                 "outcome": OUTCOME_FAILED,
                 "established_conditions": [],
                 "artifacts": [{"kind": "mechanical_failure", "detail": str(exc)}],
-                "receipt_schema_id": "receipt/tgw-workflow/v1",
+                "receipt_schema_id": "receipt/tgw-development/v1",
             }
             _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
             raise HardFailure(f"coding treatment mechanical failure: {exc}") from exc
@@ -312,7 +312,7 @@ class CodingWorker(QueueWorker):
             "outcome": outcome,
             "established_conditions": established,
             "artifacts": artifacts,
-            "receipt_schema_id": "receipt/tgw-workflow/v1",
+            "receipt_schema_id": "receipt/tgw-development/v1",
         }
         _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
         if outcome != OUTCOME_SATISFIED:

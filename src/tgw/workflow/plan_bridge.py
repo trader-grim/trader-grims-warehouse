@@ -12,7 +12,7 @@ from typing import Mapping, Sequence
 
 from tgw.plan_solver import PlanResolutionError, validate_solution_integrity
 
-from .contracts import (
+from tgw.workflow_kernel.contracts import (
     EffectClass,
     EvidenceAssertion,
     EvidenceReference,
@@ -23,7 +23,7 @@ from .contracts import (
     RuntimeWorkGraph,
     TreatmentContract,
 )
-from .evaluator import evaluate
+from tgw.workflow_kernel.evaluator import evaluate
 
 BRIDGE_VERSION = "tgw-plan-runtime-bridge/v1"
 DISPATCH_CONDITION = "plan.solution-dispatchable"

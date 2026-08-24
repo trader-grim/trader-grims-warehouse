@@ -6,10 +6,10 @@ from pathlib import Path
 
 from tgw.provider_effects import ProviderEffectConflict, resolve_succeeded_provider_effect
 
-from .evaluator import evaluate
+from tgw.workflow_kernel.evaluator import evaluate
 from .item_snapshot import build_item_snapshot
 from .profiles import TGW_EBAY_RECONCILED
-from .scheduler import DispatchResult, dispatch_treatment
+from tgw.workflow_kernel.scheduler import DispatchResult, dispatch_treatment
 from .treatments import EBAY_SYNC_TARGETED
 
 

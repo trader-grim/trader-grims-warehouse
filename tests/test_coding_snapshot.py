@@ -16,7 +16,7 @@ from tgw.workflow import (  # noqa: E402
     GoalProfile,
     ObjectSnapshot,
 )
-from tgw.workflow.coding_snapshot import (  # noqa: E402
+from tgw.development.coding_snapshot import (  # noqa: E402
     _CHECKERS,
     CONTROLLER_PYTHON,
     _check_admitted,
@@ -34,7 +34,7 @@ from tgw.workflow.coding_snapshot import (  # noqa: E402
 def test_test_and_lint_checks_use_controller_python(tmp_path):
     """Coding snapshots must not depend on an arbitrary PATH python."""
     completed = subprocess.CompletedProcess([], 0, "", "")
-    with patch("tgw.workflow.coding_snapshot.subprocess.run", return_value=completed) as run:
+    with patch("tgw.development.coding_snapshot.subprocess.run", return_value=completed) as run:
         _CHECKERS["tested"](tmp_path)
         _CHECKERS["linted"](tmp_path)
 

@@ -15,17 +15,17 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from tgw.config import load_config
 from tgw.queue.worker_base import HardFailure
 from tgw.workers.coding import CodingWorker, receipt_path_for_treatment
-from tgw.workflow.coding_snapshot import _CHECKERS, build_coding_snapshot
-from tgw.workflow.contracts import (
+from tgw.development.coding_snapshot import _CHECKERS, build_coding_snapshot
+from tgw.workflow_kernel.contracts import (
     EffectClass,
     FingerprintResult,
     GoalProfile,
     Requirement,
     TreatmentContract,
 )
-from tgw.workflow.evaluator import evaluate
-from tgw.workflow.profiles import CODING_READY_FOR_IMPLEMENTATION
-from tgw.workflow.treatments import CODING_TREATMENTS
+from tgw.workflow_kernel.evaluator import evaluate
+from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
+from tgw.development.treatments import CODING_TREATMENTS
 
 
 def _treatment(identity: str, required: str) -> TreatmentContract:
@@ -37,7 +37,7 @@ def _treatment(identity: str, required: str) -> TreatmentContract:
         must_preserve=(),
         ownership=(identity,),
         effect_class=EffectClass.LOCAL,
-        receipt_schema_id="receipt/tgw-workflow/v1",
+        receipt_schema_id="receipt/tgw-development/v1",
     )
 
 
@@ -70,6 +70,12 @@ def test_coding_worker_lease_outlives_bounded_launcher_timeout(tmp_path):
     )
 
     assert worker.lease_seconds == 2700
+
+
+@pytest.mark.parametrize("queue_name", ("workflow_evaluate", "ebay_publish", "ai_identify"))
+def test_coding_worker_rejects_business_queues(queue_name):
+    with pytest.raises(ValueError, match="unsupported coding queue"):
+        CodingWorker(queue_name, {"coding": {}})
 
 
 @pytest.mark.parametrize(
@@ -122,7 +128,7 @@ def test_review_receipt_changes_snapshot_and_selects_next_treatment(tmp_path):
         identity="next-legal-treatment", version="1",
         requires=(Requirement("reviewed", (FingerprintResult.TRUE,)),),
         may_establish=("next",), must_preserve=(), ownership=("next",),
-        effect_class=EffectClass.LOCAL, receipt_schema_id="receipt/tgw-workflow/v1",
+        effect_class=EffectClass.LOCAL, receipt_schema_id="receipt/tgw-development/v1",
     )
     before = build_coding_snapshot(tmp_path, profile)
     assert before.assertions[0].result is FingerprintResult.FALSE

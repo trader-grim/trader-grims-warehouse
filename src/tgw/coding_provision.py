@@ -20,12 +20,12 @@ from tgw.coding_execution import execution_envelope
 from tgw.config import validate_service_request_config
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure
-from tgw.workflow.coding_snapshot import deserialize_snapshot
-from tgw.workflow.evaluator import evaluate
-from tgw.workflow.foreman import EVALUATOR_VERSION
-from tgw.workflow.profiles import CODING_READY_FOR_IMPLEMENTATION
-from tgw.workflow.scheduler import select_treatment
-from tgw.workflow.treatments import CODING_TREATMENTS
+from tgw.development.coding_snapshot import deserialize_snapshot
+from tgw.workflow_kernel.evaluator import evaluate
+from tgw.development.foreman import EVALUATOR_VERSION
+from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
+from tgw.workflow_kernel.scheduler import select_treatment
+from tgw.development.treatments import CODING_TREATMENTS
 
 QUEUE_NAME = "coding-provision"
 UNKNOWN = "unknown"

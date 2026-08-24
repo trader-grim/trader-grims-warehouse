@@ -8,12 +8,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from tgw.workflow.contracts import GoalProfile  # noqa: E402
-from tgw.workflow.profiles import (  # noqa: E402
+from tgw.workflow_kernel.contracts import GoalProfile  # noqa: E402
+from tgw.development.profiles import (  # noqa: E402
     CODING_DEPLOYED,
     CODING_READY_FOR_ADMISSION,
     CODING_READY_FOR_IMPLEMENTATION,
     CODING_READY_FOR_REVIEW,
+    PROFILE as CODING_PROFILE,
+    PROFILE_META as CODING_PROFILE_META,
+    ProfileMeta as CodingProfileMeta,
+    all_profiles as all_coding_profiles,
+    coding_profiles,
+    get_meta as get_coding_meta,
+)
+from tgw.workflow.profiles import (  # noqa: E402
     PROFILE,
     PROFILE_META,
     TGW_EBAY_DRAFTED,
@@ -23,7 +31,6 @@ from tgw.workflow.profiles import (  # noqa: E402
     TGW_EBAY_STAGED,
     ProfileMeta,
     all_profiles,
-    coding_profiles,
     get_meta,
     get_profile,
     tgw_profiles,
@@ -171,8 +178,8 @@ class TestTgwCumulative:
 
 
 class TestProfileRegistry:
-    def test_dict_has_ten_entries(self):
-        assert len(PROFILE) == 10
+    def test_dict_has_six_business_entries(self):
+        assert len(PROFILE) == 6
 
     def test_all_values_are_goal_profiles(self):
         for p in PROFILE.values():
@@ -189,8 +196,8 @@ class TestProfileRegistry:
 
 class TestGetProfile:
     def test_returns_correct_profile(self):
-        p = get_profile("coding.ready_for_implementation")
-        assert p is CODING_READY_FOR_IMPLEMENTATION
+        p = get_profile("tgw.ebay_listable")
+        assert p is TGW_EBAY_LISTABLE
 
     def test_raises_keyerror_for_unknown_identity(self):
         try:
@@ -201,8 +208,8 @@ class TestGetProfile:
 
 
 class TestAllProfiles:
-    def test_returns_ten(self):
-        assert len(all_profiles()) == 10
+    def test_returns_six_business_profiles(self):
+        assert len(all_profiles()) == 6
 
     def test_returns_tuples(self):
         assert isinstance(all_profiles(), tuple)
@@ -264,19 +271,29 @@ class TestProfileMetaRegistry:
     def test_meta_keys_match_profile_identities(self):
         assert set(PROFILE_META.keys()) == set(PROFILE.keys())
 
+    def test_every_coding_profile_has_coding_meta(self):
+        for profile in all_coding_profiles():
+            meta = get_coding_meta(profile.identity)
+            assert isinstance(meta, CodingProfileMeta)
+            assert meta.description
+            assert meta.evidence_source_class
+
+    def test_coding_meta_keys_match_coding_profile_identities(self):
+        assert set(CODING_PROFILE_META.keys()) == set(CODING_PROFILE.keys())
+
 
 class TestCodingMeta:
     def test_implementation_meta(self):
-        meta = get_meta("coding.ready_for_implementation")
+        meta = get_coding_meta("coding.ready_for_implementation")
         assert meta.evidence_source_class == "ci_pipeline"
         assert meta.accepted_results == ()
 
     def test_admission_meta(self):
-        meta = get_meta("coding.ready_for_admission")
+        meta = get_coding_meta("coding.ready_for_admission")
         assert meta.evidence_source_class == "review_system"
 
     def test_deployed_meta(self):
-        meta = get_meta("coding.deployed")
+        meta = get_coding_meta("coding.deployed")
         assert meta.evidence_source_class == "deployment_system"
 
 
@@ -310,7 +327,7 @@ class TestTgwMeta:
 
 class TestProfileMetaFrozen:
     def test_cannot_mutate_description(self):
-        meta = get_meta("coding.ready_for_implementation")
+        meta = get_coding_meta("coding.ready_for_implementation")
         try:
             meta.description = "changed"  # type: ignore[misc]
             raise AssertionError("Expected FrozenInstanceError")

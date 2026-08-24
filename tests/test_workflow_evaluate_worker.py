@@ -12,6 +12,7 @@ from tgw.queue import state_machine
 from tgw.queue.worker_base import QueueWorker
 from tgw.workers.normalize_condition import handle_job
 from tgw.workers.workflow_evaluate import (
+    WorkflowEvaluateWorker,
     _listing_continuation_requested,
     _validate_listing_continuation,
     evaluate_event,
@@ -41,6 +42,18 @@ def _item(tmp_path):
     path.write_text(json.dumps({"sku": "SKU-1", "condition": "Used", "image": "a.jpg"}),
                     encoding="utf-8")
     return root
+
+
+@pytest.mark.parametrize("queue_name", ("coding-provision", "codex-implement", "claude-review"))
+def test_listing_worker_rejects_coding_queues(queue_name):
+    with pytest.raises(ValueError, match="listing workflow worker"):
+        WorkflowEvaluateWorker(queue_name, {})
+
+
+def test_listing_worker_rejects_non_item_job():
+    worker = WorkflowEvaluateWorker("workflow_evaluate", {})
+    with pytest.raises(TreatmentFailure, match="non-item"):
+        worker.handle({"entity_type": "coding", "entity_id": "worktree-1", "payload_json": {}})
 
 
 def _isolated_event(item_root):

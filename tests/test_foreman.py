@@ -1,4 +1,4 @@
-"""Tests for tgw.workflow.foreman — coding foreman tick cycle."""
+"""Tests for tgw.development.foreman — coding foreman tick cycle."""
 
 import sys
 from pathlib import Path
@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from tgw.workflow.contracts import (
+from tgw.workflow_kernel.contracts import (
     EvidenceAssertion,
     EvidenceReference,
     Fingerprint,
@@ -17,7 +17,7 @@ from tgw.workflow.contracts import (
     RuntimeWorkGraph,
     TreatmentDisposition,
 )
-from tgw.workflow.foreman import (
+from tgw.development.foreman import (
     EVALUATOR_VERSION,
     ForemanConfig,
     TickResult,
@@ -25,9 +25,9 @@ from tgw.workflow.foreman import (
     _extract_worktree,
     tick,
 )
-from tgw.workflow.profiles import CODING_READY_FOR_IMPLEMENTATION
-from tgw.workflow.scheduler import DispatchResult
-from tgw.workflow.treatments import CODING_TREATMENTS
+from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
+from tgw.workflow_kernel.scheduler import DispatchResult
+from tgw.development.treatments import CODING_TREATMENTS
 
 
 @pytest.fixture(autouse=True)
@@ -37,7 +37,7 @@ def _fake_worktree_proof_for_mocked_foreman_tests(monkeypatch):
     The containment regressions below intentionally use the real proof.
     """
     monkeypatch.setattr(
-        "tgw.workflow.foreman.validated_coding_worktree",
+        "tgw.development.foreman.validated_coding_worktree",
         lambda worktree, _object_id, _config: Path(worktree).resolve(),
     )
 
@@ -151,11 +151,11 @@ def test_tick_one_eligible_dispatches_one():
 
     with (
         patch(
-            "tgw.workflow.foreman.build_coding_snapshot",
+            "tgw.development.foreman.build_coding_snapshot",
             return_value=_snapshot(assertions=_implemented()),
         ),
         patch(
-            "tgw.workflow.foreman.evaluate",
+            "tgw.development.foreman.evaluate",
             return_value=_graph(
                 object_id="/tmp/worktree-1",
                 graph_id="graph-abc",
@@ -163,7 +163,7 @@ def test_tick_one_eligible_dispatches_one():
             ),
         ),
         patch(
-            "tgw.workflow.foreman.dispatch_treatment",
+            "tgw.development.foreman.dispatch_treatment",
             return_value=DispatchResult(
                 treatment_id="codex-implement",
                 treatment_version="1",
@@ -200,11 +200,11 @@ def test_tick_all_satisfied_dispatches_zero():
 
     with (
         patch(
-            "tgw.workflow.foreman.build_coding_snapshot",
+            "tgw.development.foreman.build_coding_snapshot",
             return_value=_snapshot(assertions=_all_satisfied()),
         ),
         patch(
-            "tgw.workflow.foreman.evaluate",
+            "tgw.development.foreman.evaluate",
             return_value=_graph(
                 object_id="/tmp/worktree-1",
                 graph_id="graph-done",
@@ -236,11 +236,11 @@ def test_tick_ownership_conflict_dispatches_zero():
 
     with (
         patch(
-            "tgw.workflow.foreman.build_coding_snapshot",
+            "tgw.development.foreman.build_coding_snapshot",
             return_value=_snapshot(assertions=_implemented()),
         ),
         patch(
-            "tgw.workflow.foreman.evaluate",
+            "tgw.development.foreman.evaluate",
             return_value=_graph(
                 object_id="/tmp/worktree-1",
                 graph_id="graph-conflict",
@@ -278,11 +278,11 @@ def test_tick_same_generation_rerun_is_idempotent():
 
     with (
         patch(
-            "tgw.workflow.foreman.build_coding_snapshot",
+            "tgw.development.foreman.build_coding_snapshot",
             return_value=_snapshot(assertions=_implemented()),
         ),
         patch(
-            "tgw.workflow.foreman.evaluate",
+            "tgw.development.foreman.evaluate",
             return_value=_graph(
                 object_id="/tmp/worktree-1",
                 graph_id="graph-same",
@@ -321,14 +321,14 @@ def test_tick_skips_todos_with_active_job():
 
     with (
         patch(
-            "tgw.workflow.foreman.build_coding_snapshot",
+            "tgw.development.foreman.build_coding_snapshot",
             side_effect=[
                 _snapshot(object_id="/tmp/worktree-1", assertions=_implemented()),
                 _snapshot(object_id="/tmp/wt2", assertions=_implemented()),
             ],
         ),
         patch(
-            "tgw.workflow.foreman.evaluate",
+            "tgw.development.foreman.evaluate",
             side_effect=[
                 _graph(graph_id="graph-active", object_id="/tmp/worktree-1",
                        eligible=(disposition,)),
@@ -337,7 +337,7 @@ def test_tick_skips_todos_with_active_job():
             ],
         ),
         patch(
-            "tgw.workflow.foreman.dispatch_treatment",
+            "tgw.development.foreman.dispatch_treatment",
             return_value=DispatchResult(
                 treatment_id="codex-implement",
                 treatment_version="1",
@@ -395,11 +395,11 @@ def test_tick_unmet_dependencies_waits():
 
     with (
         patch(
-            "tgw.workflow.foreman.build_coding_snapshot",
+            "tgw.development.foreman.build_coding_snapshot",
             return_value=_snapshot(assertions=_implemented_true()),
         ),
         patch(
-            "tgw.workflow.foreman.evaluate",
+            "tgw.development.foreman.evaluate",
             return_value=_graph(
                 object_id="/tmp/worktree-1",
                 graph_id="graph-waiting",
@@ -436,14 +436,14 @@ def test_tick_multiple_todos_dispatches_exactly_one():
 
     with (
         patch(
-            "tgw.workflow.foreman.build_coding_snapshot",
+            "tgw.development.foreman.build_coding_snapshot",
             side_effect=[
                 _snapshot(object_id="/tmp/wt1", assertions=_implemented()),
                 _snapshot(object_id="/tmp/wt2", assertions=_implemented()),
             ],
         ),
         patch(
-            "tgw.workflow.foreman.evaluate",
+            "tgw.development.foreman.evaluate",
             side_effect=[
                 _graph(graph_id="graph-1", object_id="/tmp/wt1",
                        eligible=(disposition,)),
@@ -452,7 +452,7 @@ def test_tick_multiple_todos_dispatches_exactly_one():
             ],
         ),
         patch(
-            "tgw.workflow.foreman.dispatch_treatment",
+            "tgw.development.foreman.dispatch_treatment",
             return_value=DispatchResult(
                 treatment_id="codex-implement",
                 treatment_version="1",
@@ -481,14 +481,14 @@ def test_tick_admits_most_urgent_eligible_todo():
 
     with (
         patch(
-            "tgw.workflow.foreman.build_coding_snapshot",
+            "tgw.development.foreman.build_coding_snapshot",
             side_effect=[
                 _snapshot(object_id=less_urgent.worktree, assertions=_implemented()),
                 _snapshot(object_id=urgent.worktree, assertions=_implemented()),
             ],
         ),
         patch(
-            "tgw.workflow.foreman.evaluate",
+            "tgw.development.foreman.evaluate",
             side_effect=[
                 _graph(graph_id="graph-later", object_id=less_urgent.worktree, eligible=(disposition,)),
                 _graph(graph_id="graph-urgent", object_id=urgent.worktree, eligible=(disposition,)),
@@ -517,10 +517,10 @@ def test_tick_equal_priority_orders_by_todo_id_then_treatment_identity():
     alpha = TreatmentDisposition("alpha", "1", ("ready",))
     enqueue = MagicMock(return_value="job-alpha")
     with (
-        patch("tgw.workflow.foreman.build_coding_snapshot", side_effect=[
+        patch("tgw.development.foreman.build_coding_snapshot", side_effect=[
             _snapshot(object_id=first.worktree), _snapshot(object_id=second.worktree),
         ]),
-        patch("tgw.workflow.foreman.evaluate", side_effect=[
+        patch("tgw.development.foreman.evaluate", side_effect=[
             _graph(graph_id="graph-z", object_id=first.worktree, eligible=(zeta,)),
             _graph(graph_id="graph-a", object_id=second.worktree, eligible=(alpha,)),
         ]),
@@ -540,10 +540,10 @@ def test_tick_null_priority_is_last():
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(return_value="job-real")
     with (
-        patch("tgw.workflow.foreman.build_coding_snapshot", side_effect=[
+        patch("tgw.development.foreman.build_coding_snapshot", side_effect=[
             _snapshot(object_id=missing.worktree), _snapshot(object_id=real.worktree),
         ]),
-        patch("tgw.workflow.foreman.evaluate", side_effect=[
+        patch("tgw.development.foreman.evaluate", side_effect=[
             _graph(graph_id="graph-missing", object_id=missing.worktree, eligible=(disposition,)),
             _graph(graph_id="graph-real", object_id=real.worktree, eligible=(disposition,)),
         ]),
@@ -562,8 +562,8 @@ def test_tick_retry_wait_job_is_active_and_not_reenqueued():
     enqueue = MagicMock(return_value="should-not-run")
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     with (
-        patch("tgw.workflow.foreman.build_coding_snapshot", return_value=_snapshot()),
-        patch("tgw.workflow.foreman.evaluate", return_value=_graph(eligible=(disposition,))),
+        patch("tgw.development.foreman.build_coding_snapshot", return_value=_snapshot()),
+        patch("tgw.development.foreman.evaluate", return_value=_graph(eligible=(disposition,))),
     ):
         result = tick(
             fetch_todos=lambda: [_todo()],
@@ -602,10 +602,10 @@ def test_tick_wires_evaluator_fingerprints_to_codex_dispatch():
 
     with (
         patch(
-            "tgw.workflow.foreman.build_coding_snapshot",
+            "tgw.development.foreman.build_coding_snapshot",
             return_value=_snapshot(assertions=_implemented()),
         ),
-        patch("tgw.workflow.foreman.evaluate", return_value=graph) as evaluator,
+        patch("tgw.development.foreman.evaluate", return_value=graph) as evaluator,
     ):
         result = tick(
             fetch_todos=lambda: [_todo(1731)],
@@ -642,11 +642,11 @@ def test_tick_routes_post_implementation_treatments_by_identity():
         enqueue = MagicMock(return_value=f"job-{treatment_id}")
         with (
             patch(
-                "tgw.workflow.foreman.build_coding_snapshot",
+                "tgw.development.foreman.build_coding_snapshot",
                 return_value=_snapshot(assertions=_all_satisfied()),
             ),
             patch(
-                "tgw.workflow.foreman.evaluate",
+                "tgw.development.foreman.evaluate",
                 return_value=_graph(
                     graph_id=f"graph-{treatment_id}", eligible=(disposition,)
                 ),
@@ -680,8 +680,8 @@ def test_real_evaluator_dispatches_stitch_after_review_and_verification():
         "hermes-stitch", "1", "hermes-stitch", todo.worktree, True, job_id="stitch-job",
     ))
     with (
-        patch("tgw.workflow.foreman.build_coding_snapshot", return_value=snapshot),
-        patch("tgw.workflow.foreman.dispatch_treatment", dispatch),
+        patch("tgw.development.foreman.build_coding_snapshot", return_value=snapshot),
+        patch("tgw.development.foreman.dispatch_treatment", dispatch),
     ):
         result = tick(
             fetch_todos=lambda: [todo], check_active_fn=lambda _: False,
@@ -697,10 +697,10 @@ def test_tick_dispatch_failure_continues_to_lower_priority_todo():
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(side_effect=[RuntimeError("queue unavailable"), "second-job"])
     with (
-        patch("tgw.workflow.foreman.build_coding_snapshot", side_effect=[
+        patch("tgw.development.foreman.build_coding_snapshot", side_effect=[
             _snapshot(object_id=first.worktree), _snapshot(object_id=second.worktree),
         ]),
-        patch("tgw.workflow.foreman.evaluate", side_effect=[
+        patch("tgw.development.foreman.evaluate", side_effect=[
             _graph(graph_id="first", object_id=first.worktree, eligible=(disposition,)),
             _graph(graph_id="second", object_id=second.worktree, eligible=(disposition,)),
         ]),
@@ -723,10 +723,10 @@ def test_tick_duplicate_dispatch_is_not_an_error_and_continues():
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(side_effect=[DuplicateKey(), "second-job"])
     with (
-        patch("tgw.workflow.foreman.build_coding_snapshot", side_effect=[
+        patch("tgw.development.foreman.build_coding_snapshot", side_effect=[
             _snapshot(object_id=first.worktree), _snapshot(object_id=second.worktree),
         ]),
-        patch("tgw.workflow.foreman.evaluate", side_effect=[
+        patch("tgw.development.foreman.evaluate", side_effect=[
             _graph(graph_id="first", object_id=first.worktree, eligible=(disposition,)),
             _graph(graph_id="second", object_id=second.worktree, eligible=(disposition,)),
         ]),
@@ -743,10 +743,10 @@ def test_tick_terminal_graph_is_durably_skipped_and_does_not_starve_next_todo():
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(return_value="second-job")
     with (
-        patch("tgw.workflow.foreman.build_coding_snapshot", side_effect=[
+        patch("tgw.development.foreman.build_coding_snapshot", side_effect=[
             _snapshot(object_id=first.worktree), _snapshot(object_id=second.worktree),
         ]),
-        patch("tgw.workflow.foreman.evaluate", side_effect=[
+        patch("tgw.development.foreman.evaluate", side_effect=[
             _graph(graph_id="terminal", object_id=first.worktree, eligible=(disposition,)),
             _graph(graph_id="fresh", object_id=second.worktree, eligible=(disposition,)),
         ]),
@@ -764,7 +764,7 @@ def test_tick_rejects_outside_root_before_snapshot_or_dispatch(tmp_path, monkeyp
     """A todo path cannot execute an attacker conftest or reach dispatch."""
     from tgw.workers.coding import validated_coding_worktree
 
-    monkeypatch.setattr("tgw.workflow.foreman.validated_coding_worktree", validated_coding_worktree)
+    monkeypatch.setattr("tgw.development.foreman.validated_coding_worktree", validated_coding_worktree)
     evil = tmp_path / "evil"
     evil.mkdir()
     marker = tmp_path / "conftest-executed"

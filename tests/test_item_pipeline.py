@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from tgw.workflow.contracts import (  # noqa: E402
+from tgw.workflow_kernel.contracts import (  # noqa: E402
     EffectClass,
     FingerprintResult,
     GoalProfile,
@@ -18,14 +18,14 @@ from tgw.workflow.contracts import (  # noqa: E402
     TreatmentDisposition,
     TreatmentReceipt,  # noqa: E402
 )
-from tgw.workflow.evaluator import evaluate  # noqa: E402
+from tgw.workflow_kernel.evaluator import evaluate  # noqa: E402
 from tgw.workflow.item_pipeline import (  # noqa: E402
     evaluate_and_dispatch,
     process_item,
     process_items,
 )
 from tgw.workflow.item_snapshot import build_item_snapshot  # noqa: E402
-from tgw.workflow.scheduler import dispatch_treatment  # noqa: E402
+from tgw.workflow_kernel.scheduler import dispatch_treatment  # noqa: E402
 
 # ────────────────────────────────────────────────────────────────────────────
 # Fixtures

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
 
-from .contracts import RuntimeWorkGraph, TreatmentReceipt
+from tgw.workflow_kernel.contracts import RuntimeWorkGraph, TreatmentReceipt
 
 
 class GenerationConflict(ValueError):

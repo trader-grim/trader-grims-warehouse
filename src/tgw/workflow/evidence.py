@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .contracts import EvidenceAssertion, EvidenceReference, FingerprintResult
+from tgw.workflow_kernel.contracts import EvidenceAssertion, EvidenceReference, FingerprintResult
 
 # ---------------------------------------------------------------------------
 # Internal helpers

@@ -1,4 +1,4 @@
-"""Treatment contracts for coding and TGW worker domains.
+"""Treatment contracts for TGW business/listing worker domains.
 
 Each treatment is an immutable contract that declares:
 - which fingerprint conditions must be satisfied before it can execute
@@ -9,69 +9,11 @@ Each treatment is an immutable contract that declares:
 
 from __future__ import annotations
 
-from .contracts import EffectClass, FingerprintResult, Requirement, TreatmentContract
+from tgw.workflow_kernel.contracts import EffectClass, FingerprintResult, Requirement, TreatmentContract
 
 # ── Shared receipt schema ──────────────────────────────────────────────────
 _RECEIPT = "receipt/tgw-workflow/v1"
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  Coding treatments
-# ═══════════════════════════════════════════════════════════════════════════
-
-CODEX_IMPLEMENT = TreatmentContract(
-    identity="codex-implement",
-    version="1",
-    requires=(Requirement("implemented", (FingerprintResult.FALSE,)),),
-    may_establish=("implemented", "tested"),
-    must_preserve=("source_files",),
-    ownership=("code.implement",),
-    effect_class=EffectClass.LOCAL,
-    receipt_schema_id=_RECEIPT,
-)
-
-CLAUDE_REVIEW = TreatmentContract(
-    identity="claude-review",
-    version="1",
-    requires=(
-        Requirement("implemented", (FingerprintResult.TRUE,)),
-        Requirement("tested", (FingerprintResult.TRUE,)),
-        Requirement("linted", (FingerprintResult.TRUE,)),
-    ),
-    may_establish=("reviewed",),
-    must_preserve=("source_files",),
-    ownership=("code.review",),
-    effect_class=EffectClass.LOCAL,
-    receipt_schema_id=_RECEIPT,
-)
-
-CONTROLLER_VERIFY = TreatmentContract(
-    identity="controller-verify",
-    version="1",
-    requires=(Requirement("implemented", (FingerprintResult.TRUE,)),),
-    may_establish=("tested", "linted", "controller_verified"),
-    must_preserve=("source_files",),
-    ownership=("code.verify",),
-    effect_class=EffectClass.LOCAL,
-    receipt_schema_id=_RECEIPT,
-)
-
-HERMES_STITCH = TreatmentContract(
-    identity="hermes-stitch",
-    version="1",
-    requires=(
-        Requirement("reviewed", (FingerprintResult.TRUE,)),
-        Requirement("controller_verified", (FingerprintResult.TRUE,)),
-    ),
-    # An approved Plan/PP/Todo authorizes the local execution sequence.  The
-    # independent review and controller receipts are evidence gates, not
-    # requests for another human admission.
-    may_establish=("committed",),
-    must_preserve=("source_files",),
-    ownership=("code.stitch",),
-    effect_class=EffectClass.LOCAL,
-    receipt_schema_id=_RECEIPT,
-)
 
 
 NORMALIZE_CONDITION = TreatmentContract(
@@ -213,13 +155,6 @@ EBAY_ONBOARD_LEGACY_STAGE = TreatmentContract(
 
 # ── Grouped access ─────────────────────────────────────────────────────────
 
-CODING_TREATMENTS: tuple[TreatmentContract, ...] = (
-    CODEX_IMPLEMENT,
-    CLAUDE_REVIEW,
-    CONTROLLER_VERIFY,
-    HERMES_STITCH,
-)
-
 TGW_TREATMENTS: tuple[TreatmentContract, ...] = (
     NORMALIZE_CONDITION,
     AI_IDENTIFY,
@@ -237,4 +172,4 @@ LEGACY_STAGE_ONBOARDING_TREATMENTS: tuple[TreatmentContract, ...] = (
     EBAY_ONBOARD_LEGACY_STAGE,
 )
 
-ALL_TREATMENTS: tuple[TreatmentContract, ...] = CODING_TREATMENTS + TGW_TREATMENTS
+ALL_TREATMENTS: tuple[TreatmentContract, ...] = TGW_TREATMENTS

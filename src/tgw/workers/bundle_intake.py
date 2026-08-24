@@ -451,7 +451,7 @@ class BundleIntakeWorker(QueueWorker):
         workflow_decision = derive_bundle_downstream(item_path)
         if not workflow_decision.enqueue_ai_identify:
             return
-        from tgw.workflow.scheduler import dispatch_treatment
+        from tgw.workflow_kernel.scheduler import dispatch_treatment
 
         dispatch = dispatch_treatment(
             disposition=workflow_decision.disposition,

@@ -6,8 +6,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .contracts import EffectClass, FingerprintResult, TreatmentAttempt
-from .evaluator import evaluate
+from tgw.workflow_kernel.contracts import EffectClass, FingerprintResult, TreatmentAttempt
+from tgw.workflow_kernel.evaluator import evaluate
 from .item_snapshot import build_item_snapshot
 from .profiles import TGW_EBAY_LISTABLE
 from .treatments import TGW_TREATMENTS

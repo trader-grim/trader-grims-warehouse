@@ -20,7 +20,7 @@ from tgw.workflow.profiles import (
     TGW_EBAY_LISTABLE,
     TGW_EBAY_PRICED,
 )
-from tgw.workflow.scheduler import DispatchResult
+from tgw.workflow_kernel.scheduler import DispatchResult
 from tgw.workflow.treatments import (
     AI_IDENTIFY,
     EBAY_DRAFT,

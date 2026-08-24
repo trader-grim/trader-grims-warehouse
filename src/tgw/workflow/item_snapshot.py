@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from .condition_normalization import normalized_condition
-from .contracts import (
+from tgw.workflow_kernel.contracts import (
     EvidenceAssertion,
     EvidenceReference,
     FingerprintResult,

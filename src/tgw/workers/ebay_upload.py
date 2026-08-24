@@ -76,7 +76,7 @@ class EbayUploadWorker(QueueWorker):
 
     def _current_workflow_binding(self, sku: str) -> Dict[str, str]:
         """Rebuild the authoritative identity after partial progress writes."""
-        from tgw.workflow.evaluator import evaluate
+        from tgw.workflow_kernel.evaluator import evaluate
         from tgw.workflow.item_snapshot import build_item_snapshot
         from tgw.workflow.profiles import TGW_EBAY_LISTABLE
         from tgw.workflow.treatments import TGW_TREATMENTS

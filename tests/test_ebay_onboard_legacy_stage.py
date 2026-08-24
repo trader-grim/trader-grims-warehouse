@@ -8,8 +8,8 @@ from tgw.errors import HardFailure, TreatmentFailure
 from tgw.item_mutation import item_generation
 from tgw.legacy_stage_corroboration import LegacyStageRead
 from tgw.workers.ebay_onboard_legacy_stage import EbayOnboardLegacyStageWorker
-from tgw.workflow.contracts import FingerprintResult, GoalProfile
-from tgw.workflow.evaluator import evaluate
+from tgw.workflow_kernel.contracts import FingerprintResult, GoalProfile
+from tgw.workflow_kernel.evaluator import evaluate
 from tgw.workflow.item_snapshot import build_item_snapshot
 from tgw.workflow.listing_migration import _authoritative_stage_lookup
 from tgw.workflow.operator_authority import listing_content_identity

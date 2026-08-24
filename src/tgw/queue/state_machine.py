@@ -797,7 +797,7 @@ def mark_succeeded(
 
     When *result* is supplied, it is persisted into ``payload_json.result``
     via PostgreSQL jsonb merge so downstream evaluators can reconstruct a
-    :class:`tgw.workflow.contracts.TreatmentReceipt` directly from the queue
+    :class:`tgw.workflow_kernel.contracts.TreatmentReceipt` directly from the queue
     row without re-executing the worker.
     """
     with _conn() as con:

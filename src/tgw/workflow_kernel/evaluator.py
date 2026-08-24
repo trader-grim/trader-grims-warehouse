@@ -7,7 +7,7 @@ import json
 from dataclasses import asdict
 from typing import Any
 
-from .contracts import (
+from tgw.workflow_kernel.contracts import (
     OUTCOME_CONFLICT,
     OUTCOME_FAILED,
     OUTCOME_PARTIAL,

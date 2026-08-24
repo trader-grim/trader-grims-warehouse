@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from .contracts import (
+from tgw.workflow_kernel.contracts import (
     EvidenceAssertion,
     EvidenceReference,
     FingerprintResult,

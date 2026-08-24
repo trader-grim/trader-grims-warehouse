@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from .contracts import (
+from tgw.workflow_kernel.contracts import (
     EffectClass,
     FingerprintResult,
     GoalProfile,
@@ -15,7 +15,7 @@ from .contracts import (
     TreatmentContract,
     TreatmentDisposition,
 )
-from .evaluator import evaluate
+from tgw.workflow_kernel.evaluator import evaluate
 from .item_snapshot import build_item_snapshot
 from .operator_authority import (
     get_authority,
@@ -24,7 +24,7 @@ from .operator_authority import (
     validate_authority,
 )
 from .profiles import TGW_EBAY_IDENTIFIED
-from .scheduler import DispatchResult, dispatch_treatment
+from tgw.workflow_kernel.scheduler import DispatchResult, dispatch_treatment
 from .treatments import (
     AI_IDENTIFY,
     EBAY_PUBLISH,

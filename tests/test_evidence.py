@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 import pytest
 
-from tgw.workflow.contracts import EvidenceAssertion, EvidenceReference, FingerprintResult
+from tgw.workflow_kernel.contracts import EvidenceAssertion, EvidenceReference, FingerprintResult
 from tgw.workflow.evidence import (  # noqa: E402
     assert_ai_identified,
     assert_condition,

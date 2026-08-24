@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from tgw.workflow.contracts import TreatmentReceipt  # noqa: E402
+from tgw.workflow_kernel.contracts import TreatmentReceipt  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers

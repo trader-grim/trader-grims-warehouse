@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from tgw.errors import HardFailure, TreatmentFailure
-from tgw.workflow.contracts import OUTCOME_CONFLICT, OUTCOME_FAILED, OUTCOME_PARTIAL, OUTCOME_SATISFIED
-from tgw.workflow.treatments import CODING_TREATMENTS
+from tgw.workflow_kernel.contracts import OUTCOME_CONFLICT, OUTCOME_FAILED, OUTCOME_PARTIAL, OUTCOME_SATISFIED
+from tgw.development.treatments import CODING_TREATMENTS
 
 DEFAULT_WORKTREE_ROOT = Path("/opt/TGW/var/worktrees")
 DEFAULT_REPOSITORY_ROOT = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")

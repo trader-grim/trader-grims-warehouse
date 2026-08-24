@@ -11,7 +11,7 @@ from tgw.workflow.legacy_stage_onboarding import (
     request_legacy_stage_onboarding,
 )
 from tgw.workflow.operator_authority import listing_content_identity
-from tgw.workflow.scheduler import DispatchResult
+from tgw.workflow_kernel.scheduler import DispatchResult
 
 
 def _fixture(tmp_path):

@@ -13,7 +13,7 @@ import logging
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
-from .contracts import (
+from tgw.workflow_kernel.contracts import (
     GoalProfile,
     ObjectSnapshot,
     RuntimeWorkGraph,
@@ -359,8 +359,8 @@ def build_and_dispatch(
     evaluator_version: str = EVALUATOR_VERSION,
 ) -> Optional[str]:
     """Convenience wrapper: build a coding snapshot, evaluate, then dispatch."""
-    from .coding_snapshot import build_coding_snapshot
-    from .evaluator import evaluate
+    from tgw.development.coding_snapshot import build_coding_snapshot
+    from tgw.workflow_kernel.evaluator import evaluate
 
     snapshot = build_coding_snapshot(worktree_path, goal_profile)
     graph = evaluate(

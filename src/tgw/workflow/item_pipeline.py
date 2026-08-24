@@ -15,16 +15,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .contracts import (
+from tgw.workflow_kernel.contracts import (
     FingerprintResult,
     GoalProfile,
     ObjectSnapshot,
     TreatmentContract,
     TreatmentReceipt,
 )
-from .evaluator import evaluate
+from tgw.workflow_kernel.evaluator import evaluate
 from .item_snapshot import build_item_snapshot
-from .scheduler import DispatchResult, dispatch_treatment
+from tgw.workflow_kernel.scheduler import DispatchResult, dispatch_treatment
 
 log = logging.getLogger(__name__)
 

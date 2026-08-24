@@ -20,9 +20,9 @@ from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
 from tgw.workers import coding as coding_worker
 from tgw.workers.coding import CodingWorker
-from tgw.workflow.coding_snapshot import serialize_snapshot
-from tgw.workflow.contracts import EvidenceAssertion, FingerprintResult, ObjectSnapshot
-from tgw.workflow.treatments import CODING_TREATMENTS
+from tgw.development.coding_snapshot import serialize_snapshot
+from tgw.workflow_kernel.contracts import EvidenceAssertion, FingerprintResult, ObjectSnapshot
+from tgw.development.treatments import CODING_TREATMENTS
 
 
 def test_coding_defaults_use_shared_development_repository() -> None:
@@ -259,7 +259,7 @@ def _satisfied_receipt(execution: dict | None = None, execution_identity: dict |
         "outcome": "satisfied",
         "established_conditions": [treatment.may_establish[0]],
         "artifacts": [{"kind": "review", "path": "review.md"}],
-        "receipt_schema_id": "receipt/tgw-workflow/v1",
+        "receipt_schema_id": treatment.receipt_schema_id,
     }
     if execution_identity is not None:
         receipt["execution_identity"] = execution_identity
@@ -1004,7 +1004,7 @@ def test_tgw_lib_provision_worker_has_no_direct_canonical_state_dependencies():
     imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names} | {
         node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module
     }
-    forbidden = ("psycopg", "tgw.queue.state_machine", "tgw.workflow.foreman")
+    forbidden = ("psycopg", "tgw.queue.state_machine", "tgw.development.foreman")
     assert not any(name == blocked or name.startswith(f"{blocked}.") for name in imported for blocked in forbidden)
 
 
@@ -1038,7 +1038,7 @@ worker.execute_authorized_treatment = lambda *_: {
     "treatment_id": "claude-review", "treatment_version": "1", "graph_id": "graph",
     "object_generation": "generation", "outcome": "satisfied",
     "established_conditions": ["reviewed"], "artifacts": [{"kind": "review"}],
-    "receipt_schema_id": "receipt/tgw-workflow/v1",
+    "receipt_schema_id": "receipt/tgw-development/v1",
 }
 class Service:
     def get(self, _): return document
@@ -1047,7 +1047,7 @@ class Service:
     def complete(self, *_): return {"receipt": {"worker_identity": "worker", "envelope_hash": "hash", "location": location, "execution": execution, "receipt_source": "queue-job:request"}}
     def fail(self, *_): raise AssertionError("default path failed")
 worker.claim_and_run({"coding": {"host": "host", "worker_identity": "worker"}}, request_id="request", local_host="host", worker_identity="worker", client=Service())
-for forbidden in ("tgw.queue.worker_base", "tgw.queue.state_machine", "tgw.workflow.foreman", "tgw.workers.coding", "psycopg"):
+for forbidden in ("tgw.queue.worker_base", "tgw.queue.state_machine", "tgw.development.foreman", "tgw.workers.coding", "psycopg"):
     assert not any(name == forbidden or name.startswith(forbidden + ".") for name in sys.modules), forbidden
 """
     env = {**__import__("os").environ, "PYTHONPATH": str(source)}

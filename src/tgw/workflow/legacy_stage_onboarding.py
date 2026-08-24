@@ -12,11 +12,11 @@ from tgw.ebay.sync import _build_offer_bodies
 from tgw.item_mutation import item_generation
 from tgw.queue import state_machine
 
-from .evaluator import evaluate
+from tgw.workflow_kernel.evaluator import evaluate
 from .item_snapshot import build_item_snapshot
 from .operator_authority import listing_content_identity
 from .profiles import TGW_EBAY_LEGACY_STAGE_ONBOARDED
-from .scheduler import DispatchResult, dispatch_treatment
+from tgw.workflow_kernel.scheduler import DispatchResult, dispatch_treatment
 from .treatments import LEGACY_STAGE_ONBOARDING_TREATMENTS
 
 PAYLOAD_SCHEMA = "ebay-onboard-legacy-stage/v1"

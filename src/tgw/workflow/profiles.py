@@ -1,4 +1,4 @@
-"""Goal profile registry for coding and TGW domains.
+"""Goal profile registry for TGW business/listing domains.
 
 Pure declarative definitions — no logic, no I/O.
 """
@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .contracts import GoalProfile
+from tgw.workflow_kernel.contracts import GoalProfile
 
 
 @dataclass(frozen=True)
@@ -25,39 +25,6 @@ class ProfileMeta:
     evidence_source_class: str
     accepted_results: tuple[tuple[str, str], ...] = ()
 
-
-# ---------------------------------------------------------------------------
-# CODING domain profiles
-# ---------------------------------------------------------------------------
-
-CODING_READY_FOR_IMPLEMENTATION = GoalProfile(
-    identity="coding.ready_for_implementation",
-    version="1",
-    required=("implemented", "tested", "linted"),
-)
-
-CODING_READY_FOR_REVIEW = GoalProfile(
-    identity="coding.ready_for_review",
-    version="1",
-    required=("implemented", "tested", "linted"),
-)
-
-CODING_READY_FOR_ADMISSION = GoalProfile(
-    identity="coding.ready_for_admission",
-    version="1",
-    required=(
-        "implemented", "tested", "linted", "reviewed", "controller_verified",
-    ),
-)
-
-CODING_DEPLOYED = GoalProfile(
-    identity="coding.deployed",
-    version="1",
-    required=(
-        "implemented", "tested", "linted", "reviewed", "controller_verified",
-        "admitted", "committed", "deployed",
-    ),
-)
 
 # ---------------------------------------------------------------------------
 # TGW domain profiles
@@ -123,10 +90,6 @@ LEGACY_STAGE_ONBOARDING_PROFILES: tuple[GoalProfile, ...] = (
 PROFILE: dict[str, GoalProfile] = {
     p.identity: p
     for p in (
-        CODING_READY_FOR_IMPLEMENTATION,
-        CODING_READY_FOR_REVIEW,
-        CODING_READY_FOR_ADMISSION,
-        CODING_DEPLOYED,
         TGW_EBAY_IDENTIFIED,
         TGW_EBAY_DRAFTED,
         TGW_EBAY_PRICED,
@@ -137,43 +100,6 @@ PROFILE: dict[str, GoalProfile] = {
 }
 
 PROFILE_META: dict[str, ProfileMeta] = {
-    # --- Coding ---
-    "coding.ready_for_implementation": ProfileMeta(
-        description=(
-            "Code is implemented, tested, and linted — "
-            "ready to begin implementation verification. "
-            "Shares the same required conditions as coding.ready_for_review "
-            "because implementation and review inspect the same objective "
-            "evidence (implemented, tested, linted); the profile identity "
-            "selects the next treatment (implement vs. review)."
-        ),
-        evidence_source_class="ci_pipeline",
-    ),
-    "coding.ready_for_review": ProfileMeta(
-        description=(
-            "Code is implemented, tested, and linted — "
-            "ready for peer review. "
-            "Shares the same required conditions as "
-            "coding.ready_for_implementation because both profiles gate on "
-            "identical objective evidence; the profile identity controls "
-            "routing to the appropriate treatment."
-        ),
-        evidence_source_class="ci_pipeline",
-    ),
-    "coding.ready_for_admission": ProfileMeta(
-        description=(
-            "Code has passed review and controller verification — "
-            "ready for merge admission."
-        ),
-        evidence_source_class="review_system",
-    ),
-    "coding.deployed": ProfileMeta(
-        description=(
-            "Code is fully admitted, committed, and deployed to production."
-        ),
-        evidence_source_class="deployment_system",
-    ),
-    # --- TGW ---
     "tgw.ebay_identified": ProfileMeta(
         description="Item has photos and has been AI-identified.",
         evidence_source_class="ai_identification",
@@ -236,11 +162,6 @@ def all_profiles() -> tuple[GoalProfile, ...]:
     return tuple(PROFILE.values())
 
 
-def coding_profiles() -> tuple[GoalProfile, ...]:
-    """Return all profiles in the ``coding`` domain."""
-    return tuple(
-        p for p in PROFILE.values() if p.identity.startswith("coding.")
-    )
 
 
 def tgw_profiles() -> tuple[GoalProfile, ...]:

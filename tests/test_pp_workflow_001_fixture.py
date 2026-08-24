@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import json
 
-from tgw.workflow.contracts import TreatmentAttempt
-from tgw.workflow.evaluator import evaluate
+from tgw.workflow_kernel.contracts import TreatmentAttempt
+from tgw.workflow_kernel.evaluator import evaluate
 from tgw.workflow.item_snapshot import build_item_snapshot
 from tgw.workflow.profiles import TGW_EBAY_LISTABLE
 from tgw.workflow.treatments import TGW_TREATMENTS
