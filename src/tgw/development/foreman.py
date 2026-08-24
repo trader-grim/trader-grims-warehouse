@@ -155,7 +155,7 @@ def _has_active_job(
                 """
                     SELECT 1 FROM queue_jobs
                      WHERE dedupe_key = %s
-                       AND state = ANY(%s)
+                       AND state = ANY(%s::queue_job_state[])
                      LIMIT 1
                     """,
                 (graph_id, list(_ACTIVE_JOB_STATES)),
@@ -185,7 +185,7 @@ def _has_terminal_job(
                 """
                     SELECT 1 FROM queue_jobs
                      WHERE dedupe_key = %s
-                       AND state = ANY(%s)
+                       AND state = ANY(%s::queue_job_state[])
                      LIMIT 1
                 """,
                 (graph_id, ["succeeded", "failed", "dead_letter"]),

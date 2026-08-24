@@ -1,6 +1,7 @@
 """Tests for tgw.development.foreman — coding foreman tick cycle."""
 
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +23,8 @@ from tgw.development.foreman import (
     ForemanConfig,
     TickResult,
     TodoRecord,
+    _has_active_job,
+    _has_terminal_job,
     _extract_worktree,
     tick,
 )
@@ -29,6 +32,44 @@ from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
 from tgw.workflow_kernel.scheduler import DispatchResult
 from tgw.development.treatments import CODING_TREATMENTS
 from tgw.development.provider_dispatch import ProviderAdapter
+
+
+def test_database_job_state_checks_cast_text_arrays_to_queue_enum(monkeypatch):
+    """The local schema uses ``queue_job_state`` rather than text."""
+    executed = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return None
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return Cursor()
+
+    @contextmanager
+    def connection():
+        yield Connection()
+
+    monkeypatch.setattr("tgw.queue.state_machine._conn", connection)
+    assert _has_active_job("graph") is False
+    assert _has_terminal_job("graph") is False
+    assert len(executed) == 2
+    assert all("ANY(%s::queue_job_state[])" in sql for sql, _params in executed)
 
 
 @pytest.fixture(autouse=True)
