@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+if [ "${1-}" = "coding" ]; then
+    shift
+    exec /opt/TGW/tgw-lib/bin/tgw-coding "$@"
+fi
+
+exec /usr/local/libexec/tgw-production-client "$@"

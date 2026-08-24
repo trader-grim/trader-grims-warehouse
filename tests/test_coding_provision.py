@@ -16,13 +16,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tgw import api, coding_cli, coding_execution, coding_provision, coding_provision_worker, http_server
+from tgw.development.coding_snapshot import serialize_snapshot
+from tgw.development.foreman import TickResult
+from tgw.development.treatments import CODING_TREATMENTS
 from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
 from tgw.workers import coding as coding_worker
 from tgw.workers.coding import CodingWorker
-from tgw.development.coding_snapshot import serialize_snapshot
 from tgw.workflow_kernel.contracts import EvidenceAssertion, FingerprintResult, ObjectSnapshot
-from tgw.development.treatments import CODING_TREATMENTS
 
 
 def test_coding_defaults_use_shared_development_repository() -> None:
@@ -1679,25 +1680,29 @@ def test_stop_preserves_failed_and_dead_letter_state_without_fabricating_receipt
 
 
 @pytest.mark.parametrize(
-    ("request_id", "expected_path"),
+    ("request_id", "expected_todo"),
     [
-        (None, "/api/coding/access-status"),
-        ("request id/&?", "/api/coding/access-status?request_id=request+id%2F%26%3F"),
+        (None, None),
+        ("1732", 1732),
     ],
 )
-def test_coding_cli_access_status_optionally_passes_url_encoded_request_id(
+def test_coding_cli_access_status_reads_only_the_local_workflow(
     monkeypatch,
     capsys,
     request_id,
-    expected_path,
+    expected_todo,
 ):
-    paths: list[str] = []
-    monkeypatch.setattr(coding_cli, "_configured_credentials", lambda _args: ("https://tgw.example", "test-key"))
-    monkeypatch.setattr(coding_cli, "_call", lambda _endpoint, _api_key, path: paths.append(path) or {})
+    observed: list[tuple[int | None, object]] = []
+    monkeypatch.setattr(
+        coding_cli,
+        "status",
+        lambda todo_id, *, config_path: observed.append((todo_id, config_path))
+        or {"ok": True, "dependencies": {"tgw_prod": False}},
+    )
 
-    assert coding_cli.run(argparse.Namespace(coding_op="access-status", request_id=request_id)) == 0
-    assert paths == [expected_path]
-    assert json.loads(capsys.readouterr().out) == {}
+    assert coding_cli.run(argparse.Namespace(coding_op="access-status", request_id=request_id, config=None)) == 0
+    assert observed == [(expected_todo, coding_cli.DEFAULT_CONFIG)]
+    assert json.loads(capsys.readouterr().out)["dependencies"]["tgw_prod"] is False
 
 
 @pytest.mark.parametrize(
@@ -1899,16 +1904,62 @@ def test_authenticated_api_accepts_unbound_coding_request(tmp_path, monkeypatch,
     assert "object_generation" not in native.enqueues[0]["payload"]
 
 
-def test_coding_cli_entrypoint_accepts_unbound_start_generation(monkeypatch):
-    """The operator CLI must allow tgw-lib to attest the source generation at claim."""
+def test_coding_cli_entrypoint_accepts_positional_todo_id(monkeypatch):
+    """The ordinary shell surface is exactly ``tgw coding start TODO_ID``."""
     seen = {}
-    monkeypatch.setattr("sys.argv", ["tgw", "coding", "start", "--todo-id", "1738"])
+    monkeypatch.setattr("sys.argv", ["tgw", "coding", "start", "1738"])
     monkeypatch.setattr(api, "load_config", lambda _path: {})
     monkeypatch.setattr(coding_cli, "run", lambda args: seen.update(vars(args)) or 0)
 
     assert api.main() == 0
-    assert seen["todo_id"] == 1738
+    assert seen["request_id"] == "1738"
     assert seen["object_generation"] is None
+
+
+def test_local_coding_start_binds_and_ticks_only_the_selected_todo(monkeypatch):
+    observed = {}
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {}})
+    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda todo_id: {
+        "id": todo_id,
+        "body": "build the operator CLI",
+        "priority": 3,
+        "done_at": None,
+    })
+    monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
+    monkeypatch.setattr(
+        coding_cli,
+        "bind_command",
+        lambda args: {
+            "binding": {
+                "worktree": "/opt/TGW/var/worktrees/todo-1732-plan-test",
+                "worktree_identity": {"branch": "coding/codex/todo-1732-plan-test"},
+                "source_commit": "a" * 40,
+                "plan_commit": "b" * 40,
+                "solution_hash": "sha256:" + "c" * 64,
+            }
+        },
+    )
+
+    def local_tick(_config, *, todo_ids):
+        observed["todo_ids"] = todo_ids
+        return TickResult(dispatched=1)
+
+    monkeypatch.setattr(coding_cli, "tick", local_tick)
+    monkeypatch.setattr(coding_cli, "_jobs", lambda todo_id, *, limit: [{"todo_id": todo_id}])
+
+    result = coding_cli.start(1732, config_path=Path("/tmp/coding.json"))
+
+    assert result["ok"] is True
+    assert result["worktree"] == "/opt/TGW/var/worktrees/todo-1732-plan-test"
+    assert result["session"]["codex"] == ["codex", "-C", result["worktree"]]
+    assert result["dependencies"] == {
+        "tgw_prod": False,
+        "ssh": False,
+        "sudo": False,
+        "remote_provision_api": False,
+        "approval_card": False,
+    }
+    assert observed["todo_ids"] == {1732}
 
 
 def test_execution_boundary_accepts_only_local_allowed_argv_runner(tmp_path):

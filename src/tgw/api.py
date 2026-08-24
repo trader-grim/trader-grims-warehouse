@@ -1070,9 +1070,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="loop --next continuously until tasks are exhausted or user quits (y=done/s=skip/q=quit)")
     p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next / --nextloop (e.g. claude, gemini, admin, tigwa)")
 
-    p = sub.add_parser("coding", help="create and inspect receipt-addressed coding provision requests")
+    p = sub.add_parser("coding", help="control the local tgw-lib coding workflow")
     p.add_argument("coding_op", choices=["start", "status", "log", "stop", "access-status"])
-    p.add_argument("request_id", nargs="?")
+    p.add_argument("request_id", nargs="?", help="Todo ID for start/status; durable job ID for log/stop")
     p.add_argument("--todo-id", type=int)
     p.add_argument("--object-generation")
     p.add_argument("--source-commit", help="exact lowercase 40-hex commit in the registered repository")
@@ -5754,9 +5754,9 @@ def main() -> int:
 
         elif args.op == "coding":
             from tgw.coding_cli import run as run_coding
-            if args.coding_op == "start" and not args.todo_id:
-                parser.error("coding start requires --todo-id")
-            if args.coding_op in {"status", "log", "stop"} and not args.request_id:
+            if args.coding_op == "start" and not (args.todo_id or args.request_id):
+                parser.error("coding start requires TODO_ID")
+            if args.coding_op in {"log", "stop"} and not args.request_id:
                 parser.error(f"coding {args.coding_op} requires REQUEST_ID")
             return run_coding(args)
 
