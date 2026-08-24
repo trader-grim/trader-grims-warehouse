@@ -84,6 +84,38 @@ def test_coding_worker_lease_outlives_bounded_launcher_timeout(tmp_path):
     assert worker.lease_seconds == 2700
 
 
+def test_git_identity_trusts_only_the_exact_validated_path(tmp_path, monkeypatch):
+    path = tmp_path / "shared-worktree"
+    path.mkdir()
+    observed = {}
+
+    def run(command, **kwargs):
+        observed["command"] = command
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"{path}\n{path / '.git-common'}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("tgw.workers.coding.subprocess.run", run)
+
+    assert CodingWorker._git_identity(path) == (
+        path.resolve(),
+        (path / ".git-common").resolve(),
+    )
+    assert observed["command"] == [
+        "git",
+        "-c",
+        f"safe.directory={path.resolve()}",
+        "rev-parse",
+        "--show-toplevel",
+        "--git-common-dir",
+    ]
+    assert observed["cwd"] == path
+
+
 def test_bounded_launcher_timeout_kills_descendant_process_group(tmp_path):
     marker = tmp_path / "descendant-survived"
     child = (

@@ -270,10 +270,20 @@ class CodingWorker(QueueWorker):
 
     @staticmethod
     def _git_identity(path: Path) -> tuple[Path | None, Path | None]:
-        """Return a worktree's top level and canonical common Git directory."""
+        """Return a worktree's top level and canonical common Git directory.
+
+        TGW worktrees are deliberately shared by ordinary accounts through the
+        ``tgw-coders`` Unix group.  Git's dubious-ownership check does not treat
+        shared group membership as trust, so each probe must name the already
+        path-fenced worktree explicitly.  This is a per-invocation trust fact;
+        it does not add a broad system/global ``safe.directory`` exception.
+        """
         try:
             probe = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel", "--git-common-dir"],
+                [
+                    "git", "-c", f"safe.directory={path.resolve()}",
+                    "rev-parse", "--show-toplevel", "--git-common-dir",
+                ],
                 cwd=path,
                 check=False,
                 text=True,

@@ -69,6 +69,13 @@ def test_runner_uses_noninteractive_workspace_write_without_approval_gate(
         assert ephemeral_home.parent.parent == repo
         assert (ephemeral_home / "auth.json").is_file()
         assert (ephemeral_home / "auth.json").stat().st_mode & 0o777 == 0o600
+        config = ephemeral_home / "config.toml"
+        assert config.stat().st_mode & 0o777 == 0o600
+        assert config.read_text(encoding="utf-8") == (
+            "[mcp_servers.tgw-context]\n"
+            'command = "/opt/TGW/tgw-lib/bin/tgw-context-mcp"\n'
+            "args = []\n"
+        )
         Path(command[command.index("-o") + 1]).write_text(
             json.dumps({"status": "blocked", "summary": "bounded", "tests": []}),
             encoding="utf-8",
@@ -80,6 +87,24 @@ def test_runner_uses_noninteractive_workspace_write_without_approval_gate(
     assert "--approve-for-me" not in captured
     assert captured[captured.index("--ask-for-approval") + 1] == "never"
     assert captured[captured.index("--sandbox") + 1] == "workspace-write"
+    assert "--ignore-user-config" not in captured
+
+
+def test_runner_fails_closed_when_local_context_mcp_is_missing(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(codex_implement, "_CONTEXT_MCP", tmp_path / "missing-context-mcp")
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+
+    try:
+        codex_implement.run(
+            _job(),
+            repo,
+            invoke=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("called")),
+        )
+    except Exception as exc:
+        assert "tgw-context MCP is unavailable" in str(exc)
+    else:
+        raise AssertionError("runner accepted a missing context MCP")
 
 
 def test_model_success_without_diff_is_partial(tmp_path, monkeypatch):

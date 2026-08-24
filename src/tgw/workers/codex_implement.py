@@ -34,6 +34,22 @@ _FINAL_SCHEMA = {
     },
 }
 
+_CONTEXT_MCP = Path("/opt/TGW/tgw-lib/bin/tgw-context-mcp")
+
+
+def _write_isolated_config(codex_home: Path) -> None:
+    """Expose only TGW's local read-only context MCP to the coding harness."""
+    if not _CONTEXT_MCP.is_file() or not os.access(_CONTEXT_MCP, os.X_OK):
+        raise HardFailure("local tgw-context MCP is unavailable")
+    config = codex_home / "config.toml"
+    config.write_text(
+        "[mcp_servers.tgw-context]\n"
+        f"command = {json.dumps(str(_CONTEXT_MCP))}\n"
+        "args = []\n",
+        encoding="utf-8",
+    )
+    config.chmod(0o600)
+
 
 def _git(cwd: Path, *args: str) -> str:
     result = subprocess.run(
@@ -116,11 +132,12 @@ def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> d
         destination_auth = codex_home / "auth.json"
         shutil.copyfile(source_auth, destination_auth)
         destination_auth.chmod(0o600)
+        _write_isolated_config(codex_home)
         schema_path.write_text(json.dumps(_FINAL_SCHEMA, sort_keys=True), encoding="utf-8")
         command = [
             _codex_binary(), "--ask-for-approval", "never",
             "--sandbox", "workspace-write", "exec", "--ephemeral",
-            "--ignore-user-config", "-C", str(cwd),
+            "-C", str(cwd),
             "--output-schema", str(schema_path), "-o", str(output_path), "-",
         ]
         completed = invoke(
