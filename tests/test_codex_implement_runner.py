@@ -50,7 +50,7 @@ def test_satisfied_requires_real_uncommitted_source_change(tmp_path, monkeypatch
     assert result["established_conditions"] == ["implemented"]
 
 
-def test_runner_uses_automatic_workspace_review_without_conflicting_sandbox_flag(
+def test_runner_uses_noninteractive_workspace_write_without_approval_gate(
     tmp_path, monkeypatch,
 ):
     repo = _repo(tmp_path)
@@ -72,8 +72,9 @@ def test_runner_uses_automatic_workspace_review_without_conflicting_sandbox_flag
 
     codex_implement.run(_job(), repo, invoke=invoke)
 
-    assert "--approve-for-me" in captured
-    assert "--sandbox" not in captured
+    assert "--approve-for-me" not in captured
+    assert captured[captured.index("--ask-for-approval") + 1] == "never"
+    assert captured[captured.index("--sandbox") + 1] == "workspace-write"
 
 
 def test_model_success_without_diff_is_partial(tmp_path, monkeypatch):

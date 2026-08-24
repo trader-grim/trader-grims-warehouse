@@ -1,14 +1,10 @@
-from tgw.development.plan_todo_bridge import PlanTodoBridgeError, bind_leaf as _bind_leaf
-from tgw.development.plan_binding import execution_root_hash
-from tgw.plan_execution_card import PlanExecutionCardError, build_execution_card
-from tgw.plan_execution_resources import ENVELOPE_SCHEMA, envelope_hash
+from tgw.development.plan_todo_bridge import PlanTodoBridgeError, bind_leaf
 from tgw.plan_solver import solve
 from tgw.workflow import compile_solution_runtime
 from unittest.mock import MagicMock, patch
 import pytest
 from tgw.development.foreman import TodoRecord, tick
 from tgw.development.plan_binding import MalformedPlanBindingError
-from tgw.development.provider_dispatch import ProviderAdapter
 from tgw.workers.coding import CodingWorker
 from tgw.workflow_kernel.contracts import RuntimeWorkGraph, TreatmentDisposition
 from tgw.development.foreman import EVALUATOR_VERSION
@@ -16,43 +12,6 @@ from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
 from tgw import coding_provision
 
 COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
-
-
-def bind_leaf(compiled, **kwargs):
-    """Route legacy bridge assertions through the required typed card."""
-    kwargs.pop("body", None)
-    kwargs.pop("priority", None)
-    root = kwargs.get("execution_root")
-    if root is None:
-        solved = kwargs["solution"]["root"]
-        root = {"schema": "tgw-execution-root/v1", "kind": "plan", "plan_id": solved["id"],
-                "profile": solved["profile"], "plan_commit": COMMIT}
-        kwargs["execution_root"] = root
-    root = dict(root)
-    root.setdefault("identity_hash", execution_root_hash(root))
-    kwargs["execution_root"] = root
-    capability = "base@1"
-    graph = {"plan_id": root.get("plan_id", root.get("pp_ref", "x")), "work_units": [{
-        "id": "W-test", "title": "Test Plan work", "establishes": [capability],
-        "acceptance": ["test acceptance"],
-    }, {"id": "W-promptcraft", "title": "Recover Promptcraft", "establishes": ["promptcraft.receiver-profiles@1"], "acceptance": ["Promptcraft bound"]}]}
-    resources = {name: {"ref": f"mcp:tgw-context/test/{name}", "hash": "sha256:" + "1" * 64} for name in (
-        "plan_input", "plan_commit", "plan_graph", "codegraph_snapshot", "source_tree",
-        "execution_environment", "authority_conditions", "candidate_evidence", "receipt_sink",
-    )}
-    try:
-        card = build_execution_card(
-            compiled=compiled, solution=kwargs["solution"], execution_graph=graph,
-            treatment_id=kwargs["treatment_id"], source_commit=kwargs["source_commit"],
-            source_tree="b" * 40, resources=resources, environment={"id": "test"}, execution_root=root,
-        )
-        unsigned = {"schema": ENVELOPE_SCHEMA, "card": card, "resources": card["resources"],
-                    "context": {"service": "tgw-context", "status_hash": "sha256:" + "1" * 64},
-                    "receiver": {"capability": "promptcraft.receiver-profiles@1", "provider": "recovered-promptcraft", "handoff": {"adapter": "promptcraft-card-handoff", "schema": "tgw-launcher-handoff/v1"}}}
-        kwargs["execution_envelope"] = {**unsigned, "envelope_hash": envelope_hash(unsigned)}
-    except PlanExecutionCardError as exc:
-        raise PlanTodoBridgeError("Plan solution integrity check failed") from exc
-    return _bind_leaf(compiled, **kwargs)
 
 
 def _compiled(conformant=True, root_id="x"):
@@ -158,7 +117,7 @@ def test_mismatched_or_fake_execution_root_refuses_closed():
         ("x", {"schema": "tgw-execution-root/v1", "kind": "todo", "todo_id": 41}, 41),
     ),
 )
-def test_bridge_todo_foreman_payload_and_execution_envelope_retain_plan_binding(tmp_path, root_id, execution_root, existing_id):
+def test_bridge_todo_foreman_payload_and_receipt_retain_plan_binding(tmp_path, root_id, execution_root, existing_id):
     solution, compiled = _compiled(root_id=root_id); rows = ([] if existing_id is None else [{"id": existing_id, "agent":"codex", "body":"implement", "status_note":""}])
     def create(*_):
         row = {"id": len(rows) + 1, "agent":"codex", "body":"implement", "status_note":""}; rows.append(row); return row
@@ -170,14 +129,15 @@ def test_bridge_todo_foreman_payload_and_execution_envelope_retain_plan_binding(
     graph = RuntimeWorkGraph("runtime-work-graph/v1", "graph", location["worktree"], "gen", CODING_READY_FOR_IMPLEMENTATION.identity, "1", EVALUATOR_VERSION, "evidence", "condition", "registry", (), (), (), (), (TreatmentDisposition("codex-implement", "1", ("ready",)),), (), (), (), ())
     enqueue = MagicMock(return_value="job-1")
     todo = TodoRecord(result["todo_id"], "codex", 1, "implement", location["worktree"], result["binding"])
-    with patch("tgw.development.foreman.validated_coding_worktree", return_value=__import__("pathlib").Path(location["worktree"])), patch("tgw.development.foreman.build_coding_snapshot", return_value=object()), patch("tgw.development.foreman.evaluate", return_value=graph), patch("tgw.development.foreman.resolve_implementation_adapter", return_value=ProviderAdapter("implementation", "codex-local-runner", "codex-implement", "codex-implement")):
+    with patch("tgw.development.foreman.validated_coding_worktree", return_value=__import__("pathlib").Path(location["worktree"])), patch("tgw.development.foreman.build_coding_snapshot", return_value=object()), patch("tgw.development.foreman.evaluate", return_value=graph):
         assert tick(fetch_todos=lambda:[todo], check_active_fn=lambda _:False, enqueue_fn=enqueue).dispatched == 1
     payload = enqueue.call_args.kwargs["payload"]
     assert payload["todo_id"] == result["todo_id"] and payload["worktree"] == location["worktree"] and payload["plan_binding"] == result["binding"]
     worker = CodingWorker("codex-implement", {"coding": {}}, launcher=lambda *_: {"outcome":"satisfied", "established_conditions":["implemented"], "artifacts":[]})
     with patch.object(worker, "_validated_worktree", return_value=__import__("pathlib").Path(location["worktree"])):
         receipt = worker.handle({"payload_json": payload})
-    assert receipt["execution_envelope"]["plan_binding"] == result["binding"]
+    assert receipt["plan_binding"] == result["binding"]
+    assert "execution_envelope" not in receipt
 
 
 def test_malformed_plan_bound_todo_refuses_tick_instead_of_skipping():

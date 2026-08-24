@@ -10,10 +10,11 @@ from typing import Any, Callable
 import psycopg2
 from psycopg2.extensions import parse_dsn
 
-from tgw.config import DEFAULT_CONFIG, load_config, load_json_strict
+from tgw.config import load_config, load_json_strict
 
 DEVELOPMENT_DATABASE = "tgw_lib_dev_state_machine"
-DEVELOPMENT_WRITE_IDENTITY = "tigwadev"
+DEVELOPMENT_WRITE_IDENTITIES = frozenset({"db", "codex"})
+DEFAULT_LOCAL_CONFIG = Path("/opt/TGW/tgw-lib/config/tgw-coding-local.json")
 
 
 class FixtureDatabaseBindingError(RuntimeError):
@@ -69,26 +70,31 @@ def fixture_worker_config(
 
 
 def initialize_fixture_database(
-    *, config_path: Path = DEFAULT_CONFIG,
+    *, config_path: Path = DEFAULT_LOCAL_CONFIG,
     connect: Callable[[str], Any] = psycopg2.connect,
 ) -> dict[str, str]:
     """Validate and install the one local DSN into both fixture adapters.
 
     This never selects a default DSN, contacts a remote endpoint, or elevates
-    privileges.  The invoking one-shot process must already be ``tigwadev``.
+    privileges.  PostgreSQL peer identity must match the invoking ``db`` or
+    ``codex`` Unix account.
     """
     dsn = _explicit_dsn(config_path)
     try:
         parsed = parse_dsn(dsn)
     except Exception as exc:
         raise FixtureDatabaseBindingError("fixture postgres_dsn is malformed") from exc
-    if parsed.get("dbname") != DEVELOPMENT_DATABASE or parsed.get("user") != DEVELOPMENT_WRITE_IDENTITY:
+    actor = pwd.getpwuid(os.geteuid()).pw_name
+    if actor not in DEVELOPMENT_WRITE_IDENTITIES:
+        raise FixtureDatabaseBindingError("fixture process is not a local coding Unix identity")
+    if (
+        parsed.get("dbname") != DEVELOPMENT_DATABASE
+        or parsed.get("user") not in (None, "", actor)
+    ):
         raise FixtureDatabaseBindingError("fixture postgres_dsn does not name the configured development target")
     host = parsed.get("host")
     if host not in (None, "", "/var/run/postgresql"):
         raise FixtureDatabaseBindingError("fixture postgres_dsn must use a local PostgreSQL endpoint")
-    if pwd.getpwuid(os.geteuid()).pw_name != DEVELOPMENT_WRITE_IDENTITY:
-        raise FixtureDatabaseBindingError("fixture process is not the configured local write identity")
     try:
         with connect(dsn) as con, con.cursor() as cur:
             cur.execute("SELECT current_database(), current_user, inet_server_addr()")
@@ -98,7 +104,7 @@ def initialize_fixture_database(
         raise
     except Exception as exc:
         raise FixtureDatabaseBindingError("fixture development database preflight failed") from exc
-    if database != DEVELOPMENT_DATABASE or role != DEVELOPMENT_WRITE_IDENTITY or endpoint is not None:
+    if database != DEVELOPMENT_DATABASE or role != actor or endpoint is not None:
         raise FixtureDatabaseBindingError("fixture database connection is not the configured local development target")
     # Set the explicit DSN before importing the side-effect-free Todo adapter;
     # neither import nor init is allowed to perform schema work or use a

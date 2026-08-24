@@ -1,0 +1,25 @@
+{
+  "schema": "tgw-local-coding-workflow/v1",
+  "postgres_dsn": "dbname=tgw_lib_dev_state_machine",
+  "queue": {
+    "poll_interval_s": 2,
+    "lease_seconds": 2100
+  },
+  "coding": {
+    "repository_root": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
+    "worktree_root": "/opt/TGW/var/worktrees",
+    "timeout_s": 1800,
+    "commands": {
+      "codex-implement": [
+        "/opt/TGW/.venvs/controller/bin/tgw-codex-implement-runner"
+      ],
+      "controller-verify": [
+        "/opt/TGW/.venvs/controller/bin/tgw-controller-verify-runner"
+      ]
+    },
+    "allowed_runners": [
+      "/opt/TGW/.venvs/controller/bin/tgw-codex-implement-runner",
+      "/opt/TGW/.venvs/controller/bin/tgw-controller-verify-runner"
+    ]
+  }
+}

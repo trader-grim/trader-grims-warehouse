@@ -408,6 +408,16 @@ class QueueWorker:
                 self._on_terminal_failure(job, error_text)
         else:
             receipt = _handle_result if isinstance(_handle_result, dict) else None
+            if getattr(self, "direct_local_receipts", False):
+                # Development coding receipts are consumed directly from the
+                # request worktree by the local Foreman.  They do not enter
+                # the item-workflow evaluation queue.
+                state_machine.mark_succeeded(
+                    job_id, self.owner, lease_token, result=receipt,
+                )
+                tgw_logging.log_event('job_succeeded', job_id=job_id)
+                log.info('job %s succeeded', job_id)
+                return
             waiting_error = _waiting_treatment_receipt_error(receipt, job)
             if waiting_error is None:
                 timer_job_id = state_machine.complete_treatment_and_schedule_timer(

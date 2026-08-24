@@ -14,7 +14,6 @@ from typing import Any, Callable, Mapping
 
 from tgw.development.foreman import TodoRecord
 from tgw.development.plan_binding import validate_plan_binding
-from tgw.errors import HardFailure
 from tgw.queue import state_machine
 from tgw.workers.coding import CodingWorker
 
@@ -106,13 +105,16 @@ def fixture_enqueue(run_id: object, enqueue_fn: Callable[..., str] | None = None
             raise FixtureIsolationError("fixture job Plan binding crosses fixture namespace")
         if payload.get("treatment_id") != "codex-implement":
             raise FixtureIsolationError("fixture job has wrong treatment")
+        task = payload.get("task_spec")
         if (
-            payload.get("coding_role") != "implementation"
-            or payload.get("selected_provider") != "codex-local-runner"
-            or payload.get("adapter_treatment_id") != "codex-implement"
-            or payload.get("adapter_queue_name") != "codex-implement"
+            not isinstance(task, dict)
+            or task.get("schema") != "coding-task/v1"
+            or task.get("todo_id") != payload.get("todo_id")
+            or task.get("agent") != "codex"
+            or not isinstance(task.get("body"), str)
+            or not task["body"].strip()
         ):
-            raise FixtureIsolationError("fixture job lacks the W07 implementation adapter binding")
+            raise FixtureIsolationError("fixture job lacks its local coding task")
         durable_payload = dict(payload, fixture_run_id=run_id)
         durable_key = f"fixture:{run_id}:{kwargs.get('dedupe_key', '')}"
         if not kwargs.get("dedupe_key"):

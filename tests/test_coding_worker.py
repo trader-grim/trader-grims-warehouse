@@ -232,6 +232,28 @@ def test_unsatisfied_launcher_outcome_dead_letters_instead_of_succeeding(tmp_pat
     state_machine.mark_succeeded.assert_not_called()
 
 
+def test_satisfied_local_coding_job_completes_without_item_evaluation_queue(tmp_path):
+    _git_worktree(tmp_path)
+    before = build_coding_snapshot(tmp_path, GoalProfile("test", "1", ("implemented",)))
+    worker = _worker("codex-implement", tmp_path.parent, lambda *_args: {
+        "outcome": "satisfied", "established_conditions": ["implemented"],
+        "artifacts": [],
+    }, tmp_path)
+    job = {
+        "job_id": "satisfied-local-coding",
+        "lease_token": "11111111-1111-4111-8111-111111111111",
+        "payload_json": {
+            "treatment_id": "codex-implement", "graph_id": "local-graph",
+            "worktree": str(tmp_path), "object_id": str(tmp_path.resolve()),
+            "object_generation": before.generation,
+        },
+    }
+    with patch("tgw.queue.worker_base.state_machine") as state_machine:
+        worker._process(job)
+    state_machine.mark_succeeded.assert_called_once()
+    state_machine.complete_treatment_and_enqueue_evaluation.assert_not_called()
+
+
 def test_malformed_launcher_outcome_fails_closed(tmp_path):
     _git_worktree(tmp_path)
     worker = _worker("claude-review", tmp_path.parent, lambda *_args: {}, tmp_path)

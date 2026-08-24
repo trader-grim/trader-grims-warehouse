@@ -15,9 +15,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.development.plan_binding import MalformedPlanBindingError, validate_plan_binding
-from tgw.development.provider_dispatch import ProviderDispatchError, validate_implementation_adapter
+from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.workflow_kernel.contracts import (
     OUTCOME_CONFLICT,
     OUTCOME_FAILED,
@@ -120,6 +119,8 @@ def _write_receipt(path: Path, receipt: dict[str, Any]) -> None:
 
 class CodingWorker(QueueWorker):
     """Claim one coding-treatment queue and invoke its configured launcher."""
+
+    direct_local_receipts = True
 
     def __init__(
         self,
@@ -265,8 +266,8 @@ class CodingWorker(QueueWorker):
         return outcome, established, artifacts
 
     @staticmethod
-    def _plan_execution_envelope(payload: dict[str, Any], worktree: Path) -> dict[str, Any] | None:
-        """Validate and preserve an optional Plan binding for this exact job."""
+    def _validated_plan_binding(payload: dict[str, Any], worktree: Path) -> dict[str, Any] | None:
+        """Validate optional Plan provenance against this exact local worktree."""
         raw_binding = payload.get("plan_binding")
         if raw_binding is None:
             return None
@@ -279,20 +280,7 @@ class CodingWorker(QueueWorker):
         identity = binding["worktree_identity"]
         if identity.get("worktree") not in (None, str(worktree)):
             raise HardFailure("Plan binding worktree identity does not match coding job")
-        envelope = {
-            "schema": "tgw-coding-execution/v1",
-            "todo_id": payload.get("todo_id"),
-            "treatment_id": payload.get("treatment_id"),
-            "treatment_version": payload.get("treatment_version"),
-            "graph_id": payload.get("graph_id"),
-            "object_generation": payload.get("object_generation"),
-            "worktree": str(worktree),
-            "plan_binding": binding,
-        }
-        adapter = validate_implementation_adapter(payload, str(payload.get("adapter_queue_name") or payload.get("treatment_id")))
-        if adapter is not None:
-            envelope.update(adapter)
-        return envelope
+        return binding
 
     def handle(self, job: dict[str, Any]) -> dict[str, Any]:
         payload = dict(job.get("payload_json") or {})
@@ -301,10 +289,6 @@ class CodingWorker(QueueWorker):
             raise HardFailure(
                 f"job treatment {treatment_id!r} does not match queue {self.queue_name!r}"
             )
-        try:
-            adapter_binding = validate_implementation_adapter(payload, self.queue_name)
-        except ProviderDispatchError as exc:
-            raise HardFailure(str(exc)) from exc
         if not isinstance(payload.get("graph_id"), str) or not payload["graph_id"]:
             raise HardFailure("coding job has no graph_id")
         if (
@@ -313,7 +297,7 @@ class CodingWorker(QueueWorker):
         ):
             raise HardFailure("coding job has no object_generation")
         worktree = self._validated_worktree(payload)
-        execution_envelope = self._plan_execution_envelope(payload, worktree)
+        plan_binding = self._validated_plan_binding(payload, worktree)
 
         try:
             launcher_result = self._launcher(treatment_id, payload, worktree)
@@ -321,10 +305,8 @@ class CodingWorker(QueueWorker):
                 treatment_id, launcher_result,
             )
         except (HardFailure, RuntimeError) as exc:
-            # A malformed local runner/config is operational evidence, not an
-            # authority question.  Persist it so the next snapshot can
-            # reevaluate from a durable receipt instead of opening an Action
-            # Card or waiting for an approval.
+            # Persist a local mechanical failure so the next snapshot can
+            # reevaluate from durable evidence.
             receipt = {
                 "status": "FAIL",
                 "treatment_id": treatment_id,
@@ -336,9 +318,7 @@ class CodingWorker(QueueWorker):
                 "established_conditions": [],
                 "artifacts": [{"kind": "mechanical_failure", "detail": str(exc)}],
                 "receipt_schema_id": "receipt/tgw-development/v1",
-                **(adapter_binding or {}),
-                **({"plan_binding": execution_envelope["plan_binding"]} if execution_envelope else {}),
-                **({"execution_envelope": execution_envelope} if execution_envelope else {}),
+                **({"plan_binding": plan_binding} if plan_binding else {}),
             }
             _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
             raise HardFailure(f"coding treatment mechanical failure: {exc}") from exc
@@ -353,9 +333,7 @@ class CodingWorker(QueueWorker):
             "established_conditions": established,
             "artifacts": artifacts,
             "receipt_schema_id": "receipt/tgw-development/v1",
-            **(adapter_binding or {}),
-            **({"plan_binding": execution_envelope["plan_binding"]} if execution_envelope else {}),
-            **({"execution_envelope": execution_envelope} if execution_envelope else {}),
+            **({"plan_binding": plan_binding} if plan_binding else {}),
         }
         _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
         if outcome != OUTCOME_SATISFIED:
@@ -366,15 +344,10 @@ class CodingWorker(QueueWorker):
 
 
 def execute_treatment(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-    """Execute one already-authorized registered treatment without queue I/O.
-
-    The provision bridge owns no queue lease and never claims a treatment job;
-    tgw-prod has already issued the bounded evaluator/scheduler envelope.  This
-    shares the ordinary ``CodingWorker.handle`` receipt and authority checks.
-    """
+    """Compatibility entry point for one local registered treatment."""
     treatment_id = payload.get("treatment_id")
     if not isinstance(treatment_id, str) or treatment_id not in CODING_TREATMENTS:
-        raise HardFailure("coding execution envelope has no registered treatment")
+        raise HardFailure("coding job payload has no registered treatment")
     return CodingWorker(treatment_id, config).handle({"payload_json": payload})
 
 
@@ -389,8 +362,7 @@ def main() -> int:
     parser.add_argument("--queue", required=True, choices=sorted(CODING_TREATMENTS))
     args = parser.parse_args()
     worker = CodingWorker(args.queue, load_coding_worker_config(Path(args.config)))
-    # Refuse to start a queue that cannot possibly execute its configured
-    # authority command; an absent/malformed spec is never a silent no-op.
+    # Refuse to start a queue without its configured local runner.
     worker._configured_command(args.queue)
     worker.run()
     return 0

@@ -13,10 +13,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from tgw.workers.coding import validated_coding_worktree
 from tgw.development.coding_snapshot import build_coding_snapshot
 from tgw.development.plan_binding import MalformedPlanBindingError, parse_plan_binding
-from tgw.development.provider_dispatch import ProviderDispatchError, resolve_implementation_adapter
+from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
+from tgw.development.treatments import CODING_TREATMENTS
+from tgw.workers.coding import validated_coding_worktree
 from tgw.workflow_kernel.contracts import (
     GoalProfile,
     RuntimeWorkGraph,
@@ -24,9 +25,7 @@ from tgw.workflow_kernel.contracts import (
     TreatmentDisposition,
 )
 from tgw.workflow_kernel.evaluator import evaluate
-from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
 from tgw.workflow_kernel.scheduler import DispatchResult, dispatch_treatment
-from tgw.development.treatments import CODING_TREATMENTS
 
 log = logging.getLogger(__name__)
 
@@ -58,8 +57,6 @@ class ForemanConfig:
     # The worker and foreman must apply the same canonical-root proof before
     # executing project checks or dispatching a job.
     coding_config: dict[str, Any] = field(default_factory=dict)
-    provider_registry_path: str | None = None
-    provider_adapters: dict[str, str] | None = None
     # A fixture may prove its clean allocated worktree is genuinely unimplemented
     # against its bound source commit.  Ordinary Todos never consume this field.
     fixture_implementation_baseline_commit: str | None = None
@@ -341,9 +338,9 @@ def tick(
             if cfg.fixture_implementation_baseline_commit is not None:
                 binding = todo.plan_binding
                 if not isinstance(binding, dict) or not binding.get("fixture_run_id"):
-                    raise ProviderDispatchError("fixture implementation baseline requires a fixture-bound Todo")
+                    raise ValueError("fixture implementation baseline requires a fixture-bound Todo")
                 if binding.get("source_commit") != cfg.fixture_implementation_baseline_commit:
-                    raise ProviderDispatchError("fixture implementation baseline disagrees with Plan binding")
+                    raise ValueError("fixture implementation baseline disagrees with Plan binding")
                 fixture_baseline = cfg.fixture_implementation_baseline_commit
             snapshot = build_coding_snapshot(
                 worktree, cfg.goal_profile, cfg.treatments,
@@ -449,22 +446,9 @@ def tick(
             }
             disposition = chosen.disposition
             if disposition.treatment_id == "codex-implement":
-                adapter = resolve_implementation_adapter(
-                    cfg.coding_config,
-                    registry_path=cfg.provider_registry_path,
-                    adapters=cfg.provider_adapters,
-                )
-                # Keep the evaluator treatment as the execution adapter while
-                # recording the independent neutral role/provider selection.
-                if adapter.treatment_id != disposition.treatment_id:
-                    raise ProviderDispatchError("implementation adapter disagrees with evaluator treatment")
                 if not chosen.todo.body.strip():
-                    raise ProviderDispatchError("Codex implementation requires a canonical Todo task")
+                    raise ValueError("Codex implementation requires a canonical Todo task")
                 payload_extra.update({
-                    "coding_role": adapter.role,
-                    "selected_provider": adapter.selected_provider,
-                    "adapter_treatment_id": adapter.treatment_id,
-                    "adapter_queue_name": adapter.queue_name,
                     "task_spec": {
                         "schema": "coding-task/v1",
                         "todo_id": chosen.todo.todo_id,

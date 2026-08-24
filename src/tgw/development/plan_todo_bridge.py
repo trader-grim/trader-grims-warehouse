@@ -17,7 +17,6 @@ from tgw.development.plan_binding import (
     validate_execution_root,
 )
 from tgw.plan_solver import PlanResolutionError, validate_solution_integrity
-from tgw.plan_execution_resources import PlanExecutionResourceError, validate_execution_envelope
 from tgw.workflow.plan_bridge import CompiledPlanRuntime
 
 
@@ -73,7 +72,7 @@ def _selected_execution_root(
 
 def bind_leaf(
     compiled: CompiledPlanRuntime, *, solution: Mapping[str, Any], treatment_id: str,
-    source_commit: str, worktree_identity: str, agent: str, execution_envelope: Mapping[str, Any],
+    source_commit: str, worktree_identity: str, agent: str, body: str, priority: int,
     create_todo: Callable[[str, str, int, str, str | None, str | None], Mapping[str, Any]],
     list_todos: Callable[[], list[Mapping[str, Any]]],
     allocate_worktree: Callable[[int, str, str], Mapping[str, Any]],
@@ -89,13 +88,6 @@ def bind_leaf(
     if not compiled.dispatchable or compiled.holds:
         raise PlanTodoBridgeError("Plan solution is held or non-conformant")
     try:
-        envelope = validate_execution_envelope(execution_envelope, compiled=compiled)
-    except PlanExecutionResourceError as exc:
-        raise PlanTodoBridgeError("Plan execution envelope is invalid") from exc
-    card = envelope["card"]
-    if card["work_unit"]["treatment_id"] != treatment_id or card["source"]["commit"] != source_commit:
-        raise PlanTodoBridgeError("Plan execution card does not match Todo binding")
-    try:
         validate_solution_integrity(solution, current_plan_commit=compiled.plan_commit)
     except PlanResolutionError as exc:
         raise PlanTodoBridgeError("Plan solution integrity check failed") from exc
@@ -106,15 +98,11 @@ def bind_leaf(
         raise PlanTodoBridgeError("Plan leaf is not eligible")
     capability = treatment.ownership[0]
     root = _selected_execution_root(compiled, solution, execution_root)
-    if card["plan"].get("root") != root:
-        raise PlanTodoBridgeError("Plan execution card root does not match Todo binding")
     binding = {
         "schema": "tgw-plan-coding-todo/v1", "plan_commit": compiled.plan_commit,
         "solution_hash": compiled.solution_hash, "closure_hash": compiled.closure_hash,
         "capability": capability, "treatment_id": treatment_id, "source_commit": source_commit,
         "requested_worktree_identity": worktree_identity,
-        "execution_card": card,
-        "execution_envelope": envelope,
         "execution_root": root,
     }
     if fixture_run_id is not None:
@@ -151,7 +139,7 @@ def bind_leaf(
         # A Plan root creates a derived implementation Todo with no invented
         # PP reference.  A PP root preserves its actual selected identifier.
         created = create_todo(
-            agent, card["task"]["body"], card["scheduling"]["transport_priority"], "plan-luet-bridge",
+            agent, body, priority, "plan-luet-bridge",
             root["pp_ref"] if root["kind"] == "pp" else None,
             treatment_id,
         )

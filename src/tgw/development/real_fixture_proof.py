@@ -1,23 +1,25 @@
 """One bounded real-adapter proof for the Plan-bound coding spine."""
 from __future__ import annotations
 
-import hashlib
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
-from tgw.coding_provision_worker import _prepare_request_worktree
-from tgw.development.fixture_isolation import (
-    cleanup_fixture_run, create_fixture_todo, fixture_enqueue, fixture_todo_record,
-    fixture_worktree_root, list_fixture_todos, run_fixture_job_once, validate_fixture_run_id,
-)
 from tgw.development.fixture_db_binding import fixture_worker_config, initialize_fixture_database
+from tgw.development.fixture_isolation import (
+    cleanup_fixture_run,
+    create_fixture_todo,
+    fixture_enqueue,
+    fixture_todo_record,
+    fixture_worktree_root,
+    list_fixture_todos,
+    run_fixture_job_once,
+    validate_fixture_run_id,
+)
 from tgw.development.foreman import ForemanConfig, tick
+from tgw.development.local_workflow import allocate_worktree
 from tgw.development.plan_todo_bridge import bind_leaf
-from tgw.development.plan_binding import execution_root_hash
-from tgw.plan_execution_card import build_execution_card
-from tgw.plan_execution_resources import ENVELOPE_SCHEMA, envelope_hash
 from tgw.plan_solver import solve
 from tgw.workflow import compile_solution_runtime
 
@@ -43,10 +45,10 @@ def _git(root: Path, *args: str) -> str:
 def _fixture_solution(commit: str) -> PlanSolution:
     document = {
         "schema": "tgw-plan/v2", "plan_commit": commit,
-        "capabilities": ["fixture.code@1", "promptcraft.receiver-profiles@1"],
-        "providers": [{"id": "fixture", "provides": ["fixture.code@1"]}, {"id": "recovered-promptcraft", "provides": ["promptcraft.receiver-profiles@1"]}],
+        "capabilities": ["fixture.code@1"],
+        "providers": [{"id": "fixture", "provides": ["fixture.code@1"]}],
         "observations": [],
-        "target": {"id": "fixture", "profile": "implementation", "minimum_state": "admitted", "required_capabilities": ["fixture.code@1", "promptcraft.receiver-profiles@1"]},
+        "target": {"id": "fixture", "profile": "implementation", "minimum_state": "admitted", "required_capabilities": ["fixture.code@1"]},
     }
     native = solve(document)
     return PlanSolution(document, solve(document, conformance_result={"available": True, "closure_hash": native["closure_hash"]}))
@@ -87,13 +89,15 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
         return dict(create_fixture_todo(run_id, agent=agent, body=body, priority=priority, pp_ref=pp_ref, plan_anchor=plan_anchor))
 
     def allocate(todo_id: int, request_id: str, source_commit: str) -> dict[str, Any]:
-        return _prepare_request_worktree({"todo_id": todo_id, "request_id": request_id, "source_commit": source_commit}, proof_coding, f"fixture-worker:{run_id}")
+        return allocate_worktree(
+            source_root, fixture_root, "codex", todo_id, request_id, source_commit,
+        )
 
     from tgw.todo import todo_set_status_note
     bound = bind_leaf(
         compiled, solution=plan.solution, treatment_id=ready.treatment_id,
         source_commit=candidate_commit, worktree_identity=run_id, agent="codex",
-        execution_envelope=_fixture_execution_envelope(compiled, plan.solution, ready.treatment_id, candidate_commit), create_todo=create,
+        body="fixture-only implementation proof", priority=1, create_todo=create,
         list_todos=lambda: list_fixture_todos(run_id),
         allocate_worktree=allocate,
         set_status_note=lambda todo_id, note: todo_set_status_note(todo_id, note, suppress_plan_render=True),
@@ -122,38 +126,13 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
         config=fixture_worker_config(proof_coding),
     )
     binding = bound["binding"]
-    if receipt.get("execution_envelope", {}).get("plan_binding") != binding:
+    if receipt.get("plan_binding") != binding:
         raise RuntimeError("fixture receipt lost Plan binding")
-    if (
-        receipt.get("coding_role") != "implementation"
-        or receipt.get("selected_provider") != "codex-local-runner"
-        or receipt.get("adapter_queue_name") != "codex-implement"
-    ):
-        raise RuntimeError("fixture receipt lost W07 role/provider adapter binding")
     return {"plan_solution": asdict(plan), "ready_leaf": asdict(ready), "plan_bound_todo": bound,
             "coding_request": {"job_id": job_id}, "allocated_worktree": binding["worktree_identity"],
-            "coding_execution": receipt["execution_envelope"], "receipt": receipt,
+            "coding_execution": {
+                "treatment_id": "codex-implement", "worktree": binding["worktree"],
+                "plan_binding": binding,
+            }, "receipt": receipt,
             "database_binding": database_binding,
             "cleanup": lambda: cleanup_fixture_run(run_id, canonical_worktree_root=canonical_root, repository_root=source_root)}
-def _fixture_execution_envelope(compiled, solution: Mapping[str, Any], treatment_id: str, source_commit: str) -> dict[str, Any]:
-    root = {"schema": "tgw-execution-root/v1", "kind": "plan", "plan_id": "fixture",
-            "profile": "implementation", "plan_commit": source_commit}
-    root["identity_hash"] = execution_root_hash(root)
-    resources = {name: {"ref": f"mcp:tgw-context/fixture/{name}", "hash": "sha256:" + "0" * 64} for name in (
-        "plan_input", "plan_commit", "plan_graph", "codegraph_snapshot", "source_tree",
-        "execution_environment", "authority_conditions", "candidate_evidence", "receipt_sink",
-    )}
-    card = build_execution_card(
-        compiled=compiled, solution=solution,
-        execution_graph={"plan_id": "fixture", "work_units": [{"id": "fixture", "title": "Fixture proof",
-            "establishes": ["fixture.code@1"], "acceptance": ["fixture receipt"]}, {"id": "promptcraft", "title": "Promptcraft",
-            "establishes": ["promptcraft.receiver-profiles@1"], "acceptance": ["Promptcraft bound"]}]},
-        treatment_id=treatment_id, source_commit=source_commit, source_tree=source_commit,
-        resources=resources, environment={"id": "fixture"}, execution_root=root,
-    )
-    unsigned = {
-        "schema": ENVELOPE_SCHEMA, "card": card, "resources": card["resources"],
-        "context": {"service": "tgw-context", "status_hash": "sha256:" + "0" * 64},
-        "receiver": {"capability": "promptcraft.receiver-profiles@1", "provider": "recovered-promptcraft", "handoff": {"adapter": "promptcraft-card-handoff", "schema": "tgw-launcher-handoff/v1"}},
-    }
-    return {**unsigned, "envelope_hash": envelope_hash(unsigned)}

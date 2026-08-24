@@ -1,0 +1,30 @@
+[Unit]
+Description=TGW local Codex implementation worker
+After=postgresql.service
+Requires=postgresql.service
+ConditionPathExists=/opt/TGW/tgw-lib/config/tgw-coding-local.json
+ConditionPathExists=/opt/TGW/tgw-lib/coding-runtime/current/src/tgw/development/local_workflow.py
+
+[Service]
+Type=simple
+User=codex
+Group=codex
+SupplementaryGroups=tgw-coders
+UMask=0002
+WorkingDirectory=/opt/TGW/tgw-lib/src/trader-grims-warehouse
+Environment=HOME=/home/codex
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=GIT_OPTIONAL_LOCKS=0
+Environment=PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src
+ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.development.local_workflow --config /opt/TGW/tgw-lib/config/tgw-coding-local.json worker --queue codex-implement
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=1900s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/opt/TGW/var/worktrees
+
+[Install]
+WantedBy=multi-user.target

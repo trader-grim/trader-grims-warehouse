@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import re
 from typing import Any, Mapping
-
 
 PLAN_BINDING_SCHEMA = "tgw-plan-coding-todo/v1"
 EXECUTION_ROOT_SCHEMA = "tgw-execution-root/v1"
 _REQUIRED_STRINGS = frozenset({
     "plan_commit", "solution_hash", "closure_hash", "capability",
-    "treatment_id", "idempotency_key", "worktree",
+    "treatment_id", "source_commit", "idempotency_key", "worktree",
 })
 
 
@@ -75,40 +74,8 @@ def validate_plan_binding(value: object, *, todo_id: int | None = None) -> dict[
         any(not isinstance(binding.get(field), str) or not binding[field]
             for field in _REQUIRED_STRINGS)
         or not isinstance(binding.get("worktree_identity"), dict)
-        or not isinstance(binding.get("execution_card"), Mapping)
     ):
         raise MalformedPlanBindingError(f"{label} has malformed Plan binding")
-    # Imported lazily to avoid making the light-weight Todo parser import the
-    # full solver/bridge graph unless the Todo actually claims Plan execution.
-    if "execution_envelope" in binding:
-        from tgw.plan_execution_resources import PlanExecutionResourceError, validate_execution_envelope
-        try:
-            envelope = validate_execution_envelope(binding["execution_envelope"])
-        except PlanExecutionResourceError as exc:
-            raise MalformedPlanBindingError(f"{label} has malformed Plan execution envelope") from exc
-        card = envelope["card"]
-        if binding["execution_card"] != card:
-            raise MalformedPlanBindingError(f"{label} Plan execution card does not match its envelope")
-        binding["execution_envelope"] = envelope
-    else:
-        # Existing persisted Plan Todos predate the resource-envelope compiler.
-        # They are parsed explicitly for compatibility; ``bind_leaf`` itself
-        # never creates one without the fully bound envelope.
-        from tgw.plan_execution_card import PlanExecutionCardError, validate_execution_card
-        try:
-            card = validate_execution_card(binding["execution_card"])
-        except PlanExecutionCardError as exc:
-            raise MalformedPlanBindingError(f"{label} has malformed Plan execution card") from exc
-    if (
-        card["plan"]["commit"] != binding["plan_commit"]
-        or card["solution"]["hash"] != binding["solution_hash"]
-        or card["solution"]["closure_hash"] != binding["closure_hash"]
-        or card["work_unit"]["capability"] != binding["capability"]
-        or card["work_unit"]["treatment_id"] != binding["treatment_id"]
-        or card["source"]["commit"] != binding["source_commit"]
-    ):
-        raise MalformedPlanBindingError(f"{label} Plan execution card does not match Plan binding")
-    binding["execution_card"] = card
     try:
         root = validate_execution_root(binding.get("execution_root"))
     except MalformedPlanBindingError as exc:

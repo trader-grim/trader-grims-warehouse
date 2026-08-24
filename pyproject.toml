@@ -119,6 +119,7 @@ tgw-controller-verify-worker  = "tgw.workers.coding:controller_verify_main"
 tgw-controller-verify-runner  = "tgw.workers.controller_verify:main"
 tgw-codex-implement-runner    = "tgw.workers.codex_implement:main"
 tgw-hermes-stitch-worker      = "tgw.workers.coding:hermes_stitch_main"
+tgw-coding-local              = "tgw.development.local_workflow:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

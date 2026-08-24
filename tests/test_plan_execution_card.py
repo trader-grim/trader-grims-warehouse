@@ -2,10 +2,9 @@ import copy
 
 import pytest
 
-from tgw.development.plan_binding import execution_root_hash, validate_plan_binding
-from tgw.development.plan_todo_bridge import PlanTodoBridgeError, bind_leaf
+from tgw.development.plan_binding import execution_root_hash
+from tgw.development.plan_todo_bridge import bind_leaf
 from tgw.plan_execution_card import PlanExecutionCardError, build_execution_card, card_hash, select_next_execution_card, validate_execution_card
-from tgw.plan_execution_resources import ENVELOPE_SCHEMA, envelope_hash
 from tgw.plan_solver import solve
 from tgw.workflow import compile_solution_runtime
 
@@ -51,16 +50,6 @@ def _card(treatment="establish:one@1"):
                                 source_commit=SOURCE, source_tree=TREE, resources=_resources(), environment={"id": "dev"}, execution_root=_root()), compiled, solution
 
 
-def _envelope(card):
-    resources = {name: {**binding, "ref": binding["ref"].replace("test:", "mcp:tgw-context/test/")} for name, binding in card["resources"].items()}
-    card = {**card, "resources": resources}
-    card["card_hash"] = card_hash(card)
-    unsigned = {"schema": ENVELOPE_SCHEMA, "card": card, "resources": resources,
-                "context": {"service": "tgw-context", "status_hash": "sha256:" + "0" * 64},
-                "receiver": {"capability": "promptcraft.receiver-profiles@1", "provider": "recovered-promptcraft", "handoff": {"adapter": "promptcraft-card-handoff", "schema": "tgw-launcher-handoff/v1"}}}
-    return {**unsigned, "envelope_hash": envelope_hash(unsigned)}
-
-
 def test_card_is_deterministic_and_mechanically_renders_task_and_priority():
     first, _, _ = _card()
     second, _, _ = _card()
@@ -87,23 +76,23 @@ def test_provider_only_solved_leaf_has_a_mechanical_not_manual_card():
     assert "Establish one@1" in derived["task"]["body"]
 
 
-def test_validated_card_is_the_only_plan_todo_transport_input():
-    card, compiled, solution = _card()
+def test_execution_card_is_not_a_plan_todo_transport_input():
+    _card_value, compiled, solution = _card()
     rows = []
     def create(agent, body, priority, *_):
         row = {"id": 1, "status_note": "", "body": body, "priority": priority}; rows.append(row); return row
     def note(_id, value): rows[0]["status_note"] = value
     result = bind_leaf(compiled, solution=solution, treatment_id="establish:one@1", source_commit=SOURCE,
-                       worktree_identity="request", agent="codex", execution_envelope=_envelope(card), create_todo=create,
+                       worktree_identity="request", agent="codex", body="implement one", priority=7, create_todo=create,
                        list_todos=lambda: rows, allocate_worktree=lambda *_: {"worktree": "/worktrees/test"}, set_status_note=note,
                        execution_root=_root())
-    assert rows[0]["body"] == card["task"]["body"]
-    assert rows[0]["priority"] == card["scheduling"]["transport_priority"]
-    assert validate_plan_binding(result["binding"])["execution_card"] == _envelope(card)["card"]
-    bad = _envelope(card); bad["card"]["task"]["body"] = "hand-written"
-    with pytest.raises(PlanTodoBridgeError, match="envelope"):
+    assert rows[0]["body"] == "implement one"
+    assert rows[0]["priority"] == 7
+    assert "execution_card" not in result["binding"]
+    with pytest.raises(TypeError, match="execution_envelope"):
         bind_leaf(compiled, solution=solution, treatment_id="establish:one@1", source_commit=SOURCE,
-                  worktree_identity="second", agent="codex", execution_envelope=bad, create_todo=create,
+                  worktree_identity="second", agent="codex", body="implement one", priority=7,
+                  execution_envelope={"legacy": True}, create_todo=create,
                   list_todos=lambda: rows, allocate_worktree=lambda *_: {"worktree": "/worktrees/test2"}, set_status_note=note,
                   execution_root=_root())
 

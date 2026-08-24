@@ -48,9 +48,9 @@ def _job_from_environment() -> dict[str, Any]:
     try:
         value = json.loads(os.environ["TGW_CODING_JOB"])
     except (KeyError, json.JSONDecodeError) as exc:
-        raise HardFailure("Codex implementation runner has no execution envelope") from exc
+        raise HardFailure("Codex implementation runner has no local job payload") from exc
     if not isinstance(value, dict):
-        raise HardFailure("Codex implementation execution envelope is invalid")
+        raise HardFailure("Codex implementation local job payload is invalid")
     return value
 
 
@@ -118,10 +118,9 @@ def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> d
         destination_auth.chmod(0o600)
         schema_path.write_text(json.dumps(_FINAL_SCHEMA, sort_keys=True), encoding="utf-8")
         command = [
-            _codex_binary(), "exec", "--ephemeral", "--ignore-user-config",
-            # Codex 0.147 makes --approve-for-me select its workspace-write
-            # sandbox and rejects an additional explicit --sandbox argument.
-            "--approve-for-me", "-C", str(cwd),
+            _codex_binary(), "--ask-for-approval", "never",
+            "--sandbox", "workspace-write", "exec", "--ephemeral",
+            "--ignore-user-config", "-C", str(cwd),
             "--output-schema", str(schema_path), "-o", str(output_path), "-",
         ]
         completed = invoke(
