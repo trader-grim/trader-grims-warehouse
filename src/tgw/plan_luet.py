@@ -27,6 +27,7 @@ _DIRECT_DEVELOPMENT_BINDING = (
     Path(__file__).resolve().parents[2]
     / "agent-services/catalogs/direct-development-luet-v1.json"
 )
+_DIRECT_DEVELOPMENT_TOOL_ROOT = Path("/opt/TGW/tgw-lib/development-tools")
 _VERSION = "1.0"
 _PROVIDER_CATEGORY = "tgw-provider"
 _CAPABILITY_CATEGORY = "tgw-capability"
@@ -62,7 +63,7 @@ def load_direct_development_luet_binding(
         or value.get("schema") != "tgw-direct-development-luet-binding/v1"
         or value.get("id") != "tgw-lib-direct-development-luet@1"
         or not isinstance(value.get("executable_path"), str)
-        or not value["executable_path"].startswith("/opt/TGW/")
+        or Path(value["executable_path"]).parent != _DIRECT_DEVELOPMENT_TOOL_ROOT
         or not isinstance(value.get("sha256"), str)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["sha256"])
         or not isinstance(value.get("version"), str)
@@ -155,7 +156,11 @@ def verify_direct_development_luet(
         raise ValueError("direct-development Luet binding does not match the approved Plan commit")
     observed = pinned_luet_binary_sha256(binary)
     target = Path(binary).resolve(strict=True)
-    if target != binding.executable_path.resolve(strict=True) or observed != binding.sha256:
+    if (
+        target.parent != _DIRECT_DEVELOPMENT_TOOL_ROOT
+        or target != binding.executable_path.resolve(strict=True)
+        or observed != binding.sha256
+    ):
         raise ValueError("Luet binary does not match the direct-development binding")
     version = subprocess.run(
         [str(target), *binding.invocation], check=False, capture_output=True, text=True, timeout=10,

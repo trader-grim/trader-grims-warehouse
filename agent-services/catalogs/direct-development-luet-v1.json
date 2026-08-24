@@ -1,7 +1,7 @@
 {
   "schema": "tgw-direct-development-luet-binding/v1",
   "id": "tgw-lib-direct-development-luet@1",
-  "executable_path": "/opt/TGW/var/cache/tgw/t/operator-command-plan-20260823-99b32a9/luet",
+  "executable_path": "/opt/TGW/tgw-lib/development-tools/luet-0.9.26-g",
   "sha256": "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87",
   "version": "0.9.26",
   "version_output": "luet version 0.9.26-g",

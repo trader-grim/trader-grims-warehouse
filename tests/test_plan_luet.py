@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -96,7 +97,7 @@ def test_direct_development_binding_is_exact_and_is_not_nix_metadata():
     binding = load_direct_development_luet_binding()
 
     assert LUET_VERSION == "0.9.26"
-    assert binding.executable_path == Path("/opt/TGW/var/cache/tgw/t/operator-command-plan-20260823-99b32a9/luet")
+    assert binding.executable_path == Path("/opt/TGW/tgw-lib/development-tools/luet-0.9.26-g")
     assert binding.plan_commit == "058e2f980201cc78245358e4901cf007063f2c29"
     assert "nix" not in binding.executable_path.name
 
@@ -107,6 +108,36 @@ def test_direct_development_binding_rejects_nix_metadata(tmp_path):
 
     with pytest.raises(ValueError, match="binding"):
         load_direct_development_luet_binding(binding)
+
+
+@pytest.mark.parametrize(
+    "ephemeral_path",
+    [
+        "/opt/TGW/var/cache/tgw/t/luet",
+        "/opt/TGW/w/example/luet",
+        "/opt/TGW/tgw-lib/worktrees/example/luet",
+        "/opt/TGW/tgw-lib/releases/example/luet",
+        "/opt/TGW/tgw-lib/actor-runtime/current/luet",
+        "/home/codex/bin/luet",
+    ],
+)
+def test_direct_development_binding_rejects_ephemeral_or_noncanonical_paths(tmp_path, ephemeral_path):
+    binding = json.loads(
+        Path("agent-services/catalogs/direct-development-luet-v1.json").read_text(),
+    )
+    binding["executable_path"] = ephemeral_path
+    path = tmp_path / "binding.json"
+    path.write_text(json.dumps(binding))
+
+    with pytest.raises(ValueError, match="binding"):
+        load_direct_development_luet_binding(path)
+
+
+def test_direct_development_binding_accepts_the_canonical_durable_executable():
+    assert verify_direct_development_luet(
+        "/opt/TGW/tgw-lib/development-tools/luet-0.9.26-g",
+        plan_commit="058e2f980201cc78245358e4901cf007063f2c29",
+    ) == "sha256:c227742324a92eef4767961a9e49f687195b13356881336cc83d006e43d86c87"
 
 
 def test_direct_development_binding_rejects_wrong_executable(tmp_path):
