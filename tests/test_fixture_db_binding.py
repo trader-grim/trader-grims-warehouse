@@ -72,11 +72,15 @@ def test_explicit_configured_dsn_is_required(tmp_path):
     assert _explicit_dsn(_config(tmp_path)) == DSN
 
 
-def test_fixture_worker_config_keeps_the_explicit_local_dsn(tmp_path):
-    config = fixture_worker_config({"commands": {}}, config_path=_config(tmp_path))
+def test_fixture_worker_config_keeps_the_preflighted_local_dsn(monkeypatch):
+    monkeypatch.setenv("TGW_TODO_DSN", DSN)
+    config = fixture_worker_config({"commands": {}})
     assert config == {"postgres_dsn": DSN, "coding": {"commands": {}}}
     with pytest.raises(FixtureDatabaseBindingError, match="coding configuration"):
-        fixture_worker_config([], config_path=_config(tmp_path))
+        fixture_worker_config([])
+    monkeypatch.delenv("TGW_TODO_DSN")
+    with pytest.raises(FixtureDatabaseBindingError, match="preflighted database"):
+        fixture_worker_config({"commands": {}})
 
 
 def test_configured_dsn_initializes_both_adapters(monkeypatch, tmp_path):

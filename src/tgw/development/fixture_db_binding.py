@@ -51,17 +51,21 @@ def _explicit_dsn(config_path: Path) -> str:
 
 
 def fixture_worker_config(
-    coding: dict[str, Any], *, config_path: Path = DEFAULT_CONFIG,
+    coding: dict[str, Any],
 ) -> dict[str, Any]:
-    """Bind a fixture CodingWorker to the same explicit local DSN.
+    """Bind a fixture CodingWorker to the exact preflighted local DSN.
 
     QueueWorker initializes its state-machine adapter from top-level worker
-    configuration.  Supplying only the nested ``coding`` section would make it
-    reinstate the legacy fallback after fixture preflight succeeded.
+    configuration.  Re-reading mutable configuration here could redirect the
+    worker after preflight, so use only the DSN bound by
+    ``initialize_fixture_database``.
     """
     if not isinstance(coding, dict):
         raise FixtureDatabaseBindingError("fixture coding configuration must be an object")
-    return {"postgres_dsn": _explicit_dsn(config_path), "coding": dict(coding)}
+    dsn = os.environ.get("TGW_TODO_DSN")
+    if not isinstance(dsn, str) or not dsn.strip():
+        raise FixtureDatabaseBindingError("fixture worker has no preflighted database binding")
+    return {"postgres_dsn": dsn, "coding": dict(coding)}
 
 
 def initialize_fixture_database(
