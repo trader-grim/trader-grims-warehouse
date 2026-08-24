@@ -12,7 +12,11 @@ from tgw.development.foreman import TickResult
 
 def _git(path: Path, *args: str) -> str:
     result = subprocess.run(
-        ["git", *args], cwd=path, check=True, text=True, capture_output=True,
+        ["git", *args],
+        cwd=path,
+        check=True,
+        text=True,
+        capture_output=True,
     )
     return result.stdout.strip()
 
@@ -63,10 +67,20 @@ def test_allocate_worktree_uses_one_group_workshop_and_is_idempotent(tmp_path: P
     head = _git(repository, "rev-parse", "HEAD")
 
     first = local_workflow.allocate_worktree(
-        repository, worktrees, "codex", 17, "plan-" + "a" * 24, head,
+        repository,
+        worktrees,
+        "codex",
+        17,
+        "plan-" + "a" * 24,
+        head,
     )
     second = local_workflow.allocate_worktree(
-        repository, worktrees, "codex", 17, "plan-" + "a" * 24, head,
+        repository,
+        worktrees,
+        "codex",
+        17,
+        "plan-" + "a" * 24,
+        head,
     )
 
     assert first["created"] is True

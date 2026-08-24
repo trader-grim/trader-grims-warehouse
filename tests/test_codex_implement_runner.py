@@ -19,7 +19,9 @@ def _repo(tmp_path: Path) -> Path:
 
 def _job(**overrides):
     value = {
-        "todo_id": 1745, "treatment_id": "codex-implement", "treatment_version": "1",
+        "todo_id": 1745,
+        "treatment_id": "codex-implement",
+        "treatment_version": "1",
         "task_spec": {"schema": "coding-task/v1", "todo_id": 1745, "agent": "codex", "body": "implement the bounded feature"},
     }
     value.update(overrides)
@@ -33,6 +35,7 @@ def _invoke(report, edit=None, returncode=0):
         output = Path(command[command.index("-o") + 1])
         output.write_text(json.dumps(report), encoding="utf-8")
         return subprocess.CompletedProcess(command, returncode, "", "failure" if returncode else "")
+
     return invoke
 
 
@@ -40,7 +43,8 @@ def test_satisfied_requires_real_uncommitted_source_change(tmp_path, monkeypatch
     repo = _repo(tmp_path)
     monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
     result = codex_implement.run(
-        _job(), repo,
+        _job(),
+        repo,
         invoke=_invoke(
             {"status": "implemented", "summary": "added feature", "tests": ["focused tests passed"]},
             edit=lambda path: (path / "feature.py").write_text("VALUE = 1\n", encoding="utf-8"),
@@ -51,7 +55,8 @@ def test_satisfied_requires_real_uncommitted_source_change(tmp_path, monkeypatch
 
 
 def test_runner_uses_noninteractive_workspace_write_without_approval_gate(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     repo = _repo(tmp_path)
     monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
@@ -81,7 +86,8 @@ def test_model_success_without_diff_is_partial(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
     result = codex_implement.run(
-        _job(), repo,
+        _job(),
+        repo,
         invoke=_invoke({"status": "implemented", "summary": "nothing changed", "tests": []}),
     )
     assert result["outcome"] == "partial"
@@ -109,7 +115,8 @@ def test_runner_detects_model_commit_as_conflict(tmp_path, monkeypatch):
         subprocess.run(["git", "commit", "-m", "forbidden"], cwd=path, check=True, capture_output=True)
 
     result = codex_implement.run(
-        _job(), repo,
+        _job(),
+        repo,
         invoke=_invoke({"status": "implemented", "summary": "committed", "tests": []}, edit=commit),
     )
     assert result["outcome"] == "conflict"

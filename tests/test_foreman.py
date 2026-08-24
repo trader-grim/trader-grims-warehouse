@@ -82,6 +82,7 @@ def _fake_worktree_proof_for_mocked_foreman_tests(monkeypatch):
         lambda worktree, _object_id, _config: Path(worktree).resolve(),
     )
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -113,21 +114,21 @@ def _assertion(condition_id, result, *reasons):
 
 
 def _implemented():
-    return (
-        _assertion("implemented", FingerprintResult.FALSE, "not implemented"),
-    )
+    return (_assertion("implemented", FingerprintResult.FALSE, "not implemented"),)
 
 
 def _implemented_true():
-    return (
-        _assertion("implemented", FingerprintResult.TRUE, "implemented"),
-    )
+    return (_assertion("implemented", FingerprintResult.TRUE, "implemented"),)
 
 
 def test_plan_bound_todo_uses_bound_source_as_uncommitted_implementation_baseline():
     baseline = "a" * 40
     todo = TodoRecord(
-        17, "codex", 1, "implement", "/tmp/worktree-1",
+        17,
+        "codex",
+        1,
+        "implement",
+        "/tmp/worktree-1",
         {"source_commit": baseline},
     )
     snapshot = _snapshot(assertions=_implemented())
@@ -305,9 +306,7 @@ def test_tick_ownership_conflict_dispatches_zero():
                 object_id="/tmp/worktree-1",
                 graph_id="graph-conflict",
                 eligible=(disposition_a, disposition_b),
-                conflicts=(
-                    ("codex-implement", "competing", ("code.implementation",)),
-                ),
+                conflicts=(("codex-implement", "competing", ("code.implementation",)),),
             ),
         ),
     ):
@@ -332,9 +331,7 @@ def test_tick_same_generation_rerun_is_idempotent():
     # Active job exists for this graph_id.
     check_active = MagicMock(return_value=True)
 
-    disposition = TreatmentDisposition(
-        "codex-implement", "1", ("implemented=false",)
-    )
+    disposition = TreatmentDisposition("codex-implement", "1", ("implemented=false",))
 
     with (
         patch(
@@ -374,9 +371,7 @@ def test_tick_skips_todos_with_active_job():
     def check_active(graph_id):
         return check_active_responses.pop(0)
 
-    disposition = TreatmentDisposition(
-        "codex-implement", "1", ("implemented=false",)
-    )
+    disposition = TreatmentDisposition("codex-implement", "1", ("implemented=false",))
     mock_enqueue = MagicMock(return_value="job-002")
 
     with (
@@ -390,10 +385,8 @@ def test_tick_skips_todos_with_active_job():
         patch(
             "tgw.development.foreman.evaluate",
             side_effect=[
-                _graph(graph_id="graph-active", object_id="/tmp/worktree-1",
-                       eligible=(disposition,)),
-                _graph(graph_id="graph-fresh", object_id="/tmp/wt2",
-                       eligible=(disposition,)),
+                _graph(graph_id="graph-active", object_id="/tmp/worktree-1", eligible=(disposition,)),
+                _graph(graph_id="graph-fresh", object_id="/tmp/wt2", eligible=(disposition,)),
             ],
         ),
         patch(
@@ -485,14 +478,10 @@ def test_tick_unmet_dependencies_waits():
 
 def test_tick_multiple_todos_dispatches_exactly_one():
     """When multiple todos are all eligible, only the first one dispatches."""
-    fetch_todos = MagicMock(
-        return_value=[_todo(1, worktree="/tmp/wt1"), _todo(2, worktree="/tmp/wt2")]
-    )
+    fetch_todos = MagicMock(return_value=[_todo(1, worktree="/tmp/wt1"), _todo(2, worktree="/tmp/wt2")])
     check_active = MagicMock(return_value=False)
 
-    disposition = TreatmentDisposition(
-        "codex-implement", "1", ("implemented=false",)
-    )
+    disposition = TreatmentDisposition("codex-implement", "1", ("implemented=false",))
 
     with (
         patch(
@@ -505,10 +494,8 @@ def test_tick_multiple_todos_dispatches_exactly_one():
         patch(
             "tgw.development.foreman.evaluate",
             side_effect=[
-                _graph(graph_id="graph-1", object_id="/tmp/wt1",
-                       eligible=(disposition,)),
-                _graph(graph_id="graph-2", object_id="/tmp/wt2",
-                       eligible=(disposition,)),
+                _graph(graph_id="graph-1", object_id="/tmp/wt1", eligible=(disposition,)),
+                _graph(graph_id="graph-2", object_id="/tmp/wt2", eligible=(disposition,)),
             ],
         ),
         patch(
@@ -562,10 +549,7 @@ def test_tick_admits_most_urgent_eligible_todo():
         )
 
     assert result.dispatched == 1
-    assert enqueue.call_args.kwargs["dedupe_key"] == (
-        "treatment:codex-implement:coding_task:/tmp/wt-urgent:"
-        "abc123:codex-implement:1"
-    )
+    assert enqueue.call_args.kwargs["dedupe_key"] == ("treatment:codex-implement:coding_task:/tmp/wt-urgent:abc123:codex-implement:1")
     assert enqueue.call_args.kwargs["payload"]["todo_id"] == urgent.todo_id
 
 
@@ -577,20 +561,25 @@ def test_tick_equal_priority_orders_by_todo_id_then_treatment_identity():
     alpha = TreatmentDisposition("alpha", "1", ("ready",))
     enqueue = MagicMock(return_value="job-alpha")
     with (
-        patch("tgw.development.foreman.build_coding_snapshot", side_effect=[
-            _snapshot(object_id=first.worktree), _snapshot(object_id=second.worktree),
-        ]),
-        patch("tgw.development.foreman.evaluate", side_effect=[
-            _graph(graph_id="graph-z", object_id=first.worktree, eligible=(zeta,)),
-            _graph(graph_id="graph-a", object_id=second.worktree, eligible=(alpha,)),
-        ]),
+        patch(
+            "tgw.development.foreman.build_coding_snapshot",
+            side_effect=[
+                _snapshot(object_id=first.worktree),
+                _snapshot(object_id=second.worktree),
+            ],
+        ),
+        patch(
+            "tgw.development.foreman.evaluate",
+            side_effect=[
+                _graph(graph_id="graph-z", object_id=first.worktree, eligible=(zeta,)),
+                _graph(graph_id="graph-a", object_id=second.worktree, eligible=(alpha,)),
+            ],
+        ),
     ):
         result = tick(fetch_todos=lambda: [first, second], check_active_fn=lambda _: False, enqueue_fn=enqueue)
 
     assert result.dispatched == 1
-    assert enqueue.call_args.kwargs["dedupe_key"] == (
-        "treatment:zeta:coding_task:/tmp/wt-z:abc123:zeta:1"
-    )
+    assert enqueue.call_args.kwargs["dedupe_key"] == ("treatment:zeta:coding_task:/tmp/wt-z:abc123:zeta:1")
 
 
 def test_tick_null_priority_is_last():
@@ -600,26 +589,31 @@ def test_tick_null_priority_is_last():
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(return_value="job-real")
     with (
-        patch("tgw.development.foreman.build_coding_snapshot", side_effect=[
-            _snapshot(object_id=missing.worktree), _snapshot(object_id=real.worktree),
-        ]),
-        patch("tgw.development.foreman.evaluate", side_effect=[
-            _graph(graph_id="graph-missing", object_id=missing.worktree, eligible=(disposition,)),
-            _graph(graph_id="graph-real", object_id=real.worktree, eligible=(disposition,)),
-        ]),
+        patch(
+            "tgw.development.foreman.build_coding_snapshot",
+            side_effect=[
+                _snapshot(object_id=missing.worktree),
+                _snapshot(object_id=real.worktree),
+            ],
+        ),
+        patch(
+            "tgw.development.foreman.evaluate",
+            side_effect=[
+                _graph(graph_id="graph-missing", object_id=missing.worktree, eligible=(disposition,)),
+                _graph(graph_id="graph-real", object_id=real.worktree, eligible=(disposition,)),
+            ],
+        ),
     ):
         result = tick(fetch_todos=lambda: [missing, real], check_active_fn=lambda _: False, enqueue_fn=enqueue)
 
     assert result.dispatched == 1
-    assert enqueue.call_args.kwargs["dedupe_key"] == (
-        "treatment:codex-implement:coding_task:/tmp/wt-real:"
-        "abc123:codex-implement:1"
-    )
+    assert enqueue.call_args.kwargs["dedupe_key"] == ("treatment:codex-implement:coding_task:/tmp/wt-real:abc123:codex-implement:1")
 
 
 def test_tick_retry_wait_job_is_active_and_not_reenqueued():
     """A retry-wait graph remains owned; dedupe is not recorded as an error."""
     enqueue = MagicMock(return_value="should-not-run")
+    observed_keys = []
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     with (
         patch("tgw.development.foreman.build_coding_snapshot", return_value=_snapshot()),
@@ -627,20 +621,19 @@ def test_tick_retry_wait_job_is_active_and_not_reenqueued():
     ):
         result = tick(
             fetch_todos=lambda: [_todo()],
-            check_active_fn=lambda _graph_id: True,  # retry_wait is active
+            check_active_fn=lambda key: observed_keys.append(key) or True,
             enqueue_fn=enqueue,
         )
 
     assert result.skipped_active == 1
     assert result.errors == 0
+    assert observed_keys == ["treatment:codex-implement:coding_task:/tmp/worktree-1:abc123:codex-implement:1"]
     enqueue.assert_not_called()
 
 
 def test_tick_wires_evaluator_fingerprints_to_codex_dispatch():
     """A ready implementation graph launches codex with its decision record."""
-    disposition = TreatmentDisposition(
-        "codex-implement", "1", ("implemented=false: not implemented",)
-    )
+    disposition = TreatmentDisposition("codex-implement", "1", ("implemented=false: not implemented",))
     graph = _graph(
         graph_id="graph-ready",
         eligible=(disposition,),
@@ -678,10 +671,7 @@ def test_tick_wires_evaluator_fingerprints_to_codex_dispatch():
     call = enqueue.call_args.kwargs
     assert call["queue_name"] == "codex-implement"
     assert call["handler_family"] == "codex-implement"
-    assert call["dedupe_key"] == (
-        "treatment:codex-implement:coding_task:/tmp/worktree-1:"
-        "abc123:codex-implement:1"
-    )
+    assert call["dedupe_key"] == ("treatment:codex-implement:coding_task:/tmp/worktree-1:abc123:codex-implement:1")
     assert call["entity_type"] == "coding_task"
     assert call["payload"]["todo_id"] == 1731
     assert call["payload"]["treatment_id"] == "codex-implement"
@@ -707,9 +697,7 @@ def test_tick_routes_post_implementation_treatments_by_identity():
             ),
             patch(
                 "tgw.development.foreman.evaluate",
-                return_value=_graph(
-                    graph_id=f"graph-{treatment_id}", eligible=(disposition,)
-                ),
+                return_value=_graph(graph_id=f"graph-{treatment_id}", eligible=(disposition,)),
             ),
         ):
             result = tick(
@@ -736,15 +724,23 @@ def test_real_evaluator_dispatches_stitch_after_review_and_verification():
             _assertion("committed", FingerprintResult.FALSE, "not committed"),
         ),
     )
-    dispatch = MagicMock(return_value=DispatchResult(
-        "hermes-stitch", "1", "hermes-stitch", todo.worktree, True, job_id="stitch-job",
-    ))
+    dispatch = MagicMock(
+        return_value=DispatchResult(
+            "hermes-stitch",
+            "1",
+            "hermes-stitch",
+            todo.worktree,
+            True,
+            job_id="stitch-job",
+        )
+    )
     with (
         patch("tgw.development.foreman.build_coding_snapshot", return_value=snapshot),
         patch("tgw.development.foreman.dispatch_treatment", dispatch),
     ):
         result = tick(
-            fetch_todos=lambda: [todo], check_active_fn=lambda _: False,
+            fetch_todos=lambda: [todo],
+            check_active_fn=lambda _: False,
             check_terminal_fn=lambda _: False,
         )
     assert result.dispatched == 1
@@ -757,21 +753,25 @@ def test_tick_dispatch_failure_continues_to_lower_priority_todo():
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(side_effect=[RuntimeError("queue unavailable"), "second-job"])
     with (
-        patch("tgw.development.foreman.build_coding_snapshot", side_effect=[
-            _snapshot(object_id=first.worktree), _snapshot(object_id=second.worktree),
-        ]),
-        patch("tgw.development.foreman.evaluate", side_effect=[
-            _graph(graph_id="first", object_id=first.worktree, eligible=(disposition,)),
-            _graph(graph_id="second", object_id=second.worktree, eligible=(disposition,)),
-        ]),
+        patch(
+            "tgw.development.foreman.build_coding_snapshot",
+            side_effect=[
+                _snapshot(object_id=first.worktree),
+                _snapshot(object_id=second.worktree),
+            ],
+        ),
+        patch(
+            "tgw.development.foreman.evaluate",
+            side_effect=[
+                _graph(graph_id="first", object_id=first.worktree, eligible=(disposition,)),
+                _graph(graph_id="second", object_id=second.worktree, eligible=(disposition,)),
+            ],
+        ),
     ):
         result = tick(fetch_todos=lambda: [first, second], check_active_fn=lambda _: False, check_terminal_fn=lambda _: False, enqueue_fn=enqueue)
     assert result.dispatched == 1
     assert result.errors == 1
-    assert enqueue.call_args.kwargs["dedupe_key"] == (
-        "treatment:codex-implement:coding_task:/tmp/second:"
-        "abc123:codex-implement:1"
-    )
+    assert enqueue.call_args.kwargs["dedupe_key"] == ("treatment:codex-implement:coding_task:/tmp/second:abc123:codex-implement:1")
 
 
 def test_tick_duplicate_dispatch_is_not_an_error_and_continues():
@@ -783,13 +783,20 @@ def test_tick_duplicate_dispatch_is_not_an_error_and_continues():
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(side_effect=[DuplicateKey(), "second-job"])
     with (
-        patch("tgw.development.foreman.build_coding_snapshot", side_effect=[
-            _snapshot(object_id=first.worktree), _snapshot(object_id=second.worktree),
-        ]),
-        patch("tgw.development.foreman.evaluate", side_effect=[
-            _graph(graph_id="first", object_id=first.worktree, eligible=(disposition,)),
-            _graph(graph_id="second", object_id=second.worktree, eligible=(disposition,)),
-        ]),
+        patch(
+            "tgw.development.foreman.build_coding_snapshot",
+            side_effect=[
+                _snapshot(object_id=first.worktree),
+                _snapshot(object_id=second.worktree),
+            ],
+        ),
+        patch(
+            "tgw.development.foreman.evaluate",
+            side_effect=[
+                _graph(graph_id="first", object_id=first.worktree, eligible=(disposition,)),
+                _graph(graph_id="second", object_id=second.worktree, eligible=(disposition,)),
+            ],
+        ),
     ):
         result = tick(fetch_todos=lambda: [first, second], check_active_fn=lambda _: False, check_terminal_fn=lambda _: False, enqueue_fn=enqueue)
     assert result.dispatched == 1
@@ -803,21 +810,31 @@ def test_tick_terminal_graph_is_durably_skipped_and_does_not_starve_next_todo():
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(return_value="second-job")
     with (
-        patch("tgw.development.foreman.build_coding_snapshot", side_effect=[
-            _snapshot(object_id=first.worktree), _snapshot(object_id=second.worktree),
-        ]),
-        patch("tgw.development.foreman.evaluate", side_effect=[
-            _graph(graph_id="terminal", object_id=first.worktree, eligible=(disposition,)),
-            _graph(graph_id="fresh", object_id=second.worktree, eligible=(disposition,)),
-        ]),
+        patch(
+            "tgw.development.foreman.build_coding_snapshot",
+            side_effect=[
+                _snapshot(object_id=first.worktree),
+                _snapshot(object_id=second.worktree),
+            ],
+        ),
+        patch(
+            "tgw.development.foreman.evaluate",
+            side_effect=[
+                _graph(graph_id="terminal", object_id=first.worktree, eligible=(disposition,)),
+                _graph(graph_id="fresh", object_id=second.worktree, eligible=(disposition,)),
+            ],
+        ),
     ):
-        result = tick(fetch_todos=lambda: [first, second], check_active_fn=lambda _: False, check_terminal_fn=lambda graph_id: graph_id == "terminal", enqueue_fn=enqueue)
+        terminal_key = "treatment:codex-implement:coding_task:/tmp/first:abc123:codex-implement:1"
+        result = tick(
+            fetch_todos=lambda: [first, second],
+            check_active_fn=lambda _: False,
+            check_terminal_fn=lambda key: key == terminal_key,
+            enqueue_fn=enqueue,
+        )
     assert result.dispatched == 1
     assert result.skipped_terminal == 1
-    assert enqueue.call_args.kwargs["dedupe_key"] == (
-        "treatment:codex-implement:coding_task:/tmp/second:"
-        "abc123:codex-implement:1"
-    )
+    assert enqueue.call_args.kwargs["dedupe_key"] == ("treatment:codex-implement:coding_task:/tmp/second:abc123:codex-implement:1")
 
 
 def test_tick_rejects_outside_root_before_snapshot_or_dispatch(tmp_path, monkeypatch):
@@ -831,8 +848,9 @@ def test_tick_rejects_outside_root_before_snapshot_or_dispatch(tmp_path, monkeyp
     (evil / "conftest.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran')\n")
     todo = TodoRecord(1731, "test-agent", 1, f"worktree: {evil}", str(evil))
     result = tick(
-        config=ForemanConfig(coding_config={"worktree_root": str(tmp_path / "canonical"), "repository_root": str(tmp_path / "repository")} ),
-        fetch_todos=lambda: [todo], check_active_fn=lambda _: False,
+        config=ForemanConfig(coding_config={"worktree_root": str(tmp_path / "canonical"), "repository_root": str(tmp_path / "repository")}),
+        fetch_todos=lambda: [todo],
+        check_active_fn=lambda _: False,
     )
     assert result.errors == 1
     assert not marker.exists()
@@ -860,9 +878,7 @@ def test_tick_skips_todo_without_worktree():
 
 
 def test_tick_limit_caps_processing():
-    fetch_todos = MagicMock(
-        return_value=[_todo(1), _todo(2), _todo(3)]
-    )
+    fetch_todos = MagicMock(return_value=[_todo(1), _todo(2), _todo(3)])
     check_active = MagicMock(return_value=False)
 
     result = tick(

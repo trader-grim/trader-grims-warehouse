@@ -25,13 +25,17 @@ from tgw.workflow_kernel.contracts import (
     TreatmentDisposition,
 )
 from tgw.workflow_kernel.evaluator import evaluate
-from tgw.workflow_kernel.scheduler import DispatchResult, dispatch_treatment
+from tgw.workflow_kernel.scheduler import (
+    DispatchResult,
+    dispatch_treatment,
+    treatment_dedupe_key,
+)
 
 log = logging.getLogger(__name__)
 
 EVALUATOR_VERSION = "foreman/v1"
 
-# Active job states — if a job for the same graph_id is in any of these
+# Active job states — if a job for the same treatment identity is in any of these
 # states, the todo should be skipped (already dispatched).
 _ACTIVE_JOB_STATES = frozenset({"queued", "leased", "running", "retry_wait"})
 
@@ -132,16 +136,16 @@ class _EligibleTreatment:
 
 
 def _has_active_job(
-    graph_id: str,
+    dedupe_key: str,
     check_active_fn: Callable[[str], bool] | None = None,
 ) -> bool:
-    """Return ``True`` if a job with ``graph_id`` is currently active.
+    """Return whether the exact scheduler treatment identity is active.
 
-    *check_active_fn* is a callable ``(graph_id: str) -> bool`` for testing.
-    When ``None``, uses ``tgw.queue.state_machine`` (requires a database).
+    ``check_active_fn`` receives the scheduler dedupe key in tests.  When it
+    is absent, the development queue database is queried directly.
     """
     if check_active_fn is not None:
-        return check_active_fn(graph_id)
+        return check_active_fn(dedupe_key)
 
     # Lazily import to avoid DB dependency in pure tests.
     from tgw.queue.state_machine import _conn
@@ -155,25 +159,25 @@ def _has_active_job(
                        AND state = ANY(%s::queue_job_state[])
                      LIMIT 1
                     """,
-                (graph_id, list(_ACTIVE_JOB_STATES)),
+                (dedupe_key, list(_ACTIVE_JOB_STATES)),
             )
             return cur.fetchone() is not None
     except Exception:
         log.warning(
-            "failed to check active jobs for graph_id=%s — treating as inactive",
-            graph_id,
+            "failed to check active jobs for dedupe_key=%s — treating as inactive",
+            dedupe_key,
             exc_info=True,
         )
         return False
 
 
 def _has_terminal_job(
-    graph_id: str,
+    dedupe_key: str,
     check_terminal_fn: Callable[[str], bool] | None = None,
 ) -> bool:
-    """Return whether this unchanged graph already reached a durable terminal state."""
+    """Return whether this exact treatment identity reached a terminal state."""
     if check_terminal_fn is not None:
-        return check_terminal_fn(graph_id)
+        return check_terminal_fn(dedupe_key)
     from tgw.queue.state_machine import _conn
 
     try:
@@ -185,11 +189,11 @@ def _has_terminal_job(
                        AND state = ANY(%s::queue_job_state[])
                      LIMIT 1
                 """,
-                (graph_id, ["succeeded", "failed", "dead_letter"]),
+                (dedupe_key, ["succeeded", "failed", "dead_letter"]),
             )
             return cur.fetchone() is not None
     except Exception:
-        log.warning("failed to check terminal jobs for graph_id=%s", graph_id, exc_info=True)
+        log.warning("failed to check terminal jobs for dedupe_key=%s", dedupe_key, exc_info=True)
         return False
 
 
@@ -248,9 +252,7 @@ def _extract_worktree(body: str) -> str:
     import re
 
     # Pattern: "worktree:" or "worktree =" followed by a path
-    match = re.search(
-        r"worktree\s*[:=]\s*(/\S+)", body, re.IGNORECASE
-    )
+    match = re.search(r"worktree\s*[:=]\s*(/\S+)", body, re.IGNORECASE)
     if match:
         return match.group(1)
 
@@ -332,7 +334,9 @@ def tick(
             # pytest/ruff in the candidate directory.  Never trust the
             # free-text todo path.
             worktree = validated_coding_worktree(
-                todo.worktree, todo.worktree, cfg.coding_config,
+                todo.worktree,
+                todo.worktree,
+                cfg.coding_config,
             )
             implementation_baseline = None
             binding = todo.plan_binding
@@ -346,7 +350,9 @@ def tick(
                 if binding.get("source_commit") != cfg.fixture_implementation_baseline_commit:
                     raise ValueError("fixture implementation baseline disagrees with Plan binding")
             snapshot = build_coding_snapshot(
-                worktree, cfg.goal_profile, cfg.treatments,
+                worktree,
+                cfg.goal_profile,
+                cfg.treatments,
                 implementation_baseline_commit=implementation_baseline,
             )
         except Exception:
@@ -369,21 +375,10 @@ def tick(
             )
         except Exception:
             log.exception(
-                "evaluate failed for todo %d", todo.todo_id,
+                "evaluate failed for todo %d",
+                todo.todo_id,
             )
             result = replace(result, errors=result.errors + 1)
-            continue
-
-        # Generation-stable dedupe: skip if an active job already exists.
-        if _has_active_job(graph.graph_id, check_active_fn):
-            result = replace(result, skipped_active=result.skipped_active + 1)
-            continue
-
-        # An unchanged graph which already completed, failed, or dead-lettered
-        # is durable terminal evidence.  A source/evidence change produces a
-        # new graph id and is therefore eligible for a fresh attempt.
-        if _has_terminal_job(graph.graph_id, check_terminal_fn):
-            result = replace(result, skipped_terminal=result.skipped_terminal + 1)
             continue
 
         # If no eligible treatments, record waiting reason.
@@ -394,10 +389,7 @@ def tick(
                     todo.todo_id,
                     graph.object_id,
                     len(graph.waiting_treatments),
-                    [
-                        (w.treatment_id, w.reasons)
-                        for w in graph.waiting_treatments
-                    ],
+                    [(w.treatment_id, w.reasons) for w in graph.waiting_treatments],
                 )
             result = replace(result, skipped_waiting=result.skipped_waiting + 1)
             continue
@@ -414,6 +406,20 @@ def tick(
             continue
 
         for disposition in graph.eligible_treatments:
+            dedupe_key = treatment_dedupe_key(
+                disposition,
+                entity_type="coding_task",
+                entity_id=canonical_todo.worktree,
+                object_generation=graph.object_generation,
+            )
+            if _has_active_job(dedupe_key, check_active_fn):
+                result = replace(result, skipped_active=result.skipped_active + 1)
+                continue
+            # A terminal queue outcome owns this exact source generation until
+            # its source changes or an operator explicitly requeues that job.
+            if _has_terminal_job(dedupe_key, check_terminal_fn):
+                result = replace(result, skipped_terminal=result.skipped_terminal + 1)
+                continue
             eligible.append(
                 _EligibleTreatment(
                     todo=canonical_todo,
@@ -451,14 +457,16 @@ def tick(
             if disposition.treatment_id == "codex-implement":
                 if not chosen.todo.body.strip():
                     raise ValueError("Codex implementation requires a canonical Todo task")
-                payload_extra.update({
-                    "task_spec": {
-                        "schema": "coding-task/v1",
-                        "todo_id": chosen.todo.todo_id,
-                        "agent": "codex",
-                        "body": chosen.todo.body,
-                    },
-                })
+                payload_extra.update(
+                    {
+                        "task_spec": {
+                            "schema": "coding-task/v1",
+                            "todo_id": chosen.todo.todo_id,
+                            "agent": "codex",
+                            "body": chosen.todo.body,
+                        },
+                    }
+                )
             dispatch_result: DispatchResult = dispatch_treatment(
                 disposition=disposition,
                 entity_id=chosen.graph.object_id,
@@ -478,8 +486,7 @@ def tick(
             continue
         if dispatch_result.enqueued:
             log.info(
-                "dispatched %s for todo %d → job %s; evaluator graph %s "
-                "recorded in queue payload",
+                "dispatched %s for todo %d → job %s; evaluator graph %s recorded in queue payload",
                 chosen.disposition.treatment_id,
                 chosen.todo.todo_id,
                 dispatch_result.job_id,

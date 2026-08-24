@@ -24,9 +24,7 @@ from tgw.workflow_kernel.contracts import (
     OUTCOME_SATISFIED,
 )
 
-CODING_TREATMENTS = frozenset(
-    {"codex-implement", "claude-review", "controller-verify", "hermes-stitch"}
-)
+CODING_TREATMENTS = frozenset({"codex-implement", "claude-review", "controller-verify", "hermes-stitch"})
 
 DEFAULT_WORKTREE_ROOT = Path("/opt/TGW/var/worktrees")
 DEFAULT_REPOSITORY_ROOT = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
@@ -46,9 +44,14 @@ _MAY_ESTABLISH = {
     "controller-verify": frozenset({"tested", "linted", "controller_verified"}),
     "hermes-stitch": frozenset({"committed"}),
 }
-_VALID_OUTCOMES = frozenset({
-    OUTCOME_SATISFIED, OUTCOME_FAILED, OUTCOME_PARTIAL, OUTCOME_CONFLICT,
-})
+_VALID_OUTCOMES = frozenset(
+    {
+        OUTCOME_SATISFIED,
+        OUTCOME_FAILED,
+        OUTCOME_PARTIAL,
+        OUTCOME_CONFLICT,
+    }
+)
 
 
 def validated_coding_worktree(
@@ -150,15 +153,11 @@ class CodingWorker(QueueWorker):
             raise HardFailure("coding timeout_s must be a positive integer")
         return timeout
 
-    def _launch_configured_command(
-        self, treatment_id: str, payload: dict[str, Any], worktree: Path
-    ) -> dict[str, Any]:
+    def _launch_configured_command(self, treatment_id: str, payload: dict[str, Any], worktree: Path) -> dict[str, Any]:
         """Run the configured argv command for a treatment in its worktree."""
         command = self._configured_command(treatment_id)
         if not isinstance(command, list) or not all(isinstance(arg, str) for arg in command):
-            raise HardFailure(
-                f"coding.commands.{treatment_id} must be a non-empty argv list"
-            )
+            raise HardFailure(f"coding.commands.{treatment_id} must be a non-empty argv list")
         if not command:
             raise HardFailure(f"coding.commands.{treatment_id} is empty")
         try:
@@ -169,14 +168,16 @@ class CodingWorker(QueueWorker):
                 text=True,
                 capture_output=True,
                 timeout=self._timeout_seconds(),
-                env={**os.environ, "TGW_CODING_JOB": json.dumps(payload)},
+                env={
+                    **os.environ,
+                    "TGW_CODING_JOB": json.dumps(payload),
+                    "TGW_CODING_WORKTREE_SRC": str(worktree / "src"),
+                },
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RuntimeError(f"coding launcher failed: {exc}") from exc
         if completed.returncode:
-            raise RuntimeError(
-                f"coding launcher exited {completed.returncode}: {completed.stderr[-500:]}"
-            )
+            raise RuntimeError(f"coding launcher exited {completed.returncode}: {completed.stderr[-500:]}")
         # Exit status only says the launcher executed.  Its structured result
         # states whether the treatment's authority condition was satisfied.
         try:
@@ -196,27 +197,21 @@ class CodingWorker(QueueWorker):
     def _configured_command(self, treatment_id: str) -> list[str]:
         commands = self._coding_config().get("commands", {})
         command = commands.get(treatment_id) if isinstance(commands, dict) else None
-        if not isinstance(command, list) or not command or not all(
-            isinstance(arg, str) and arg for arg in command
-        ):
-            raise HardFailure(
-                f"coding.commands.{treatment_id} must be a non-empty argv list"
-            )
+        if not isinstance(command, list) or not command or not all(isinstance(arg, str) and arg for arg in command):
+            raise HardFailure(f"coding.commands.{treatment_id} must be a non-empty argv list")
         runner = Path(command[0]).name.lower()
         if runner in {"ssh", "sudo", "sh", "bash"}:
             raise HardFailure("coding runner must use the configured local argv protocol")
         allowed = self._coding_config().get("allowed_runners")
-        if allowed is not None and (
-            not isinstance(allowed, list)
-            or not all(isinstance(item, str) and item for item in allowed)
-            or command[0] not in allowed
-        ):
+        if allowed is not None and (not isinstance(allowed, list) or not all(isinstance(item, str) and item for item in allowed) or command[0] not in allowed):
             raise HardFailure("coding command is not an allowed local runner")
         return command
 
     def _validated_worktree(self, payload: dict[str, Any]) -> Path:
         return validated_coding_worktree(
-            payload.get("worktree"), payload.get("object_id"), self._coding_config(),
+            payload.get("worktree"),
+            payload.get("object_id"),
+            self._coding_config(),
         )
 
     @staticmethod
@@ -225,7 +220,10 @@ class CodingWorker(QueueWorker):
         try:
             probe = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel", "--git-common-dir"],
-                cwd=path, check=False, text=True, capture_output=True,
+                cwd=path,
+                check=False,
+                text=True,
+                capture_output=True,
             )
         except OSError:
             return None, None
@@ -243,7 +241,9 @@ class CodingWorker(QueueWorker):
         return top, common
 
     def _validated_launcher_result(
-        self, treatment_id: str, launcher_result: dict[str, Any] | None,
+        self,
+        treatment_id: str,
+        launcher_result: dict[str, Any] | None,
     ) -> tuple[str, list[str], list[Any]]:
         if not isinstance(launcher_result, dict):
             raise HardFailure("coding launcher returned no structured outcome")
@@ -286,15 +286,10 @@ class CodingWorker(QueueWorker):
         payload = dict(job.get("payload_json") or {})
         treatment_id = str(payload.get("treatment_id") or self.queue_name)
         if treatment_id != self.queue_name:
-            raise HardFailure(
-                f"job treatment {treatment_id!r} does not match queue {self.queue_name!r}"
-            )
+            raise HardFailure(f"job treatment {treatment_id!r} does not match queue {self.queue_name!r}")
         if not isinstance(payload.get("graph_id"), str) or not payload["graph_id"]:
             raise HardFailure("coding job has no graph_id")
-        if (
-            not isinstance(payload.get("object_generation"), str)
-            or not payload["object_generation"]
-        ):
+        if not isinstance(payload.get("object_generation"), str) or not payload["object_generation"]:
             raise HardFailure("coding job has no object_generation")
         worktree = self._validated_worktree(payload)
         plan_binding = self._validated_plan_binding(payload, worktree)
@@ -302,7 +297,8 @@ class CodingWorker(QueueWorker):
         try:
             launcher_result = self._launcher(treatment_id, payload, worktree)
             outcome, established, artifacts = self._validated_launcher_result(
-                treatment_id, launcher_result,
+                treatment_id,
+                launcher_result,
             )
         except (HardFailure, RuntimeError) as exc:
             # Persist a local mechanical failure so the next snapshot can

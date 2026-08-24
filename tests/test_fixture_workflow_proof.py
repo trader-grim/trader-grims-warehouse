@@ -1,5 +1,5 @@
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 from tgw.development.fixture_workflow_proof import run_fixture_proof
 

@@ -28,9 +28,11 @@ EVALUATOR_VERSION = "workflow-scheduler/v2"
 
 # ── Phase 4: DispatchResult dataclass ──────────────────────────────────────
 
+
 @dataclass
 class DispatchResult:
     """Result of dispatching a single treatment."""
+
     treatment_id: str
     treatment_version: str
     queue_name: str
@@ -56,9 +58,22 @@ _TREATMENT_QUEUE_MAP: dict[str, str] = {
     "catalog-rebuild": "catalog_rebuild",
 }
 
+
 def _treatment_to_queue(treatment_id: str) -> str:
     """Resolve treatment_id to queue worker name."""
     return _TREATMENT_QUEUE_MAP.get(treatment_id, treatment_id)
+
+
+def treatment_dedupe_key(
+    disposition: TreatmentDisposition,
+    *,
+    entity_type: str,
+    entity_id: str,
+    object_generation: str,
+) -> str:
+    """Return the one durable queue identity shared by dispatch and Foreman."""
+    queue_name = _treatment_to_queue(disposition.treatment_id)
+    return f"treatment:{queue_name}:{entity_type}:{entity_id}:{object_generation}:{disposition.treatment_id}:{disposition.treatment_version}"
 
 
 def select_treatment(graph: RuntimeWorkGraph, treatments: tuple[TreatmentContract, ...]) -> TreatmentContract | None:
@@ -119,10 +134,7 @@ def _dispatch_treatment_v2(
         return None
 
     if graph.ownership_conflicts:
-        conflicts_repr = [
-            f"{left} ↔ {right}: {', '.join(overlap)}"
-            for left, right, overlap in graph.ownership_conflicts
-        ]
+        conflicts_repr = [f"{left} ↔ {right}: {', '.join(overlap)}" for left, right, overlap in graph.ownership_conflicts]
         log.info(
             "dispatch_treatment: ownership conflicts present for graph_id=%s — %s",
             graph.graph_id,
@@ -141,14 +153,9 @@ def _dispatch_treatment_v2(
     chosen: TreatmentDisposition = graph.eligible_treatments[0]
 
     if len(graph.eligible_treatments) > 1:
-        remaining = [
-            f"{d.treatment_id}@{d.treatment_version}"
-            for d in graph.eligible_treatments[1:]
-        ]
+        remaining = [f"{d.treatment_id}@{d.treatment_version}" for d in graph.eligible_treatments[1:]]
         log.info(
-            "dispatch_treatment: dispatching %s@%s (first eligible); "
-            "%d additional eligible treatment(s) available but not "
-            "dispatched: %s",
+            "dispatch_treatment: dispatching %s@%s (first eligible); %d additional eligible treatment(s) available but not dispatched: %s",
             chosen.treatment_id,
             chosen.treatment_version,
             len(remaining),
@@ -156,12 +163,13 @@ def _dispatch_treatment_v2(
         )
 
     treatment = _lookup_treatment(
-        chosen.treatment_id, chosen.treatment_version, treatments,
+        chosen.treatment_id,
+        chosen.treatment_version,
+        treatments,
     )
     if treatment is None:
         log.error(
-            "dispatch_treatment: treatment %s@%s is in eligible list "
-            "but not in the supplied treatments tuple",
+            "dispatch_treatment: treatment %s@%s is in eligible list but not in the supplied treatments tuple",
             chosen.treatment_id,
             chosen.treatment_version,
         )
@@ -192,8 +200,7 @@ def _dispatch_treatment_v2(
             dedupe_key=graph.graph_id,
         )
         log.info(
-            "dispatch_treatment: enqueued job_id=%s queue=%s "
-            "treatment=%s@%s graph_id=%s",
+            "dispatch_treatment: enqueued job_id=%s queue=%s treatment=%s@%s graph_id=%s",
             job_id,
             treatment.identity,
             chosen.treatment_id,
@@ -204,8 +211,7 @@ def _dispatch_treatment_v2(
     except Exception as exc:
         if _is_duplicate_key(exc):
             log.info(
-                "dispatch_treatment: graph_id=%s already enqueued "
-                "(dedupe collision) — idempotent, returning None",
+                "dispatch_treatment: graph_id=%s already enqueued (dedupe collision) — idempotent, returning None",
                 graph.graph_id,
             )
             return None
@@ -273,9 +279,7 @@ def _dispatch_treatment_v4(
             }
         )
     if payload_extra and "observation_checkpoint" in payload_extra:
-        raise ValueError(
-            "observation_checkpoint is reserved for the running worker"
-        )
+        raise ValueError("observation_checkpoint is reserved for the running worker")
     if payload_extra:
         payload.update(payload_extra)
     if entity_type == "item":
@@ -291,10 +295,11 @@ def _dispatch_treatment_v4(
     # ai_identify calls against the same generation.  One treatment may be
     # active for one entity generation at a time.  A later mutation gets a
     # new generation and therefore a new, valid job.
-    active_dedupe_key = (
-        f"treatment:{queue_name}:{entity_type}:{entity_id}:"
-        f"{graph.object_generation if graph is not None else 'manual'}:"
-        f"{disposition.treatment_id}:{disposition.treatment_version}"
+    active_dedupe_key = treatment_dedupe_key(
+        disposition,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        object_generation=graph.object_generation if graph is not None else "manual",
     )
 
     try:

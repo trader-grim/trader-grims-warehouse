@@ -3,29 +3,43 @@ from contextlib import contextmanager
 import pytest
 
 from tgw.development.fixture_isolation import (
-    FixtureIsolationError, create_fixture_todo, fixture_enqueue, fixture_queue_name,
-    fixture_worktree_root, run_fixture_job_once, validate_fixture_run_id, cleanup_fixture_run,
+    FixtureIsolationError,
+    cleanup_fixture_run,
+    create_fixture_todo,
+    fixture_enqueue,
+    fixture_queue_name,
+    fixture_worktree_root,
+    run_fixture_job_once,
+    validate_fixture_run_id,
 )
-from tgw.workers.coding import CodingWorker
 from tgw.development.plan_binding import execution_root_hash
-
+from tgw.workers.coding import CodingWorker
 
 RUN_ID = "fixture-local-spine-001"
 
 
 def _binding():
     root = {
-        "schema": "tgw-execution-root/v1", "kind": "plan",
-        "plan_id": "fixture", "profile": "implementation", "plan_commit": "a" * 40,
+        "schema": "tgw-execution-root/v1",
+        "kind": "plan",
+        "plan_id": "fixture",
+        "profile": "implementation",
+        "plan_commit": "a" * 40,
     }
     root["identity_hash"] = execution_root_hash(root)
     return {
-        "schema": "tgw-plan-coding-todo/v1", "plan_commit": "a" * 40,
-        "solution_hash": "sha256:" + "1" * 64, "closure_hash": "sha256:" + "2" * 64,
-        "capability": "fixture.code@1", "treatment_id": "codex-implement",
-        "source_commit": "a" * 40, "requested_worktree_identity": RUN_ID,
-        "idempotency_key": "sha256:key", "worktree": "/configured/fixture",
-        "worktree_identity": {"worktree": "/configured/fixture"}, "fixture_run_id": RUN_ID,
+        "schema": "tgw-plan-coding-todo/v1",
+        "plan_commit": "a" * 40,
+        "solution_hash": "sha256:" + "1" * 64,
+        "closure_hash": "sha256:" + "2" * 64,
+        "capability": "fixture.code@1",
+        "treatment_id": "codex-implement",
+        "source_commit": "a" * 40,
+        "requested_worktree_identity": RUN_ID,
+        "idempotency_key": "sha256:key",
+        "worktree": "/configured/fixture",
+        "worktree_identity": {"worktree": "/configured/fixture"},
+        "fixture_run_id": RUN_ID,
         "execution_root": root,
     }
 
@@ -51,7 +65,9 @@ def test_fixture_dispatch_uses_namespaced_queue_and_preserves_binding():
     calls = []
     enqueue = fixture_enqueue(RUN_ID, lambda *args, **kwargs: calls.append((args, kwargs)) or "fixture-job")
     payload = {
-        "todo_id": 7, "treatment_id": "codex-implement", "object_id": "/configured/fixture",
+        "todo_id": 7,
+        "treatment_id": "codex-implement",
+        "object_id": "/configured/fixture",
         "plan_binding": _binding(),
         "task_spec": {"schema": "coding-task/v1", "todo_id": 7, "agent": "codex", "body": "fixture"},
     }

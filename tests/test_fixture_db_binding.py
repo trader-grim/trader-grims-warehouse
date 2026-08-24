@@ -3,10 +3,11 @@ from types import SimpleNamespace
 import pytest
 
 from tgw.development.fixture_db_binding import (
-    FixtureDatabaseBindingError, _explicit_dsn, fixture_worker_config,
+    FixtureDatabaseBindingError,
+    _explicit_dsn,
+    fixture_worker_config,
     initialize_fixture_database,
 )
-
 
 DSN = "dbname=tgw_lib_dev_state_machine"
 
@@ -105,10 +106,13 @@ def test_wrong_identity_or_target_refuses_before_adapter_initialization(monkeypa
         initialize_fixture_database(config_path=_config(tmp_path), connect=lambda _dsn: _WrongRoleConnection())
 
 
-@pytest.mark.parametrize("columns, missing", [
-    (("status_note",), "reasoning"),
-    (("reasoning",), "status_note"),
-])
+@pytest.mark.parametrize(
+    "columns, missing",
+    [
+        (("status_note",), "reasoning"),
+        (("reasoning",), "status_note"),
+    ],
+)
 def test_fixture_preflight_refuses_missing_todo_schema_columns(monkeypatch, tmp_path, columns, missing):
     monkeypatch.setattr("tgw.development.fixture_db_binding.pwd.getpwuid", lambda _uid: SimpleNamespace(pw_name="codex"))
     monkeypatch.setattr("tgw.development.fixture_db_binding.importlib.import_module", lambda _name: pytest.fail("must not import adapters"))
