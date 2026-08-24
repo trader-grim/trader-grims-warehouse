@@ -9,6 +9,7 @@ import json
 from tgw.development.foreman import ForemanConfig, TodoRecord, tick
 from tgw.development.provider_dispatch import ProviderDispatchError, resolve_implementation_adapter
 from tgw.development.plan_binding import execution_root_hash
+from tgw.plan_execution_card import card_hash
 from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
 from tgw.workflow_kernel.contracts import RuntimeWorkGraph, TreatmentDisposition
 from tgw.workers.coding import CodingWorker
@@ -42,6 +43,23 @@ def _graph(worktree: Path) -> RuntimeWorkGraph:
     )
 
 
+def _plan_card() -> dict:
+    names = ("plan_input", "plan_commit", "plan_graph", "codegraph_snapshot", "source_tree", "execution_environment", "authority_conditions", "candidate_evidence", "receipt_sink")
+    resources = {name: {"ref": f"test:{name}", "hash": "sha256:" + "0" * 64} for name in names}
+    card = {
+        "schema": "tgw-plan-execution-card/v1", "plan": {"id": "P", "commit": "a" * 40, "root": {}},
+        "solution": {"hash": "sha256:" + "1" * 64, "closure_hash": "sha256:" + "2" * 64},
+        "work_unit": {"id": "W", "capability": "code@1", "treatment_id": "establish:base@1", "provider": "base"},
+        "role": {"canonical": "implementation", "provider_selection": "launch-time-qualified-provider"},
+        "receiver": {"required_capability": "promptcraft.receiver-profiles@1", "capability_provider": "recovered-promptcraft", "selected_provider": "launch-time-qualified-provider", "handoff": {"adapter": "promptcraft-card-handoff", "schema": "tgw-launcher-handoff/v1"}},
+        "resources": resources, "source": {"commit": "a" * 40, "tree": "b" * 40}, "environment": {"id": "test"},
+        "receipt_sink": dict(resources["receipt_sink"]), "stop_conditions": ["failed-candidate"],
+        "task": {"intent": "test", "acceptance": ["pass"], "source_references": [], "body": "implement"},
+        "scheduling": {"phase": 0, "ordinal": 0, "transport_priority": 1},
+    }
+    return {**card, "card_hash": card_hash(card)}
+
+
 def test_neutral_implementation_selects_codex_local_runner(tmp_path):
     adapter = resolve_implementation_adapter(
         {"commands": {"codex-implement": [_runner(tmp_path / "codex"), "run"]}},
@@ -56,7 +74,7 @@ def test_foreman_worker_and_receipt_preserve_role_provider_adapter_and_plan_bind
     worktree = tmp_path / "worktree"; worktree.mkdir()
     binding = {
         "schema": "tgw-plan-coding-todo/v1", "plan_commit": "a" * 40,
-        "solution_hash": "sha256:solution", "closure_hash": "sha256:closure",
+        "solution_hash": "sha256:" + "1" * 64, "closure_hash": "sha256:" + "2" * 64,
         "capability": "code@1", "treatment_id": "establish:base@1",
         "source_commit": "a" * 40, "requested_worktree_identity": "allocated",
         "idempotency_key": "sha256:key", "worktree": str(worktree),
@@ -65,8 +83,11 @@ def test_foreman_worker_and_receipt_preserve_role_provider_adapter_and_plan_bind
             "schema": "tgw-execution-root/v1", "kind": "plan", "plan_id": "P",
             "profile": "default", "plan_commit": "a" * 40,
         },
+        "execution_card": _plan_card(),
     }
     binding["execution_root"]["identity_hash"] = execution_root_hash(binding["execution_root"])
+    binding["execution_card"]["plan"]["root"] = dict(binding["execution_root"])
+    binding["execution_card"]["card_hash"] = card_hash(binding["execution_card"])
     todo = TodoRecord(9, "codex", 1, "implement", str(worktree), binding)
     enqueue = MagicMock(return_value="job-1")
     config = ForemanConfig(

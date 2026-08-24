@@ -8,6 +8,7 @@ from tgw.development.fixture_isolation import (
 )
 from tgw.workers.coding import CodingWorker
 from tgw.development.plan_binding import execution_root_hash
+from tgw.plan_execution_card import card_hash
 
 
 RUN_ID = "fixture-local-spine-001"
@@ -19,14 +20,30 @@ def _binding():
         "plan_id": "fixture", "profile": "implementation", "plan_commit": "a" * 40,
     }
     root["identity_hash"] = execution_root_hash(root)
+    resources = {name: {"ref": f"fixture:{name}", "hash": "sha256:" + "0" * 64} for name in (
+        "plan_input", "plan_commit", "plan_graph", "codegraph_snapshot", "source_tree",
+        "execution_environment", "authority_conditions", "candidate_evidence", "receipt_sink",
+    )}
+    card = {
+        "schema": "tgw-plan-execution-card/v1", "plan": {"id": "fixture", "commit": "a" * 40, "root": root},
+        "solution": {"hash": "sha256:" + "1" * 64, "closure_hash": "sha256:" + "2" * 64},
+        "work_unit": {"id": "fixture", "capability": "fixture.code@1", "treatment_id": "codex-implement", "provider": "fixture"},
+        "role": {"canonical": "implementation", "provider_selection": "launch-time-qualified-provider"},
+        "receiver": {"required_capability": "promptcraft.receiver-profiles@1", "capability_provider": "recovered-promptcraft", "selected_provider": "launch-time-qualified-provider", "handoff": {"adapter": "promptcraft-card-handoff", "schema": "tgw-launcher-handoff/v1"}},
+        "resources": resources, "source": {"commit": "a" * 40, "tree": "b" * 40}, "environment": {"id": "fixture"},
+        "receipt_sink": dict(resources["receipt_sink"]), "stop_conditions": ["failed-candidate"],
+        "task": {"intent": "fixture", "acceptance": ["pass"], "source_references": [], "body": "fixture"},
+        "scheduling": {"phase": 0, "ordinal": 0, "transport_priority": 1},
+    }
     return {
         "schema": "tgw-plan-coding-todo/v1", "plan_commit": "a" * 40,
-        "solution_hash": "sha256:solution", "closure_hash": "sha256:closure",
+        "solution_hash": "sha256:" + "1" * 64, "closure_hash": "sha256:" + "2" * 64,
         "capability": "fixture.code@1", "treatment_id": "codex-implement",
         "source_commit": "a" * 40, "requested_worktree_identity": RUN_ID,
         "idempotency_key": "sha256:key", "worktree": "/configured/fixture",
         "worktree_identity": {"worktree": "/configured/fixture"}, "fixture_run_id": RUN_ID,
         "execution_root": root,
+        "execution_card": {**card, "card_hash": card_hash(card)},
     }
 
 

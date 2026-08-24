@@ -75,8 +75,26 @@ def validate_plan_binding(value: object, *, todo_id: int | None = None) -> dict[
         any(not isinstance(binding.get(field), str) or not binding[field]
             for field in _REQUIRED_STRINGS)
         or not isinstance(binding.get("worktree_identity"), dict)
+        or not isinstance(binding.get("execution_card"), Mapping)
     ):
         raise MalformedPlanBindingError(f"{label} has malformed Plan binding")
+    # Imported lazily to avoid making the light-weight Todo parser import the
+    # full solver/bridge graph unless the Todo actually claims Plan execution.
+    from tgw.plan_execution_card import PlanExecutionCardError, validate_execution_card
+    try:
+        card = validate_execution_card(binding["execution_card"])
+    except PlanExecutionCardError as exc:
+        raise MalformedPlanBindingError(f"{label} has malformed Plan execution card") from exc
+    if (
+        card["plan"]["commit"] != binding["plan_commit"]
+        or card["solution"]["hash"] != binding["solution_hash"]
+        or card["solution"]["closure_hash"] != binding["closure_hash"]
+        or card["work_unit"]["capability"] != binding["capability"]
+        or card["work_unit"]["treatment_id"] != binding["treatment_id"]
+        or card["source"]["commit"] != binding["source_commit"]
+    ):
+        raise MalformedPlanBindingError(f"{label} Plan execution card does not match Plan binding")
+    binding["execution_card"] = card
     try:
         root = validate_execution_root(binding.get("execution_root"))
     except MalformedPlanBindingError as exc:

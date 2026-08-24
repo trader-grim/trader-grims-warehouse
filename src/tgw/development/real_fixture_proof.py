@@ -5,7 +5,7 @@ import hashlib
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from tgw.coding_provision_worker import _prepare_request_worktree
 from tgw.development.fixture_isolation import (
@@ -15,6 +15,8 @@ from tgw.development.fixture_isolation import (
 from tgw.development.fixture_db_binding import fixture_worker_config, initialize_fixture_database
 from tgw.development.foreman import ForemanConfig, tick
 from tgw.development.plan_todo_bridge import bind_leaf
+from tgw.development.plan_binding import execution_root_hash
+from tgw.plan_execution_card import build_execution_card
 from tgw.plan_solver import solve
 from tgw.workflow import compile_solution_runtime
 
@@ -40,10 +42,10 @@ def _git(root: Path, *args: str) -> str:
 def _fixture_solution(commit: str) -> PlanSolution:
     document = {
         "schema": "tgw-plan/v2", "plan_commit": commit,
-        "capabilities": ["fixture.code@1"],
-        "providers": [{"id": "fixture", "provides": ["fixture.code@1"]}],
+        "capabilities": ["fixture.code@1", "promptcraft.receiver-profiles@1"],
+        "providers": [{"id": "fixture", "provides": ["fixture.code@1"]}, {"id": "recovered-promptcraft", "provides": ["promptcraft.receiver-profiles@1"]}],
         "observations": [],
-        "target": {"id": "fixture", "profile": "implementation", "minimum_state": "admitted", "required_capabilities": ["fixture.code@1"]},
+        "target": {"id": "fixture", "profile": "implementation", "minimum_state": "admitted", "required_capabilities": ["fixture.code@1", "promptcraft.receiver-profiles@1"]},
     }
     native = solve(document)
     return PlanSolution(document, solve(document, conformance_result={"available": True, "closure_hash": native["closure_hash"]}))
@@ -90,12 +92,7 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
     bound = bind_leaf(
         compiled, solution=plan.solution, treatment_id=ready.treatment_id,
         source_commit=candidate_commit, worktree_identity=run_id, agent="codex",
-        body=(
-            "Fixture-only proof: create one untracked file named "
-            f".tgw-fixture-proof-{run_id} containing this fixture run ID, then report it. "
-            "Do not modify tracked source, configuration, or workflow receipts."
-        ),
-        priority=1, create_todo=create,
+        execution_card=_fixture_execution_card(compiled, plan.solution, ready.treatment_id, candidate_commit), create_todo=create,
         list_todos=lambda: list_fixture_todos(run_id),
         allocate_worktree=allocate,
         set_status_note=lambda todo_id, note: todo_set_status_note(todo_id, note, suppress_plan_render=True),
@@ -137,3 +134,19 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
             "coding_execution": receipt["execution_envelope"], "receipt": receipt,
             "database_binding": database_binding,
             "cleanup": lambda: cleanup_fixture_run(run_id, canonical_worktree_root=canonical_root, repository_root=source_root)}
+def _fixture_execution_card(compiled, solution: Mapping[str, Any], treatment_id: str, source_commit: str) -> dict[str, Any]:
+    root = {"schema": "tgw-execution-root/v1", "kind": "plan", "plan_id": "fixture",
+            "profile": "implementation", "plan_commit": source_commit}
+    root["identity_hash"] = execution_root_hash(root)
+    resources = {name: {"ref": f"fixture:{name}", "hash": "sha256:" + "0" * 64} for name in (
+        "plan_input", "plan_commit", "plan_graph", "codegraph_snapshot", "source_tree",
+        "execution_environment", "authority_conditions", "candidate_evidence", "receipt_sink",
+    )}
+    return build_execution_card(
+        compiled=compiled, solution=solution,
+        execution_graph={"plan_id": "fixture", "work_units": [{"id": "fixture", "title": "Fixture proof",
+            "establishes": ["fixture.code@1"], "acceptance": ["fixture receipt"]}, {"id": "promptcraft", "title": "Promptcraft",
+            "establishes": ["promptcraft.receiver-profiles@1"], "acceptance": ["Promptcraft bound"]}]},
+        treatment_id=treatment_id, source_commit=source_commit, source_tree=source_commit,
+        resources=resources, environment={"id": "fixture"}, execution_root=root,
+    )

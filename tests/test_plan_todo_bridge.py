@@ -1,4 +1,6 @@
-from tgw.development.plan_todo_bridge import PlanTodoBridgeError, bind_leaf
+from tgw.development.plan_todo_bridge import PlanTodoBridgeError, bind_leaf as _bind_leaf
+from tgw.development.plan_binding import execution_root_hash
+from tgw.plan_execution_card import PlanExecutionCardError, build_execution_card
 from tgw.plan_solver import solve
 from tgw.workflow import compile_solution_runtime
 from unittest.mock import MagicMock, patch
@@ -15,8 +17,41 @@ from tgw import coding_provision
 COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
 
 
+def bind_leaf(compiled, **kwargs):
+    """Route legacy bridge assertions through the required typed card."""
+    kwargs.pop("body", None)
+    kwargs.pop("priority", None)
+    root = kwargs.get("execution_root")
+    if root is None:
+        solved = kwargs["solution"]["root"]
+        root = {"schema": "tgw-execution-root/v1", "kind": "plan", "plan_id": solved["id"],
+                "profile": solved["profile"], "plan_commit": COMMIT}
+        kwargs["execution_root"] = root
+    root = dict(root)
+    root.setdefault("identity_hash", execution_root_hash(root))
+    kwargs["execution_root"] = root
+    capability = "base@1"
+    graph = {"plan_id": root.get("plan_id", root.get("pp_ref", "x")), "work_units": [{
+        "id": "W-test", "title": "Test Plan work", "establishes": [capability],
+        "acceptance": ["test acceptance"],
+    }, {"id": "W-promptcraft", "title": "Recover Promptcraft", "establishes": ["promptcraft.receiver-profiles@1"], "acceptance": ["Promptcraft bound"]}]}
+    resources = {name: {"ref": f"test:{name}", "hash": "sha256:" + "1" * 64} for name in (
+        "plan_input", "plan_commit", "plan_graph", "codegraph_snapshot", "source_tree",
+        "execution_environment", "authority_conditions", "candidate_evidence", "receipt_sink",
+    )}
+    try:
+        kwargs["execution_card"] = build_execution_card(
+            compiled=compiled, solution=kwargs["solution"], execution_graph=graph,
+            treatment_id=kwargs["treatment_id"], source_commit=kwargs["source_commit"],
+            source_tree="b" * 40, resources=resources, environment={"id": "test"}, execution_root=root,
+        )
+    except PlanExecutionCardError as exc:
+        raise PlanTodoBridgeError("Plan solution integrity check failed") from exc
+    return _bind_leaf(compiled, **kwargs)
+
+
 def _compiled(conformant=True, root_id="x"):
-    document = {"schema":"tgw-plan/v2","plan_commit":COMMIT,"capabilities":["base@1"],"providers":[{"id":"base","provides":["base@1"]}],"observations":[],"target":{"id":root_id,"profile":"implementation","minimum_state":"admitted","required_capabilities":["base@1"]}}
+    document = {"schema":"tgw-plan/v2","plan_commit":COMMIT,"capabilities":["base@1", "promptcraft.receiver-profiles@1"],"providers":[{"id":"base","provides":["base@1"]}, {"id":"recovered-promptcraft", "provides":["promptcraft.receiver-profiles@1"]}],"observations":[],"target":{"id":root_id,"profile":"implementation","minimum_state":"admitted","required_capabilities":["base@1", "promptcraft.receiver-profiles@1"]}}
     native = solve(document)
     solution = solve(document, conformance_result={"available": conformant, "closure_hash": native["closure_hash"]}) if conformant else native
     return solution, compile_solution_runtime(solution, current_plan_commit=COMMIT)
