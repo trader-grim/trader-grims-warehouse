@@ -188,6 +188,23 @@ def _verify_closed_environment(
     startup = status["startup"]
     source = status.get("source")
     catalog = status.get("environment")
+    runtime_executable = str(runtime.get("executable"))
+    environment_executable = environment.get(
+        "TGW_CONTEXT_RUNTIME_EXECUTABLE", ""
+    )
+    try:
+        executable_matches = (
+            bool(environment_executable)
+            and Path(environment_executable).is_absolute()
+            and Path(environment_executable).resolve(strict=True)
+            == Path(runtime_executable).resolve(strict=True)
+        )
+    except OSError:
+        executable_matches = False
+    if not executable_matches:
+        raise ContextConfirmationRelayError(
+            "Context process executable binding differs"
+        )
     expected = {
         "TGW_CONTEXT_ACTOR": actor,
         "TGW_CONTEXT_ENDPOINT": "tgw-context",
@@ -204,7 +221,7 @@ def _verify_closed_environment(
         "TGW_CONTEXT_RUNTIME_CONTEXT_MODULE_SHA256": str(runtime.get("context_module_sha256")),
         "TGW_CONTEXT_STABLE_LAUNCHER": str(runtime.get("stable_launcher")),
         "TGW_CONTEXT_STABLE_LAUNCHER_SHA256": str(runtime.get("stable_launcher_sha256")),
-        "TGW_CONTEXT_RUNTIME_EXECUTABLE": str(runtime.get("executable")),
+        "TGW_CONTEXT_RUNTIME_EXECUTABLE": environment_executable,
         "TGW_CONTEXT_RUNTIME_EXECUTABLE_SHA256": str(runtime.get("executable_sha256")),
         "TGW_CONTEXT_RUNTIME_EXECUTABLE_DEVICE": str(runtime.get("executable_device")),
         "TGW_CONTEXT_RUNTIME_EXECUTABLE_INODE": str(runtime.get("executable_inode")),
