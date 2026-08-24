@@ -524,8 +524,8 @@ def test_tick_multiple_todos_dispatches_exactly_one():
 
 def test_tick_admits_most_urgent_eligible_todo():
     """Admission considers all evaluated todos, not caller ordering."""
-    less_urgent = TodoRecord(2, "test-agent", 90, "", "/tmp/wt-later")
-    urgent = TodoRecord(1, "test-agent", 10, "", "/tmp/wt-urgent")
+    less_urgent = TodoRecord(2, "test-agent", 90, "implement", "/tmp/wt-later")
+    urgent = TodoRecord(1, "test-agent", 10, "implement", "/tmp/wt-urgent")
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(return_value="job-urgent")
 
@@ -561,8 +561,8 @@ def test_tick_admits_most_urgent_eligible_todo():
 
 def test_tick_equal_priority_orders_by_todo_id_then_treatment_identity():
     """The global admission key includes a stable todo tie-breaker."""
-    first = TodoRecord(1, "test-agent", 10, "", "/tmp/wt-z")
-    second = TodoRecord(2, "test-agent", 10, "", "/tmp/wt-a")
+    first = TodoRecord(1, "test-agent", 10, "implement", "/tmp/wt-z")
+    second = TodoRecord(2, "test-agent", 10, "implement", "/tmp/wt-a")
     zeta = TreatmentDisposition("zeta", "1", ("ready",))
     alpha = TreatmentDisposition("alpha", "1", ("ready",))
     enqueue = MagicMock(return_value="job-alpha")
@@ -585,8 +585,8 @@ def test_tick_equal_priority_orders_by_todo_id_then_treatment_identity():
 
 def test_tick_null_priority_is_last():
     """A missing priority has the documented value 999, after real priorities."""
-    missing = TodoRecord(1, "test-agent", None, "", "/tmp/wt-missing")
-    real = TodoRecord(2, "test-agent", 20, "", "/tmp/wt-real")
+    missing = TodoRecord(1, "test-agent", None, "implement", "/tmp/wt-missing")
+    real = TodoRecord(2, "test-agent", 20, "implement", "/tmp/wt-real")
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(return_value="job-real")
     with (
@@ -742,8 +742,8 @@ def test_real_evaluator_dispatches_stitch_after_review_and_verification():
 
 
 def test_tick_dispatch_failure_continues_to_lower_priority_todo():
-    first = TodoRecord(1, "test-agent", 1, "", "/tmp/first")
-    second = TodoRecord(2, "test-agent", 5, "", "/tmp/second")
+    first = TodoRecord(1, "test-agent", 1, "implement", "/tmp/first")
+    second = TodoRecord(2, "test-agent", 5, "implement", "/tmp/second")
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(side_effect=[RuntimeError("queue unavailable"), "second-job"])
     with (
@@ -768,8 +768,8 @@ def test_tick_duplicate_dispatch_is_not_an_error_and_continues():
     class DuplicateKey(Exception):
         pgcode = "23505"
 
-    first = TodoRecord(1, "test-agent", 1, "", "/tmp/first")
-    second = TodoRecord(2, "test-agent", 5, "", "/tmp/second")
+    first = TodoRecord(1, "test-agent", 1, "implement", "/tmp/first")
+    second = TodoRecord(2, "test-agent", 5, "implement", "/tmp/second")
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(side_effect=[DuplicateKey(), "second-job"])
     with (
@@ -788,8 +788,8 @@ def test_tick_duplicate_dispatch_is_not_an_error_and_continues():
 
 
 def test_tick_terminal_graph_is_durably_skipped_and_does_not_starve_next_todo():
-    first = TodoRecord(1, "test-agent", 1, "", "/tmp/first")
-    second = TodoRecord(2, "test-agent", 5, "", "/tmp/second")
+    first = TodoRecord(1, "test-agent", 1, "implement", "/tmp/first")
+    second = TodoRecord(2, "test-agent", 5, "implement", "/tmp/second")
     disposition = TreatmentDisposition("codex-implement", "1", ("ready",))
     enqueue = MagicMock(return_value="second-job")
     with (

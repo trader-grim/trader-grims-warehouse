@@ -126,7 +126,8 @@ def fixture_enqueue(run_id: object, enqueue_fn: Callable[..., str] | None = None
 
 
 def run_fixture_job_once(
-    run_id: object, *, job_id: str, config: dict[str, Any], launcher: Callable[..., dict[str, Any]],
+    run_id: object, *, job_id: str, config: dict[str, Any],
+    launcher: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Claim one named fixture job and execute it through ``CodingWorker``.
 

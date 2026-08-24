@@ -90,7 +90,12 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
     bound = bind_leaf(
         compiled, solution=plan.solution, treatment_id=ready.treatment_id,
         source_commit=candidate_commit, worktree_identity=run_id, agent="codex",
-        body="fixture-only Plan-bound coding proof", priority=1, create_todo=create,
+        body=(
+            "Fixture-only proof: create one untracked file named "
+            f".tgw-fixture-proof-{run_id} containing this fixture run ID, then report it. "
+            "Do not modify tracked source, configuration, or workflow receipts."
+        ),
+        priority=1, create_todo=create,
         list_todos=lambda: list_fixture_todos(run_id),
         allocate_worktree=allocate,
         set_status_note=lambda todo_id, note: todo_set_status_note(todo_id, note, suppress_plan_render=True),
@@ -117,11 +122,6 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
         run_id,
         job_id=job_id,
         config=fixture_worker_config(proof_coding),
-        launcher=lambda *_: {
-            "outcome": "satisfied",
-            "established_conditions": ["implemented"],
-            "artifacts": ["fixture"],
-        },
     )
     binding = bound["binding"]
     if receipt.get("execution_envelope", {}).get("plan_binding") != binding:

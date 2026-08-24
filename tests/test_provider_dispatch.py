@@ -81,6 +81,10 @@ def test_foreman_worker_and_receipt_preserve_role_provider_adapter_and_plan_bind
         "adapter_treatment_id": "codex-implement", "adapter_queue_name": "codex-implement",
     }
     assert payload["plan_binding"] == binding
+    assert payload["task_spec"] == {
+        "schema": "coding-task/v1", "todo_id": 9,
+        "agent": "codex", "body": "implement",
+    }
     worker = CodingWorker("codex-implement", {"coding": {}}, launcher=lambda *_: {"outcome": "satisfied", "established_conditions": ["implemented"], "artifacts": []})
     monkeypatch.setattr(worker, "_validated_worktree", lambda _: worktree)
     receipt = worker.handle({"payload_json": payload})

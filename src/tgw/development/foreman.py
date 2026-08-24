@@ -458,11 +458,19 @@ def tick(
                 # recording the independent neutral role/provider selection.
                 if adapter.treatment_id != disposition.treatment_id:
                     raise ProviderDispatchError("implementation adapter disagrees with evaluator treatment")
+                if not chosen.todo.body.strip():
+                    raise ProviderDispatchError("Codex implementation requires a canonical Todo task")
                 payload_extra.update({
                     "coding_role": adapter.role,
                     "selected_provider": adapter.selected_provider,
                     "adapter_treatment_id": adapter.treatment_id,
                     "adapter_queue_name": adapter.queue_name,
+                    "task_spec": {
+                        "schema": "coding-task/v1",
+                        "todo_id": chosen.todo.todo_id,
+                        "agent": "codex",
+                        "body": chosen.todo.body,
+                    },
                 })
             dispatch_result: DispatchResult = dispatch_treatment(
                 disposition=disposition,
