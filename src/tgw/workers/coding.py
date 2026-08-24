@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from tgw.queue.worker_base import HardFailure, QueueWorker
+from tgw.development.plan_binding import MalformedPlanBindingError, validate_plan_binding
 from tgw.workflow_kernel.contracts import (
     OUTCOME_CONFLICT,
     OUTCOME_FAILED,
@@ -262,6 +263,32 @@ class CodingWorker(QueueWorker):
             raise HardFailure("satisfied coding outcome must establish a condition")
         return outcome, established, artifacts
 
+    @staticmethod
+    def _plan_execution_envelope(payload: dict[str, Any], worktree: Path) -> dict[str, Any] | None:
+        """Validate and preserve an optional Plan binding for this exact job."""
+        raw_binding = payload.get("plan_binding")
+        if raw_binding is None:
+            return None
+        try:
+            binding = validate_plan_binding(raw_binding, todo_id=payload.get("todo_id"))
+        except MalformedPlanBindingError as exc:
+            raise HardFailure(str(exc)) from exc
+        if binding["worktree"] != str(worktree):
+            raise HardFailure("Plan binding worktree does not match coding job")
+        identity = binding["worktree_identity"]
+        if identity.get("worktree") not in (None, str(worktree)):
+            raise HardFailure("Plan binding worktree identity does not match coding job")
+        return {
+            "schema": "tgw-coding-execution/v1",
+            "todo_id": payload.get("todo_id"),
+            "treatment_id": payload.get("treatment_id"),
+            "treatment_version": payload.get("treatment_version"),
+            "graph_id": payload.get("graph_id"),
+            "object_generation": payload.get("object_generation"),
+            "worktree": str(worktree),
+            "plan_binding": binding,
+        }
+
     def handle(self, job: dict[str, Any]) -> dict[str, Any]:
         payload = dict(job.get("payload_json") or {})
         treatment_id = str(payload.get("treatment_id") or self.queue_name)
@@ -277,6 +304,7 @@ class CodingWorker(QueueWorker):
         ):
             raise HardFailure("coding job has no object_generation")
         worktree = self._validated_worktree(payload)
+        execution_envelope = self._plan_execution_envelope(payload, worktree)
 
         try:
             launcher_result = self._launcher(treatment_id, payload, worktree)
@@ -299,6 +327,7 @@ class CodingWorker(QueueWorker):
                 "established_conditions": [],
                 "artifacts": [{"kind": "mechanical_failure", "detail": str(exc)}],
                 "receipt_schema_id": "receipt/tgw-development/v1",
+                **({"execution_envelope": execution_envelope} if execution_envelope else {}),
             }
             _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
             raise HardFailure(f"coding treatment mechanical failure: {exc}") from exc
@@ -313,6 +342,7 @@ class CodingWorker(QueueWorker):
             "established_conditions": established,
             "artifacts": artifacts,
             "receipt_schema_id": "receipt/tgw-development/v1",
+            **({"execution_envelope": execution_envelope} if execution_envelope else {}),
         }
         _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
         if outcome != OUTCOME_SATISFIED:

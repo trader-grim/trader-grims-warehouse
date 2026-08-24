@@ -8,7 +8,6 @@ again is safe: same generation → same graph_id → skipped (idempotent).
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -16,6 +15,7 @@ from typing import Any
 
 from tgw.workers.coding import validated_coding_worktree
 from tgw.development.coding_snapshot import build_coding_snapshot
+from tgw.development.plan_binding import MalformedPlanBindingError, parse_plan_binding
 from tgw.workflow_kernel.contracts import (
     GoalProfile,
     RuntimeWorkGraph,
@@ -110,6 +110,7 @@ class TickResult:
     skipped_active: int = 0
     skipped_no_worktree: int = 0
     skipped_terminal: int = 0
+    refused_plan_binding: int = 0
     errors: int = 0
 
 
@@ -217,17 +218,7 @@ def _default_fetch_open_todos() -> list[TodoRecord]:
             for row in cur.fetchall():
                 todo_id, agent, priority, body, status_note = row
                 worktree = _extract_worktree(status_note or "") or _extract_worktree(body)
-                plan_binding = None
-                if status_note:
-                    try:
-                        parsed = json.loads(status_note)
-                    except (TypeError, ValueError):
-                        parsed = None
-                    if isinstance(parsed, dict) and parsed.get("schema") == "tgw-plan-coding-todo/v1":
-                        required = {"plan_commit", "solution_hash", "closure_hash", "capability", "treatment_id", "idempotency_key", "worktree", "worktree_identity"}
-                        if not required.issubset(parsed) or not all(isinstance(parsed[key], str) and parsed[key] for key in required - {"worktree_identity"}) or not isinstance(parsed["worktree_identity"], dict):
-                            raise ValueError(f"Todo {todo_id} has malformed Plan binding")
-                        plan_binding = parsed
+                plan_binding = parse_plan_binding(status_note, todo_id=todo_id)
                 todos.append(
                     TodoRecord(
                         todo_id=todo_id,
@@ -238,6 +229,8 @@ def _default_fetch_open_todos() -> list[TodoRecord]:
                         plan_binding=plan_binding,
                     )
                 )
+    except MalformedPlanBindingError:
+        raise
     except Exception:
         log.exception("failed to fetch open todos from database")
     return todos
@@ -311,6 +304,9 @@ def tick(
 
     try:
         todos = fetcher()
+    except MalformedPlanBindingError:
+        log.error("refusing tick due to malformed Plan-bound Todo metadata", exc_info=True)
+        return TickResult(refused_plan_binding=1, errors=1)
     except Exception:
         log.exception("todo fetch failed")
         return TickResult(errors=1)

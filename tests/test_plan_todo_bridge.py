@@ -3,6 +3,8 @@ from tgw.plan_solver import solve
 from tgw.workflow import compile_solution_runtime
 from unittest.mock import MagicMock, patch
 from tgw.development.foreman import TodoRecord, tick
+from tgw.development.plan_binding import MalformedPlanBindingError
+from tgw.workers.coding import CodingWorker
 from tgw.workflow_kernel.contracts import RuntimeWorkGraph, TreatmentDisposition
 from tgw.development.foreman import EVALUATOR_VERSION
 from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
@@ -51,12 +53,13 @@ def test_changed_worktree_identity_creates_superseding_todo():
     assert second["binding"]["supersedes_todo_id"] == first["todo_id"]
 
 
-def test_bridge_todo_foreman_payload_and_execution_envelope_retain_plan_binding():
+def test_bridge_todo_foreman_payload_and_execution_envelope_retain_plan_binding(tmp_path):
     solution, compiled = _compiled(); rows = []
     def create(*_):
         row = {"id": 1, "agent":"codex", "body":"implement", "status_note":""}; rows.append(row); return row
     def note(_, value): rows[0]["status_note"] = value
-    location = {"worktree":"/tmp/allocated", "todo_id":1, "branch":"coding/test", "head":"a"*40}
+    worktree = tmp_path / "allocated"; worktree.mkdir()
+    location = {"worktree":str(worktree), "todo_id":1, "branch":"coding/test", "head":"a"*40}
     result = bind_leaf(compiled, solution=solution, treatment_id="establish:base@1", source_commit="a"*40, worktree_identity="allocated", agent="codex", body="implement", priority=1, create_todo=create, list_todos=lambda: rows, allocate_worktree=lambda *_: location, set_status_note=note)
     graph = RuntimeWorkGraph("runtime-work-graph/v1", "graph", location["worktree"], "gen", CODING_READY_FOR_IMPLEMENTATION.identity, "1", EVALUATOR_VERSION, "evidence", "condition", "registry", (), (), (), (), (TreatmentDisposition("codex-implement", "1", ("ready",)),), (), (), (), ())
     enqueue = MagicMock(return_value="job-1")
@@ -65,7 +68,15 @@ def test_bridge_todo_foreman_payload_and_execution_envelope_retain_plan_binding(
         assert tick(fetch_todos=lambda:[todo], check_active_fn=lambda _:False, enqueue_fn=enqueue).dispatched == 1
     payload = enqueue.call_args.kwargs["payload"]
     assert payload["todo_id"] == 1 and payload["worktree"] == location["worktree"] and payload["plan_binding"] == result["binding"]
-    snapshot = type("S", (), {"object_id": location["worktree"], "generation":"gen"})()
-    with patch.object(coding_provision, "todo_lookup", return_value=rows[0]), patch.object(coding_provision, "deserialize_snapshot", return_value=snapshot), patch.object(coding_provision, "evaluate", return_value=graph), patch.object(coding_provision, "select_treatment", return_value=__import__("tgw.development.treatments", fromlist=["CODEX_IMPLEMENT"]).CODEX_IMPLEMENT):
-        envelope = coding_provision._authorize_execution({"todo_id":1, "plan_binding":payload["plan_binding"]}, location, {})
-    assert envelope["task_spec"]["plan_binding"] == result["binding"]
+    worker = CodingWorker("codex-implement", {"coding": {}}, launcher=lambda *_: {"outcome":"satisfied", "established_conditions":["implemented"], "artifacts":[]})
+    with patch.object(worker, "_validated_worktree", return_value=__import__("pathlib").Path(location["worktree"])):
+        receipt = worker.handle({"payload_json": payload})
+    assert receipt["execution_envelope"]["plan_binding"] == result["binding"]
+
+
+def test_malformed_plan_bound_todo_refuses_tick_instead_of_skipping():
+    malformed = '{"schema":"tgw-plan-coding-todo/v1","plan_commit":"missing-fields"}'
+    with patch("tgw.development.foreman._default_fetch_open_todos", side_effect=MalformedPlanBindingError("Todo 7 has malformed Plan binding")):
+        result = tick()
+    assert result.errors == 1
+    assert result.refused_plan_binding == 1
