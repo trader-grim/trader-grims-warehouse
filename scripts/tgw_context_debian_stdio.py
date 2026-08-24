@@ -12,10 +12,7 @@ from pathlib import Path
 SERVER_SOURCE = Path(
     "/opt/TGW/tgw-lib/actor-runtime/releases/w18-9634e8a7-20260822/src"
 )
-CONTEXT_SOURCE = Path(
-    "/var/lib/tgw/context-update/retained-sources/"
-    "8ae1f37a16b677d7e862b479c1b5be07f4820123"
-)
+CONTEXT_SOURCE = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
 CATALOG = Path("/opt/TGW/tgw-lib/config/tgw-context-debian-v1.json")
 
 
