@@ -102,7 +102,10 @@ def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> d
     task = _validated_task(job)
     before_head = _git(cwd, "rev-parse", "HEAD")
     before_status = _git(cwd, "status", "--porcelain=v1", "--untracked-files=all")
-    with tempfile.TemporaryDirectory(prefix="tgw-codex-implement-") as temporary:
+    # Keep ephemeral auth and result files inside the isolated request worktree
+    # rather than the host-wide /tmp namespace.  The directory is removed before
+    # the runner evaluates Git state or emits a workflow outcome.
+    with tempfile.TemporaryDirectory(prefix=".tgw-codex-implement-", dir=cwd) as temporary:
         temp = Path(temporary)
         schema_path, output_path = temp / "schema.json", temp / "result.json"
         codex_home = temp / "codex-home"
