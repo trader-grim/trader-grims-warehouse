@@ -3,7 +3,8 @@ from types import SimpleNamespace
 import pytest
 
 from tgw.development.fixture_db_binding import (
-    FixtureDatabaseBindingError, _explicit_dsn, initialize_fixture_database,
+    FixtureDatabaseBindingError, _explicit_dsn, fixture_worker_config,
+    initialize_fixture_database,
 )
 
 
@@ -69,6 +70,13 @@ def test_explicit_configured_dsn_is_required(tmp_path):
     with pytest.raises(FixtureDatabaseBindingError, match="explicit postgres_dsn"):
         _explicit_dsn(path)
     assert _explicit_dsn(_config(tmp_path)) == DSN
+
+
+def test_fixture_worker_config_keeps_the_explicit_local_dsn(tmp_path):
+    config = fixture_worker_config({"commands": {}}, config_path=_config(tmp_path))
+    assert config == {"postgres_dsn": DSN, "coding": {"commands": {}}}
+    with pytest.raises(FixtureDatabaseBindingError, match="coding configuration"):
+        fixture_worker_config([], config_path=_config(tmp_path))
 
 
 def test_configured_dsn_initializes_both_adapters(monkeypatch, tmp_path):

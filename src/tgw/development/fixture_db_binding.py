@@ -50,6 +50,20 @@ def _explicit_dsn(config_path: Path) -> str:
     return str(load_config(config_path)["postgres_dsn"])
 
 
+def fixture_worker_config(
+    coding: dict[str, Any], *, config_path: Path = DEFAULT_CONFIG,
+) -> dict[str, Any]:
+    """Bind a fixture CodingWorker to the same explicit local DSN.
+
+    QueueWorker initializes its state-machine adapter from top-level worker
+    configuration.  Supplying only the nested ``coding`` section would make it
+    reinstate the legacy fallback after fixture preflight succeeded.
+    """
+    if not isinstance(coding, dict):
+        raise FixtureDatabaseBindingError("fixture coding configuration must be an object")
+    return {"postgres_dsn": _explicit_dsn(config_path), "coding": dict(coding)}
+
+
 def initialize_fixture_database(
     *, config_path: Path = DEFAULT_CONFIG,
     connect: Callable[[str], Any] = psycopg2.connect,

@@ -12,7 +12,7 @@ from tgw.development.fixture_isolation import (
     cleanup_fixture_run, create_fixture_todo, fixture_enqueue, fixture_todo_record,
     fixture_worktree_root, list_fixture_todos, run_fixture_job_once, validate_fixture_run_id,
 )
-from tgw.development.fixture_db_binding import initialize_fixture_database
+from tgw.development.fixture_db_binding import fixture_worker_config, initialize_fixture_database
 from tgw.development.foreman import ForemanConfig, tick
 from tgw.development.plan_todo_bridge import bind_leaf
 from tgw.plan_solver import solve
@@ -113,7 +113,16 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
     if len(rows) != 1:
         raise RuntimeError("fixture queue did not contain exactly one job")
     job_id = rows[0][0]
-    receipt = run_fixture_job_once(run_id, job_id=job_id, config={"coding": proof_coding}, launcher=lambda *_: {"outcome": "satisfied", "established_conditions": ["implemented"], "artifacts": ["fixture"]})
+    receipt = run_fixture_job_once(
+        run_id,
+        job_id=job_id,
+        config=fixture_worker_config(proof_coding),
+        launcher=lambda *_: {
+            "outcome": "satisfied",
+            "established_conditions": ["implemented"],
+            "artifacts": ["fixture"],
+        },
+    )
     binding = bound["binding"]
     if receipt.get("execution_envelope", {}).get("plan_binding") != binding:
         raise RuntimeError("fixture receipt lost Plan binding")
