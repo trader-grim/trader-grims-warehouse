@@ -92,6 +92,16 @@ def _ensure_status_note_column() -> None:
         log.warning('_ensure_status_note_column: migration skipped — %s', exc)
 
 
+def bootstrap_schema_columns() -> None:
+    """Explicitly apply legacy Todo compatibility migrations.
+
+    Importing this module and binding a DSN are intentionally side-effect free.
+    Schema changes belong only to an explicit bootstrap operation.
+    """
+    _ensure_reasoning_column()
+    _ensure_status_note_column()
+
+
 def _push_clipboard(text: str) -> bool:
     """Push text to the system clipboard via pyperclip."""
     try:
@@ -113,10 +123,6 @@ def _conn() -> Generator:
         raise
     finally:
         con.close()
-
-
-_ensure_reasoning_column()
-_ensure_status_note_column()
 
 
 # ---------------------------------------------------------------------------

@@ -11,11 +11,18 @@ DSN = "dbname=tgw_lib_dev_state_machine user=tigwadev"
 
 
 class _Cursor:
-    def execute(self, _sql):
-        pass
+    def __init__(self, columns=("reasoning", "status_note")):
+        self.columns = columns
+        self.query = ""
+
+    def execute(self, sql, _params=None):
+        self.query = sql
 
     def fetchone(self):
         return ("tgw_lib_dev_state_machine", "tigwadev", None)
+
+    def fetchall(self):
+        return [(column,) for column in self.columns]
 
     def __enter__(self):
         return self
@@ -25,8 +32,11 @@ class _Cursor:
 
 
 class _Connection:
+    def __init__(self, columns=("reasoning", "status_note")):
+        self.columns = columns
+
     def cursor(self):
-        return _Cursor()
+        return _Cursor(self.columns)
 
     def __enter__(self):
         return self
@@ -81,3 +91,14 @@ def test_wrong_identity_or_target_refuses_before_adapter_initialization(monkeypa
         initialize_fixture_database(config_path=_config(tmp_path, "dbname=state_machine user=tgw"), connect=lambda _dsn: pytest.fail("must not connect"))
     with pytest.raises(FixtureDatabaseBindingError, match="connection is not"):
         initialize_fixture_database(config_path=_config(tmp_path), connect=lambda _dsn: _WrongRoleConnection())
+
+
+@pytest.mark.parametrize("columns, missing", [
+    (("status_note",), "reasoning"),
+    (("reasoning",), "status_note"),
+])
+def test_fixture_preflight_refuses_missing_todo_schema_columns(monkeypatch, tmp_path, columns, missing):
+    monkeypatch.setattr("tgw.development.fixture_db_binding.pwd.getpwuid", lambda _uid: SimpleNamespace(pw_name="tigwadev"))
+    monkeypatch.setattr("tgw.development.fixture_db_binding.importlib.import_module", lambda _name: pytest.fail("must not import adapters"))
+    with pytest.raises(FixtureDatabaseBindingError, match=missing):
+        initialize_fixture_database(config_path=_config(tmp_path), connect=lambda _dsn: _Connection(columns))

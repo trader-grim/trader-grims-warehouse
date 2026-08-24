@@ -1,11 +1,39 @@
 """Tests for tgw.todo CRUD operations and dead_letter state_machine helpers."""
 from __future__ import annotations
 
+import importlib
 import subprocess
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+def test_import_todo_opens_no_database_connection(monkeypatch):
+    import tgw.todo as todo
+
+    calls = []
+    monkeypatch.setattr(todo.psycopg2, "connect", lambda *_args, **_kwargs: calls.append(True))
+    importlib.reload(todo)
+    assert calls == []
+
+
+def test_explicit_todo_init_binds_only_supplied_dsn(monkeypatch):
+    import tgw.todo as todo
+
+    monkeypatch.setattr(todo.psycopg2, "connect", lambda *_args, **_kwargs: pytest.fail("must not connect"))
+    todo.init("dbname=explicit_local user=fixture")
+    assert todo._DSN == "dbname=explicit_local user=fixture"
+
+
+def test_todo_schema_migrations_are_explicit(monkeypatch):
+    import tgw.todo as todo
+
+    calls = []
+    monkeypatch.setattr(todo, "_ensure_reasoning_column", lambda: calls.append("reasoning"))
+    monkeypatch.setattr(todo, "_ensure_status_note_column", lambda: calls.append("status_note"))
+    todo.bootstrap_schema_columns()
+    assert calls == ["reasoning", "status_note"]
 
 
 @pytest.fixture(autouse=True)

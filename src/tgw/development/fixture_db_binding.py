@@ -20,6 +20,25 @@ class FixtureDatabaseBindingError(RuntimeError):
     """The fixture runner lacks its explicitly local database binding."""
 
 
+_FIXTURE_TODO_COLUMNS = frozenset({"reasoning", "status_note"})
+
+
+def _require_fixture_todo_schema(cursor: Any) -> None:
+    """Refuse fixture writes unless the already-installed Todo schema is exact."""
+    cursor.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = 'todo_items' "
+        "AND column_name = ANY(%s)",
+        (list(_FIXTURE_TODO_COLUMNS),),
+    )
+    found = {row[0] for row in cursor.fetchall()}
+    missing = sorted(_FIXTURE_TODO_COLUMNS - found)
+    if missing:
+        raise FixtureDatabaseBindingError(
+            "fixture Todo schema is missing required columns: " + ", ".join(missing)
+        )
+
+
 def _explicit_dsn(config_path: Path) -> str:
     if not config_path.is_file():
         raise FixtureDatabaseBindingError("fixture database config is missing")
@@ -56,12 +75,16 @@ def initialize_fixture_database(
         with connect(dsn) as con, con.cursor() as cur:
             cur.execute("SELECT current_database(), current_user, inet_server_addr()")
             database, role, endpoint = cur.fetchone()
+            _require_fixture_todo_schema(cur)
+    except FixtureDatabaseBindingError:
+        raise
     except Exception as exc:
         raise FixtureDatabaseBindingError("fixture development database preflight failed") from exc
     if database != DEVELOPMENT_DATABASE or role != DEVELOPMENT_WRITE_IDENTITY or endpoint is not None:
         raise FixtureDatabaseBindingError("fixture database connection is not the configured local development target")
-    # ``tgw.todo`` performs legacy import-time compatibility checks.  Give it
-    # this exact DSN before import, then initialize its explicit adapter state.
+    # Set the explicit DSN before importing the side-effect-free Todo adapter;
+    # neither import nor init is allowed to perform schema work or use a
+    # legacy fallback in this fixture path.
     os.environ["TGW_TODO_DSN"] = dsn
     todo = importlib.import_module("tgw.todo")
     queue = importlib.import_module("tgw.queue.state_machine")
