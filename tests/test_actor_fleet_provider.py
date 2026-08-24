@@ -48,7 +48,7 @@ def _protected_fixture_root(path):
 
 def _runtime_entrypoint_content():
     return (
-        f"#!{Path(sys.executable).resolve(strict=True)}\n"
+        f"#!{sys.executable}\n"
         "# exact admitted startup entrypoint\n"
     )
 
@@ -921,7 +921,8 @@ def _live_process(request, fixture_root, *, pid, stable=True, current=False):
     revisions = request["revisions"]
     actor = request["actors"][0]
     source_root = _protected_fixture_root(fixture_root) / "releases/candidate"
-    executable = Path(sys.executable).resolve(strict=True)
+    executable_argument = sys.executable
+    executable = Path(executable_argument).resolve(strict=True)
     executable_state = executable.stat(follow_symlinks=False)
     entrypoint = source_root / "scripts/tgw_actor_startup.py"
     startup_module = source_root / "src/tgw/actor_startup.py"
@@ -929,7 +930,7 @@ def _live_process(request, fixture_root, *, pid, stable=True, current=False):
     home = Path(pwd.getpwnam(actor).pw_dir)
     stable_launcher = fleet_provider_module._STABLE_CONTEXT_LAUNCHER
     arguments = [
-        str(executable),
+        executable_argument,
         "-I",
         "-s",
         "-P",
@@ -987,7 +988,7 @@ def _live_process(request, fixture_root, *, pid, stable=True, current=False):
         "TGW_CONTEXT_RUNTIME_CONTEXT_MODULE_SHA256": _file_hash(context_module),
         "TGW_CONTEXT_STABLE_LAUNCHER": str(stable_launcher),
         "TGW_CONTEXT_STABLE_LAUNCHER_SHA256": _file_hash(entrypoint),
-        "TGW_CONTEXT_RUNTIME_EXECUTABLE": str(executable),
+        "TGW_CONTEXT_RUNTIME_EXECUTABLE": executable_argument,
         "TGW_CONTEXT_RUNTIME_EXECUTABLE_SHA256": _file_hash(executable),
         "TGW_CONTEXT_RUNTIME_EXECUTABLE_DEVICE": str(executable_state.st_dev),
         "TGW_CONTEXT_RUNTIME_EXECUTABLE_INODE": str(executable_state.st_ino),
@@ -1018,7 +1019,7 @@ def _live_process(request, fixture_root, *, pid, stable=True, current=False):
         "catalog": revisions["catalog"] if current else "sha256:" + "1" * 64,
         "arguments": arguments,
         "cmdline_shape": [
-            executable.name,
+            Path(executable_argument).name,
             "--context-mcp-runtime",
             "--context-mcp",
             "--context-mcp-stable-launcher",
@@ -1036,7 +1037,7 @@ def _live_process(request, fixture_root, *, pid, stable=True, current=False):
         "runtime_context_module_sha256": _file_hash(context_module),
         "stable_launcher_path": str(stable_launcher),
         "stable_launcher_sha256": _file_hash(entrypoint),
-        "runtime_executable": str(executable),
+        "runtime_executable": executable_argument,
         "runtime_executable_sha256": _file_hash(executable),
         "runtime_executable_device": str(executable_state.st_dev),
         "runtime_executable_inode": str(executable_state.st_ino),

@@ -4241,7 +4241,7 @@ class ActorFleetProvider:
                 if not isinstance(fleet_path, str) or not Path(fleet_path).is_absolute():
                     return False
                 expected_arguments = [
-                    str(executable), "-I", "-s", "-P", str(entrypoint),
+                    executable_argument, "-I", "-s", "-P", str(entrypoint),
                     "--context-mcp-runtime", "--context-mcp",
                     "--context-mcp-stable-launcher", str(stable_launcher),
                 ]
@@ -4264,7 +4264,7 @@ class ActorFleetProvider:
                     "TGW_CONTEXT_STABLE_LAUNCHER_SHA256": raw_sha(
                         stable_launcher
                     ),
-                    "TGW_CONTEXT_RUNTIME_EXECUTABLE": str(executable),
+                    "TGW_CONTEXT_RUNTIME_EXECUTABLE": executable_argument,
                     "TGW_CONTEXT_RUNTIME_EXECUTABLE_SHA256": executable_sha256,
                     "TGW_CONTEXT_RUNTIME_EXECUTABLE_DEVICE": str(
                         executable_state.st_dev
@@ -4355,7 +4355,7 @@ class ActorFleetProvider:
             "runtime_context_module_sha256": raw_sha(context_module),
             "stable_launcher_path": str(stable_launcher),
             "stable_launcher_sha256": raw_sha(stable_launcher),
-            "runtime_executable": str(executable),
+            "runtime_executable": executable_argument,
             "runtime_executable_sha256": executable_sha256,
             "runtime_executable_device": str(executable_state.st_dev),
             "runtime_executable_inode": str(executable_state.st_ino),
