@@ -16,6 +16,7 @@ from typing import Any
 from tgw.workers.coding import validated_coding_worktree
 from tgw.development.coding_snapshot import build_coding_snapshot
 from tgw.development.plan_binding import MalformedPlanBindingError, parse_plan_binding
+from tgw.development.provider_dispatch import ProviderDispatchError, resolve_implementation_adapter
 from tgw.workflow_kernel.contracts import (
     GoalProfile,
     RuntimeWorkGraph,
@@ -57,6 +58,8 @@ class ForemanConfig:
     # The worker and foreman must apply the same canonical-root proof before
     # executing project checks or dispatching a job.
     coding_config: dict[str, Any] = field(default_factory=dict)
+    provider_registry_path: str | None = None
+    provider_adapters: dict[str, str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -425,18 +428,36 @@ def tick(
     # candidate.  Idempotent outcomes and failures must not starve later work.
     for chosen in runnable:
         try:
+            payload_extra = {
+                "todo_id": chosen.todo.todo_id,
+                "todo_priority": chosen.todo.priority,
+                "todo_agent": chosen.todo.agent,
+                "worktree": chosen.todo.worktree,
+                **({"plan_binding": chosen.todo.plan_binding} if chosen.todo.plan_binding is not None else {}),
+            }
+            disposition = chosen.disposition
+            if disposition.treatment_id == "codex-implement":
+                adapter = resolve_implementation_adapter(
+                    cfg.coding_config,
+                    registry_path=cfg.provider_registry_path,
+                    adapters=cfg.provider_adapters,
+                )
+                # Keep the evaluator treatment as the execution adapter while
+                # recording the independent neutral role/provider selection.
+                if adapter.treatment_id != disposition.treatment_id:
+                    raise ProviderDispatchError("implementation adapter disagrees with evaluator treatment")
+                payload_extra.update({
+                    "coding_role": adapter.role,
+                    "selected_provider": adapter.selected_provider,
+                    "adapter_treatment_id": adapter.treatment_id,
+                    "adapter_queue_name": adapter.queue_name,
+                })
             dispatch_result: DispatchResult = dispatch_treatment(
-                disposition=chosen.disposition,
+                disposition=disposition,
                 entity_id=chosen.graph.object_id,
                 entity_type="coding_task",
                 graph=chosen.graph,
-                payload_extra={
-                    "todo_id": chosen.todo.todo_id,
-                    "todo_priority": chosen.todo.priority,
-                    "todo_agent": chosen.todo.agent,
-                    "worktree": chosen.todo.worktree,
-                    **({"plan_binding": chosen.todo.plan_binding} if chosen.todo.plan_binding is not None else {}),
-                },
+                payload_extra=payload_extra,
                 enqueue_fn=enqueue_fn,
                 coding_config=cfg.coding_config,
             )

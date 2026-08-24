@@ -17,6 +17,7 @@ from typing import Any
 
 from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.development.plan_binding import MalformedPlanBindingError, validate_plan_binding
+from tgw.development.provider_dispatch import ProviderDispatchError, validate_implementation_adapter
 from tgw.workflow_kernel.contracts import (
     OUTCOME_CONFLICT,
     OUTCOME_FAILED,
@@ -278,7 +279,7 @@ class CodingWorker(QueueWorker):
         identity = binding["worktree_identity"]
         if identity.get("worktree") not in (None, str(worktree)):
             raise HardFailure("Plan binding worktree identity does not match coding job")
-        return {
+        envelope = {
             "schema": "tgw-coding-execution/v1",
             "todo_id": payload.get("todo_id"),
             "treatment_id": payload.get("treatment_id"),
@@ -288,6 +289,10 @@ class CodingWorker(QueueWorker):
             "worktree": str(worktree),
             "plan_binding": binding,
         }
+        adapter = validate_implementation_adapter(payload, str(payload.get("adapter_queue_name") or payload.get("treatment_id")))
+        if adapter is not None:
+            envelope.update(adapter)
+        return envelope
 
     def handle(self, job: dict[str, Any]) -> dict[str, Any]:
         payload = dict(job.get("payload_json") or {})
@@ -296,6 +301,10 @@ class CodingWorker(QueueWorker):
             raise HardFailure(
                 f"job treatment {treatment_id!r} does not match queue {self.queue_name!r}"
             )
+        try:
+            adapter_binding = validate_implementation_adapter(payload, self.queue_name)
+        except ProviderDispatchError as exc:
+            raise HardFailure(str(exc)) from exc
         if not isinstance(payload.get("graph_id"), str) or not payload["graph_id"]:
             raise HardFailure("coding job has no graph_id")
         if (
@@ -327,6 +336,8 @@ class CodingWorker(QueueWorker):
                 "established_conditions": [],
                 "artifacts": [{"kind": "mechanical_failure", "detail": str(exc)}],
                 "receipt_schema_id": "receipt/tgw-development/v1",
+                **(adapter_binding or {}),
+                **({"plan_binding": execution_envelope["plan_binding"]} if execution_envelope else {}),
                 **({"execution_envelope": execution_envelope} if execution_envelope else {}),
             }
             _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
@@ -342,6 +353,8 @@ class CodingWorker(QueueWorker):
             "established_conditions": established,
             "artifacts": artifacts,
             "receipt_schema_id": "receipt/tgw-development/v1",
+            **(adapter_binding or {}),
+            **({"plan_binding": execution_envelope["plan_binding"]} if execution_envelope else {}),
             **({"execution_envelope": execution_envelope} if execution_envelope else {}),
         }
         _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)

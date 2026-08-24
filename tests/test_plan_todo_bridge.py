@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from tgw.development.foreman import TodoRecord, tick
 from tgw.development.plan_binding import MalformedPlanBindingError
+from tgw.development.provider_dispatch import ProviderAdapter
 from tgw.workers.coding import CodingWorker
 from tgw.workflow_kernel.contracts import RuntimeWorkGraph, TreatmentDisposition
 from tgw.development.foreman import EVALUATOR_VERSION
@@ -129,7 +130,7 @@ def test_bridge_todo_foreman_payload_and_execution_envelope_retain_plan_binding(
     graph = RuntimeWorkGraph("runtime-work-graph/v1", "graph", location["worktree"], "gen", CODING_READY_FOR_IMPLEMENTATION.identity, "1", EVALUATOR_VERSION, "evidence", "condition", "registry", (), (), (), (), (TreatmentDisposition("codex-implement", "1", ("ready",)),), (), (), (), ())
     enqueue = MagicMock(return_value="job-1")
     todo = TodoRecord(result["todo_id"], "codex", 1, "implement", location["worktree"], result["binding"])
-    with patch("tgw.development.foreman.validated_coding_worktree", return_value=__import__("pathlib").Path(location["worktree"])), patch("tgw.development.foreman.build_coding_snapshot", return_value=object()), patch("tgw.development.foreman.evaluate", return_value=graph):
+    with patch("tgw.development.foreman.validated_coding_worktree", return_value=__import__("pathlib").Path(location["worktree"])), patch("tgw.development.foreman.build_coding_snapshot", return_value=object()), patch("tgw.development.foreman.evaluate", return_value=graph), patch("tgw.development.foreman.resolve_implementation_adapter", return_value=ProviderAdapter("implementation", "codex-local-runner", "codex-implement", "codex-implement")):
         assert tick(fetch_todos=lambda:[todo], check_active_fn=lambda _:False, enqueue_fn=enqueue).dispatched == 1
     payload = enqueue.call_args.kwargs["payload"]
     assert payload["todo_id"] == result["todo_id"] and payload["worktree"] == location["worktree"] and payload["plan_binding"] == result["binding"]

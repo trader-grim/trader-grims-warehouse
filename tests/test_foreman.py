@@ -28,6 +28,7 @@ from tgw.development.foreman import (
 from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
 from tgw.workflow_kernel.scheduler import DispatchResult
 from tgw.development.treatments import CODING_TREATMENTS
+from tgw.development.provider_dispatch import ProviderAdapter
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +40,14 @@ def _fake_worktree_proof_for_mocked_foreman_tests(monkeypatch):
     monkeypatch.setattr(
         "tgw.development.foreman.validated_coding_worktree",
         lambda worktree, _object_id, _config: Path(worktree).resolve(),
+    )
+    # Legacy unit cases exercise evaluator/direct-treatment mechanics.  The
+    # provider-resolution contract has dedicated tests with the real catalog.
+    monkeypatch.setattr(
+        "tgw.development.foreman.resolve_implementation_adapter",
+        lambda *_args, **_kwargs: ProviderAdapter(
+            "implementation", "codex-local-runner", "codex-implement", "codex-implement"
+        ),
     )
 
 # ---------------------------------------------------------------------------
