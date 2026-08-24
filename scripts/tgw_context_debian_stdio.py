@@ -11,6 +11,7 @@ import socket
 import stat
 import sys
 from pathlib import Path
+from typing import Any
 
 
 SERVER_SOURCE = Path(
@@ -54,6 +55,45 @@ def _current_task() -> str:
     return json.dumps(result, sort_keys=True, separators=(",", ":"))
 
 
+def _bind_context_receiver(context_server: Any) -> None:
+    original_plan_graph = context_server.plan_graph
+    original_context_bundle = context_server._tgw_context_bundle
+
+    def actor_plan_graph(
+        task: str, receiver: str = "", operation: str = "brief", limit: int = 12
+    ) -> dict[str, object]:
+        return original_plan_graph(task, _harness_actor(), operation, limit)
+
+    def actor_context_bundle(
+        task: str,
+        receiver: str = "",
+        limit: int = 12,
+        challenge: str = "",
+        card_json: str = "",
+        handoff_hash: str = "",
+        resource_receipt_hash: str = "",
+        skill_contract_hash: str = "",
+        grant_json: str = "",
+        *,
+        governed_only: bool = False,
+    ) -> str:
+        return original_context_bundle(
+            task,
+            _harness_actor(),
+            limit,
+            challenge,
+            card_json,
+            handoff_hash,
+            resource_receipt_hash,
+            skill_contract_hash,
+            grant_json,
+            governed_only=governed_only,
+        )
+
+    context_server.plan_graph = actor_plan_graph
+    context_server._tgw_context_bundle = actor_context_bundle
+
+
 def main() -> None:
     if socket.gethostname().split(".", 1)[0] != "tgw-lib":
         raise SystemExit("tgw-context-mcp is available only on tgw-lib")
@@ -83,7 +123,11 @@ def main() -> None:
         }
     )
     sys.path.insert(0, str(SERVER_SOURCE))
-    from tgw.context_mcp_server import main as context_main, mcp
+    from tgw import context_mcp_server
+
+    _bind_context_receiver(context_mcp_server)
+    context_main = context_mcp_server.main
+    mcp = context_mcp_server.mcp
 
     @mcp.tool()
     def tgw_context_current_task() -> str:
