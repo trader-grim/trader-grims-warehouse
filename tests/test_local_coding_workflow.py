@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from tgw.development import local_workflow
+from tgw.development.foreman import TickResult
 
 
 def _git(path: Path, *args: str) -> str:
@@ -131,3 +132,20 @@ def test_status_reports_only_local_dependencies(monkeypatch, tmp_path: Path) -> 
         "execution_card": False,
         "tgw_prod": False,
     }
+    assert result["treatments"] == ["codex-implement", "controller-verify"]
+
+
+def test_foreman_uses_only_installed_local_treatments(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(local_workflow, "require_coder_account", lambda: "db")
+    monkeypatch.setattr(local_workflow.todo, "init", lambda _dsn: None)
+    monkeypatch.setattr(local_workflow.state_machine, "init", lambda _dsn: None)
+    observed = []
+
+    def tick(config, *, limit=None):
+        observed.extend(item.identity for item in config.treatments)
+        return TickResult()
+
+    monkeypatch.setattr(local_workflow, "tick", tick)
+    local_workflow.foreman_command(argparse.Namespace(config=config, limit=None))
+    assert observed == ["codex-implement", "controller-verify"]

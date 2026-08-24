@@ -22,6 +22,7 @@ from typing import Any, Mapping
 from tgw import todo
 from tgw.development.foreman import ForemanConfig, tick
 from tgw.development.plan_todo_bridge import bind_leaf
+from tgw.development.treatments import CODEX_IMPLEMENT, CONTROLLER_VERIFY
 from tgw.plan_luet import verify_direct_development_solution
 from tgw.queue import state_machine
 from tgw.workers.coding import CodingWorker
@@ -30,6 +31,7 @@ from tgw.workflow import compile_solution_runtime
 DEFAULT_CONFIG = Path("/opt/TGW/tgw-lib/config/tgw-coding-local.json")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _REQUEST = re.compile(r"plan-[0-9a-f]{24}\Z")
+_LOCAL_TREATMENTS = (CODEX_IMPLEMENT, CONTROLLER_VERIFY)
 
 
 class LocalCodingWorkflowError(RuntimeError):
@@ -224,7 +226,10 @@ def foreman_command(args: argparse.Namespace) -> dict[str, Any]:
     todo.init(config["postgres_dsn"])
     state_machine.init(config["postgres_dsn"])
     result = tick(
-        ForemanConfig(coding_config=dict(config["coding"])),
+        ForemanConfig(
+            coding_config=dict(config["coding"]),
+            treatments=_LOCAL_TREATMENTS,
+        ),
         limit=args.limit,
     )
     return dataclasses.asdict(result)
@@ -251,6 +256,7 @@ def status_command(args: argparse.Namespace) -> dict[str, Any]:
         "database": config["postgres_dsn"],
         "repository_root": coding["repository_root"],
         "worktree_root": coding["worktree_root"],
+        "treatments": [item.identity for item in _LOCAL_TREATMENTS],
         "luet": {
             "path": str(binding.executable_path),
             "sha256": binding.sha256,

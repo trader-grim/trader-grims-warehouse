@@ -334,17 +334,20 @@ def tick(
             worktree = validated_coding_worktree(
                 todo.worktree, todo.worktree, cfg.coding_config,
             )
-            fixture_baseline = None
+            implementation_baseline = None
+            binding = todo.plan_binding
+            if binding is not None:
+                if not isinstance(binding, dict) or not isinstance(binding.get("source_commit"), str):
+                    raise ValueError("Plan-bound Todo lacks its source commit")
+                implementation_baseline = binding["source_commit"]
             if cfg.fixture_implementation_baseline_commit is not None:
-                binding = todo.plan_binding
                 if not isinstance(binding, dict) or not binding.get("fixture_run_id"):
                     raise ValueError("fixture implementation baseline requires a fixture-bound Todo")
                 if binding.get("source_commit") != cfg.fixture_implementation_baseline_commit:
                     raise ValueError("fixture implementation baseline disagrees with Plan binding")
-                fixture_baseline = cfg.fixture_implementation_baseline_commit
             snapshot = build_coding_snapshot(
                 worktree, cfg.goal_profile, cfg.treatments,
-                implementation_baseline_commit=fixture_baseline,
+                implementation_baseline_commit=implementation_baseline,
             )
         except Exception:
             log.exception(

@@ -9,6 +9,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
+from tgw.development.foreman import (
+    EVALUATOR_VERSION,
+    ForemanConfig,
+    TickResult,
+    TodoRecord,
+    _extract_worktree,
+    _has_active_job,
+    _has_terminal_job,
+    tick,
+)
+from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
+from tgw.development.treatments import CODING_TREATMENTS
 from tgw.workflow_kernel.contracts import (
     EvidenceAssertion,
     EvidenceReference,
@@ -18,19 +30,7 @@ from tgw.workflow_kernel.contracts import (
     RuntimeWorkGraph,
     TreatmentDisposition,
 )
-from tgw.development.foreman import (
-    EVALUATOR_VERSION,
-    ForemanConfig,
-    TickResult,
-    TodoRecord,
-    _has_active_job,
-    _has_terminal_job,
-    _extract_worktree,
-    tick,
-)
-from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
 from tgw.workflow_kernel.scheduler import DispatchResult
-from tgw.development.treatments import CODING_TREATMENTS
 
 
 def test_database_job_state_checks_cast_text_arrays_to_queue_enum(monkeypatch):
@@ -122,6 +122,25 @@ def _implemented_true():
     return (
         _assertion("implemented", FingerprintResult.TRUE, "implemented"),
     )
+
+
+def test_plan_bound_todo_uses_bound_source_as_uncommitted_implementation_baseline():
+    baseline = "a" * 40
+    todo = TodoRecord(
+        17, "codex", 1, "implement", "/tmp/worktree-1",
+        {"source_commit": baseline},
+    )
+    snapshot = _snapshot(assertions=_implemented())
+    with (
+        patch("tgw.development.foreman.build_coding_snapshot", return_value=snapshot) as build,
+        patch("tgw.development.foreman.evaluate", return_value=_graph(snapshot.object_id)),
+    ):
+        tick(
+            fetch_todos=lambda: [todo],
+            check_active_fn=lambda _graph_id: False,
+            check_terminal_fn=lambda _graph_id: False,
+        )
+    assert build.call_args.kwargs["implementation_baseline_commit"] == baseline
 
 
 def _all_satisfied():
