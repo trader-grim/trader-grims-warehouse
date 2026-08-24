@@ -108,6 +108,32 @@ def test_bounded_launcher_timeout_kills_descendant_process_group(tmp_path):
     assert not marker.exists()
 
 
+def test_bounded_launcher_timeout_kills_term_ignoring_descendant_with_closed_stdio(tmp_path):
+    marker = tmp_path / "term-ignoring-descendant-survived"
+    child = (
+        "import os,pathlib,signal,sys,time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "os.close(0); os.close(1); os.close(2); "
+        "time.sleep(0.8); "
+        "pathlib.Path(sys.argv[1]).write_text('survived')"
+    )
+    parent = (
+        "import subprocess,sys,time; "
+        "subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[1]]); "
+        "time.sleep(30)"
+    )
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_bounded_process_group(
+            [sys.executable, "-c", parent, str(marker), child],
+            cwd=tmp_path,
+            env={},
+            timeout=0.2,
+        )
+
+    time.sleep(1)
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("queue_name", ("workflow_evaluate", "ebay_publish", "ai_identify"))
 def test_coding_worker_rejects_business_queues(queue_name):
     with pytest.raises(ValueError, match="unsupported coding queue"):

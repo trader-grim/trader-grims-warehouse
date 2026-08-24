@@ -82,11 +82,21 @@ def _run_bounded_process_group(
         try:
             stdout, stderr = process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
+            stdout = stderr = ""
+        # The session leader may exit and close its pipes while a nested
+        # descendant that ignored SIGTERM remains in the process group.  Kill
+        # the group unconditionally after the grace period/leader exit; tying
+        # SIGKILL to another communicate timeout misses descendants that have
+        # closed inherited stdout and stderr.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if process.poll() is None:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            stdout, stderr = process.communicate()
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired as kill_exc:  # pragma: no cover - kernel invariant
+                raise RuntimeError("launcher process survived SIGKILL") from kill_exc
         raise subprocess.TimeoutExpired(
             command,
             timeout,
