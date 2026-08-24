@@ -154,12 +154,16 @@ def test_foreman_uses_only_installed_local_treatments(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(local_workflow, "require_coder_account", lambda: "db")
     monkeypatch.setattr(local_workflow.todo, "init", lambda _dsn: None)
     monkeypatch.setattr(local_workflow.state_machine, "init", lambda _dsn: None)
-    observed = []
+    observed = {}
 
     def tick(config, *, limit=None):
-        observed.extend(item.identity for item in config.treatments)
+        observed["treatments"] = [item.identity for item in config.treatments]
+        observed["receipt_backed_conditions"] = config.receipt_backed_conditions
         return TickResult()
 
     monkeypatch.setattr(local_workflow, "tick", tick)
     local_workflow.foreman_command(argparse.Namespace(config=config, limit=None))
-    assert observed == ["codex-implement", "controller-verify"]
+    assert observed == {
+        "treatments": ["codex-implement", "controller-verify"],
+        "receipt_backed_conditions": frozenset({"tested", "linted"}),
+    }

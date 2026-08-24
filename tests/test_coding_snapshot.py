@@ -11,11 +11,6 @@ from unittest.mock import patch
 # Ensure src/ is on the path so we can import tgw.workflow
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from tgw.workflow import (  # noqa: E402
-    FingerprintResult,
-    GoalProfile,
-    ObjectSnapshot,
-)
 from tgw.development.coding_snapshot import (  # noqa: E402
     _CHECKERS,
     CONTROLLER_PYTHON,
@@ -28,6 +23,11 @@ from tgw.development.coding_snapshot import (  # noqa: E402
     _git_is_clean,
     _git_rev_parse,
     build_coding_snapshot,
+)
+from tgw.workflow import (  # noqa: E402
+    FingerprintResult,
+    GoalProfile,
+    ObjectSnapshot,
 )
 
 
@@ -402,6 +402,52 @@ class TestBuildCodingSnapshot:
         _git_write_file(tmp_path, "x.py", "x = 2")
         stale = build_coding_snapshot(tmp_path, _goal("reviewed", "controller_verified"))
         assert all(a.result is FingerprintResult.STALE for a in stale.assertions)
+
+    def test_local_test_and_lint_conditions_use_bound_controller_receipt(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _git_init(tmp_path)
+        _git_commit(tmp_path, "initial", allow_empty=True)
+        before = build_coding_snapshot(tmp_path, _goal("controller_verified"))
+        (tmp_path / "controller-harness-receipt.json").write_text(
+            json.dumps(
+                {
+                    "status": "PASS",
+                    "outcome": "satisfied",
+                    "established_conditions": [
+                        "tested",
+                        "linted",
+                        "controller_verified",
+                    ],
+                    "graph_id": "controller-graph",
+                    "object_id": str(tmp_path.resolve()),
+                    "object_generation": before.generation,
+                }
+            )
+        )
+        monkeypatch.setitem(
+            _CHECKERS,
+            "tested",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("pytest ran")),
+        )
+        monkeypatch.setitem(
+            _CHECKERS,
+            "linted",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("ruff ran")),
+        )
+
+        snapshot = build_coding_snapshot(
+            tmp_path,
+            _goal("tested", "linted"),
+            receipt_backed_conditions=frozenset({"tested", "linted"}),
+        )
+
+        assert all(
+            assertion.result is FingerprintResult.TRUE
+            for assertion in snapshot.assertions
+        )
 
     def test_stitch_receipt_does_not_dirty_or_change_generation(self, tmp_path):
         _git_init(tmp_path)

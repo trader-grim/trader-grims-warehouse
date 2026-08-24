@@ -1,5 +1,6 @@
 """Tests for tgw.development.foreman — coding foreman tick cycle."""
 
+import json
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,6 +15,7 @@ from tgw.development.foreman import (
     ForemanConfig,
     TickResult,
     TodoRecord,
+    _default_fetch_open_todos,
     _extract_worktree,
     _has_active_job,
     _has_terminal_job,
@@ -258,6 +260,46 @@ def test_tick_refuses_unbound_todo_before_snapshot_or_dispatch():
     snapshot.assert_not_called()
     evaluator.assert_not_called()
     dispatch.assert_not_called()
+
+
+def test_default_fetch_uses_validated_binding_worktree_without_json_punctuation(
+    monkeypatch,
+):
+    binding = _plan_binding(17, "/opt/TGW/var/worktrees/todo-17-plan-test")
+    status_note = json.dumps(binding, sort_keys=True, separators=(",", ":"))
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, *_args):
+            return None
+
+        def fetchall(self):
+            return [(17, "codex", 1, "implement bounded leaf", status_note)]
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return Cursor()
+
+    @contextmanager
+    def connection():
+        yield Connection()
+
+    monkeypatch.setattr("tgw.queue.state_machine._conn", connection)
+    record = _default_fetch_open_todos()[0]
+
+    assert record.worktree == binding["worktree"]
+    assert record.plan_binding == binding
 
 
 # ---------------------------------------------------------------------------

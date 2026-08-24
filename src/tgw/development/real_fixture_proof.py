@@ -108,6 +108,7 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
         config=ForemanConfig(
             coding_config=proof_coding,
             fixture_implementation_baseline_commit=candidate_commit,
+            receipt_backed_conditions=frozenset({"tested", "linted"}),
         ), todo_ids={record.todo_id},
         fetch_todos=lambda: [record], enqueue_fn=fixture_enqueue(run_id),
     )

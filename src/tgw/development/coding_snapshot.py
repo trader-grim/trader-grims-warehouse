@@ -106,6 +106,8 @@ CANONICAL_BRANCHES = frozenset({"main", "master"})
 
 _RECEIPT_PATHS: dict[str, str] = {
     "implemented": "implementation-receipt.json",
+    "tested": "controller-harness-receipt.json",
+    "linted": "controller-harness-receipt.json",
     "reviewed": "review-receipt.json",
     "controller_verified": "controller-harness-receipt.json",
     "deployed": "deployment-receipt.json",
@@ -617,6 +619,7 @@ def build_coding_snapshot(
     treatments: tuple[TreatmentContract, ...] = (),
     *,
     implementation_baseline_commit: str | None = None,
+    receipt_backed_conditions: frozenset[str] = frozenset(),
 ) -> ObjectSnapshot:
     """Build a read-only ObjectSnapshot by checking coding conditions in a
     git worktree.
@@ -672,7 +675,14 @@ def build_coding_snapshot(
             )
             continue
 
-        if condition_id == "implemented":
+        if condition_id in receipt_backed_conditions:
+            result, reasons, evidence = _check_receipt(
+                worktree,
+                condition_id,
+                object_id,
+                generation,
+            )
+        elif condition_id == "implemented":
             result, reasons, evidence = checker(
                 worktree, implementation_baseline_commit,
             )

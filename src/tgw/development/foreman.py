@@ -73,6 +73,9 @@ class ForemanConfig:
     # A fixture may prove its clean allocated worktree is genuinely unimplemented
     # against its bound source commit.  Ordinary Todos never consume this field.
     fixture_implementation_baseline_commit: str | None = None
+    # The direct local lane consumes source-bound controller receipts instead
+    # of rerunning project commands inside each short Foreman timer tick.
+    receipt_backed_conditions: frozenset[str] = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -233,8 +236,12 @@ def _default_fetch_open_todos() -> list[TodoRecord]:
             )
             for row in cur.fetchall():
                 todo_id, agent, priority, body, status_note = row
-                worktree = _extract_worktree(status_note or "") or _extract_worktree(body)
                 plan_binding = parse_plan_binding(status_note, todo_id=todo_id)
+                worktree = (
+                    plan_binding["worktree"]
+                    if plan_binding is not None
+                    else _extract_worktree(status_note or "") or _extract_worktree(body)
+                )
                 todos.append(
                     TodoRecord(
                         todo_id=todo_id,
@@ -381,6 +388,7 @@ def tick(
                 cfg.goal_profile,
                 cfg.treatments,
                 implementation_baseline_commit=implementation_baseline,
+                receipt_backed_conditions=cfg.receipt_backed_conditions,
             )
         except Exception:
             log.exception(

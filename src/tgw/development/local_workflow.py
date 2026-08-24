@@ -229,6 +229,7 @@ def foreman_command(args: argparse.Namespace) -> dict[str, Any]:
         ForemanConfig(
             coding_config=dict(config["coding"]),
             treatments=_LOCAL_TREATMENTS,
+            receipt_backed_conditions=frozenset({"tested", "linted"}),
         ),
         limit=args.limit,
     )
