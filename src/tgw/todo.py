@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
 import time
 from contextlib import contextmanager
@@ -37,7 +38,19 @@ import psycopg2.extras
 
 log = logging.getLogger(__name__)
 
-_DSN = 'dbname=state_machine user=tgw'
+_DSN = os.environ.get('TGW_TODO_DSN', 'dbname=state_machine user=tgw')
+
+
+def init(dsn: str) -> None:
+    """Set the Todo adapter DSN for an explicitly configured caller.
+
+    Legacy callers retain the module default.  Development fixture runs call
+    this only after their local-identity and target-database preflight.
+    """
+    if not isinstance(dsn, str) or not dsn.strip():
+        raise ValueError("Todo DSN must be a non-empty string")
+    global _DSN
+    _DSN = dsn
 
 
 def _ensure_reasoning_column() -> None:

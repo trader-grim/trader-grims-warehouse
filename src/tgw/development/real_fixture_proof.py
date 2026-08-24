@@ -12,6 +12,7 @@ from tgw.development.fixture_isolation import (
     cleanup_fixture_run, create_fixture_todo, fixture_enqueue, fixture_todo_record,
     fixture_worktree_root, list_fixture_todos, run_fixture_job_once, validate_fixture_run_id,
 )
+from tgw.development.fixture_db_binding import initialize_fixture_database
 from tgw.development.foreman import ForemanConfig, tick
 from tgw.development.plan_todo_bridge import bind_leaf
 from tgw.plan_solver import solve
@@ -58,6 +59,7 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
     source_root = source_root.resolve()
     if _git(source_root, "rev-parse", "HEAD") != candidate_commit:
         raise ValueError("source does not resolve to the requested candidate")
+    database_binding = initialize_fixture_database()
     canonical_root = Path(str(coding["worktree_root"])).resolve()
     fixture_root = fixture_worktree_root(canonical_root, run_id)
     if fixture_root.exists() and any(fixture_root.iterdir()):
@@ -115,4 +117,5 @@ def run_real_fixture_proof(*, run_id: str, source_root: Path, coding: dict[str, 
     return {"plan_solution": asdict(plan), "ready_leaf": asdict(ready), "plan_bound_todo": bound,
             "coding_request": {"job_id": job_id}, "allocated_worktree": binding["worktree_identity"],
             "coding_execution": receipt["execution_envelope"], "receipt": receipt,
+            "database_binding": database_binding,
             "cleanup": lambda: cleanup_fixture_run(run_id, canonical_worktree_root=canonical_root, repository_root=source_root)}
