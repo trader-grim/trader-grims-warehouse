@@ -13,7 +13,9 @@ from tgw.plan_render import PlanRenderBindingError, approved_render_plan_identit
 from tgw.plan_runtime_projection import load_projection, validate_projection
 
 ROOT = Path(__file__).resolve().parents[1]
-PROJECTION = ROOT / "agent-services/plan-runtime/GOVERNED-EXECUTION-PLATFORM-f0a8cf22.json"
+PLAN_COMMIT = "058e2f980201cc78245358e4901cf007063f2c29"
+SOLUTION_HASH = "sha256:ecce15aad2699492c0c5577bff1af7005ffbbec6ae6166b325b34c1cc7e70e9f"
+PROJECTION = ROOT / "agent-services/plan-runtime/GOVERNED-EXECUTION-PLATFORM-058e2f98.json"
 
 
 def _value():
@@ -21,12 +23,12 @@ def _value():
 
 
 def test_projection_binds_current_approved_plan_and_complete_solution():
-    value = validate_projection(_value(), expected_plan_commit="f0a8cf22b2c7b2f064292a048ffcb8ee98919e99")
+    value = validate_projection(_value(), expected_plan_commit=PLAN_COMMIT)
     assert value["solution"]["complete"] is True
     assert value["solution"]["dispatchable"] is True
     assert value["solution"]["conformance_verified"] is True
-    assert value["solution"]["solution_hash"] == "sha256:1c3684135769e5dcabcaf130c55df160a4cecc0d3ebcee6ccd129ab97cdd709b"
-    assert value["solution"]["closure_hash"] == "sha256:5d3e52999223f7df9a5421bd0a5f6549c9f0b2965b8cca55adb5c002492ae4a5"
+    assert value["solution"]["solution_hash"] == SOLUTION_HASH
+    assert value["solution"]["closure_hash"] == "sha256:16db00efe71a3c84d27faf012e58e5e664abe47e7eece40f2436dd125943f7bb"
 
 
 def test_projection_runtime_render_consumers_never_fall_back_to_direct_plan_root(monkeypatch):
@@ -39,8 +41,8 @@ def test_projection_runtime_render_consumers_never_fall_back_to_direct_plan_root
             {
                 "plan_projection_path": PROJECTION,
                 "standalone_plan_root": "/run/tgw/no-local-plan",
-                "plan_approved_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
-                "plan_approved_solution_hash": "sha256:1c3684135769e5dcabcaf130c55df160a4cecc0d3ebcee6ccd129ab97cdd709b",
+                "plan_approved_commit": PLAN_COMMIT,
+                "plan_approved_solution_hash": SOLUTION_HASH,
             }
         )
 
@@ -71,7 +73,7 @@ def test_held_projection_loader_and_console_host_use_one_exact_projection(tmp_pa
         "plan_projection_path": path,
         "plan_projection_trusted_uid": os.getuid(),
         "plan_projection_root": root,
-        "plan_approved_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+        "plan_approved_commit": PLAN_COMMIT,
         "plan_approved_solution_hash": value["solution"]["solution_hash"],
     }
     loaded = load_projection(path, expected_plan_commit=config["plan_approved_commit"], trusted_uid=os.getuid(), trusted_root=root)

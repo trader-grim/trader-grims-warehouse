@@ -15,14 +15,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
+from tgw.plan_catalog import compose_catalog
 from tgw.plan_luet import LUET_VERSION, PINNED_LUET_BINARY_SHA256, conform
 from tgw.plan_solver import solve
 
 pytestmark = pytest.mark.real_luet
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMIT = "fb9fee3e9db756ad0f5071525e943794bf1dab9b"
+COMMIT = "058e2f980201cc78245358e4901cf007063f2c29"
+PLAN_ROOT = Path("/opt/TGW/library/plans")
 
 
 @pytest.fixture(scope="module")
@@ -66,18 +69,15 @@ def canonical_graph() -> dict[str, Any]:
     catalog = json.loads(
         (ROOT / "agent-services/catalogs/governed-execution-platform-v1.json").read_text()
     )
+    execution = yaml.safe_load(subprocess.check_output(
+        ["git", "-C", str(PLAN_ROOT), "show", f"{COMMIT}:plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml"],
+        text=True,
+    ))
     assert catalog["plan_commit"] == COMMIT
-    catalog["schema"] = "tgw-plan/v2"
-    catalog["target"] = {
-        "id": catalog["plan_id"],
-        "profile": "production",
-        "minimum_state": catalog["profiles"]["production"]["minimum_state"],
-        "required_capabilities": catalog["capabilities"],
-    }
-    return catalog
+    return compose_catalog(execution, catalog, plan_commit=COMMIT)
 
 
-def test_real_pinned_luet_agrees_on_canonical_fb9_graph(real_luet_binary: Path):
+def test_real_pinned_luet_agrees_on_current_approved_plan_graph(real_luet_binary: Path):
     document = canonical_graph()
 
     result = conform(
@@ -86,7 +86,7 @@ def test_real_pinned_luet_agrees_on_canonical_fb9_graph(real_luet_binary: Path):
 
     assert result["status"] == "AGREEMENT"
     assert result["selected_providers"] == solve(document)["selected_providers"]
-    assert result["closure_hash"] == "sha256:bc0c53b2574fc359c629bd213e078fdd2824e5e1c4a98c0c7a347de869d9e6f8"
+    assert result["closure_hash"] == "sha256:16db00efe71a3c84d27faf012e58e5e664abe47e7eece40f2436dd125943f7bb"
 
 
 def test_real_pinned_luet_agrees_on_global_non_greedy_choice(real_luet_binary: Path):

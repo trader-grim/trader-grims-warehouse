@@ -2,7 +2,7 @@
   "schema": "tgw-plan-provider-catalog/v1",
   "id": "governed-execution-platform-providers@1",
   "plan_id": "PLAN-GOVERNED-EXECUTION-PLATFORM",
-  "plan_commit": "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99",
+  "plan_commit": "058e2f980201cc78245358e4901cf007063f2c29",
   "profiles": {
     "production": {"minimum_state": "operationally_verified"}
   },
@@ -13,7 +13,7 @@
     "plan.shared-planning-skill@1",
     "workflow.condition-derived-convergence@1",
     "coding.governed-execution@1",
-    "authority.operator-decisions@1",
+    "operator.instruction-records@1",
     "operator.surface-projection@1",
     "coding.harness-agnostic-role-lanes@1",
     "promptcraft.receiver-profiles@1"
@@ -25,8 +25,8 @@
     {"id": "shared-tgw-plan-skill", "provides": ["plan.shared-planning-skill@1"], "requires": ["plan.graph-query@1"]},
     {"id": "recovered-promptcraft", "provides": ["promptcraft.receiver-profiles@1"], "requires": []},
     {"id": "build-workflow-convergence", "provides": ["workflow.condition-derived-convergence@1"], "requires": []},
-    {"id": "build-operator-authority", "provides": ["authority.operator-decisions@1"], "requires": ["workflow.condition-derived-convergence@1"]},
-    {"id": "build-operator-surface", "provides": ["operator.surface-projection@1"], "requires": ["authority.operator-decisions@1"]},
+    {"id": "build-operator-instruction-records", "provides": ["operator.instruction-records@1"], "requires": ["workflow.condition-derived-convergence@1"]},
+    {"id": "build-operator-surface", "provides": ["operator.surface-projection@1"], "requires": ["operator.instruction-records@1"]},
     {"id": "build-harness-role-lanes", "provides": ["coding.harness-agnostic-role-lanes@1"], "requires": ["plan.shared-planning-skill@1", "promptcraft.receiver-profiles@1"]},
     {"id": "build-governed-execution", "provides": ["coding.governed-execution@1"], "requires": ["plan.capability-resolution@2", "workflow.condition-derived-convergence@1", "coding.harness-agnostic-role-lanes@1"]}
   ],

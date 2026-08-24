@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from tgw.plan_luet import (
 
 CATALOG_PATH = "agent-services/catalogs/governed-execution-platform-v1.json"
 EXECUTION_PATH = "plan/execution/GOVERNED-EXECUTION-PLATFORM-v1.yaml"
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _git(repo: Path, *arguments: str, text: bool = True) -> str | bytes:
@@ -30,9 +32,11 @@ def _git(repo: Path, *arguments: str, text: bool = True) -> str | bytes:
 
 
 def _approved_plan_commit(repository: Path, approved_ref: str) -> str:
+    if not _COMMIT.fullmatch(approved_ref):
+        raise ValueError("approved Plan binding must be an exact full Git commit")
     commit = str(_git(repository, "rev-parse", f"{approved_ref}^{{commit}}")).strip()
-    if len(commit) != 40:
-        raise ValueError("approved Plan ref did not resolve to an exact commit")
+    if commit != approved_ref:
+        raise ValueError("approved Plan binding did not resolve to the exact commit")
     return commit
 
 
@@ -87,7 +91,8 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--plan-repository", type=Path, required=True)
-    parser.add_argument("--plan-approved-ref", required=True)
+    parser.add_argument("--plan-approved-ref", required=True,
+                        help="exact approved Plan commit (never a movable ref)")
     args = parser.parse_args()
     announce_script_run(
         "run_luet_conformance.py",

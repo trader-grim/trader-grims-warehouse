@@ -5,16 +5,16 @@ from pathlib import Path
 import pytest
 
 from tgw.plan_catalog import CATALOG_SCHEMA, compose_catalog, load_provider_catalog
-from tgw.plan_solver import PlanResolutionError, solve
+from tgw.plan_solver import PlanResolutionError, solve, validate_for_dispatch
 
-COMMIT = "f0a8cf22b2c7b2f064292a048ffcb8ee98919e99"
+COMMIT = "058e2f980201cc78245358e4901cf007063f2c29"
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "agent-services/catalogs/governed-execution-platform-v1.json"
 TARGET_CAPABILITIES = [
     "plan.capability-resolution@2",
     "workflow.condition-derived-convergence@1",
     "coding.governed-execution@1",
-    "authority.operator-decisions@1",
+    "operator.instruction-records@1",
     "operator.surface-projection@1",
     "coding.harness-agnostic-role-lanes@1",
     "promptcraft.receiver-profiles@1",
@@ -50,7 +50,7 @@ def test_canonical_catalog_composes_complete_closure_as_work_not_installed_state
         "shared-tgw-plan-skill",
         "recovered-promptcraft",
         "build-workflow-convergence",
-        "build-operator-authority",
+        "build-operator-instruction-records",
         "build-operator-surface",
         "build-harness-role-lanes",
         "build-governed-execution",
@@ -110,3 +110,17 @@ def test_catalog_plan_binding_is_strict():
 
     with pytest.raises(PlanResolutionError, match="exact Plan commit"):
         compose_catalog(execution_graph(), stale, plan_commit=COMMIT)
+
+
+def test_catalog_semantic_mismatch_cannot_dispatch_as_a_complete_plan_solution():
+    explicit = load_provider_catalog(CATALOG)
+    explicit["providers"] = [
+        provider for provider in explicit["providers"]
+        if "operator.instruction-records@1" not in provider["provides"]
+    ]
+
+    solution = solve(compose_catalog(execution_graph(), explicit, plan_commit=COMMIT))
+
+    assert solution["complete"] is False
+    with pytest.raises(PlanResolutionError, match="incomplete"):
+        validate_for_dispatch(solution, current_plan_commit=COMMIT)
