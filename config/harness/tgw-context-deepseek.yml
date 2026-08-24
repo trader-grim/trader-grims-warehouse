@@ -1,0 +1,12 @@
+- insert:
+    - id: tgw-context
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: tgw-context
+        transport: stdio
+        command: "/opt/TGW/tgw-lib/bin/tgw-context-mcp"
+        args: []
+        cwd: "/home/deepseek"
+        failOnStartupError: true
+        reconnect:
+          enabled: false

@@ -1,0 +1,58 @@
+{
+  "schema": "tgw-execution-environment-catalog/v3",
+  "host_policy": {
+    "actor_execution_host": "tgw-lib",
+    "production_host": "tgw-prod",
+    "production_installs_catalog": false
+  },
+  "actors": {
+    "claude": {
+      "enabled": true,
+      "permitted_profiles": ["development"],
+      "required_mcp_endpoints": ["tgw-context"],
+      "required_skills": ["tgw-plan", "tgw-review"]
+    },
+    "codex": {
+      "enabled": true,
+      "permitted_profiles": ["development"],
+      "required_mcp_endpoints": ["tgw-context"],
+      "required_skills": ["tgw-plan", "tgw-review"]
+    },
+    "deepseek": {
+      "enabled": true,
+      "permitted_profiles": ["development"],
+      "required_mcp_endpoints": ["tgw-context"],
+      "required_skills": ["tgw-plan", "tgw-review"]
+    }
+  },
+  "profiles": {
+    "development": {
+      "state": "ready",
+      "broker_capabilities": ["plan-read", "source-read"],
+      "tools": [
+        {
+          "name": "git",
+          "executable_path": "/usr/bin/git",
+          "executable_sha256": "sha256:356db14e102d68a1a37d8a1ac577dfd678d45d46e92f468bef8b7154e7bfdc60"
+        },
+        {
+          "name": "rg",
+          "executable_path": "/usr/bin/rg",
+          "executable_sha256": "sha256:55f963c480771ef14d4400664433f63e36e16d41c56ab44410c9521f2736763a"
+        },
+        {
+          "name": "python",
+          "executable_path": "/usr/bin/python3",
+          "executable_sha256": "sha256:17b78e0a93175e86f9ac03141924fd7a7f0c0c52e66b34bfa0de20ffef989df1"
+        }
+      ],
+      "verification_commands": [
+        ["python", "--version"],
+        ["git", "--version"],
+        ["rg", "--version"]
+      ],
+      "workspace_root": "/opt/TGW/w",
+      "cache_root": "/opt/TGW/var/cache/tgw"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "tgw-context": {
+      "command": "/opt/TGW/tgw-lib/bin/tgw-context-mcp",
+      "args": []
+    }
+  },
+  "tgw": {
+    "schema": "tgw-shared-debian-context-registration/v1",
+    "fallback": "forbidden"
+  }
+}
