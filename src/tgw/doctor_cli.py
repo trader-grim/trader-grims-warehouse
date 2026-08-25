@@ -10,6 +10,7 @@ delete work, change application data, or widen an actor's authority.
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import grp
 import hashlib
@@ -18,6 +19,7 @@ import os
 import pwd
 import re
 import shlex
+import shutil
 import socket
 import stat
 import subprocess
@@ -120,6 +122,15 @@ class DoctorPaths:
     context_runtime_source: Path = Path("/opt/TGW/tgw-lib/context-runtime/src")
     context_catalog: Path = Path("/opt/TGW/tgw-lib/config/tgw-context-debian-v1.json")
     receipts: Path = Path("/opt/TGW/tgw-lib/doctor-receipts")
+    cleanup_archive_root: Path = Path("/opt/TGW/tgw-lib/archive/doctor-cleanup")
+    cleanup_system_bin: Path = Path("/usr/local/bin")
+    cleanup_actor_home: Path | None = None
+    cleanup_reference_roots: tuple[Path, ...] = (
+        Path("/etc/systemd/system"),
+        Path("/run/systemd/system"),
+        Path("/usr/local/lib/systemd/system"),
+        Path("/opt/TGW/tgw-lib/config"),
+    )
     trusted_release_owners: tuple[int, ...] = (0, 65534)
     systemd_unit_roots: tuple[Path, ...] = _SYSTEMD_UNIT_ROOTS
     archive_discovery_roots: tuple[Path, ...] = _ARCHIVE_DISCOVERY_ROOTS
@@ -1299,22 +1310,134 @@ def check_runtime(paths: DoctorPaths) -> dict[str, Any]:
         )
 
 
-def check_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
-    known = (
-        Path("/usr/local/bin/tgw-coding"),
-        Path("/usr/local/bin/tgw-coding-helper"),
+_OBSOLETE_FILE_HASHES = {
+    "tgw-foreman": "sha256:10152bcc0c7c72555a630d662e736ee827dc3edb5e3f3a0ad78ecf5b450d6332",
+    "tgw-foreman-dispatch": "sha256:61fa8586dfc655685bfece1cbd71b7deed357d23833177bf9d0b6158825f66c5",
+    "tgw-context-mcp-candidate-3fe54df8": "sha256:722dcfecebb23ee2dd71d8bfcf923a5275b8089edd03d47e632c51417bfc8699",
+    "tgw-context-mcp-candidate-408ee56c": "sha256:3e9f57ad0a60597595e158dde60c36f8857e03b9902f0106332975fab5db4db6",
+    "tgw-context-mcp-candidate-6813c302": "sha256:a1a1d637414e4afa881af03d0d0574e44733985a13b33f4acfff3bc443923e5b",
+    "tgw-context-mcp-candidate-6865ce87": "sha256:9821db48b5205bbc06ccb6bd32697fbf25532c81b3292ddb5e0bae78fcda6009",
+}
+_OBSOLETE_ACTOR_TARGET = (
+    "/opt/TGW/tgw-lib/actor-runtime/releases/"
+    "w18-9634e8a7-20260822/scripts/tgw_actor_startup.py"
+)
+_UNBOUND_OBSOLETE_NAMES = ("tgw-coding", "tgw-coding-helper")
+
+
+def _lexists(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _declared_obsolete_surfaces(paths: DoctorPaths) -> list[dict[str, Any]]:
+    actor = _operator_actor()
+    actor_home = paths.cleanup_actor_home
+    if actor_home is None:
+        try:
+            actor_home = Path(pwd.getpwnam(actor).pw_dir)
+        except KeyError as exc:
+            raise DoctorError(f"invoking actor account does not exist: {actor}") from exc
+    rows = [
+        {
+            "path": paths.cleanup_system_bin / name,
+            "kind": "file",
+            "declared_sha256": _OBSOLETE_FILE_HASHES[name],
+        }
+        for name in ("tgw-foreman", "tgw-foreman-dispatch")
+    ]
+    rows.append(
+        {
+            "path": actor_home / ".local/bin/tgw-actor",
+            "kind": "symlink",
+            "declared_target": _OBSOLETE_ACTOR_TARGET,
+        }
     )
-    visible = [str(path) for path in known if path.exists() or path.is_symlink()]
+    candidate_names = {
+        name
+        for name in _OBSOLETE_FILE_HASHES
+        if name.startswith("tgw-context-mcp-candidate-")
+    }
+    if paths.local_bin.is_dir():
+        candidate_names.update(
+            path.name for path in paths.local_bin.glob("tgw-context-mcp-candidate-*")
+        )
+    for name in sorted(candidate_names):
+        rows.append(
+            {
+                "path": paths.local_bin / name,
+                "kind": "file",
+                "declared_sha256": _OBSOLETE_FILE_HASHES.get(name),
+            }
+        )
+    return rows
+
+
+def _surface_observation(item: Mapping[str, Any]) -> dict[str, Any]:
+    path = Path(item["path"])
+    row = {"path": str(path), "kind": item["kind"]}
+    if path.is_symlink():
+        row["target"] = os.readlink(path)
+    elif path.is_file():
+        row["sha256"] = _file_hash(path)
+    else:
+        row["observed_type"] = "unsupported"
+    if "declared_sha256" in item:
+        row["declared_sha256"] = item["declared_sha256"]
+    if "declared_target" in item:
+        row["declared_target"] = item["declared_target"]
+    return row
+
+
+def _surface_matches_declaration(
+    item: Mapping[str, Any], observation: Mapping[str, Any]
+) -> bool:
+    if item["kind"] == "symlink":
+        return observation.get("target") == item.get("declared_target")
+    return (
+        isinstance(item.get("declared_sha256"), str)
+        and observation.get("sha256") == item["declared_sha256"]
+    )
+
+
+def check_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
+    declared = _declared_obsolete_surfaces(paths)
+    present = [item for item in declared if _lexists(item["path"])]
+    visible = [_surface_observation(item) for item in present]
+    mismatched = [
+        observation
+        for item, observation in zip(present, visible, strict=True)
+        if not _surface_matches_declaration(item, observation)
+    ]
+    unbound = [
+        str(path)
+        for name in _UNBOUND_OBSOLETE_NAMES
+        if _lexists(path := paths.cleanup_system_bin / name)
+    ]
+    if mismatched or unbound:
+        state = "FAIL"
+        detail = "obsolete active surfaces are not bound to the exact cleanup treatment"
+        repair = None
+    elif visible:
+        state = "WARN"
+        detail = "verified obsolete active surfaces remain: " + ", ".join(
+            item["path"] for item in visible
+        )
+        repair = "sudo -n tgw doctor repair obsolete-surfaces"
+    else:
+        state = "PASS"
+        detail = "no declared obsolete active surface remains"
+        repair = None
     return _check(
         "cleanup.obsolete-active-surfaces",
-        "WARN" if visible else "PASS",
-        "obsolete coding commands remain in active PATH: " + ", ".join(visible)
-        if visible
-        else "no known obsolete coding command remains in active PATH",
-        evidence={"visible": visible},
-        repair="tgw doctor inventory, then move verified obsolete commands to the recovery archive"
-        if visible
-        else None,
+        state,
+        detail,
+        evidence={
+            "visible": visible,
+            "mismatched": mismatched,
+            "unbound": unbound,
+            "declared_count": len(declared),
+        },
+        repair=repair,
     )
 
 
@@ -1441,6 +1564,11 @@ def _atomic_bytes(path: Path, value: bytes, *, mode: int) -> None:
             os.fsync(stream.fileno())
         os.chmod(temporary, mode)
         os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -1735,11 +1863,303 @@ def repair_workers(paths: DoctorPaths) -> dict[str, Any]:
     }
 
 
+def _cleanup_references(
+    paths: DoctorPaths, surfaces: Sequence[Mapping[str, Any]]
+) -> list[dict[str, str]]:
+    needles = {
+        value
+        for item in surfaces
+        for value in (
+            str(item["path"]),
+            Path(item["path"]).name,
+            item.get("declared_target"),
+        )
+        if isinstance(value, str) and value
+    }
+    references: list[dict[str, str]] = []
+    actor_home = paths.cleanup_actor_home
+    if actor_home is None:
+        actor_home = Path(pwd.getpwnam(_operator_actor()).pw_dir)
+    actor_configuration = (
+        actor_home / ".bash_profile",
+        actor_home / ".bashrc",
+        actor_home / ".profile",
+        actor_home / ".zshrc",
+        actor_home / ".codex/config.toml",
+        actor_home / ".claude/settings.json",
+        actor_home / ".config/hermes/config.toml",
+        actor_home / ".config/opencode/opencode.json",
+        actor_home / ".gemini/settings.json",
+        actor_home / ".antigravity/settings.json",
+    )
+    evidence_records = {
+        path.resolve(strict=False)
+        for path in (paths.context_snapshot, paths.context_task, paths.context_cursor)
+    }
+    roots = tuple(dict.fromkeys((*paths.cleanup_reference_roots, *actor_configuration)))
+    for root in roots:
+        if root.resolve(strict=False) in evidence_records:
+            continue
+        if root.is_file() or root.is_symlink():
+            candidates = [root]
+        elif root.is_dir():
+            try:
+                candidates = list(root.rglob("*"))
+            except OSError as exc:
+                raise DoctorError(
+                    f"cannot completely scan active configuration: {root}"
+                ) from exc
+        else:
+            continue
+        for candidate in candidates:
+            if candidate.resolve(strict=False) in evidence_records:
+                continue
+            try:
+                if candidate.is_symlink():
+                    raw = os.readlink(candidate).encode()
+                elif candidate.is_file():
+                    raw = candidate.read_bytes()
+                else:
+                    continue
+            except OSError as exc:
+                raise DoctorError(
+                    f"cannot completely inspect active configuration: {candidate}"
+                ) from exc
+            for needle in sorted(needles):
+                if needle.encode() in raw:
+                    references.append({"path": str(candidate), "reference": needle})
+    return references
+
+
+def _cleanup_process_references(
+    surfaces: Sequence[Mapping[str, Any]], proc_root: Path = Path("/proc")
+) -> list[dict[str, Any]]:
+    needles = {
+        value
+        for item in surfaces
+        for value in (str(item["path"]), item.get("declared_target"))
+        if isinstance(value, str) and value
+    }
+    references = []
+    if not proc_root.is_dir():
+        raise DoctorError("process inventory is unavailable; cleanup refuses unknown activity")
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            argv = [
+                value.decode(errors="replace")
+                for value in (entry / "cmdline").read_bytes().split(b"\0")
+                if value
+            ]
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ESRCH):
+                continue
+            raise DoctorError(
+                f"cannot completely inspect process activity: {entry}"
+            ) from exc
+        matched = sorted(
+            needle
+            for needle in needles
+            if any(argument == needle or argument.startswith(needle + " ") for argument in argv)
+        )
+        if matched:
+            references.append(
+                {"pid": int(entry.name), "command": " ".join(argv), "references": matched}
+            )
+    return references
+
+
+def _verify_cleanup_surface(item: Mapping[str, Any]) -> dict[str, Any]:
+    path = Path(item["path"])
+    if item["kind"] == "symlink":
+        if not path.is_symlink():
+            raise DoctorError(f"obsolete surface is not the declared symlink: {path}")
+        target = os.readlink(path)
+        if target != item["declared_target"]:
+            raise DoctorError(f"obsolete symlink target changed; refusing cleanup: {path}")
+        return {"path": str(path), "kind": "symlink", "target": target}
+    if path.is_symlink() or not path.is_file():
+        raise DoctorError(f"obsolete surface is not the declared regular file: {path}")
+    if not item.get("declared_sha256"):
+        raise DoctorError(f"obsolete surface has no declared file hash; refusing cleanup: {path}")
+    digest = _file_hash(path)
+    if digest != item["declared_sha256"]:
+        raise DoctorError(f"obsolete surface bytes changed; refusing cleanup: {path}")
+    state = path.stat(follow_symlinks=False)
+    return {
+        "path": str(path),
+        "kind": "file",
+        "sha256": digest,
+        "mode": stat.S_IMODE(state.st_mode),
+    }
+
+
+def _archive_relative(path: Path) -> Path:
+    return Path(str(path).lstrip("/"))
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_file(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _copy_cleanup_surface(source: Path, destination: Path, identity: Mapping[str, Any]) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if identity["kind"] == "symlink":
+        os.symlink(identity["target"], destination)
+    else:
+        shutil.copyfile(source, destination, follow_symlinks=False)
+        os.chmod(destination, int(identity["mode"]))
+        if _file_hash(destination) != identity["sha256"]:
+            raise DoctorError(f"recovery archive verification failed: {source}")
+        _fsync_file(destination)
+    _fsync_directory(destination.parent)
+
+
+def _restore_cleanup_surface(destination: Path, archived: Path, identity: Mapping[str, Any]) -> None:
+    if _lexists(destination):
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if identity["kind"] == "symlink":
+        os.symlink(identity["target"], destination)
+    else:
+        shutil.copyfile(archived, destination, follow_symlinks=False)
+        os.chmod(destination, int(identity["mode"]))
+        _fsync_file(destination)
+    _fsync_directory(destination.parent)
+
+
+def repair_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
+    """Archive and remove only the exact recovery-Todo obsolete surfaces."""
+    _require_root()
+    declared = _declared_obsolete_surfaces(paths)
+    present = [item for item in declared if _lexists(Path(item["path"]))]
+    if not present:
+        receipt = _receipt(paths, "obsolete-surfaces", [], {"state": "ALREADY_ABSENT"})
+        return {
+            "ok": True,
+            "operation": "obsolete-surfaces",
+            "changed": False,
+            "archive": None,
+            "receipt": receipt,
+        }
+    identities = [_verify_cleanup_surface(item) for item in present]
+    references = _cleanup_references(paths, present)
+    processes = _cleanup_process_references(present)
+    if references or processes:
+        raise DoctorError(
+            "obsolete cleanup refused because active references remain: "
+            + json.dumps({"configuration": references, "processes": processes}, sort_keys=True)
+        )
+
+    now = datetime.now(UTC)
+    archive = paths.cleanup_archive_root / now.strftime("%Y-%m-%d") / now.strftime(
+        "%Y%m%dT%H%M%S%fZ"
+    )
+    archive.mkdir(parents=True, mode=0o700)
+    _fsync_directory(archive.parent)
+    archived_rows = []
+    for identity in identities:
+        source = Path(identity["path"])
+        destination = archive / "active-root" / _archive_relative(source)
+        _copy_cleanup_surface(source, destination, identity)
+        archived_rows.append({**identity, "archive_path": str(destination)})
+    manifest = {
+        "schema": "tgw-doctor-obsolete-surface-archive/v1",
+        "created_at": now.isoformat(),
+        "operator_actor": _operator_actor(),
+        "executor_actor": pwd.getpwuid(os.geteuid()).pw_name,
+        "scope": "todo-1733-recovery-obsolete-active-surfaces-only",
+        "entries": archived_rows,
+        "boundaries": {
+            "production_effects": False,
+            "provider_effects": False,
+            "plan_effects": False,
+            "business_data_effects": False,
+            "git_worktree_effects": False,
+        },
+    }
+    manifest["manifest_sha256"] = _hash(manifest)
+    manifest_path = archive / "manifest.json"
+    _atomic_json(manifest_path, manifest, mode=0o400)
+
+    # Re-verify the live identities after the copies and before the durable
+    # PREPARED receipt. No active path is removed before both records exist.
+    for item, identity in zip(present, identities, strict=True):
+        if _verify_cleanup_surface(item) != identity:
+            raise DoctorError(f"obsolete surface changed before removal: {item['path']}")
+    prepared_receipt = _receipt(
+        paths,
+        "obsolete-surfaces-prepared",
+        identities,
+        {
+            "state": "PREPARED",
+            "archive": str(archive),
+            "manifest": str(manifest_path),
+            "manifest_sha256": manifest["manifest_sha256"],
+        },
+    )
+    removed: list[tuple[Path, Path, Mapping[str, Any]]] = []
+    try:
+        for identity in identities:
+            source = Path(identity["path"])
+            archived = archive / "active-root" / _archive_relative(source)
+            _verify_cleanup_surface(next(item for item in present if item["path"] == source))
+            source.unlink()
+            _fsync_directory(source.parent)
+            removed.append((source, archived, identity))
+        if any(_lexists(Path(identity["path"])) for identity in identities):
+            raise DoctorError("an obsolete surface remains after removal")
+        receipt = _receipt(
+            paths,
+            "obsolete-surfaces",
+            {"prepared_receipt": prepared_receipt},
+            {"state": "COMPLETED", "removed": identities, "archive": str(archive)},
+        )
+    except Exception as exc:
+        rollback_errors = []
+        for source, archived, identity in reversed(removed):
+            try:
+                _restore_cleanup_surface(source, archived, identity)
+            except Exception as rollback_exc:
+                rollback_errors.append(str(rollback_exc))
+        rollback_receipt = _receipt(
+            paths,
+            "obsolete-surfaces-rolled-back",
+            {"prepared_receipt": prepared_receipt},
+            {"error": str(exc), "rollback_errors": rollback_errors},
+        )
+        suffix = "original active view restored" if not rollback_errors else "rollback incomplete"
+        raise DoctorError(f"obsolete cleanup failed; {suffix}; receipt: {rollback_receipt}") from exc
+    return {
+        "ok": True,
+        "operation": "obsolete-surfaces",
+        "changed": True,
+        "archive": str(archive),
+        "manifest": str(manifest_path),
+        "prepared_receipt": prepared_receipt,
+        "receipt": receipt,
+    }
+
+
 _REPAIRS: dict[str, Callable[[DoctorPaths], dict[str, Any]]] = {
     "context": repair_context,
     "runtime": repair_runtime,
     "database": repair_database,
     "workers": repair_workers,
+    "obsolete-surfaces": repair_obsolete_surfaces,
 }
 
 

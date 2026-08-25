@@ -171,6 +171,10 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         context_runtime_source=context_runtime_source,
         context_catalog=catalog_path,
         receipts=root / "doctor-receipts",
+        cleanup_archive_root=root / "recovery-archive",
+        cleanup_system_bin=tmp_path / "usr-local-bin",
+        cleanup_actor_home=tmp_path / "actor-home",
+        cleanup_reference_roots=(tmp_path / "active-config",),
         trusted_release_owners=(os.getuid(),),
         systemd_unit_roots=(tmp_path / "systemd-units",),
         archive_discovery_roots=(tmp_path / "archive-discovery",),
@@ -693,3 +697,234 @@ def test_doctor_launcher_is_local_and_provider_independent() -> None:
     assert "tgw.doctor_cli" in launcher
     assert "tgw-prod" not in launcher
     assert "ssh" not in launcher.lower()
+
+
+def _obsolete_fixture(
+    paths: doctor_cli.DoctorPaths, monkeypatch: pytest.MonkeyPatch
+) -> list[Path]:
+    hashes = dict(doctor_cli._OBSOLETE_FILE_HASHES)
+    created = []
+    for name in hashes:
+        if name.startswith("tgw-context-mcp-candidate-"):
+            path = paths.local_bin / name
+        else:
+            path = paths.cleanup_system_bin / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = ("declared obsolete " + name + "\n").encode()
+        path.write_bytes(raw)
+        path.chmod(0o755)
+        hashes[name] = "sha256:" + __import__("hashlib").sha256(raw).hexdigest()
+        created.append(path)
+    actor = paths.cleanup_actor_home / ".local/bin/tgw-actor"
+    actor.parent.mkdir(parents=True)
+    actor.symlink_to(doctor_cli._OBSOLETE_ACTOR_TARGET)
+    created.append(actor)
+    paths.cleanup_reference_roots[0].mkdir(parents=True)
+    monkeypatch.setattr(doctor_cli, "_OBSOLETE_FILE_HASHES", hashes)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_cleanup_process_references", lambda _rows: [])
+    return created
+
+
+def test_obsolete_cleanup_diagnoses_warn_and_moves_exact_surfaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    sources = _obsolete_fixture(paths, monkeypatch)
+
+    warning = doctor_cli.check_obsolete_surfaces(paths)
+    result = doctor_cli.repair_obsolete_surfaces(paths)
+
+    assert warning["state"] == "WARN"
+    assert result["changed"] is True
+    assert all(not path.exists() and not path.is_symlink() for path in sources)
+    manifest = json.loads(Path(result["manifest"]).read_text())
+    assert manifest["schema"] == "tgw-doctor-obsolete-surface-archive/v1"
+    assert {row["path"] for row in manifest["entries"]} == {str(path) for path in sources}
+    for row in manifest["entries"]:
+        archived = Path(row["archive_path"])
+        assert archived.is_symlink() if row["kind"] == "symlink" else archived.is_file()
+    assert Path(result["prepared_receipt"]).is_file()
+    assert Path(result["receipt"]).is_file()
+
+
+def test_obsolete_cleanup_refuses_changed_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    sources = _obsolete_fixture(paths, monkeypatch)
+    sources[0].write_text("changed\n")
+
+    diagnosis = doctor_cli.check_obsolete_surfaces(paths)
+    with pytest.raises(doctor_cli.DoctorError, match="bytes changed"):
+        doctor_cli.repair_obsolete_surfaces(paths)
+
+    assert diagnosis["state"] == "FAIL"
+    assert "operator_action" not in diagnosis
+    assert all(path.exists() or path.is_symlink() for path in sources)
+    assert not paths.cleanup_archive_root.exists()
+
+
+def test_obsolete_cleanup_keeps_detecting_unbound_legacy_launchers(
+    tmp_path: Path,
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    legacy = paths.cleanup_system_bin / "tgw-coding"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("unknown historical bytes\n")
+
+    diagnosis = doctor_cli.check_obsolete_surfaces(paths)
+
+    assert diagnosis["state"] == "FAIL"
+    assert diagnosis["evidence"]["unbound"] == [str(legacy)]
+    assert "operator_action" not in diagnosis
+
+
+def test_obsolete_cleanup_ignores_context_evidence_but_detects_active_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    sources = _obsolete_fixture(paths, monkeypatch)
+    paths.context_snapshot.write_text(f'{{"historical_path": "{sources[0]}"}}')
+    paths = replace(
+        paths,
+        cleanup_reference_roots=(
+            paths.context_snapshot,
+            paths.cleanup_reference_roots[0],
+        ),
+    )
+    present = [
+        item
+        for item in doctor_cli._declared_obsolete_surfaces(paths)
+        if doctor_cli._lexists(item["path"])
+    ]
+
+    assert doctor_cli._cleanup_references(paths, present) == []
+
+    active = paths.cleanup_reference_roots[1] / "active.service"
+    active.write_text(f"ExecStart={sources[0]}\n")
+    references = doctor_cli._cleanup_references(paths, present)
+    assert {row["path"] for row in references} == {str(active)}
+    assert {row["reference"] for row in references} == {
+        str(sources[0]),
+        sources[0].name,
+    }
+
+
+def test_obsolete_cleanup_refuses_unknown_process_visibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    proc_root = tmp_path / "proc"
+    cmdline = proc_root / "42/cmdline"
+    cmdline.parent.mkdir(parents=True)
+    cmdline.write_bytes(b"/bin/true\0")
+    original = Path.read_bytes
+
+    def unreadable(path: Path) -> bytes:
+        if path == cmdline:
+            raise PermissionError("fixture process is unreadable")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    surfaces = doctor_cli._declared_obsolete_surfaces(paths)
+
+    with pytest.raises(doctor_cli.DoctorError, match="process activity"):
+        doctor_cli._cleanup_process_references(surfaces, proc_root)
+
+
+@pytest.mark.parametrize("blocker", ["configuration", "process"])
+def test_obsolete_cleanup_refuses_active_reference_or_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocker: str
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    sources = _obsolete_fixture(paths, monkeypatch)
+    if blocker == "configuration":
+        (paths.cleanup_reference_roots[0] / "active.service").write_text(
+            f"ExecStart={sources[0]}\n"
+        )
+    else:
+        monkeypatch.setattr(
+            doctor_cli,
+            "_cleanup_process_references",
+            lambda _rows: [{"pid": 42, "command": str(sources[0])}],
+        )
+
+    with pytest.raises(doctor_cli.DoctorError, match="active references remain"):
+        doctor_cli.repair_obsolete_surfaces(paths)
+
+    assert all(path.exists() or path.is_symlink() for path in sources)
+
+
+def test_obsolete_cleanup_rolls_back_active_view_on_remove_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    sources = _obsolete_fixture(paths, monkeypatch)
+    original_unlink = Path.unlink
+    failed = False
+
+    def unlink(path, *args, **kwargs):
+        nonlocal failed
+        if path == sources[1] and not failed:
+            failed = True
+            raise OSError("fixture removal failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(doctor_cli.DoctorError, match="active view restored"):
+        doctor_cli.repair_obsolete_surfaces(paths)
+
+    assert all(path.exists() or path.is_symlink() for path in sources)
+    assert list(paths.receipts.glob("*obsolete-surfaces-rolled-back.json"))
+
+
+def test_obsolete_cleanup_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    _obsolete_fixture(paths, monkeypatch)
+
+    first = doctor_cli.repair_obsolete_surfaces(paths)
+    second = doctor_cli.repair_obsolete_surfaces(paths)
+
+    assert first["changed"] is True
+    assert second["changed"] is False
+    assert second["archive"] is None
+
+
+def test_obsolete_cleanup_has_no_production_provider_plan_business_or_worktree_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    _obsolete_fixture(paths, monkeypatch)
+    preserved = {}
+    for name in (
+        "tgw-flake-git",
+        "tgw-source-git",
+        "tgw-github-agent",
+        "tgw-context-mcp",
+        "tgw-coding",
+        "tgw-coding-mcp",
+        "tgw-doctor",
+    ):
+        path = paths.local_bin / name
+        if not (path.exists() or path.is_symlink()):
+            path.write_text("preserved\n")
+        preserved[path] = os.readlink(path) if path.is_symlink() else path.read_bytes()
+    sentinels = {}
+    for name in ("production", "provider", "plan", "business-data", "git-worktree"):
+        path = tmp_path / "out-of-scope" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(name)
+        sentinels[path] = path.read_bytes()
+    worktrees_before = _git(paths.repository, "worktree", "list", "--porcelain")
+
+    doctor_cli.repair_obsolete_surfaces(paths)
+
+    assert {path: path.read_bytes() for path in sentinels} == sentinels
+    assert _git(paths.repository, "worktree", "list", "--porcelain") == worktrees_before
+    assert {
+        path: os.readlink(path) if path.is_symlink() else path.read_bytes()
+        for path in preserved
+    } == preserved
