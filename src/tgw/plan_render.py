@@ -71,6 +71,16 @@ def taskboard_path(cfg: Dict[str, Any]) -> Path:
     return Path(cfg.get('plan_render_root') or '/opt/TGW/var/plan-render') / TASKBOARD_NAME
 
 
+def _configured_todo_list(cfg: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Read Todos through this caller's explicit database without global mutation."""
+    from tgw.todo import todo_list
+
+    dsn = cfg.get('postgres_dsn')
+    if dsn is not None and (not isinstance(dsn, str) or not dsn.strip()):
+        raise ValueError('postgres_dsn must be a non-empty string')
+    return todo_list(show_all=True, dsn=dsn)
+
+
 class PlanRenderBindingError(ValueError):
     """A rendered Plan view cannot establish its approved source identity."""
 
@@ -239,15 +249,13 @@ def build_taskboard(
 
 def render_taskboard(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Query the tracker and atomically write a non-authoritative runtime view."""
-    from tgw.todo import todo_list
-
     try:
         plan_identity = approved_render_plan_identity(cfg)
     except PlanRenderBindingError as exc:
         return {'ok': False, 'error': str(exc), 'code': exc.code}
 
     try:
-        items = todo_list(show_all=True)
+        items = _configured_todo_list(cfg)
     except Exception as exc:
         return {
             'ok': False,
@@ -330,8 +338,6 @@ def plan_check(cfg: Dict[str, Any]) -> Dict[str, Any]:
     Issues are grouped per pp_ref / per round to avoid one-issue-per-todo noise.
     Returns {ok, issues: [...], counts: {warnings, infos}}.
     """
-    from tgw.todo import todo_list
-
     try:
         plan_identity = approved_render_plan_identity(cfg)
     except PlanRenderBindingError as exc:
@@ -344,7 +350,7 @@ def plan_check(cfg: Dict[str, Any]) -> Dict[str, Any]:
     pp_in_headings, done_in_headings, all_headings = _parse_plan_sections(Path(plan_path))
 
     try:
-        items = todo_list(show_all=True)
+        items = _configured_todo_list(cfg)
     except Exception as exc:
         return {
             'ok': False, 'error': f'todo tracker unavailable: {exc}',
@@ -531,10 +537,8 @@ def plan_status(cfg: Dict[str, Any], pp_ref: Optional[str] = None) -> Dict[str, 
     pp_ref: if given, restrict output to that single PP-* item.
     Returns {ok, rows: [{pp_ref, open, done, blocked, latest, latest_body}]}.
     """
-    from tgw.todo import todo_list
-
     try:
-        all_items = todo_list(show_all=True)
+        all_items = _configured_todo_list(cfg)
     except Exception as exc:
         return {'ok': False, 'error': f'todo tracker unavailable: {exc}', 'rows': []}
 

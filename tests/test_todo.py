@@ -26,6 +26,19 @@ def test_explicit_todo_init_binds_only_supplied_dsn(monkeypatch):
     assert todo._DSN == "dbname=explicit_local user=fixture"
 
 
+def test_todo_list_uses_per_call_dsn_without_global_rebind():
+    import tgw.todo as todo
+
+    default_dsn = todo._DSN
+    ctx, cur = _mock_conn()
+    cur.fetchall.return_value = []
+    with patch("tgw.todo._conn", return_value=ctx()) as connection:
+        assert todo.todo_list(show_all=True, dsn="dbname=per_call") == []
+
+    connection.assert_called_once_with("dbname=per_call")
+    assert todo._DSN == default_dsn
+
+
 def test_todo_schema_migrations_are_explicit(monkeypatch):
     import tgw.todo as todo
 

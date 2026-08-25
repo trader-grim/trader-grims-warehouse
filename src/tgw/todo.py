@@ -114,8 +114,8 @@ def _push_clipboard(text: str) -> bool:
 
 
 @contextmanager
-def _conn() -> Generator:
-    con = psycopg2.connect(_DSN)
+def _conn(dsn: Optional[str] = None) -> Generator:
+    con = psycopg2.connect(dsn if dsn is not None else _DSN)
     try:
         yield con
         con.commit()
@@ -309,8 +309,14 @@ def todo_done(item_id: int) -> Dict[str, Any]:
     return {'ok': True, 'id': row[0], 'agent': row[1], 'body': row[2]}
 
 
-def todo_list(agent: Optional[str] = None, show_all: bool = False) -> List[Dict[str, Any]]:
-    with _conn() as con:
+def todo_list(
+    agent: Optional[str] = None,
+    show_all: bool = False,
+    *,
+    dsn: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    connector = _conn() if dsn is None else _conn(dsn)
+    with connector as con:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             parts = []
             params: list = []
