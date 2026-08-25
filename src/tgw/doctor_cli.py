@@ -135,6 +135,8 @@ class DoctorPaths:
     )
     trusted_release_owners: tuple[int, ...] = (0, 65534)
     systemd_install_root: Path = Path("/etc/systemd/system")
+    systemd_runtime_root: Path = Path("/run/systemd/system")
+    quiescence_root: Path = Path("/run/tgw-doctor")
     systemd_unit_uid: int = 0
     systemd_unit_gid: int = 0
     systemd_unit_mode: int = 0o444
@@ -2271,9 +2273,106 @@ def _verify_bound_directory(path: Path, descriptor: int) -> None:
         raise DoctorError(f"bound shared directory changed before repair: {path}")
 
 
+_QUIESCENCE_DROPIN = "90-tgw-doctor-unix-git-access.conf"
+_QUIESCENCE_MARKER = "unix-git-access.active"
+
+
+def _secure_runtime_directory(path: Path, *, uid: int, gid: int) -> bool:
+    """Create one trusted runtime directory without following a replaced parent."""
+    parent = path.parent
+    parent_state = parent.stat(follow_symlinks=False)
+    if (
+        parent.is_symlink()
+        or not stat.S_ISDIR(parent_state.st_mode)
+        or parent_state.st_uid != uid
+        or parent_state.st_gid != gid
+        or parent_state.st_mode & 0o022
+    ):
+        raise DoctorError(f"unsafe quiescence parent directory: {parent}")
+    if os.path.lexists(path):
+        state = path.stat(follow_symlinks=False)
+        if (
+            path.is_symlink()
+            or not stat.S_ISDIR(state.st_mode)
+            or state.st_uid != uid
+            or state.st_gid != gid
+            or state.st_mode & 0o022
+        ):
+            raise DoctorError(f"unsafe quiescence directory: {path}")
+        return False
+    os.mkdir(path, 0o755)
+    os.chown(path, uid, gid, follow_symlinks=False)
+    os.chmod(path, 0o755, follow_symlinks=False)
+    return True
+
+
+def _create_quiescence_file(
+    path: Path, value: bytes, *, mode: int, uid: int, gid: int
+) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        stream = os.fdopen(descriptor, "wb")
+        descriptor = -1
+        with stream:
+            stream.write(value)
+            stream.flush()
+            os.fchown(stream.fileno(), uid, gid)
+            os.fchmod(stream.fileno(), mode)
+            os.fsync(stream.fileno())
+        parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _quiescence_file_exact(
+    path: Path, value: bytes, *, mode: int, uid: int, gid: int
+) -> bool:
+    if not os.path.lexists(path) or path.is_symlink() or not path.is_file():
+        return False
+    before = path.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != uid
+        or before.st_gid != gid
+        or stat.S_IMODE(before.st_mode) != mode
+        or before.st_nlink != 1
+    ):
+        return False
+    observed = path.read_bytes()
+    after = path.stat(follow_symlinks=False)
+    return observed == value and (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ) == (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    )
+
+
 @contextmanager
-def _coding_quiescence():
-    """Use systemd runtime masks as the worker-shared repair lock."""
+def _coding_quiescence(paths: DoctorPaths):
+    """Block starts with exact runtime conditions while shared Git data changes.
+
+    A runtime mask cannot shadow these units because their fragments live in
+    /etc/systemd/system, which precedes /run/systemd/system in systemd's load
+    path.  Root-owned runtime drop-ins instead add a false condition while the
+    marker exists.  The repair stops and verifies every unit after activating
+    that condition, then removes only its exact guards and restores the initial
+    active set.
+    """
     units = list(_CODING_UNITS)
     initial_states = {unit: _unit_state(unit) for unit in units}
     preexisting_masks = [
@@ -2291,54 +2390,126 @@ def _coding_quiescence():
         for unit, state in initial_states.items()
         if state.get("ActiveState") == "active"
     ]
+    uid = paths.systemd_unit_uid
+    gid = paths.systemd_unit_gid
+    marker = paths.quiescence_root / _QUIESCENCE_MARKER
+    marker_value = b"tgw doctor unix-git-access active\n"
+    dropin_value = f"[Unit]\nConditionPathExists=!{marker}\n".encode()
+    dropins = {
+        unit: paths.systemd_runtime_root / f"{unit}.d" / _QUIESCENCE_DROPIN
+        for unit in units
+    }
+    preexisting_guards = [
+        str(path)
+        for path in (marker, *dropins.values())
+        if os.path.lexists(path)
+    ]
+    if preexisting_guards:
+        raise DoctorError(
+            "refusing to alter pre-existing coding quiescence guards: "
+            + ", ".join(preexisting_guards)
+        )
+
+    created_directories: list[Path] = []
+    created_files: list[tuple[Path, bytes, int]] = []
+
+    def create_file(path: Path, value: bytes, mode: int) -> None:
+        _create_quiescence_file(path, value, mode=mode, uid=uid, gid=gid)
+        created_files.append((path, value, mode))
 
     def restore_initial_state() -> None:
         errors: list[str] = []
-        unmasked = _run(["systemctl", "unmask", "--runtime", *units], timeout=30)
-        if unmasked.returncode:
+        for path, value, mode in reversed(created_files):
+            if not _quiescence_file_exact(
+                path, value, mode=mode, uid=uid, gid=gid
+            ):
+                errors.append(f"quiescence guard changed; refusing removal: {path}")
+                continue
+            try:
+                path.unlink()
+            except OSError as exc:
+                errors.append(f"cannot remove quiescence guard {path}: {exc}")
+        for directory in reversed(created_directories):
+            try:
+                directory.rmdir()
+            except OSError as exc:
+                errors.append(f"cannot remove quiescence directory {directory}: {exc}")
+        reloaded = _run(["systemctl", "daemon-reload"], timeout=30)
+        if reloaded.returncode:
             errors.append(
-                unmasked.stderr.strip() or "cannot release local coding quiescence"
+                reloaded.stderr.strip()
+                or "cannot reload systemd after local coding quiescence"
             )
-        elif initially_active:
+        if not errors and initially_active:
             started = _run(["systemctl", "start", *initially_active], timeout=30)
             if started.returncode:
                 errors.append(
                     started.stderr.strip()
                     or "cannot restore initially active local coding units"
                 )
-            else:
-                inactive = [
-                    unit
-                    for unit in initially_active
-                    if _unit_state(unit).get("ActiveState") != "active"
-                ]
-                if inactive:
-                    errors.append(
-                        "initially active local coding units were not restored: "
-                        + ", ".join(inactive)
-                    )
+        if not errors:
+            wrong = [
+                unit
+                for unit in units
+                if (_unit_state(unit).get("ActiveState") == "active")
+                != (unit in initially_active)
+            ]
+            if wrong:
+                errors.append(
+                    "local coding units did not return to their initial state: "
+                    + ", ".join(wrong)
+                )
         if errors:
             raise DoctorError("; ".join(errors))
 
-    masked = _run(["systemctl", "mask", "--runtime", "--now", *units], timeout=30)
-    if masked.returncode:
-        mask_error = masked.stderr.strip() or "cannot quiesce local coding units"
-        try:
-            restore_initial_state()
-        except DoctorError as restore_error:
-            raise DoctorError(
-                f"{mask_error}; restore failed: {restore_error}"
-            ) from restore_error
-        raise DoctorError(mask_error)
     try:
+        runtime_state = paths.systemd_runtime_root.stat(follow_symlinks=False)
+        if (
+            paths.systemd_runtime_root.is_symlink()
+            or not stat.S_ISDIR(runtime_state.st_mode)
+            or runtime_state.st_uid != uid
+            or runtime_state.st_gid != gid
+            or runtime_state.st_mode & 0o022
+        ):
+            raise DoctorError(
+                f"unsafe systemd runtime directory: {paths.systemd_runtime_root}"
+            )
+        for path in dropins.values():
+            if _secure_runtime_directory(path.parent, uid=uid, gid=gid):
+                created_directories.append(path.parent)
+            create_file(path, dropin_value, 0o444)
+        loaded = _run(["systemctl", "daemon-reload"], timeout=30)
+        if loaded.returncode:
+            raise DoctorError(
+                loaded.stderr.strip() or "cannot load local coding quiescence guards"
+            )
+        if _secure_runtime_directory(paths.quiescence_root, uid=uid, gid=gid):
+            created_directories.append(paths.quiescence_root)
+        create_file(marker, marker_value, 0o400)
+        stopped = _run(["systemctl", "stop", *units], timeout=30)
+        if stopped.returncode:
+            raise DoctorError(
+                stopped.stderr.strip() or "cannot stop local coding units"
+            )
         unsettled = []
-        for unit in units:
+        for unit, dropin in dropins.items():
             state = _unit_state(unit)
-            if state.get("ActiveState") != "inactive" or state.get("LoadState") != "masked":
+            loaded_dropins = state.get("DropInPaths", "").split()
+            if (
+                state.get("ActiveState") != "inactive"
+                or str(dropin) not in loaded_dropins
+                or not _quiescence_file_exact(
+                    dropin, dropin_value, mode=0o444, uid=uid, gid=gid
+                )
+            ):
                 unsettled.append(unit)
+        if not _quiescence_file_exact(
+            marker, marker_value, mode=0o400, uid=uid, gid=gid
+        ):
+            unsettled.append("quiescence-marker")
         if unsettled:
             raise DoctorError(
-                "local coding units did not reach masked/inactive state: "
+                "local coding units did not reach guarded/inactive state: "
                 + ", ".join(unsettled)
             )
         yield
@@ -2400,9 +2571,9 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
                 descriptor, group_gid, mutate=False
             )
 
-        # Runtime masks are the shared worker lock. Recheck every visible binding
-        # after acquisition, then mutate only through the retained descriptors.
-        with _coding_quiescence():
+        # Runtime condition guards are the shared worker lock. Recheck every visible
+        # binding after acquisition, then mutate only through retained descriptors.
+        with _coding_quiescence(paths):
             for path, descriptor in bound:
                 _verify_bound_directory(path, descriptor)
             _set_shared_fd(worktree_root_fd, group_gid, directory=True)

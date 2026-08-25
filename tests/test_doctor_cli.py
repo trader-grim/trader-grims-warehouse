@@ -452,7 +452,9 @@ def test_unix_git_repair_recurses_into_configured_linked_worktrees(
         lambda _name: type("Group", (), {"gr_gid": os.getgid()})(),
     )
     monkeypatch.setattr(doctor_cli, "check_unix_access", lambda _paths: next(reports))
-    monkeypatch.setattr(doctor_cli, "_coding_quiescence", lambda: nullcontext())
+    monkeypatch.setattr(
+        doctor_cli, "_coding_quiescence", lambda _paths: nullcontext()
+    )
 
     result = doctor_cli.repair_unix_git_access(paths)
 
@@ -462,43 +464,59 @@ def test_unix_git_repair_recurses_into_configured_linked_worktrees(
     assert result["git_tree_changes"]["linked:todo"]["files"] > 0
 
 
-def test_coding_quiescence_masks_and_verifies_every_local_unit(
-    monkeypatch: pytest.MonkeyPatch,
+def test_coding_quiescence_guards_and_verifies_every_local_unit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands = []
-    masked = False
     active = {
         "tgw-codex-implement-worker.service",
         "tgw-coding-local-foreman.timer",
     }
+    runtime_root = tmp_path / "systemd"
+    runtime_root.mkdir()
+    runtime_root.chmod(0o755)
+    quiescence_root = tmp_path / "tgw-doctor"
+    paths = doctor_cli.DoctorPaths(
+        systemd_runtime_root=runtime_root,
+        quiescence_root=quiescence_root,
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
 
     def run(command, **_kwargs):
-        nonlocal masked
         commands.append(command)
-        if command[1] == "mask":
-            masked = True
+        if command[1] == "stop":
             active.clear()
-        elif command[1] == "unmask":
-            masked = False
         elif command[1] == "start":
             active.update(command[2:])
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(doctor_cli, "_run", run)
-    monkeypatch.setattr(
-        doctor_cli,
-        "_unit_state",
-        lambda unit: {
-            "LoadState": "masked" if masked else "loaded",
+    def unit_state(unit):
+        dropin = runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN
+        return {
+            "LoadState": "loaded",
             "ActiveState": "active" if unit in active else "inactive",
-        },
-    )
+            "DropInPaths": str(dropin) if dropin.exists() else "",
+        }
 
-    with doctor_cli._coding_quiescence():
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
+
+    with doctor_cli._coding_quiescence(paths):
         assert not active
+        assert (quiescence_root / doctor_cli._QUIESCENCE_MARKER).is_file()
+        assert all(
+            (
+                runtime_root
+                / f"{unit}.d"
+                / doctor_cli._QUIESCENCE_DROPIN
+            ).is_file()
+            for unit in doctor_cli._CODING_UNITS
+        )
 
-    assert commands[0][:4] == ["systemctl", "mask", "--runtime", "--now"]
-    assert commands[-2][:3] == ["systemctl", "unmask", "--runtime"]
+    assert commands[0] == ["systemctl", "daemon-reload"]
+    assert commands[1] == ["systemctl", "stop", *doctor_cli._CODING_UNITS]
+    assert commands[-2] == ["systemctl", "daemon-reload"]
     assert commands[-1] == [
         "systemctl",
         "start",
@@ -509,6 +527,8 @@ def test_coding_quiescence_masks_and_verifies_every_local_unit(
         "tgw-codex-implement-worker.service",
         "tgw-coding-local-foreman.timer",
     }
+    assert not quiescence_root.exists()
+    assert not any(runtime_root.iterdir())
 
 
 def test_coding_quiescence_refuses_preexisting_runtime_mask(
@@ -533,46 +553,92 @@ def test_coding_quiescence_refuses_preexisting_runtime_mask(
     )
 
     with pytest.raises(doctor_cli.DoctorError, match="pre-existing coding unit masks"):
-        with doctor_cli._coding_quiescence():
+        with doctor_cli._coding_quiescence(doctor_cli.DoctorPaths()):
             pass
 
 
-def test_coding_quiescence_restores_active_units_after_mask_failure(
-    monkeypatch: pytest.MonkeyPatch,
+def test_coding_quiescence_refuses_preexisting_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_root = tmp_path / "systemd"
+    runtime_root.mkdir(mode=0o755)
+    quiescence_root = tmp_path / "tgw-doctor"
+    quiescence_root.mkdir(mode=0o755)
+    marker = quiescence_root / doctor_cli._QUIESCENCE_MARKER
+    marker.write_text("preserve pre-existing state\n", encoding="utf-8")
+    paths = doctor_cli.DoctorPaths(
+        systemd_runtime_root=runtime_root,
+        quiescence_root=quiescence_root,
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda _unit: {"LoadState": "loaded", "ActiveState": "inactive"},
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("systemctl must not be called"),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="pre-existing coding quiescence"):
+        with doctor_cli._coding_quiescence(paths):
+            pass
+
+    assert marker.read_text(encoding="utf-8") == "preserve pre-existing state\n"
+
+
+def test_coding_quiescence_restores_active_units_after_stop_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands = []
     active = {"tgw-controller-verify-worker.service"}
+    runtime_root = tmp_path / "systemd"
+    runtime_root.mkdir()
+    runtime_root.chmod(0o755)
+    quiescence_root = tmp_path / "tgw-doctor"
+    paths = doctor_cli.DoctorPaths(
+        systemd_runtime_root=runtime_root,
+        quiescence_root=quiescence_root,
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
 
     def run(command, **_kwargs):
         commands.append(command)
-        if command[1] == "mask":
+        if command[1] == "stop":
             active.clear()
-            return subprocess.CompletedProcess(command, 1, "", "partial mask failure")
+            return subprocess.CompletedProcess(command, 1, "", "partial stop failure")
         if command[1] == "start":
             active.update(command[2:])
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(doctor_cli, "_run", run)
-    monkeypatch.setattr(
-        doctor_cli,
-        "_unit_state",
-        lambda unit: {
+    def unit_state(unit):
+        dropin = runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN
+        return {
             "LoadState": "loaded",
             "ActiveState": "active" if unit in active else "inactive",
-        },
-    )
+            "DropInPaths": str(dropin) if dropin.exists() else "",
+        }
 
-    with pytest.raises(doctor_cli.DoctorError, match="partial mask failure"):
-        with doctor_cli._coding_quiescence():
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
+
+    with pytest.raises(doctor_cli.DoctorError, match="partial stop failure"):
+        with doctor_cli._coding_quiescence(paths):
             pass
 
-    assert commands[-2][:3] == ["systemctl", "unmask", "--runtime"]
+    assert commands[-2] == ["systemctl", "daemon-reload"]
     assert commands[-1] == [
         "systemctl",
         "start",
         "tgw-controller-verify-worker.service",
     ]
     assert active == {"tgw-controller-verify-worker.service"}
+    assert not quiescence_root.exists()
+    assert not any(runtime_root.iterdir())
 
 
 def test_worker_unit_exactness_includes_immutable_metadata(tmp_path: Path) -> None:
