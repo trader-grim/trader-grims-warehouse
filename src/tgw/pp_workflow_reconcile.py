@@ -1,90 +1,149 @@
-"""Read-only, source-bound PP-WORKFLOW-001 installed-state reconciliation."""
+"""Fail-closed PP-WORKFLOW-001 reconciliation through native and Luet solvers."""
 from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
-from tgw.plan_luet import load_direct_development_luet_binding
+from tgw.plan_luet import conform, load_direct_development_luet_binding, verify_direct_development_luet
+from tgw.plan_solver import solve
 
 PLAN_COMMIT = "058e2f980201cc78245358e4901cf007063f2c29"
 PP_REF = "PP-WORKFLOW-001"
-CATALOG = Path(__file__).resolve().parents[2] / "agent-services/catalogs/pp-workflow-001-v1.json"
+PP_SOURCE_SHA256 = "sha256:ee5eac22eb072649ea601d77f398ee87e8397f9a84eb3675b4d61f1c32f81af9"
+REJECTED_CANDIDATE = "a6207cb80311519bfe10ee45545bdbe677d05052"
+REJECTED_PARENT = "77192f2127bcd510561a25bfa8f33d449084c13b"
+REJECTED_TREE = "66b788709ff94c52db91f29893987be923a87296"
+REVIEW_SHA256 = "sha256:812d21b875a2c1cc730c3d45b5555dc62bc91846f3707c1ca5a2cfeabb913ba8"
+ROOT = Path(__file__).resolve().parents[2]
+CATALOG = ROOT / "agent-services/catalogs/pp-workflow-001-v1.json"
+APPROVED_PLAN_ROOT = Path("/opt/TGW/library/approved") / PLAN_COMMIT
 
 
 class PPWorkflowReconcileError(ValueError):
     pass
 
 
-def _hash(value: Mapping[str, Any]) -> str:
-    data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return "sha256:" + hashlib.sha256(data).hexdigest()
+def _sha(path: Path) -> str:
+    try:
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise PPWorkflowReconcileError(f"evidence source is unavailable: {path}") from exc
+
+
+def _git(*args: str) -> str:
+    proc = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=False)
+    if proc.returncode:
+        raise PPWorkflowReconcileError("source Git identity is unavailable")
+    return proc.stdout.strip()
 
 
 def load_catalog(path: Path | str = CATALOG) -> dict[str, Any]:
     try:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
+        value = json.loads(Path(path).read_bytes())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PPWorkflowReconcileError("PP capability catalog is unavailable") from exc
-    if (not isinstance(value, Mapping) or value.get("schema") != "tgw-pp-capability-catalog/v1"
-            or value.get("pp_ref") != PP_REF or value.get("plan_commit") != PLAN_COMMIT):
-        raise PPWorkflowReconcileError("PP capability catalog binding drift")
-    source = value.get("plan_source")
-    lineage = value.get("source_lineage")
-    if not isinstance(source, Mapping) or not isinstance(lineage, Mapping):
-        raise PPWorkflowReconcileError("PP source identity is incomplete")
-    if not str(source.get("sha256", "")).startswith("sha256:"):
-        raise PPWorkflowReconcileError("PP source hash is invalid")
-    if len(str(lineage.get("commit", ""))) != 40 or len(str(lineage.get("tree", ""))) != 40:
-        raise PPWorkflowReconcileError("PP lineage identity is invalid")
+    expected = {
+        "pp_ref": PP_REF, "plan_commit": PLAN_COMMIT,
+        "plan_source_sha256": PP_SOURCE_SHA256,
+        "rejected_candidate": REJECTED_CANDIDATE, "rejected_parent": REJECTED_PARENT,
+        "rejected_tree": REJECTED_TREE,
+        "review_sha256": REVIEW_SHA256,
+    }
+    if (not isinstance(value, Mapping)
+            or value.get("schema") != "tgw-pp-capability-catalog/v2"
+            or value.get("identity") != expected):
+        raise PPWorkflowReconcileError("PP source/candidate/review identity drift")
     return dict(value)
 
 
-def reconcile(*, installed_todos: Sequence[int] = (1734, 1735, 1736, 1737, 1738),
-              catalog_path: Path | str = CATALOG) -> dict[str, Any]:
-    """Return a deterministic projection; never creates Todos or dispatches work."""
+def _verify_plan_source(plan_root: Path) -> None:
+    if _sha(plan_root / "plan/pp/PP-WORKFLOW-001.md") != PP_SOURCE_SHA256:
+        raise PPWorkflowReconcileError("approved PP source content hash drift")
+
+
+def _verify_source_identity() -> dict[str, str]:
+    if (_git("rev-parse", f"{REJECTED_CANDIDATE}^") != REJECTED_PARENT
+            or _git("rev-parse", f"{REJECTED_CANDIDATE}^{{tree}}") != REJECTED_TREE
+            or _git("cat-file", "-t", REJECTED_CANDIDATE) != "commit"):
+        raise PPWorkflowReconcileError("rejected candidate/parent identity drift")
+    return {"rejected_candidate": REJECTED_CANDIDATE, "candidate_tree": REJECTED_TREE,
+            "parent": REJECTED_PARENT,
+            "review_sha256": REVIEW_SHA256}
+
+
+def _verified_graph(catalog: Mapping[str, Any], *, source_root: Path,
+                    todo_rows: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    graph = dict(catalog.get("graph", {}))
+    providers = graph.get("providers")
+    evidence = catalog.get("provider_evidence")
+    if not isinstance(providers, list) or not isinstance(evidence, Mapping):
+        raise PPWorkflowReconcileError("PP provider catalog is incomplete")
+    rows = list(todo_rows)
+    states: list[dict[str, Any]] = []
+    observations = []
+    for provider in providers:
+        provider_id = provider.get("id")
+        spec = evidence.get(provider_id) if isinstance(provider_id, str) else None
+        if not isinstance(spec, Mapping):
+            raise PPWorkflowReconcileError("PP provider evidence is missing")
+        verified: list[str] = []
+        for item in spec.get("sources", ()):
+            if not isinstance(item, Mapping) or set(item) != {"path", "sha256"}:
+                raise PPWorkflowReconcileError("source evidence identity is malformed")
+            path = source_root / str(item["path"])
+            if _sha(path) != item["sha256"]:
+                raise PPWorkflowReconcileError(f"source evidence content drift: {item['path']}")
+            verified.append(f"source:{item['path']}@{item['sha256']}")
+        for identity in spec.get("local_todos", ()):
+            if not isinstance(identity, Mapping):
+                raise PPWorkflowReconcileError("local Todo evidence identity is malformed")
+            if next((row for row in rows if all(row.get(k) == v for k, v in identity.items())), None):
+                verified.append("local-todo:" + hashlib.sha256(
+                    json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+        installed = len(verified) >= int(spec.get("minimum_verified", 1))
+        states.append({"id": provider_id, "state": "SATISFIED" if installed else "UNMET",
+                       "evidence": verified})
+        if installed:
+            for capability in provider.get("provides", ()):
+                observations.append({"capability": capability, "provider": provider_id,
+                                     "state": "admitted", "evidence": verified})
+    graph["observations"] = observations
+    return graph, states
+
+
+def reconcile(*, catalog_path: Path | str = CATALOG, plan_root: Path = APPROVED_PLAN_ROOT,
+              source_root: Path = ROOT, todo_rows: Sequence[Mapping[str, Any]] = (),
+              conform_fn: Callable[..., Mapping[str, Any]] = conform) -> dict[str, Any]:
+    """Content-verify evidence and solve the same PP graph with native and pinned Luet."""
     catalog = load_catalog(catalog_path)
-    luet = load_direct_development_luet_binding()
-    if luet.plan_commit != PLAN_COMMIT:
+    _verify_plan_source(plan_root)
+    candidate = _verify_source_identity()
+    graph, providers = _verified_graph(catalog, source_root=source_root, todo_rows=todo_rows)
+    binding = load_direct_development_luet_binding()
+    if binding.plan_commit != PLAN_COMMIT:
         raise PPWorkflowReconcileError("pinned Luet Plan binding drift")
-    installed = frozenset(int(item) for item in installed_todos)
-    providers = []
-    satisfied: set[str] = set()
-    for provider in catalog["providers"]:
-        evidence_todos = {int(item[5:]) for item in provider.get("evidence", ()) if str(item).startswith("todo:")}
-        state = "SATISFIED" if evidence_todos <= installed else "UNMET"
-        providers.append({"id": provider["id"], "state": state, "evidence": list(provider["evidence"])})
-        if state == "SATISFIED":
-            satisfied.update(provider["provides"])
-    capabilities = list(catalog["capabilities"])
-    unmet = [item for item in capabilities if item not in satisfied]
-    source_identity = {"plan_commit": catalog["plan_commit"], "plan_source": catalog["plan_source"], "source_lineage": catalog["source_lineage"]}
-    solution = {
-        "schema": "tgw-plan-solution/v1", "root": {"id": PP_REF, "profile": "implementation"},
-        "plan_commit": PLAN_COMMIT, "resolver": "tgw-native-exact@1",
-        "selected_capabilities": capabilities, "satisfied_installed": sorted(satisfied),
-        "work_units": [{"id": "establish:" + item, "capability": item, "requires_capabilities": []} for item in unmet],
-        "unresolved": [], "complete": not unmet, "dispatchable": True,
-        "conformance_verified": True,
-        "conformance_providers": [
-            {"id": "tgw-native-exact@1", "result": "selected", "available": True},
-            {"id": "luet-pinned-0.9.26@1", "result": "agreement", "available": True, "agreement": "verified"},
-        ],
-        "source_identity": source_identity,
-    }
-    solution["closure_hash"] = _hash({"capabilities": capabilities, "providers": providers, "source_identity": source_identity})
-    solution["solution_hash"] = _hash({key: value for key, value in solution.items() if key != "solution_hash"})
+    try:
+        verify_direct_development_luet(binding.executable_path, plan_commit=PLAN_COMMIT)
+        luet = dict(conform_fn(graph, luet_binary=binding.executable_path,
+                              expected_plan_commit=PLAN_COMMIT))
+        solution = solve(graph, expected_plan_commit=PLAN_COMMIT, conformance_result=luet)
+    except (OSError, ValueError) as exc:
+        raise PPWorkflowReconcileError("PP native/Luet conformance failed closed") from exc
+    if luet.get("status") != "AGREEMENT" or not solution.get("conformance_verified"):
+        raise PPWorkflowReconcileError("PP native/Luet solver disagreement")
+    complete = bool(solution.get("complete") and not solution.get("work_units"))
     return {
-        "schema": "tgw-pp-runtime-projection/v1", "ok": not unmet, "pp_ref": PP_REF,
-        "catalog_id": catalog["id"], "source_identity": source_identity,
-        "resolver_binding": {
-            "native": "tgw-native-exact@1", "luet": "luet-pinned-0.9.26@1",
-            "agreement": "verified", "executable_path": str(luet.executable_path),
-            "executable_sha256": luet.sha256, "version": luet.version,
-            "plan_solution_hash": luet.plan_solution_hash,
-        },
-        "partial_provider_todos": list(catalog["partial_provider_todos"]),
-        "providers": providers, "unmet_capabilities": unmet, "solution": solution,
+        "schema": "tgw-pp-runtime-projection/v2", "ok": complete, "pp_ref": PP_REF,
+        "source_identity": {"plan_commit": PLAN_COMMIT, "plan_source_sha256": PP_SOURCE_SHA256,
+                            **candidate},
+        "resolver_binding": {"native": solution["resolver"], "luet": luet["provider_id"],
+                             "agreement": "verified", "executable_path": str(binding.executable_path),
+                             "executable_sha256": binding.sha256, "version": binding.version},
+        "providers": providers,
+        "unmet_capabilities": [item["capability"] for item in solution.get("work_units", ())],
+        "solution": solution,
         "effects": {"todo_created": False, "worktree_created": False, "job_created": False},
     }

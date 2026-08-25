@@ -1,39 +1,34 @@
 {
-  "schema": "tgw-pp-capability-catalog/v1",
-  "id": "PP-WORKFLOW-001@1",
-  "pp_ref": "PP-WORKFLOW-001",
-  "plan_commit": "058e2f980201cc78245358e4901cf007063f2c29",
-  "plan_source": {
-    "path": "plan/pp/PP-WORKFLOW-001.md",
-    "sha256": "sha256:ee5eac22eb072649ea601d77f398ee87e8397f9a84eb3675b4d61f1c32f81af9"
+  "schema":"tgw-pp-capability-catalog/v2",
+  "identity":{"pp_ref":"PP-WORKFLOW-001","plan_commit":"058e2f980201cc78245358e4901cf007063f2c29","plan_source_sha256":"sha256:ee5eac22eb072649ea601d77f398ee87e8397f9a84eb3675b4d61f1c32f81af9","rejected_candidate":"a6207cb80311519bfe10ee45545bdbe677d05052","rejected_parent":"77192f2127bcd510561a25bfa8f33d449084c13b","rejected_tree":"66b788709ff94c52db91f29893987be923a87296","review_sha256":"sha256:812d21b875a2c1cc730c3d45b5555dc62bc91846f3707c1ca5a2cfeabb913ba8"},
+  "graph":{
+    "schema":"tgw-plan/v2","plan_commit":"058e2f980201cc78245358e4901cf007063f2c29",
+    "capabilities":["workflow.condition-evaluator-runtime-graph@1","workflow.generation-scheduler@1","workflow.immutable-receipts@1","workflow.worker-treatment-migrations@1","workflow.coding-foreman@1","workflow.action-card-projection@1","workflow.mandatory-fixture@1","plan.native-luet-agreement@1","plan.pp-root-todo-bridge@1","coding.local-cli-and-mcp@1"],
+    "providers":[
+      {"id":"current-condition-runtime","provides":["workflow.condition-evaluator-runtime-graph@1"]},
+      {"id":"current-generation-scheduler","provides":["workflow.generation-scheduler@1"]},
+      {"id":"current-receipt-runtime","provides":["workflow.immutable-receipts@1"]},
+      {"id":"current-worker-migrations","provides":["workflow.worker-treatment-migrations@1"]},
+      {"id":"current-coding-foreman","provides":["workflow.coding-foreman@1"]},
+      {"id":"current-action-cards","provides":["workflow.action-card-projection@1"]},
+      {"id":"current-mandatory-fixture","provides":["workflow.mandatory-fixture@1"]},
+      {"id":"current-native-luet-resolver","provides":["plan.native-luet-agreement@1"]},
+      {"id":"current-pp-root-bridge","provides":["plan.pp-root-todo-bridge@1"]},
+      {"id":"current-local-coding-surfaces","provides":["coding.local-cli-and-mcp@1"]}
+    ],
+    "observations":[],
+    "target":{"id":"PP-WORKFLOW-001","profile":"implementation","minimum_state":"admitted","required_capabilities":["workflow.condition-evaluator-runtime-graph@1","workflow.generation-scheduler@1","workflow.immutable-receipts@1","workflow.worker-treatment-migrations@1","workflow.coding-foreman@1","workflow.action-card-projection@1","workflow.mandatory-fixture@1","plan.native-luet-agreement@1","plan.pp-root-todo-bridge@1","coding.local-cli-and-mcp@1"]}
   },
-  "source_lineage": {
-    "commit": "77192f2127bcd510561a25bfa8f33d449084c13b",
-    "tree": "d38c88fd46e59de4b62a03f9bbd9c94a86cf7d95"
-  },
-  "capabilities": [
-    "workflow.condition-evaluator-runtime-graph@1",
-    "workflow.generation-scheduler@1",
-    "workflow.immutable-receipts@1",
-    "workflow.worker-treatment-migrations@1",
-    "workflow.coding-foreman@1",
-    "workflow.action-card-projection@1",
-    "workflow.mandatory-fixture@1",
-    "plan.native-luet-agreement@1",
-    "plan.pp-root-todo-bridge@1",
-    "coding.local-cli-and-mcp@1"
-  ],
-  "providers": [
-    {"id":"current-condition-runtime","provides":["workflow.condition-evaluator-runtime-graph@1"],"evidence":["src/tgw/workflow_kernel/evaluator.py","src/tgw/workflow/plan_bridge.py","todo:1734"]},
-    {"id":"current-generation-scheduler","provides":["workflow.generation-scheduler@1"],"evidence":["src/tgw/workflow_kernel/scheduler.py","todo:1734"]},
-    {"id":"current-receipt-runtime","provides":["workflow.immutable-receipts@1"],"evidence":["src/tgw/workflow/treatments.py","src/tgw/workflow/standalone_plan.py","todo:1734"]},
-    {"id":"current-worker-migrations","provides":["workflow.worker-treatment-migrations@1"],"evidence":["src/tgw/workflow/treatments.py","todo:1734"]},
-    {"id":"current-coding-foreman","provides":["workflow.coding-foreman@1"],"evidence":["src/tgw/development/foreman.py","todo:1735"]},
-    {"id":"current-action-cards","provides":["workflow.action-card-projection@1"],"evidence":["src/tgw/workflow/action_cards.py","todo:1734"]},
-    {"id":"current-mandatory-fixture","provides":["workflow.mandatory-fixture@1"],"evidence":["tests/test_pp_workflow_001_fixture.py","todo:1734"]},
-    {"id":"current-native-luet-resolver","provides":["plan.native-luet-agreement@1"],"evidence":["src/tgw/plan_solver.py","src/tgw/plan_luet.py","todo:1735"]},
-    {"id":"current-pp-root-bridge","provides":["plan.pp-root-todo-bridge@1"],"evidence":["src/tgw/development/plan_todo_bridge.py","todo:1737"]},
-    {"id":"current-local-coding-surfaces","provides":["coding.local-cli-and-mcp@1"],"evidence":["src/tgw/coding_cli.py","src/tgw/coding_mcp_server.py","todo:1738"]}
-  ],
-  "partial_provider_todos": [1734,1735,1736,1737,1738]
+  "provider_evidence":{
+    "current-condition-runtime":{"sources":[{"path":"src/tgw/workflow_kernel/evaluator.py","sha256":"sha256:c494aa9ed13543122edb31f3a8ee5d8d1cb43e8a452d7ec0128830b3955ce4c9"}]},
+    "current-generation-scheduler":{"sources":[{"path":"src/tgw/workflow_kernel/scheduler.py","sha256":"sha256:b7da7d265b2afbd0337b1162f4f5e978f1082e6f6432a670e87a440cb7e256e6"}]},
+    "current-receipt-runtime":{"sources":[{"path":"src/tgw/workflow/standalone_plan.py","sha256":"sha256:9087e99e746b286e653562a463251ec1decc6e79b42bbc61a7223dc527afff57"}]},
+    "current-worker-migrations":{"sources":[{"path":"src/tgw/workflow/treatments.py","sha256":"sha256:77e1f2a0e9aa41a5e20226c414e6d383ee745ab380ce73cff0076c351f0a282f"}]},
+    "current-coding-foreman":{"sources":[{"path":"src/tgw/development/foreman.py","sha256":"sha256:80b6b3624e244d9fac03158bdf2005536dca5bab2991067560a35a2c15882fdc"}]},
+    "current-action-cards":{"sources":[{"path":"src/tgw/workflow/action_cards.py","sha256":"sha256:370d55c02bdd1a2553b7974f70003da71156d715978ae23aae8bc8cfbf73e78e"}]},
+    "current-mandatory-fixture":{"sources":[{"path":"tests/test_pp_workflow_001_fixture.py","sha256":"sha256:cc0e1f32d40cfe3aad5c7d7101e6ddc603cfc0c94dc8cde06b7435f197f52662"}]},
+    "current-native-luet-resolver":{"sources":[{"path":"src/tgw/plan_solver.py","sha256":"sha256:3149c25384ae7c533184fdae982d6068ef7b90de95edcc20328d91211d17d906"}]},
+    "current-pp-root-bridge":{"sources":[{"path":"src/tgw/development/plan_todo_bridge.py","sha256":"sha256:d265bd1a0bff4e6cd752562cfbfd81d792647ae443dede277d895ee37ad401e0"}]},
+    "current-local-coding-surfaces":{"sources":[{"path":"src/tgw/coding_mcp_server.py","sha256":"sha256:3dc8b922520ef6aac88f4832ccb9feb60a7957394ec085a2ae0018c5dec0dc85"}]}
+  }
 }

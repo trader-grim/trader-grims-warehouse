@@ -22,17 +22,20 @@ from tgw.development.foreman import ForemanConfig, tick
 from tgw.development.local_workflow import (
     DEFAULT_CONFIG,
     LocalCodingWorkflowError,
+    allocate_worktree,
     bind_command,
     load_config,
     require_coder_account,
     status_command,
 )
+from tgw.development.plan_todo_bridge import bind_leaf
 from tgw.development.plan_todo_source import PlanTodoSourceError
 from tgw.development.plan_todo_source import resolve as resolve_plan_todo
 from tgw.development.treatments import CODEX_IMPLEMENT, CONTROLLER_VERIFY
 from tgw.pp_workflow_reconcile import PP_REF
 from tgw.pp_workflow_reconcile import reconcile as reconcile_pp_workflow
 from tgw.queue import state_machine
+from tgw.workflow import compile_solution_runtime
 
 DEFAULT_SOLUTION = (
     Path(__file__).resolve().parents[2]
@@ -104,14 +107,51 @@ def start(
 ) -> dict[str, Any]:
     """Bind, allocate, evaluate, and dispatch one existing Todo locally."""
     if isinstance(todo_id, str) and todo_id == PP_REF:
+        config = _initialize(config_path)
         actor = require_coder_account()
-        result = reconcile_pp_workflow()
+        result = reconcile_pp_workflow(todo_rows=todo.todo_list(show_all=True))
+        materialized = []
+        if result["unmet_capabilities"]:
+            solution = result["solution"]
+            compiled = compile_solution_runtime(solution, current_plan_commit=solution["plan_commit"])
+            coding = config["coding"]
+            repository = Path(coding["repository_root"])
+            worktree_root = Path(coding["worktree_root"])
+            commit = source_commit or __import__(
+                "tgw.development.local_workflow", fromlist=["_git"]
+            )._git(repository, "rev-parse", "HEAD")
+            root = {"schema": "tgw-execution-root/v1", "kind": "pp", "pp_ref": PP_REF}
+            for unit in solution["work_units"]:
+                capability = unit["capability"]
+                materialized.append(bind_leaf(
+                    compiled, solution=solution, treatment_id=unit["id"],
+                    source_commit=commit, worktree_identity=solution["closure_hash"],
+                    agent=actor, body=f"{PP_REF}: establish genuinely unmet {capability}",
+                    priority=50,
+                    create_todo=lambda agent, body, priority, source, pp, anchor: todo.todo_add(
+                        agent, body, priority, source, pp_ref=pp, plan_anchor=anchor),
+                    list_todos=lambda: todo.todo_list(show_all=True),
+                    allocate_worktree=lambda item, request, source: allocate_worktree(
+                        repository, worktree_root, actor, item, request, source),
+                    set_status_note=lambda item, note: todo.todo_set_status_note(
+                        item, note, suppress_plan_render=True),
+                    execution_root=root,
+                ))
+            tick(
+                ForemanConfig(
+                    coding_config=dict(coding),
+                    treatments=(CODEX_IMPLEMENT, CONTROLLER_VERIFY),
+                    receipt_backed_conditions=frozenset({"tested", "linted"}),
+                ),
+                todo_ids={item["todo_id"] for item in materialized},
+            )
         return {
             "schema": "tgw-local-coding-start-pp/v1", "ok": result["ok"],
             "target": PP_REF, "actor": actor, "group": "tgw-coders",
             "reconciliation": result,
-            "materialized": False,
-            "note": "All bounded PP capabilities are satisfied; no Todo, worktree, or job was created.",
+            "materialized": materialized,
+            "note": ("All bounded PP capabilities are satisfied; no Todo, worktree, or job was created."
+                     if not materialized else "Genuinely unmet PP work was passed through the explicit PP-root bridge; Foreman owns dispatch."),
         }
     todo_id = _todo_id(todo_id)
     config = _initialize(config_path)
