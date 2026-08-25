@@ -236,9 +236,25 @@ def _check_implemented(
         return FingerprintResult.UNKNOWN, ("not a git repository",), ()
 
     if baseline_commit is not None:
-        if head != baseline_commit:
+        if _git_rev_parse(worktree, baseline_commit) != baseline_commit:
             return FingerprintResult.UNKNOWN, (
-                "HEAD no longer matches the source-bound implementation baseline",
+                "source-bound implementation baseline is unavailable",
+            ), ()
+        if head == baseline_commit:
+            return FingerprintResult.FALSE, (
+                "HEAD still matches the source-bound implementation baseline",
+            ), (
+                EvidenceReference(
+                    identity=head,
+                    source_class="git",
+                    source_generation="HEAD",
+                    supersession_identity=baseline_commit,
+                ),
+            )
+        code, _, _ = _git(worktree, "merge-base", "--is-ancestor", baseline_commit, head)
+        if code != 0:
+            return FingerprintResult.UNKNOWN, (
+                "HEAD is not a successor of the source-bound implementation baseline",
             ), (
                 EvidenceReference(
                     identity=head,
@@ -247,22 +263,41 @@ def _check_implemented(
                     freshness_identity=baseline_commit,
                 ),
             )
-        fingerprint = _git_source_fingerprint(worktree)
-        empty = hashlib.sha256(b"|").hexdigest()
-        implemented = fingerprint != empty
-        return (
-            FingerprintResult.TRUE if implemented else FingerprintResult.FALSE,
-            (
-                "working tree has implementation changes from the source-bound commit"
-                if implemented
-                else "working tree matches the source-bound commit",
-            ),
-            (
+        if _git_is_clean(worktree) is not True:
+            return FingerprintResult.FALSE, (
+                "successor source is not closed in a clean commit",
+            ), (
                 EvidenceReference(
                     identity=head,
                     source_class="git",
                     source_generation="HEAD",
-                    freshness_identity=fingerprint,
+                    supersession_identity=baseline_commit,
+                ),
+            )
+        tree = _git_rev_parse(worktree, "HEAD^{tree}")
+        baseline_tree = _git_rev_parse(worktree, f"{baseline_commit}^{{tree}}")
+        if tree is None or baseline_tree is None:
+            return FingerprintResult.UNKNOWN, ("cannot resolve successor tree",), ()
+        if tree == baseline_tree:
+            return FingerprintResult.FALSE, (
+                "successor commit has no implementation tree change",
+            ), (
+                EvidenceReference(
+                    identity=head,
+                    source_class="git",
+                    source_generation=tree,
+                    supersession_identity=baseline_commit,
+                ),
+            )
+        return (
+            FingerprintResult.TRUE,
+            ("clean committed successor descends from the source-bound commit",),
+            (
+                EvidenceReference(
+                    identity=head,
+                    source_class="git",
+                    source_generation=tree,
+                    freshness_identity=tree,
                     supersession_identity=baseline_commit,
                 ),
             ),
@@ -641,21 +676,14 @@ def build_coding_snapshot(
 
     object_id = str(worktree)
 
-    # Content-addressed generation: hash only the source state.  A request-bound
-    # worktree branch name is a location/claim identity, not source content; if
-    # it participated here, a generation attested before provisioning could
-    # never match the newly provisioned request worktree.
+    # A candidate generation is the immutable commit/tree identity. Receipts
+    # are deliberately outside it and dirty bytes can never become a candidate.
     head = _git_rev_parse(worktree, "HEAD") or "no-head"
-    canonical = _find_canonical_branch(worktree)
-    if canonical:
-        diff_content = _git_diff_stat(worktree, canonical, "HEAD") or ""
-    else:
-        diff_content = ""
-    source_fingerprint = _git_source_fingerprint(worktree)
-    # Generation is source state only. Receipts attest this state but must
-    # never change the state they attest (which would make every receipt stale
-    # the instant it is written).
-    gen_input = f"{head}|{diff_content}|{source_fingerprint}".encode()
+    tree = _git_rev_parse(worktree, "HEAD^{tree}") or "no-tree"
+    # Dirty state is not a candidate, but it still needs a distinct generation
+    # so a receipt for the last closed commit becomes stale immediately.
+    dirty = "" if _git_is_clean(worktree) is True else f"|dirty:{_git_source_fingerprint(worktree)}"
+    gen_input = f"{head}|{tree}{dirty}".encode()
     generation = hashlib.sha256(gen_input).hexdigest()[:16]
 
     assertions: list[EvidenceAssertion] = []

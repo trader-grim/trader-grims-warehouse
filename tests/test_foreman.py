@@ -882,6 +882,33 @@ def test_real_evaluator_dispatches_stitch_after_review_and_verification():
     assert [call.kwargs["disposition"].treatment_id for call in dispatch.call_args_list] == ["hermes-stitch"]
 
 
+def test_repeated_tick_after_current_controller_receipt_dispatches_nothing():
+    """The direct local lane converges once the closed candidate is verified."""
+    from tgw.development.treatments import CODEX_IMPLEMENT, CONTROLLER_VERIFY
+
+    snapshot = _snapshot(
+        assertions=(
+            _assertion("implemented", FingerprintResult.TRUE, "closed successor"),
+            _assertion("tested", FingerprintResult.TRUE, "current controller receipt"),
+            _assertion("linted", FingerprintResult.TRUE, "current controller receipt"),
+            _assertion("controller_verified", FingerprintResult.TRUE, "current controller receipt"),
+        ),
+    )
+    enqueue = MagicMock()
+    with patch("tgw.development.foreman.build_coding_snapshot", return_value=snapshot):
+        result = tick(
+            ForemanConfig(treatments=(CODEX_IMPLEMENT, CONTROLLER_VERIFY)),
+            fetch_todos=lambda: [_todo(1735)],
+            check_active_fn=lambda _: False,
+            check_terminal_fn=lambda _: False,
+            enqueue_fn=enqueue,
+        )
+
+    assert result.dispatched == 0
+    assert result.skipped_waiting == 1
+    enqueue.assert_not_called()
+
+
 def test_tick_dispatch_failure_continues_to_lower_priority_todo():
     first = _todo(1, "/tmp/first", "implement", priority=1)
     second = _todo(2, "/tmp/second", "implement", priority=5)

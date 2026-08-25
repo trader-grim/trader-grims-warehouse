@@ -127,14 +127,68 @@ run proportionate offline tests:
 
 Return the requested JSON report. Use status=blocked if the task cannot be
 implemented inside these boundaries. The wrapper independently determines
-whether source changed and does not accept your report as completion evidence.
+whether source changed, closes an exact commit after a successful report, and
+does not accept your report as completion evidence.
 """
+
+
+_RECEIPT_FILES = frozenset(
+    {
+        "implementation-receipt.json",
+        "controller-harness-receipt.json",
+        "review-receipt.json",
+        "deployment-receipt.json",
+        "stitch-receipt.json",
+        "operator-admit-pending.json",
+    }
+)
+
+
+def _source_status(cwd: Path) -> tuple[str, ...]:
+    """Return mutable source entries while excluding workflow evidence files."""
+    status = _git(cwd, "status", "--porcelain=v1", "--untracked-files=all")
+    return tuple(
+        line for line in status.splitlines() if line[3:] not in _RECEIPT_FILES
+    )
+
+
+def _close_candidate(cwd: Path, *, todo_id: int, baseline: str) -> tuple[str, str]:
+    """Commit only the implementation bytes and return the exact commit/tree."""
+    pathspec = (".", *(f":(exclude){name}" for name in sorted(_RECEIPT_FILES)))
+    _git(cwd, "add", "-A", "--", *pathspec)
+    staged = _git(cwd, "diff", "--cached", "--name-only", "--")
+    if not staged:
+        raise HardFailure("Codex implementation produced no source bytes to close")
+    _git(
+        cwd,
+        "-c",
+        "user.name=TGW Codex",
+        "-c",
+        "user.email=codex@tgw-lib",
+        "commit",
+        "-m",
+        f"Todo {todo_id}: close implementation candidate",
+    )
+    head = _git(cwd, "rev-parse", "HEAD")
+    tree = _git(cwd, "rev-parse", "HEAD^{tree}")
+    if head == baseline or _source_status(cwd):
+        raise HardFailure("Codex implementation candidate did not close cleanly")
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", baseline, head],
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+    )
+    if ancestor.returncode:
+        raise HardFailure("Codex implementation candidate is not a source-bound successor")
+    return head, tree
 
 
 def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
     task = _validated_task(job)
     before_head = _git(cwd, "rev-parse", "HEAD")
-    before_status = _git(cwd, "status", "--porcelain=v1", "--untracked-files=all")
+    if _source_status(cwd):
+        raise HardFailure("Codex implementation requires a source-clean worktree")
     # Keep ephemeral auth and result files inside the isolated request worktree
     # rather than the host-wide /tmp namespace.  The directory is removed before
     # the runner evaluates Git state or emits a workflow outcome.
@@ -176,13 +230,12 @@ def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> d
             }
 
     after_head = _git(cwd, "rev-parse", "HEAD")
-    after_status = _git(cwd, "status", "--porcelain=v1", "--untracked-files=all")
     if after_head != before_head:
         return {
             "outcome": "conflict", "established_conditions": [],
             "artifacts": [{"kind": "boundary_violation", "detail": "Codex changed Git HEAD"}],
         }
-    changed = after_status != before_status and bool(after_status)
+    changed = bool(_source_status(cwd))
     valid_report = (
         isinstance(report, dict)
         and report.get("status") in {"implemented", "blocked"}
@@ -196,14 +249,25 @@ def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> d
             "outcome": "failed", "established_conditions": [],
             "artifacts": [{"kind": "codex_failure", "detail": "final report violates runner contract"}],
         }
+    diff_stat = _git(cwd, "diff", "--stat")
     artifacts = [
         {"kind": "codex_summary", "detail": report["summary"]},
         {"kind": "tests_reported", "tests": report["tests"]},
-        {"kind": "git_diff", "detail": _git(cwd, "diff", "--stat")},
+        {"kind": "git_diff", "detail": diff_stat},
     ]
     if report["status"] != "implemented" or not changed:
         return {"outcome": "partial", "established_conditions": [], "artifacts": artifacts}
-    return {"outcome": "satisfied", "established_conditions": ["implemented"], "artifacts": artifacts}
+    candidate, tree = _close_candidate(
+        cwd, todo_id=task["todo_id"], baseline=before_head
+    )
+    artifacts.append(
+        {"kind": "closed_candidate", "commit": candidate, "tree": tree}
+    )
+    return {
+        "outcome": "satisfied",
+        "established_conditions": ["implemented"],
+        "artifacts": artifacts,
+    }
 
 
 def main() -> int:

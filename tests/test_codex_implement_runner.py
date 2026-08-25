@@ -39,8 +39,12 @@ def _invoke(report, edit=None, returncode=0):
     return invoke
 
 
-def test_satisfied_requires_real_uncommitted_source_change(tmp_path, monkeypatch):
+def test_satisfied_closes_exact_source_commit(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
     monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
     result = codex_implement.run(
         _job(),
@@ -52,6 +56,19 @@ def test_satisfied_requires_real_uncommitted_source_change(tmp_path, monkeypatch
     )
     assert result["outcome"] == "satisfied"
     assert result["established_conditions"] == ["implemented"]
+    candidate = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    assert candidate != baseline
+    assert subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, check=True,
+        text=True, capture_output=True,
+    ).stdout == ""
+    closed = result["artifacts"][-1]
+    assert closed["kind"] == "closed_candidate"
+    assert closed["commit"] == candidate
+    assert len(closed["tree"]) == 40
 
 
 def test_runner_uses_noninteractive_workspace_write_without_approval_gate(
@@ -123,6 +140,25 @@ def test_model_success_without_diff_is_partial(tmp_path, monkeypatch):
     )
     assert result["outcome"] == "partial"
     assert result["established_conditions"] == []
+
+
+def test_runner_refuses_preexisting_mutable_source(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    (repo / "operator-work.py").write_text("preserve = True\n", encoding="utf-8")
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+
+    try:
+        codex_implement.run(
+            _job(),
+            repo,
+            invoke=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("called")
+            ),
+        )
+    except Exception as exc:
+        assert "source-clean worktree" in str(exc)
+    else:
+        raise AssertionError("runner accepted preexisting mutable source")
 
 
 def test_runner_rejects_another_actor_before_codex(tmp_path):

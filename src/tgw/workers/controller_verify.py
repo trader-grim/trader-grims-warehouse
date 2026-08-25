@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -11,6 +12,11 @@ from pathlib import Path
 from typing import Any
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+_RECEIPTS = frozenset({
+    "implementation-receipt.json", "controller-harness-receipt.json",
+    "review-receipt.json", "deployment-receipt.json", "stitch-receipt.json",
+    "operator-admit-pending.json",
+})
 
 
 class ControllerVerificationError(RuntimeError):
@@ -54,15 +60,29 @@ def _source_bound_python_files() -> tuple[tuple[str, ...], tuple[str, ...]]:
         raise ControllerVerificationError("controller job lacks a Plan-bound source commit")
 
     cwd = Path.cwd().resolve()
-    if _git_text(cwd, "rev-parse", "HEAD") != baseline:
-        raise ControllerVerificationError("controller worktree HEAD differs from its bound source")
+    head = _git_text(cwd, "rev-parse", "HEAD")
+    tree = _git_text(cwd, "rev-parse", "HEAD^{tree}")
+    if head == baseline:
+        raise ControllerVerificationError("controller worktree has no committed successor")
+    if subprocess.run(
+        ["git", "-c", f"safe.directory={cwd}", "merge-base", "--is-ancestor", baseline, head],
+        cwd=cwd, check=False, capture_output=True,
+    ).returncode:
+        raise ControllerVerificationError("controller candidate does not descend from its bound source")
+    status = _git_paths(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if any(item[3:] not in _RECEIPTS for item in status):
+        raise ControllerVerificationError("controller candidate source is mutable or uncommitted")
+    expected_generation = job.get("object_generation")
+    actual_generation = hashlib.sha256(f"{head}|{tree}".encode()).hexdigest()[:16]
+    if expected_generation != actual_generation:
+        raise ControllerVerificationError("controller candidate commit/tree differs from its dispatched generation")
     tracked = _git_paths(
         cwd,
         "diff",
         "--name-only",
         "--diff-filter=ACMRT",
         "-z",
-        baseline,
+        f"{baseline}..{head}",
         "--",
     )
     untracked = _git_paths(cwd, "ls-files", "--others", "--exclude-standard", "-z")
