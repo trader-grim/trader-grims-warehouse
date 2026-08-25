@@ -135,6 +135,9 @@ class DoctorPaths:
     )
     trusted_release_owners: tuple[int, ...] = (0, 65534)
     systemd_install_root: Path = Path("/etc/systemd/system")
+    systemd_unit_uid: int = 0
+    systemd_unit_gid: int = 0
+    systemd_unit_mode: int = 0o444
     systemd_unit_roots: tuple[Path, ...] = _SYSTEMD_UNIT_ROOTS
     archive_discovery_roots: tuple[Path, ...] = _ARCHIVE_DISCOVERY_ROOTS
     archive_discovery_max_depth: int = _ARCHIVE_DISCOVERY_MAX_DEPTH
@@ -1008,16 +1011,8 @@ def _unit_definition(paths: DoctorPaths, unit: str, state: Mapping[str, str]) ->
         reasons.append("release source missing")
     if fragment is None or not fragment.is_file():
         reasons.append("installed fragment missing")
-    else:
-        fragment_state = fragment.stat(follow_symlinks=False)
-        if (
-            fragment.is_symlink()
-            or fragment_state.st_uid not in paths.trusted_release_owners
-            or fragment_state.st_mode & 0o022
-        ):
-            reasons.append("installed fragment is not trusted-owner immutable")
-        if source.is_file() and _file_hash(fragment) != _file_hash(source):
-            reasons.append("installed fragment differs")
+    elif not source.is_file() or not _unit_destination_exact(paths, fragment, source):
+        reasons.append("installed fragment metadata or bytes differ")
     if state.get("DropInPaths"):
         reasons.append("unexpected systemd drop-in")
     if state.get("NeedDaemonReload") != "no":
@@ -1611,7 +1606,14 @@ def _repair_lock(paths: DoctorPaths):
         os.close(descriptor)
 
 
-def _atomic_bytes(path: Path, value: bytes, *, mode: int) -> None:
+def _atomic_bytes(
+    path: Path,
+    value: bytes,
+    *,
+    mode: int,
+    uid: int | None = None,
+    gid: int | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_text = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
     temporary = Path(temporary_text)
@@ -1619,8 +1621,14 @@ def _atomic_bytes(path: Path, value: bytes, *, mode: int) -> None:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(value)
             stream.flush()
+            if uid is not None or gid is not None:
+                os.fchown(
+                    stream.fileno(),
+                    -1 if uid is None else uid,
+                    -1 if gid is None else gid,
+                )
+            os.fchmod(stream.fileno(), mode)
             os.fsync(stream.fileno())
-        os.chmod(temporary, mode)
         os.replace(temporary, path)
         directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
@@ -2436,8 +2444,11 @@ def _unit_destination_exact(
         return False
     state = destination.stat(follow_symlinks=False)
     return (
-        state.st_uid in paths.trusted_release_owners
-        and not state.st_mode & 0o022
+        stat.S_ISREG(state.st_mode)
+        and state.st_uid == paths.systemd_unit_uid
+        and state.st_gid == paths.systemd_unit_gid
+        and stat.S_IMODE(state.st_mode) == paths.systemd_unit_mode
+        and state.st_nlink == 1
         and destination.read_bytes() == source.read_bytes()
     )
 
@@ -2458,7 +2469,13 @@ def repair_workers(paths: DoctorPaths) -> dict[str, Any]:
         ):
             raise DoctorError(f"refusing unsafe coding unit destination: {destination}")
         if not _unit_destination_exact(paths, destination, source):
-            _atomic_bytes(destination, source.read_bytes(), mode=0o444)
+            _atomic_bytes(
+                destination,
+                source.read_bytes(),
+                mode=paths.systemd_unit_mode,
+                uid=paths.systemd_unit_uid,
+                gid=paths.systemd_unit_gid,
+            )
             installed.append(unit)
     if installed:
         result = _run(["systemctl", "daemon-reload"], timeout=30)

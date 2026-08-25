@@ -580,12 +580,38 @@ def test_worker_unit_exactness_includes_immutable_metadata(tmp_path: Path) -> No
     destination = tmp_path / "installed.service"
     source.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
     destination.write_bytes(source.read_bytes())
-    paths = doctor_cli.DoctorPaths(trusted_release_owners=(os.getuid(),))
+    paths = doctor_cli.DoctorPaths(
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
 
-    destination.chmod(0o664)
-    assert doctor_cli._unit_destination_exact(paths, destination, source) is False
-    destination.chmod(0o644)
+    for wrong_mode in (0o400, 0o440, 0o111, 0o555, 0o644, 0o664):
+        destination.chmod(wrong_mode)
+        assert doctor_cli._unit_destination_exact(paths, destination, source) is False
+    destination.chmod(0o444)
     assert doctor_cli._unit_destination_exact(paths, destination, source) is True
+
+    alias = tmp_path / "installed-alias.service"
+    os.link(destination, alias)
+    assert doctor_cli._unit_destination_exact(paths, destination, source) is False
+
+
+def test_atomic_bytes_applies_exact_descriptor_metadata(tmp_path: Path) -> None:
+    destination = tmp_path / "unit.service"
+
+    doctor_cli._atomic_bytes(
+        destination,
+        b"[Service]\nExecStart=/bin/true\n",
+        mode=0o444,
+        uid=os.getuid(),
+        gid=os.getgid(),
+    )
+
+    state = destination.stat(follow_symlinks=False)
+    assert state.st_uid == os.getuid()
+    assert state.st_gid == os.getgid()
+    assert stat.S_IMODE(state.st_mode) == 0o444
+    assert state.st_nlink == 1
 
 
 def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(
@@ -815,11 +841,14 @@ def test_runtime_selector_rolls_back_if_post_switch_release_check_changes(
 
 def test_unit_definition_requires_exact_fragment_and_no_dropins(tmp_path: Path) -> None:
     paths, head, _tree = _fixture(tmp_path)
+    paths = replace(
+        paths, systemd_unit_uid=os.getuid(), systemd_unit_gid=os.getgid()
+    )
     unit = "tgw-codex-implement-worker.service"
     source = paths.runtime_root / "releases" / head / "systemd" / unit
     fragment = tmp_path / "installed.service"
     shutil.copyfile(source, fragment)
-    fragment.chmod(0o644)
+    fragment.chmod(0o444)
     state = {
         "FragmentPath": str(fragment),
         "DropInPaths": "",
@@ -843,11 +872,14 @@ def test_unit_definition_rejects_loaded_exec_start_with_extra_argument(
     tmp_path: Path,
 ) -> None:
     paths, head, _tree = _fixture(tmp_path)
+    paths = replace(
+        paths, systemd_unit_uid=os.getuid(), systemd_unit_gid=os.getgid()
+    )
     unit = "tgw-codex-implement-worker.service"
     source = paths.runtime_root / "releases" / head / "systemd" / unit
     fragment = tmp_path / "installed.service"
     shutil.copyfile(source, fragment)
-    fragment.chmod(0o644)
+    fragment.chmod(0o444)
     expected = doctor_cli._UNIT_ARGV[unit]
     state = {
         "FragmentPath": str(fragment),
@@ -869,11 +901,14 @@ def test_unit_definition_rejects_loaded_exec_start_with_extra_argument(
 
 def test_unit_definition_rejects_active_process_with_different_argv(tmp_path: Path) -> None:
     paths, head, _tree = _fixture(tmp_path)
+    paths = replace(
+        paths, systemd_unit_uid=os.getuid(), systemd_unit_gid=os.getgid()
+    )
     unit = "tgw-codex-implement-worker.service"
     source = paths.runtime_root / "releases" / head / "systemd" / unit
     fragment = tmp_path / "installed.service"
     shutil.copyfile(source, fragment)
-    fragment.chmod(0o644)
+    fragment.chmod(0o444)
     state = {
         "FragmentPath": str(fragment),
         "DropInPaths": "",
