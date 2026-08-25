@@ -158,7 +158,7 @@ def start(
                     capability = unit["capability"]
                     materialized.append(bind_leaf(
                     compiled, solution=solution, treatment_id=unit["id"],
-                    source_commit=commit, worktree_identity=actor,
+                    source_commit=commit, worktree_identity=f"unix:{actor}",
                     agent=actor, body=f"{PP_REF}: establish genuinely unmet {capability}",
                     priority=50,
                     create_todo=lambda agent, body, priority, source, pp, anchor: todo.todo_add(

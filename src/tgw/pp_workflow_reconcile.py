@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -19,7 +18,7 @@ REJECTED_PARENT = "5f33481abf7f77cac54446345c22b230fbe1e06b"
 REJECTED_TREE = "b5c6e400392182ee343c94e94f89e86939b4113b"
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "agent-services/catalogs/pp-workflow-001-v1.json"
-CATALOG_SHA256 = "sha256:9d28edb68f48c43b6855b26dac88adedfdcfdee3e40ceee032fc97eed6025568"
+CATALOG_SHA256 = "sha256:6aa0788e5e42c9a48a300284f074839958faf055d909f85c2680b35be6675320"
 APPROVED_PLAN_ROOT = Path("/opt/TGW/library/approved") / PLAN_COMMIT
 
 
@@ -94,8 +93,15 @@ def _source_status(source_root: Path) -> list[str]:
         relative = line[3:].split(" -> ")[-1]
         # Codex creates this request-bound scratch below the worktree. It is
         # untracked and cannot alter a tracked evidence byte.
-        known_scratch = line.startswith("?? ") and relative.startswith(".tgw-codex-implement-")
-        if not known_scratch:
+        path = source_root / relative
+        known_scratch = (line.startswith("?? ")
+                         and relative.startswith(".tgw-codex-implement-")
+                         and "/" in relative)
+        known_receipt = (line.startswith("?? ")
+                         and relative in {"implementation-receipt.json",
+                                          "controller-harness-receipt.json"}
+                         and path.is_file() and not path.is_symlink())
+        if not (known_scratch or known_receipt):
             dirty.append(line)
     return dirty
 
@@ -130,8 +136,8 @@ def verify_selected_runtime(*, repository: Path, source_root: Path, commit: str,
         from tgw.doctor_cli import DoctorError, DoctorPaths, _verify_release_tree
         try:
             evidence = _verify_release_tree(
-                DoctorPaths(repository=repository, runtime_root=source_root.parent.parent,
-                            trusted_release_owners=(0, os.geteuid())), commit, source_root,
+                DoctorPaths(repository=repository, runtime_root=source_root.parent.parent),
+                commit, source_root,
             )
         except DoctorError as exc:
             raise PPWorkflowReconcileError("selected immutable release differs from exact Git tree") from exc
@@ -155,6 +161,9 @@ def _verified_graph(catalog: Mapping[str, Any], *, repository: Path, source_root
         spec = evidence.get(provider_id) if isinstance(provider_id, str) else None
         if not isinstance(spec, Mapping):
             raise PPWorkflowReconcileError("PP provider evidence is missing")
+        if "receipts" in spec:
+            raise PPWorkflowReconcileError(
+                "source-tree catalog receipts cannot independently admit capability")
         verified: list[str] = []
         for item in spec.get("sources", ()):
             if not isinstance(item, Mapping) or set(item) != {"path", "sha256"}:
@@ -175,33 +184,11 @@ def _verified_graph(catalog: Mapping[str, Any], *, repository: Path, source_root
             if next((row for row in rows if all(row.get(k) == v for k, v in identity.items())), None):
                 verified.append("local-todo:" + hashlib.sha256(
                     json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
-        # Source and Todo identity prove implementation evidence, never the
-        # stronger admitted state required by the PP target. Only an exact,
-        # independently verified receipt may establish that state.
+        # Source and Todo identity prove implementation evidence only. A JSON
+        # file committed beside the source is source-authenticated and cannot
+        # independently establish the PP target's admitted state.
         admitted = False
-        for receipt in spec.get("receipts", ()):
-            if (not isinstance(receipt, Mapping)
-                    or set(receipt) != {"path", "sha256"}):
-                raise PPWorkflowReconcileError("provider receipt identity is malformed")
-            relative = str(receipt["path"])
-            actual = (source_root / relative).read_bytes()
-            if (actual != _repository_bytes(repository, selected_commit, relative)
-                    or "sha256:" + hashlib.sha256(actual).hexdigest() != receipt["sha256"]):
-                raise PPWorkflowReconcileError(f"provider receipt content drift: {relative}")
-            try:
-                receipt_value = json.loads(actual)
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise PPWorkflowReconcileError("provider receipt is not exact JSON evidence") from exc
-            if (not isinstance(receipt_value, Mapping)
-                    or receipt_value.get("schema") != "tgw-capability-receipt/v1"
-                    or receipt_value.get("state") != "ADMITTED"
-                    or receipt_value.get("provider_id") != provider_id
-                    or receipt_value.get("capabilities") != provider.get("provides")):
-                raise PPWorkflowReconcileError("provider receipt does not independently admit capability")
-            verified.append(f"receipt:{relative}@{receipt['sha256']}")
-            admitted = True
-        evidence_state = "ADMITTED_RECEIPT" if admitted else (
-            "IMPLEMENTED_UNVERIFIED" if verified else "UNVERIFIED")
+        evidence_state = "IMPLEMENTED_UNVERIFIED" if verified else "UNVERIFIED"
         states.append({"id": provider_id, "state": evidence_state, "evidence": verified})
         if admitted:
             for capability in provider.get("provides", ()):

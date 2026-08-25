@@ -2,10 +2,11 @@ import hashlib
 import json
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
-from tgw import coding_cli
+from tgw import coding_cli, coding_mcp_server
 from tgw import pp_workflow_reconcile as workflow_reconcile
 from tgw.development.foreman import TickResult
 from tgw.pp_workflow_reconcile import (
@@ -35,6 +36,22 @@ def test_real_pinned_luet_executes_and_leaves_unreceipted_capabilities_as_work(m
     assert all(item["state"] == "IMPLEMENTED_UNVERIFIED" for item in first["providers"])
     assert all(item["evidence"] for item in first["providers"])
     assert all(not capability.startswith("listing.") for capability in first["unmet_capabilities"])
+
+
+def test_mandatory_fixture_is_exactly_retained_without_listing_or_item_scope():
+    catalog = load_catalog()
+    graph = catalog["graph"]
+    assert "workflow.mandatory-fixture@1" in graph["capabilities"]
+    assert "workflow.mandatory-fixture@1" in graph["target"]["required_capabilities"]
+    provider = next(item for item in graph["providers"]
+                    if item["id"] == "current-mandatory-fixture")
+    assert provider["provides"] == ["workflow.mandatory-fixture@1"]
+    assert catalog["provider_evidence"][provider["id"]] == {"sources": [{
+        "path": "tests/test_pp_workflow_001_fixture.py",
+        "sha256": "sha256:cc0e1f32d40cfe3aad5c7d7101e6ddc603cfc0c94dc8cde06b7435f197f52662",
+    }]}
+    assert not any(capability.startswith(("listing.", "item."))
+                   for capability in graph["capabilities"])
 
 
 def test_catalog_and_plan_content_tampering_fail_closed(tmp_path):
@@ -76,8 +93,16 @@ def test_external_canonical_source_and_gitless_immutable_release_modes(tmp_path)
     scratch = source / ".tgw-codex-implement-fixture"
     scratch.mkdir()
     (scratch / "worker-state").write_text("ignored scratch")
+    (source / "implementation-receipt.json").write_text("{}")
+    (source / "controller-harness-receipt.json").write_text("{}")
     assert verify_selected_runtime(repository=repository, source_root=source,
                                    commit=commit, tree=tree, mode="source-worktree")["verified"]
+    arbitrary = source / "importable.py"
+    arbitrary.write_text("raise RuntimeError('must not be trusted')\n")
+    with pytest.raises(PPWorkflowReconcileError, match="exact clean commit"):
+        verify_selected_runtime(repository=repository, source_root=source,
+                                commit=commit, tree=tree, mode="source-worktree")
+    arbitrary.unlink()
     (source / "tracked.txt").write_text("tampered")
     with pytest.raises(PPWorkflowReconcileError, match="exact clean commit"):
         verify_selected_runtime(repository=repository, source_root=source,
@@ -90,9 +115,43 @@ def test_external_canonical_source_and_gitless_immutable_release_modes(tmp_path)
     release.chmod(0o755)
     (release / "tracked.txt").chmod(0o644)
     assert not (release / ".git").exists()
-    immutable = verify_selected_runtime(repository=repository, source_root=release,
-                                        commit=commit, tree=tree, mode="immutable-release")
-    assert immutable["verified"] and immutable["manifest_source"] == "git-ls-tree"
+    # The production owner allowlist is deliberately not widened to the
+    # invoking test user for a disposable release.
+    with pytest.raises(PPWorkflowReconcileError, match="immutable release"):
+        verify_selected_runtime(repository=repository, source_root=release,
+                                commit=commit, tree=tree, mode="immutable-release")
+
+
+def test_live_installed_release_verifies_with_production_owner_defaults():
+    repository = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
+    release = Path("/opt/TGW/tgw-lib/coding-runtime/current").resolve()
+    commit = release.name
+    tree = subprocess.check_output(
+        ["git", "-c", f"safe.directory={repository}", "rev-parse", f"{commit}^{{tree}}"],
+        cwd=repository, text=True,
+    ).strip()
+    result = verify_selected_runtime(repository=repository, source_root=release,
+                                     commit=commit, tree=tree, mode="immutable-release")
+    assert result["verified"] and result["manifest_source"] == "git-ls-tree"
+
+
+def test_immutable_runtime_uses_production_doctor_owner_defaults(monkeypatch, tmp_path):
+    observed = {}
+
+    def verify(paths, _commit, _release):
+        observed["owners"] = paths.trusted_release_owners
+        return {"verified": True}
+
+    monkeypatch.setattr("tgw.doctor_cli._verify_release_tree", verify)
+    monkeypatch.setattr(workflow_reconcile, "_repository_git", lambda *_args: {
+        ("cat-file", "-t", "a" * 40): "commit",
+        ("rev-parse", "a" * 40 + "^{tree}"): "b" * 40,
+        ("rev-parse", "--git-common-dir"): ".git",
+    }[_args[1:]])
+    release = tmp_path / "runtime/releases" / ("a" * 40)
+    verify_selected_runtime(repository=tmp_path, source_root=release,
+                            commit="a" * 40, tree="b" * 40, mode="immutable-release")
+    assert observed["owners"] == (0, 65534)
 
 
 def test_solver_disagreement_never_claims_metadata_agreement(monkeypatch):
@@ -152,6 +211,22 @@ def test_canonical_todo_identity_does_not_promote_a_source_hash_or_todo_to_admit
     assert "coding.local-cli-and-mcp@1" in value["unmet_capabilities"]
 
 
+def test_catalog_receipt_can_never_source_authenticate_admission(tmp_path, monkeypatch):
+    catalog = json.loads(CATALOG.read_text())
+    catalog["provider_evidence"]["current-mandatory-fixture"]["receipts"] = [{
+        "path": "admission.json", "sha256": "sha256:" + "0" * 64,
+    }]
+    path = tmp_path / "catalog.json"
+    path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(workflow_reconcile, "CATALOG_SHA256",
+                        "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest())
+    monkeypatch.setattr(workflow_reconcile, "_repository_bytes",
+                        lambda _repo, _commit, relative: (CATALOG.parents[2] / relative).read_bytes())
+    with pytest.raises(PPWorkflowReconcileError, match="cannot independently admit"):
+        reconcile(catalog_path=path,
+                  runtime_verifier=lambda **kwargs: {"verified": True, **kwargs})
+
+
 def test_fully_satisfied_pp_start_has_no_materialization(monkeypatch):
     monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {
         "repository_root": str(CATALOG.parents[2]), "worktree_root": str(CATALOG.parents[2]),
@@ -206,7 +281,7 @@ def test_incomplete_pp_start_calls_explicit_bridge_only_for_unmet_work(monkeypat
     assert calls[0]["execution_root"]["kind"] == "pp"
     assert calls[0]["execution_root"]["pp_ref"] == PP_REF
     assert calls[0]["treatment_id"] == "establish:missing@1"
-    assert calls[0]["worktree_identity"] == "codex"
+    assert calls[0]["worktree_identity"] == "unix:codex"
     assert ticks == [{"todo_ids": {42}}]
     assert value["ok"] and not value["reconciliation_complete"]
     assert value["reconciliation"]["dimensions"] == {
@@ -222,3 +297,18 @@ def test_incomplete_pp_start_calls_explicit_bridge_only_for_unmet_work(monkeypat
     assert not failed["ok"]
     assert not failed["reconciliation"]["dimensions"]["operation_success"]
     assert failed["reconciliation"]["foreman"]["errors"] == 1
+
+
+def test_cli_and_mcp_reconcile_share_configured_path(monkeypatch, tmp_path):
+    expected = {"schema": "projection", "ok": False}
+    calls = []
+    monkeypatch.setattr(coding_cli, "_initialize", lambda path: calls.append(path) or {
+        "coding": {"repository_root": str(tmp_path)}})
+    monkeypatch.setattr(coding_cli.todo, "todo_list", lambda **_kwargs: [])
+    monkeypatch.setattr(coding_cli, "_pp_runtime_binding", lambda _config: {"binding": "exact"})
+    monkeypatch.setattr(coding_cli, "reconcile_pp_workflow", lambda **kwargs: expected)
+    assert coding_cli.reconcile(PP_REF, config_path=tmp_path / "cli.json") == expected
+    monkeypatch.setattr(coding_mcp_server, "_config_path", lambda: tmp_path / "mcp.json")
+    payload = json.loads(coding_mcp_server.tgw_coding_reconcile())
+    assert payload == expected
+    assert calls == [tmp_path / "cli.json", tmp_path / "mcp.json"]
