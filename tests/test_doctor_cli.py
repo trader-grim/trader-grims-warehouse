@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -739,6 +740,29 @@ def test_obsolete_cleanup_default_actor_surface_is_fixed_under_direct_root(
     assert actor["path"] == Path("/home/codex/.local/bin/tgw-actor")
 
 
+def test_obsolete_cleanup_production_scope_is_exactly_seven_pinned_surfaces() -> None:
+    paths = doctor_cli.DoctorPaths()
+    rows = doctor_cli._declared_obsolete_surfaces(paths)
+
+    assert {str(row["path"]) for row in rows} == {
+        "/usr/local/bin/tgw-foreman",
+        "/usr/local/bin/tgw-foreman-dispatch",
+        "/home/codex/.local/bin/tgw-actor",
+        "/opt/TGW/tgw-lib/bin/tgw-context-mcp-candidate-3fe54df8",
+        "/opt/TGW/tgw-lib/bin/tgw-context-mcp-candidate-408ee56c",
+        "/opt/TGW/tgw-lib/bin/tgw-context-mcp-candidate-6813c302",
+        "/opt/TGW/tgw-lib/bin/tgw-context-mcp-candidate-6865ce87",
+    }
+    assert doctor_cli._OBSOLETE_FILE_HASHES == {
+        "tgw-foreman": "sha256:10152bcc0c7c72555a630d662e736ee827dc3edb5e3f3a0ad78ecf5b450d6332",
+        "tgw-foreman-dispatch": "sha256:61fa8586dfc655685bfece1cbd71b7deed357d23833177bf9d0b6158825f66c5",
+        "tgw-context-mcp-candidate-3fe54df8": "sha256:722dcfecebb23ee2dd71d8bfcf923a5275b8089edd03d47e632c51417bfc8699",
+        "tgw-context-mcp-candidate-408ee56c": "sha256:3e9f57ad0a60597595e158dde60c36f8857e03b9902f0106332975fab5db4db6",
+        "tgw-context-mcp-candidate-6813c302": "sha256:a1a1d637414e4afa881af03d0d0574e44733985a13b33f4acfff3bc443923e5b",
+        "tgw-context-mcp-candidate-6865ce87": "sha256:9821db48b5205bbc06ccb6bd32697fbf25532c81b3292ddb5e0bae78fcda6009",
+    }
+
+
 def test_obsolete_cleanup_diagnoses_warn_and_moves_exact_surfaces(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -781,6 +805,25 @@ def test_obsolete_cleanup_diagnoses_warn_and_moves_exact_surfaces(
     assert Path(result["receipt"]).is_file()
 
 
+def test_obsolete_cleanup_preserves_posix_acl_xattr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {"system.posix_acl_access": b"valid fixture ACL bytes"}
+    restored = {}
+    monkeypatch.setattr(doctor_cli.os, "listxattr", lambda _fd: list(source))
+    monkeypatch.setattr(doctor_cli.os, "getxattr", lambda _fd, name: source[name])
+    monkeypatch.setattr(
+        doctor_cli.os, "setxattr", lambda _fd, name, value: restored.__setitem__(name, value)
+    )
+    monkeypatch.setattr(doctor_cli.os, "removexattr", lambda _fd, _name: None)
+
+    encoded = doctor_cli._read_xattrs(42)
+    doctor_cli._replace_xattrs(43, encoded)
+
+    assert encoded == {"system.posix_acl_access": "dmFsaWQgZml4dHVyZSBBQ0wgYnl0ZXM="}
+    assert restored == source
+
+
 def test_obsolete_cleanup_refuses_changed_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -811,6 +854,24 @@ def test_obsolete_cleanup_keeps_detecting_unbound_legacy_launchers(
     assert diagnosis["state"] == "FAIL"
     assert diagnosis["evidence"]["unbound"] == [str(legacy)]
     assert "operator_action" not in diagnosis
+
+
+def test_obsolete_cleanup_refuses_unbound_candidate_without_expanding_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    sources = _obsolete_fixture(paths, monkeypatch)
+    unexpected = paths.local_bin / "tgw-context-mcp-candidate-unbound"
+    unexpected.write_text("unique unknown bytes\n")
+
+    diagnosis = doctor_cli.check_obsolete_surfaces(paths)
+    with pytest.raises(doctor_cli.DoctorError, match="unbound active surfaces"):
+        doctor_cli.repair_obsolete_surfaces(paths)
+
+    assert diagnosis["state"] == "FAIL"
+    assert diagnosis["evidence"]["unbound"] == [str(unexpected)]
+    assert unexpected.read_text() == "unique unknown bytes\n"
+    assert all(path.exists() or path.is_symlink() for path in sources)
 
 
 def test_obsolete_cleanup_ignores_context_evidence_but_detects_active_config(
@@ -1031,6 +1092,90 @@ def test_obsolete_cleanup_binding_rejects_replaced_parent(
         sources[0].parent.mkdir()
         with pytest.raises(doctor_cli.DoctorError, match="parent changed"):
             doctor_cli._verify_bound_cleanup_surface(binding)
+
+
+def test_obsolete_cleanup_secure_open_rejects_prebind_ancestor_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "binding"
+    ancestor = root / "ancestor"
+    parent = ancestor / "bin"
+    parent.mkdir(parents=True)
+    source = parent / "surface"
+    raw = b"exact bytes\n"
+    source.write_bytes(raw)
+    declared_hash = "sha256:" + __import__("hashlib").sha256(raw).hexdigest()
+    item = {"path": source, "kind": "file", "declared_sha256": declared_hash}
+    original_ancestor = root / "ancestor-original"
+    original_open = os.open
+    replaced = False
+
+    def open_path(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal replaced
+        if path == "bin" and dir_fd is not None and not replaced:
+            ancestor.rename(original_ancestor)
+            replacement = ancestor / "bin"
+            replacement.mkdir(parents=True)
+            (replacement / "surface").write_bytes(raw)
+            replaced = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(doctor_cli.os, "open", open_path)
+
+    with pytest.raises(doctor_cli.DoctorError, match="parent changed"):
+        with doctor_cli._bind_cleanup_surface(item):
+            pass
+
+    assert replaced is True
+
+
+def test_obsolete_cleanup_archive_path_rejects_symlink_and_failed_intermediate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    symlink = tmp_path / "archive-link"
+    symlink.symlink_to(real, target_is_directory=True)
+    with pytest.raises(doctor_cli.DoctorError, match="not direct"):
+        doctor_cli._durable_mkdir(symlink / "child")
+
+    target = tmp_path / "durable" / "middle" / "leaf"
+    original_mkdir = os.mkdir
+
+    def mkdir(path, mode=0o777, *, dir_fd=None):
+        if path == "middle":
+            raise OSError("fixture durable mkdir failure")
+        return original_mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(doctor_cli.os, "mkdir", mkdir)
+    with pytest.raises(doctor_cli.DoctorError, match="durably create"):
+        doctor_cli._durable_mkdir(target)
+    assert not target.exists()
+
+
+def test_obsolete_cleanup_archive_name_collision_refuses_without_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    sources = _obsolete_fixture(paths, monkeypatch)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 8, 25, 12, 34, 56, 789000, tzinfo=tz or UTC)
+
+    monkeypatch.setattr(doctor_cli, "datetime", FixedDatetime)
+    collision = (
+        paths.cleanup_archive_root
+        / "2026-08-25"
+        / "20260825T123456789000Z"
+    )
+    collision.mkdir(parents=True)
+
+    with pytest.raises(doctor_cli.DoctorError, match="archive name collision"):
+        doctor_cli.repair_obsolete_surfaces(paths)
+
+    assert all(path.exists() or path.is_symlink() for path in sources)
 
 
 def test_obsolete_cleanup_reconciles_interrupted_prepared_archive(

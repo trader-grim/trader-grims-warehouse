@@ -1346,16 +1346,12 @@ def _declared_obsolete_surfaces(paths: DoctorPaths) -> list[dict[str, Any]]:
             "declared_target": _OBSOLETE_ACTOR_TARGET,
         }
     )
-    candidate_names = {
+    candidate_names = sorted(
         name
         for name in _OBSOLETE_FILE_HASHES
         if name.startswith("tgw-context-mcp-candidate-")
-    }
-    if paths.local_bin.is_dir():
-        candidate_names.update(
-            path.name for path in paths.local_bin.glob("tgw-context-mcp-candidate-*")
-        )
-    for name in sorted(candidate_names):
+    )
+    for name in candidate_names:
         rows.append(
             {
                 "path": paths.local_bin / name,
@@ -1364,6 +1360,26 @@ def _declared_obsolete_surfaces(paths: DoctorPaths) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _unbound_obsolete_surfaces(paths: DoctorPaths) -> list[str]:
+    unbound = [
+        str(path)
+        for name in _UNBOUND_OBSOLETE_NAMES
+        if _lexists(path := paths.cleanup_system_bin / name)
+    ]
+    declared_candidates = {
+        name
+        for name in _OBSOLETE_FILE_HASHES
+        if name.startswith("tgw-context-mcp-candidate-")
+    }
+    if paths.local_bin.is_dir():
+        unbound.extend(
+            str(path)
+            for path in paths.local_bin.glob("tgw-context-mcp-candidate-*")
+            if path.name not in declared_candidates
+        )
+    return sorted(unbound)
 
 
 def _surface_observation(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -1402,11 +1418,7 @@ def check_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
         for item, observation in zip(present, visible, strict=True)
         if not _surface_matches_declaration(item, observation)
     ]
-    unbound = [
-        str(path)
-        for name in _UNBOUND_OBSOLETE_NAMES
-        if _lexists(path := paths.cleanup_system_bin / name)
-    ]
+    unbound = _unbound_obsolete_surfaces(paths)
     if mismatched or unbound:
         state = "FAIL"
         detail = "obsolete active surfaces are not bound to the exact cleanup treatment"
@@ -1996,26 +2008,65 @@ class _CleanupBinding:
     source_ino: int
 
 
-def _assert_no_symlink_ancestors(path: Path) -> None:
+def _open_direct_directory(path: Path) -> int:
     if not path.is_absolute():
         raise DoctorError(f"cleanup path is not absolute: {path}")
-    current = Path(path.anchor)
-    for component in path.parts[1:]:
-        current /= component
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path.anchor, flags)
+    traversed = Path(path.anchor)
+    try:
+        for component in path.parts[1:]:
+            if component in ("", ".", ".."):
+                raise DoctorError(f"cleanup path has an unsafe component: {path}")
+            traversed /= component
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except OSError as exc:
+                raise DoctorError(
+                    f"cleanup parent path is not a direct directory: {traversed}"
+                ) from exc
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+@contextmanager
+def _bind_cleanup_parent(
+    path: Path, item: Mapping[str, Any]
+) -> Iterator[_CleanupBinding]:
+    parent_fd = _open_direct_directory(path.parent)
+    try:
+        bound_parent = os.fstat(parent_fd)
         try:
-            state = current.lstat()
+            visible_parent = path.parent.stat(follow_symlinks=False)
         except OSError as exc:
-            raise DoctorError(f"cleanup parent path is unavailable: {current}") from exc
-        if stat.S_ISLNK(state.st_mode) or not stat.S_ISDIR(state.st_mode):
-            raise DoctorError(f"cleanup parent path is not a direct directory: {current}")
+            raise DoctorError(f"cleanup parent path is unavailable: {path.parent}") from exc
+        if (visible_parent.st_dev, visible_parent.st_ino) != (
+            bound_parent.st_dev,
+            bound_parent.st_ino,
+        ):
+            raise DoctorError(f"cleanup parent changed while binding: {path.parent}")
+        yield _CleanupBinding(
+            item=item,
+            path=path,
+            parent_fd=parent_fd,
+            source_fd=None,
+            parent_dev=bound_parent.st_dev,
+            parent_ino=bound_parent.st_ino,
+            source_dev=0,
+            source_ino=0,
+        )
+    finally:
+        os.close(parent_fd)
 
 
 @contextmanager
 def _bind_cleanup_surface(item: Mapping[str, Any]) -> Iterator[_CleanupBinding]:
     path = Path(item["path"])
-    _assert_no_symlink_ancestors(path.parent)
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    parent_fd = os.open(path.parent, flags)
+    parent_fd = _open_direct_directory(path.parent)
     source_fd: int | None = None
     try:
         path_parent = path.parent.stat(follow_symlinks=False)
@@ -2200,42 +2251,52 @@ def _archive_relative(path: Path) -> Path:
     return Path(str(path).lstrip("/"))
 
 
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _fsync_directory_fd(descriptor: int) -> None:
     os.fsync(descriptor)
 
 
-def _fsync_file(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
+def _durable_mkdir(
+    path: Path, *, mode: int = 0o755, require_new: bool = False
+) -> None:
+    if not path.is_absolute():
+        raise DoctorError(f"archive path is not absolute: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path.anchor, flags)
+    traversed = Path(path.anchor)
     try:
-        os.fsync(descriptor)
+        components = path.parts[1:]
+        for index, component in enumerate(components):
+            if component in ("", ".", ".."):
+                raise DoctorError(f"archive path has an unsafe component: {path}")
+            traversed /= component
+            final = index == len(components) - 1
+            created = False
+            if require_new and final:
+                try:
+                    os.mkdir(component, mode=mode, dir_fd=descriptor)
+                except FileExistsError as exc:
+                    raise DoctorError(f"cleanup archive name collision: {path}") from exc
+                created = True
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode=mode, dir_fd=descriptor)
+                except OSError as exc:
+                    raise DoctorError(
+                        f"cannot durably create archive directory: {traversed}"
+                    ) from exc
+                created = True
+                child = os.open(component, flags, dir_fd=descriptor)
+            except OSError as exc:
+                raise DoctorError(f"archive directory is not direct: {traversed}") from exc
+            if created:
+                os.fsync(descriptor)
+                os.fsync(child)
+            os.close(descriptor)
+            descriptor = child
     finally:
         os.close(descriptor)
-
-
-def _durable_mkdir(path: Path, *, mode: int = 0o755) -> None:
-    missing = []
-    current = path
-    while not _lexists(current):
-        missing.append(current)
-        if current == current.parent:
-            break
-        current = current.parent
-    if current.is_symlink() or not current.is_dir():
-        raise DoctorError(f"archive parent is not a directory: {current}")
-    for directory in reversed(missing):
-        directory.mkdir(mode=mode)
-        _fsync_directory(directory)
-        _fsync_directory(directory.parent)
-    if path.is_symlink() or not path.is_dir():
-        raise DoctorError(f"archive directory is not direct: {path}")
 
 
 def _replace_xattrs(path_or_fd: Path | int, values: Mapping[str, str], *, follow: bool = True) -> None:
@@ -2267,23 +2328,6 @@ def _apply_fd_metadata(descriptor: int, metadata: Mapping[str, Any]) -> None:
         ns=(int(metadata["atime_ns"]), int(metadata["mtime_ns"])),
     )
     os.fsync(descriptor)
-
-
-def _apply_path_metadata(path: Path, metadata: Mapping[str, Any], *, symlink: bool) -> None:
-    os.chown(
-        path,
-        int(metadata["uid"]),
-        int(metadata["gid"]),
-        follow_symlinks=not symlink,
-    )
-    if not symlink:
-        os.chmod(path, int(metadata["mode"]), follow_symlinks=False)
-    _replace_xattrs(path, metadata.get("xattrs", {}), follow=not symlink)
-    os.utime(
-        path,
-        ns=(int(metadata["atime_ns"]), int(metadata["mtime_ns"])),
-        follow_symlinks=not symlink,
-    )
 
 
 def _open_path_noatime(path: Path) -> int:
@@ -2343,82 +2387,106 @@ def _verify_archived_surface(path: Path, identity: Mapping[str, Any]) -> None:
         raise DoctorError(f"recovery archive identity differs: {path}")
 
 
+def _apply_bound_symlink_metadata(
+    parent_fd: int, name: str, metadata: Mapping[str, Any]
+) -> None:
+    os.chown(
+        name,
+        int(metadata["uid"]),
+        int(metadata["gid"]),
+        dir_fd=parent_fd,
+        follow_symlinks=False,
+    )
+    proc_path = Path(f"/proc/self/fd/{parent_fd}") / name
+    _replace_xattrs(proc_path, metadata.get("xattrs", {}), follow=False)
+    os.utime(
+        name,
+        ns=(int(metadata["atime_ns"]), int(metadata["mtime_ns"])),
+        dir_fd=parent_fd,
+        follow_symlinks=False,
+    )
+
+
 def _copy_cleanup_surface(
     binding: _CleanupBinding, destination: Path
 ) -> dict[str, Any]:
     before = _verify_bound_cleanup_surface(binding)
     _durable_mkdir(destination.parent)
-    if before["kind"] == "symlink":
-        os.symlink(before["target"], destination)
-        final = _verify_bound_cleanup_surface(binding)
-        _apply_path_metadata(destination, final["metadata"], symlink=True)
-    else:
-        if binding.source_fd is None:
-            raise DoctorError(f"obsolete file binding is unavailable: {binding.path}")
-        destination_fd = os.open(
-            destination,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
-        try:
-            os.lseek(binding.source_fd, 0, os.SEEK_SET)
-            digest = hashlib.sha256()
-            while chunk := os.read(binding.source_fd, 1024 * 1024):
-                digest.update(chunk)
-                view = memoryview(chunk)
-                while view:
-                    written = os.write(destination_fd, view)
-                    view = view[written:]
-            os.fsync(destination_fd)
-            if "sha256:" + digest.hexdigest() != before["sha256"]:
-                raise DoctorError(f"obsolete surface changed while archiving: {binding.path}")
+    archive_parent_fd = _open_direct_directory(destination.parent)
+    try:
+        parent_state = os.fstat(archive_parent_fd)
+        visible_parent = destination.parent.stat(follow_symlinks=False)
+        if (parent_state.st_dev, parent_state.st_ino) != (
+            visible_parent.st_dev,
+            visible_parent.st_ino,
+        ):
+            raise DoctorError(f"archive parent changed while binding: {destination.parent}")
+        if before["kind"] == "symlink":
+            os.symlink(before["target"], destination.name, dir_fd=archive_parent_fd)
             final = _verify_bound_cleanup_surface(binding)
-            if final["sha256"] != before["sha256"]:
-                raise DoctorError(f"obsolete surface changed while archiving: {binding.path}")
-            _apply_fd_metadata(destination_fd, final["metadata"])
-        finally:
-            os.close(destination_fd)
-    _verify_archived_surface(destination, final)
-    _fsync_directory(destination.parent)
-    return final
+            _apply_bound_symlink_metadata(
+                archive_parent_fd, destination.name, final["metadata"]
+            )
+        else:
+            if binding.source_fd is None:
+                raise DoctorError(f"obsolete file binding is unavailable: {binding.path}")
+            destination_fd = os.open(
+                destination.name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=archive_parent_fd,
+            )
+            try:
+                os.lseek(binding.source_fd, 0, os.SEEK_SET)
+                digest = hashlib.sha256()
+                while chunk := os.read(binding.source_fd, 1024 * 1024):
+                    digest.update(chunk)
+                    view = memoryview(chunk)
+                    while view:
+                        written = os.write(destination_fd, view)
+                        view = view[written:]
+                os.fsync(destination_fd)
+                if "sha256:" + digest.hexdigest() != before["sha256"]:
+                    raise DoctorError(
+                        f"obsolete surface changed while archiving: {binding.path}"
+                    )
+                final = _verify_bound_cleanup_surface(binding)
+                if final["sha256"] != before["sha256"]:
+                    raise DoctorError(
+                        f"obsolete surface changed while archiving: {binding.path}"
+                    )
+                _apply_fd_metadata(destination_fd, final["metadata"])
+            finally:
+                os.close(destination_fd)
+        archived_state = os.stat(
+            destination.name, dir_fd=archive_parent_fd, follow_symlinks=False
+        )
+        archived_binding = _CleanupBinding(
+            item=final,
+            path=destination,
+            parent_fd=archive_parent_fd,
+            source_fd=None,
+            parent_dev=parent_state.st_dev,
+            parent_ino=parent_state.st_ino,
+            source_dev=archived_state.st_dev,
+            source_ino=archived_state.st_ino,
+        )
+        observed = _bound_recovery_identity(archived_binding)
+        if _stable_restorable_identity(observed) != _stable_restorable_identity(final):
+            raise DoctorError(f"recovery archive identity differs: {destination}")
+        _fsync_directory_fd(archive_parent_fd)
+        _assert_parent_binding(archived_binding)
+        return final
+    finally:
+        os.close(archive_parent_fd)
 
 
 def _restore_cleanup_surface(
     destination: Path, archived: Path, identity: Mapping[str, Any]
 ) -> None:
-    if _lexists(destination):
-        observed = _path_recovery_identity(destination, str(identity["kind"]))
-        if _stable_restorable_identity(observed) != _stable_restorable_identity(identity):
-            raise DoctorError(f"active surface differs during recovery: {destination}")
-        return
-    _assert_no_symlink_ancestors(destination.parent)
-    _verify_archived_surface(archived, identity)
-    if identity["kind"] == "symlink":
-        os.symlink(identity["target"], destination)
-        _apply_path_metadata(destination, identity["metadata"], symlink=True)
-    else:
-        source_fd = _open_path_noatime(archived)
-        destination_fd = os.open(
-            destination,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
-        try:
-            os.lseek(source_fd, 0, os.SEEK_SET)
-            while chunk := os.read(source_fd, 1024 * 1024):
-                view = memoryview(chunk)
-                while view:
-                    written = os.write(destination_fd, view)
-                    view = view[written:]
-            os.fsync(destination_fd)
-            _apply_fd_metadata(destination_fd, identity["metadata"])
-        finally:
-            os.close(source_fd)
-            os.close(destination_fd)
-    observed = _path_recovery_identity(destination, str(identity["kind"]))
-    if _stable_restorable_identity(observed) != _stable_restorable_identity(identity):
-        raise DoctorError(f"restored obsolete surface identity differs: {destination}")
-    _fsync_directory(destination.parent)
+    with _bind_cleanup_parent(destination, identity) as binding:
+        _restore_bound_cleanup_surface(binding, archived, identity)
+        _assert_parent_binding(binding)
 
 
 def _bound_recovery_identity(binding: _CleanupBinding) -> dict[str, Any]:
@@ -2468,25 +2536,8 @@ def _restore_bound_cleanup_surface(
     _verify_archived_surface(archived, identity)
     if identity["kind"] == "symlink":
         os.symlink(identity["target"], binding.path.name, dir_fd=binding.parent_fd)
-        os.chown(
-            binding.path.name,
-            int(identity["metadata"]["uid"]),
-            int(identity["metadata"]["gid"]),
-            dir_fd=binding.parent_fd,
-            follow_symlinks=False,
-        )
-        proc_path = Path(f"/proc/self/fd/{binding.parent_fd}") / binding.path.name
-        _replace_xattrs(
-            proc_path, identity["metadata"].get("xattrs", {}), follow=False
-        )
-        os.utime(
-            binding.path.name,
-            ns=(
-                int(identity["metadata"]["atime_ns"]),
-                int(identity["metadata"]["mtime_ns"]),
-            ),
-            dir_fd=binding.parent_fd,
-            follow_symlinks=False,
+        _apply_bound_symlink_metadata(
+            binding.parent_fd, binding.path.name, identity["metadata"]
         )
     else:
         source_fd = _open_path_noatime(archived)
@@ -2659,6 +2710,11 @@ def repair_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
     reconciled = _reconcile_incomplete_cleanup(paths, declared)
     if reconciled is not None:
         return reconciled
+    unbound = _unbound_obsolete_surfaces(paths)
+    if unbound:
+        raise DoctorError(
+            "obsolete cleanup refuses unbound active surfaces: " + ", ".join(unbound)
+        )
     present = [item for item in declared if _lexists(Path(item["path"]))]
     if not present:
         receipt = _receipt(paths, "obsolete-surfaces", [], {"state": "ALREADY_ABSENT"})
@@ -2687,7 +2743,7 @@ def repair_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
         # Bind and validate the entire source set before creating any archive entry.
         for binding in bindings:
             _verify_bound_cleanup_surface(binding)
-        _durable_mkdir(archive, mode=0o700)
+        _durable_mkdir(archive, mode=0o700, require_new=True)
         for binding in bindings:
             destination = archive / "active-root" / _archive_relative(binding.path)
             identity = _copy_cleanup_surface(binding, destination)
