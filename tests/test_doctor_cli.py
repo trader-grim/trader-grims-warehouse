@@ -213,6 +213,56 @@ def test_context_process_match_ignores_parent_shell_command_text() -> None:
     )
 
 
+def test_root_post_repair_checks_use_the_invoking_operator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_USER", "codex")
+
+    assert doctor_cli._operator_actor() == "codex"
+
+
+def test_root_database_postcheck_runs_as_the_invoking_operator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    observed = {}
+
+    def run(command, **_kwargs):
+        observed["command"] = command
+        result = {
+            "actor": "codex",
+            "database_connect": True,
+            "schema_usage": True,
+            "role_member": True,
+            "todo_access": True,
+            "queue_access": True,
+            "history_access": True,
+            "todo_sequence_access": True,
+            "history_sequence_access": True,
+            "claim_function_access": True,
+            "recovery_function_access": True,
+            "active_jobs": 0,
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(result) + "\n", "")
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_USER", "codex")
+    monkeypatch.setattr(doctor_cli, "_run", run)
+
+    result = doctor_cli.check_database(paths)
+
+    assert result["state"] == "PASS"
+    assert result["evidence"]["actor"] == "codex"
+    assert observed["command"][:5] == [
+        "sudo",
+        "-n",
+        "-u",
+        "codex",
+        "/usr/bin/psql",
+    ]
+
+
 def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

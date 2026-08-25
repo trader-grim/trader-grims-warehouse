@@ -401,15 +401,41 @@ def check_context_processes(paths: DoctorPaths) -> dict[str, Any]:
         return _check("context.clients", "UNKNOWN", str(exc))
 
 
+def _operator_actor() -> str:
+    current = pwd.getpwuid(os.geteuid()).pw_name
+    if os.geteuid() != 0:
+        return current
+    sudo_user = os.environ.get("SUDO_USER", "")
+    if not sudo_user or sudo_user == "root":
+        return current
+    try:
+        pwd.getpwnam(sudo_user)
+    except KeyError as exc:
+        raise DoctorError(f"sudo operator account does not exist: {sudo_user}") from exc
+    return sudo_user
+
+
+def _actor_path_access(actor: str, path: Path) -> bool:
+    current = pwd.getpwuid(os.geteuid()).pw_name
+    if actor == current:
+        return os.access(path, os.R_OK | os.W_OK | os.X_OK)
+    return all(
+        _run(["sudo", "-n", "-u", actor, "/usr/bin/test", flag, str(path)]).returncode
+        == 0
+        for flag in ("-r", "-w", "-x")
+    )
+
+
 def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
     try:
-        actor = pwd.getpwuid(os.geteuid()).pw_name
+        actor = _operator_actor()
+        actor_record = pwd.getpwnam(actor)
         group = grp.getgrnam("tgw-coders")
-        memberships = set(os.getgroups()) | {os.getegid()}
+        memberships = set(os.getgrouplist(actor, actor_record.pw_gid))
         member = group.gr_gid in memberships or actor in group.gr_mem
         writable = {
-            "repository": os.access(paths.repository, os.R_OK | os.W_OK | os.X_OK),
-            "worktree_root": os.access(paths.worktrees, os.R_OK | os.W_OK | os.X_OK),
+            "repository": _actor_path_access(actor, paths.repository),
+            "worktree_root": _actor_path_access(actor, paths.worktrees),
         }
         state = "PASS" if member and all(writable.values()) else "FAIL"
         return _check(
@@ -777,34 +803,71 @@ def _coding_config(paths: DoctorPaths) -> dict[str, Any]:
     return config
 
 
+_DATABASE_OBSERVATION_SQL = """
+SELECT json_build_object(
+    'actor', current_user,
+    'database_connect', has_database_privilege(current_user, current_database(), 'CONNECT'),
+    'schema_usage', has_schema_privilege(current_user, 'public', 'USAGE'),
+    'role_member', pg_has_role(current_user, 'tgw_coding', 'member'),
+    'todo_access', has_table_privilege(current_user, 'public.todo_items', 'SELECT,INSERT,UPDATE,DELETE'),
+    'queue_access', has_table_privilege(current_user, 'public.queue_jobs', 'SELECT,INSERT,UPDATE,DELETE'),
+    'history_access', has_table_privilege(current_user, 'public.queue_job_history', 'SELECT,INSERT'),
+    'todo_sequence_access', has_sequence_privilege(current_user, 'public.todo_items_id_seq', 'USAGE,SELECT,UPDATE'),
+    'history_sequence_access', has_sequence_privilege(current_user, 'public.queue_job_history_history_id_seq', 'USAGE,SELECT,UPDATE'),
+    'claim_function_access', COALESCE(has_function_privilege(current_user, to_regprocedure('public.claim_queue_jobs(text,text,integer,integer)'), 'EXECUTE'), false),
+    'recovery_function_access', COALESCE(has_function_privilege(current_user, to_regprocedure('public.recover_expired_jobs()'), 'EXECUTE'), false),
+    'active_jobs', (
+        SELECT count(*)::integer
+        FROM public.queue_jobs
+        WHERE queue_name IN ('codex-implement','controller-verify')
+          AND state IN ('queued','leased','running')
+    )
+)::text AS observation_json
+"""
+
+
+def _database_observation(config: Mapping[str, Any]) -> tuple[dict[str, Any], int]:
+    actor = _operator_actor()
+    current = pwd.getpwuid(os.geteuid()).pw_name
+    if actor != current:
+        result = _run(
+            [
+                "sudo",
+                "-n",
+                "-u",
+                actor,
+                "/usr/bin/psql",
+                f"--dbname={config['postgres_dsn']}",
+                "--no-align",
+                "--tuples-only",
+                "--command",
+                _DATABASE_OBSERVATION_SQL,
+            ],
+            timeout=30,
+        )
+        if result.returncode:
+            raise DoctorError(result.stderr.strip() or "operator database check failed")
+        try:
+            row = json.loads(result.stdout.strip())
+        except json.JSONDecodeError as exc:
+            raise DoctorError("operator database check returned invalid JSON") from exc
+        if not isinstance(row, dict):
+            raise DoctorError("operator database check returned a non-object")
+        active = int(row.pop("active_jobs"))
+        return row, active
+    with psycopg2.connect(config["postgres_dsn"]) as connection:
+        with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(_DATABASE_OBSERVATION_SQL)
+            row = json.loads(cursor.fetchone()["observation_json"])
+    active = int(row.pop("active_jobs"))
+    return row, active
+
+
 def check_database(paths: DoctorPaths) -> dict[str, Any]:
     repair = "sudo -n tgw doctor repair database"
     try:
         config = _coding_config(paths)
-        with psycopg2.connect(config["postgres_dsn"]) as connection:
-            with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-                cursor.execute(
-                    """
-                    SELECT current_user AS actor,
-                           has_database_privilege(current_user, current_database(), 'CONNECT') AS database_connect,
-                           has_schema_privilege(current_user, 'public', 'USAGE') AS schema_usage,
-                           pg_has_role(current_user, 'tgw_coding', 'member') AS role_member,
-                           has_table_privilege(current_user, 'public.todo_items', 'SELECT,INSERT,UPDATE,DELETE') AS todo_access,
-                           has_table_privilege(current_user, 'public.queue_jobs', 'SELECT,INSERT,UPDATE,DELETE') AS queue_access,
-                           has_table_privilege(current_user, 'public.queue_job_history', 'SELECT,INSERT') AS history_access,
-                           has_sequence_privilege(current_user, 'public.todo_items_id_seq', 'USAGE,SELECT,UPDATE') AS todo_sequence_access,
-                           has_sequence_privilege(current_user, 'public.queue_job_history_history_id_seq', 'USAGE,SELECT,UPDATE') AS history_sequence_access,
-                           COALESCE(has_function_privilege(current_user, to_regprocedure('public.claim_queue_jobs(text,text,integer,integer)'), 'EXECUTE'), false) AS claim_function_access,
-                           COALESCE(has_function_privilege(current_user, to_regprocedure('public.recover_expired_jobs()'), 'EXECUTE'), false) AS recovery_function_access
-                    """
-                )
-                row = dict(cursor.fetchone())
-                cursor.execute(
-                    "SELECT count(*) AS active FROM public.queue_jobs "
-                    "WHERE queue_name IN ('codex-implement','controller-verify') "
-                    "AND state IN ('queued','leased','running')"
-                )
-                active = int(cursor.fetchone()["active"])
+        row, active = _database_observation(config)
         required = (
             "database_connect",
             "schema_usage",
