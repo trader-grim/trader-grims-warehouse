@@ -49,7 +49,7 @@ def _git_text(cwd: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def _source_bound_python_files() -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _source_bound_candidate_files() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], str, str]:
     try:
         job = json.loads(os.environ["TGW_CODING_JOB"])
     except (KeyError, json.JSONDecodeError) as exc:
@@ -69,7 +69,14 @@ def _source_bound_python_files() -> tuple[tuple[str, ...], tuple[str, ...]]:
         cwd=cwd, check=False, capture_output=True,
     ).returncode:
         raise ControllerVerificationError("controller candidate does not descend from its bound source")
-    status = _git_paths(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    status = _git_paths(
+        cwd,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--ignored=matching",
+    )
     if any(item[3:] not in _RECEIPTS for item in status):
         raise ControllerVerificationError("controller candidate source is mutable or uncommitted")
     expected_generation = job.get("object_generation")
@@ -80,18 +87,22 @@ def _source_bound_python_files() -> tuple[tuple[str, ...], tuple[str, ...]]:
         cwd,
         "diff",
         "--name-only",
-        "--diff-filter=ACMRT",
         "-z",
         f"{baseline}..{head}",
         "--",
     )
-    untracked = _git_paths(cwd, "ls-files", "--others", "--exclude-standard", "-z")
+    if not tracked:
+        raise ControllerVerificationError("controller candidate has no source-bound changes")
 
     python_files: list[str] = []
-    for relative in sorted(set((*tracked, *untracked))):
+    all_files: list[str] = []
+    for relative in sorted(set(tracked)):
         candidate = Path(relative)
         resolved = (cwd / candidate).resolve()
-        if candidate.is_absolute() or cwd not in resolved.parents or resolved.suffix != ".py" or not resolved.is_file():
+        if candidate.is_absolute() or cwd not in resolved.parents:
+            raise ControllerVerificationError("controller candidate contains an unsafe path")
+        all_files.append(relative)
+        if resolved.suffix != ".py" or not resolved.is_file():
             continue
         python_files.append(relative)
     tests = tuple(item for item in python_files if Path(item).parts[:1] == ("tests",) and Path(item).name.startswith("test_"))
@@ -99,12 +110,26 @@ def _source_bound_python_files() -> tuple[tuple[str, ...], tuple[str, ...]]:
         raise ControllerVerificationError("implementation has no changed Python files to verify")
     if not tests:
         raise ControllerVerificationError("implementation has no changed source-bound tests")
-    return tuple(python_files), tests
+    return tuple(all_files), tuple(python_files), tests, baseline, head
+
+
+def _source_bound_python_files() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Compatibility view used by focused tests and callers."""
+    _all_files, python_files, tests, _baseline, _head = _source_bound_candidate_files()
+    return python_files, tests
 
 
 def _verification_commands() -> tuple[tuple[str, list[str]], ...]:
-    python_files, tests = _source_bound_python_files()
+    all_files, python_files, tests, baseline, head = _source_bound_candidate_files()
+    cwd = Path.cwd().resolve()
     return (
+        (
+            "candidate-diff",
+            [
+                "git", "-c", f"safe.directory={cwd}", "diff", "--check",
+                f"{baseline}..{head}", "--", *all_files,
+            ],
+        ),
         ("pytest", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *tests]),
         ("ruff", [sys.executable, "-m", "ruff", "check", "--no-cache", *python_files]),
     )
@@ -123,7 +148,13 @@ def _run_check(name: str, command: list[str]) -> dict[str, Any]:
         "kind": "check",
         "name": name,
         "status": "passed" if completed.returncode == 0 else "failed",
-        "targets": command[6:] if name == "pytest" else command[5:],
+        "targets": (
+            command[7:]
+            if name == "candidate-diff"
+            else command[6:]
+            if name == "pytest"
+            else command[5:]
+        ),
     }
     if completed.returncode:
         result["detail"] = (completed.stderr or completed.stdout)[-2000:]

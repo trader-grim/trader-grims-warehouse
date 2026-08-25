@@ -158,7 +158,13 @@ def _git_branch(worktree: Path) -> Optional[str]:
 
 def _git_is_clean(worktree: Path) -> Optional[bool]:
     """Return True if the worktree is clean, False if dirty, None if not a repo."""
-    code, out, _ = _git(worktree, "status", "--porcelain")
+    code, out, _ = _git(
+        worktree,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignored=matching",
+    )
     if code != 0:
         return None
     receipt_names = set(_RECEIPT_PATHS.values())
@@ -175,8 +181,15 @@ def _git_source_fingerprint(worktree: Path) -> str:
     pathspecs = (".", *(f":(exclude){name}" for name in sorted(receipt_names)))
     _, tracked_diff, _ = _git(worktree, "diff", "--binary", "HEAD", "--", *pathspecs)
     _, untracked, _ = _git(worktree, "ls-files", "--others", "--exclude-standard")
+    _, ignored, _ = _git(
+        worktree,
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+    )
     untracked_content: list[str] = []
-    for relative in untracked.splitlines():
+    for relative in (*untracked.splitlines(), *ignored.splitlines()):
         if relative in receipt_names:
             continue
         candidate = worktree / relative

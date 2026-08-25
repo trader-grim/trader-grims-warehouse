@@ -151,6 +151,15 @@ class TestGitHelpers:
         (tmp_path / "new_file.py").write_text("x")
         assert _git_is_clean(tmp_path) is False
 
+    def test_git_is_clean_false_with_ignored(self, tmp_path):
+        _git_init(tmp_path)
+        (tmp_path / ".gitignore").write_text("ignored/\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-m", "ignore"], cwd=tmp_path, check=True, capture_output=True)
+        (tmp_path / "ignored").mkdir()
+        (tmp_path / "ignored/value").write_text("mutable")
+        assert _git_is_clean(tmp_path) is False
+
     def test_find_canonical_main(self, tmp_path):
         _git_init(tmp_path)
         _git_commit(tmp_path, "initial", allow_empty=True)

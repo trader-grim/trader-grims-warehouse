@@ -551,11 +551,53 @@ def test_controller_verify_scope_is_bound_to_changed_source_and_tests(
     assert tests == ("tests/test_feature.py",)
     assert controller_verify.main() == 0
     result = json.loads(capsys.readouterr().out)
+    assert result["artifacts"][0] == {
+        "kind": "check",
+        "name": "candidate-diff",
+        "status": "passed",
+        "targets": ["src/feature.py", "tests/test_feature.py"],
+    }
     assert result["outcome"] == "satisfied"
     assert result["established_conditions"] == [
         "tested",
         "linted",
         "controller_verified",
+    ]
+
+
+def test_controller_diff_check_covers_non_python_candidate_paths(tmp_path, monkeypatch):
+    from tgw.workers import controller_verify
+
+    worktree = tmp_path / "worktree"
+    _git_worktree(worktree)
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=worktree, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    (worktree / "src").mkdir()
+    (worktree / "tests").mkdir()
+    (worktree / "src/feature.py").write_text("implemented = True\n")
+    (worktree / "tests/test_feature.py").write_text("def test_feature():\n    assert True\n")
+    (worktree / "config.json").write_text('{"enabled": true}\n')
+    subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-m", "closed successor"], cwd=worktree, check=True, capture_output=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, check=True, text=True, capture_output=True).stdout.strip()
+    tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=worktree, check=True, text=True, capture_output=True).stdout.strip()
+    monkeypatch.chdir(worktree)
+    monkeypatch.setenv(
+        "TGW_CODING_JOB",
+        json.dumps(
+            {
+                "plan_binding": {"source_commit": baseline},
+                "object_generation": __import__("hashlib").sha256(f"{head}|{tree}".encode()).hexdigest()[:16],
+            }
+        ),
+    )
+
+    commands = dict(controller_verify._verification_commands())
+
+    assert commands["candidate-diff"][7:] == [
+        "config.json", "src/feature.py", "tests/test_feature.py"
     ]
 
 
@@ -606,6 +648,35 @@ def test_controller_refuses_mutable_or_wrong_generation_candidate(tmp_path, monk
 
     subprocess.run(["git", "restore", "src/feature.py"], cwd=worktree, check=True)
     with pytest.raises(controller_verify.ControllerVerificationError, match="dispatched generation"):
+        controller_verify._source_bound_python_files()
+
+
+def test_controller_refuses_ignored_mutable_candidate_state(tmp_path, monkeypatch):
+    from tgw.workers import controller_verify
+
+    worktree = tmp_path / "worktree"
+    _git_worktree(worktree)
+    (worktree / ".gitignore").write_text("ignored/\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-m", "baseline ignore"], cwd=worktree, check=True, capture_output=True)
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=worktree, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    (worktree / "src.py").write_text("implemented = True\n")
+    (worktree / "tests").mkdir()
+    (worktree / "tests/test_feature.py").write_text("def test_feature():\n    assert True\n")
+    subprocess.run(["git", "add", "src.py", "tests/test_feature.py"], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-m", "closed successor"], cwd=worktree, check=True, capture_output=True)
+    (worktree / "ignored").mkdir()
+    (worktree / "ignored/value").write_text("mutable")
+    monkeypatch.chdir(worktree)
+    monkeypatch.setenv(
+        "TGW_CODING_JOB",
+        json.dumps({"plan_binding": {"source_commit": baseline}, "object_generation": "irrelevant"}),
+    )
+
+    with pytest.raises(controller_verify.ControllerVerificationError, match="mutable or uncommitted"):
         controller_verify._source_bound_python_files()
 
 

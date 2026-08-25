@@ -8,11 +8,13 @@ does not commit, deploy, access production, or author workflow receipts.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
@@ -146,29 +148,97 @@ _RECEIPT_FILES = frozenset(
 
 def _source_status(cwd: Path) -> tuple[str, ...]:
     """Return mutable source entries while excluding workflow evidence files."""
-    status = _git(cwd, "status", "--porcelain=v1", "--untracked-files=all")
+    status = _git(
+        cwd,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignored=matching",
+    )
     return tuple(
         line for line in status.splitlines() if line[3:] not in _RECEIPT_FILES
     )
 
 
+@contextmanager
+def _exclusive_worktree_lease(cwd: Path):
+    """Fence one request worktree across model execution and candidate close."""
+    lock_path = Path(_git(cwd, "rev-parse", "--git-path", "tgw-coding.lock"))
+    if not lock_path.is_absolute():
+        lock_path = (cwd / lock_path).resolve()
+    try:
+        descriptor = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC,
+            0o660,
+        )
+    except OSError as exc:
+        raise HardFailure(f"Codex implementation cannot open its worktree lease: {exc}") from exc
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise HardFailure("Codex implementation worktree is already leased") from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _reset_index(cwd: Path) -> None:
+    """Undo wrapper staging without discarding any implementation bytes."""
+    completed = subprocess.run(
+        ["git", "reset", "--mixed", "--quiet", "HEAD", "--"],
+        cwd=cwd,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if completed.returncode:
+        raise HardFailure(
+            f"Codex implementation could not recover its Git index: {completed.stderr[-300:]}"
+        )
+
+
 def _close_candidate(cwd: Path, *, todo_id: int, baseline: str) -> tuple[str, str]:
     """Commit only the implementation bytes and return the exact commit/tree."""
     pathspec = (".", *(f":(exclude){name}" for name in sorted(_RECEIPT_FILES)))
-    _git(cwd, "add", "-A", "--", *pathspec)
-    staged = _git(cwd, "diff", "--cached", "--name-only", "--")
-    if not staged:
-        raise HardFailure("Codex implementation produced no source bytes to close")
-    _git(
-        cwd,
-        "-c",
-        "user.name=TGW Codex",
-        "-c",
-        "user.email=codex@tgw-lib",
-        "commit",
-        "-m",
-        f"Todo {todo_id}: close implementation candidate",
-    )
+    try:
+        _git(cwd, "add", "-A", "--", *pathspec)
+        staged = _git(cwd, "diff", "--cached", "--name-only", "--")
+        if not staged:
+            raise HardFailure("Codex implementation produced no source bytes to close")
+        # The lease fences cooperating TGW actors. These final checks also keep
+        # a non-cooperating writer's later bytes out of the staged candidate.
+        unstaged = _git(cwd, "diff", "--name-only", "--")
+        untracked = tuple(
+            item
+            for item in _git(cwd, "ls-files", "--others", "--exclude-standard").splitlines()
+            if item not in _RECEIPT_FILES
+        )
+        ignored = _git(
+            cwd, "ls-files", "--others", "--ignored", "--exclude-standard"
+        )
+        if unstaged or untracked or ignored:
+            raise HardFailure("Codex implementation source changed while closing its candidate")
+        _git(
+            cwd,
+            "-c",
+            "user.name=TGW Codex",
+            "-c",
+            "user.email=codex@tgw-lib",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "--no-verify",
+            "-m",
+            f"Todo {todo_id}: close implementation candidate",
+        )
+    except HardFailure:
+        _reset_index(cwd)
+        raise
     head = _git(cwd, "rev-parse", "HEAD")
     tree = _git(cwd, "rev-parse", "HEAD^{tree}")
     if head == baseline or _source_status(cwd):
@@ -184,7 +254,7 @@ def _close_candidate(cwd: Path, *, todo_id: int, baseline: str) -> tuple[str, st
     return head, tree
 
 
-def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
+def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
     task = _validated_task(job)
     before_head = _git(cwd, "rev-parse", "HEAD")
     if _source_status(cwd):
@@ -268,6 +338,11 @@ def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> d
         "established_conditions": ["implemented"],
         "artifacts": artifacts,
     }
+
+
+def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
+    with _exclusive_worktree_lease(cwd):
+        return _run_with_lease(job, cwd, invoke=invoke)
 
 
 def main() -> int:

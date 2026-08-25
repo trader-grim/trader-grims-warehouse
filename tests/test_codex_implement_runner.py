@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tgw.workers import codex_implement
 
 
@@ -188,6 +190,88 @@ def test_runner_detects_model_commit_as_conflict(tmp_path, monkeypatch):
     )
     assert result["outcome"] == "conflict"
     assert result["established_conditions"] == []
+
+
+def test_commit_failure_recovers_index_and_preserves_source(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+    real_git = codex_implement._git
+
+    def fail_commit(cwd, *args):
+        if "commit" in args:
+            raise codex_implement.HardFailure("simulated commit failure")
+        return real_git(cwd, *args)
+
+    monkeypatch.setattr(codex_implement, "_git", fail_commit)
+    with pytest.raises(codex_implement.HardFailure, match="simulated commit failure"):
+        codex_implement.run(
+            _job(),
+            repo,
+            invoke=_invoke(
+                {"status": "implemented", "summary": "added feature", "tests": []},
+                edit=lambda path: (path / "feature.py").write_text("VALUE = 1\n"),
+            ),
+        )
+    assert subprocess.run(
+        ["git", "diff", "--cached", "--quiet"], cwd=repo, check=False
+    ).returncode == 0
+    assert (repo / "feature.py").read_text() == "VALUE = 1\n"
+
+
+def test_runner_refuses_ignored_mutable_files(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    (repo / ".gitignore").write_text("cache/\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "ignore cache"], cwd=repo, check=True, capture_output=True)
+    (repo / "cache").mkdir()
+    (repo / "cache/value").write_text("mutable\n")
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+
+    with pytest.raises(codex_implement.HardFailure, match="source-clean worktree"):
+        codex_implement.run(
+            _job(),
+            repo,
+            invoke=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("called")),
+        )
+
+
+def test_runner_refuses_a_concurrent_worktree_lease(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+
+    with codex_implement._exclusive_worktree_lease(repo):
+        with pytest.raises(codex_implement.HardFailure, match="already leased"):
+            codex_implement.run(
+                _job(),
+                repo,
+                invoke=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("called")),
+            )
+
+
+def test_candidate_close_disables_hooks_and_signing(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+    observed = []
+    real_git = codex_implement._git
+
+    def inspect_git(cwd, *args):
+        if "commit" in args:
+            observed.extend(args)
+        return real_git(cwd, *args)
+
+    monkeypatch.setattr(codex_implement, "_git", inspect_git)
+    result = codex_implement.run(
+        _job(),
+        repo,
+        invoke=_invoke(
+            {"status": "implemented", "summary": "added feature", "tests": []},
+            edit=lambda path: (path / "feature.py").write_text("VALUE = 1\n"),
+        ),
+    )
+
+    assert result["outcome"] == "satisfied"
+    assert "--no-verify" in observed
+    assert "commit.gpgSign=false" in observed
 
 
 def test_prompt_forbids_deploy_commit_config_secrets_and_satellites():
