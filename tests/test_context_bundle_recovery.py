@@ -4,7 +4,9 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import stat
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -17,6 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts/tgw_context_debian_stdio.py"
 
 import tgw  # noqa: E402
+from tgw.current_context_snapshot import CurrentContextError  # noqa: E402
+from tgw.current_context_snapshot import parse as parse_context_snapshot  # noqa: E402
 
 tgw.__path__.insert(0, str(ROOT / "src/tgw"))
 _DOCTOR_SPEC = importlib.util.spec_from_file_location(
@@ -28,14 +32,50 @@ sys.modules[_DOCTOR_SPEC.name] = doctor_cli
 _DOCTOR_SPEC.loader.exec_module(doctor_cli)
 
 
+def test_worktree_is_the_exact_environment_bound_candidate() -> None:
+    expected_commit = os.environ.get("TGW_EXPECTED_CANDIDATE_COMMIT")
+    if expected_commit is None:
+        pytest.skip("exact candidate binding is supplied by the review harness")
+    expected_tree = os.environ.get("TGW_EXPECTED_CANDIDATE_TREE")
+    assert expected_tree is not None
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD^{commit}"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
+    ).stdout.strip()
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
+    ).stdout
+
+    assert commit == expected_commit
+    assert tree == expected_tree
+    assert status == ""
+
+
 def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
-def _snapshot() -> dict[str, Any]:
+def _snapshot(
+    source_commit: str = "b" * 40, source_tree: str = "c" * 40
+) -> dict[str, Any]:
     plan_commit = "a" * 40
-    source_commit = "b" * 40
-    source_tree = "c" * 40
     capability = "PP-WORKFLOW-001"
     task = {
         "schema": "tgw-current-task/v1",
@@ -68,26 +108,83 @@ def _snapshot() -> dict[str, Any]:
     return value
 
 
-def _launcher_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
-    snapshot = _snapshot()
+def _launcher_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tamper_runtime: str | None = None,
+) -> ModuleType:
+    context_source = tmp_path / "source"
+    context_source.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=context_source,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "test"], cwd=context_source, check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=context_source,
+        check=True,
+    )
+    source_runtime = context_source / "src/tgw"
+    source_runtime.mkdir(parents=True)
+    for name in (
+        "context_mcp_server.py",
+        "current_context_snapshot.py",
+        "dependency.py",
+        "local_context_runtime.py",
+    ):
+        (source_runtime / name).write_text(
+            "# immutable test runtime\n", encoding="utf-8"
+        )
+    subprocess.run(["git", "add", "."], cwd=context_source, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "runtime"],
+        cwd=context_source,
+        check=True,
+        capture_output=True,
+    )
+    source_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD^{commit}"],
+        cwd=context_source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source_tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=context_source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    snapshot = _snapshot(source_commit, source_tree)
     releases = tmp_path / "releases"
     runtime = releases / snapshot["source_commit"] / "src/tgw"
     runtime.mkdir(parents=True)
     for name in (
         "context_mcp_server.py",
         "current_context_snapshot.py",
+        "dependency.py",
         "local_context_runtime.py",
     ):
         path = runtime / name
-        path.write_text("# immutable test runtime\n", encoding="utf-8")
+        shutil.copyfile(source_runtime / name, path)
         path.chmod(0o444)
+    if tamper_runtime:
+        tampered = runtime / tamper_runtime
+        tampered.chmod(0o644)
+        tampered.write_text("# tampered\n", encoding="utf-8")
+        tampered.chmod(0o444)
     for directory in (runtime, runtime.parent, runtime.parent.parent):
         directory.chmod(0o555)
     current = tmp_path / "tgw-context-current.json"
     current.write_text(json.dumps(snapshot), encoding="utf-8")
     current.chmod(0o444)
-    context_source = tmp_path / "source"
-    context_source.mkdir()
     catalog = tmp_path / "catalog.json"
     catalog.write_text("{}", encoding="utf-8")
     source = LAUNCHER.read_text(encoding="utf-8")
@@ -104,9 +201,8 @@ def _launcher_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleT
         'CURRENT_CONTEXT = Path("/opt/TGW/tgw-lib/config/tgw-context-current.json")': (
             f"CURRENT_CONTEXT = Path({str(current)!r})"
         ),
-        "TRUSTED_RUNTIME_OWNERS = frozenset({0, 65534})": (
-            f"TRUSTED_RUNTIME_OWNERS = frozenset({{{os.getuid()}}})"
-        ),
+        "RUNTIME_OWNER_UID = 0": f"RUNTIME_OWNER_UID = {os.getuid()}",
+        "RUNTIME_OWNER_GID = 0": f"RUNTIME_OWNER_GID = {os.getgid()}",
     }
     for old, new in replacements.items():
         assert old in source
@@ -115,6 +211,7 @@ def _launcher_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleT
     module = ModuleType("context_launcher_test")
     module.__file__ = str(LAUNCHER)
     exec(compile(source, str(LAUNCHER), "exec"), module.__dict__)
+    module._test_snapshot = snapshot
     return module
 
 
@@ -259,13 +356,46 @@ def test_launcher_declares_only_narrow_bundle_and_immutable_release() -> None:
     assert 'def tgw_context_bundle(task: str = "current", limit: int = 12)' in source
 
 
+def test_atomic_snapshot_rejects_a_non_git_source_tree() -> None:
+    snapshot = _snapshot()
+    snapshot["source_tree"] = "not-a-tree"
+    snapshot["cursor"]["source_tree"] = "not-a-tree"
+    body = dict(snapshot)
+    body.pop("snapshot_sha256")
+    snapshot["snapshot_sha256"] = (
+        "sha256:" + hashlib.sha256(_canonical(body)).hexdigest()
+    )
+
+    with pytest.raises(CurrentContextError, match="different Plan context"):
+        parse_context_snapshot(snapshot)
+
+
 def test_launcher_bootstrap_binds_the_atomic_snapshot_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _launcher_module(tmp_path, monkeypatch)
 
-    assert module.SERVER_SOURCE == tmp_path / "releases" / ("b" * 40) / "src"
-    assert module._current_context()["source_commit"] == "b" * 40
+    assert module.SERVER_SOURCE == Path(
+        f"/proc/self/fd/{module._RUNTIME_RELEASE_DESCRIPTOR}/src"
+    )
+    assert module.RUNTIME_RELEASE == (
+        tmp_path / "releases" / module._test_snapshot["source_commit"]
+    )
+    assert (
+        module._current_context()["source_commit"]
+        == module._test_snapshot["source_commit"]
+    )
+
+
+def test_launcher_bootstrap_rejects_a_tampered_transitive_runtime_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(ValueError, match="bytes differ from Git"):
+        _launcher_module(
+            tmp_path,
+            monkeypatch,
+            tamper_runtime="dependency.py",
+        )
 
 
 def test_bundle_agrees_with_every_local_binding_and_refuses_malformed_input(

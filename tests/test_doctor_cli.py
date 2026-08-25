@@ -1034,6 +1034,40 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(
     assert receipt["receipt_sha256"].startswith("sha256:")
 
 
+def test_context_repair_is_semantically_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    cursor_inode = paths.context_cursor.stat().st_ino
+    snapshot_inode = paths.context_snapshot.stat().st_ino
+    original_run = doctor_cli._run
+
+    def run(command, **kwargs):
+        if command[0] == str(paths.context_publisher):
+            task_path = Path(command[command.index("--task") + 1])
+            cursor_path = Path(command[command.index("--cursor") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            _write_json(
+                output_path,
+                _snapshot(
+                    json.loads(task_path.read_text()),
+                    json.loads(cursor_path.read_text()),
+                ),
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+
+    result = doctor_cli.repair_context(paths)
+
+    assert result["changed"] is False
+    assert paths.context_cursor.stat().st_ino == cursor_inode
+    assert paths.context_snapshot.stat().st_ino == snapshot_inode
+
+
 def test_context_publisher_failure_leaves_live_inputs_unchanged_and_is_receipted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1074,6 +1108,16 @@ def test_context_repair_refuses_writable_context_runtime(
         doctor_cli.repair_context(paths)
 
 
+def test_context_repair_requires_the_exact_context_release_group(
+    tmp_path: Path,
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    paths = replace(paths, context_install_gid=os.getgid() + 1)
+
+    with pytest.raises(doctor_cli.DoctorError, match="root:root immutable"):
+        doctor_cli._selected_context_artifacts(paths)
+
+
 def test_context_repair_refuses_symlinked_context_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1093,14 +1137,19 @@ def test_context_repair_refuses_symlinked_context_runtime(
         doctor_cli.repair_context(paths)
 
 
-def test_context_repair_detects_snapshot_race_and_restores_both_records(
+def test_context_repair_preserves_concurrent_snapshot_and_restores_its_cursor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths, _head, _tree = _fixture(tmp_path)
+    task = json.loads(paths.context_task.read_text())
+    cursor = json.loads(paths.context_cursor.read_text())
+    cursor["source_commit"] = "b" * 40
+    cursor["source_tree"] = "c" * 40
+    _write_json(paths.context_cursor, cursor)
+    _write_json(paths.context_snapshot, _snapshot(task, cursor))
     cursor_before = paths.context_cursor.read_bytes()
-    snapshot_before = paths.context_snapshot.read_bytes()
     original_run = doctor_cli._run
-    original_atomic = doctor_cli._atomic_json
+    original_cas = doctor_cli._cas_regular_file
 
     def run(command, **kwargs):
         if command[0] == str(paths.context_publisher):
@@ -1117,25 +1166,82 @@ def test_context_repair_detects_snapshot_race_and_restores_both_records(
             return subprocess.CompletedProcess(command, 0, "", "")
         return original_run(command, **kwargs)
 
+    concurrent_snapshot = {"concurrent": "snapshot"}
     raced = False
 
-    def atomic(path, value, **kwargs):
+    def cas(path, expected, replacement, **kwargs):
         nonlocal raced
-        original_atomic(path, value, **kwargs)
-        if path == paths.context_cursor and not raced:
+        if path == paths.context_snapshot and not raced:
             raced = True
-            _write_json(paths.context_snapshot, {"concurrent": True})
+            _write_json(paths.context_snapshot, concurrent_snapshot)
+        return original_cas(path, expected, replacement, **kwargs)
 
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
     monkeypatch.setattr(doctor_cli, "_run", run)
-    monkeypatch.setattr(doctor_cli, "_atomic_json", atomic)
+    monkeypatch.setattr(doctor_cli, "_cas_regular_file", cas)
     monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
 
-    with pytest.raises(doctor_cli.DoctorError, match="changed before atomic cutover"):
+    with pytest.raises(doctor_cli.DoctorError, match="concurrent change"):
         doctor_cli.repair_context(paths)
 
     assert paths.context_cursor.read_bytes() == cursor_before
-    assert paths.context_snapshot.read_bytes() == snapshot_before
+    assert json.loads(paths.context_snapshot.read_text()) == concurrent_snapshot
+
+
+def test_context_repair_never_overwrites_concurrent_cursor_during_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    task = json.loads(paths.context_task.read_text())
+    cursor = json.loads(paths.context_cursor.read_text())
+    cursor["source_commit"] = "b" * 40
+    cursor["source_tree"] = "c" * 40
+    _write_json(paths.context_cursor, cursor)
+    _write_json(paths.context_snapshot, _snapshot(task, cursor))
+    original_run = doctor_cli._run
+    original_cas = doctor_cli._cas_regular_file
+
+    def run(command, **kwargs):
+        if command[0] == str(paths.context_publisher):
+            task_path = Path(command[command.index("--task") + 1])
+            cursor_path = Path(command[command.index("--cursor") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            _write_json(
+                output_path,
+                _snapshot(
+                    json.loads(task_path.read_text()),
+                    json.loads(cursor_path.read_text()),
+                ),
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original_run(command, **kwargs)
+
+    concurrent_cursor = {"concurrent": "cursor"}
+    concurrent_snapshot = {"concurrent": "snapshot"}
+    raced = False
+
+    def cas(path, expected, replacement, **kwargs):
+        nonlocal raced
+        if path != paths.context_snapshot or raced:
+            return original_cas(path, expected, replacement, **kwargs)
+        raced = True
+        _write_json(paths.context_snapshot, concurrent_snapshot)
+        try:
+            return original_cas(path, expected, replacement, **kwargs)
+        except doctor_cli.DoctorError:
+            _write_json(paths.context_cursor, concurrent_cursor)
+            raise
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_cas_regular_file", cas)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+
+    with pytest.raises(doctor_cli.DoctorError, match="refused rollback overwrite"):
+        doctor_cli.repair_context(paths)
+
+    assert json.loads(paths.context_cursor.read_text()) == concurrent_cursor
+    assert json.loads(paths.context_snapshot.read_text()) == concurrent_snapshot
 
 
 def test_runtime_check_requires_exact_release_selector_and_launchers(tmp_path: Path) -> None:

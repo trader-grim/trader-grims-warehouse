@@ -10,6 +10,7 @@ import pwd
 import re
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -21,7 +22,9 @@ CATALOG = Path("/opt/TGW/tgw-lib/config/tgw-context-debian-v1.json")
 CURRENT_CONTEXT = Path("/opt/TGW/tgw-lib/config/tgw-context-current.json")
 HARNESS_ACTORS = frozenset({"codex", "claude", "deepseek"})
 RETIRED_TOOLS = ("tgw_context_bundle", "tgw_context_confirm_rebind")
-TRUSTED_RUNTIME_OWNERS = frozenset({0, 65534})
+RUNTIME_OWNER_UID = 0
+RUNTIME_OWNER_GID = 0
+SYSTEM_CODE_OWNERS = frozenset({0, 65534})
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 
 
@@ -56,7 +59,142 @@ def _protected_snapshot_raw() -> bytes:
     return raw
 
 
-def _bootstrap_runtime() -> tuple[Path, bytes, str, str]:
+def _git_blob_oid(raw: bytes) -> str:
+    framed = b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw
+    return hashlib.sha1(framed, usedforsecurity=False).hexdigest()
+
+
+def _git(*args: str) -> bytes:
+    executable = Path("/usr/bin/git").resolve(strict=True)
+    observed = executable.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid not in SYSTEM_CODE_OWNERS
+        or observed.st_gid not in SYSTEM_CODE_OWNERS
+        or observed.st_mode & 0o022
+        or not observed.st_mode & 0o111
+    ):
+        raise ValueError("system Git executable is not immutable host code")
+    result = subprocess.run(
+        [
+            str(executable),
+            "-c",
+            f"safe.directory={CONTEXT_SOURCE}",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+            str(CONTEXT_SOURCE),
+            *args,
+        ],
+        check=False,
+        capture_output=True,
+        env={
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+        },
+        timeout=30,
+    )
+    if result.returncode:
+        raise ValueError("cannot verify immutable Context runtime against Git")
+    return result.stdout
+
+
+def _verify_bound_release(
+    release: Path, source_commit: str, source_tree: str
+) -> tuple[int, Path]:
+    observed_commit = _git("rev-parse", f"{source_commit}^{{commit}}").decode().strip()
+    if observed_commit != source_commit:
+        raise ValueError("atomic Context snapshot source commit is not a Git commit")
+    observed_tree = _git("rev-parse", f"{source_commit}^{{tree}}").decode().strip()
+    if observed_tree != source_tree:
+        raise ValueError("atomic Context snapshot source tree differs from Git")
+    descriptor = os.open(
+        release,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        root_state = os.fstat(descriptor)
+        if (
+            root_state.st_uid != RUNTIME_OWNER_UID
+            or root_state.st_gid != RUNTIME_OWNER_GID
+            or root_state.st_mode & 0o022
+        ):
+            raise ValueError("immutable Context release root is not root:root protected")
+        bound = Path(f"/proc/self/fd/{descriptor}")
+        expected: dict[str, tuple[str, str]] = {}
+        for record in _git("ls-tree", "-r", "-z", "--full-tree", source_commit).split(
+            b"\0"
+        ):
+            if not record:
+                continue
+            metadata, separator, relative_raw = record.partition(b"\t")
+            fields = metadata.decode("ascii").split()
+            relative = relative_raw.decode("utf-8")
+            if (
+                not separator
+                or len(fields) != 3
+                or fields[1] != "blob"
+                or fields[0] not in {"100644", "100755"}
+                or Path(relative).is_absolute()
+                or ".." in Path(relative).parts
+            ):
+                raise ValueError("Git tree contains an unsupported Context runtime entry")
+            expected[relative] = (fields[0], fields[2])
+        actual: set[str] = set()
+        for path in bound.rglob("*"):
+            relative = str(path.relative_to(bound))
+            state = path.stat(follow_symlinks=False)
+            if (
+                path.is_symlink()
+                or state.st_uid != RUNTIME_OWNER_UID
+                or state.st_gid != RUNTIME_OWNER_GID
+                or state.st_mode & 0o022
+            ):
+                raise ValueError(
+                    f"immutable Context runtime entry is not root:root protected: {relative}"
+                )
+            if stat.S_ISDIR(state.st_mode):
+                continue
+            if not stat.S_ISREG(state.st_mode):
+                raise ValueError(
+                    f"immutable Context runtime entry has unsupported type: {relative}"
+                )
+            actual.add(relative)
+        if actual != set(expected):
+            raise ValueError("immutable Context runtime file set differs from Git")
+        for relative, (mode, object_id) in expected.items():
+            path = bound / relative
+            before = path.stat(follow_symlinks=False)
+            raw = path.read_bytes()
+            after = path.stat(follow_symlinks=False)
+            if _stat_identity(before) != _stat_identity(after):
+                raise ValueError(
+                    f"immutable Context runtime changed during verification: {relative}"
+                )
+            if bool(after.st_mode & 0o111) != (mode == "100755"):
+                raise ValueError(
+                    f"immutable Context runtime mode differs from Git: {relative}"
+                )
+            if _git_blob_oid(raw) != object_id:
+                raise ValueError(
+                    f"immutable Context runtime bytes differ from Git: {relative}"
+                )
+        root_after = os.fstat(descriptor)
+        if _stat_identity(root_state) != _stat_identity(root_after):
+            raise ValueError("immutable Context release root changed during verification")
+        return descriptor, bound / "src"
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _bootstrap_runtime() -> tuple[Path, Path, int, bytes, str, str]:
     raw = _protected_snapshot_raw()
     try:
         value = json.loads(raw)
@@ -74,38 +212,26 @@ def _bootstrap_runtime() -> tuple[Path, bytes, str, str]:
     if claimed != observed:
         raise ValueError("current TGW context snapshot hash differs")
     source_commit = value.get("source_commit")
-    if not isinstance(source_commit, str) or _COMMIT.fullmatch(source_commit) is None:
-        raise ValueError("current TGW context snapshot source commit is invalid")
+    source_tree = value.get("source_tree")
+    if (
+        not isinstance(source_commit, str)
+        or _COMMIT.fullmatch(source_commit) is None
+        or not isinstance(source_tree, str)
+        or _COMMIT.fullmatch(source_tree) is None
+    ):
+        raise ValueError("current TGW context snapshot source identity is invalid")
     release = RUNTIME_RELEASES / source_commit
-    server_source = release / "src"
-    required = (
-        (release, stat.S_ISDIR),
-        (server_source, stat.S_ISDIR),
-        (server_source / "tgw", stat.S_ISDIR),
-        (server_source / "tgw/context_mcp_server.py", stat.S_ISREG),
-        (server_source / "tgw/current_context_snapshot.py", stat.S_ISREG),
-        (server_source / "tgw/local_context_runtime.py", stat.S_ISREG),
+    release_descriptor, server_source = _verify_bound_release(
+        release, source_commit, source_tree
     )
-    for path, expected_kind in required:
-        try:
-            state = path.stat(follow_symlinks=False)
-        except OSError as exc:
-            raise ValueError(
-                f"immutable Context runtime path is unavailable: {path}"
-            ) from exc
-        if (
-            path.is_symlink()
-            or not expected_kind(state.st_mode)
-            or state.st_uid not in TRUSTED_RUNTIME_OWNERS
-            or state.st_mode & 0o022
-        ):
-            raise ValueError(f"immutable Context runtime path is untrusted: {path}")
     record_sha256 = "sha256:" + hashlib.sha256(raw).hexdigest()
-    return server_source, raw, observed, record_sha256
+    return release, server_source, release_descriptor, raw, observed, record_sha256
 
 
 (
+    RUNTIME_RELEASE,
     SERVER_SOURCE,
+    _RUNTIME_RELEASE_DESCRIPTOR,
     _STARTUP_CONTEXT_RAW,
     _STARTUP_SNAPSHOT_SHA256,
     _STARTUP_RECORD_SHA256,
@@ -336,6 +462,7 @@ def context_server_bundle(context_server: Any, task: str, limit: int) -> str:
                 )
             },
             "runtime": {
+                "release": str(RUNTIME_RELEASE),
                 "source": str(SERVER_SOURCE),
                 "snapshot_sha256": _STARTUP_SNAPSHOT_SHA256,
                 "snapshot_record_sha256": _STARTUP_RECORD_SHA256,

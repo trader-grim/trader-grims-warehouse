@@ -44,11 +44,13 @@ def build(task: Mapping[str, Any], cursor: Mapping[str, Any]) -> dict[str, Any]:
         raise CurrentContextError("task/cursor bindings are invalid")
     plan_commit = plan.get("approved_commit")
     source_commit = development.get("commit")
+    source_tree = cursor.get("source_tree")
     capability = development.get("next_leaf")
     treatment = resolved.get("next_treatment")
     if (
         not isinstance(plan_commit, str) or _COMMIT.fullmatch(plan_commit) is None
         or not isinstance(source_commit, str) or _COMMIT.fullmatch(source_commit) is None
+        or not isinstance(source_tree, str) or _COMMIT.fullmatch(source_tree) is None
         or not isinstance(capability, str) or not capability
         or cursor.get("plan_commit") != plan_commit
         or cursor.get("source_commit") != source_commit
@@ -59,7 +61,7 @@ def build(task: Mapping[str, Any], cursor: Mapping[str, Any]) -> dict[str, Any]:
         "schema": SCHEMA,
         "plan_commit": plan_commit,
         "source_commit": source_commit,
-        "source_tree": cursor.get("source_tree"),
+        "source_tree": source_tree,
         "active_capability": capability,
         "active_treatment": treatment,
         "task": dict(task),

@@ -411,6 +411,18 @@ def check_context_snapshot(paths: DoctorPaths) -> dict[str, Any]:
 def _selected_context_artifacts(paths: DoctorPaths) -> dict[str, Any]:
     desired, release, _task = _desired_runtime(paths)
     release_tree = _verify_release_tree(paths, desired, release)
+    for runtime_path in (release, *release.rglob("*")):
+        observed = runtime_path.stat(follow_symlinks=False)
+        relative = str(runtime_path.relative_to(release)) or "."
+        if (
+            runtime_path.is_symlink()
+            or observed.st_uid != paths.context_install_uid
+            or observed.st_gid != paths.context_install_gid
+            or observed.st_mode & 0o022
+        ):
+            raise DoctorError(
+                "selected Context release is not root:root immutable: " + relative
+            )
     launcher = release / "scripts/tgw_context_debian_stdio.py"
     runtime_source = release / "src"
     modules = {
@@ -1949,9 +1961,192 @@ def _atomic_bytes(
         temporary.unlink(missing_ok=True)
 
 
+def _surface_snapshot_at(directory_descriptor: int, name: str) -> dict[str, Any]:
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=directory_descriptor,
+        )
+    except FileNotFoundError:
+        return {"kind": "missing"}
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise DoctorError(f"transaction surface is not a regular file: {name}")
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        fields = (
+            "st_dev",
+            "st_ino",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+            "st_mode",
+            "st_uid",
+            "st_gid",
+        )
+        if any(getattr(before, field) != getattr(after, field) for field in fields):
+            raise DoctorError(f"transaction surface changed during read: {name}")
+        return {
+            "kind": "file",
+            "raw": raw,
+            "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+            "uid": after.st_uid,
+            "gid": after.st_gid,
+            "mode": stat.S_IMODE(after.st_mode),
+            "device": after.st_dev,
+            "inode": after.st_ino,
+            "size": after.st_size,
+            "mtime_ns": after.st_mtime_ns,
+            "ctime_ns": after.st_ctime_ns,
+        }
+    finally:
+        os.close(descriptor)
+
+
+def _same_regular_surface(
+    observed: Mapping[str, Any], expected: Mapping[str, Any]
+) -> bool:
+    """Compare a file across rename-exchange while allowing rename ctime updates."""
+    keys = (
+        "kind",
+        "raw",
+        "sha256",
+        "uid",
+        "gid",
+        "mode",
+        "device",
+        "inode",
+        "size",
+        "mtime_ns",
+    )
+    return all(observed.get(key) == expected.get(key) for key in keys)
+
+
+def _cas_regular_file(
+    path: Path,
+    expected: Mapping[str, Any],
+    replacement: bytes,
+    *,
+    mode: int,
+    uid: int,
+    gid: int,
+) -> dict[str, Any]:
+    """Atomically replace one exact inode or restore it without lost updates."""
+    if expected.get("kind") != "file" or path.name in {"", ".", ".."}:
+        raise DoctorError(f"CAS requires an exact regular-file surface: {path}")
+    parent = os.open(
+        path.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    temporary = f".{path.name}.tgw-cas-{os.getpid()}-{secrets.token_hex(8)}"
+    staged_descriptor = -1
+    exchanged = False
+    staged: dict[str, Any] | None = None
+    try:
+        staged_descriptor = os.open(
+            temporary,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_NOFOLLOW
+            | os.O_CLOEXEC,
+            mode,
+            dir_fd=parent,
+        )
+        view = memoryview(replacement)
+        while view:
+            written = os.write(staged_descriptor, view)
+            if written <= 0:
+                raise DoctorError(f"short write while staging Context CAS: {path}")
+            view = view[written:]
+        os.fchown(staged_descriptor, uid, gid)
+        os.fchmod(staged_descriptor, mode)
+        os.fsync(staged_descriptor)
+        os.close(staged_descriptor)
+        staged_descriptor = -1
+        staged = _surface_snapshot_at(parent, temporary)
+        _rename_exchange(parent, temporary, path.name)
+        exchanged = True
+        displaced = _surface_snapshot_at(parent, temporary)
+        current = _surface_snapshot_at(parent, path.name)
+        if not _same_regular_surface(
+            displaced, expected
+        ) or not _same_regular_surface(current, staged):
+            if _same_regular_surface(current, staged):
+                _rename_exchange(parent, temporary, path.name)
+                exchanged = False
+                restored = _surface_snapshot_at(parent, path.name)
+                if not _same_regular_surface(restored, expected):
+                    raise DoctorError(
+                        f"Context CAS could not restore a concurrent change: {path}"
+                    )
+                os.fsync(parent)
+            raise DoctorError(f"Context CAS detected a concurrent change: {path}")
+        os.fsync(parent)
+        os.unlink(temporary, dir_fd=parent)
+        exchanged = False
+        return current
+    except Exception as exc:
+        if exchanged:
+            try:
+                current = _surface_snapshot_at(parent, path.name)
+                displaced = _surface_snapshot_at(parent, temporary)
+                if not _same_regular_surface(
+                    current, staged
+                ) or not _same_regular_surface(displaced, expected):
+                    raise DoctorError(
+                        f"Context CAS rollback refused a concurrent change: {path}"
+                    )
+                _rename_exchange(parent, temporary, path.name)
+                exchanged = False
+                restored = _surface_snapshot_at(parent, path.name)
+                if not _same_regular_surface(restored, expected):
+                    raise DoctorError(
+                        f"Context CAS rollback did not restore the expected file: {path}"
+                    )
+                os.fsync(parent)
+            except Exception as rollback_exc:
+                raise DoctorError(
+                    f"Context CAS failed: {exc}; rollback failed: {rollback_exc}"
+                ) from exc
+        raise
+    finally:
+        if staged_descriptor >= 0:
+            os.close(staged_descriptor)
+        if not exchanged:
+            try:
+                os.unlink(temporary, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+        os.close(parent)
+
+
+def _json_bytes(value: Mapping[str, Any]) -> bytes:
+    return json.dumps(value, indent=2, sort_keys=True).encode() + b"\n"
+
+
+def _json_from_surface(path: Path, surface: Mapping[str, Any]) -> dict[str, Any]:
+    if surface.get("kind") != "file":
+        raise DoctorError(f"Context transaction input is not a regular file: {path}")
+    try:
+        value = json.loads(surface["raw"])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DoctorError(f"cannot read valid JSON from {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise DoctorError(f"JSON root must be an object: {path}")
+    return value
+
+
 def _atomic_json(path: Path, value: Mapping[str, Any], *, mode: int = 0o444) -> None:
-    raw = json.dumps(value, indent=2, sort_keys=True).encode() + b"\n"
-    _atomic_bytes(path, raw, mode=mode)
+    _atomic_bytes(path, _json_bytes(value), mode=mode)
 
 
 def _receipt(paths: DoctorPaths, operation: str, before: Any, after: Any) -> str:
@@ -2141,14 +2336,13 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
     _require_root()
     _require_trusted_root_program(paths.context_publisher)
     context_runtime = _require_trusted_context_runtime(paths)
-    cursor_raw = paths.context_cursor.read_bytes()
-    snapshot_raw = paths.context_snapshot.read_bytes()
-    cursor_mode = paths.context_cursor.stat().st_mode & 0o777
-    snapshot_mode = paths.context_snapshot.stat().st_mode & 0o777
+    task_surface = _surface_snapshot(paths.context_task)
+    cursor_surface = _surface_snapshot(paths.context_cursor)
+    snapshot_surface = _surface_snapshot(paths.context_snapshot)
     before = {
-        "task": _json(paths.context_task),
-        "cursor": _json(paths.context_cursor),
-        "snapshot": _json(paths.context_snapshot),
+        "task": _json_from_surface(paths.context_task, task_surface),
+        "cursor": _json_from_surface(paths.context_cursor, cursor_surface),
+        "snapshot": _json_from_surface(paths.context_snapshot, snapshot_surface),
     }
     head, tree, status = _source_identity(paths)
     if status:
@@ -2166,8 +2360,10 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
     treatment = cursor.get("resolved", {}).get("next_treatment")
     if not isinstance(capability, str) or not isinstance(treatment, str) or treatment.rsplit(":", 1)[-1] != capability:
         raise DoctorError("task capability and cursor treatment disagree; repair is ambiguous")
-    changed = cursor.get("source_commit") != head or cursor.get("source_tree") != tree
-    if changed:
+    source_changed = (
+        cursor.get("source_commit") != head or cursor.get("source_tree") != tree
+    )
+    if source_changed:
         cursor["source_commit"] = head
         cursor["source_tree"] = tree
         cursor["updated_at"] = datetime.now().astimezone().isoformat()
@@ -2210,47 +2406,110 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
         _validate_snapshot(after)
         if after.get("task") != task or after.get("cursor") != cursor:
             raise DoctorError("staged context publisher output differs from exact inputs")
+        changed = before["cursor"] != cursor or before["snapshot"] != after
         current_head, current_tree, current_status = _source_identity(paths)
         if current_status or (current_head, current_tree) != (head, tree):
             raise DoctorError("canonical source changed during context repair")
         if (
-            _json(paths.context_task) != before["task"]
-            or _json(paths.context_cursor) != before["cursor"]
-            or _json(paths.context_snapshot) != before["snapshot"]
+            _surface_snapshot(paths.context_task) != task_surface
+            or _surface_snapshot(paths.context_cursor) != cursor_surface
+            or _surface_snapshot(paths.context_snapshot) != snapshot_surface
         ):
             raise DoctorError("context inputs changed concurrently; no live file was replaced")
+        committed_cursor: dict[str, Any] | None = None
+        committed_snapshot: dict[str, Any] | None = None
         try:
             # The cursor is non-live publisher input. Commit it first; the one
-            # atomic snapshot rename below is the sole MCP-visible cutover.
-            _atomic_json(paths.context_cursor, cursor)
-            if _json(paths.context_snapshot) != before["snapshot"]:
-                raise DoctorError("live Context snapshot changed before atomic cutover")
-            _atomic_json(paths.context_snapshot, after)
+            # snapshot CAS below remains the sole MCP-visible cutover.
+            if before["cursor"] == cursor:
+                committed_cursor = cursor_surface
+            else:
+                committed_cursor = _cas_regular_file(
+                    paths.context_cursor,
+                    cursor_surface,
+                    _json_bytes(cursor),
+                    mode=cursor_surface["mode"],
+                    uid=cursor_surface["uid"],
+                    gid=cursor_surface["gid"],
+                )
             if (
-                _json(paths.context_cursor) != cursor
-                or _json(paths.context_snapshot) != after
+                _surface_snapshot(paths.context_task) != task_surface
+                or _surface_snapshot(paths.context_cursor) != committed_cursor
+            ):
+                raise DoctorError("Context inputs changed before atomic snapshot cutover")
+            if before["snapshot"] == after:
+                committed_snapshot = snapshot_surface
+            else:
+                committed_snapshot = _cas_regular_file(
+                    paths.context_snapshot,
+                    snapshot_surface,
+                    _json_bytes(after),
+                    mode=snapshot_surface["mode"],
+                    uid=snapshot_surface["uid"],
+                    gid=snapshot_surface["gid"],
+                )
+            if (
+                _surface_snapshot(paths.context_task) != task_surface
+                or _surface_snapshot(paths.context_cursor) != committed_cursor
+                or _surface_snapshot(paths.context_snapshot) != committed_snapshot
             ):
                 raise DoctorError("final Context transaction verification failed")
+            receipt = _receipt(
+                paths,
+                "context",
+                before,
+                {"cursor": cursor, "snapshot": after},
+            )
         except Exception as exc:
-            rollback_errors = []
-            for path, raw, mode in (
-                (paths.context_snapshot, snapshot_raw, snapshot_mode),
-                (paths.context_cursor, cursor_raw, cursor_mode),
+            rollback_errors: list[str] = []
+            rollback_states: list[str] = []
+            for label, path, committed, original in (
+                (
+                    "snapshot",
+                    paths.context_snapshot,
+                    committed_snapshot,
+                    snapshot_surface,
+                ),
+                ("cursor", paths.context_cursor, committed_cursor, cursor_surface),
             ):
+                if committed is None:
+                    continue
                 try:
-                    _atomic_bytes(path, raw, mode=mode)
+                    current = _surface_snapshot(path)
+                    if _same_regular_surface(current, original):
+                        rollback_states.append(f"{label} already original")
+                        continue
+                    if current != committed:
+                        raise DoctorError(
+                            f"{label} changed concurrently; refused rollback overwrite"
+                        )
+                    restored = _cas_regular_file(
+                        path,
+                        current,
+                        original["raw"],
+                        mode=original["mode"],
+                        uid=original["uid"],
+                        gid=original["gid"],
+                    )
+                    expected_semantics = _surface_semantics(original)
+                    if _surface_semantics(restored) != expected_semantics:
+                        raise DoctorError(
+                            f"{label} rollback did not restore original semantics"
+                        )
+                    rollback_states.append(f"{label} restored")
                 except Exception as rollback_exc:
-                    rollback_errors.append(str(rollback_exc))
+                    rollback_errors.append(f"{label}: {rollback_exc}")
             suffix = (
                 "; rollback errors: " + "; ".join(rollback_errors)
                 if rollback_errors
-                else "; original inputs restored"
+                else "; " + ", ".join(rollback_states)
+                if rollback_states
+                else "; no live file was replaced"
             )
             raise DoctorError(f"context commit failed: {exc}{suffix}") from exc
     finally:
         staged_cursor.unlink(missing_ok=True)
         staged_snapshot.unlink(missing_ok=True)
-    receipt = _receipt(paths, "context", before, {"cursor": cursor, "snapshot": after})
     return {"ok": True, "operation": "context", "changed": changed, "receipt": receipt}
 
 
@@ -2396,7 +2655,7 @@ def _rename_exchange(
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
-        raise DoctorError("renameat2 is unavailable; atomic pack detachment is unsafe")
+        raise DoctorError("renameat2 is unavailable; atomic file exchange is unsafe")
     renameat2.argtypes = [
         ctypes.c_int,
         ctypes.c_char_p,
@@ -2414,9 +2673,7 @@ def _rename_exchange(
     )
     if result != 0:
         error = ctypes.get_errno()
-        raise DoctorError(
-            f"cannot atomically exchange Git pack aliases: {os.strerror(error)}"
-        )
+        raise DoctorError(f"cannot atomically exchange files: {os.strerror(error)}")
 
 
 def _detach_pack_hardlink(
