@@ -43,8 +43,25 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     _git(repository, "init", "-b", "main")
     _git(repository, "config", "user.name", "test")
     _git(repository, "config", "user.email", "test@example.invalid")
-    (repository / "README").write_text("source\n", encoding="utf-8")
-    _git(repository, "add", "README")
+    source_files = {
+        "README": "source\n",
+        "bin/tgw-coding-local-operator": "#!/bin/sh\nexit 0\n",
+        "bin/tgw-coding-mcp": "#!/bin/sh\nexit 0\n",
+        "bin/tgw-doctor": "#!/bin/sh\nexit 0\n",
+        "bin/tgw-operator": "#!/bin/sh\nexit 0\n",
+        "config/tgw-coding-local-roles.sql": "SELECT 1;\n",
+        "systemd/tgw-codex-implement-worker.service": "[Service]\nExecStart=/bin/true\n",
+        "systemd/tgw-controller-verify-worker.service": "[Service]\nExecStart=/bin/true\n",
+        "systemd/tgw-coding-local-foreman.timer": "[Timer]\nOnBootSec=1s\n",
+        "systemd/tgw-coding-local-foreman.service": "[Service]\nType=oneshot\nExecStart=/bin/true\n",
+    }
+    for relative, content in source_files.items():
+        path = repository / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        if relative.startswith("bin/"):
+            path.chmod(0o755)
+    _git(repository, "add", ".")
     _git(repository, "commit", "-m", "source")
     head = _git(repository, "rev-parse", "HEAD")
     tree = _git(repository, "rev-parse", "HEAD^{tree}")
@@ -56,23 +73,23 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     operator_cli = tmp_path / "usr-local-bin-tgw"
     worktrees = tmp_path / "worktrees"
     worktrees.mkdir()
-    for relative, content in {
-        "bin/tgw-coding-local-operator": "#!/bin/sh\nexit 0\n",
-        "bin/tgw-coding-mcp": "#!/bin/sh\nexit 0\n",
-        "bin/tgw-doctor": "#!/bin/sh\nexit 0\n",
-        "bin/tgw-operator": "#!/bin/sh\nexit 0\n",
-        "config/tgw-coding-local-roles.sql": "SELECT 1;\n",
-    }.items():
+    for relative in _git(repository, "ls-files").splitlines():
+        source = repository / relative
         path = release / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        shutil.copyfile(source, path)
+        path.chmod(source.stat().st_mode & 0o777)
     runtime_root.mkdir(parents=True, exist_ok=True)
     (runtime_root / "current").symlink_to(Path("releases") / head)
     local_bin.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(release / "bin/tgw-coding-local-operator", local_bin / "tgw-coding")
-    shutil.copyfile(release / "bin/tgw-coding-mcp", local_bin / "tgw-coding-mcp")
-    shutil.copyfile(release / "bin/tgw-doctor", local_bin / "tgw-doctor")
-    shutil.copyfile(release / "bin/tgw-operator", operator_cli)
+    (local_bin / "tgw-coding").symlink_to(
+        runtime_root / "current/bin/tgw-coding-local-operator"
+    )
+    (local_bin / "tgw-coding-mcp").symlink_to(
+        runtime_root / "current/bin/tgw-coding-mcp"
+    )
+    (local_bin / "tgw-doctor").symlink_to(runtime_root / "current/bin/tgw-doctor")
+    operator_cli.symlink_to(runtime_root / "current/bin/tgw-operator")
 
     config = root / "config/tgw-coding-local.json"
     _write_json(
@@ -185,14 +202,18 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(
 
     def run(command, **kwargs):
         if command[0] == str(paths.context_publisher):
-            task = json.loads(paths.context_task.read_text())
-            updated_cursor = json.loads(paths.context_cursor.read_text())
-            _write_json(paths.context_snapshot, _snapshot(task, updated_cursor))
+            task_path = Path(command[command.index("--task") + 1])
+            cursor_path = Path(command[command.index("--cursor") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            task = json.loads(task_path.read_text())
+            updated_cursor = json.loads(cursor_path.read_text())
+            _write_json(output_path, _snapshot(task, updated_cursor))
             return subprocess.CompletedProcess(command, 0, "", "")
         return original_run(command, **kwargs)
 
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
     monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda _path: None)
 
     result = doctor_cli.repair_context(paths)
 
@@ -206,6 +227,31 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(
     assert receipt["receipt_sha256"].startswith("sha256:")
 
 
+def test_context_publisher_failure_leaves_live_inputs_unchanged_and_is_receipted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    cursor_before = paths.context_cursor.read_bytes()
+    snapshot_before = paths.context_snapshot.read_bytes()
+    original_run = doctor_cli._run
+
+    def run(command, **kwargs):
+        if command[0] == str(paths.context_publisher):
+            return subprocess.CompletedProcess(command, 1, "", "publisher rejected")
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda _path: None)
+
+    with pytest.raises(doctor_cli.DoctorError, match="failure receipt"):
+        doctor_cli.repair("context", paths)
+
+    assert paths.context_cursor.read_bytes() == cursor_before
+    assert paths.context_snapshot.read_bytes() == snapshot_before
+    assert len(list(paths.receipts.glob("*context-failed.json"))) == 1
+
+
 def test_runtime_check_requires_exact_release_selector_and_launchers(tmp_path: Path) -> None:
     paths, head, _tree = _fixture(tmp_path)
 
@@ -214,6 +260,58 @@ def test_runtime_check_requires_exact_release_selector_and_launchers(tmp_path: P
     assert result["state"] == "PASS"
     assert result["evidence"]["desired_commit"] == head
     assert result["evidence"]["forbidden_dependencies"] == []
+
+
+def test_runtime_check_rejects_mutated_immutable_release(tmp_path: Path) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    (paths.runtime_root / "current/README").write_text("mutated\n", encoding="utf-8")
+
+    result = doctor_cli.check_runtime(paths)
+
+    assert result["state"] == "FAIL"
+    assert "release tree differs from Git" in result["detail"]
+
+
+def test_runtime_repair_installs_stable_links_then_switches_one_selector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, head, _tree = _fixture(tmp_path)
+    previous = paths.runtime_root / "releases/previous"
+    previous.mkdir()
+    current = paths.runtime_root / "current"
+    current.unlink()
+    current.symlink_to(Path("releases/previous"))
+    stale = paths.local_bin / "tgw-coding"
+    stale.unlink()
+    stale.write_text("old launcher\n", encoding="utf-8")
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+
+    result = doctor_cli.repair_runtime(paths)
+
+    assert result["changed"] is True
+    assert current.is_symlink()
+    assert current.resolve() == paths.runtime_root / "releases" / head
+    for destination, target in doctor_cli._launcher_links(paths).items():
+        assert destination.is_symlink()
+        assert destination.readlink() == target
+
+
+def test_unit_definition_requires_exact_fragment_and_no_dropins(tmp_path: Path) -> None:
+    paths, head, _tree = _fixture(tmp_path)
+    unit = "tgw-codex-implement-worker.service"
+    source = paths.runtime_root / "releases" / head / "systemd" / unit
+    fragment = tmp_path / "installed.service"
+    shutil.copyfile(source, fragment)
+    state = {"FragmentPath": str(fragment), "DropInPaths": ""}
+
+    exact = doctor_cli._unit_definition(paths, unit, state)
+    with_dropin = doctor_cli._unit_definition(
+        paths, unit, {**state, "DropInPaths": "/etc/systemd/system/x.conf"}
+    )
+
+    assert exact["exact"] is True
+    assert with_dropin["exact"] is False
+    assert "unexpected systemd drop-in" in with_dropin["reasons"]
 
 
 def test_inventory_marks_unique_work_for_preservation(tmp_path: Path) -> None:
@@ -251,6 +349,13 @@ def test_repairs_require_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
     with pytest.raises(doctor_cli.DoctorError, match="sudo -n"):
         doctor_cli.repair_context(paths)
+
+
+def test_blanket_repair_all_is_not_exposed(tmp_path: Path) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+
+    with pytest.raises(doctor_cli.DoctorError, match="unknown repair"):
+        doctor_cli.repair("all", paths)
 
 
 def test_operator_launcher_routes_only_local_coding_and_doctor() -> None:

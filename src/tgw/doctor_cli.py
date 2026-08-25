@@ -10,17 +10,18 @@ delete work, change application data, or widen an actor's authority.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import grp
 import hashlib
 import json
 import os
 import pwd
 import re
-import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,11 +41,12 @@ _FORBIDDEN_CODING_DEPENDENCIES = (
     "execution_card",
     "actor_fleet",
 )
-_CODING_UNITS = (
+_ACTIVE_CODING_UNITS = (
     "tgw-codex-implement-worker.service",
     "tgw-controller-verify-worker.service",
     "tgw-coding-local-foreman.timer",
 )
+_CODING_UNITS = (*_ACTIVE_CODING_UNITS, "tgw-coding-local-foreman.service")
 
 
 class DoctorError(RuntimeError):
@@ -498,19 +500,72 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
             }
         )
 
-    known = (Path("/usr/local/bin/tgw-coding"), Path("/usr/local/bin/tgw-coding-helper"))
+    surface_roots = (
+        ("operator-command", Path("/usr/local/bin"), "tgw*"),
+        ("operator-libexec", Path("/usr/local/libexec"), "tgw*"),
+        ("development-command", paths.local_bin, "tgw*"),
+        ("systemd-unit", Path("/etc/systemd/system"), "tgw-*"),
+    )
     active_surfaces = []
-    for path in known:
-        if not (path.exists() or path.is_symlink()):
+    seen: set[Path] = set()
+    for kind, parent, pattern in surface_roots:
+        if not parent.is_dir():
             continue
-        active_surfaces.append(
+        for path in sorted(parent.glob(pattern)):
+            if path in seen or not (path.exists() or path.is_symlink()):
+                continue
+            seen.add(path)
+            active_surfaces.append(
+                {
+                    "kind": kind,
+                    "path": str(path),
+                    "symlink": path.is_symlink(),
+                    "target": str(path.resolve(strict=False))
+                    if path.is_symlink()
+                    else None,
+                    "sha256": _file_hash(path) if path.is_file() else None,
+                }
+            )
+
+    harness_names = ("codex", "claude", "deepseek", "hermes", "opencode", "antigravity")
+    harnesses = []
+    for name in harness_names:
+        home = Path("/home") / name
+        markers = [
+            home / ".codex",
+            home / ".claude",
+            home / ".config/hermes",
+            home / ".config/opencode",
+            home / ".gemini",
+            home / ".antigravity",
+        ]
+        marker_rows = []
+        for path in markers:
+            try:
+                marker_rows.append({"path": str(path), "exists": path.exists()})
+            except OSError as exc:
+                marker_rows.append(
+                    {"path": str(path), "exists": None, "error": type(exc).__name__}
+                )
+        harnesses.append(
             {
-                "path": str(path),
-                "symlink": path.is_symlink(),
-                "target": str(path.resolve(strict=False)) if path.is_symlink() else None,
-                "sha256": _file_hash(path) if path.is_file() else None,
+                "name": name,
+                "home": str(home),
+                "home_exists": home.is_dir(),
+                "configuration_markers": marker_rows,
             }
         )
+
+    archive_candidates = (
+        Path("/opt/TGW/archive"),
+        Path("/opt/TGW/tgw-lib/archive"),
+        Path("/opt/TGW/tgw-lib/migration-verify"),
+        Path("/opt/TGW/w/attempts"),
+    )
+    archives = [
+        {"path": str(path), "exists": path.is_dir()}
+        for path in archive_candidates
+    ]
     return {
         "schema": "tgw-local-doctor-inventory/v1",
         "ok": True,
@@ -520,6 +575,8 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         "canonical_source": {"repository": str(repository), "commit": canonical_head},
         "worktrees": worktrees,
         "active_surfaces": active_surfaces,
+        "harnesses": harnesses,
+        "archive_roots": archives,
         "counts": {
             "worktrees": len(worktrees),
             "outside_configured_root": sum(
@@ -530,6 +587,8 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
                 row["preservation_required"] for row in worktrees
             ),
             "active_surfaces": len(active_surfaces),
+            "harness_homes": sum(row["home_exists"] for row in harnesses),
+            "archive_roots": sum(row["exists"] for row in archives),
         },
         "cleanup_boundary": (
             "inventory is read-only; archive dirty or unique work before unlinking any "
@@ -596,7 +655,7 @@ def _unit_state(unit: str) -> dict[str, Any]:
             "systemctl",
             "show",
             unit,
-            "--property=LoadState,ActiveState,SubState,FragmentPath,ExecStart",
+            "--property=LoadState,ActiveState,SubState,FragmentPath,DropInPaths,ExecStart",
             "--no-pager",
         ]
     )
@@ -610,19 +669,56 @@ def _unit_state(unit: str) -> dict[str, Any]:
     return values
 
 
+def _unit_definition(paths: DoctorPaths, unit: str, state: Mapping[str, str]) -> dict[str, Any]:
+    desired, release, _task = _desired_runtime(paths)
+    source = release / "systemd" / unit
+    fragment_text = state.get("FragmentPath", "")
+    fragment = Path(fragment_text) if fragment_text else None
+    reasons: list[str] = []
+    if not source.is_file():
+        reasons.append("release source missing")
+    if fragment is None or not fragment.is_file():
+        reasons.append("installed fragment missing")
+    elif source.is_file() and _file_hash(fragment) != _file_hash(source):
+        reasons.append("installed fragment differs")
+    if state.get("DropInPaths"):
+        reasons.append("unexpected systemd drop-in")
+    return {
+        "exact": not reasons,
+        "desired_commit": desired,
+        "source": str(source),
+        "source_sha256": _file_hash(source) if source.is_file() else None,
+        "fragment": fragment_text or None,
+        "fragment_sha256": _file_hash(fragment)
+        if fragment is not None and fragment.is_file()
+        else None,
+        "drop_ins": state.get("DropInPaths") or None,
+        "reasons": reasons,
+    }
+
+
 def check_units(paths: DoctorPaths) -> dict[str, Any]:
     repair = "sudo -n tgw doctor repair workers"
     try:
-        observed = {unit: _unit_state(unit) for unit in _CODING_UNITS}
+        observed = {}
+        for unit in _CODING_UNITS:
+            state = _unit_state(unit)
+            state["definition"] = _unit_definition(paths, unit, state)
+            observed[unit] = state
         unhealthy = [
             unit
             for unit, state in observed.items()
-            if state.get("LoadState") != "loaded" or state.get("ActiveState") != "active"
+            if state.get("LoadState") != "loaded"
+            or not state["definition"]["exact"]
+            or (
+                unit in _ACTIVE_CODING_UNITS
+                and state.get("ActiveState") != "active"
+            )
         ]
         return _check(
             "services.local-coding",
             "PASS" if not unhealthy else "FAIL",
-            "all local coding workers/timer are active"
+            "all local coding definitions are exact and required units are active"
             if not unhealthy
             else "inactive or missing units: " + ", ".join(unhealthy),
             evidence={"units": observed},
@@ -649,6 +745,98 @@ def _desired_runtime(paths: DoctorPaths) -> tuple[str, Path, dict[str, Any]]:
     return desired, release, task
 
 
+def _git_blob_oid(data: bytes) -> str:
+    framed = b"blob " + str(len(data)).encode("ascii") + b"\0" + data
+    return hashlib.sha1(framed, usedforsecurity=False).hexdigest()
+
+
+def _verify_release_tree(
+    paths: DoctorPaths, desired: str, release: Path
+) -> dict[str, Any]:
+    """Verify every released path and mode against the exact Git commit tree."""
+    result = _run(
+        [
+            "git",
+            "-c",
+            f"safe.directory={paths.repository.resolve()}",
+            "ls-tree",
+            "-r",
+            "-z",
+            "--full-tree",
+            desired,
+        ],
+        cwd=paths.repository,
+        timeout=30,
+    )
+    if result.returncode:
+        raise DoctorError(result.stderr.strip() or "cannot read the declared Git tree")
+    expected: dict[str, tuple[str, str]] = {}
+    for record in result.stdout.split("\0"):
+        if not record:
+            continue
+        metadata, separator, relative = record.partition("\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3 or fields[1] != "blob":
+            raise DoctorError("declared runtime tree contains an unsupported Git entry")
+        mode, _kind, object_id = fields
+        expected[relative] = (mode, object_id)
+
+    actual = {
+        str(path.relative_to(release))
+        for path in release.rglob("*")
+        if path.is_file() or path.is_symlink()
+    }
+    missing = sorted(set(expected) - actual)
+    extra = sorted(actual - set(expected))
+    mismatched: list[str] = []
+    for relative, (mode, object_id) in expected.items():
+        path = release / relative
+        if relative in missing:
+            continue
+        if mode == "120000":
+            if not path.is_symlink():
+                mismatched.append(relative + ":mode")
+                continue
+            data = os.readlink(path).encode()
+        else:
+            if path.is_symlink() or not path.is_file():
+                mismatched.append(relative + ":type")
+                continue
+            data = path.read_bytes()
+            executable = bool(path.stat().st_mode & 0o111)
+            if executable != (mode == "100755"):
+                mismatched.append(relative + ":mode")
+        if _git_blob_oid(data) != object_id:
+            mismatched.append(relative + ":content")
+    if missing or extra or mismatched:
+        fragments = []
+        if missing:
+            fragments.append(f"{len(missing)} missing")
+        if extra:
+            fragments.append(f"{len(extra)} extra")
+        if mismatched:
+            fragments.append(f"{len(mismatched)} mismatched")
+        raise DoctorError("release tree differs from Git: " + ", ".join(fragments))
+    tree = _git(paths.repository, "rev-parse", f"{desired}^{{tree}}")
+    return {
+        "verified": True,
+        "commit": desired,
+        "tree": tree,
+        "file_count": len(expected),
+        "manifest_source": "git-ls-tree",
+    }
+
+
+def _launcher_links(paths: DoctorPaths) -> dict[Path, Path]:
+    current = paths.runtime_root / "current/bin"
+    return {
+        paths.local_bin / "tgw-coding": current / "tgw-coding-local-operator",
+        paths.local_bin / "tgw-coding-mcp": current / "tgw-coding-mcp",
+        paths.local_bin / "tgw-doctor": current / "tgw-doctor",
+        paths.operator_cli: current / "tgw-operator",
+    }
+
+
 def check_runtime(paths: DoctorPaths) -> dict[str, Any]:
     repair = "sudo -n tgw doctor repair runtime"
     try:
@@ -660,15 +848,12 @@ def check_runtime(paths: DoctorPaths) -> dict[str, Any]:
             mismatches.append("current runtime selector")
         if desired != head:
             mismatches.append("task/runtime versus canonical source")
-        launchers = {
-            str(paths.local_bin / "tgw-coding"): release / "bin/tgw-coding-local-operator",
-            str(paths.local_bin / "tgw-coding-mcp"): release / "bin/tgw-coding-mcp",
-            str(paths.local_bin / "tgw-doctor"): release / "bin/tgw-doctor",
-            str(paths.operator_cli): release / "bin/tgw-operator",
-        }
+        release_tree = _verify_release_tree(paths, desired, release)
+        launchers = _launcher_links(paths)
         hashes: dict[str, Any] = {}
-        for destination_text, source in launchers.items():
-            destination = Path(destination_text)
+        for destination, target in launchers.items():
+            destination_text = str(destination)
+            source = release / "bin" / target.name
             if not source.is_file():
                 mismatches.append(f"release source missing: {source.name}")
                 continue
@@ -678,8 +863,16 @@ def check_runtime(paths: DoctorPaths) -> dict[str, Any]:
                 "source": str(source),
                 "source_sha256": source_hash,
                 "installed_sha256": destination_hash,
+                "expected_link": str(target),
+                "installed_link": os.readlink(destination)
+                if destination.is_symlink()
+                else None,
             }
-            if destination_hash != source_hash:
+            if (
+                not destination.is_symlink()
+                or os.readlink(destination) != str(target)
+                or destination_hash != source_hash
+            ):
                 mismatches.append(str(destination))
         config_text = paths.coding_config.read_text(encoding="utf-8").lower()
         forbidden = [item for item in _FORBIDDEN_CODING_DEPENDENCIES if item in config_text]
@@ -697,6 +890,7 @@ def check_runtime(paths: DoctorPaths) -> dict[str, Any]:
                 "release": str(release),
                 "current": str(current),
                 "launcher_hashes": hashes,
+                "release_tree": release_tree,
                 "forbidden_dependencies": forbidden,
             },
             repair=None if not mismatches else repair,
@@ -772,6 +966,36 @@ def _require_root() -> None:
         raise DoctorError("repair requires the operator to rerun this exact command with sudo -n")
 
 
+def _require_trusted_root_program(path: Path) -> None:
+    try:
+        resolved = path.resolve(strict=True)
+        state = resolved.stat()
+    except OSError as exc:
+        raise DoctorError(f"trusted repair program is unavailable: {path}") from exc
+    if (
+        not resolved.is_file()
+        or state.st_uid != 0
+        or state.st_mode & 0o022
+        or not os.access(resolved, os.X_OK)
+    ):
+        raise DoctorError(f"repair program is not root-owned and immutable: {resolved}")
+
+
+@contextmanager
+def _repair_lock(paths: DoctorPaths):
+    paths.receipts.mkdir(parents=True, exist_ok=True)
+    lock_path = paths.receipts / ".repair.lock"
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise DoctorError("another TGW doctor repair is already running") from exc
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_json(path: Path, value: Mapping[str, Any], *, mode: int = 0o444) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_text = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
@@ -807,6 +1031,7 @@ def _receipt(paths: DoctorPaths, operation: str, before: Any, after: Any) -> str
 
 def repair_context(paths: DoctorPaths) -> dict[str, Any]:
     _require_root()
+    _require_trusted_root_program(paths.context_publisher)
     before = {
         "task": _json(paths.context_task),
         "cursor": _json(paths.context_cursor),
@@ -833,39 +1058,123 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
         cursor["source_commit"] = head
         cursor["source_tree"] = tree
         cursor["updated_at"] = datetime.now().astimezone().isoformat()
-        _atomic_json(paths.context_cursor, cursor)
-    result = _run(
-        [
-            str(paths.context_publisher),
-            "--task",
-            str(paths.context_task),
-            "--cursor",
-            str(paths.context_cursor),
-            "--output",
-            str(paths.context_snapshot),
-        ]
+    paths.context_cursor.parent.mkdir(parents=True, exist_ok=True)
+    cursor_fd, cursor_text = tempfile.mkstemp(
+        prefix=paths.context_cursor.name + ".doctor-stage.",
+        dir=paths.context_cursor.parent,
     )
-    if result.returncode:
-        raise DoctorError(result.stderr.strip() or "context publisher failed")
-    after = _json(paths.context_snapshot)
-    _validate_snapshot(after)
+    snapshot_fd, snapshot_text = tempfile.mkstemp(
+        prefix=paths.context_snapshot.name + ".doctor-stage.",
+        dir=paths.context_snapshot.parent,
+    )
+    os.close(cursor_fd)
+    os.close(snapshot_fd)
+    staged_cursor = Path(cursor_text)
+    staged_snapshot = Path(snapshot_text)
+    try:
+        _atomic_json(staged_cursor, cursor)
+        staged_snapshot.unlink(missing_ok=True)
+        result = _run(
+            [
+                str(paths.context_publisher),
+                "--task",
+                str(paths.context_task),
+                "--cursor",
+                str(staged_cursor),
+                "--output",
+                str(staged_snapshot),
+            ]
+        )
+        if result.returncode:
+            raise DoctorError(result.stderr.strip() or "context publisher failed")
+        after = _json(staged_snapshot)
+        _validate_snapshot(after)
+        if after.get("task") != task or after.get("cursor") != cursor:
+            raise DoctorError("staged context publisher output differs from exact inputs")
+        current_head, current_tree, current_status = _source_identity(paths)
+        if current_status or (current_head, current_tree) != (head, tree):
+            raise DoctorError("canonical source changed during context repair")
+        if (
+            _json(paths.context_task) != before["task"]
+            or _json(paths.context_cursor) != before["cursor"]
+        ):
+            raise DoctorError("context inputs changed concurrently; no live file was replaced")
+        try:
+            # Readers consume the atomic snapshot. Publish it first, then align its
+            # source cursor; rollback both if the second replacement fails.
+            _atomic_json(paths.context_snapshot, after)
+            _atomic_json(paths.context_cursor, cursor)
+        except Exception as exc:
+            rollback_errors = []
+            for path, value in (
+                (paths.context_snapshot, before["snapshot"]),
+                (paths.context_cursor, before["cursor"]),
+            ):
+                try:
+                    _atomic_json(path, value)
+                except Exception as rollback_exc:
+                    rollback_errors.append(str(rollback_exc))
+            suffix = (
+                "; rollback errors: " + "; ".join(rollback_errors)
+                if rollback_errors
+                else "; original inputs restored"
+            )
+            raise DoctorError(f"context commit failed: {exc}{suffix}") from exc
+    finally:
+        staged_cursor.unlink(missing_ok=True)
+        staged_snapshot.unlink(missing_ok=True)
     receipt = _receipt(paths, "context", before, {"cursor": cursor, "snapshot": after})
     return {"ok": True, "operation": "context", "changed": changed, "receipt": receipt}
 
 
-def _atomic_install(source: Path, destination: Path, mode: int) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_text = tempfile.mkstemp(
-        prefix=destination.name + ".", dir=destination.parent
-    )
+def _path_snapshot(path: Path) -> dict[str, Any]:
+    if path.is_symlink():
+        return {"kind": "symlink", "target": os.readlink(path)}
+    if path.is_file():
+        return {
+            "kind": "file",
+            "bytes": path.read_bytes(),
+            "mode": path.stat().st_mode & 0o777,
+        }
+    if path.exists():
+        raise DoctorError(f"repair refuses non-file launcher surface: {path}")
+    return {"kind": "missing"}
+
+
+def _replace_link(path: Path, target: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_text = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
     os.close(descriptor)
     temporary = Path(temporary_text)
+    temporary.unlink()
     try:
-        shutil.copyfile(source, temporary)
-        os.chmod(temporary, mode)
-        os.replace(temporary, destination)
+        os.symlink(str(target), temporary)
+        os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _restore_path(path: Path, snapshot: Mapping[str, Any]) -> None:
+    kind = snapshot["kind"]
+    if kind == "symlink":
+        _replace_link(path, Path(str(snapshot["target"])))
+        return
+    if kind == "file":
+        descriptor, temporary_text = tempfile.mkstemp(
+            prefix=path.name + ".rollback.", dir=path.parent
+        )
+        temporary = Path(temporary_text)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(snapshot["bytes"])
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, int(snapshot["mode"]))
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return
+    path.unlink(missing_ok=True)
 
 
 def repair_runtime(paths: DoctorPaths) -> dict[str, Any]:
@@ -874,39 +1183,75 @@ def repair_runtime(paths: DoctorPaths) -> dict[str, Any]:
     head, _tree, status = _source_identity(paths)
     if status or head != desired:
         raise DoctorError("runtime repair requires clean canonical source at the declared commit")
+    release_tree = _verify_release_tree(paths, desired, release)
     current_link = paths.runtime_root / "current"
-    before = {
-        "current": str(current_link.resolve(strict=True)),
-        "launchers": {},
-    }
-    mapping = {
-        paths.local_bin / "tgw-coding": release / "bin/tgw-coding-local-operator",
-        paths.local_bin / "tgw-coding-mcp": release / "bin/tgw-coding-mcp",
-        paths.local_bin / "tgw-doctor": release / "bin/tgw-doctor",
-        paths.operator_cli: release / "bin/tgw-operator",
-    }
-    for destination, source in mapping.items():
+    if current_link.exists() and not current_link.is_symlink():
+        raise DoctorError("runtime selector is not a symlink; automatic replacement is unsafe")
+    launcher_links = _launcher_links(paths)
+    for target in launcher_links.values():
+        source = release / "bin" / target.name
         if not source.is_file():
             raise DoctorError(f"declared release lacks launcher {source}")
-        before["launchers"][str(destination)] = (
-            _file_hash(destination) if destination.is_file() else None
+    snapshots = {path: _path_snapshot(path) for path in launcher_links}
+    previous_selector = os.readlink(current_link) if current_link.is_symlink() else None
+    before = {
+        "current_link": previous_selector,
+        "current": str(current_link.resolve(strict=False)),
+        "launchers": {
+            str(path): {
+                "kind": snapshot["kind"],
+                "target": snapshot.get("target"),
+                "sha256": _file_hash(path) if path.is_file() else None,
+            }
+            for path, snapshot in snapshots.items()
+        },
+    }
+    changed = current_link.resolve(strict=False) != release.resolve() or any(
+        snapshot.get("kind") != "symlink"
+        or snapshot.get("target") != str(launcher_links[path])
+        for path, snapshot in snapshots.items()
+    )
+    replaced: list[Path] = []
+    try:
+        for destination, target in launcher_links.items():
+            _replace_link(destination, target)
+            replaced.append(destination)
+        _replace_link(current_link, Path("releases") / desired)
+    except Exception as exc:
+        rollback_errors = []
+        if previous_selector is not None:
+            try:
+                _replace_link(current_link, Path(previous_selector))
+            except Exception as rollback_exc:
+                rollback_errors.append(str(rollback_exc))
+        for destination in reversed(replaced):
+            try:
+                _restore_path(destination, snapshots[destination])
+            except Exception as rollback_exc:
+                rollback_errors.append(str(rollback_exc))
+        suffix = (
+            "; rollback errors: " + "; ".join(rollback_errors)
+            if rollback_errors
+            else "; original selector and launchers restored"
         )
-        _atomic_install(source, destination, 0o555)
-    temporary_link = paths.runtime_root / "current.doctor-next"
-    temporary_link.unlink(missing_ok=True)
-    os.symlink(Path("releases") / desired, temporary_link)
-    os.replace(temporary_link, current_link)
+        raise DoctorError(f"runtime commit failed: {exc}{suffix}") from exc
     after = {
+        "current_link": os.readlink(current_link),
         "current": str(current_link.resolve(strict=True)),
-        "launchers": {str(path): _file_hash(path) for path in mapping},
+        "launchers": {
+            str(path): {"target": os.readlink(path), "sha256": _file_hash(path)}
+            for path in launcher_links
+        },
+        "release_tree": release_tree,
     }
     receipt = _receipt(paths, "runtime", before, after)
-    return {"ok": True, "operation": "runtime", "changed": before != after, "receipt": receipt}
+    return {"ok": True, "operation": "runtime", "changed": changed, "receipt": receipt}
 
 
 def repair_database(paths: DoctorPaths) -> dict[str, Any]:
     _require_root()
     desired, release, _task = _desired_runtime(paths)
+    _verify_release_tree(paths, desired, release)
     sql = release / "config/tgw-coding-local-roles.sql"
     if not sql.is_file():
         raise DoctorError(f"runtime {desired} lacks the coding role SQL")
@@ -935,9 +1280,21 @@ def repair_database(paths: DoctorPaths) -> dict[str, Any]:
 
 def repair_workers(paths: DoctorPaths) -> dict[str, Any]:
     _require_root()
+    desired, release, _task = _desired_runtime(paths)
+    _verify_release_tree(paths, desired, release)
     before = check_units(paths)
+    definition_failures = [
+        unit
+        for unit, state in before.get("evidence", {}).get("units", {}).items()
+        if not state.get("definition", {}).get("exact")
+    ]
+    if definition_failures:
+        raise DoctorError(
+            "worker repair refuses non-exact unit definitions: "
+            + ", ".join(definition_failures)
+        )
     actions: list[str] = []
-    for unit in _CODING_UNITS:
+    for unit in _ACTIVE_CODING_UNITS:
         state = _unit_state(unit)
         if state.get("ActiveState") == "active":
             continue
@@ -967,18 +1324,38 @@ _REPAIRS: dict[str, Callable[[DoctorPaths], dict[str, Any]]] = {
 
 
 def repair(operation: str, paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
-    operations = list(_REPAIRS) if operation == "all" else [operation]
-    results = []
-    for name in operations:
-        function = _REPAIRS.get(name)
-        if function is None:
-            raise DoctorError(f"unknown repair: {name}")
-        results.append(function(paths))
+    function = _REPAIRS.get(operation)
+    if function is None:
+        raise DoctorError(f"unknown repair: {operation}")
+    _require_root()
+    with _repair_lock(paths):
+        started_receipt = _receipt(
+            paths,
+            operation + "-started",
+            {"operation": operation},
+            {"state": "STARTED"},
+        )
+        try:
+            result = function(paths)
+            result = {**result, "started_receipt": started_receipt}
+        except Exception as exc:
+            try:
+                receipt = _receipt(
+                    paths,
+                    operation + "-failed",
+                    {"operation": operation},
+                    {"ok": False, "error": str(exc)},
+                )
+            except Exception as receipt_exc:
+                receipt = f"unavailable ({receipt_exc})"
+            raise DoctorError(
+                f"{exc}; started receipt: {started_receipt}; failure receipt: {receipt}"
+            ) from exc
     return {
         "schema": "tgw-local-doctor-repair/v1",
         "ok": True,
         "operation": operation,
-        "results": results,
+        "results": [result],
         "diagnosis": diagnose(paths),
     }
 
@@ -1006,7 +1383,7 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("check", help="run read-only diagnosis (default)")
     sub.add_parser("inventory", help="inventory linked and active-path remnants read-only")
     repair_parser = sub.add_parser("repair", help="restore an exact declared local state")
-    repair_parser.add_argument("target", choices=[*_REPAIRS, "all"])
+    repair_parser.add_argument("target", choices=[*_REPAIRS])
     repair_parser.add_argument("--json", action="store_true", dest="repair_json_output")
     return parser
 
