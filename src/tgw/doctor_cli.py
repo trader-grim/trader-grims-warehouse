@@ -124,7 +124,7 @@ class DoctorPaths:
     receipts: Path = Path("/opt/TGW/tgw-lib/doctor-receipts")
     cleanup_archive_root: Path = Path("/opt/TGW/tgw-lib/archive/doctor-cleanup")
     cleanup_system_bin: Path = Path("/usr/local/bin")
-    cleanup_actor_home: Path | None = None
+    cleanup_actor_home: Path = Path("/home/codex")
     cleanup_reference_roots: tuple[Path, ...] = (
         Path("/etc/systemd/system"),
         Path("/run/systemd/system"),
@@ -1330,13 +1330,7 @@ def _lexists(path: Path) -> bool:
 
 
 def _declared_obsolete_surfaces(paths: DoctorPaths) -> list[dict[str, Any]]:
-    actor = _operator_actor()
     actor_home = paths.cleanup_actor_home
-    if actor_home is None:
-        try:
-            actor_home = Path(pwd.getpwnam(actor).pw_dir)
-        except KeyError as exc:
-            raise DoctorError(f"invoking actor account does not exist: {actor}") from exc
     rows = [
         {
             "path": paths.cleanup_system_bin / name,
@@ -1878,8 +1872,6 @@ def _cleanup_references(
     }
     references: list[dict[str, str]] = []
     actor_home = paths.cleanup_actor_home
-    if actor_home is None:
-        actor_home = Path(pwd.getpwnam(_operator_actor()).pw_dir)
     actor_configuration = (
         actor_home / ".bash_profile",
         actor_home / ".bashrc",
@@ -1903,12 +1895,7 @@ def _cleanup_references(
         if root.is_file() or root.is_symlink():
             candidates = [root]
         elif root.is_dir():
-            try:
-                candidates = list(root.rglob("*"))
-            except OSError as exc:
-                raise DoctorError(
-                    f"cannot completely scan active configuration: {root}"
-                ) from exc
+            candidates = _configuration_candidates(root)
         else:
             continue
         for candidate in candidates:
@@ -1929,6 +1916,26 @@ def _cleanup_references(
                 if needle.encode() in raw:
                     references.append({"path": str(candidate), "reference": needle})
     return references
+
+
+def _configuration_candidates(root: Path) -> list[Path]:
+    """Enumerate every entry without pathlib's permission-error suppression."""
+    candidates: list[Path] = []
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    candidate = Path(entry.path)
+                    candidates.append(candidate)
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(candidate)
+        except OSError as exc:
+            raise DoctorError(
+                f"cannot completely scan active configuration: {directory}"
+            ) from exc
+    return candidates
 
 
 def _cleanup_process_references(
@@ -2201,6 +2208,10 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _fsync_directory_fd(descriptor: int) -> None:
+    os.fsync(descriptor)
+
+
 def _fsync_file(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
@@ -2408,6 +2419,98 @@ def _restore_cleanup_surface(
     if _stable_restorable_identity(observed) != _stable_restorable_identity(identity):
         raise DoctorError(f"restored obsolete surface identity differs: {destination}")
     _fsync_directory(destination.parent)
+
+
+def _bound_recovery_identity(binding: _CleanupBinding) -> dict[str, Any]:
+    state = os.stat(binding.path.name, dir_fd=binding.parent_fd, follow_symlinks=False)
+    if stat.S_ISLNK(state.st_mode):
+        proc_path = Path(f"/proc/self/fd/{binding.parent_fd}") / binding.path.name
+        return {
+            "path": str(binding.path),
+            "kind": "symlink",
+            "target": os.readlink(binding.path.name, dir_fd=binding.parent_fd),
+            "metadata": _metadata(
+                state, _read_xattrs(proc_path, follow_symlinks=False)
+            ),
+        }
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(
+            binding.path.name,
+            flags | getattr(os, "O_NOATIME", 0),
+            dir_fd=binding.parent_fd,
+        )
+    except PermissionError:
+        descriptor = os.open(binding.path.name, flags, dir_fd=binding.parent_fd)
+    try:
+        return {
+            "path": str(binding.path),
+            "kind": "file",
+            "sha256": _hash_fd(descriptor, binding.path),
+            "metadata": _metadata(os.fstat(descriptor), _read_xattrs(descriptor)),
+        }
+    finally:
+        os.close(descriptor)
+
+
+def _restore_bound_cleanup_surface(
+    binding: _CleanupBinding, archived: Path, identity: Mapping[str, Any]
+) -> None:
+    try:
+        os.stat(binding.path.name, dir_fd=binding.parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        observed = _bound_recovery_identity(binding)
+        if _stable_restorable_identity(observed) != _stable_restorable_identity(identity):
+            raise DoctorError(f"bound active surface differs during recovery: {binding.path}")
+        return
+    _verify_archived_surface(archived, identity)
+    if identity["kind"] == "symlink":
+        os.symlink(identity["target"], binding.path.name, dir_fd=binding.parent_fd)
+        os.chown(
+            binding.path.name,
+            int(identity["metadata"]["uid"]),
+            int(identity["metadata"]["gid"]),
+            dir_fd=binding.parent_fd,
+            follow_symlinks=False,
+        )
+        proc_path = Path(f"/proc/self/fd/{binding.parent_fd}") / binding.path.name
+        _replace_xattrs(
+            proc_path, identity["metadata"].get("xattrs", {}), follow=False
+        )
+        os.utime(
+            binding.path.name,
+            ns=(
+                int(identity["metadata"]["atime_ns"]),
+                int(identity["metadata"]["mtime_ns"]),
+            ),
+            dir_fd=binding.parent_fd,
+            follow_symlinks=False,
+        )
+    else:
+        source_fd = _open_path_noatime(archived)
+        destination_fd = os.open(
+            binding.path.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=binding.parent_fd,
+        )
+        try:
+            while chunk := os.read(source_fd, 1024 * 1024):
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(destination_fd, view)
+                    view = view[written:]
+            os.fsync(destination_fd)
+            _apply_fd_metadata(destination_fd, identity["metadata"])
+        finally:
+            os.close(source_fd)
+            os.close(destination_fd)
+    observed = _bound_recovery_identity(binding)
+    if _stable_restorable_identity(observed) != _stable_restorable_identity(identity):
+        raise DoctorError(f"bound restored surface identity differs: {binding.path}")
+    _fsync_directory_fd(binding.parent_fd)
 
 
 def _unlink_bound_surface(
@@ -2646,15 +2749,27 @@ def repair_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
                 # Track deletion before the durability operation so an fsync
                 # failure necessarily restores the already-unlinked source.
                 removed.append((binding.path, archived, identity))
-                _fsync_directory(binding.path.parent)
+                _fsync_directory_fd(binding.parent_fd)
                 _assert_parent_binding(binding)
             if any(_lexists(Path(identity["path"])) for identity in identities):
                 raise DoctorError("an obsolete surface remains after removal")
         except Exception as exc:
             rollback_errors = []
+            binding_by_path = {binding.path: binding for binding in bindings}
             for source, archived, identity in reversed(removed):
                 try:
-                    _restore_cleanup_surface(source, archived, identity)
+                    binding = binding_by_path[source]
+                    parent_visible = True
+                    try:
+                        _assert_parent_binding(binding)
+                    except DoctorError:
+                        parent_visible = False
+                    _restore_bound_cleanup_surface(binding, archived, identity)
+                    if not parent_visible:
+                        rollback_errors.append(
+                            f"bound parent no longer visible at {binding.path.parent}; "
+                            "surface restored only to its original directory inode"
+                        )
                 except Exception as rollback_exc:
                     rollback_errors.append(str(rollback_exc))
             rollback_receipt = _receipt(

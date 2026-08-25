@@ -727,6 +727,18 @@ def _obsolete_fixture(
     return created
 
 
+def test_obsolete_cleanup_default_actor_surface_is_fixed_under_direct_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.delenv("SUDO_USER", raising=False)
+
+    rows = doctor_cli._declared_obsolete_surfaces(doctor_cli.DoctorPaths())
+
+    actor = next(row for row in rows if row["kind"] == "symlink")
+    assert actor["path"] == Path("/home/codex/.local/bin/tgw-actor")
+
+
 def test_obsolete_cleanup_diagnoses_warn_and_moves_exact_surfaces(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -832,6 +844,31 @@ def test_obsolete_cleanup_ignores_context_evidence_but_detects_active_config(
     }
 
 
+def test_obsolete_cleanup_configuration_scan_fails_on_unreadable_subdirectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    _obsolete_fixture(paths, monkeypatch)
+    nested = paths.cleanup_reference_roots[0] / "nested"
+    nested.mkdir()
+    original_scandir = os.scandir
+
+    def scandir(path):
+        if Path(path) == nested:
+            raise PermissionError("fixture unreadable configuration directory")
+        return original_scandir(path)
+
+    monkeypatch.setattr(doctor_cli.os, "scandir", scandir)
+    present = [
+        item
+        for item in doctor_cli._declared_obsolete_surfaces(paths)
+        if doctor_cli._lexists(item["path"])
+    ]
+
+    with pytest.raises(doctor_cli.DoctorError, match="completely scan"):
+        doctor_cli._cleanup_references(paths, present)
+
+
 def test_obsolete_cleanup_refuses_unknown_process_visibility(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -929,23 +966,52 @@ def test_obsolete_cleanup_rolls_back_when_parent_fsync_fails_after_unlink(
 ) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
-    original_fsync = doctor_cli._fsync_directory
+    original_fsync = doctor_cli._fsync_directory_fd
     failed = False
 
-    def fsync_directory(path):
+    def fsync_directory(descriptor):
         nonlocal failed
-        if path == sources[0].parent and not sources[0].exists() and not failed:
+        if not sources[0].exists() and not failed:
             failed = True
             raise OSError("fixture parent fsync failure")
-        return original_fsync(path)
+        return original_fsync(descriptor)
 
-    monkeypatch.setattr(doctor_cli, "_fsync_directory", fsync_directory)
+    monkeypatch.setattr(doctor_cli, "_fsync_directory_fd", fsync_directory)
 
     with pytest.raises(doctor_cli.DoctorError, match="active view restored"):
         doctor_cli.repair_obsolete_surfaces(paths)
 
     assert failed is True
     assert all(path.exists() or path.is_symlink() for path in sources)
+
+
+def test_obsolete_cleanup_post_unlink_parent_replacement_never_mutates_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    sources = _obsolete_fixture(paths, monkeypatch)
+    parent = sources[0].parent
+    original_parent = parent.with_name(parent.name + "-original")
+    original_fsync = doctor_cli._fsync_directory_fd
+    replaced = False
+
+    def replace_parent(descriptor):
+        nonlocal replaced
+        if not sources[0].exists() and not replaced:
+            parent.rename(original_parent)
+            parent.mkdir()
+            replaced = True
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(doctor_cli, "_fsync_directory_fd", replace_parent)
+
+    with pytest.raises(doctor_cli.DoctorError, match="rollback incomplete"):
+        doctor_cli.repair_obsolete_surfaces(paths)
+
+    assert replaced is True
+    assert list(parent.iterdir()) == []
+    assert (original_parent / sources[0].name).is_file()
+    assert (original_parent / sources[1].name).is_file()
 
 
 def test_obsolete_cleanup_binding_rejects_replaced_parent(
