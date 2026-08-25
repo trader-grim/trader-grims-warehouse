@@ -246,6 +246,7 @@ def test_runner_refuses_a_concurrent_worktree_lease(tmp_path, monkeypatch):
                 repo,
                 invoke=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("called")),
             )
+    assert not (repo / ".git/tgw-coding.lock").exists()
 
 
 def test_candidate_close_disables_hooks_and_signing(tmp_path, monkeypatch):
@@ -272,6 +273,46 @@ def test_candidate_close_disables_hooks_and_signing(tmp_path, monkeypatch):
     assert result["outcome"] == "satisfied"
     assert "--no-verify" in observed
     assert "commit.gpgSign=false" in observed
+    assert "core.hooksPath=/dev/null" in observed
+
+
+def test_late_source_is_preserved_outside_clean_candidate(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+    real_git = codex_implement._git
+    wrote_late_source = False
+
+    def late_write(cwd, *args):
+        nonlocal wrote_late_source
+        result = real_git(cwd, *args)
+        if "commit" in args and not wrote_late_source:
+            (cwd / "late.py").write_text("outside_lease = True\n")
+            wrote_late_source = True
+        return result
+
+    monkeypatch.setattr(codex_implement, "_git", late_write)
+    result = codex_implement.run(
+        _job(),
+        repo,
+        invoke=_invoke(
+            {"status": "implemented", "summary": "added feature", "tests": []},
+            edit=lambda path: (path / "feature.py").write_text("VALUE = 1\n"),
+        ),
+    )
+
+    assert result["outcome"] == "satisfied"
+    recovery = result["artifacts"][-1]
+    assert recovery["kind"] == "late_source_recovery"
+    assert len(recovery["stash"]) == 40
+    assert not (repo / "late.py").exists()
+    assert subprocess.run(
+        ["git", "status", "--porcelain", "--ignored=matching"],
+        cwd=repo, check=True, text=True, capture_output=True,
+    ).stdout == ""
+    assert "late.py" in subprocess.run(
+        ["git", "stash", "show", "--include-untracked", "--name-only"],
+        cwd=repo, check=True, text=True, capture_output=True,
+    ).stdout
 
 
 def test_prompt_forbids_deploy_commit_config_secrets_and_satellites():

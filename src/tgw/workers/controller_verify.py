@@ -8,8 +8,12 @@ import os
 import re
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
+
+from tgw.development.worktree_lease import exclusive_worktree_lease
+from tgw.errors import HardFailure
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _RECEIPTS = frozenset({
@@ -140,6 +144,7 @@ def _run_check(name: str, command: list[str]) -> dict[str, Any]:
     worktree_source = env.get("TGW_CODING_WORKTREE_SRC") or str(Path.cwd() / "src")
     inherited = env.get("PYTHONPATH")
     env["PYTHONPATH"] = worktree_source + (os.pathsep + inherited if inherited else "")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
         completed = subprocess.run(command, check=False, text=True, capture_output=True, env=env)
     except OSError as exc:
@@ -164,26 +169,37 @@ def _run_check(name: str, command: list[str]) -> dict[str, Any]:
 def main() -> int:
     """Verify only candidate bytes and tests changed from the Plan-bound source."""
     try:
-        checks = _verification_commands()
-    except ControllerVerificationError as exc:
-        print(
-            json.dumps(
-                {
-                    "outcome": "failed",
-                    "established_conditions": [],
-                    "artifacts": [{"kind": "verification_scope", "status": "failed", "detail": str(exc)}],
-                }
-            )
+        # Unit callers without a dispatched job remain pure. Every production
+        # controller job has TGW_CODING_JOB and holds the same inode lease used
+        # by implementation from the first identity check through the last.
+        lease = (
+            exclusive_worktree_lease(Path.cwd().resolve())
+            if "TGW_CODING_JOB" in os.environ
+            else nullcontext()
         )
+        with lease:
+            checks = _verification_commands()
+            artifacts: list[dict[str, Any]] = []
+            for name, command in checks:
+                artifact = _run_check(name, command)
+                artifacts.append(artifact)
+                if artifact["status"] != "passed":
+                    print(json.dumps({"outcome": "failed", "established_conditions": [], "artifacts": artifacts}))
+                    return 0
+            if "TGW_CODING_JOB" in os.environ:
+                # Re-evaluate HEAD, tree, generation, status and the complete
+                # path set after the checks, before emitting success.
+                _source_bound_candidate_files()
+    except (ControllerVerificationError, HardFailure) as exc:
+        print(json.dumps({
+            "outcome": "failed",
+            "established_conditions": [],
+            "artifacts": [
+                {"kind": "verification_scope", "status": "failed", "detail": str(exc)}
+            ],
+        }))
         return 0
 
-    artifacts: list[dict[str, Any]] = []
-    for name, command in checks:
-        artifact = _run_check(name, command)
-        artifacts.append(artifact)
-        if artifact["status"] != "passed":
-            print(json.dumps({"outcome": "failed", "established_conditions": [], "artifacts": artifacts}))
-            return 0
     print(
         json.dumps(
             {

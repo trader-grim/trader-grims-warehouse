@@ -565,6 +565,47 @@ def test_controller_verify_scope_is_bound_to_changed_source_and_tests(
     ]
 
 
+def test_controller_final_recheck_rejects_mutation_during_checks(
+    tmp_path, monkeypatch, capsys
+):
+    from tgw.workers import controller_verify
+
+    worktree = tmp_path / "worktree"
+    _git_worktree(worktree)
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=worktree, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    (worktree / "src").mkdir()
+    (worktree / "tests").mkdir()
+    (worktree / "src/feature.py").write_text("implemented = True\n")
+    (worktree / "tests/test_feature.py").write_text("def test_feature():\n    assert True\n")
+    subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-m", "closed successor"], cwd=worktree, check=True, capture_output=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, check=True, text=True, capture_output=True).stdout.strip()
+    tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=worktree, check=True, text=True, capture_output=True).stdout.strip()
+    monkeypatch.chdir(worktree)
+    monkeypatch.setenv("TGW_CODING_JOB", json.dumps({
+        "plan_binding": {"source_commit": baseline},
+        "object_generation": __import__("hashlib").sha256(f"{head}|{tree}".encode()).hexdigest()[:16],
+    }))
+    calls = 0
+
+    def pass_then_mutate(name, command):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            (worktree / "src/feature.py").write_text("implemented = False\n")
+        return {"kind": "check", "name": name, "status": "passed", "targets": command[-1:]}
+
+    monkeypatch.setattr(controller_verify, "_run_check", pass_then_mutate)
+
+    assert controller_verify.main() == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["outcome"] == "failed"
+    assert "mutable or uncommitted" in result["artifacts"][0]["detail"]
+
+
 def test_controller_diff_check_covers_non_python_candidate_paths(tmp_path, monkeypatch):
     from tgw.workers import controller_verify
 
