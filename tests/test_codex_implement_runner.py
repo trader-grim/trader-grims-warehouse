@@ -315,6 +315,43 @@ def test_late_source_is_preserved_outside_clean_candidate(tmp_path, monkeypatch)
     ).stdout
 
 
+def test_next_generation_recovers_dirty_closed_candidate_without_model(
+    tmp_path, monkeypatch
+):
+    repo = _repo(tmp_path)
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    (repo / "feature.py").write_text("VALUE = 1\n")
+    subprocess.run(["git", "add", "feature.py"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "already closed"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    candidate = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    (repo / "late.py").write_text("preserve = True\n")
+    (repo / "implementation-receipt.json").write_text("stale evidence\n")
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+
+    result = codex_implement.run(
+        _job(plan_binding={"source_commit": baseline}),
+        repo,
+        invoke=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("model reran")
+        ),
+    )
+
+    assert result["outcome"] == "satisfied"
+    assert result["artifacts"][0]["commit"] == candidate
+    assert result["artifacts"][-1]["kind"] == "late_source_recovery"
+    assert (repo / "implementation-receipt.json").read_text() == "stale evidence\n"
+    assert not (repo / "late.py").exists()
+
+
 def test_prompt_forbids_deploy_commit_config_secrets_and_satellites():
     prompt = codex_implement._prompt(_job()["task_spec"])
     for word in ("commit", "deploy", "configuration", "secrets", "satellite"):

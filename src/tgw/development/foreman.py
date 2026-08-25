@@ -11,7 +11,9 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from tgw.development.coding_snapshot import build_coding_snapshot
@@ -22,6 +24,10 @@ from tgw.development.plan_binding import (
 )
 from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
 from tgw.development.treatments import CODING_TREATMENTS
+from tgw.development.worktree_lease import (
+    WorktreeLeaseBusy,
+    exclusive_worktree_lease,
+)
 from tgw.workers.coding import validated_coding_worktree
 from tgw.workflow_kernel.contracts import (
     GoalProfile,
@@ -214,12 +220,14 @@ def _has_active_worktree_job(
             )
             return cur.fetchone() is not None
     except Exception:
-        log.warning(
-            "failed to check active coding jobs for worktree=%s — treating as inactive",
+        log.error(
+            "failed active coding job check for worktree=%s; refusing snapshot/dispatch",
             worktree,
             exc_info=True,
         )
-        return False
+        # Unavailable concurrency evidence is not evidence of no active writer.
+        # The caller must refuse snapshot and dispatch until it can prove idle.
+        return True
 
 
 def _has_terminal_job(
@@ -419,37 +427,43 @@ def tick(
                 todo.worktree,
                 cfg.coding_config,
             )
-            # A successor treatment must never inspect or mutate a worktree
-            # while an earlier treatment is still active.  The generation and
-            # treatment-specific dedupe key below cannot enforce this fence.
-            # Tests that inject the old exact-key seam remain pure unless they
-            # explicitly exercise this new entity-wide seam.
-            if check_worktree_active_fn is None and check_active_fn is not None:
-                has_active_worktree_job = False
-            else:
-                has_active_worktree_job = _has_active_worktree_job(
-                    str(worktree),
-                    check_worktree_active_fn,
-                )
-            if has_active_worktree_job:
-                result = replace(
-                    result,
-                    skipped_active=result.skipped_active + 1,
-                )
-                continue
-            implementation_baseline = binding["source_commit"]
-            if cfg.fixture_implementation_baseline_commit is not None:
-                if not isinstance(binding, dict) or not binding.get("fixture_run_id"):
-                    raise ValueError("fixture implementation baseline requires a fixture-bound Todo")
-                if binding.get("source_commit") != cfg.fixture_implementation_baseline_commit:
-                    raise ValueError("fixture implementation baseline disagrees with Plan binding")
-            snapshot = build_coding_snapshot(
-                worktree,
-                cfg.goal_profile,
-                cfg.treatments,
-                implementation_baseline_commit=implementation_baseline,
-                receipt_backed_conditions=cfg.receipt_backed_conditions,
+            lease = (
+                exclusive_worktree_lease(worktree)
+                if cfg.coding_config
+                else nullcontext()
             )
+            with lease:
+                # Database state fails closed, while the inode lease prevents
+                # snapshotting between another treatment's writes.
+                if check_worktree_active_fn is None and check_active_fn is not None:
+                    has_active_worktree_job = False
+                else:
+                    has_active_worktree_job = _has_active_worktree_job(
+                        str(worktree),
+                        check_worktree_active_fn,
+                    )
+                if has_active_worktree_job:
+                    result = replace(
+                        result,
+                        skipped_active=result.skipped_active + 1,
+                    )
+                    continue
+                implementation_baseline = binding["source_commit"]
+                if cfg.fixture_implementation_baseline_commit is not None:
+                    if not isinstance(binding, dict) or not binding.get("fixture_run_id"):
+                        raise ValueError("fixture implementation baseline requires a fixture-bound Todo")
+                    if binding.get("source_commit") != cfg.fixture_implementation_baseline_commit:
+                        raise ValueError("fixture implementation baseline disagrees with Plan binding")
+                snapshot = build_coding_snapshot(
+                    worktree,
+                    cfg.goal_profile,
+                    cfg.treatments,
+                    implementation_baseline_commit=implementation_baseline,
+                    receipt_backed_conditions=cfg.receipt_backed_conditions,
+                )
+        except WorktreeLeaseBusy:
+            result = replace(result, skipped_active=result.skipped_active + 1)
+            continue
         except Exception:
             log.exception(
                 "failed canonical worktree preflight or snapshot for todo %d at %s",
@@ -566,15 +580,49 @@ def tick(
                         },
                     }
                 )
-            dispatch_result: DispatchResult = dispatch_treatment(
-                disposition=disposition,
-                entity_id=chosen.graph.object_id,
-                entity_type="coding_task",
-                graph=chosen.graph,
-                payload_extra=payload_extra,
-                enqueue_fn=enqueue_fn,
-                coding_config=cfg.coding_config,
+            dispatch_lease = (
+                exclusive_worktree_lease(Path(chosen.todo.worktree))
+                if cfg.coding_config
+                else nullcontext()
             )
+            with dispatch_lease:
+                if check_worktree_active_fn is None and check_active_fn is not None:
+                    has_active_worktree_job = False
+                else:
+                    has_active_worktree_job = _has_active_worktree_job(
+                        chosen.todo.worktree,
+                        check_worktree_active_fn,
+                    )
+                if has_active_worktree_job:
+                    result = replace(
+                        result, skipped_active=result.skipped_active + 1
+                    )
+                    continue
+                if cfg.coding_config:
+                    current = build_coding_snapshot(
+                        chosen.todo.worktree,
+                        cfg.goal_profile,
+                        cfg.treatments,
+                        implementation_baseline_commit=chosen.todo.plan_binding["source_commit"],
+                        receipt_backed_conditions=cfg.receipt_backed_conditions,
+                    )
+                    if current.generation != chosen.graph.object_generation:
+                        result = replace(
+                            result, skipped_active=result.skipped_active + 1
+                        )
+                        continue
+                dispatch_result: DispatchResult = dispatch_treatment(
+                    disposition=disposition,
+                    entity_id=chosen.graph.object_id,
+                    entity_type="coding_task",
+                    graph=chosen.graph,
+                    payload_extra=payload_extra,
+                    enqueue_fn=enqueue_fn,
+                    coding_config=cfg.coding_config,
+                )
+        except WorktreeLeaseBusy:
+            result = replace(result, skipped_active=result.skipped_active + 1)
+            continue
         except Exception:
             log.exception(
                 "dispatch failed for todo %d treatment %s",

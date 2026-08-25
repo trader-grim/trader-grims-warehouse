@@ -13,6 +13,10 @@ from typing import Iterator
 from tgw.errors import HardFailure
 
 
+class WorktreeLeaseBusy(HardFailure):
+    """Another cooperating TGW actor currently owns this worktree."""
+
+
 def _metadata_directory(worktree: Path) -> Path:
     """Return a verified, non-symlinked Git metadata directory for worktree."""
     resolved_worktree = worktree.resolve()
@@ -88,7 +92,7 @@ def exclusive_worktree_lease(worktree: Path) -> Iterator[None]:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise HardFailure("coding implementation worktree is already leased") from exc
+            raise WorktreeLeaseBusy("coding implementation worktree is already leased") from exc
         yield
     finally:
         try:

@@ -84,6 +84,14 @@ def test_database_job_state_checks_cast_text_arrays_to_queue_enum(monkeypatch):
     }
 
 
+def test_active_worktree_database_failure_fails_closed(monkeypatch):
+    monkeypatch.setattr(
+        "tgw.queue.state_machine._conn",
+        lambda: (_ for _ in ()).throw(RuntimeError("database unavailable")),
+    )
+    assert _has_active_worktree_job("/tmp/worktree") is True
+
+
 @pytest.fixture(autouse=True)
 def _fake_worktree_proof_for_mocked_foreman_tests(monkeypatch):
     """Legacy unit cases use invented paths and mock all project work.

@@ -252,10 +252,61 @@ def _close_candidate(
     return head, tree, recovery
 
 
+def _recover_existing_candidate(
+    job: dict[str, Any], cwd: Path, *, todo_id: int
+) -> dict[str, Any] | None:
+    """Converge a dirty but already-closed descendant without rerunning Codex."""
+    binding = job.get("plan_binding")
+    baseline = binding.get("source_commit") if isinstance(binding, dict) else None
+    if not isinstance(baseline, str) or len(baseline) != 40:
+        return None
+    head = _git(cwd, "rev-parse", "HEAD")
+    if head == baseline:
+        return None
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", baseline, head],
+        cwd=cwd, check=False, capture_output=True,
+    )
+    if ancestor.returncode:
+        return None
+    tree = _git(cwd, "rev-parse", "HEAD^{tree}")
+    baseline_tree = _git(cwd, "rev-parse", f"{baseline}^{{tree}}")
+    if tree == baseline_tree:
+        return None
+    recovery = _preserve_late_source(cwd, todo_id=todo_id, candidate=head)
+    if _source_status(cwd):
+        raise HardFailure("Codex implementation could not recover existing candidate")
+    artifacts: list[dict[str, Any]] = [
+        {
+            "kind": "closed_candidate",
+            "commit": head,
+            "tree": tree,
+            "detail": "existing closed descendant recovered without rerunning the model",
+        }
+    ]
+    if recovery:
+        artifacts.append(
+            {
+                "kind": "late_source_recovery", "stash": recovery,
+                "detail": "late source preserved outside the active worktree",
+            }
+        )
+    return {
+        "outcome": "satisfied",
+        "established_conditions": ["implemented"],
+        "artifacts": artifacts,
+    }
+
+
 def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
     task = _validated_task(job)
     before_head = _git(cwd, "rev-parse", "HEAD")
     if _source_status(cwd):
+        recovered = _recover_existing_candidate(
+            job, cwd, todo_id=task["todo_id"]
+        )
+        if recovered is not None:
+            return recovered
         raise HardFailure("Codex implementation requires a source-clean worktree")
     # Keep ephemeral auth and result files inside the isolated request worktree
     # rather than the host-wide /tmp namespace.  The directory is removed before
