@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+runtime=/opt/TGW/tgw-lib/coding-runtime/current
+python=/opt/TGW/.venvs/controller/bin/python3
+
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONPATH="$runtime/src"
+export TGW_CODING_CONFIG=/opt/TGW/tgw-lib/config/tgw-coding-local.json
+exec "$python" -m tgw.coding_mcp_server
