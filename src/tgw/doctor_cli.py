@@ -1116,19 +1116,42 @@ def check_units(paths: DoctorPaths) -> dict[str, Any]:
         )
 
 
+def _runtime_selector_identity(
+    paths: DoctorPaths, desired: str, release: Path
+) -> dict[str, Any]:
+    current_link = paths.runtime_root / "current"
+    expected_selector = str(Path("releases") / desired)
+    installed_selector = (
+        os.readlink(current_link) if current_link.is_symlink() else None
+    )
+    resolved: Path | None = None
+    release_resolved: Path | None = None
+    try:
+        if installed_selector == expected_selector:
+            resolved = current_link.resolve(strict=True)
+            release_resolved = release.resolve(strict=True)
+    except OSError:
+        pass
+    exact = (
+        installed_selector == expected_selector
+        and resolved is not None
+        and resolved == release_resolved
+    )
+    return {
+        "desired": desired,
+        "release": str(release),
+        "expected_selector": expected_selector,
+        "installed_selector": installed_selector,
+        "resolved": None if resolved is None else str(resolved),
+        "exact": exact,
+    }
+
+
 def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
     repair = "sudo -n tgw doctor repair plan-render-worker"
     try:
         desired, release, _task = _desired_runtime(paths)
-        current_link = paths.runtime_root / "current"
-        expected_selector = str(Path("releases") / desired)
-        installed_selector = (
-            os.readlink(current_link) if current_link.is_symlink() else None
-        )
-        exact_runtime = (
-            installed_selector == expected_selector
-            and current_link.resolve(strict=True) == release.resolve(strict=True)
-        )
+        runtime = _runtime_selector_identity(paths, desired, release)
         state = _unit_state(_PLAN_RENDER_UNIT)
         definition = _unit_definition(paths, _PLAN_RENDER_UNIT, state)
         config = _json(paths.plan_render_config)
@@ -1142,11 +1165,11 @@ def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
         )
         healthy = (state.get("LoadState") == "loaded"
                    and state.get("ActiveState") == "active"
-                   and definition["exact"] and exact_config and exact_runtime)
+                   and definition["exact"] and exact_config and runtime["exact"])
         reasons = list(definition["reasons"])
         if not exact_config:
             reasons.append("immutable config path or bytes differ")
-        if not exact_runtime:
+        if not runtime["exact"]:
             reasons.append("immutable runtime selector differs")
         if state.get("ActiveState") != "active":
             reasons.append("service is not active")
@@ -1158,13 +1181,7 @@ def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
                 "unit": state,
                 "definition": definition,
                 "config": config,
-                "runtime": {
-                    "desired": desired,
-                    "release": str(release),
-                    "expected_selector": expected_selector,
-                    "installed_selector": installed_selector,
-                    "exact": exact_runtime,
-                },
+                "runtime": runtime,
             },
             repair=None if healthy else repair,
         )
@@ -3248,6 +3265,11 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
     _require_root()
     desired, release, _task = _desired_runtime(paths)
     _verify_release_tree(paths, desired, release)
+    runtime = _runtime_selector_identity(paths, desired, release)
+    if not runtime["exact"]:
+        raise DoctorError(
+            "immutable runtime selector differs; repair runtime before plan_render"
+        )
     before = check_plan_render_worker(paths)
     config_source = release / "config/tgw-plan-render-local.json"
     unit_source = release / "systemd" / _PLAN_RENDER_UNIT

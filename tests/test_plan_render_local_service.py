@@ -150,3 +150,39 @@ def test_plan_render_repair_refuses_matching_config_symlink(
 
     with pytest.raises(doctor_cli.DoctorError, match="unsafe plan_render config"):
         doctor_cli.repair_plan_render_worker(paths)
+
+
+@pytest.mark.parametrize("selector_state", ["missing", "broken", "wrong"])
+def test_plan_render_repair_refuses_runtime_selector_before_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    selector_state: str,
+) -> None:
+    paths, release = _plan_render_check_fixture(tmp_path, monkeypatch)
+    current = paths.runtime_root / "current"
+    current.unlink()
+    if selector_state == "broken":
+        current.symlink_to(Path("releases") / ("a" * 40))
+        for path in sorted(release.rglob("*"), reverse=True):
+            path.unlink() if path.is_file() else path.rmdir()
+        release.rmdir()
+    elif selector_state == "wrong":
+        current.symlink_to(Path("releases") / ("b" * 40))
+    effects: list[str] = []
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli, "_verify_release_tree", lambda *_args: {})
+    monkeypatch.setattr(
+        doctor_cli,
+        "_atomic_bytes",
+        lambda *_args, **_kwargs: effects.append("write"),
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_run",
+        lambda *_args, **_kwargs: effects.append("service"),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="repair runtime before"):
+        doctor_cli.repair_plan_render_worker(paths)
+
+    assert effects == []
