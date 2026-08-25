@@ -1206,6 +1206,7 @@ def _verify_release_tree(
 def _launcher_links(paths: DoctorPaths) -> dict[Path, Path]:
     current = paths.runtime_root / "current/bin"
     return {
+        paths.local_bin / "tgw-todo": current / "tgw-todo-local-operator",
         paths.local_bin / "tgw-coding": current / "tgw-coding-local-operator",
         paths.local_bin / "tgw-coding-mcp": current / "tgw-coding-mcp",
         paths.local_bin / "tgw-doctor": current / "tgw-doctor",

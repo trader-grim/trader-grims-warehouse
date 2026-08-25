@@ -2,6 +2,24 @@
 set -eu
 
 case "${1-}" in
+    --help|-h|help|"")
+        cat <<'EOF'
+Usage: tgw COMMAND [ARGS]
+
+Local tgw-lib controls (ordinary tgw-coders users):
+  todo      list and mutate the local Todo store
+  coding    start and inspect local coding work
+  doctor    diagnose local TGW runtime state
+
+Run "tgw COMMAND --help" for command help. Other commands are explicitly
+delegated to /usr/local/libexec/tgw-production-client.
+EOF
+        exit 0
+        ;;
+    todo)
+        shift
+        exec /opt/TGW/tgw-lib/bin/tgw-todo "$@"
+        ;;
     coding)
         shift
         exec /opt/TGW/tgw-lib/bin/tgw-coding "$@"

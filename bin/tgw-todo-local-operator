@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+runtime=/opt/TGW/tgw-lib/coding-runtime/current
+python=/opt/TGW/.venvs/controller/bin/python3
+
+export PYTHONPATH="$runtime/src"
+exec "$python" -m tgw.todo_cli "$@"

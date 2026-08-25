@@ -50,6 +50,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     source_files = {
         "README": "source\n",
         "bin/tgw-coding-local-operator": "#!/bin/sh\nexit 0\n",
+        "bin/tgw-todo-local-operator": "#!/bin/sh\nexit 0\n",
         "bin/tgw-coding-mcp": "#!/bin/sh\nexit 0\n",
         "bin/tgw-doctor": "#!/bin/sh\nexit 0\n",
         "bin/tgw-operator": "#!/bin/sh\nexit 0\n",
@@ -92,6 +93,9 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     local_bin.mkdir(parents=True, exist_ok=True)
     (local_bin / "tgw-coding").symlink_to(
         runtime_root / "current/bin/tgw-coding-local-operator"
+    )
+    (local_bin / "tgw-todo").symlink_to(
+        runtime_root / "current/bin/tgw-todo-local-operator"
     )
     (local_bin / "tgw-coding-mcp").symlink_to(
         runtime_root / "current/bin/tgw-coding-mcp"
@@ -672,12 +676,14 @@ def test_blanket_repair_all_is_not_exposed(tmp_path: Path) -> None:
         doctor_cli.repair("all", paths)
 
 
-def test_operator_launcher_routes_only_local_coding_and_doctor() -> None:
+def test_operator_launcher_routes_only_local_todo_coding_and_doctor() -> None:
     root = Path(__file__).resolve().parents[1]
     launcher = (root / "bin/tgw-operator").read_text(encoding="utf-8")
 
     assert "coding)" in launcher
     assert "doctor)" in launcher
+    assert "todo)" in launcher
+    assert "/opt/TGW/tgw-lib/bin/tgw-todo" in launcher
     assert "/opt/TGW/tgw-lib/bin/tgw-coding" in launcher
     assert "/opt/TGW/tgw-lib/bin/tgw-doctor" in launcher
     assert "exec /usr/local/libexec/tgw-production-client" in launcher
