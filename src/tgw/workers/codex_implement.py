@@ -384,44 +384,69 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
     # Keep ephemeral auth and result files inside the isolated request worktree
     # rather than the host-wide /tmp namespace.  The directory is removed before
     # the runner evaluates Git state or emits a workflow outcome.
-    with tempfile.TemporaryDirectory(prefix=".tgw-codex-implement-", dir=cwd) as temporary:
-        temp = Path(temporary)
-        schema_path, output_path = temp / "schema.json", temp / "result.json"
-        codex_home = temp / "codex-home"
-        codex_home.mkdir(mode=0o700)
-        source_auth = _codex_auth_path()
-        if not source_auth.is_file():
-            raise HardFailure("dedicated Codex authentication is unavailable")
-        destination_auth = codex_home / "auth.json"
-        shutil.copyfile(source_auth, destination_auth)
-        destination_auth.chmod(0o600)
-        _write_isolated_config(codex_home)
-        schema_path.write_text(json.dumps(_FINAL_SCHEMA, sort_keys=True), encoding="utf-8")
-        command = [
-            _codex_binary(), "--ask-for-approval", "never",
-            "--sandbox", "workspace-write", "exec", "--ephemeral",
-            "-C", str(cwd),
-            "--output-schema", str(schema_path), "-o", str(output_path), "-",
-        ]
-        completed = invoke(
-            command, cwd=cwd, input=_prompt(task), text=True,
-            capture_output=True, check=False,
-            env={**os.environ, "CODEX_HOME": str(codex_home)},
-        )
-        if completed.returncode:
-            return {
-                "outcome": "failed", "established_conditions": [],
-                "artifacts": [{"kind": "codex_failure", "detail": completed.stderr[-1000:]}],
-            }
-        try:
-            report = json.loads(output_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            return {
-                "outcome": "failed", "established_conditions": [],
-                "artifacts": [{"kind": "codex_failure", "detail": f"invalid final report: {exc}"}],
-            }
+    early_result: dict[str, Any] | None = None
+    report: Any = None
+    try:
+        with tempfile.TemporaryDirectory(prefix=".tgw-codex-implement-", dir=cwd) as temporary:
+            temp = Path(temporary)
+            schema_path, output_path = temp / "schema.json", temp / "result.json"
+            codex_home = temp / "codex-home"
+            codex_home.mkdir(mode=0o700)
+            source_auth = _codex_auth_path()
+            if not source_auth.is_file():
+                raise HardFailure("dedicated Codex authentication is unavailable")
+            destination_auth = codex_home / "auth.json"
+            shutil.copyfile(source_auth, destination_auth)
+            destination_auth.chmod(0o600)
+            _write_isolated_config(codex_home)
+            schema_path.write_text(json.dumps(_FINAL_SCHEMA, sort_keys=True), encoding="utf-8")
+            command = [
+                _codex_binary(), "--ask-for-approval", "never",
+                "--sandbox", "workspace-write", "exec", "--ephemeral",
+                "-C", str(cwd),
+                "--output-schema", str(schema_path), "-o", str(output_path), "-",
+            ]
+            completed = invoke(
+                command, cwd=cwd, input=_prompt(task), text=True,
+                capture_output=True, check=False,
+                env={**os.environ, "CODEX_HOME": str(codex_home)},
+            )
+            if completed.returncode:
+                early_result = {
+                    "outcome": "failed", "established_conditions": [],
+                    "artifacts": [
+                        {"kind": "codex_failure", "detail": completed.stderr[-1000:]}
+                    ],
+                }
+            else:
+                try:
+                    report = json.loads(output_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    early_result = {
+                        "outcome": "failed", "established_conditions": [],
+                        "artifacts": [
+                            {
+                                "kind": "codex_failure",
+                                "detail": f"invalid final report: {exc}",
+                            }
+                        ],
+                    }
+    finally:
+        cleaned_caches.update(_purge_transient_caches(cwd))
 
-    cleaned_caches.update(_purge_transient_caches(cwd))
+    cleanup_artifact = (
+        {
+            "kind": "transient_cache_cleanup",
+            "paths": sorted(cleaned_caches),
+            "detail": "removed generated caches without touching ignored work",
+        }
+        if cleaned_caches
+        else None
+    )
+    if early_result is not None:
+        if cleanup_artifact is not None:
+            early_result["artifacts"].append(cleanup_artifact)
+        return early_result
     after_head = _git(cwd, "rev-parse", "HEAD")
     if after_head != before_head:
         return {
@@ -448,14 +473,8 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
         {"kind": "tests_reported", "tests": report["tests"]},
         {"kind": "git_diff", "detail": diff_stat},
     ]
-    if cleaned_caches:
-        artifacts.append(
-            {
-                "kind": "transient_cache_cleanup",
-                "paths": sorted(cleaned_caches),
-                "detail": "removed generated caches without touching ignored work",
-            }
-        )
+    if cleanup_artifact is not None:
+        artifacts.append(cleanup_artifact)
     if report["status"] != "implemented" or not changed:
         return {"outcome": "partial", "established_conditions": [], "artifacts": artifacts}
     candidate, tree, recovery = _close_candidate(

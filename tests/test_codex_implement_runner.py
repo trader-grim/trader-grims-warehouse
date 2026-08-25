@@ -339,6 +339,63 @@ def test_runner_still_refuses_noncache_ignored_work_with_generated_caches(
     assert (repo / "private-cache/unique").read_text(encoding="utf-8") == "preserve\n"
 
 
+def test_runner_removes_generated_cache_after_model_failure(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    (repo / ".gitignore").write_text(".pytest_cache/\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "ignore pytest cache"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+
+    def create_cache(path: Path) -> None:
+        (path / ".pytest_cache").mkdir()
+        (path / ".pytest_cache/state").write_text("generated\n", encoding="utf-8")
+
+    result = codex_implement.run(
+        _job(),
+        repo,
+        invoke=_invoke(
+            {"status": "blocked", "summary": "failed", "tests": []},
+            edit=create_cache,
+            returncode=1,
+        ),
+    )
+
+    assert result["outcome"] == "failed"
+    assert not (repo / ".pytest_cache").exists()
+    assert result["artifacts"][-1]["kind"] == "transient_cache_cleanup"
+
+
+def test_runner_removes_generated_cache_when_model_invocation_raises(
+    tmp_path, monkeypatch
+):
+    repo = _repo(tmp_path)
+    (repo / ".gitignore").write_text(".ruff_cache/\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "ignore ruff cache"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+
+    def raise_after_cache(_command, *, cwd, **_kwargs):
+        path = Path(cwd) / ".ruff_cache"
+        path.mkdir()
+        (path / "state").write_text("generated\n", encoding="utf-8")
+        raise OSError("model invocation failed")
+
+    with pytest.raises(OSError, match="model invocation failed"):
+        codex_implement.run(_job(), repo, invoke=raise_after_cache)
+
+    assert not (repo / ".ruff_cache").exists()
+
+
 def test_runner_refuses_a_concurrent_worktree_lease(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
