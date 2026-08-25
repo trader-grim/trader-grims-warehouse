@@ -2473,13 +2473,27 @@ def _open_relative_directory(root_descriptor: int, relative: Path) -> int:
 
 def _verify_bound_directory(path: Path, descriptor: int) -> None:
     bound = os.fstat(descriptor)
+    if not path.is_absolute():
+        raise DoctorError(f"bound shared directory path is not absolute: {path}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    root_descriptor = -1
+    visible_descriptor = -1
     try:
-        visible = path.stat(follow_symlinks=False)
+        root_descriptor = os.open(path.anchor, flags)
+        visible_descriptor = _open_relative_directory(
+            root_descriptor, path.relative_to(path.anchor)
+        )
+        visible = os.fstat(visible_descriptor)
     except OSError as exc:
         raise DoctorError(f"bound shared directory is no longer visible: {path}") from exc
-    if not stat.S_ISDIR(visible.st_mode) or (visible.st_dev, visible.st_ino) != (
-        bound.st_dev,
-        bound.st_ino,
+    finally:
+        if visible_descriptor >= 0:
+            os.close(visible_descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+    if (
+        not stat.S_ISDIR(visible.st_mode)
+        or (visible.st_dev, visible.st_ino) != (bound.st_dev, bound.st_ino)
     ):
         raise DoctorError(f"bound shared directory changed before repair: {path}")
 

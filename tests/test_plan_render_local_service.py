@@ -308,6 +308,40 @@ def test_plan_render_storage_diagnosis_rejects_symlinked_parent(
     assert result["exact"] is False
 
 
+def test_plan_render_storage_diagnosis_rejects_same_target_parent_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "parent"
+    leaf = parent / "plan-render"
+    leaf.mkdir(parents=True)
+    leaf.chmod(0o2770)
+    moved = tmp_path / "moved"
+    original_open = doctor_cli._open_relative_directory
+    calls = 0
+
+    def race(root_descriptor: int, relative: Path) -> int:
+        nonlocal calls
+        calls += 1
+        descriptor = original_open(root_descriptor, relative)
+        if calls == 1:
+            parent.rename(moved)
+            parent.symlink_to(moved, target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(doctor_cli, "_open_relative_directory", race)
+
+    result = doctor_cli._directory_identity(
+        leaf,
+        uid=os.getuid(),
+        gid=os.getgid(),
+        mode=0o2770,
+    )
+
+    assert calls == 2
+    assert result["kind"] == "unsafe"
+    assert result["exact"] is False
+
+
 def test_plan_render_repair_receipts_storage_before_service(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
