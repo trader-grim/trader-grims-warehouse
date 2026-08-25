@@ -761,6 +761,7 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
     repository = paths.repository.resolve()
     root = paths.worktrees.resolve()
     worktrees: list[dict[str, Any]] = []
+    from tgw.development.partial_resume import classify as classify_coding
     for row in rows:
         location = Path(str(row.get("worktree", ""))).resolve()
         head = str(row.get("HEAD", ""))
@@ -838,6 +839,10 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
                 "merged_into_canonical": merged_into_canonical,
                 "preservation_required": preservation_required,
                 "errors": errors,
+                "coding_state": (
+                    classify_coding(location) if exists and inside_root
+                    and location.name.startswith("todo-") else None
+                ),
             }
         )
 
@@ -5170,6 +5175,10 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="operation")
     sub.add_parser("check", help="run read-only diagnosis (default)")
     sub.add_parser("inventory", help="inventory linked and active-path remnants read-only")
+    resume_parser = sub.add_parser(
+        "coding-resume", help="resume one exact local RESUMABLE_PARTIAL Todo"
+    )
+    resume_parser.add_argument("todo_id", type=int)
     repair_parser = sub.add_parser("repair", help="restore an exact declared local state")
     repair_parser.add_argument("target", choices=[*_REPAIRS])
     repair_parser.add_argument("--json", action="store_true", dest="repair_json_output")
@@ -5186,6 +5195,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.operation == "inventory":
             print(json.dumps(inventory(), indent=2, sort_keys=True))
             return 0
+        if args.operation == "coding-resume":
+            from tgw.coding_cli import start
+            result = start(args.todo_id)
+            print(json.dumps(result, indent=2, sort_keys=True, default=str))
+            return 0 if result.get("ok", True) else 1
         result = diagnose()
         if args.json_output:
             print(json.dumps(result, indent=2, sort_keys=True))

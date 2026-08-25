@@ -118,6 +118,7 @@ _RECEIPT_PATHS: dict[str, str] = {
 }
 
 CONTROLLER_PYTHON = "/opt/TGW/.venvs/controller/bin/python"
+_ATTEMPT_EVIDENCE_ROOTS = (".tgw-coding-history/", ".tgw-coding-preservation/")
 
 
 def _git(
@@ -168,7 +169,8 @@ def _git_is_clean(worktree: Path) -> Optional[bool]:
     if code != 0:
         return None
     receipt_names = set(_RECEIPT_PATHS.values())
-    changes = [line for line in out.splitlines() if line[3:] not in receipt_names]
+    changes = [line for line in out.splitlines() if line[3:] not in receipt_names
+               and not line[3:].startswith(_ATTEMPT_EVIDENCE_ROOTS)]
     return not changes
 
 
@@ -178,7 +180,8 @@ def _git_source_fingerprint(worktree: Path) -> str:
     # Exclude receipts from tracked changes too: an operator may have added a
     # receipt path to Git in an old worktree, and that must not make evidence
     # alter the source generation it attests.
-    pathspecs = (".", *(f":(exclude){name}" for name in sorted(receipt_names)))
+    pathspecs = (".", *(f":(exclude){name}" for name in sorted(receipt_names)),
+                 ":(exclude).tgw-coding-history", ":(exclude).tgw-coding-preservation")
     _, tracked_diff, _ = _git(worktree, "diff", "--binary", "HEAD", "--", *pathspecs)
     _, untracked, _ = _git(worktree, "ls-files", "--others", "--exclude-standard")
     _, ignored, _ = _git(
@@ -190,7 +193,7 @@ def _git_source_fingerprint(worktree: Path) -> str:
     )
     untracked_content: list[str] = []
     for relative in (*untracked.splitlines(), *ignored.splitlines()):
-        if relative in receipt_names:
+        if relative in receipt_names or relative.startswith(_ATTEMPT_EVIDENCE_ROOTS):
             continue
         candidate = worktree / relative
         if candidate.is_file():

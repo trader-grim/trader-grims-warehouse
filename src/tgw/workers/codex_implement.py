@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
+from tgw.development.partial_resume import HISTORY, PRESERVATION, classify
 from tgw.development.worktree_lease import exclusive_worktree_lease as _exclusive_worktree_lease
 from tgw.errors import HardFailure
 
@@ -121,7 +122,15 @@ def _codex_auth_path() -> Path:
     return Path.home() / ".codex" / "auth.json"
 
 
-def _prompt(task: dict[str, Any]) -> str:
+def _prompt(task: dict[str, Any], continuation: dict[str, Any] | None = None) -> str:
+    continuation_brief = ""
+    if continuation:
+        continuation_brief = f"""
+This is an exact bounded continuation of a preserved partial attempt.
+Preserve every current source byte. Continue from attempt {continuation['resume_of']}
+with source fingerprint {continuation['resume_fingerprint']}. Do not restart,
+clean, reset, stash, or replace the existing implementation.
+"""
     return f"""You are the Codex implementation treatment for TGW Todo #{task['todo_id']}.
 
 Repository AGENTS.md is your actor contract. CLAUDE.md does not govern Codex.
@@ -129,6 +138,7 @@ Work only in the current request-bound worktree. Do not commit, deploy, change
 configuration or secrets, contact production, access satellite machines, import
 memory, or create workflow receipt files. Implement only this bounded task and
 run proportionate offline tests:
+{continuation_brief}
 
 {task['body']}
 
@@ -151,6 +161,15 @@ _RECEIPT_FILES = frozenset(
 )
 
 _TRANSIENT_CACHE_ROOTS = frozenset({".pytest_cache", ".ruff_cache"})
+
+
+def _source_pathspec() -> tuple[str, ...]:
+    return (
+        ".",
+        *(f":(exclude){name}" for name in sorted(_RECEIPT_FILES)),
+        f":(exclude){HISTORY}",
+        f":(exclude){PRESERVATION}",
+    )
 
 
 def _ignored_paths(cwd: Path) -> tuple[str, ...]:
@@ -227,9 +246,10 @@ def _source_status(cwd: Path) -> tuple[str, ...]:
         "--untracked-files=all",
         "--ignored=matching",
     )
-    return tuple(
-        line for line in status.splitlines() if line[3:] not in _RECEIPT_FILES
-    )
+    return tuple(line for line in status.splitlines()
+                 if line[3:] not in _RECEIPT_FILES
+                 and not line[3:].startswith(HISTORY + "/")
+                 and not line[3:].startswith(PRESERVATION + "/"))
 
 
 def _reset_index(cwd: Path) -> None:
@@ -255,7 +275,7 @@ def _preserve_late_source(cwd: Path, *, todo_id: int, candidate: str) -> str | N
         ["git", "rev-parse", "--verify", "refs/stash"],
         cwd=cwd, check=False, text=True, capture_output=True,
     ).stdout.strip()
-    pathspec = (".", *(f":(exclude){name}" for name in sorted(_RECEIPT_FILES)))
+    pathspec = _source_pathspec()
     _git(
         cwd,
         "stash",
@@ -276,22 +296,28 @@ def _close_candidate(
     cwd: Path, *, todo_id: int, baseline: str
 ) -> tuple[str, str, str | None]:
     """Commit only the implementation bytes and return the exact commit/tree."""
-    pathspec = (".", *(f":(exclude){name}" for name in sorted(_RECEIPT_FILES)))
+    pathspec = _source_pathspec()
     try:
         _git(cwd, "add", "-A", "--", *pathspec)
-        staged = _git(cwd, "diff", "--cached", "--name-only", "--")
+        staged = _git(cwd, "diff", "--cached", "--name-only", "--", *pathspec)
         if not staged:
             raise HardFailure("Codex implementation produced no source bytes to close")
         # The lease fences cooperating TGW actors. These final checks also keep
         # a non-cooperating writer's later bytes out of the staged candidate.
-        unstaged = _git(cwd, "diff", "--name-only", "--")
+        unstaged = _git(cwd, "diff", "--name-only", "--", *pathspec)
         untracked = tuple(
             item
             for item in _git(cwd, "ls-files", "--others", "--exclude-standard").splitlines()
             if item not in _RECEIPT_FILES
+            and not item.startswith(HISTORY + "/")
+            and not item.startswith(PRESERVATION + "/")
         )
-        ignored = _git(
-            cwd, "ls-files", "--others", "--ignored", "--exclude-standard"
+        ignored = "\n".join(
+            item for item in _git(
+                cwd, "ls-files", "--others", "--ignored", "--exclude-standard"
+            ).splitlines()
+            if not item.startswith(HISTORY + "/")
+            and not item.startswith(PRESERVATION + "/")
         )
         if unstaged or untracked or ignored:
             raise HardFailure("Codex implementation source changed while closing its candidate")
@@ -374,13 +400,29 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
     task = _validated_task(job)
     before_head = _git(cwd, "rev-parse", "HEAD")
     cleaned_caches = set(_purge_transient_caches(cwd))
+    continuation = None
     if _source_status(cwd):
-        recovered = _recover_existing_candidate(
-            job, cwd, todo_id=task["todo_id"]
-        )
-        if recovered is not None:
-            return recovered
-        raise HardFailure("Codex implementation requires a source-clean worktree")
+        binding = job.get("plan_binding")
+        expected = {
+            "job_id": None, "attempt_count": None,
+            "todo_id": job.get("todo_id"),
+            "plan_commit": binding.get("plan_commit") if isinstance(binding, dict) else None,
+            "solution_hash": binding.get("solution_hash") if isinstance(binding, dict) else None,
+            "source_commit": binding.get("source_commit") if isinstance(binding, dict) else None,
+            "actor": job.get("todo_agent"), "worktree": str(cwd.resolve()),
+            "treatment_id": "codex-implement", "treatment_version": str(job.get("treatment_version", "1")),
+        }
+        state = classify(cwd, expected)
+        if (not state["resumable"] or job.get("resume_of") != state.get("resume_of")
+                or job.get("resume_fingerprint") != state.get("fingerprint")):
+            recovered = _recover_existing_candidate(job, cwd, todo_id=task["todo_id"])
+            if recovered is not None:
+                return recovered
+            raise HardFailure(
+                "Codex implementation requires a source-clean worktree unless the dirty "
+                "resume binding and fingerprint are exact"
+            )
+        continuation = {"resume_of": state["resume_of"], "resume_fingerprint": state["fingerprint"]}
     # Keep ephemeral auth and result files inside the isolated request worktree
     # rather than the host-wide /tmp namespace.  The directory is removed before
     # the runner evaluates Git state or emits a workflow outcome.
@@ -407,7 +449,7 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
                 "--output-schema", str(schema_path), "-o", str(output_path), "-",
             ]
             completed = invoke(
-                command, cwd=cwd, input=_prompt(task), text=True,
+                command, cwd=cwd, input=_prompt(task, continuation), text=True,
                 capture_output=True, check=False,
                 env={**os.environ, "CODEX_HOME": str(codex_home)},
             )

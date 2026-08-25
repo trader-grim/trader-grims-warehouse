@@ -30,10 +30,12 @@ from tgw.development.local_workflow import (
     require_coder_account,
     status_command,
 )
+from tgw.development.partial_resume import classify, preservation_manifest
 from tgw.development.plan_todo_bridge import bind_leaf
 from tgw.development.plan_todo_source import PlanTodoSourceError
 from tgw.development.plan_todo_source import resolve as resolve_plan_todo
 from tgw.development.treatments import CODEX_IMPLEMENT, CONTROLLER_VERIFY
+from tgw.development.worktree_lease import exclusive_worktree_lease
 from tgw.pp_workflow_reconcile import PP_REF
 from tgw.pp_workflow_reconcile import reconcile as reconcile_pp_workflow
 from tgw.queue import state_machine
@@ -243,11 +245,33 @@ def start(
         )
     )
     coding = config["coding"]
+    worktree = Path(binding["binding"]["worktree"])
+    expected_attempt = {
+        "todo_id": todo_id, "plan_commit": binding["binding"]["plan_commit"],
+        "solution_hash": binding["binding"]["solution_hash"],
+        "source_commit": binding["binding"]["source_commit"],
+        "actor": item.get("agent") or "codex", "worktree": str(worktree),
+        "treatment_id": "codex-implement", "treatment_version": "1",
+    }
+    with exclusive_worktree_lease(worktree):
+        resume_state = classify(worktree, expected_attempt)
+        resume_bindings: dict[int, dict[str, str]] = {}
+        if resume_state["state"] == "RESUMABLE_PARTIAL":
+            resume_bindings[todo_id] = {
+                "resume_of": resume_state["resume_of"],
+                "resume_fingerprint": resume_state["fingerprint"],
+            }
+        elif resume_state["state"] not in {"ABANDONED_CLEAN", "CLOSED_CANDIDATE"}:
+            manifest = preservation_manifest(worktree, resume_state, expected_attempt)
+            raise CodingCLIError(
+                f"Todo {todo_id} is {resume_state['state']}; preserved at {manifest} and not dispatched"
+            )
     result = tick(
         ForemanConfig(
             coding_config=dict(coding),
             treatments=(CODEX_IMPLEMENT, CONTROLLER_VERIFY),
             receipt_backed_conditions=frozenset({"tested", "linted"}),
+            resume_bindings=resume_bindings,
         ),
         todo_ids={todo_id},
     )
@@ -272,6 +296,7 @@ def start(
         },
         "foreman": dataclasses.asdict(result),
         "jobs": jobs,
+        "coding_state": classify(Path(worktree), expected_attempt),
         "session": {
             "cwd": worktree,
             "codex": ["codex", "-C", worktree],
@@ -297,6 +322,17 @@ def status(
     local["jobs"] = _jobs(todo_id)
     if todo_id is not None:
         local["todo_id"] = todo_id
+        item = todo.todo_get(todo_id)
+        if item and isinstance(item.get("status_note"), str):
+            from tgw.development.plan_binding import parse_plan_binding
+            binding = parse_plan_binding(item["status_note"], todo_id=todo_id)
+            if binding:
+                local["coding_state"] = classify(Path(binding["worktree"]), {
+                    "todo_id": todo_id, "plan_commit": binding["plan_commit"],
+                    "solution_hash": binding["solution_hash"], "source_commit": binding["source_commit"],
+                    "actor": item.get("agent") or "codex", "worktree": binding["worktree"],
+                    "treatment_id": "codex-implement", "treatment_version": "1",
+                })
     local["database"] = config["postgres_dsn"]
     return local
 
@@ -319,6 +355,16 @@ def job_log(
     job = state_machine.get_job(job_id)
     if job is None or job.get("queue_name") not in _LOCAL_QUEUES:
         raise CodingCLIError(f"local coding job {job_id} does not exist")
+    payload = job.get("payload_json") or job.get("payload")
+    if isinstance(payload, dict) and payload.get("queue_name", job.get("queue_name")) == "codex-implement":
+        binding = payload.get("plan_binding")
+        if isinstance(binding, dict) and isinstance(payload.get("worktree"), str):
+            job["coding_state"] = classify(Path(payload["worktree"]), {
+                "todo_id": payload.get("todo_id"), "plan_commit": binding.get("plan_commit"),
+                "solution_hash": binding.get("solution_hash"), "source_commit": binding.get("source_commit"),
+                "actor": payload.get("todo_agent"), "worktree": payload["worktree"],
+                "treatment_id": "codex-implement", "treatment_version": str(payload.get("treatment_version", "1")),
+            })
     return job
 
 

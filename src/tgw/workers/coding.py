@@ -16,6 +16,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from tgw.development.partial_resume import (
+    append_attempt,
+    classify,
+    make_attempt,
+    preservation_manifest,
+)
 from tgw.development.plan_binding import MalformedPlanBindingError, validate_plan_binding
 from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.workflow_kernel.contracts import (
@@ -172,6 +178,8 @@ def receipt_path_for_treatment(worktree: Path, treatment_id: str) -> Path:
 
 def _write_receipt(path: Path, receipt: dict[str, Any]) -> None:
     """Atomically persist a worktree receipt for the snapshot reader."""
+    if path.exists() and receipt.get("outcome") != OUTCOME_SATISFIED:
+        return
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(temporary, path)
@@ -358,6 +366,44 @@ class CodingWorker(QueueWorker):
         worktree = self._validated_worktree(payload)
         plan_binding = self._validated_plan_binding(payload, worktree)
 
+        attempt_binding = None
+        predecessor = None
+        if treatment_id == "codex-implement" and payload.get("todo_id") is not None:
+            payload.setdefault("job_id", str(job.get("job_id") or ""))
+            payload.setdefault("attempt_count", job.get("attempt_count"))
+            if not isinstance(plan_binding, dict):
+                raise HardFailure("Codex implementation attempt requires an exact Plan binding")
+            source_commit = plan_binding["source_commit"]
+            source_tree = subprocess.run(
+                ["git", "rev-parse", f"{source_commit}^{{tree}}"], cwd=worktree,
+                check=True, text=True, capture_output=True,
+            ).stdout.strip()
+            attempt_binding = {
+                "job_id": str(job.get("job_id") or payload.get("job_id") or ""),
+                "attempt_count": job.get("attempt_count", payload.get("attempt_count")),
+                "todo_id": payload.get("todo_id"), "plan_commit": plan_binding["plan_commit"],
+                "solution_hash": plan_binding["solution_hash"], "source_commit": source_commit,
+                "source_tree": source_tree, "actor": payload.get("todo_agent"),
+                "worktree": str(worktree), "treatment_id": treatment_id,
+                "treatment_version": str(payload.get("treatment_version", "1")),
+            }
+            lineage_binding = {**attempt_binding, "job_id": None, "attempt_count": None}
+            state = classify(worktree, lineage_binding)
+            if state["state"] == "RESUMABLE_PARTIAL":
+                if (payload.get("resume_of") != state.get("resume_of")
+                        or payload.get("resume_fingerprint") != state.get("fingerprint")):
+                    preservation_manifest(worktree, state, attempt_binding)
+                    raise HardFailure("dirty Codex worktree is resumable only with its exact attempt hash and fingerprint")
+                predecessor = state["predecessor"]
+            elif state["state"] == "ABANDONED_CLEAN":
+                if payload.get("resume_of") or payload.get("resume_fingerprint"):
+                    raise HardFailure("clean initial Codex attempt cannot carry resume authority")
+            elif state["state"] == "CLOSED_CANDIDATE":
+                pass
+            else:
+                preservation_manifest(worktree, state, attempt_binding)
+                raise HardFailure(f"Codex implementation refuses {state['state']} worktree")
+
         try:
             launcher_result = self._launcher(treatment_id, payload, worktree)
             outcome, established, artifacts = self._validated_launcher_result(
@@ -380,6 +426,10 @@ class CodingWorker(QueueWorker):
                 "receipt_schema_id": "receipt/tgw-development/v1",
                 **({"plan_binding": plan_binding} if plan_binding else {}),
             }
+            if attempt_binding is not None:
+                append_attempt(worktree, make_attempt(attempt_binding, worktree,
+                    outcome=OUTCOME_FAILED, predecessor=predecessor,
+                    artifacts=receipt["artifacts"]))
             _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
             raise HardFailure(f"coding treatment mechanical failure: {exc}") from exc
         receipt = {
@@ -395,6 +445,9 @@ class CodingWorker(QueueWorker):
             "receipt_schema_id": "receipt/tgw-development/v1",
             **({"plan_binding": plan_binding} if plan_binding else {}),
         }
+        if attempt_binding is not None:
+            append_attempt(worktree, make_attempt(attempt_binding, worktree,
+                outcome=outcome, predecessor=predecessor, artifacts=artifacts))
         _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
         if outcome != OUTCOME_SATISFIED:
             # A negative launcher result is a terminal job outcome, not a
@@ -408,7 +461,11 @@ def execute_treatment(config: dict[str, Any], payload: dict[str, Any]) -> dict[s
     treatment_id = payload.get("treatment_id")
     if not isinstance(treatment_id, str) or treatment_id not in CODING_TREATMENTS:
         raise HardFailure("coding job payload has no registered treatment")
-    return CodingWorker(treatment_id, config).handle({"payload_json": payload})
+    return CodingWorker(treatment_id, config).handle({
+        "job_id": payload.get("job_id") or payload.get("graph_id"),
+        "attempt_count": payload.get("attempt_count", 1),
+        "payload_json": payload,
+    })
 
 
 def main() -> int:

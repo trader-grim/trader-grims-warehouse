@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from tgw.development.coding_snapshot import build_coding_snapshot
+from tgw.development.partial_resume import classify, preservation_manifest
 from tgw.development.plan_binding import (
     MalformedPlanBindingError,
     parse_plan_binding,
@@ -82,6 +83,9 @@ class ForemanConfig:
     # The direct local lane consumes source-bound controller receipts instead
     # of rerunning project commands inside each short Foreman timer tick.
     receipt_backed_conditions: frozenset[str] = frozenset()
+    # Populated only by the owner-commanded CLI start path, under the worktree
+    # lease. Timer ticks retain the empty default and suppress every dirty tree.
+    resume_bindings: dict[int, dict[str, str]] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +452,23 @@ def tick(
                         skipped_active=result.skipped_active + 1,
                     )
                     continue
+                if cfg.coding_config:
+                    expected_attempt = {
+                        "todo_id": todo.todo_id, "plan_commit": binding["plan_commit"],
+                        "solution_hash": binding["solution_hash"], "source_commit": binding["source_commit"],
+                        "actor": todo.agent, "worktree": str(worktree),
+                        "treatment_id": "codex-implement", "treatment_version": "1",
+                    }
+                    resume_state = classify(worktree, expected_attempt)
+                    if resume_state["state"] not in {"ABANDONED_CLEAN", "CLOSED_CANDIDATE"}:
+                        authority = cfg.resume_bindings.get(todo.todo_id)
+                        exact = (resume_state["state"] == "RESUMABLE_PARTIAL" and authority
+                                 and authority.get("resume_of") == resume_state.get("resume_of")
+                                 and authority.get("resume_fingerprint") == resume_state.get("fingerprint"))
+                        if not exact:
+                            preservation_manifest(worktree, resume_state, expected_attempt)
+                            result = replace(result, skipped_terminal=result.skipped_terminal + 1)
+                            continue
                 implementation_baseline = binding["source_commit"]
                 if cfg.fixture_implementation_baseline_commit is not None:
                     if not isinstance(binding, dict) or not binding.get("fixture_run_id"):
@@ -580,6 +601,9 @@ def tick(
                         },
                     }
                 )
+                authority = cfg.resume_bindings.get(chosen.todo.todo_id)
+                if authority:
+                    payload_extra.update(authority)
             dispatch_lease = (
                 exclusive_worktree_lease(Path(chosen.todo.worktree))
                 if cfg.coding_config
