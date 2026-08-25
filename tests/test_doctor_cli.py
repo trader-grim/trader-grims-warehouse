@@ -147,6 +147,13 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     launcher.chmod(0o555)
     publisher = local_bin / "tgw-context-publish"
     publisher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    context_runtime_source = root / "context-runtime/src"
+    context_module = context_runtime_source / "tgw/current_context_snapshot.py"
+    context_module.parent.mkdir(parents=True)
+    context_module.write_text("# fixture\n", encoding="utf-8")
+    context_module.chmod(0o444)
+    context_module.parent.chmod(0o555)
+    context_runtime_source.chmod(0o555)
     catalog_path = root / "config/tgw-context-debian-v1.json"
     _write_json(catalog_path, {"schema": "fixture", "actors": {"codex": {}}})
     paths = doctor_cli.DoctorPaths(
@@ -161,6 +168,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         context_cursor=cursor_path,
         context_launcher=launcher,
         context_publisher=publisher,
+        context_runtime_source=context_runtime_source,
         context_catalog=catalog_path,
         receipts=root / "doctor-receipts",
         trusted_release_owners=(os.getuid(),),
@@ -214,9 +222,11 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(
     cursor["source_tree"] = "c" * 40
     _write_json(paths.context_cursor, cursor)
     original_run = doctor_cli._run
+    publisher_env = {}
 
     def run(command, **kwargs):
         if command[0] == str(paths.context_publisher):
+            publisher_env.update(kwargs["env"])
             task_path = Path(command[command.index("--task") + 1])
             cursor_path = Path(command[command.index("--cursor") + 1])
             output_path = Path(command[command.index("--output") + 1])
@@ -237,6 +247,12 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(
     assert result["changed"] is True
     assert repaired["source_commit"] == head
     assert repaired["source_tree"] == tree
+    assert publisher_env == {
+        "LANG": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": str(paths.context_runtime_source.resolve()),
+    }
     receipt = json.loads(Path(result["receipt"]).read_text())
     assert receipt["operation"] == "context"
     assert receipt["receipt_sha256"].startswith("sha256:")
@@ -265,6 +281,18 @@ def test_context_publisher_failure_leaves_live_inputs_unchanged_and_is_receipted
     assert paths.context_cursor.read_bytes() == cursor_before
     assert paths.context_snapshot.read_bytes() == snapshot_before
     assert len(list(paths.receipts.glob("*context-failed.json"))) == 1
+
+
+def test_context_repair_refuses_writable_context_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    paths.context_runtime_source.chmod(0o777)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+
+    with pytest.raises(doctor_cli.DoctorError, match="not trusted-owner immutable"):
+        doctor_cli.repair_context(paths)
 
 
 def test_context_repair_detects_snapshot_race_and_restores_both_records(

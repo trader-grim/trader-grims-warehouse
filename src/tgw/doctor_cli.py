@@ -117,6 +117,7 @@ class DoctorPaths:
     context_cursor: Path = Path("/opt/TGW/tgw-lib/context-input/plan-cycle-cursor.json")
     context_launcher: Path = Path("/opt/TGW/tgw-lib/bin/tgw-context-mcp")
     context_publisher: Path = Path("/opt/TGW/tgw-lib/bin/tgw-context-publish")
+    context_runtime_source: Path = Path("/opt/TGW/tgw-lib/context-runtime/src")
     context_catalog: Path = Path("/opt/TGW/tgw-lib/config/tgw-context-debian-v1.json")
     receipts: Path = Path("/opt/TGW/tgw-lib/doctor-receipts")
     trusted_release_owners: tuple[int, ...] = (0, 65534)
@@ -158,10 +159,12 @@ def _run(
     *,
     cwd: Path | None = None,
     timeout: int = 15,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(command),
         cwd=cwd,
+        env={**os.environ, **env} if env is not None else None,
         check=False,
         capture_output=True,
         text=True,
@@ -1317,6 +1320,33 @@ def _require_trusted_root_program(
         raise DoctorError(f"repair program is not trusted-owner immutable: {resolved}")
 
 
+def _require_trusted_context_runtime(paths: DoctorPaths) -> Path:
+    source = paths.context_runtime_source.resolve(strict=True)
+    module = source / "tgw/current_context_snapshot.py"
+    for path, expected_kind in (
+        (source, "directory"),
+        (source / "tgw", "directory"),
+        (module, "file"),
+    ):
+        try:
+            observed = path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise DoctorError(f"Context runtime path is unavailable: {path}") from exc
+        correct_kind = (
+            stat.S_ISDIR(observed.st_mode)
+            if expected_kind == "directory"
+            else stat.S_ISREG(observed.st_mode)
+        )
+        if (
+            path.is_symlink()
+            or not correct_kind
+            or observed.st_uid not in paths.trusted_release_owners
+            or observed.st_mode & 0o022
+        ):
+            raise DoctorError(f"Context runtime path is not trusted-owner immutable: {path}")
+    return source
+
+
 @contextmanager
 def _repair_lock(paths: DoctorPaths):
     paths.receipts.mkdir(parents=True, exist_ok=True)
@@ -1372,6 +1402,7 @@ def _receipt(paths: DoctorPaths, operation: str, before: Any, after: Any) -> str
 def repair_context(paths: DoctorPaths) -> dict[str, Any]:
     _require_root()
     _require_trusted_root_program(paths.context_publisher)
+    context_runtime = _require_trusted_context_runtime(paths)
     cursor_raw = paths.context_cursor.read_bytes()
     snapshot_raw = paths.context_snapshot.read_bytes()
     cursor_mode = paths.context_cursor.stat().st_mode & 0o777
@@ -1427,7 +1458,13 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
                 str(staged_cursor),
                 "--output",
                 str(staged_snapshot),
-            ]
+            ],
+            env={
+                "LANG": "C.UTF-8",
+                "PATH": "/usr/bin:/bin",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPATH": str(context_runtime),
+            },
         )
         if result.returncode:
             raise DoctorError(result.stderr.strip() or "context publisher failed")
