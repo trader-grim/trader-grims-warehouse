@@ -1,0 +1,39 @@
+{
+  "schema": "tgw-pp-capability-catalog/v1",
+  "id": "PP-WORKFLOW-001@1",
+  "pp_ref": "PP-WORKFLOW-001",
+  "plan_commit": "058e2f980201cc78245358e4901cf007063f2c29",
+  "plan_source": {
+    "path": "plan/pp/PP-WORKFLOW-001.md",
+    "sha256": "sha256:ee5eac22eb072649ea601d77f398ee87e8397f9a84eb3675b4d61f1c32f81af9"
+  },
+  "source_lineage": {
+    "commit": "77192f2127bcd510561a25bfa8f33d449084c13b",
+    "tree": "d38c88fd46e59de4b62a03f9bbd9c94a86cf7d95"
+  },
+  "capabilities": [
+    "workflow.condition-evaluator-runtime-graph@1",
+    "workflow.generation-scheduler@1",
+    "workflow.immutable-receipts@1",
+    "workflow.worker-treatment-migrations@1",
+    "workflow.coding-foreman@1",
+    "workflow.action-card-projection@1",
+    "workflow.mandatory-fixture@1",
+    "plan.native-luet-agreement@1",
+    "plan.pp-root-todo-bridge@1",
+    "coding.local-cli-and-mcp@1"
+  ],
+  "providers": [
+    {"id":"current-condition-runtime","provides":["workflow.condition-evaluator-runtime-graph@1"],"evidence":["src/tgw/workflow_kernel/evaluator.py","src/tgw/workflow/plan_bridge.py","todo:1734"]},
+    {"id":"current-generation-scheduler","provides":["workflow.generation-scheduler@1"],"evidence":["src/tgw/workflow_kernel/scheduler.py","todo:1734"]},
+    {"id":"current-receipt-runtime","provides":["workflow.immutable-receipts@1"],"evidence":["src/tgw/workflow/treatments.py","src/tgw/workflow/standalone_plan.py","todo:1734"]},
+    {"id":"current-worker-migrations","provides":["workflow.worker-treatment-migrations@1"],"evidence":["src/tgw/workflow/treatments.py","todo:1734"]},
+    {"id":"current-coding-foreman","provides":["workflow.coding-foreman@1"],"evidence":["src/tgw/development/foreman.py","todo:1735"]},
+    {"id":"current-action-cards","provides":["workflow.action-card-projection@1"],"evidence":["src/tgw/workflow/action_cards.py","todo:1734"]},
+    {"id":"current-mandatory-fixture","provides":["workflow.mandatory-fixture@1"],"evidence":["tests/test_pp_workflow_001_fixture.py","todo:1734"]},
+    {"id":"current-native-luet-resolver","provides":["plan.native-luet-agreement@1"],"evidence":["src/tgw/plan_solver.py","src/tgw/plan_luet.py","todo:1735"]},
+    {"id":"current-pp-root-bridge","provides":["plan.pp-root-todo-bridge@1"],"evidence":["src/tgw/development/plan_todo_bridge.py","todo:1737"]},
+    {"id":"current-local-coding-surfaces","provides":["coding.local-cli-and-mcp@1"],"evidence":["src/tgw/coding_cli.py","src/tgw/coding_mcp_server.py","todo:1738"]}
+  ],
+  "partial_provider_todos": [1734,1735,1736,1737,1738]
+}

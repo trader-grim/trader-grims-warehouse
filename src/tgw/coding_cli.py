@@ -30,6 +30,8 @@ from tgw.development.local_workflow import (
 from tgw.development.plan_todo_source import PlanTodoSourceError
 from tgw.development.plan_todo_source import resolve as resolve_plan_todo
 from tgw.development.treatments import CODEX_IMPLEMENT, CONTROLLER_VERIFY
+from tgw.pp_workflow_reconcile import PP_REF
+from tgw.pp_workflow_reconcile import reconcile as reconcile_pp_workflow
 from tgw.queue import state_machine
 
 DEFAULT_SOLUTION = (
@@ -94,13 +96,23 @@ def _todo_id(value: Any) -> int:
 
 
 def start(
-    todo_id: int,
+    todo_id: int | str,
     *,
     config_path: Path | str = DEFAULT_CONFIG,
     solution_path: Path | str = DEFAULT_SOLUTION,
     source_commit: str | None = None,
 ) -> dict[str, Any]:
     """Bind, allocate, evaluate, and dispatch one existing Todo locally."""
+    if isinstance(todo_id, str) and todo_id == PP_REF:
+        actor = require_coder_account()
+        result = reconcile_pp_workflow()
+        return {
+            "schema": "tgw-local-coding-start-pp/v1", "ok": result["ok"],
+            "target": PP_REF, "actor": actor, "group": "tgw-coders",
+            "reconciliation": result,
+            "materialized": False,
+            "note": "All bounded PP capabilities are satisfied; no Todo, worktree, or job was created.",
+        }
     todo_id = _todo_id(todo_id)
     config = _initialize(config_path)
     item = todo.todo_get(todo_id)
@@ -193,6 +205,13 @@ def status(
     return local
 
 
+def reconcile(target: str = PP_REF) -> dict[str, Any]:
+    """Read-only reconciliation status for an explicit PP root."""
+    if target != PP_REF:
+        raise CodingCLIError(f"unsupported PP root: {target}")
+    return reconcile_pp_workflow()
+
+
 def job_log(
     job_id: str,
     *,
@@ -230,15 +249,15 @@ def run(args: argparse.Namespace) -> int:
         if args.coding_op == "start":
             value = target or getattr(args, "todo_id", None)
             result = start(
-                _todo_id(value),
+                value if value == PP_REF else _todo_id(value),
                 config_path=config_path,
                 source_commit=getattr(args, "source_commit", None),
             )
         elif args.coding_op in {"status", "access-status"}:
-            result = status(
-                _todo_id(target) if target is not None else None,
-                config_path=config_path,
-            )
+            result = (reconcile(target) if target == PP_REF else status(
+                _todo_id(target) if target is not None else None, config_path=config_path))
+        elif args.coding_op == "reconcile":
+            result = reconcile(target or PP_REF)
         elif args.coding_op == "log":
             if not target:
                 raise CodingCLIError("log requires a coding job ID")
@@ -264,10 +283,12 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     commands = root.add_subparsers(dest="coding_op", required=True)
     start_parser = commands.add_parser("start", help="bind and dispatch one Todo locally")
-    start_parser.add_argument("coding_target", metavar="TODO_ID")
+    start_parser.add_argument("coding_target", metavar="TODO_ID|PP_REF")
     start_parser.add_argument("--source-commit")
     status_parser = commands.add_parser("status", help="show local coding jobs")
-    status_parser.add_argument("coding_target", metavar="TODO_ID", nargs="?")
+    status_parser.add_argument("coding_target", metavar="TODO_ID|PP_REF", nargs="?")
+    reconcile_parser = commands.add_parser("reconcile", help="read-only PP reconciliation")
+    reconcile_parser.add_argument("coding_target", metavar="PP_REF", nargs="?", default=PP_REF)
     log_parser = commands.add_parser("log", help="show one durable coding job")
     log_parser.add_argument("coding_target", metavar="JOB_ID")
     stop_parser = commands.add_parser("stop", help="cancel one active coding job")

@@ -61,7 +61,7 @@ mcp = FastMCP(
 
 
 @mcp.tool()
-def tgw_coding_start(todo_id: int, source_commit: str = "") -> str:
+def tgw_coding_start(todo_id: int | str, source_commit: str = "") -> str:
     """Bind and dispatch one existing Plan Todo through the local workflow.
 
     The result includes the exact group-owned worktree and correctly rooted
@@ -75,6 +75,12 @@ def tgw_coding_start(todo_id: int, source_commit: str = "") -> str:
         config_path=_config_path(),
         source_commit=source_commit or None,
     )
+
+
+@mcp.tool()
+def tgw_coding_reconcile(pp_ref: str = coding_cli.PP_REF) -> str:
+    """Return read-only PP reconciliation and exact native/Luet binding status."""
+    return _result("reconcile", coding_cli.reconcile, pp_ref)
 
 
 @mcp.tool()
