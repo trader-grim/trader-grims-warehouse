@@ -1877,20 +1877,90 @@ def repair_database(paths: DoctorPaths) -> dict[str, Any]:
     return {"ok": True, "operation": "database", "changed": before != after, "receipt": receipt}
 
 
-def _set_shared_group(path: Path, group_gid: int, *, directory: bool) -> None:
-    os.chown(path, -1, group_gid, follow_symlinks=False)
-    if path.is_symlink():
-        return
-    mode = stat.S_IMODE(path.stat(follow_symlinks=False).st_mode)
+def _set_shared_fd(descriptor: int, group_gid: int, *, directory: bool) -> None:
+    state = os.fstat(descriptor)
+    mode = stat.S_IMODE(state.st_mode)
+    os.fchown(descriptor, -1, group_gid)
     if directory:
-        os.chmod(path, mode | stat.S_ISGID | stat.S_IRWXG)
+        os.fchmod(descriptor, mode | stat.S_ISGID | stat.S_IRWXG)
     else:
-        os.chmod(path, mode | stat.S_IRGRP | stat.S_IWGRP)
+        os.fchmod(descriptor, mode | stat.S_IRGRP | stat.S_IWGRP)
+
+
+def _set_shared_directory(path: Path, group_gid: int) -> None:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    descriptor = os.open(path, flags)
+    try:
+        _set_shared_fd(descriptor, group_gid, directory=True)
+    finally:
+        os.close(descriptor)
+
+
+def _repair_shared_git_tree(root: Path, group_gid: int) -> dict[str, int]:
+    """Mutate only descriptor-pinned entries below a non-symlink Git root."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    root_descriptor = os.open(root, flags)
+    pending = [root_descriptor]
+    counts = {"directories": 0, "files": 0, "symlinks_untouched": 0, "hardlinks_untouched": 0}
+    try:
+        while pending:
+            directory_descriptor = pending.pop()
+            try:
+                _set_shared_fd(directory_descriptor, group_gid, directory=True)
+                counts["directories"] += 1
+                for name in os.listdir(directory_descriptor):
+                    try:
+                        descriptor = os.open(
+                            name,
+                            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                            dir_fd=directory_descriptor,
+                        )
+                    except OSError as exc:
+                        if exc.errno == errno.ELOOP:
+                            counts["symlinks_untouched"] += 1
+                            continue
+                        raise
+                    state = os.fstat(descriptor)
+                    if stat.S_ISDIR(state.st_mode):
+                        pending.append(descriptor)
+                        continue
+                    try:
+                        if not stat.S_ISREG(state.st_mode):
+                            raise DoctorError(
+                                f"unsupported entry in canonical Git directory: {name}"
+                            )
+                        if state.st_nlink > 1:
+                            counts["hardlinks_untouched"] += 1
+                            continue
+                        _set_shared_fd(descriptor, group_gid, directory=False)
+                        counts["files"] += 1
+                    finally:
+                        os.close(descriptor)
+            finally:
+                os.close(directory_descriptor)
+    finally:
+        for descriptor in pending:
+            os.close(descriptor)
+    return counts
+
+
+def _require_coding_quiescent() -> None:
+    active = []
+    for unit in _CODING_UNITS:
+        state = _unit_state(unit)
+        if state.get("ActiveState") == "active":
+            active.append(unit)
+    if active:
+        raise DoctorError(
+            "Unix Git repair requires the local coding units stopped first: "
+            + ", ".join(active)
+        )
 
 
 def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
     """Restore only the shared local Git directories to tgw-coders access."""
     _require_root()
+    _require_coding_quiescent()
     before = check_unix_access(paths)
     group_gid = grp.getgrnam("tgw-coders").gr_gid
     repository = paths.repository.resolve(strict=True)
@@ -1901,31 +1971,27 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
     if paths.repository.is_symlink() or paths.worktrees.is_symlink():
         raise DoctorError("shared Git repair refuses symlinked configured roots")
 
-    _set_shared_group(repository, group_gid, directory=True)
-    _set_shared_group(worktree_root, group_gid, directory=True)
-    for parent, directories, files in os.walk(git_common, followlinks=False):
-        parent_path = Path(parent)
-        _set_shared_group(parent_path, group_gid, directory=True)
-        directories[:] = [
-            name for name in directories if not (parent_path / name).is_symlink()
-        ]
-        for name in files:
-            _set_shared_group(parent_path / name, group_gid, directory=False)
+    _set_shared_directory(repository, group_gid)
+    _set_shared_directory(worktree_root, group_gid)
+    tree_changes = _repair_shared_git_tree(git_common, group_gid)
 
     raw = _git(repository, "worktree", "list", "--porcelain")
     outside_untouched: list[str] = []
     for line in raw.splitlines():
         if not line.startswith("worktree "):
             continue
-        location = Path(line.removeprefix("worktree ")).resolve(strict=True)
+        raw_location = Path(line.removeprefix("worktree "))
+        if raw_location.is_symlink():
+            raise DoctorError(f"linked worktree root is a symlink: {raw_location}")
+        location = raw_location.resolve(strict=True)
         if location == repository:
             continue
         if worktree_root not in location.parents:
             outside_untouched.append(str(location))
             continue
-        if location.is_symlink() or not location.is_dir():
+        if not location.is_dir():
             raise DoctorError(f"linked worktree root is unsafe: {location}")
-        _set_shared_group(location, group_gid, directory=True)
+        _set_shared_directory(raw_location, group_gid)
 
     after = check_unix_access(paths)
     if after["state"] != "PASS":
@@ -1935,9 +2001,23 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
         "ok": True,
         "operation": "unix-git-access",
         "changed": before != after,
+        "git_tree_changes": tree_changes,
         "outside_configured_root_untouched": outside_untouched,
         "receipt": receipt,
     }
+
+
+def _unit_destination_exact(
+    paths: DoctorPaths, destination: Path, source: Path
+) -> bool:
+    if destination.is_symlink() or not destination.is_file():
+        return False
+    state = destination.stat(follow_symlinks=False)
+    return (
+        state.st_uid in paths.trusted_release_owners
+        and not state.st_mode & 0o022
+        and destination.read_bytes() == source.read_bytes()
+    )
 
 
 def repair_workers(paths: DoctorPaths) -> dict[str, Any]:
@@ -1955,7 +2035,7 @@ def repair_workers(paths: DoctorPaths) -> dict[str, Any]:
             destination.exists() and not destination.is_file()
         ):
             raise DoctorError(f"refusing unsafe coding unit destination: {destination}")
-        if not destination.is_file() or destination.read_bytes() != source.read_bytes():
+        if not _unit_destination_exact(paths, destination, source):
             _atomic_bytes(destination, source.read_bytes(), mode=0o444)
             installed.append(unit)
     if installed:

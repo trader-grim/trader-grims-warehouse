@@ -287,7 +287,7 @@ def test_shared_git_directory_requires_exact_group_and_setgid(tmp_path: Path) ->
     assert missing_setgid["reason"] == "group, setgid, or group access differs"
 
 
-def test_set_shared_group_preserves_file_kind_and_adds_group_access(
+def test_descriptor_anchored_git_tree_repair_adds_group_access(
     tmp_path: Path,
 ) -> None:
     directory = tmp_path / "worktree"
@@ -296,11 +296,41 @@ def test_set_shared_group_preserves_file_kind_and_adds_group_access(
     file_path.write_text("git index fixture", encoding="utf-8")
     file_path.chmod(0o640)
 
-    doctor_cli._set_shared_group(directory, os.getgid(), directory=True)
-    doctor_cli._set_shared_group(file_path, os.getgid(), directory=False)
+    changes = doctor_cli._repair_shared_git_tree(directory, os.getgid())
 
     assert stat.S_IMODE(directory.stat().st_mode) == 0o2770
     assert stat.S_IMODE(file_path.stat().st_mode) == 0o660
+    assert changes["directories"] == 1
+    assert changes["files"] == 1
+
+
+def test_descriptor_anchored_git_tree_repair_never_follows_symlinks(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "git"
+    directory.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("preserve", encoding="utf-8")
+    outside.chmod(0o600)
+    (directory / "link").symlink_to(outside)
+
+    changes = doctor_cli._repair_shared_git_tree(directory, os.getgid())
+
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o600
+    assert changes["symlinks_untouched"] == 1
+
+
+def test_worker_unit_exactness_includes_immutable_metadata(tmp_path: Path) -> None:
+    source = tmp_path / "source.service"
+    destination = tmp_path / "installed.service"
+    source.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
+    destination.write_bytes(source.read_bytes())
+    paths = doctor_cli.DoctorPaths(trusted_release_owners=(os.getuid(),))
+
+    destination.chmod(0o664)
+    assert doctor_cli._unit_destination_exact(paths, destination, source) is False
+    destination.chmod(0o644)
+    assert doctor_cli._unit_destination_exact(paths, destination, source) is True
 
 
 def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(
