@@ -418,6 +418,26 @@ def test_git_tree_repair_detaches_only_valid_pack_hardlinks(
         doctor_cli._scan_shared_git_tree(git_root, os.getgid(), mutate=False)
 
 
+def test_git_tree_accepts_standard_read_only_loose_objects(tmp_path: Path) -> None:
+    git_root = tmp_path / "git"
+    loose_directory = git_root / "objects" / "ab"
+    loose_directory.mkdir(parents=True)
+    for directory in (git_root, git_root / "objects", loose_directory):
+        directory.chmod(0o2770)
+    loose = loose_directory / ("c" * 38)
+    loose.write_bytes(b"immutable loose object")
+    loose.chmod(0o444)
+
+    counts = doctor_cli._scan_shared_git_tree(
+        git_root, os.getgid(), mutate=False
+    )
+
+    assert counts["loose_objects"] == 1
+    assert counts["loose_objects_inexact"] == 0
+    assert counts["files"] == 0
+    assert doctor_cli._shared_tree_exact(counts) is True
+
+
 def test_unix_git_repair_recurses_into_configured_linked_worktrees(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

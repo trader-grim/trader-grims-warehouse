@@ -37,6 +37,8 @@ import psycopg2
 import psycopg2.extras
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+_LOOSE_OBJECT_DIRECTORY = re.compile(r"[0-9a-f]{2}\Z")
+_LOOSE_OBJECT_NAME = re.compile(r"[0-9a-f]{38}\Z")
 _STATES = {"PASS", "WARN", "FAIL", "UNKNOWN", "RESTART_REQUIRED"}
 _FORBIDDEN_CODING_DEPENDENCIES = (
     "tgw-prod",
@@ -2059,6 +2061,8 @@ def _scan_shared_git_tree(
         "files_inexact": 0,
         "pack_components": 0,
         "pack_components_inexact": 0,
+        "loose_objects": 0,
+        "loose_objects_inexact": 0,
         "symlinks_untouched": 0,
         "pack_hardlinks_seen": 0,
         "pack_hardlinks_detached": 0,
@@ -2112,6 +2116,12 @@ def _scan_shared_git_tree(
                             and parts[:2] == ("objects", "pack")
                             and _PACK_COMPONENT.fullmatch(parts[2]) is not None
                         )
+                        loose_object = (
+                            len(parts) == 3
+                            and parts[0] == "objects"
+                            and _LOOSE_OBJECT_DIRECTORY.fullmatch(parts[1]) is not None
+                            and _LOOSE_OBJECT_NAME.fullmatch(parts[2]) is not None
+                        )
                         if pack_component:
                             if not bool(state.st_mode & stat.S_IROTH) or bool(
                                 state.st_mode & 0o111
@@ -2149,6 +2159,28 @@ def _scan_shared_git_tree(
                                         | stat.S_IROTH
                                     )
                                     & ~0o222,
+                                )
+                            continue
+                        if loose_object:
+                            if state.st_nlink > 1:
+                                raise DoctorError(
+                                    "hardlinked loose object in canonical Git directory: "
+                                    f"{relative}"
+                                )
+                            mode = stat.S_IMODE(state.st_mode)
+                            counts["loose_objects"] += 1
+                            loose_exact = (
+                                state.st_gid == group_gid
+                                and bool(mode & stat.S_IRGRP)
+                                and not bool(mode & 0o111)
+                            )
+                            if not loose_exact:
+                                counts["loose_objects_inexact"] += 1
+                            if mutate:
+                                os.fchown(descriptor, -1, group_gid)
+                                os.fchmod(
+                                    descriptor,
+                                    (mode | stat.S_IRGRP | stat.S_IROTH) & ~0o111,
                                 )
                             continue
                         if state.st_nlink > 1:
@@ -2214,6 +2246,7 @@ def _shared_tree_exact(counts: Mapping[str, int]) -> bool:
             "directories_inexact",
             "files_inexact",
             "pack_components_inexact",
+            "loose_objects_inexact",
         )
     )
 
