@@ -116,6 +116,11 @@ def _codex_binary() -> str:
     return str(candidate.resolve())
 
 
+def _codex_auth_path() -> Path:
+    """Return the dedicated implementation actor's native Codex credential."""
+    return Path.home() / ".codex" / "auth.json"
+
+
 def _prompt(task: dict[str, Any]) -> str:
     return f"""You are the Codex implementation treatment for TGW Todo #{task['todo_id']}.
 
@@ -316,7 +321,7 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
         schema_path, output_path = temp / "schema.json", temp / "result.json"
         codex_home = temp / "codex-home"
         codex_home.mkdir(mode=0o700)
-        source_auth = Path.home() / ".codex" / "auth.json"
+        source_auth = _codex_auth_path()
         if not source_auth.is_file():
             raise HardFailure("dedicated Codex authentication is unavailable")
         destination_auth = codex_home / "auth.json"

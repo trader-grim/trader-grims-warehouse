@@ -9,6 +9,15 @@ import pytest
 from tgw.workers import codex_implement
 
 
+@pytest.fixture(autouse=True)
+def _isolated_codex_auth(monkeypatch, tmp_path_factory):
+    """Runner tests never borrow credentials from the executing Unix user."""
+    auth = tmp_path_factory.mktemp("codex-auth") / "auth.json"
+    auth.write_text('{"test": true}\n', encoding="utf-8")
+    auth.chmod(0o600)
+    monkeypatch.setattr(codex_implement, "_codex_auth_path", lambda: auth)
+
+
 def _repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
