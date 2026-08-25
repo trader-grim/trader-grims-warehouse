@@ -183,6 +183,45 @@ def _has_active_job(
         return False
 
 
+def _has_active_worktree_job(
+    worktree: str,
+    check_worktree_active_fn: Callable[[str], bool] | None = None,
+) -> bool:
+    """Return whether any coding treatment is active for ``worktree``.
+
+    Treatment dedupe keys intentionally change when the worktree generation
+    or selected treatment changes.  They therefore cannot prevent a successor
+    treatment (for example controller verification) from being dispatched
+    while the implementation treatment is still writing the same worktree.
+    This entity-wide check preserves the one-treatment-at-a-time invariant.
+    """
+    if check_worktree_active_fn is not None:
+        return check_worktree_active_fn(worktree)
+
+    from tgw.queue.state_machine import _conn
+
+    try:
+        with _conn() as con, con.cursor() as cur:
+            cur.execute(
+                """
+                    SELECT 1 FROM queue_jobs
+                     WHERE entity_type = 'coding_task'
+                       AND entity_id = %s
+                       AND state = ANY(%s::queue_job_state[])
+                     LIMIT 1
+                    """,
+                (worktree, list(_ACTIVE_JOB_STATES)),
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        log.warning(
+            "failed to check active coding jobs for worktree=%s — treating as inactive",
+            worktree,
+            exc_info=True,
+        )
+        return False
+
+
 def _has_terminal_job(
     dedupe_key: str,
     check_terminal_fn: Callable[[str], bool] | None = None,
@@ -292,6 +331,7 @@ def tick(
     todo_ids: set[int] | None = None,
     fetch_todos: Callable[[], list[TodoRecord]] | None = None,
     check_active_fn: Callable[[str], bool] | None = None,
+    check_worktree_active_fn: Callable[[str], bool] | None = None,
     check_terminal_fn: Callable[[str], bool] | None = None,
     enqueue_fn: Any = None,
 ) -> TickResult:
@@ -301,9 +341,9 @@ def tick(
     worktree path, evaluates every one against ``CODING_READY_FOR_IMPLEMENTATION``,
     and dispatches **exactly one** eligible treatment.
 
-    Todos that already have an active job (queued/leased/running) with the
-    same ``graph_id`` are skipped — this makes ``tick()`` idempotent across
-    repeated calls for the same generation.
+    Todos that already have any active coding job for the same worktree are
+    skipped before snapshotting.  The exact treatment dedupe check remains as
+    the second idempotency fence for repeated calls on the same generation.
 
     Args:
         config: Foreman configuration. Defaults to ``CODING_READY_FOR_IMPLEMENTATION``
@@ -313,6 +353,8 @@ def tick(
             testing to avoid a real database call.
         check_active_fn: Callable ``(graph_id: str) -> bool``. Override for
             testing.
+        check_worktree_active_fn: Callable ``(worktree: str) -> bool``.
+            Override for testing the cross-treatment concurrency fence.
         enqueue_fn: Callable with the same signature as
             ``state_machine.enqueue_job``. Override for testing.
 
@@ -377,6 +419,24 @@ def tick(
                 todo.worktree,
                 cfg.coding_config,
             )
+            # A successor treatment must never inspect or mutate a worktree
+            # while an earlier treatment is still active.  The generation and
+            # treatment-specific dedupe key below cannot enforce this fence.
+            # Tests that inject the old exact-key seam remain pure unless they
+            # explicitly exercise this new entity-wide seam.
+            if check_worktree_active_fn is None and check_active_fn is not None:
+                has_active_worktree_job = False
+            else:
+                has_active_worktree_job = _has_active_worktree_job(
+                    str(worktree),
+                    check_worktree_active_fn,
+                )
+            if has_active_worktree_job:
+                result = replace(
+                    result,
+                    skipped_active=result.skipped_active + 1,
+                )
+                continue
             implementation_baseline = binding["source_commit"]
             if cfg.fixture_implementation_baseline_commit is not None:
                 if not isinstance(binding, dict) or not binding.get("fixture_run_id"):

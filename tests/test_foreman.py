@@ -18,6 +18,7 @@ from tgw.development.foreman import (
     _default_fetch_open_todos,
     _extract_worktree,
     _has_active_job,
+    _has_active_worktree_job,
     _has_terminal_job,
     tick,
 )
@@ -69,10 +70,13 @@ def test_database_job_state_checks_cast_text_arrays_to_queue_enum(monkeypatch):
 
     monkeypatch.setattr("tgw.queue.state_machine._conn", connection)
     assert _has_active_job("graph") is False
+    assert _has_active_worktree_job("/tmp/worktree") is False
     assert _has_terminal_job("graph") is False
-    assert len(executed) == 2
+    assert len(executed) == 3
     assert all("ANY(%s::queue_job_state[])" in sql for sql, _params in executed)
-    assert set(executed[1][1][1]) == {
+    assert "entity_type = 'coding_task'" in executed[1][0]
+    assert executed[1][1][0] == "/tmp/worktree"
+    assert set(executed[2][1][1]) == {
         "succeeded",
         "failed",
         "dead_letter",
@@ -463,6 +467,29 @@ def test_tick_same_generation_rerun_is_idempotent():
     assert result.dispatched == 0
     assert result.skipped_active == 1  # deduped
     assert result.errors == 0
+
+
+def test_tick_active_implementation_blocks_successor_before_snapshot():
+    """A running treatment owns the whole worktree, not only its dedupe key."""
+    todo = _todo(1)
+    worktree_active = MagicMock(return_value=True)
+    with (
+        patch("tgw.development.foreman.build_coding_snapshot") as snapshot,
+        patch("tgw.development.foreman.evaluate") as evaluator,
+        patch("tgw.development.foreman.dispatch_treatment") as dispatch,
+    ):
+        result = tick(
+            fetch_todos=lambda: [todo],
+            check_worktree_active_fn=worktree_active,
+        )
+
+    assert result.dispatched == 0
+    assert result.skipped_active == 1
+    assert result.errors == 0
+    worktree_active.assert_called_once_with(todo.worktree)
+    snapshot.assert_not_called()
+    evaluator.assert_not_called()
+    dispatch.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
