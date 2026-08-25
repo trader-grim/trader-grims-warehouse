@@ -5,6 +5,7 @@ import os
 import shutil
 import stat
 import subprocess
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -292,7 +293,9 @@ def test_descriptor_anchored_git_tree_repair_adds_group_access(
 ) -> None:
     directory = tmp_path / "worktree"
     directory.mkdir(mode=0o750)
-    file_path = directory / "index"
+    nested = directory / "src"
+    nested.mkdir(mode=0o750)
+    file_path = nested / "module.py"
     file_path.write_text("git index fixture", encoding="utf-8")
     file_path.chmod(0o640)
 
@@ -301,9 +304,40 @@ def test_descriptor_anchored_git_tree_repair_adds_group_access(
     )
 
     assert stat.S_IMODE(directory.stat().st_mode) == 0o2770
+    assert stat.S_IMODE(nested.stat().st_mode) == 0o2770
     assert stat.S_IMODE(file_path.stat().st_mode) == 0o660
-    assert changes["directories"] == 1
+    assert changes["directories"] == 2
     assert changes["files"] == 1
+
+
+def test_descriptor_anchored_git_tree_repair_keeps_bound_root(
+    tmp_path: Path,
+) -> None:
+    original = tmp_path / "bound"
+    original.mkdir(mode=0o750)
+    bound_file = original / "index"
+    bound_file.write_text("bound", encoding="utf-8")
+    bound_file.chmod(0o640)
+    descriptor = os.open(
+        original,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    moved = tmp_path / "moved"
+    original.rename(moved)
+    original.mkdir(mode=0o700)
+    replacement = original / "index"
+    replacement.write_text("replacement", encoding="utf-8")
+    replacement.chmod(0o600)
+    try:
+        doctor_cli._scan_shared_git_tree(
+            descriptor, os.getgid(), mutate=True
+        )
+    finally:
+        os.close(descriptor)
+
+    assert stat.S_IMODE((moved / "index").stat().st_mode) == 0o660
+    assert stat.S_IMODE(replacement.stat().st_mode) == 0o600
+    assert stat.S_IMODE(original.stat().st_mode) == 0o700
 
 
 def test_descriptor_anchored_git_tree_repair_never_follows_symlinks(
@@ -322,6 +356,26 @@ def test_descriptor_anchored_git_tree_repair_never_follows_symlinks(
 
     assert stat.S_IMODE(outside.stat().st_mode) == 0o600
     assert changes["symlinks_untouched"] == 1
+
+
+def test_git_tree_scan_excludes_only_declared_root_entry(tmp_path: Path) -> None:
+    directory = tmp_path / "worktree"
+    nested_git = directory / "nested/.git"
+    root_git = directory / ".git"
+    nested_git.mkdir(parents=True)
+    root_git.mkdir(parents=True)
+    (nested_git / "index").write_text("must scan", encoding="utf-8")
+    (root_git / "index").write_text("excluded", encoding="utf-8")
+
+    counts = doctor_cli._scan_shared_git_tree(
+        directory,
+        os.getgid(),
+        mutate=False,
+        excluded_root_entries=(".git",),
+    )
+
+    assert counts["excluded_root_entries"] == 1
+    assert counts["files"] == 1
 
 
 def test_git_tree_repair_detaches_only_valid_pack_hardlinks(
@@ -343,11 +397,15 @@ def test_git_tree_repair_detaches_only_valid_pack_hardlinks(
     repaired = doctor_cli._scan_shared_git_tree(
         git_root, os.getgid(), mutate=True
     )
+    idempotent = doctor_cli._scan_shared_git_tree(
+        git_root, os.getgid(), mutate=False
+    )
 
     assert preflight["pack_hardlinks_seen"] == 1
     assert preflight["pack_hardlinks_detached"] == 0
     assert repaired["pack_hardlinks_seen"] == 1
     assert repaired["pack_hardlinks_detached"] == 1
+    assert idempotent["pack_components_inexact"] == 0
     assert canonical.read_bytes() == outside.read_bytes() == b"immutable pack"
     assert canonical.stat().st_ino != outside_inode
     assert outside.stat().st_ino == outside_inode
@@ -358,6 +416,50 @@ def test_git_tree_repair_detaches_only_valid_pack_hardlinks(
     os.link(outside, mutable)
     with pytest.raises(doctor_cli.DoctorError, match="mutable or unreadable hardlink"):
         doctor_cli._scan_shared_git_tree(git_root, os.getgid(), mutate=False)
+
+
+def test_unix_git_repair_recurses_into_configured_linked_worktrees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "source"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.name", "test")
+    _git(repository, "config", "user.email", "test@example.invalid")
+    (repository / "README").write_text("source\n", encoding="utf-8")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-m", "source")
+    worktrees = tmp_path / "worktrees"
+    worktrees.mkdir()
+    linked = worktrees / "todo"
+    _git(repository, "worktree", "add", "-b", "todo", str(linked))
+    nested = linked / "src"
+    nested.mkdir(mode=0o700)
+    file_path = nested / "module.py"
+    file_path.write_text("preserve bytes\n", encoding="utf-8")
+    file_path.chmod(0o600)
+    paths = doctor_cli.DoctorPaths(
+        repository=repository,
+        worktrees=worktrees,
+        receipts=tmp_path / "receipts",
+    )
+    reports = iter(({"state": "FAIL"}, {"state": "PASS"}))
+
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(
+        doctor_cli.grp,
+        "getgrnam",
+        lambda _name: type("Group", (), {"gr_gid": os.getgid()})(),
+    )
+    monkeypatch.setattr(doctor_cli, "check_unix_access", lambda _paths: next(reports))
+    monkeypatch.setattr(doctor_cli, "_coding_quiescence", lambda: nullcontext())
+
+    result = doctor_cli.repair_unix_git_access(paths)
+
+    assert file_path.read_text(encoding="utf-8") == "preserve bytes\n"
+    assert stat.S_IMODE(nested.stat().st_mode) & 0o2070 == 0o2070
+    assert stat.S_IMODE(file_path.stat().st_mode) & 0o060 == 0o060
+    assert result["git_tree_changes"]["linked:todo"]["files"] > 0
 
 
 def test_coding_quiescence_masks_and_verifies_every_local_unit(

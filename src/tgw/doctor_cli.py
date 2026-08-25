@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import errno
 import fcntl
 import grp
@@ -487,9 +488,10 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
             "git_common": _shared_git_directory(git_common, group.gr_gid),
             "worktree_root": _shared_git_directory(paths.worktrees, group.gr_gid),
         }
+        shared_trees = _inspect_shared_git_trees(paths, group.gr_gid)
         exact = all(row["exact"] for row in actors.values()) and all(
             row["exact"] for row in directories.values()
-        )
+        ) and shared_trees["exact"]
         return _check(
             "access.unix-group",
             "PASS" if exact else "FAIL",
@@ -503,6 +505,7 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
                 "members": sorted(group.gr_mem),
                 "actors": actors,
                 "directories": directories,
+                "shared_trees": shared_trees,
             },
             repair=None if exact else "sudo -n tgw doctor repair unix-git-access",
         )
@@ -1900,6 +1903,36 @@ def _set_shared_directory(path: Path, group_gid: int) -> None:
 _PACK_COMPONENT = re.compile(
     r"pack-[0-9a-f]{40}(?:[0-9a-f]{24})?\.(?:pack|idx|rev|bitmap)\Z"
 )
+_RENAME_EXCHANGE = 2
+
+
+def _rename_exchange(
+    directory_descriptor: int, first: str, second: str
+) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise DoctorError("renameat2 is unavailable; atomic pack detachment is unsafe")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        directory_descriptor,
+        os.fsencode(first),
+        directory_descriptor,
+        os.fsencode(second),
+        _RENAME_EXCHANGE,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        raise DoctorError(
+            f"cannot atomically exchange Git pack aliases: {os.strerror(error)}"
+        )
 
 
 def _detach_pack_hardlink(
@@ -1921,7 +1954,8 @@ def _detach_pack_hardlink(
         0o400,
         dir_fd=parent_descriptor,
     )
-    replaced = False
+    committed = False
+    exchanged = False
     try:
         while True:
             chunk = os.read(source_descriptor, 1024 * 1024)
@@ -1955,17 +1989,41 @@ def _detach_pack_hardlink(
         os.fchown(destination, -1, group_gid)
         os.fchmod(destination, (stat.S_IMODE(before.st_mode) | stat.S_IRGRP) & ~0o222)
         os.fsync(destination)
-        os.replace(
-            temporary,
-            name,
-            src_dir_fd=parent_descriptor,
-            dst_dir_fd=parent_descriptor,
+        _rename_exchange(parent_descriptor, temporary, name)
+        exchanged = True
+        displaced = os.stat(
+            temporary, dir_fd=parent_descriptor, follow_symlinks=False
         )
-        replaced = True
+        if (displaced.st_dev, displaced.st_ino) != (before.st_dev, before.st_ino):
+            try:
+                _rename_exchange(parent_descriptor, temporary, name)
+                exchanged = False
+            except DoctorError as rollback_error:
+                raise DoctorError(
+                    f"Git pack path raced and exchange rollback failed: {name}; "
+                    f"{rollback_error}"
+                ) from rollback_error
+            raise DoctorError(f"Git pack path raced during detachment: {name}")
+        try:
+            os.unlink(temporary, dir_fd=parent_descriptor)
+            exchanged = False
+        except OSError as unlink_error:
+            try:
+                _rename_exchange(parent_descriptor, temporary, name)
+                exchanged = False
+            except DoctorError as rollback_error:
+                raise DoctorError(
+                    f"cannot remove detached Git pack alias or roll back: {name}; "
+                    f"{rollback_error}"
+                ) from unlink_error
+            raise DoctorError(
+                f"cannot remove detached Git pack alias; original restored: {name}"
+            ) from unlink_error
+        committed = True
         os.fsync(parent_descriptor)
     finally:
         os.close(destination)
-        if not replaced:
+        if not committed and not exchanged:
             try:
                 os.unlink(temporary, dir_fd=parent_descriptor)
             except FileNotFoundError:
@@ -1973,27 +2031,49 @@ def _detach_pack_hardlink(
 
 
 def _scan_shared_git_tree(
-    root: Path, group_gid: int, *, mutate: bool
+    root: Path | int,
+    group_gid: int,
+    *,
+    mutate: bool,
+    excluded_root_entries: Sequence[str] = (),
 ) -> dict[str, int]:
-    """Preflight or monotonically repair descriptor-pinned Git entries."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    root_descriptor = os.open(root, flags)
+    """Preflight or repair descriptor-pinned shared Git/worktree entries."""
+    root_descriptor = (
+        os.dup(root) if isinstance(root, int) else _open_direct_directory(root)
+    )
     pending = [(root_descriptor, Path())]
     counts = {
         "directories": 0,
+        "directories_inexact": 0,
         "files": 0,
+        "files_inexact": 0,
+        "pack_components": 0,
+        "pack_components_inexact": 0,
         "symlinks_untouched": 0,
         "pack_hardlinks_seen": 0,
         "pack_hardlinks_detached": 0,
+        "excluded_root_entries": 0,
     }
     try:
         while pending:
             directory_descriptor, relative_parent = pending.pop()
             try:
+                directory_state = os.fstat(directory_descriptor)
+                directory_mode = stat.S_IMODE(directory_state.st_mode)
+                if not (
+                    directory_state.st_gid == group_gid
+                    and bool(directory_mode & stat.S_ISGID)
+                    and directory_mode & stat.S_IRWXG == stat.S_IRWXG
+                ):
+                    counts["directories_inexact"] += 1
                 if mutate:
                     _set_shared_fd(directory_descriptor, group_gid, directory=True)
                 counts["directories"] += 1
+                os.lseek(directory_descriptor, 0, os.SEEK_SET)
                 for name in os.listdir(directory_descriptor):
+                    if not relative_parent.parts and name in excluded_root_entries:
+                        counts["excluded_root_entries"] += 1
+                        continue
                     try:
                         descriptor = os.open(
                             name,
@@ -2016,22 +2096,32 @@ def _scan_shared_git_tree(
                                 "unsupported entry in canonical Git directory: "
                                 f"{relative}"
                             )
-                        if state.st_nlink > 1:
-                            parts = relative.parts
-                            detachable_pack = (
-                                len(parts) == 3
-                                and parts[:2] == ("objects", "pack")
-                                and _PACK_COMPONENT.fullmatch(parts[2]) is not None
-                                and bool(state.st_mode & stat.S_IROTH)
-                                and not bool(state.st_mode & 0o111)
-                            )
-                            if not detachable_pack:
+                        parts = relative.parts
+                        pack_component = (
+                            len(parts) == 3
+                            and parts[:2] == ("objects", "pack")
+                            and _PACK_COMPONENT.fullmatch(parts[2]) is not None
+                        )
+                        if pack_component:
+                            if not bool(state.st_mode & stat.S_IROTH) or bool(
+                                state.st_mode & 0o111
+                            ):
                                 raise DoctorError(
-                                    "mutable or unreadable hardlink in canonical Git "
+                                    "unreadable or executable pack component in canonical Git "
                                     f"directory: {relative}"
                                 )
-                            counts["pack_hardlinks_seen"] += 1
-                            if mutate:
+                            counts["pack_components"] += 1
+                            pack_exact = (
+                                state.st_nlink == 1
+                                and state.st_gid == group_gid
+                                and not bool(state.st_mode & 0o222)
+                                and bool(state.st_mode & stat.S_IRGRP)
+                            )
+                            if not pack_exact:
+                                counts["pack_components_inexact"] += 1
+                            if state.st_nlink > 1:
+                                counts["pack_hardlinks_seen"] += 1
+                            if mutate and state.st_nlink > 1:
                                 _detach_pack_hardlink(
                                     directory_descriptor,
                                     name,
@@ -2039,7 +2129,30 @@ def _scan_shared_git_tree(
                                     group_gid,
                                 )
                                 counts["pack_hardlinks_detached"] += 1
+                            elif mutate:
+                                os.fchown(descriptor, -1, group_gid)
+                                os.fchmod(
+                                    descriptor,
+                                    (
+                                        stat.S_IMODE(state.st_mode)
+                                        | stat.S_IRGRP
+                                        | stat.S_IROTH
+                                    )
+                                    & ~0o222,
+                                )
                             continue
+                        if state.st_nlink > 1:
+                            raise DoctorError(
+                                "mutable or unreadable hardlink in canonical Git "
+                                f"directory: {relative}"
+                            )
+                        mode = stat.S_IMODE(state.st_mode)
+                        if not (
+                            state.st_gid == group_gid
+                            and mode & (stat.S_IRGRP | stat.S_IWGRP)
+                            == (stat.S_IRGRP | stat.S_IWGRP)
+                        ):
+                            counts["files_inexact"] += 1
                         if mutate:
                             _set_shared_fd(descriptor, group_gid, directory=False)
                         counts["files"] += 1
@@ -2051,6 +2164,103 @@ def _scan_shared_git_tree(
         for descriptor, _relative in pending:
             os.close(descriptor)
     return counts
+
+
+def _configured_worktree_locations(
+    paths: DoctorPaths,
+) -> tuple[list[tuple[Path, Path]], list[str]]:
+    repository = paths.repository.absolute()
+    worktree_root = paths.worktrees.absolute()
+    raw = _git(repository, "worktree", "list", "--porcelain")
+    local: list[tuple[Path, Path]] = []
+    outside: list[str] = []
+    seen: set[Path] = set()
+    for line in raw.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        location = Path(line.removeprefix("worktree "))
+        if not location.is_absolute():
+            raise DoctorError(f"Git returned a non-absolute worktree: {location}")
+        if location == repository:
+            continue
+        try:
+            relative = location.relative_to(worktree_root)
+        except ValueError:
+            outside.append(str(location))
+            continue
+        if not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
+            raise DoctorError(f"linked worktree path is unsafe: {location}")
+        if relative in seen:
+            raise DoctorError(f"duplicate linked worktree path: {location}")
+        seen.add(relative)
+        local.append((location, relative))
+    return local, outside
+
+
+def _shared_tree_exact(counts: Mapping[str, int]) -> bool:
+    return not any(
+        counts.get(name, 0)
+        for name in (
+            "directories_inexact",
+            "files_inexact",
+            "pack_components_inexact",
+        )
+    )
+
+
+def _inspect_shared_git_trees(
+    paths: DoctorPaths, group_gid: int
+) -> dict[str, Any]:
+    local, outside = _configured_worktree_locations(paths)
+    trees: dict[str, dict[str, int]] = {
+        "canonical_worktree": _scan_shared_git_tree(
+            paths.repository,
+            group_gid,
+            mutate=False,
+            excluded_root_entries=(".git",),
+        ),
+        "git_common": _scan_shared_git_tree(
+            paths.repository / ".git", group_gid, mutate=False
+        ),
+    }
+    for location, relative in local:
+        trees[f"linked:{relative}"] = _scan_shared_git_tree(
+            location, group_gid, mutate=False
+        )
+    return {
+        "exact": all(_shared_tree_exact(counts) for counts in trees.values()),
+        "trees": trees,
+        "outside_configured_root_untouched": outside,
+    }
+
+
+def _open_relative_directory(root_descriptor: int, relative: Path) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    descriptor = os.dup(root_descriptor)
+    try:
+        for component in relative.parts:
+            if component in ("", ".", ".."):
+                raise DoctorError(f"unsafe relative directory path: {relative}")
+            child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _verify_bound_directory(path: Path, descriptor: int) -> None:
+    bound = os.fstat(descriptor)
+    try:
+        visible = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise DoctorError(f"bound shared directory is no longer visible: {path}") from exc
+    if not stat.S_ISDIR(visible.st_mode) or (visible.st_dev, visible.st_ino) != (
+        bound.st_dev,
+        bound.st_ino,
+    ):
+        raise DoctorError(f"bound shared directory changed before repair: {path}")
 
 
 @contextmanager
@@ -2133,48 +2343,76 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
     _require_root()
     before = check_unix_access(paths)
     group_gid = grp.getgrnam("tgw-coders").gr_gid
-    repository = paths.repository.resolve(strict=True)
-    worktree_root = paths.worktrees.resolve(strict=True)
+    repository = paths.repository.absolute()
+    worktree_root = paths.worktrees.absolute()
     git_common = repository / ".git"
-    if git_common.is_symlink() or not git_common.is_dir():
-        raise DoctorError("canonical Git common directory is not a real directory")
-    if paths.repository.is_symlink() or paths.worktrees.is_symlink():
-        raise DoctorError("shared Git repair refuses symlinked configured roots")
+    local_worktrees, outside_untouched = _configured_worktree_locations(paths)
 
-    raw = _git(repository, "worktree", "list", "--porcelain")
-    outside_untouched: list[str] = []
-    local_worktrees: list[Path] = []
-    for line in raw.splitlines():
-        if not line.startswith("worktree "):
-            continue
-        raw_location = Path(line.removeprefix("worktree "))
-        if raw_location.is_symlink():
-            raise DoctorError(f"linked worktree root is a symlink: {raw_location}")
-        location = raw_location.resolve(strict=True)
-        if location == repository:
-            continue
-        if worktree_root not in location.parents:
-            outside_untouched.append(str(location))
-            continue
-        if not location.is_dir():
-            raise DoctorError(f"linked worktree root is unsafe: {location}")
-        descriptor = os.open(
-            raw_location,
+    # Bind every declared root once. All recursive preflight passes finish while
+    # these exact descriptors remain open; mutation later uses only those roots.
+    with ExitStack() as stack:
+        repository_fd = _open_direct_directory(repository)
+        stack.callback(os.close, repository_fd)
+        worktree_root_fd = _open_direct_directory(worktree_root)
+        stack.callback(os.close, worktree_root_fd)
+        git_common_fd = os.open(
+            ".git",
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=repository_fd,
         )
-        os.close(descriptor)
-        local_worktrees.append(raw_location)
+        stack.callback(os.close, git_common_fd)
+        linked_descriptors: list[tuple[Path, Path, int]] = []
+        for location, relative in local_worktrees:
+            descriptor = _open_relative_directory(worktree_root_fd, relative)
+            stack.callback(os.close, descriptor)
+            linked_descriptors.append((location, relative, descriptor))
 
-    # Finish every content/type/path validation before the first permission
-    # mutation. The repair itself only adds tgw-coders access, is idempotent,
-    # and remains safely retryable if an I/O failure interrupts the pass.
-    preflight = _scan_shared_git_tree(git_common, group_gid, mutate=False)
-    with _coding_quiescence():
-        _set_shared_directory(repository, group_gid)
-        _set_shared_directory(worktree_root, group_gid)
-        tree_changes = _scan_shared_git_tree(git_common, group_gid, mutate=True)
-        for location in local_worktrees:
-            _set_shared_directory(location, group_gid)
+        bound = [
+            (repository, repository_fd),
+            (worktree_root, worktree_root_fd),
+            (git_common, git_common_fd),
+            *((location, descriptor) for location, _relative, descriptor in linked_descriptors),
+        ]
+        for path, descriptor in bound:
+            _verify_bound_directory(path, descriptor)
+
+        preflight: dict[str, dict[str, int]] = {
+            "canonical_worktree": _scan_shared_git_tree(
+                repository_fd,
+                group_gid,
+                mutate=False,
+                excluded_root_entries=(".git",),
+            ),
+            "git_common": _scan_shared_git_tree(
+                git_common_fd, group_gid, mutate=False
+            ),
+        }
+        for _location, relative, descriptor in linked_descriptors:
+            preflight[f"linked:{relative}"] = _scan_shared_git_tree(
+                descriptor, group_gid, mutate=False
+            )
+
+        # Runtime masks are the shared worker lock. Recheck every visible binding
+        # after acquisition, then mutate only through the retained descriptors.
+        with _coding_quiescence():
+            for path, descriptor in bound:
+                _verify_bound_directory(path, descriptor)
+            _set_shared_fd(worktree_root_fd, group_gid, directory=True)
+            tree_changes: dict[str, dict[str, int]] = {
+                "canonical_worktree": _scan_shared_git_tree(
+                    repository_fd,
+                    group_gid,
+                    mutate=True,
+                    excluded_root_entries=(".git",),
+                ),
+                "git_common": _scan_shared_git_tree(
+                    git_common_fd, group_gid, mutate=True
+                ),
+            }
+            for _location, relative, descriptor in linked_descriptors:
+                tree_changes[f"linked:{relative}"] = _scan_shared_git_tree(
+                    descriptor, group_gid, mutate=True
+                )
 
     after = check_unix_access(paths)
     if after["state"] != "PASS":
