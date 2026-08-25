@@ -151,6 +151,9 @@ class DoctorPaths:
     systemd_unit_uid: int = 0
     systemd_unit_gid: int = 0
     systemd_unit_mode: int = 0o444
+    context_install_uid: int = 0
+    context_install_gid: int = 0
+    context_launcher_mode: int = 0o555
     systemd_unit_roots: tuple[Path, ...] = _SYSTEMD_UNIT_ROOTS
     archive_discovery_roots: tuple[Path, ...] = _ARCHIVE_DISCOVERY_ROOTS
     archive_discovery_max_depth: int = _ARCHIVE_DISCOVERY_MAX_DEPTH
@@ -172,6 +175,68 @@ def _file_hash(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return "sha256:" + digest.hexdigest()
+
+
+def _surface_snapshot(path: Path) -> dict[str, Any]:
+    """Capture one path without following it and reject a raced read."""
+    try:
+        before = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        if path.is_symlink():
+            raise DoctorError(f"surface disappeared during inspection: {path}")
+        return {"kind": "missing"}
+    common = {
+        "uid": before.st_uid,
+        "gid": before.st_gid,
+        "mode": stat.S_IMODE(before.st_mode),
+        "device": before.st_dev,
+        "inode": before.st_ino,
+        "size": before.st_size,
+        "mtime_ns": before.st_mtime_ns,
+        "ctime_ns": before.st_ctime_ns,
+    }
+    if stat.S_ISLNK(before.st_mode):
+        target = os.readlink(path)
+        after = path.stat(follow_symlinks=False)
+        result = {"kind": "symlink", "target": target, **common}
+    elif stat.S_ISREG(before.st_mode):
+        raw = path.read_bytes()
+        after = path.stat(follow_symlinks=False)
+        result = {
+            "kind": "file",
+            "raw": raw,
+            "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+            **common,
+        }
+    else:
+        raise DoctorError(f"surface has an unsupported type: {path}")
+    after_identity = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+        stat.S_IMODE(after.st_mode),
+        after.st_uid,
+        after.st_gid,
+    )
+    before_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+        stat.S_IMODE(before.st_mode),
+        before.st_uid,
+        before.st_gid,
+    )
+    if after_identity != before_identity:
+        raise DoctorError(f"surface changed during inspection: {path}")
+    return result
+
+
+def _surface_record(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if key != "raw"}
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -343,29 +408,68 @@ def check_context_snapshot(paths: DoctorPaths) -> dict[str, Any]:
         return _failed("context.snapshot", exc, repair=repair)
 
 
-def _selected_context_launcher(paths: DoctorPaths) -> tuple[str, Path]:
+def _selected_context_artifacts(paths: DoctorPaths) -> dict[str, Any]:
     desired, release, _task = _desired_runtime(paths)
-    _verify_release_tree(paths, desired, release)
-    source = release / "scripts/tgw_context_debian_stdio.py"
-    if not source.is_file() or source.is_symlink():
-        raise DoctorError("selected immutable runtime has no exact Context launcher")
-    observed = source.stat(follow_symlinks=False)
-    if observed.st_mode & 0o022:
-        raise DoctorError("selected immutable runtime Context launcher is writable")
-    return desired, source
+    release_tree = _verify_release_tree(paths, desired, release)
+    launcher = release / "scripts/tgw_context_debian_stdio.py"
+    runtime_source = release / "src"
+    modules = {
+        name: runtime_source / f"tgw/{name}.py"
+        for name in (
+            "context_mcp_server",
+            "current_context_snapshot",
+            "local_context_runtime",
+        )
+    }
+    required = {"launcher": launcher, **modules}
+    for name, source in required.items():
+        if not source.is_file() or source.is_symlink():
+            raise DoctorError(f"selected immutable runtime has no exact Context {name}")
+        observed = source.stat(follow_symlinks=False)
+        if (
+            observed.st_uid not in paths.trusted_release_owners
+            or observed.st_mode & 0o022
+        ):
+            raise DoctorError(
+                f"selected immutable runtime Context {name} is not immutable"
+            )
+    return {
+        "commit": desired,
+        "release": release,
+        "release_tree": release_tree,
+        "launcher": launcher,
+        "runtime_source": runtime_source,
+        "modules": modules,
+        "hashes": {name: _file_hash(source) for name, source in required.items()},
+    }
+
+
+def _selected_context_launcher(paths: DoctorPaths) -> tuple[str, Path]:
+    selected = _selected_context_artifacts(paths)
+    return selected["commit"], selected["launcher"]
 
 
 def check_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
     repair = "sudo -n tgw doctor repair context-launcher"
     try:
-        desired, source = _selected_context_launcher(paths)
-        if paths.context_launcher.is_symlink() or not paths.context_launcher.is_file():
+        selected = _selected_context_artifacts(paths)
+        desired = selected["commit"]
+        source = selected["launcher"]
+        installed = _surface_snapshot(paths.context_launcher)
+        if installed["kind"] != "file":
             raise DoctorError("installed Context launcher is missing or indirect")
-        if paths.context_launcher.read_bytes() != source.read_bytes():
-            raise DoctorError("installed Context launcher differs from selected runtime")
-        observed = paths.context_launcher.stat(follow_symlinks=False)
-        if observed.st_mode & 0o022 or not observed.st_mode & 0o111:
-            raise DoctorError("installed Context launcher mode is not immutable executable")
+        if installed["sha256"] != selected["hashes"]["launcher"]:
+            raise DoctorError(
+                "installed Context launcher differs from selected runtime"
+            )
+        if (
+            installed["uid"] != paths.context_install_uid
+            or installed["gid"] != paths.context_install_gid
+            or installed["mode"] != paths.context_launcher_mode
+        ):
+            raise DoctorError(
+                "installed Context launcher owner or mode differs from root:root 0555"
+            )
         return _check(
             "context.launcher",
             "PASS",
@@ -375,6 +479,18 @@ def check_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
                 "source": str(source),
                 "installed": str(paths.context_launcher),
                 "sha256": _file_hash(source),
+                "installed_uid": installed["uid"],
+                "installed_gid": installed["gid"],
+                "installed_mode": oct(installed["mode"]),
+                "runtime_source": str(selected["runtime_source"]),
+                "runtime_modules": {
+                    name: {
+                        "path": str(path),
+                        "sha256": selected["hashes"][name],
+                    }
+                    for name, path in selected["modules"].items()
+                },
+                "release_tree": selected["release_tree"],
             },
         )
     except Exception as exc:
@@ -1781,35 +1897,8 @@ def _require_trusted_root_program(
 
 
 def _require_trusted_context_runtime(paths: DoctorPaths) -> Path:
-    configured_source = paths.context_runtime_source
-    if configured_source.is_symlink():
-        raise DoctorError(
-            f"Context runtime path is not trusted-owner immutable: {configured_source}"
-        )
-    source = configured_source.resolve(strict=True)
-    module = source / "tgw/current_context_snapshot.py"
-    for path, expected_kind in (
-        (source, "directory"),
-        (source / "tgw", "directory"),
-        (module, "file"),
-    ):
-        try:
-            observed = path.stat(follow_symlinks=False)
-        except OSError as exc:
-            raise DoctorError(f"Context runtime path is unavailable: {path}") from exc
-        correct_kind = (
-            stat.S_ISDIR(observed.st_mode)
-            if expected_kind == "directory"
-            else stat.S_ISREG(observed.st_mode)
-        )
-        if (
-            path.is_symlink()
-            or not correct_kind
-            or observed.st_uid not in paths.trusted_release_owners
-            or observed.st_mode & 0o022
-        ):
-            raise DoctorError(f"Context runtime path is not trusted-owner immutable: {path}")
-    return source
+    selected = _selected_context_artifacts(paths)
+    return selected["runtime_source"]
 
 
 @contextmanager
@@ -1882,28 +1971,153 @@ def _receipt(paths: DoctorPaths, operation: str, before: Any, after: Any) -> str
     return str(path)
 
 
-def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
-    """Install only the selected launcher's bytes; clients hand off on restart."""
-    _require_root()
-    desired, source = _selected_context_launcher(paths)
-    expected = source.read_bytes()
-    before_hash = (
-        _file_hash(paths.context_launcher)
-        if paths.context_launcher.is_file() and not paths.context_launcher.is_symlink()
-        else None
+def _context_artifact_signature(selected: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "commit": selected["commit"],
+        "tree": selected["release_tree"]["tree"],
+        "hashes": dict(selected["hashes"]),
+    }
+
+
+def _launcher_surface_exact(
+    surface: Mapping[str, Any],
+    expected: bytes,
+    paths: DoctorPaths,
+) -> bool:
+    return (
+        surface.get("kind") == "file"
+        and surface.get("raw") == expected
+        and surface.get("uid") == paths.context_install_uid
+        and surface.get("gid") == paths.context_install_gid
+        and surface.get("mode") == paths.context_launcher_mode
     )
-    changed = before_hash != _file_hash(source)
-    if changed:
+
+
+def _surface_semantics(surface: Mapping[str, Any]) -> dict[str, Any]:
+    keys = ("kind", "raw", "target", "uid", "gid", "mode")
+    return {key: surface[key] for key in keys if key in surface}
+
+
+def _restore_surface(path: Path, surface: Mapping[str, Any]) -> None:
+    kind = surface.get("kind")
+    if kind == "file":
         _atomic_bytes(
-            paths.context_launcher,
-            expected,
-            mode=0o555,
-            uid=source.stat(follow_symlinks=False).st_uid,
-            gid=source.stat(follow_symlinks=False).st_gid,
+            path,
+            surface["raw"],
+            mode=surface["mode"],
+            uid=surface["uid"],
+            gid=surface["gid"],
         )
-    if paths.context_launcher.read_bytes() != expected:
-        raise DoctorError("Context launcher atomic replacement did not converge")
-    clients = _context_processes(paths)
+        return
+    if kind == "symlink":
+        _replace_link(path, Path(surface["target"]))
+        os.lchown(path, surface["uid"], surface["gid"])
+        return
+    if kind == "missing":
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+            directory = os.open(
+                path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        return
+    raise DoctorError(f"cannot restore unsupported surface type at {path}")
+
+
+def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
+    """Install one root-owned launcher bound to the exact immutable release."""
+    _require_root()
+    selected = _selected_context_artifacts(paths)
+    desired = selected["commit"]
+    source = selected["launcher"]
+    expected = source.read_bytes()
+    signature = _context_artifact_signature(selected)
+    before = _surface_snapshot(paths.context_launcher)
+    changed = not _launcher_surface_exact(before, expected, paths)
+    installed_snapshot: dict[str, Any] | None = None
+    replacement_attempted = False
+    try:
+        selected_before_commit = _selected_context_artifacts(paths)
+        if _context_artifact_signature(selected_before_commit) != signature:
+            raise DoctorError(
+                "selected Context runtime changed before repair; no live file was replaced"
+            )
+        if _surface_snapshot(paths.context_launcher) != before:
+            raise DoctorError(
+                "installed Context launcher changed concurrently; no live file was replaced"
+            )
+        if changed:
+            replacement_attempted = True
+            _atomic_bytes(
+                paths.context_launcher,
+                expected,
+                mode=paths.context_launcher_mode,
+                uid=paths.context_install_uid,
+                gid=paths.context_install_gid,
+            )
+        installed_snapshot = _surface_snapshot(paths.context_launcher)
+        if not _launcher_surface_exact(installed_snapshot, expected, paths):
+            raise DoctorError("Context launcher atomic replacement did not converge")
+        selected_after = _selected_context_artifacts(paths)
+        if _context_artifact_signature(selected_after) != signature:
+            raise DoctorError("selected Context runtime changed during repair")
+        after_record = {
+            "launcher": _surface_record(installed_snapshot),
+            "runtime_commit": desired,
+            "runtime_source": str(selected["runtime_source"]),
+            "runtime_hashes": selected["hashes"],
+        }
+        receipt = _receipt(
+            paths,
+            "context-launcher",
+            {"launcher": _surface_record(before)},
+            after_record,
+        )
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        rollback_state: str | None = None
+        if changed and replacement_attempted:
+            try:
+                current = _surface_snapshot(paths.context_launcher)
+                if current == before:
+                    rollback_state = "original launcher unchanged"
+                elif installed_snapshot is not None and current != installed_snapshot:
+                    raise DoctorError(
+                        "launcher changed concurrently after replacement; refused rollback overwrite"
+                    )
+                elif installed_snapshot is None and not _launcher_surface_exact(
+                    current, expected, paths
+                ):
+                    raise DoctorError(
+                        "launcher changed unexpectedly during replacement; refused rollback overwrite"
+                    )
+                else:
+                    _restore_surface(paths.context_launcher, before)
+                    restored = _surface_snapshot(paths.context_launcher)
+                    if _surface_semantics(restored) != _surface_semantics(before):
+                        raise DoctorError(
+                            "original launcher surface was not restored exactly"
+                        )
+                    rollback_state = "original launcher restored"
+            except Exception as rollback_exc:
+                rollback_errors.append(str(rollback_exc))
+        suffix = (
+            "; rollback errors: " + "; ".join(rollback_errors)
+            if rollback_errors
+            else f"; {rollback_state}"
+            if rollback_state
+            else ""
+        )
+        raise DoctorError(f"Context launcher repair failed: {exc}{suffix}") from exc
+    try:
+        clients = _context_processes(paths)
+        process_error = None
+    except Exception as exc:
+        clients = []
+        process_error = str(exc)
     affected = [item for item in clients if item["predates_launcher"]]
     return {
         "ok": True,
@@ -1913,9 +2127,13 @@ def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
         "source": str(source),
         "installed": str(paths.context_launcher),
         "sha256": _file_hash(source),
+        "runtime_source": str(selected["runtime_source"]),
+        "runtime_hashes": selected["hashes"],
+        "receipt": receipt,
         "client_processes_mutated": False,
         "restart_required": [item["pid"] for item in affected],
         "restart_scope": "affected parent harness sessions only",
+        "restart_detection_error": process_error,
     }
 
 

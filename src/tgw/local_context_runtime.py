@@ -65,6 +65,15 @@ def install(
         source_status = context_server._git(
             source_root, "status", "--porcelain=v1", "--untracked-files=all"
         )
+        snapshot = current_context()
+        if (
+            snapshot.get("plan_commit") != approved
+            or snapshot.get("source_commit") != source_commit
+            or snapshot.get("source_tree") != source_tree
+        ):
+            raise context_server.ContextError(
+                "atomic Context snapshot differs from Plan or canonical source; restart this harness session after the Context cutover"
+            )
         return {
             "plan_root": plan_root,
             "plan_repository": plan_repository,
@@ -85,6 +94,7 @@ def install(
             "environment_catalog_path": catalog_path,
             "environment_catalog_resolved_path": catalog_path.resolve(strict=True),
             "environment_catalog_hash": catalog_hash,
+            "current_context_snapshot": snapshot,
         }
 
     def status() -> dict[str, Any]:
@@ -92,7 +102,7 @@ def install(
         graph = context_server._code_snapshot(
             str(binding["source_root"]), binding["source_commit"]
         )
-        snapshot = current_context()
+        snapshot = binding["current_context_snapshot"]
         result = {
             "schema": "tgw-context-service/v2-local",
             "ok": True,
@@ -131,6 +141,7 @@ def install(
                     "active_treatment",
                     "plan_commit",
                     "source_commit",
+                    "source_tree",
                     "snapshot_sha256",
                 )
             },
@@ -157,7 +168,7 @@ def install(
         if requested_actor != actor():
             raise context_server.ContextError("orientation actor differs from Linux account")
         binding = bindings()
-        snapshot = current_context()
+        snapshot = binding["current_context_snapshot"]
         orientation_path = Path(f"/home/{requested_actor}/TGW-ORIENTATION.md")
         orientation = orientation_path.read_text(encoding="utf-8") if orientation_path.is_file() else ""
         result = {

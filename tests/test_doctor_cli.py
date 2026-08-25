@@ -48,6 +48,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     _git(repository, "init", "-b", "main")
     _git(repository, "config", "user.name", "test")
     _git(repository, "config", "user.email", "test@example.invalid")
+    snapshot_fixture_path = tmp_path / "tgw-lib/config/tgw-context-current.json"
     source_files = {
         "README": "source\n",
         "bin/tgw-coding-local-operator": "#!/bin/sh\nexit 0\n",
@@ -60,12 +61,18 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         "systemd/tgw-controller-verify-worker.service": "[Service]\nExecStart=/bin/true\n",
         "systemd/tgw-coding-local-foreman.timer": "[Timer]\nOnBootSec=1s\n",
         "systemd/tgw-coding-local-foreman.service": "[Service]\nType=oneshot\nExecStart=/bin/true\n",
+        "scripts/tgw_context_debian_stdio.py": (
+            f"#!/bin/sh\n# runtime snapshot: {snapshot_fixture_path}\nexit 0\n"
+        ),
+        "src/tgw/context_mcp_server.py": "# context server fixture\n",
+        "src/tgw/current_context_snapshot.py": "# snapshot fixture\n",
+        "src/tgw/local_context_runtime.py": "# local runtime fixture\n",
     }
     for relative, content in source_files.items():
         path = repository / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
-        if relative.startswith("bin/"):
+        if relative.startswith("bin/") or relative.startswith("scripts/"):
             path.chmod(0o755)
         else:
             path.chmod(0o644)
@@ -147,10 +154,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     _write_json(cursor_path, cursor)
     _write_json(snapshot_path, _snapshot(task, cursor))
     launcher = local_bin / "tgw-context-mcp"
-    launcher.write_text(
-        f"#!/bin/sh\n# runtime snapshot: {snapshot_path}\nexit 0\n",
-        encoding="utf-8",
-    )
+    shutil.copyfile(release / "scripts/tgw_context_debian_stdio.py", launcher)
     launcher.chmod(0o555)
     publisher = local_bin / "tgw-context-publish"
     publisher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -183,6 +187,8 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         cleanup_actor_home=tmp_path / "actor-home",
         cleanup_reference_roots=(tmp_path / "active-config",),
         trusted_release_owners=(os.getuid(),),
+        context_install_uid=os.getuid(),
+        context_install_gid=os.getgid(),
         systemd_unit_roots=(tmp_path / "systemd-units",),
         archive_discovery_roots=(tmp_path / "archive-discovery",),
     )
@@ -1021,7 +1027,7 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(
         "LANG": "C.UTF-8",
         "PATH": "/usr/bin:/bin",
         "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONPATH": str(paths.context_runtime_source.resolve()),
+        "PYTHONPATH": str(paths.runtime_root / "releases" / head / "src"),
     }
     receipt = json.loads(Path(result["receipt"]).read_text())
     assert receipt["operation"] == "context"
@@ -1056,28 +1062,34 @@ def test_context_publisher_failure_leaves_live_inputs_unchanged_and_is_receipted
 def test_context_repair_refuses_writable_context_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    paths, _head, _tree = _fixture(tmp_path)
-    paths.context_runtime_source.chmod(0o777)
+    paths, head, _tree = _fixture(tmp_path)
+    module = (
+        paths.runtime_root / "releases" / head / "src/tgw/current_context_snapshot.py"
+    )
+    module.chmod(0o666)
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
     monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
 
-    with pytest.raises(doctor_cli.DoctorError, match="not trusted-owner immutable"):
+    with pytest.raises(doctor_cli.DoctorError, match="release tree differs from Git"):
         doctor_cli.repair_context(paths)
 
 
 def test_context_repair_refuses_symlinked_context_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    paths, _head, _tree = _fixture(tmp_path)
-    configured_source = paths.context_runtime_source
-    real_source = configured_source.parent / "real-src"
-    configured_source.rename(real_source)
-    configured_source.symlink_to(real_source)
-    paths = replace(paths, context_runtime_source=configured_source)
+    paths, head, _tree = _fixture(tmp_path)
+    module = (
+        paths.runtime_root / "releases" / head / "src/tgw/current_context_snapshot.py"
+    )
+    outside = tmp_path / "outside-context-module.py"
+    outside.write_text("# outside\n", encoding="utf-8")
+    module.parent.chmod(0o755)
+    module.unlink()
+    module.symlink_to(outside)
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
     monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
 
-    with pytest.raises(doctor_cli.DoctorError, match="not trusted-owner immutable"):
+    with pytest.raises(doctor_cli.DoctorError, match="release tree differs from Git"):
         doctor_cli.repair_context(paths)
 
 
