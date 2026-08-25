@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -283,3 +285,71 @@ def test_plan_render_storage_repair_refuses_symlink(
 
     with pytest.raises(doctor_cli.DoctorError, match="unsafe managed directory"):
         doctor_cli._repair_plan_render_storage(paths)
+
+
+def test_plan_render_storage_diagnosis_rejects_symlinked_parent(
+    tmp_path: Path,
+) -> None:
+    actual = tmp_path / "actual"
+    leaf = actual / "plan-render"
+    leaf.mkdir(parents=True)
+    leaf.chmod(0o2770)
+    linked = tmp_path / "linked"
+    linked.symlink_to(actual, target_is_directory=True)
+
+    result = doctor_cli._directory_identity(
+        linked / "plan-render",
+        uid=os.getuid(),
+        gid=os.getgid(),
+        mode=0o2770,
+    )
+
+    assert result["kind"] == "unsafe"
+    assert result["exact"] is False
+
+
+def test_plan_render_repair_receipts_storage_before_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, release = _plan_render_check_fixture(tmp_path, monkeypatch)
+    (release / "systemd").mkdir()
+    unit_source = release / "systemd" / doctor_cli._PLAN_RENDER_UNIT
+    unit_source.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
+    systemd_root = tmp_path / "systemd"
+    systemd_root.mkdir()
+    paths = replace(
+        paths,
+        systemd_install_root=systemd_root,
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+    events: list[str] = []
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli, "_verify_release_tree", lambda *_args: {})
+    monkeypatch.setattr(
+        doctor_cli,
+        "_receipt",
+        lambda _paths, operation, *_args: events.append(f"receipt:{operation}")
+        or f"/{operation}.json",
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_run",
+        lambda command, **_kwargs: events.append("run:" + " ".join(command))
+        or subprocess.CompletedProcess(command, 0, "", ""),
+    )
+
+    result = doctor_cli.repair_plan_render_worker(paths)
+
+    assert result["ok"] is True
+    storage_started_index = events.index("receipt:plan-render-storage-started")
+    storage_receipt_index = events.index("receipt:plan-render-storage")
+    service_indexes = [
+        index
+        for index, event in enumerate(events)
+        if event.startswith("run:systemctl") and "daemon-reload" not in event
+    ]
+    assert service_indexes
+    assert events.index("run:systemctl daemon-reload") < storage_started_index
+    assert storage_started_index < storage_receipt_index
+    assert storage_receipt_index < min(service_indexes)

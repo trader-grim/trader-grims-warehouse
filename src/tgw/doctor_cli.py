@@ -1153,20 +1153,56 @@ def _runtime_selector_identity(
 def _directory_identity(
     path: Path, *, uid: int, gid: int, mode: int
 ) -> dict[str, Any]:
+    expected = {
+        "path": str(path),
+        "expected_uid": uid,
+        "expected_gid": gid,
+        "expected_mode": mode,
+    }
+    if not path.is_absolute() or path.name in ("", ".", ".."):
+        return {
+            **expected,
+            "kind": "unsafe",
+            "uid": None,
+            "gid": None,
+            "mode": None,
+            "error": "unsafe absolute path",
+            "exact": False,
+        }
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    root_descriptor = -1
+    descriptor = -1
     try:
-        observed = path.stat(follow_symlinks=False)
+        root_descriptor = os.open(path.anchor, flags)
+        descriptor = _open_relative_directory(
+            root_descriptor, path.relative_to(path.anchor)
+        )
+        _verify_bound_directory(path, descriptor)
+        observed = os.fstat(descriptor)
     except FileNotFoundError:
         return {
-            "path": str(path),
+            **expected,
             "kind": "missing",
             "uid": None,
             "gid": None,
             "mode": None,
-            "expected_uid": uid,
-            "expected_gid": gid,
-            "expected_mode": mode,
             "exact": False,
         }
+    except (DoctorError, OSError, ValueError) as exc:
+        return {
+            **expected,
+            "kind": "unsafe",
+            "uid": None,
+            "gid": None,
+            "mode": None,
+            "error": str(exc),
+            "exact": False,
+        }
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
     kind = "directory" if stat.S_ISDIR(observed.st_mode) else "unsafe"
     observed_mode = stat.S_IMODE(observed.st_mode)
     exact = (
@@ -1176,14 +1212,11 @@ def _directory_identity(
         and observed_mode == mode
     )
     return {
-        "path": str(path),
+        **expected,
         "kind": kind,
         "uid": observed.st_uid,
         "gid": observed.st_gid,
         "mode": observed_mode,
-        "expected_uid": uid,
-        "expected_gid": gid,
-        "expected_mode": mode,
         "exact": exact,
     }
 
@@ -3429,7 +3462,7 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
         destination.exists() and not destination.is_file()
     ):
         raise DoctorError("refusing unsafe plan_render unit destination")
-    changed = _repair_plan_render_storage(paths)
+    changed = False
     if (
         not paths.plan_render_config.is_file()
         or paths.plan_render_config.read_bytes() != config_source.read_bytes()
@@ -3447,6 +3480,35 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
     state = _unit_state(_PLAN_RENDER_UNIT)
     if not _unit_definition(paths, _PLAN_RENDER_UNIT, state)["exact"]:
         raise DoctorError("installed plan_render unit is not exact")
+    storage_before = _plan_render_storage_identity(paths)
+    storage_started_receipt = _receipt(
+        paths,
+        "plan-render-storage-started",
+        storage_before,
+        {"state": "STARTED"},
+    )
+    try:
+        changed = _repair_plan_render_storage(paths) or changed
+        storage_after = _plan_render_storage_identity(paths)
+        storage_receipt = _receipt(
+            paths, "plan-render-storage", storage_before, storage_after
+        )
+    except Exception as exc:
+        try:
+            storage_failed = _plan_render_storage_identity(paths)
+        except Exception as identity_exc:
+            storage_failed = {"identity_error": str(identity_exc)}
+        storage_failure_receipt = _receipt(
+            paths,
+            "plan-render-storage-failed",
+            storage_before,
+            {"error": str(exc), "storage": storage_failed},
+        )
+        raise DoctorError(
+            f"plan_render storage repair failed: {exc}; "
+            f"started receipt: {storage_started_receipt}; "
+            f"failure receipt: {storage_failure_receipt}"
+        ) from exc
     action = None
     if changed or state.get("ActiveState") != "active":
         for command in (["systemctl", "enable", _PLAN_RENDER_UNIT],
@@ -3459,7 +3521,10 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
     if after["state"] != "PASS":
         raise DoctorError("plan_render unit remains unhealthy after repair")
     return {"ok": True, "operation": "plan-render-worker", "changed": changed or action is not None,
-            "service_action": action, "receipt": _receipt(paths, "plan-render-worker", before, after)}
+            "service_action": action,
+            "storage_started_receipt": storage_started_receipt,
+            "storage_receipt": storage_receipt,
+            "receipt": _receipt(paths, "plan-render-worker", before, after)}
 
 
 def _cleanup_references(
