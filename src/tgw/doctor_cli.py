@@ -2416,6 +2416,80 @@ def _quiescence_layout(
     return state_path, marker, dropins, dropin_value
 
 
+def _unexpected_quiescence_entries(
+    paths: DoctorPaths,
+    *,
+    state_path: Path,
+    marker: Path,
+    dropins: Mapping[str, Path],
+) -> list[Path]:
+    """Return entries outside the exact Doctor-owned quiescence layout."""
+    unexpected: list[Path] = []
+    directories = {
+        paths.quiescence_root: {state_path.name, marker.name},
+        **{dropin.parent: {dropin.name} for dropin in dropins.values()},
+    }
+    for directory, allowed_names in directories.items():
+        if not os.path.lexists(directory):
+            continue
+        directory_state = directory.stat(follow_symlinks=False)
+        if directory.is_symlink() or not stat.S_ISDIR(directory_state.st_mode):
+            raise DoctorError(
+                f"unsafe coding quiescence directory while inspecting: {directory}"
+            )
+        try:
+            entries = list(directory.iterdir())
+        except OSError as exc:
+            raise DoctorError(
+                f"cannot inspect coding quiescence directory {directory}: {exc}"
+            ) from exc
+        unexpected.extend(
+            entry for entry in entries if entry.name not in allowed_names
+        )
+    return sorted(unexpected, key=lambda path: str(path))
+
+
+def _assert_known_quiescence_layout(
+    paths: DoctorPaths,
+    *,
+    state_path: Path,
+    marker: Path,
+    dropins: Mapping[str, Path],
+) -> None:
+    unexpected = _unexpected_quiescence_entries(
+        paths,
+        state_path=state_path,
+        marker=marker,
+        dropins=dropins,
+    )
+    if unexpected:
+        raise DoctorError(
+            "unexpected coding quiescence remnants; refusing alteration: "
+            + ", ".join(str(path) for path in unexpected)
+        )
+
+
+def _assert_quiescence_units_safe(states: Mapping[str, Mapping[str, str]]) -> None:
+    preexisting_masks = [
+        unit for unit, state in states.items() if state.get("LoadState") == "masked"
+    ]
+    if preexisting_masks:
+        raise DoctorError(
+            "refusing to alter pre-existing coding unit masks: "
+            + ", ".join(preexisting_masks)
+        )
+    transient_active = [
+        unit
+        for unit, state in states.items()
+        if unit not in _ACTIVE_CODING_UNITS and state.get("ActiveState") == "active"
+    ]
+    if transient_active:
+        raise DoctorError(
+            "local coding one-shot is active; retry after it exits: "
+            + ", ".join(transient_active)
+        )
+
+
 def _new_quiescence_state(
     units: Sequence[str],
     initially_active: Sequence[str],
@@ -2696,6 +2770,31 @@ def _release_quiescence(
     if remaining_guards:
         errors.append("quiescence guards remain: " + ", ".join(remaining_guards))
 
+    unexpected = _unexpected_quiescence_entries(
+        paths,
+        state_path=state_path,
+        marker=marker,
+        dropins=dropins,
+    )
+    if unexpected:
+        errors.append(
+            "unexpected coding quiescence remnants remain: "
+            + ", ".join(str(path) for path in unexpected)
+        )
+
+    if not errors:
+        dropin_directories = sorted(
+            {dropin.parent for dropin in dropins.values()}, key=lambda path: str(path)
+        )
+        for directory in reversed(dropin_directories):
+            try:
+                directory.rmdir()
+                _fsync_parent(directory)
+            except OSError as exc:
+                if exc.errno != errno.ENOENT:
+                    errors.append(
+                        f"cannot remove quiescence directory {directory}: {exc}"
+                    )
     if not errors:
         try:
             _unlink_quiescence_file(
@@ -2704,16 +2803,14 @@ def _release_quiescence(
         except (OSError, DoctorError) as exc:
             errors.append(str(exc))
     if not errors:
-        for directory in [
-            *(dropin.parent for dropin in reversed(list(dropins.values()))),
-            paths.quiescence_root,
-        ]:
-            try:
-                directory.rmdir()
-                _fsync_parent(directory)
-            except OSError as exc:
-                if exc.errno not in (errno.ENOENT, errno.ENOTEMPTY):
-                    errors.append(f"cannot remove quiescence directory {directory}: {exc}")
+        try:
+            paths.quiescence_root.rmdir()
+            _fsync_parent(paths.quiescence_root)
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                errors.append(
+                    f"cannot remove quiescence directory {paths.quiescence_root}: {exc}"
+                )
     result = {
         "initially_active": list(initially_active),
         "restored": not wrong and marker_absent,
@@ -2729,6 +2826,12 @@ def _recover_stale_quiescence(
     paths: DoctorPaths, *, units: Sequence[str], uid: int, gid: int
 ) -> dict[str, Any] | None:
     state_path, marker, dropins, dropin_value = _quiescence_layout(paths, units)
+    _assert_known_quiescence_layout(
+        paths,
+        state_path=state_path,
+        marker=marker,
+        dropins=dropins,
+    )
     existing = [
         str(path)
         for path in (state_path, marker, *dropins.values())
@@ -2819,34 +2922,22 @@ def _coding_quiescence(paths: DoctorPaths):
     units = list(_CODING_UNITS)
     uid = paths.systemd_unit_uid
     gid = paths.systemd_unit_gid
+    state_path, marker, dropins, dropin_value = _quiescence_layout(paths, units)
+    _assert_known_quiescence_layout(
+        paths,
+        state_path=state_path,
+        marker=marker,
+        dropins=dropins,
+    )
+    _assert_quiescence_units_safe({unit: _unit_state(unit) for unit in units})
     recovered = _recover_stale_quiescence(paths, units=units, uid=uid, gid=gid)
     initial_states = {unit: _unit_state(unit) for unit in units}
-    preexisting_masks = [
-        unit
-        for unit, state in initial_states.items()
-        if state.get("LoadState") == "masked"
-    ]
-    if preexisting_masks:
-        raise DoctorError(
-            "refusing to alter pre-existing coding unit masks: "
-            + ", ".join(preexisting_masks)
-        )
-    transient_active = [
-        unit
-        for unit, state in initial_states.items()
-        if unit not in _ACTIVE_CODING_UNITS and state.get("ActiveState") == "active"
-    ]
-    if transient_active:
-        raise DoctorError(
-            "local coding one-shot is active; retry after it exits: "
-            + ", ".join(transient_active)
-        )
+    _assert_quiescence_units_safe(initial_states)
     initially_active = [
         unit
         for unit, state in initial_states.items()
         if unit in _ACTIVE_CODING_UNITS and state.get("ActiveState") == "active"
     ]
-    state_path, marker, dropins, dropin_value = _quiescence_layout(paths, units)
     _secure_runtime_directory(paths.quiescence_root, uid=uid, gid=gid)
     state, state_raw = _new_quiescence_state(
         units, initially_active, state_path, marker, dropins

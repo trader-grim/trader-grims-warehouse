@@ -737,6 +737,119 @@ def test_coding_quiescence_recovers_exact_stale_interrupted_state(
     assert not any(runtime_root.iterdir())
 
 
+def test_coding_quiescence_refuses_stale_recovery_while_foreman_is_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_root = tmp_path / "systemd"
+    runtime_root.mkdir(mode=0o755)
+    quiescence_root = tmp_path / "tgw-doctor"
+    quiescence_root.mkdir(mode=0o755)
+    paths = doctor_cli.DoctorPaths(
+        systemd_runtime_root=runtime_root,
+        quiescence_root=quiescence_root,
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+    units = list(doctor_cli._CODING_UNITS)
+    state_path, marker, dropins, _dropin_value = doctor_cli._quiescence_layout(
+        paths, units
+    )
+    state = {
+        "schema": doctor_cli._QUIESCENCE_SCHEMA,
+        "boot_id": doctor_cli._boot_id(),
+        "owner_pid": 999999999,
+        "owner_start_ticks": "1",
+        "units": units,
+        "initially_active": ["tgw-coding-local-foreman.timer"],
+        "state_path": str(state_path),
+        "marker": str(marker),
+        "dropins": {unit: str(dropins[unit]) for unit in units},
+    }
+    state_raw = doctor_cli._canonical(state) + b"\n"
+    doctor_cli._create_quiescence_file(
+        state_path,
+        state_raw,
+        mode=0o400,
+        uid=os.getuid(),
+        gid=os.getgid(),
+    )
+
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda unit: {
+            "LoadState": "loaded",
+            "ActiveState": (
+                "active"
+                if unit == "tgw-coding-local-foreman.service"
+                else "inactive"
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("systemctl must not be called"),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="one-shot is active"):
+        with doctor_cli._coding_quiescence(paths):
+            pass
+
+    assert state_path.read_bytes() == state_raw
+    assert not marker.exists()
+    assert not any(runtime_root.iterdir())
+
+
+@pytest.mark.parametrize("extra_location", ["state-root", "drop-in-root"])
+def test_coding_quiescence_retains_state_for_unexpected_runtime_remnant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_location: str,
+) -> None:
+    runtime_root = tmp_path / "systemd"
+    runtime_root.mkdir(mode=0o755)
+    quiescence_root = tmp_path / "tgw-doctor"
+    paths = doctor_cli.DoctorPaths(
+        systemd_runtime_root=runtime_root,
+        quiescence_root=quiescence_root,
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+    units = list(doctor_cli._CODING_UNITS)
+    state_path, _marker, dropins, _dropin_value = doctor_cli._quiescence_layout(
+        paths, units
+    )
+
+    def unit_state(unit):
+        dropin = dropins[unit]
+        return {
+            "LoadState": "loaded",
+            "ActiveState": "inactive",
+            "DropInPaths": str(dropin) if dropin.exists() else "",
+        }
+
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "", ""),
+    )
+
+    with pytest.raises(
+        doctor_cli.DoctorError, match="unexpected coding quiescence remnants remain"
+    ):
+        with doctor_cli._coding_quiescence(paths):
+            if extra_location == "state-root":
+                extra = quiescence_root / "unexpected.guard"
+            else:
+                extra = next(iter(dropins.values())).parent / "unexpected.conf"
+            extra.write_text("preserve\n", encoding="utf-8")
+
+    assert extra.read_text(encoding="utf-8") == "preserve\n"
+    assert state_path.is_file()
+
+
 def test_coding_quiescence_reload_failure_restores_and_is_recoverable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
