@@ -70,8 +70,19 @@ def _metadata_directory(worktree: Path) -> Path:
     return gitdir
 
 
+def _validate_descriptor(worktree: Path, descriptor: int) -> None:
+    gitdir = _metadata_directory(worktree)
+    opened = os.fstat(descriptor)
+    current = os.stat(gitdir, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        raise HardFailure("coding worktree lease descriptor does not match Git metadata")
+
+
 @contextmanager
-def exclusive_worktree_lease(worktree: Path) -> Iterator[None]:
+def exclusive_worktree_lease(worktree: Path) -> Iterator[int]:
     """Lock the verified Git worktree-metadata inode, not a replaceable file."""
     gitdir = _metadata_directory(worktree)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
@@ -82,20 +93,31 @@ def exclusive_worktree_lease(worktree: Path) -> Iterator[None]:
     except OSError as exc:
         raise HardFailure(f"coding worktree lease cannot open Git metadata: {exc}") from exc
     try:
-        opened = os.fstat(descriptor)
-        current = os.stat(gitdir, follow_symlinks=False)
-        if (
-            not stat.S_ISDIR(opened.st_mode)
-            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
-        ):
-            raise HardFailure("coding worktree lease metadata changed during open")
+        _validate_descriptor(worktree, descriptor)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise WorktreeLeaseBusy("coding implementation worktree is already leased") from exc
-        yield
+        yield descriptor
     finally:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
+
+
+@contextmanager
+def inherited_worktree_lease(worktree: Path, descriptor: int) -> Iterator[int]:
+    """Validate and retain the exact worker-owned lease inherited by a runner.
+
+    ``pass_fds`` gives the runner the same open file description as the worker.
+    The child must never unlock it: doing so would release the parent's lock too.
+    """
+    if not isinstance(descriptor, int) or descriptor < 0:
+        raise HardFailure("coding runner inherited an invalid worktree lease descriptor")
+    try:
+        _validate_descriptor(worktree, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError) as exc:
+        raise HardFailure("coding runner did not inherit the worker worktree lease") from exc
+    yield descriptor

@@ -16,6 +16,18 @@ MANIFEST_SCHEMA = "tgw-coding-preservation-manifest/v2"
 HISTORY = ".tgw-coding-history/implementation"
 PRESERVATION = ".tgw-coding-preservation"
 LEGACY_1747 = Path("/opt/TGW/var/worktrees/todo-1747-plan-52b355efbebde5d607a2b055")
+LEGACY_1747_FINGERPRINT = "sha256:1682aca6df1d147169a7d7aa9bce000a270546d57cf765c1002aecaa9071d733"
+LEGACY_1747_RECEIPT_SHA256 = "0d58f8e21f3b89a89c3e242c7a96827534242989dd3ec751aa0e46c97b57742c"
+RECEIPT_FILES = frozenset(
+    {
+        "implementation-receipt.json",
+        "review-receipt.json",
+        "controller-harness-receipt.json",
+        "stitch-receipt.json",
+        "deployment-receipt.json",
+        "operator-admit-pending.json",
+    }
+)
 
 
 class PartialResumeError(ValueError):
@@ -31,6 +43,21 @@ def _git(root: Path, *args: str) -> bytes:
     if result.returncode:
         raise PartialResumeError(result.stderr.decode(errors="replace")[-500:])
     return result.stdout
+
+
+def source_tree(worktree: Path, source_commit: str) -> str:
+    """Resolve the exact baseline tree through the request-bound repository."""
+    if not isinstance(source_commit, str) or len(source_commit) != 40:
+        raise PartialResumeError("source commit is malformed")
+    return _git(worktree, "rev-parse", f"{source_commit}^{{tree}}").decode().strip()
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _safe_path(raw: bytes) -> str:
@@ -87,7 +114,11 @@ def _node(root: Path, relative: str) -> dict[str, Any]:
 
 
 def source_fingerprint(worktree: Path) -> dict[str, Any]:
-    exclusions = (":(exclude)implementation-receipt.json", f":(exclude){HISTORY}", f":(exclude){PRESERVATION}")
+    exclusions = (
+        *(f":(exclude){name}" for name in sorted(RECEIPT_FILES)),
+        f":(exclude){HISTORY}",
+        f":(exclude){PRESERVATION}",
+    )
     raw = _git(worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".", *exclusions)
     entries, paths = _status_entries(raw)
     index_delta = _git(worktree, "diff", "--cached", "--binary", "HEAD", "--", ".", *exclusions)
@@ -120,7 +151,18 @@ def make_attempt(binding: Mapping[str, Any], worktree: Path, *, outcome: str, pr
 def append_attempt(worktree: Path, attempt: Mapping[str, Any]) -> Path:
     root = worktree / HISTORY
     root.mkdir(parents=True, exist_ok=True)
-    sequence = len(tuple(root.glob("[0-9]*-*.json"))) + 1
+    existing = history(worktree)
+    unsigned = dict(attempt)
+    claimed = unsigned.pop("attempt_hash", None)
+    actual = "sha256:" + hashlib.sha256(_canonical(unsigned)).hexdigest()
+    if (
+        attempt.get("schema") != SCHEMA
+        or claimed != actual
+        or attempt.get("predecessor")
+        != (existing[-1]["attempt_hash"] if existing else None)
+    ):
+        raise PartialResumeError("attempt append is not the next exact lineage entry")
+    sequence = len(existing) + 1
     digest = str(attempt.get("attempt_hash", "")).removeprefix("sha256:")
     path = root / f"{sequence:06d}-{digest}.json"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o440)
@@ -128,10 +170,20 @@ def append_attempt(worktree: Path, attempt: Mapping[str, Any]) -> Path:
         stream.write(json.dumps(attempt, sort_keys=True) + "\n")
         stream.flush()
         os.fsync(stream.fileno())
+    _fsync_directory(root)
+    _fsync_directory(root.parent)
+    _fsync_directory(worktree)
     return path
 
 
 def history(worktree: Path, expected: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+    if expected is not None:
+        required = tuple(key for key in _BINDINGS if key not in {"job_id", "attempt_count"})
+        missing = [key for key in required if expected.get(key) in (None, "")]
+        if missing:
+            raise PartialResumeError(
+                "incomplete expected attempt binding: " + ",".join(missing)
+            )
     result, predecessor = [], None
     paths = sorted((worktree / HISTORY).glob("*.json")) if (worktree / HISTORY).is_dir() else ()
     for sequence, path in enumerate(paths, 1):
@@ -166,7 +218,33 @@ def classify(worktree: Path, expected: Mapping[str, Any] | None = None) -> dict[
     latest = attempts[-1]
     resumable = next((item for item in reversed(attempts) if item["outcome"] == "partial" and item["fingerprint"] == current["fingerprint"]), None)
     if latest["outcome"] == "satisfied":
-        state = "CLOSED_CANDIDATE" if current["head"] != latest["source_commit"] else "STALE_RECEIPT"
+        closed = [
+            item for item in latest.get("artifacts", [])
+            if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"
+        ]
+        exact_closed = (
+            len(closed) == 1
+            and not current["changed_paths"]
+            and current["fingerprint"] == latest.get("fingerprint")
+            and current["head"] == latest.get("head") == closed[0].get("commit")
+            and current["tree"] == latest.get("tree") == closed[0].get("tree")
+            and current["head"] != latest.get("source_commit")
+        )
+        if exact_closed:
+            ancestor = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", latest["source_commit"], current["head"]],
+                cwd=worktree,
+                check=False,
+                capture_output=True,
+            )
+            exact_closed = ancestor.returncode == 0
+        state = (
+            "CLOSED_CANDIDATE"
+            if exact_closed
+            else "UNSAFE_DIRTY"
+            if current["changed_paths"]
+            else "STALE_RECEIPT"
+        )
     elif resumable is not None and all(item["fingerprint"] == current["fingerprint"] and item["outcome"] in {"partial", "failed"} for item in attempts[attempts.index(resumable) :]):
         state = "RESUMABLE_PARTIAL"
     else:
@@ -194,65 +272,142 @@ def preservation_manifest(worktree: Path, classification: Mapping[str, Any], bin
             stream.write(json.dumps(value, sort_keys=True) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
+        _fsync_directory(root)
+        _fsync_directory(worktree)
     return path
 
 
 def migrate_todo_1747(worktree: Path, binding: Mapping[str, Any], jobs: list[Mapping[str, Any]]) -> Path:
     """Write and verify the exact one-time 1747 manifest before attempt history."""
-    if worktree.resolve() != LEGACY_1747 or binding.get("todo_id") != 1747:
+    if (
+        worktree.resolve() != LEGACY_1747
+        or binding.get("todo_id") != 1747
+        or binding.get("worktree") != str(worktree.resolve())
+        or binding.get("actor") != "codex"
+        or binding.get("treatment_id") != "codex-implement"
+        or binding.get("treatment_version") != "1"
+    ):
         raise PartialResumeError("migration is restricted to exact Todo 1747")
     expected_jobs = {
-        "dfdfd643-312e-46ef-a33c-1542340e9b9c": "partial",
-        "2b1f9f04-a09f-489e-aade-f21ab1e4aaa9": "failed",
+        "dfdfd643-312e-46ef-a33c-1542340e9b9c": (
+            "partial", 1, "HardFailure('coding treatment reported partial')"
+        ),
+        "2b1f9f04-a09f-489e-aade-f21ab1e4aaa9": (
+            "failed", 1, "HardFailure('coding treatment reported failed')"
+        ),
     }
+    if len(jobs) != len(expected_jobs):
+        raise PartialResumeError("Todo 1747 requires exactly two durable jobs")
+    if binding.get("source_tree") != source_tree(worktree, str(binding.get("source_commit", ""))):
+        raise PartialResumeError("Todo 1747 source commit/tree binding mismatch")
     normalized = []
     for job in jobs:
         job_id, outcome = str(job.get("job_id")), job.get("outcome")
-        if expected_jobs.get(job_id) != outcome or not isinstance(job.get("payload"), Mapping):
+        expected = expected_jobs.get(job_id)
+        if (
+            expected is None
+            or expected
+            != (outcome, job.get("attempt_count"), job.get("error_detail"))
+            or job.get("state") != "dead_letter"
+            or job.get("error_code") != "HARD_FAILURE"
+            or not isinstance(job.get("payload"), Mapping)
+        ):
             raise PartialResumeError("Todo 1747 durable job identity, outcome, or payload mismatch")
         payload = job["payload"]
         plan = payload.get("plan_binding")
+        identity = plan.get("worktree_identity") if isinstance(plan, Mapping) else None
         if (
             not isinstance(plan, Mapping)
+            or not isinstance(identity, Mapping)
             or payload.get("todo_id") != 1747
             or payload.get("todo_agent") != binding.get("actor")
             or payload.get("worktree") != binding.get("worktree")
+            or payload.get("object_id") != binding.get("worktree")
             or payload.get("treatment_id") != "codex-implement"
             or any(plan.get(key) != binding.get(key) for key in ("plan_commit", "solution_hash", "source_commit"))
+            or plan.get("worktree") != binding.get("worktree")
+            or identity.get("worktree") != binding.get("worktree")
+            or identity.get("actor") != binding.get("actor")
+            or identity.get("head") != binding.get("source_commit")
         ):
             raise PartialResumeError("Todo 1747 durable payload binding mismatch")
-        normalized.append({"job_id": job_id, "outcome": outcome, "payload": dict(payload)})
-    if {item["job_id"] for item in normalized} != set(expected_jobs):
+        normalized.append(
+            {
+                "job_id": job_id,
+                "outcome": outcome,
+                "attempt_count": job["attempt_count"],
+                "state": job["state"],
+                "error_code": job["error_code"],
+                "error_detail": job["error_detail"],
+                "payload": dict(payload),
+            }
+        )
+    if len({item["job_id"] for item in normalized}) != len(expected_jobs):
         raise PartialResumeError("Todo 1747 requires both exact durable jobs")
     state = source_fingerprint(worktree)
-    if state["changed_paths"] != ["src/tgw/coding_cli.py", "src/tgw/pp_workflow_reconcile.py", "tests/test_pp_workflow_reconcile.py"]:
+    if (
+        state["fingerprint"] != LEGACY_1747_FINGERPRINT
+        or state["changed_paths"]
+        != [
+            "src/tgw/coding_cli.py",
+            "src/tgw/pp_workflow_reconcile.py",
+            "tests/test_pp_workflow_reconcile.py",
+        ]
+    ):
         raise PartialResumeError("Todo 1747 exact three-path binding mismatch")
     receipt = worktree / "implementation-receipt.json"
-    if not receipt.is_file() or history(worktree):
-        raise PartialResumeError("Todo 1747 receipt is missing or migration already ran")
+    receipt_hash = hashlib.sha256(receipt.read_bytes()).hexdigest() if receipt.is_file() else None
+    if receipt_hash != LEGACY_1747_RECEIPT_SHA256:
+        raise PartialResumeError("Todo 1747 exact legacy receipt is missing or differs")
     unsigned = {
         "schema": "tgw-coding-1747-migration/v1",
         "binding": dict(binding),
         "source": state,
-        "legacy_receipt_sha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
+        "legacy_receipt_sha256": receipt_hash,
         "jobs": sorted(normalized, key=lambda item: item["job_id"]),
     }
     value = {**unsigned, "manifest_hash": "sha256:" + hashlib.sha256(_canonical(unsigned)).hexdigest()}
+    predecessor = None
+    expected_attempts = []
+    for job in sorted(normalized, key=lambda item: item["outcome"] != "partial"):
+        attempt_binding = {
+            **binding,
+            "job_id": job["job_id"],
+            "attempt_count": job["attempt_count"],
+        }
+        attempt = make_attempt(
+            attempt_binding,
+            worktree,
+            outcome=job["outcome"],
+            predecessor=predecessor,
+        )
+        expected_attempts.append(attempt)
+        predecessor = attempt["attempt_hash"]
+    existing = history(worktree, {**binding, "job_id": None, "attempt_count": None})
+    if existing != expected_attempts[: len(existing)]:
+        raise PartialResumeError(
+            "Todo 1747 existing attempt history is not an exact migration prefix"
+        )
     root = worktree / PRESERVATION
     root.mkdir(exist_ok=True)
     path = root / "todo-1747-migration.json"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o440)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        stream.write(json.dumps(value, sort_keys=True) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
+    if path.exists():
+        try:
+            installed = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PartialResumeError("Todo 1747 migration manifest is unreadable") from exc
+        if installed != value:
+            raise PartialResumeError("Todo 1747 migration manifest differs")
+    else:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o440)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(value, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        _fsync_directory(root)
+        _fsync_directory(worktree)
     if json.loads(path.read_text(encoding="utf-8")) != value:
         raise PartialResumeError("Todo 1747 immutable migration manifest verification failed")
-    predecessor = None
-    for job in sorted(normalized, key=lambda item: item["outcome"] != "partial"):
-        payload = job["payload"]
-        attempt_binding = {**binding, "job_id": job["job_id"], "attempt_count": payload.get("attempt_count", 1)}
-        attempt = make_attempt(attempt_binding, worktree, outcome=job["outcome"], predecessor=predecessor)
+    for attempt in expected_attempts[len(existing) :]:
         append_attempt(worktree, attempt)
-        predecessor = attempt["attempt_hash"]
     return path

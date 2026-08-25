@@ -17,8 +17,9 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
-from tgw.development.partial_resume import HISTORY, PRESERVATION, classify
+from tgw.development.partial_resume import HISTORY, PRESERVATION, classify, source_tree
 from tgw.development.worktree_lease import exclusive_worktree_lease as _exclusive_worktree_lease
+from tgw.development.worktree_lease import inherited_worktree_lease
 from tgw.errors import HardFailure
 
 Invoke = Callable[..., subprocess.CompletedProcess[str]]
@@ -409,6 +410,11 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
             "plan_commit": binding.get("plan_commit") if isinstance(binding, dict) else None,
             "solution_hash": binding.get("solution_hash") if isinstance(binding, dict) else None,
             "source_commit": binding.get("source_commit") if isinstance(binding, dict) else None,
+            "source_tree": (
+                source_tree(cwd, binding["source_commit"])
+                if isinstance(binding, dict) and isinstance(binding.get("source_commit"), str)
+                else None
+            ),
             "actor": job.get("todo_agent"), "worktree": str(cwd.resolve()),
             "treatment_id": "codex-implement", "treatment_version": str(job.get("treatment_version", "1")),
         }
@@ -540,7 +546,16 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
 
 
 def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
-    with _exclusive_worktree_lease(cwd):
+    inherited = os.environ.get("TGW_CODING_WORKTREE_LEASE_FD")
+    if inherited is not None:
+        try:
+            descriptor = int(inherited)
+        except ValueError as exc:
+            raise HardFailure("coding runner inherited a malformed lease descriptor") from exc
+        lease = inherited_worktree_lease(cwd, descriptor)
+    else:
+        lease = _exclusive_worktree_lease(cwd)
+    with lease:
         return _run_with_lease(job, cwd, invoke=invoke)
 
 

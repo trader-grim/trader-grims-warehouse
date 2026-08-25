@@ -30,7 +30,12 @@ from tgw.development.local_workflow import (
     require_coder_account,
     status_command,
 )
-from tgw.development.partial_resume import classify, preservation_manifest
+from tgw.development.partial_resume import (
+    classify,
+    migrate_todo_1747,
+    preservation_manifest,
+    source_tree,
+)
 from tgw.development.plan_todo_bridge import bind_leaf
 from tgw.development.plan_todo_source import PlanTodoSourceError
 from tgw.development.plan_todo_source import resolve as resolve_plan_todo
@@ -50,6 +55,10 @@ DEFAULT_TREATMENT = "establish:workflow.condition-derived-convergence@1"
 DEFAULT_PLAN_REPOSITORY = Path("/opt/TGW/library/plans")
 _LOCAL_QUEUES = ("codex-implement", "controller-verify")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
+_LEGACY_1747_JOBS = (
+    ("dfdfd643-312e-46ef-a33c-1542340e9b9c", "partial"),
+    ("2b1f9f04-a09f-489e-aade-f21ab1e4aaa9", "failed"),
+)
 
 
 class CodingCLIError(RuntimeError):
@@ -104,6 +113,27 @@ def _todo_id(value: Any) -> int:
     return result
 
 
+def _legacy_1747_jobs() -> list[dict[str, Any]]:
+    """Read the two immutable queue facts used by the one-time migration."""
+    result = []
+    for job_id, outcome in _LEGACY_1747_JOBS:
+        row = state_machine.get_job(job_id)
+        if row is None:
+            raise CodingCLIError(f"Todo 1747 durable job {job_id} is missing")
+        result.append(
+            {
+                "job_id": job_id,
+                "outcome": outcome,
+                "attempt_count": row.get("attempt_count"),
+                "state": row.get("state"),
+                "error_code": row.get("error_code"),
+                "error_detail": row.get("error_detail"),
+                "payload": row.get("payload_json") or row.get("payload"),
+            }
+        )
+    return result
+
+
 def _pp_runtime_binding(config: dict[str, Any], source_commit: str | None = None) -> dict[str, Any]:
     """Resolve the one external repository/runtime binding used by CLI and MCP."""
     local = __import__("tgw.development.local_workflow", fromlist=["_git"])
@@ -134,9 +164,12 @@ def start(
     config_path: Path | str = DEFAULT_CONFIG,
     solution_path: Path | str = DEFAULT_SOLUTION,
     source_commit: str | None = None,
+    resume_only: bool = False,
 ) -> dict[str, Any]:
     """Bind, allocate, evaluate, and dispatch one existing Todo locally."""
     if isinstance(todo_id, str) and todo_id == PP_REF:
+        if resume_only:
+            raise CodingCLIError("resume-only operation requires one Todo ID")
         config = _initialize(config_path)
         actor = require_coder_account()
         coding = config["coding"]
@@ -250,10 +283,16 @@ def start(
         "todo_id": todo_id, "plan_commit": binding["binding"]["plan_commit"],
         "solution_hash": binding["binding"]["solution_hash"],
         "source_commit": binding["binding"]["source_commit"],
+        "source_tree": source_tree(worktree, binding["binding"]["source_commit"]),
         "actor": item.get("agent") or "codex", "worktree": str(worktree),
         "treatment_id": "codex-implement", "treatment_version": "1",
     }
+    migration: str | None = None
     with exclusive_worktree_lease(worktree):
+        if resume_only and todo_id == 1747:
+            migration = str(
+                migrate_todo_1747(worktree, expected_attempt, _legacy_1747_jobs())
+            )
         resume_state = classify(worktree, expected_attempt)
         resume_bindings: dict[int, dict[str, str]] = {}
         if resume_state["state"] == "RESUMABLE_PARTIAL":
@@ -261,6 +300,15 @@ def start(
                 "resume_of": resume_state["resume_of"],
                 "resume_fingerprint": resume_state["fingerprint"],
             }
+        elif resume_only:
+            manifest = None
+            if resume_state["state"] in {"UNSAFE_DIRTY", "STALE_RECEIPT"}:
+                manifest = preservation_manifest(worktree, resume_state, expected_attempt)
+            suffix = f"; preserved at {manifest}" if manifest is not None else ""
+            raise CodingCLIError(
+                f"Todo {todo_id} is {resume_state['state']}; "
+                f"coding resume requires RESUMABLE_PARTIAL{suffix}"
+            )
         elif resume_state["state"] not in {"ABANDONED_CLEAN", "CLOSED_CANDIDATE"}:
             manifest = preservation_manifest(worktree, resume_state, expected_attempt)
             raise CodingCLIError(
@@ -297,6 +345,8 @@ def start(
         "foreman": dataclasses.asdict(result),
         "jobs": jobs,
         "coding_state": classify(Path(worktree), expected_attempt),
+        "resume_only": resume_only,
+        "migration": migration,
         "session": {
             "cwd": worktree,
             "codex": ["codex", "-C", worktree],
@@ -310,6 +360,23 @@ def start(
             "approval_card": False,
         },
     }
+
+
+def resume(
+    todo_id: int | str,
+    *,
+    config_path: Path | str = DEFAULT_CONFIG,
+    solution_path: Path | str = DEFAULT_SOLUTION,
+    source_commit: str | None = None,
+) -> dict[str, Any]:
+    """Resume exactly one already-proven partial implementation."""
+    return start(
+        todo_id,
+        config_path=config_path,
+        solution_path=solution_path,
+        source_commit=source_commit,
+        resume_only=True,
+    )
 
 
 def status(
@@ -330,6 +397,7 @@ def status(
                 local["coding_state"] = classify(Path(binding["worktree"]), {
                     "todo_id": todo_id, "plan_commit": binding["plan_commit"],
                     "solution_hash": binding["solution_hash"], "source_commit": binding["source_commit"],
+                    "source_tree": source_tree(Path(binding["worktree"]), binding["source_commit"]),
                     "actor": item.get("agent") or "codex", "worktree": binding["worktree"],
                     "treatment_id": "codex-implement", "treatment_version": "1",
                 })
@@ -362,6 +430,7 @@ def job_log(
             job["coding_state"] = classify(Path(payload["worktree"]), {
                 "todo_id": payload.get("todo_id"), "plan_commit": binding.get("plan_commit"),
                 "solution_hash": binding.get("solution_hash"), "source_commit": binding.get("source_commit"),
+                "source_tree": source_tree(Path(payload["worktree"]), binding.get("source_commit")),
                 "actor": payload.get("todo_agent"), "worktree": payload["worktree"],
                 "treatment_id": "codex-implement", "treatment_version": str(payload.get("treatment_version", "1")),
             })
@@ -397,6 +466,12 @@ def run(args: argparse.Namespace) -> int:
                 config_path=config_path,
                 source_commit=getattr(args, "source_commit", None),
             )
+        elif args.coding_op == "resume":
+            result = resume(
+                _todo_id(target),
+                config_path=config_path,
+                source_commit=getattr(args, "source_commit", None),
+            )
         elif args.coding_op in {"status", "access-status"}:
             result = (reconcile(target, config_path=config_path) if target == PP_REF else status(
                 _todo_id(target) if target is not None else None, config_path=config_path))
@@ -429,6 +504,11 @@ def parser() -> argparse.ArgumentParser:
     start_parser = commands.add_parser("start", help="bind and dispatch one Todo locally")
     start_parser.add_argument("coding_target", metavar="TODO_ID|PP_REF")
     start_parser.add_argument("--source-commit")
+    resume_parser = commands.add_parser(
+        "resume", help="resume one exact RESUMABLE_PARTIAL Todo"
+    )
+    resume_parser.add_argument("coding_target", metavar="TODO_ID")
+    resume_parser.add_argument("--source-commit")
     status_parser = commands.add_parser("status", help="show local coding jobs")
     status_parser.add_argument("coding_target", metavar="TODO_ID|PP_REF", nargs="?")
     reconcile_parser = commands.add_parser("reconcile", help="read-only PP reconciliation")

@@ -410,6 +410,23 @@ def test_runner_refuses_a_concurrent_worktree_lease(tmp_path, monkeypatch):
     assert not (repo / ".git/tgw-coding.lock").exists()
 
 
+def test_runner_uses_exact_inherited_worker_lease(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+
+    with codex_implement._exclusive_worktree_lease(repo) as descriptor:
+        monkeypatch.setenv("TGW_CODING_WORKTREE_LEASE_FD", str(descriptor))
+        result = codex_implement.run(
+            _job(),
+            repo,
+            invoke=_invoke(
+                {"status": "blocked", "summary": "still bounded", "tests": []}
+            ),
+        )
+
+    assert result["outcome"] == "partial"
+
+
 def test_worktree_lease_accepts_a_normal_repository_common_dir(tmp_path):
     repo = _repo(tmp_path)
 

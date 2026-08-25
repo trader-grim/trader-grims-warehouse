@@ -699,6 +699,112 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
         )
 
 
+_TODO_BINDINGS_SQL = """
+SELECT COALESCE(
+    json_agg(json_build_object('id', id, 'agent', agent, 'status_note', status_note)),
+    '[]'::json
+)::text
+FROM public.todo_items
+WHERE status_note IS NOT NULL
+"""
+
+
+def _todo_binding_rows(paths: DoctorPaths) -> list[dict[str, Any]]:
+    config = _coding_config(paths)
+    actor = _operator_actor()
+    current = pwd.getpwuid(os.geteuid()).pw_name
+    if actor != current:
+        result = _run(
+            [
+                "sudo", "-n", "-u", actor, "/usr/bin/psql",
+                f"--dbname={config['postgres_dsn']}",
+                "--no-align", "--tuples-only", "--command", _TODO_BINDINGS_SQL,
+            ],
+            timeout=30,
+        )
+        if result.returncode:
+            raise DoctorError(result.stderr.strip() or "cannot read Todo Plan bindings")
+        raw = result.stdout.strip()
+    else:
+        with psycopg2.connect(config["postgres_dsn"]) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(_TODO_BINDINGS_SQL)
+                raw = cursor.fetchone()[0]
+    rows = json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise DoctorError("Todo Plan binding query returned malformed data")
+    return rows
+
+
+def _bound_coding_states(
+    paths: DoctorPaths, locations: Sequence[Path]
+) -> dict[str, dict[str, Any]]:
+    from tgw.development.partial_resume import classify as classify_coding
+    from tgw.development.partial_resume import source_tree
+    from tgw.development.plan_binding import parse_plan_binding
+
+    requested = {
+        location.resolve()
+        for location in locations
+        if location.is_dir()
+        and paths.worktrees.resolve() in location.resolve().parents
+        and re.fullmatch(r"todo-[0-9]+-plan-[0-9a-f]+", location.name)
+    }
+    if not requested:
+        return {}
+    expected_by_path: dict[Path, dict[str, Any]] = {}
+    for row in _todo_binding_rows(paths):
+        todo_id = row.get("id")
+        if not isinstance(todo_id, int):
+            continue
+        try:
+            binding = parse_plan_binding(row.get("status_note"), todo_id=todo_id)
+        except ValueError:
+            continue
+        if binding is None:
+            continue
+        location = Path(binding["worktree"]).resolve()
+        if location not in requested:
+            continue
+        expected_by_path[location] = {
+            "todo_id": todo_id,
+            "plan_commit": binding["plan_commit"],
+            "solution_hash": binding["solution_hash"],
+            "source_commit": binding["source_commit"],
+            "source_tree": source_tree(location, binding["source_commit"]),
+            "actor": row.get("agent") or "codex",
+            "worktree": str(location),
+            "treatment_id": "codex-implement",
+            "treatment_version": "1",
+        }
+    states = {}
+    for location in sorted(requested):
+        expected = expected_by_path.get(location)
+        classified = (
+            classify_coding(location, expected) if expected is not None else {
+                "state": "STALE_RECEIPT",
+                "resumable": False,
+                "error": "worktree has no exact current Todo Plan binding",
+                "history": [],
+            }
+        )
+        source = classified.get("source")
+        history_rows = classified.get("history")
+        states[str(location)] = {
+            "state": classified.get("state"),
+            "resumable": classified.get("resumable", False),
+            "attempts": len(history_rows) if isinstance(history_rows, list) else 0,
+            "resume_of": classified.get("resume_of"),
+            "predecessor": classified.get("predecessor"),
+            "fingerprint": classified.get("fingerprint"),
+            "source_head": source.get("head") if isinstance(source, dict) else None,
+            "source_tree": source.get("tree") if isinstance(source, dict) else None,
+            "changed_paths": source.get("changed_paths") if isinstance(source, dict) else None,
+            "error": classified.get("error"),
+        }
+    return states
+
+
 def check_worktrees(paths: DoctorPaths) -> dict[str, Any]:
     try:
         raw = _git(paths.repository, "worktree", "list", "--porcelain")
@@ -722,14 +828,25 @@ def check_worktrees(paths: DoctorPaths) -> dict[str, Any]:
                 outside.append(str(location))
             if "prunable" in row:
                 prunable.append(str(location))
+        locations = [Path(str(row.get("worktree", ""))).resolve() for row in rows]
+        coding_states = _bound_coding_states(paths, locations)
+        coding_counts = {
+            name: sum(item.get("state") == name for item in coding_states.values())
+            for name in (
+                "ABANDONED_CLEAN", "RESUMABLE_PARTIAL", "CLOSED_CANDIDATE",
+                "UNSAFE_DIRTY", "STALE_RECEIPT",
+            )
+        }
         same_filesystem = paths.repository.stat().st_dev == paths.worktrees.stat().st_dev
-        state = "PASS" if not outside and not prunable and same_filesystem else "WARN"
+        attention = coding_counts["RESUMABLE_PARTIAL"] + coding_counts["UNSAFE_DIRTY"] + coding_counts["STALE_RECEIPT"]
+        state = "PASS" if not outside and not prunable and same_filesystem and not attention else "WARN"
         return _check(
             "git.worktrees",
             state,
             f"{len(rows)} linked worktree(s); "
             f"{'same' if same_filesystem else 'different'} filesystem; "
-            f"{len(outside)} outside root; {len(prunable)} prunable",
+            f"{len(outside)} outside root; {len(prunable)} prunable; "
+            f"coding states {coding_counts}",
             evidence={
                 "repository": str(repository),
                 "worktree_root": str(root),
@@ -737,6 +854,8 @@ def check_worktrees(paths: DoctorPaths) -> dict[str, Any]:
                 "count": len(rows),
                 "outside_root": outside,
                 "prunable": prunable,
+                "coding_states": coding_states,
+                "coding_state_counts": coding_counts,
             },
         )
     except Exception as exc:
@@ -761,7 +880,8 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
     repository = paths.repository.resolve()
     root = paths.worktrees.resolve()
     worktrees: list[dict[str, Any]] = []
-    from tgw.development.partial_resume import classify as classify_coding
+    locations = [Path(str(row.get("worktree", ""))).resolve() for row in rows]
+    coding_states = _bound_coding_states(paths, locations)
     for row in rows:
         location = Path(str(row.get("worktree", ""))).resolve()
         head = str(row.get("HEAD", ""))
@@ -839,10 +959,7 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
                 "merged_into_canonical": merged_into_canonical,
                 "preservation_required": preservation_required,
                 "errors": errors,
-                "coding_state": (
-                    classify_coding(location) if exists and inside_root
-                    and location.name.startswith("todo-") else None
-                ),
+                "coding_state": coding_states.get(str(location)),
             }
         )
 
@@ -1036,6 +1153,15 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
             "archive_roots": sum(row["exists"] is True for row in archives),
             "catalog_actors": len(catalog_actors),
             "unix_coding_actors": len(unix_actors),
+            "coding_states": {
+                name: sum(
+                    item.get("state") == name for item in coding_states.values()
+                )
+                for name in (
+                    "ABANDONED_CLEAN", "RESUMABLE_PARTIAL", "CLOSED_CANDIDATE",
+                    "UNSAFE_DIRTY", "STALE_RECEIPT",
+                )
+            },
         },
         "cleanup_boundary": (
             "inventory is read-only; archive dirty or unique work before unlinking any "
@@ -5196,8 +5322,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(inventory(), indent=2, sort_keys=True))
             return 0
         if args.operation == "coding-resume":
-            from tgw.coding_cli import start
-            result = start(args.todo_id)
+            from tgw.coding_cli import resume
+            result = resume(args.todo_id)
             print(json.dumps(result, indent=2, sort_keys=True, default=str))
             return 0 if result.get("ok", True) else 1
         result = diagnose()

@@ -772,6 +772,41 @@ def test_configured_worker_launches_candidate_bytes_not_runtime_release(tmp_path
     assert observed["env"]["TGW_CODING_WORKTREE_SRC"] == str(tmp_path / "src")
 
 
+def test_configured_worker_passes_exact_worktree_lease_to_runner(tmp_path, monkeypatch):
+    worker = CodingWorker(
+        "codex-implement",
+        {
+            "coding": {
+                "commands": {"codex-implement": ["/bin/true"]},
+                "allowed_runners": ["/bin/true"],
+            }
+        },
+    )
+    worker._worktree_lease_fd = 37
+    observed = {}
+
+    def run(command, **kwargs):
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "outcome": "partial",
+                    "established_conditions": [],
+                    "artifacts": [],
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("tgw.workers.coding._run_bounded_process_group", run)
+    worker._launch_configured_command("codex-implement", {}, tmp_path)
+
+    assert observed["pass_fds"] == (37,)
+    assert observed["env"]["TGW_CODING_WORKTREE_LEASE_FD"] == "37"
+
+
 def test_coding_worker_entrypoint_loads_config_file_and_starts_allowed_local_runner(tmp_path, monkeypatch):
     """The installed queue entrypoint consumes the coding-worker config contract."""
     from tgw.workers import coding

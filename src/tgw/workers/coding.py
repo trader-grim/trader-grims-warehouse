@@ -21,8 +21,10 @@ from tgw.development.partial_resume import (
     classify,
     make_attempt,
     preservation_manifest,
+    source_fingerprint,
 )
 from tgw.development.plan_binding import MalformedPlanBindingError, validate_plan_binding
+from tgw.development.worktree_lease import exclusive_worktree_lease
 from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.workflow_kernel.contracts import (
     OUTCOME_CONFLICT,
@@ -67,6 +69,7 @@ def _run_bounded_process_group(
     cwd: Path,
     env: dict[str, str],
     timeout: int | float,
+    pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     """Run one launcher and terminate its complete descendant group on timeout."""
     process = subprocess.Popen(
@@ -77,6 +80,7 @@ def _run_bounded_process_group(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
+        pass_fds=pass_fds,
     )
     try:
         stdout, stderr = process.communicate(timeout=timeout)
@@ -181,8 +185,16 @@ def _write_receipt(path: Path, receipt: dict[str, Any]) -> None:
     if path.exists() and receipt.get("outcome") != OUTCOME_SATISFIED:
         return
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+    with temporary.open("w", encoding="utf-8") as stream:
+        stream.write(json.dumps(receipt, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
     os.replace(temporary, path)
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 class CodingWorker(QueueWorker):
@@ -200,6 +212,7 @@ class CodingWorker(QueueWorker):
         if queue_name not in CODING_TREATMENTS:
             raise ValueError(f"unsupported coding queue: {queue_name}")
         self._launcher = launcher or self._launch_configured_command
+        self._worktree_lease_fd: int | None = None
         super().__init__(queue_name=queue_name, config=config)
         self.lease_seconds = max(
             self.lease_seconds,
@@ -226,6 +239,7 @@ class CodingWorker(QueueWorker):
         if not command:
             raise HardFailure(f"coding.commands.{treatment_id} is empty")
         try:
+            lease_fd = self._worktree_lease_fd
             completed = _run_bounded_process_group(
                 command,
                 cwd=worktree,
@@ -234,7 +248,13 @@ class CodingWorker(QueueWorker):
                     **os.environ,
                     "TGW_CODING_JOB": json.dumps(payload),
                     "TGW_CODING_WORKTREE_SRC": str(worktree / "src"),
+                    **(
+                        {"TGW_CODING_WORKTREE_LEASE_FD": str(lease_fd)}
+                        if lease_fd is not None
+                        else {}
+                    ),
                 },
+                pass_fds=(lease_fd,) if lease_fd is not None else (),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RuntimeError(f"coding launcher failed: {exc}") from exc
@@ -366,6 +386,32 @@ class CodingWorker(QueueWorker):
         worktree = self._validated_worktree(payload)
         plan_binding = self._validated_plan_binding(payload, worktree)
 
+        tracked_implementation = (
+            treatment_id == "codex-implement" and payload.get("todo_id") is not None
+        )
+        if tracked_implementation:
+            with exclusive_worktree_lease(worktree) as descriptor:
+                previous = self._worktree_lease_fd
+                self._worktree_lease_fd = descriptor
+                try:
+                    return self._handle_under_lease(
+                        job, payload, treatment_id, worktree, plan_binding
+                    )
+                finally:
+                    self._worktree_lease_fd = previous
+        return self._handle_under_lease(
+            job, payload, treatment_id, worktree, plan_binding
+        )
+
+    def _handle_under_lease(
+        self,
+        job: dict[str, Any],
+        payload: dict[str, Any],
+        treatment_id: str,
+        worktree: Path,
+        plan_binding: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+
         attempt_binding = None
         predecessor = None
         if treatment_id == "codex-implement" and payload.get("todo_id") is not None:
@@ -399,7 +445,30 @@ class CodingWorker(QueueWorker):
                 if payload.get("resume_of") or payload.get("resume_fingerprint"):
                     raise HardFailure("clean initial Codex attempt cannot carry resume authority")
             elif state["state"] == "CLOSED_CANDIDATE":
-                pass
+                latest = state["history"][-1]
+                artifacts = [
+                    *latest.get("artifacts", []),
+                    {
+                        "kind": "recovered_attempt",
+                        "attempt_hash": latest["attempt_hash"],
+                        "detail": "exact closed candidate recovered without rerunning Codex",
+                    },
+                ]
+                receipt = {
+                    "status": "PASS",
+                    "treatment_id": treatment_id,
+                    "treatment_version": str(payload.get("treatment_version", "1")),
+                    "graph_id": payload.get("graph_id"),
+                    "object_id": str(worktree),
+                    "object_generation": payload.get("object_generation"),
+                    "outcome": OUTCOME_SATISFIED,
+                    "established_conditions": ["implemented"],
+                    "artifacts": artifacts,
+                    "receipt_schema_id": "receipt/tgw-development/v1",
+                    "plan_binding": plan_binding,
+                }
+                _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
+                return receipt
             else:
                 preservation_manifest(worktree, state, attempt_binding)
                 raise HardFailure(f"Codex implementation refuses {state['state']} worktree")
@@ -410,6 +479,32 @@ class CodingWorker(QueueWorker):
                 treatment_id,
                 launcher_result,
             )
+            if attempt_binding is not None and outcome == OUTCOME_SATISFIED:
+                candidate = source_fingerprint(worktree)
+                closed = [
+                    item for item in artifacts
+                    if isinstance(item, dict) and item.get("kind") == "closed_candidate"
+                ]
+                ancestor = subprocess.run(
+                    [
+                        "git", "merge-base", "--is-ancestor",
+                        attempt_binding["source_commit"], candidate["head"],
+                    ],
+                    cwd=worktree,
+                    check=False,
+                    capture_output=True,
+                )
+                if (
+                    len(closed) != 1
+                    or candidate["changed_paths"]
+                    or candidate["head"] == attempt_binding["source_commit"]
+                    or closed[0].get("commit") != candidate["head"]
+                    or closed[0].get("tree") != candidate["tree"]
+                    or ancestor.returncode != 0
+                ):
+                    raise HardFailure(
+                        "satisfied Codex outcome is not the exact closed source descendant"
+                    )
         except (HardFailure, RuntimeError) as exc:
             # Persist a local mechanical failure so the next snapshot can
             # reevaluate from durable evidence.

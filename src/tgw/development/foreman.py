@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from tgw.development.coding_snapshot import build_coding_snapshot
-from tgw.development.partial_resume import classify, preservation_manifest
+from tgw.development.partial_resume import classify, preservation_manifest, source_tree
 from tgw.development.plan_binding import (
     MalformedPlanBindingError,
     parse_plan_binding,
@@ -150,6 +150,7 @@ class _EligibleTreatment:
     todo: TodoRecord
     graph: RuntimeWorkGraph
     disposition: TreatmentDisposition
+    dedupe_key: str
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +259,18 @@ def _has_terminal_job(
     except Exception:
         log.warning("failed to check terminal jobs for dedupe_key=%s", dedupe_key, exc_info=True)
         return False
+
+
+def _resume_dedupe_key(base: str, authority: Mapping[str, str]) -> str:
+    resume_of = authority.get("resume_of", "")
+    fingerprint = authority.get("resume_fingerprint", "")
+    digest = re.compile(r"sha256:[0-9a-f]{64}\Z")
+    if digest.fullmatch(resume_of) is None or digest.fullmatch(fingerprint) is None:
+        raise ValueError("partial resume authority is malformed")
+    return (
+        f"{base}:resume:{resume_of.removeprefix('sha256:')}:"
+        f"{fingerprint.removeprefix('sha256:')}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -456,19 +469,34 @@ def tick(
                     expected_attempt = {
                         "todo_id": todo.todo_id, "plan_commit": binding["plan_commit"],
                         "solution_hash": binding["solution_hash"], "source_commit": binding["source_commit"],
+                        "source_tree": source_tree(worktree, binding["source_commit"]),
                         "actor": todo.agent, "worktree": str(worktree),
                         "treatment_id": "codex-implement", "treatment_version": "1",
                     }
                     resume_state = classify(worktree, expected_attempt)
-                    if resume_state["state"] not in {"ABANDONED_CLEAN", "CLOSED_CANDIDATE"}:
-                        authority = cfg.resume_bindings.get(todo.todo_id)
-                        exact = (resume_state["state"] == "RESUMABLE_PARTIAL" and authority
-                                 and authority.get("resume_of") == resume_state.get("resume_of")
-                                 and authority.get("resume_fingerprint") == resume_state.get("fingerprint"))
-                        if not exact:
-                            preservation_manifest(worktree, resume_state, expected_attempt)
-                            result = replace(result, skipped_terminal=result.skipped_terminal + 1)
-                            continue
+                    authority = cfg.resume_bindings.get(todo.todo_id)
+                    exact_resume = (
+                        resume_state["state"] == "RESUMABLE_PARTIAL"
+                        and authority is not None
+                        and authority.get("resume_of") == resume_state.get("resume_of")
+                        and authority.get("resume_fingerprint") == resume_state.get("fingerprint")
+                    )
+                    if authority is not None and not exact_resume:
+                        preservation_manifest(worktree, resume_state, expected_attempt)
+                        result = replace(
+                            result, skipped_terminal=result.skipped_terminal + 1
+                        )
+                        continue
+                    if (
+                        resume_state["state"]
+                        not in {"ABANDONED_CLEAN", "CLOSED_CANDIDATE"}
+                        and not exact_resume
+                    ):
+                        preservation_manifest(worktree, resume_state, expected_attempt)
+                        result = replace(
+                            result, skipped_terminal=result.skipped_terminal + 1
+                        )
+                        continue
                 implementation_baseline = binding["source_commit"]
                 if cfg.fixture_implementation_baseline_commit is not None:
                     if not isinstance(binding, dict) or not binding.get("fixture_run_id"):
@@ -546,6 +574,9 @@ def tick(
                 entity_id=canonical_todo.worktree,
                 object_generation=graph.object_generation,
             )
+            authority = cfg.resume_bindings.get(todo.todo_id)
+            if disposition.treatment_id == "codex-implement" and authority is not None:
+                dedupe_key = _resume_dedupe_key(dedupe_key, authority)
             if _has_active_job(dedupe_key, check_active_fn):
                 result = replace(result, skipped_active=result.skipped_active + 1)
                 continue
@@ -559,6 +590,7 @@ def tick(
                     todo=canonical_todo,
                     graph=graph,
                     disposition=disposition,
+                    dedupe_key=dedupe_key,
                 )
             )
 
@@ -635,13 +667,35 @@ def tick(
                             result, skipped_active=result.skipped_active + 1
                         )
                         continue
+                standard_dedupe_key = treatment_dedupe_key(
+                    disposition,
+                    entity_type="coding_task",
+                    entity_id=chosen.graph.object_id,
+                    object_generation=chosen.graph.object_generation,
+                )
+                dispatch_enqueue = enqueue_fn
+                if chosen.dedupe_key != standard_dedupe_key:
+                    if dispatch_enqueue is None:
+                        from tgw.queue.state_machine import enqueue_job
+
+                        dispatch_enqueue = enqueue_job
+                    base_enqueue = dispatch_enqueue
+
+                    def resume_enqueue(**kwargs: Any) -> Any:
+                        if kwargs.get("dedupe_key") != standard_dedupe_key:
+                            raise ValueError("scheduler resume dedupe base changed")
+                        return base_enqueue(
+                            **{**kwargs, "dedupe_key": chosen.dedupe_key}
+                        )
+
+                    dispatch_enqueue = resume_enqueue
                 dispatch_result: DispatchResult = dispatch_treatment(
                     disposition=disposition,
                     entity_id=chosen.graph.object_id,
                     entity_type="coding_task",
                     graph=chosen.graph,
                     payload_extra=payload_extra,
-                    enqueue_fn=enqueue_fn,
+                    enqueue_fn=dispatch_enqueue,
                     coding_config=cfg.coding_config,
                 )
         except WorktreeLeaseBusy:

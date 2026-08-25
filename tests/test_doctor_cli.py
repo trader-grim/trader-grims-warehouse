@@ -2097,3 +2097,89 @@ def test_obsolete_cleanup_has_no_production_provider_plan_business_or_worktree_e
         path: os.readlink(path) if path.is_symlink() else path.read_bytes()
         for path in preserved
     } == preserved
+
+
+def test_doctor_coding_resume_uses_resume_only_surface(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tgw import coding_cli
+
+    called = []
+    monkeypatch.setattr(
+        coding_cli,
+        "resume",
+        lambda todo_id: called.append(todo_id) or {
+            "ok": True,
+            "coding_state": {"state": "RESUMABLE_PARTIAL"},
+        },
+    )
+    monkeypatch.setattr(
+        coding_cli,
+        "start",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Doctor must not use unrestricted coding start")
+        ),
+    )
+
+    assert doctor_cli.main(["coding-resume", "1752"]) == 0
+    assert called == [1752]
+    assert json.loads(capsys.readouterr().out)["coding_state"]["state"] == "RESUMABLE_PARTIAL"
+
+
+def test_doctor_classifies_coding_history_against_todo_plan_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tgw.development import partial_resume
+    from tgw.development import plan_binding as plan_binding_module
+
+    paths, _canonical_head, _canonical_tree = _fixture(tmp_path)
+    worktree = paths.worktrees / "todo-1752-plan-deadbeef"
+    worktree.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    (worktree / "base").write_text("base\n")
+    subprocess.run(["git", "add", "base"], cwd=worktree, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-qm", "base"],
+        cwd=worktree,
+        check=True,
+    )
+    head = _git(worktree, "rev-parse", "HEAD")
+    tree = _git(worktree, "rev-parse", "HEAD^{tree}")
+    expected = {
+        "job_id": "job-1", "attempt_count": 1, "todo_id": 1752,
+        "plan_commit": "a" * 40, "solution_hash": "sha256:" + "b" * 64,
+        "source_commit": head, "source_tree": tree, "actor": "codex",
+        "worktree": str(worktree), "treatment_id": "codex-implement",
+        "treatment_version": "1",
+    }
+    (worktree / "partial.py").write_text("partial = True\n")
+    partial_resume.append_attempt(
+        worktree, partial_resume.make_attempt(expected, worktree, outcome="partial")
+    )
+    binding = {
+        "plan_commit": expected["plan_commit"],
+        "solution_hash": expected["solution_hash"],
+        "source_commit": head,
+        "worktree": str(worktree),
+    }
+    monkeypatch.setattr(
+        doctor_cli,
+        "_todo_binding_rows",
+        lambda _paths: [{"id": 1752, "agent": "codex", "status_note": "bound"}],
+    )
+    monkeypatch.setattr(
+        plan_binding_module,
+        "parse_plan_binding",
+        lambda _note, todo_id=None: binding,
+    )
+
+    state = doctor_cli._bound_coding_states(paths, [worktree])[str(worktree)]
+    assert state["state"] == "RESUMABLE_PARTIAL"
+
+    monkeypatch.setattr(
+        doctor_cli,
+        "_todo_binding_rows",
+        lambda _paths: [{"id": 1752, "agent": "claude", "status_note": "bound"}],
+    )
+    stale = doctor_cli._bound_coding_states(paths, [worktree])[str(worktree)]
+    assert stale["state"] == "STALE_RECEIPT"
