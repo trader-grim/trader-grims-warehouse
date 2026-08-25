@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -731,8 +732,12 @@ def test_obsolete_cleanup_diagnoses_warn_and_moves_exact_surfaces(
 ) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
+    timestamp = 1_700_000_000_123_456_789
+    os.utime(sources[0], ns=(timestamp, timestamp))
+    os.setxattr(sources[0], "user.tgw-cleanup-test", b"preserved")
 
     warning = doctor_cli.check_obsolete_surfaces(paths)
+    source_state = sources[0].stat(follow_symlinks=False)
     result = doctor_cli.repair_obsolete_surfaces(paths)
 
     assert warning["state"] == "WARN"
@@ -744,6 +749,22 @@ def test_obsolete_cleanup_diagnoses_warn_and_moves_exact_surfaces(
     for row in manifest["entries"]:
         archived = Path(row["archive_path"])
         assert archived.is_symlink() if row["kind"] == "symlink" else archived.is_file()
+    regular = next(row for row in manifest["entries"] if row["path"] == str(sources[0]))
+    archived_regular = Path(regular["archive_path"])
+    archived_state = archived_regular.stat(follow_symlinks=False)
+    assert regular["metadata"] == {
+        "uid": source_state.st_uid,
+        "gid": source_state.st_gid,
+        "mode": stat.S_IMODE(source_state.st_mode),
+        "atime_ns": source_state.st_atime_ns,
+        "mtime_ns": timestamp,
+        "xattrs": {"user.tgw-cleanup-test": "cHJlc2VydmVk"},
+    }
+    assert archived_state.st_uid == source_state.st_uid
+    assert archived_state.st_gid == source_state.st_gid
+    assert stat.S_IMODE(archived_state.st_mode) == stat.S_IMODE(source_state.st_mode)
+    assert archived_state.st_mtime_ns == timestamp
+    assert os.getxattr(archived_regular, "user.tgw-cleanup-test") == b"preserved"
     assert Path(result["prepared_receipt"]).is_file()
     assert Path(result["receipt"]).is_file()
 
@@ -833,6 +854,30 @@ def test_obsolete_cleanup_refuses_unknown_process_visibility(
         doctor_cli._cleanup_process_references(surfaces, proc_root)
 
 
+def test_obsolete_cleanup_detects_path_launched_process(tmp_path: Path) -> None:
+    proc_root = tmp_path / "proc"
+    cmdline = proc_root / "42/cmdline"
+    cmdline.parent.mkdir(parents=True)
+    cmdline.write_bytes(b"tgw-foreman\0--help\0")
+    surfaces = [
+        {
+            "path": Path("/usr/local/bin/tgw-foreman"),
+            "kind": "file",
+            "declared_sha256": "sha256:fixture",
+        }
+    ]
+
+    references = doctor_cli._cleanup_process_references(surfaces, proc_root)
+
+    assert references == [
+        {
+            "pid": 42,
+            "command": "tgw-foreman --help",
+            "references": ["tgw-foreman"],
+        }
+    ]
+
+
 @pytest.mark.parametrize("blocker", ["configuration", "process"])
 def test_obsolete_cleanup_refuses_active_reference_or_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocker: str
@@ -861,22 +906,92 @@ def test_obsolete_cleanup_rolls_back_active_view_on_remove_failure(
 ) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
-    original_unlink = Path.unlink
+    original_unlink = doctor_cli._unlink_bound_surface
     failed = False
 
-    def unlink(path, *args, **kwargs):
+    def unlink(binding, identity):
         nonlocal failed
-        if path == sources[1] and not failed:
+        if binding.path == sources[1] and not failed:
             failed = True
             raise OSError("fixture removal failure")
-        return original_unlink(path, *args, **kwargs)
+        return original_unlink(binding, identity)
 
-    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(doctor_cli, "_unlink_bound_surface", unlink)
     with pytest.raises(doctor_cli.DoctorError, match="active view restored"):
         doctor_cli.repair_obsolete_surfaces(paths)
 
     assert all(path.exists() or path.is_symlink() for path in sources)
     assert list(paths.receipts.glob("*obsolete-surfaces-rolled-back.json"))
+
+
+def test_obsolete_cleanup_rolls_back_when_parent_fsync_fails_after_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    sources = _obsolete_fixture(paths, monkeypatch)
+    original_fsync = doctor_cli._fsync_directory
+    failed = False
+
+    def fsync_directory(path):
+        nonlocal failed
+        if path == sources[0].parent and not sources[0].exists() and not failed:
+            failed = True
+            raise OSError("fixture parent fsync failure")
+        return original_fsync(path)
+
+    monkeypatch.setattr(doctor_cli, "_fsync_directory", fsync_directory)
+
+    with pytest.raises(doctor_cli.DoctorError, match="active view restored"):
+        doctor_cli.repair_obsolete_surfaces(paths)
+
+    assert failed is True
+    assert all(path.exists() or path.is_symlink() for path in sources)
+
+
+def test_obsolete_cleanup_binding_rejects_replaced_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    sources = _obsolete_fixture(paths, monkeypatch)
+    declaration = next(
+        item
+        for item in doctor_cli._declared_obsolete_surfaces(paths)
+        if item["path"] == sources[0]
+    )
+    original_parent = sources[0].parent.with_name(sources[0].parent.name + "-bound")
+
+    with doctor_cli._bind_cleanup_surface(declaration) as binding:
+        sources[0].parent.rename(original_parent)
+        sources[0].parent.mkdir()
+        with pytest.raises(doctor_cli.DoctorError, match="parent changed"):
+            doctor_cli._verify_bound_cleanup_surface(binding)
+
+
+def test_obsolete_cleanup_reconciles_interrupted_prepared_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    sources = _obsolete_fixture(paths, monkeypatch)
+    original_state = doctor_cli._write_archive_state
+
+    def interrupt_completion(archive, name, value):
+        if name == "COMPLETED":
+            raise KeyboardInterrupt("fixture crash after durable removal")
+        return original_state(archive, name, value)
+
+    monkeypatch.setattr(doctor_cli, "_write_archive_state", interrupt_completion)
+    with pytest.raises(KeyboardInterrupt, match="fixture crash"):
+        doctor_cli.repair_obsolete_surfaces(paths)
+    assert all(not path.exists() and not path.is_symlink() for path in sources)
+
+    monkeypatch.setattr(doctor_cli, "_write_archive_state", original_state)
+    reconciled = doctor_cli.repair_obsolete_surfaces(paths)
+    idempotent = doctor_cli.repair_obsolete_surfaces(paths)
+
+    assert reconciled["changed"] is True
+    assert reconciled["reconciled"] is True
+    assert Path(reconciled["completion_state"]).is_file()
+    assert idempotent["changed"] is False
 
 
 def test_obsolete_cleanup_is_idempotent(
