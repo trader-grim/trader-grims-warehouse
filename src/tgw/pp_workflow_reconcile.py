@@ -14,13 +14,12 @@ from tgw.plan_solver import solve
 PLAN_COMMIT = "058e2f980201cc78245358e4901cf007063f2c29"
 PP_REF = "PP-WORKFLOW-001"
 PP_SOURCE_SHA256 = "sha256:ee5eac22eb072649ea601d77f398ee87e8397f9a84eb3675b4d61f1c32f81af9"
-REJECTED_CANDIDATE = "a6207cb80311519bfe10ee45545bdbe677d05052"
-REJECTED_PARENT = "77192f2127bcd510561a25bfa8f33d449084c13b"
-REJECTED_TREE = "66b788709ff94c52db91f29893987be923a87296"
-REVIEW_SHA256 = "sha256:812d21b875a2c1cc730c3d45b5555dc62bc91846f3707c1ca5a2cfeabb913ba8"
+REJECTED_CANDIDATE = "f71793588565b7094c877bfb37b4ac8f0c865129"
+REJECTED_PARENT = "5f33481abf7f77cac54446345c22b230fbe1e06b"
+REJECTED_TREE = "b5c6e400392182ee343c94e94f89e86939b4113b"
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "agent-services/catalogs/pp-workflow-001-v1.json"
-CATALOG_SHA256 = "sha256:2435f40a7721e5c776bac73de09c53a86d3e2b4a6da298539fd0f3536b615038"
+CATALOG_SHA256 = "sha256:9d28edb68f48c43b6855b26dac88adedfdcfdee3e40ceee032fc97eed6025568"
 APPROVED_PLAN_ROOT = Path("/opt/TGW/library/approved") / PLAN_COMMIT
 
 
@@ -42,8 +41,9 @@ def _git(*args: str) -> str:
     return proc.stdout.strip()
 
 
-def load_catalog(path: Path | str = CATALOG, *, expected_sha256: str = CATALOG_SHA256) -> dict[str, Any]:
-    if _sha(Path(path)) != expected_sha256:
+def load_catalog(path: Path | str = CATALOG) -> dict[str, Any]:
+    """Load the production catalog against its compiled, non-overridable hash."""
+    if _sha(Path(path)) != CATALOG_SHA256:
         raise PPWorkflowReconcileError("whole PP capability catalog hash drift")
     try:
         value = json.loads(Path(path).read_bytes())
@@ -54,7 +54,6 @@ def load_catalog(path: Path | str = CATALOG, *, expected_sha256: str = CATALOG_S
         "plan_source_sha256": PP_SOURCE_SHA256,
         "rejected_candidate": REJECTED_CANDIDATE, "rejected_parent": REJECTED_PARENT,
         "rejected_tree": REJECTED_TREE,
-        "review_sha256": REVIEW_SHA256,
     }
     if (not isinstance(value, Mapping)
             or value.get("schema") != "tgw-pp-capability-catalog/v2"
@@ -78,6 +77,29 @@ def _repository_git(repository: Path, *args: str) -> str:
     return proc.stdout.strip()
 
 
+def _repository_bytes(repository: Path, commit: str, relative: str) -> bytes:
+    proc = subprocess.run(
+        ["git", "-c", f"safe.directory={repository.resolve()}", "show", f"{commit}:{relative}"],
+        cwd=repository, capture_output=True, check=False,
+    )
+    if proc.returncode:
+        raise PPWorkflowReconcileError(f"tracked evidence is absent from selected commit: {relative}")
+    return proc.stdout
+
+
+def _source_status(source_root: Path) -> list[str]:
+    raw = _repository_git(source_root, "status", "--porcelain=v1", "--untracked-files=all")
+    dirty = []
+    for line in raw.splitlines():
+        relative = line[3:].split(" -> ")[-1]
+        # Codex creates this request-bound scratch below the worktree. It is
+        # untracked and cannot alter a tracked evidence byte.
+        known_scratch = line.startswith("?? ") and relative.startswith(".tgw-codex-implement-")
+        if not known_scratch:
+            dirty.append(line)
+    return dirty
+
+
 def verify_selected_runtime(*, repository: Path, source_root: Path, commit: str,
                             tree: str, mode: str) -> dict[str, Any]:
     """Verify the caller-selected exact reachable source before any allocation."""
@@ -88,19 +110,18 @@ def verify_selected_runtime(*, repository: Path, source_root: Path, commit: str,
     observed_tree = _repository_git(repository, "rev-parse", f"{commit}^{{tree}}")
     if observed_tree != tree:
         raise PPWorkflowReconcileError("selected runtime commit/tree binding differs")
-    common = Path(_repository_git(repository, "rev-parse", "--git-common-dir"))
-    if not common.is_absolute():
-        common = repository / common
-    root_common = Path(_repository_git(ROOT, "rev-parse", "--git-common-dir"))
+    root_common = Path(_repository_git(repository, "rev-parse", "--git-common-dir"))
     if not root_common.is_absolute():
-        root_common = ROOT / root_common
-    if common.resolve() != root_common.resolve():
-        raise PPWorkflowReconcileError("selected runtime is not bound to the canonical repository")
+        root_common = repository / root_common
     if mode == "source-worktree":
+        common = Path(_repository_git(source_root, "rev-parse", "--git-common-dir"))
+        if not common.is_absolute():
+            common = source_root / common
+        if common.resolve() != root_common.resolve():
+            raise PPWorkflowReconcileError("selected runtime is not bound to the canonical repository")
         if Path(_repository_git(source_root, "rev-parse", "--show-toplevel")).resolve() != source_root.resolve():
             raise PPWorkflowReconcileError("selected source worktree root differs")
-        if (_repository_git(source_root, "rev-parse", "HEAD") != commit
-                or _repository_git(source_root, "status", "--porcelain", "--untracked-files=all")):
+        if (_repository_git(source_root, "rev-parse", "HEAD") != commit or _source_status(source_root)):
             raise PPWorkflowReconcileError("selected source worktree is not the exact clean commit")
         evidence = {"verified": True, "manifest_source": "git-worktree", "file_count": None}
     else:
@@ -118,7 +139,8 @@ def verify_selected_runtime(*, repository: Path, source_root: Path, commit: str,
             "repository": str(repository.resolve()), "source_root": str(source_root.resolve())}
 
 
-def _verified_graph(catalog: Mapping[str, Any], *, source_root: Path,
+def _verified_graph(catalog: Mapping[str, Any], *, repository: Path, source_root: Path,
+                    selected_commit: str,
                     todo_rows: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     graph = dict(catalog.get("graph", {}))
     providers = graph.get("providers")
@@ -137,8 +159,14 @@ def _verified_graph(catalog: Mapping[str, Any], *, source_root: Path,
         for item in spec.get("sources", ()):
             if not isinstance(item, Mapping) or set(item) != {"path", "sha256"}:
                 raise PPWorkflowReconcileError("source evidence identity is malformed")
-            path = source_root / str(item["path"])
-            if _sha(path) != item["sha256"]:
+            relative = str(item["path"])
+            path = source_root / relative
+            try:
+                actual = path.read_bytes()
+            except OSError as exc:
+                raise PPWorkflowReconcileError(f"source evidence is unavailable: {relative}") from exc
+            tracked = _repository_bytes(repository, selected_commit, relative)
+            if actual != tracked or "sha256:" + hashlib.sha256(actual).hexdigest() != item["sha256"]:
                 raise PPWorkflowReconcileError(f"source evidence content drift: {item['path']}")
             verified.append(f"source:{item['path']}@{item['sha256']}")
         for identity in spec.get("local_todos", ()):
@@ -147,10 +175,35 @@ def _verified_graph(catalog: Mapping[str, Any], *, source_root: Path,
             if next((row for row in rows if all(row.get(k) == v for k, v in identity.items())), None):
                 verified.append("local-todo:" + hashlib.sha256(
                     json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
-        installed = len(verified) >= int(spec.get("minimum_verified", 1))
-        states.append({"id": provider_id, "state": "SATISFIED" if installed else "UNMET",
-                       "evidence": verified})
-        if installed:
+        # Source and Todo identity prove implementation evidence, never the
+        # stronger admitted state required by the PP target. Only an exact,
+        # independently verified receipt may establish that state.
+        admitted = False
+        for receipt in spec.get("receipts", ()):
+            if (not isinstance(receipt, Mapping)
+                    or set(receipt) != {"path", "sha256"}):
+                raise PPWorkflowReconcileError("provider receipt identity is malformed")
+            relative = str(receipt["path"])
+            actual = (source_root / relative).read_bytes()
+            if (actual != _repository_bytes(repository, selected_commit, relative)
+                    or "sha256:" + hashlib.sha256(actual).hexdigest() != receipt["sha256"]):
+                raise PPWorkflowReconcileError(f"provider receipt content drift: {relative}")
+            try:
+                receipt_value = json.loads(actual)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise PPWorkflowReconcileError("provider receipt is not exact JSON evidence") from exc
+            if (not isinstance(receipt_value, Mapping)
+                    or receipt_value.get("schema") != "tgw-capability-receipt/v1"
+                    or receipt_value.get("state") != "ADMITTED"
+                    or receipt_value.get("provider_id") != provider_id
+                    or receipt_value.get("capabilities") != provider.get("provides")):
+                raise PPWorkflowReconcileError("provider receipt does not independently admit capability")
+            verified.append(f"receipt:{relative}@{receipt['sha256']}")
+            admitted = True
+        evidence_state = "ADMITTED_RECEIPT" if admitted else (
+            "IMPLEMENTED_UNVERIFIED" if verified else "UNVERIFIED")
+        states.append({"id": provider_id, "state": evidence_state, "evidence": verified})
+        if admitted:
             for capability in provider.get("provides", ()):
                 observations.append({"capability": capability, "provider": provider_id,
                                      "state": "admitted", "evidence": verified})
@@ -163,16 +216,16 @@ def reconcile(*, catalog_path: Path | str = CATALOG, plan_root: Path = APPROVED_
               conform_fn: Callable[..., Mapping[str, Any]] = conform,
               repository: Path = ROOT, selected_commit: str | None = None,
               selected_tree: str | None = None, runtime_mode: str = "source-worktree",
-              catalog_sha256: str = CATALOG_SHA256,
               runtime_verifier: Callable[..., Mapping[str, Any]] = verify_selected_runtime) -> dict[str, Any]:
     """Content-verify evidence and solve the same PP graph with native and pinned Luet."""
-    catalog = load_catalog(catalog_path, expected_sha256=catalog_sha256)
+    catalog = load_catalog(catalog_path)
     _verify_plan_source(plan_root)
     commit = selected_commit or _repository_git(source_root, "rev-parse", "HEAD")
     tree = selected_tree or _repository_git(repository, "rev-parse", f"{commit}^{{tree}}")
     runtime = dict(runtime_verifier(repository=repository, source_root=source_root,
                                     commit=commit, tree=tree, mode=runtime_mode))
-    graph, providers = _verified_graph(catalog, source_root=source_root, todo_rows=todo_rows)
+    graph, providers = _verified_graph(catalog, repository=repository, source_root=source_root,
+                                       selected_commit=commit, todo_rows=todo_rows)
     binding = load_direct_development_luet_binding()
     if binding.plan_commit != PLAN_COMMIT:
         raise PPWorkflowReconcileError("pinned Luet Plan binding drift")
@@ -189,10 +242,9 @@ def reconcile(*, catalog_path: Path | str = CATALOG, plan_root: Path = APPROVED_
     return {
         "schema": "tgw-pp-runtime-projection/v2", "ok": complete, "pp_ref": PP_REF,
         "source_identity": {"plan_commit": PLAN_COMMIT, "plan_source_sha256": PP_SOURCE_SHA256,
-                            "catalog_sha256": catalog_sha256, "runtime": runtime,
+                            "catalog_sha256": CATALOG_SHA256, "runtime": runtime,
                             "rejected_candidate": REJECTED_CANDIDATE,
-                            "rejected_parent": REJECTED_PARENT, "rejected_tree": REJECTED_TREE,
-                            "review_sha256": REVIEW_SHA256},
+                            "rejected_parent": REJECTED_PARENT, "rejected_tree": REJECTED_TREE},
         "resolver_binding": {"native": solution["resolver"], "luet": luet["provider_id"],
                              "agreement": "verified", "executable_path": str(binding.executable_path),
                              "executable_sha256": binding.sha256, "version": binding.version},

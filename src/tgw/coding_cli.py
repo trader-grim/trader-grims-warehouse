@@ -12,6 +12,7 @@ import argparse
 import dataclasses
 import fcntl
 import json
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -38,13 +39,15 @@ from tgw.pp_workflow_reconcile import reconcile as reconcile_pp_workflow
 from tgw.queue import state_machine
 from tgw.workflow import compile_solution_runtime
 
+ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOLUTION = (
-    Path(__file__).resolve().parents[2]
+    ROOT
     / "agent-services/plan-runtime/GOVERNED-EXECUTION-PLATFORM-058e2f98.json"
 )
 DEFAULT_TREATMENT = "establish:workflow.condition-derived-convergence@1"
 DEFAULT_PLAN_REPOSITORY = Path("/opt/TGW/library/plans")
 _LOCAL_QUEUES = ("codex-implement", "controller-verify")
+_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
 class CodingCLIError(RuntimeError):
@@ -99,6 +102,30 @@ def _todo_id(value: Any) -> int:
     return result
 
 
+def _pp_runtime_binding(config: dict[str, Any], source_commit: str | None = None) -> dict[str, Any]:
+    """Resolve the one external repository/runtime binding used by CLI and MCP."""
+    local = __import__("tgw.development.local_workflow", fromlist=["_git"])
+    repository = Path(config["coding"]["repository_root"])
+    try:
+        top = Path(local._git(ROOT, "rev-parse", "--show-toplevel")).resolve()
+    except (OSError, ValueError, LocalCodingWorkflowError):
+        top = None
+    if top == ROOT.resolve():
+        mode = "source-worktree"
+        commit = source_commit or local._git(ROOT, "rev-parse", "HEAD")
+    else:
+        mode = "immutable-release"
+        release_commit = ROOT.name
+        if _COMMIT.fullmatch(release_commit) is None:
+            raise CodingCLIError("installed coding runtime is not an immutable commit release")
+        if source_commit is not None and source_commit != release_commit:
+            raise CodingCLIError("requested source differs from installed immutable runtime")
+        commit = release_commit
+    tree = local._git(repository, "rev-parse", f"{commit}^{{tree}}")
+    return {"repository": repository, "source_root": ROOT, "selected_commit": commit,
+            "selected_tree": tree, "runtime_mode": mode}
+
+
 def start(
     todo_id: int | str,
     *,
@@ -111,16 +138,11 @@ def start(
         config = _initialize(config_path)
         actor = require_coder_account()
         coding = config["coding"]
-        repository = Path(coding["repository_root"])
-        commit = source_commit or __import__(
-            "tgw.development.local_workflow", fromlist=["_git"]
-        )._git(repository, "rev-parse", "HEAD")
-        tree = __import__("tgw.development.local_workflow", fromlist=["_git"])._git(
-            repository, "rev-parse", f"{commit}^{{tree}}")
+        runtime = _pp_runtime_binding(config, source_commit)
+        repository = runtime["repository"]
+        commit = runtime["selected_commit"]
         result = reconcile_pp_workflow(
-            todo_rows=todo.todo_list(show_all=True), repository=repository,
-            source_root=repository, selected_commit=commit, selected_tree=tree,
-            runtime_mode="source-worktree",
+            todo_rows=todo.todo_list(show_all=True), **runtime,
         )
         materialized = []
         if result["unmet_capabilities"]:
@@ -136,7 +158,7 @@ def start(
                     capability = unit["capability"]
                     materialized.append(bind_leaf(
                     compiled, solution=solution, treatment_id=unit["id"],
-                    source_commit=commit, worktree_identity=solution["closure_hash"],
+                    source_commit=commit, worktree_identity=actor,
                     agent=actor, body=f"{PP_REF}: establish genuinely unmet {capability}",
                     priority=50,
                     create_todo=lambda agent, body, priority, source, pp, anchor: todo.todo_add(
@@ -150,17 +172,20 @@ def start(
                     execution_root=root,
                     ))
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-            created_ids = {item["todo_id"] for item in materialized if item["created"]}
+            # Resumed bindings need the same deduplicating Foreman tick as new
+            # rows; the Foreman alone decides whether a job already exists.
+            bound_ids = {item["todo_id"] for item in materialized}
             foreman = tick(
                 ForemanConfig(
                     coding_config=dict(coding),
                     treatments=(CODEX_IMPLEMENT, CONTROLLER_VERIFY),
                     receipt_backed_conditions=frozenset({"tested", "linted"}),
                 ),
-                todo_ids=created_ids,
+                todo_ids=bound_ids,
             )
+            operation_success = foreman.errors == 0 and foreman.refused_plan_binding == 0
             result["dimensions"] = {"reconciliation_complete": False,
-                                    "operation_success": True,
+                                    "operation_success": operation_success,
                                     "materialization_attempted": True}
             result["effects"] = {
                 "todo_created": any(item["created"] for item in materialized),
@@ -171,12 +196,16 @@ def start(
                 "job_created": getattr(foreman, "dispatched", 0) > 0,
                 "plan_publication": False,
             }
+            result["foreman"] = dataclasses.asdict(foreman)
+        operation_success = result.get("dimensions", {}).get("operation_success", True)
         return {
-            "schema": "tgw-local-coding-start-pp/v1", "ok": True,
+            "schema": "tgw-local-coding-start-pp/v1", "ok": operation_success,
             "reconciliation_complete": result["ok"],
             "target": PP_REF, "actor": actor, "group": "tgw-coders",
             "reconciliation": result,
             "materialized": materialized,
+            "dependencies": {"tgw_prod": False, "ssh": False, "sudo": False,
+                             "remote_provision_api": False, "approval_card": False},
             "note": ("All bounded PP capabilities are satisfied; no Todo, worktree, or job was created."
                      if not materialized else "Genuinely unmet PP work was passed through the explicit PP-root bridge; Foreman owns dispatch."),
         }
@@ -272,11 +301,13 @@ def status(
     return local
 
 
-def reconcile(target: str = PP_REF) -> dict[str, Any]:
+def reconcile(target: str = PP_REF, *, config_path: Path | str = DEFAULT_CONFIG) -> dict[str, Any]:
     """Read-only reconciliation status for an explicit PP root."""
     if target != PP_REF:
         raise CodingCLIError(f"unsupported PP root: {target}")
-    return reconcile_pp_workflow()
+    config = _initialize(config_path)
+    return reconcile_pp_workflow(todo_rows=todo.todo_list(show_all=True),
+                                 **_pp_runtime_binding(config))
 
 
 def job_log(
@@ -321,10 +352,10 @@ def run(args: argparse.Namespace) -> int:
                 source_commit=getattr(args, "source_commit", None),
             )
         elif args.coding_op in {"status", "access-status"}:
-            result = (reconcile(target) if target == PP_REF else status(
+            result = (reconcile(target, config_path=config_path) if target == PP_REF else status(
                 _todo_id(target) if target is not None else None, config_path=config_path))
         elif args.coding_op == "reconcile":
-            result = reconcile(target or PP_REF)
+            result = reconcile(target or PP_REF, config_path=config_path)
         elif args.coding_op == "log":
             if not target:
                 raise CodingCLIError("log requires a coding job ID")

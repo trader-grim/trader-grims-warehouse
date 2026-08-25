@@ -215,7 +215,10 @@ def test_explicit_pp_root_uses_actual_pp_reference_and_supersedes():
         set_status_note=note,
         execution_root=root,
     )
-    assert calls == [("plan-luet-bridge", "PP-WORKFLOW-001", "establish:base@1")] * 2
+    assert len(calls) == 2
+    assert all(source.startswith("plan-luet-bridge@") for source, _pp, _anchor in calls)
+    assert all((pp, anchor) == ("PP-WORKFLOW-001", "establish:base@1")
+               for _source, pp, anchor in calls)
     assert again["todo_id"] == first["todo_id"] and not again["created"]
     assert second["binding"]["execution_root"]["kind"] == "pp"
     assert second["binding"]["supersedes_todo_id"] == first["todo_id"]
@@ -382,3 +385,44 @@ def test_malformed_plan_bound_todo_refuses_tick_instead_of_skipping():
         result = tick()
     assert result.errors == 1
     assert result.refused_plan_binding == 1
+
+
+def test_crash_after_todo_creation_resumes_content_addressed_row_and_allocator():
+    solution, compiled = _compiled(root_id="PP-WORKFLOW-001")
+    rows = []
+    allocations = []
+
+    def create(agent, body, priority, source, pp_ref, anchor):
+        row = {"id": 91, "agent": agent, "body": body, "priority": priority,
+               "source": source, "pp_ref": pp_ref, "plan_anchor": anchor,
+               "status_note": ""}
+        rows.append(row)
+        return row
+
+    calls = {"allocate": 0}
+
+    def allocator(todo_id, request_id, source):
+        calls["allocate"] += 1
+        allocations.append((todo_id, request_id, source))
+        if calls["allocate"] == 1:
+            raise RuntimeError("simulated crash after Todo commit")
+        return {"worktree": f"/worktrees/todo-{todo_id}-{request_id}",
+                "todo_id": todo_id, "request_id": request_id, "created": True}
+
+    common = dict(
+        solution=solution, treatment_id="establish:base@1", source_commit="a" * 40,
+        worktree_identity="codex", agent="codex", body="implement", priority=10,
+        create_todo=create, list_todos=lambda: rows, allocate_worktree=allocator,
+        set_status_note=lambda todo_id, note: rows[0].update(status_note=note),
+        execution_root={"schema": "tgw-execution-root/v1", "kind": "pp",
+                        "pp_ref": "PP-WORKFLOW-001"},
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        bind_leaf(compiled, **common)
+    resumed = bind_leaf(compiled, **common)
+    again = bind_leaf(compiled, **common)
+    assert len(rows) == 1
+    assert resumed["todo_id"] == again["todo_id"] == 91
+    assert not resumed["created"] and not again["created"]
+    assert calls["allocate"] == 2
+    assert allocations[0] == allocations[1]

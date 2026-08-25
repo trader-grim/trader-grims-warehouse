@@ -80,7 +80,7 @@ def tgw_coding_start(todo_id: int | str, source_commit: str = "") -> str:
 @mcp.tool()
 def tgw_coding_reconcile(pp_ref: str = coding_cli.PP_REF) -> str:
     """Return read-only PP reconciliation and exact native/Luet binding status."""
-    return _result("reconcile", coding_cli.reconcile, pp_ref)
+    return _result("reconcile", coding_cli.reconcile, pp_ref, config_path=_config_path())
 
 
 @mcp.tool()

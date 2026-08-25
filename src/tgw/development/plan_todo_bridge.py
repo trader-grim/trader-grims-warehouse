@@ -108,6 +108,7 @@ def bind_leaf(
     if fixture_run_id is not None:
         binding["fixture_run_id"] = fixture_run_id
     binding["idempotency_key"] = _key(binding)
+    todo_source = "plan-luet-bridge@" + binding["idempotency_key"][7:]
     supersedes_todo_id = None
     rows = list_todos()
     selected_todo: Mapping[str, Any] | None = None
@@ -115,6 +116,22 @@ def bind_leaf(
         selected_todo = next((row for row in rows if row.get("id") == root["todo_id"]), None)
         if selected_todo is None:
             raise PlanTodoBridgeError("selected Todo root does not exist in the canonical Todo adapter")
+    else:
+        # The source is written in the same transaction that creates the Todo.
+        # It therefore survives a crash before allocator/status binding and is
+        # the durable recovery key for this exact leaf.
+        recovered = [row for row in rows if row.get("source") == todo_source]
+        if len(recovered) > 1:
+            raise PlanTodoBridgeError("content-addressed Todo source is not unique")
+        if recovered:
+            candidate = recovered[0]
+            if any(candidate.get(field) != expected for field, expected in (
+                ("agent", agent), ("body", body), ("priority", priority),
+                ("pp_ref", root["pp_ref"] if root["kind"] == "pp" else None),
+                ("plan_anchor", treatment_id),
+            )):
+                raise PlanTodoBridgeError("content-addressed Todo row differs from requested leaf")
+            selected_todo = candidate
     for row in rows:
         note = row.get("status_note")
         if isinstance(note, str):
@@ -139,7 +156,7 @@ def bind_leaf(
         # A Plan root creates a derived implementation Todo with no invented
         # PP reference.  A PP root preserves its actual selected identifier.
         created = create_todo(
-            agent, body, priority, "plan-luet-bridge",
+            agent, body, priority, todo_source,
             root["pp_ref"] if root["kind"] == "pp" else None,
             treatment_id,
         )
