@@ -51,6 +51,7 @@ nats = [
 tgw                = "tgw.api:main"
 tgw-coding         = "tgw.coding_cli:main"
 tgw-coding-mcp-server = "tgw.coding_mcp_server:main"
+tgw-doctor         = "tgw.doctor_cli:main"
 tgw-mcp-server     = "tgw.mcp_server:main"
 tgw-context-mcp-server = "tgw.context_mcp_server:main"
 tgw-context-generation-status = "tgw.context_generation_status:main"

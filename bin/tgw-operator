@@ -1,9 +1,15 @@
 #!/bin/sh
 set -eu
 
-if [ "${1-}" = "coding" ]; then
-    shift
-    exec /opt/TGW/tgw-lib/bin/tgw-coding "$@"
-fi
+case "${1-}" in
+    coding)
+        shift
+        exec /opt/TGW/tgw-lib/bin/tgw-coding "$@"
+        ;;
+    doctor)
+        shift
+        exec /opt/TGW/tgw-lib/bin/tgw-doctor "$@"
+        ;;
+esac
 
 exec /usr/local/libexec/tgw-production-client "$@"

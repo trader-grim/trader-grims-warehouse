@@ -30,7 +30,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE
 GRANT SELECT, INSERT
     ON TABLE public.queue_job_history
     TO tgw_coding;
-GRANT USAGE, SELECT
+GRANT USAGE, SELECT, UPDATE
     ON SEQUENCE public.todo_items_id_seq, public.queue_job_history_history_id_seq
     TO tgw_coding;
 
