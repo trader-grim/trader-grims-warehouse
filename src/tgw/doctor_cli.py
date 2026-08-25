@@ -19,6 +19,7 @@ import json
 import os
 import pwd
 import re
+import secrets
 import shlex
 import socket
 import stat
@@ -1896,6 +1897,81 @@ def _set_shared_directory(path: Path, group_gid: int) -> None:
         os.close(descriptor)
 
 
+_PACK_COMPONENT = re.compile(
+    r"pack-[0-9a-f]{40}(?:[0-9a-f]{24})?\.(?:pack|idx|rev|bitmap)\Z"
+)
+
+
+def _detach_pack_hardlink(
+    parent_descriptor: int,
+    name: str,
+    source_descriptor: int,
+    group_gid: int,
+) -> None:
+    """Replace one canonical pack alias without changing its external hardlink."""
+    before = os.fstat(source_descriptor)
+    temporary = f".{name}.tgw-doctor-{os.getpid()}-{secrets.token_hex(8)}"
+    destination = os.open(
+        temporary,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | os.O_NOFOLLOW
+        | os.O_CLOEXEC,
+        0o400,
+        dir_fd=parent_descriptor,
+    )
+    replaced = False
+    try:
+        while True:
+            chunk = os.read(source_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination, view)
+                if written <= 0:
+                    raise DoctorError("short write while detaching Git pack hardlink")
+                view = view[written:]
+        after = os.fstat(source_descriptor)
+        stable = all(
+            getattr(before, field) == getattr(after, field)
+            for field in (
+                "st_dev",
+                "st_ino",
+                "st_size",
+                "st_mode",
+                "st_uid",
+                "st_gid",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+        )
+        if not stable:
+            raise DoctorError(f"Git pack hardlink changed while detaching: {name}")
+        current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+            raise DoctorError(f"Git pack path changed while detaching: {name}")
+        os.fchown(destination, -1, group_gid)
+        os.fchmod(destination, (stat.S_IMODE(before.st_mode) | stat.S_IRGRP) & ~0o222)
+        os.fsync(destination)
+        os.replace(
+            temporary,
+            name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        replaced = True
+        os.fsync(parent_descriptor)
+    finally:
+        os.close(destination)
+        if not replaced:
+            try:
+                os.unlink(temporary, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                pass
+
+
 def _scan_shared_git_tree(
     root: Path, group_gid: int, *, mutate: bool
 ) -> dict[str, int]:
@@ -1907,7 +1983,8 @@ def _scan_shared_git_tree(
         "directories": 0,
         "files": 0,
         "symlinks_untouched": 0,
-        "immutable_pack_hardlinks_untouched": 0,
+        "pack_hardlinks_seen": 0,
+        "pack_hardlinks_detached": 0,
     }
     try:
         while pending:
@@ -1941,17 +2018,27 @@ def _scan_shared_git_tree(
                             )
                         if state.st_nlink > 1:
                             parts = relative.parts
-                            immutable_pack = (
-                                len(parts) >= 3
+                            detachable_pack = (
+                                len(parts) == 3
                                 and parts[:2] == ("objects", "pack")
+                                and _PACK_COMPONENT.fullmatch(parts[2]) is not None
                                 and bool(state.st_mode & stat.S_IROTH)
+                                and not bool(state.st_mode & 0o111)
                             )
-                            if not immutable_pack:
+                            if not detachable_pack:
                                 raise DoctorError(
                                     "mutable or unreadable hardlink in canonical Git "
                                     f"directory: {relative}"
                                 )
-                            counts["immutable_pack_hardlinks_untouched"] += 1
+                            counts["pack_hardlinks_seen"] += 1
+                            if mutate:
+                                _detach_pack_hardlink(
+                                    directory_descriptor,
+                                    name,
+                                    descriptor,
+                                    group_gid,
+                                )
+                                counts["pack_hardlinks_detached"] += 1
                             continue
                         if mutate:
                             _set_shared_fd(descriptor, group_gid, directory=False)
@@ -1970,18 +2057,61 @@ def _scan_shared_git_tree(
 def _coding_quiescence():
     """Use systemd runtime masks as the worker-shared repair lock."""
     units = list(_CODING_UNITS)
+    initial_states = {unit: _unit_state(unit) for unit in units}
     preexisting_masks = [
-        unit for unit in units if _unit_state(unit).get("LoadState") == "masked"
+        unit
+        for unit, state in initial_states.items()
+        if state.get("LoadState") == "masked"
     ]
     if preexisting_masks:
         raise DoctorError(
             "refusing to alter pre-existing coding unit masks: "
             + ", ".join(preexisting_masks)
         )
+    initially_active = [
+        unit
+        for unit, state in initial_states.items()
+        if state.get("ActiveState") == "active"
+    ]
+
+    def restore_initial_state() -> None:
+        errors: list[str] = []
+        unmasked = _run(["systemctl", "unmask", "--runtime", *units], timeout=30)
+        if unmasked.returncode:
+            errors.append(
+                unmasked.stderr.strip() or "cannot release local coding quiescence"
+            )
+        elif initially_active:
+            started = _run(["systemctl", "start", *initially_active], timeout=30)
+            if started.returncode:
+                errors.append(
+                    started.stderr.strip()
+                    or "cannot restore initially active local coding units"
+                )
+            else:
+                inactive = [
+                    unit
+                    for unit in initially_active
+                    if _unit_state(unit).get("ActiveState") != "active"
+                ]
+                if inactive:
+                    errors.append(
+                        "initially active local coding units were not restored: "
+                        + ", ".join(inactive)
+                    )
+        if errors:
+            raise DoctorError("; ".join(errors))
+
     masked = _run(["systemctl", "mask", "--runtime", "--now", *units], timeout=30)
     if masked.returncode:
-        _run(["systemctl", "unmask", "--runtime", *units], timeout=30)
-        raise DoctorError(masked.stderr.strip() or "cannot quiesce local coding units")
+        mask_error = masked.stderr.strip() or "cannot quiesce local coding units"
+        try:
+            restore_initial_state()
+        except DoctorError as restore_error:
+            raise DoctorError(
+                f"{mask_error}; restore failed: {restore_error}"
+            ) from restore_error
+        raise DoctorError(mask_error)
     try:
         unsettled = []
         for unit in units:
@@ -1995,11 +2125,7 @@ def _coding_quiescence():
             )
         yield
     finally:
-        unmasked = _run(["systemctl", "unmask", "--runtime", *units], timeout=30)
-        if unmasked.returncode:
-            raise DoctorError(
-                unmasked.stderr.strip() or "cannot release local coding quiescence"
-            )
+        restore_initial_state()
 
 
 def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:

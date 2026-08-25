@@ -324,7 +324,7 @@ def test_descriptor_anchored_git_tree_repair_never_follows_symlinks(
     assert changes["symlinks_untouched"] == 1
 
 
-def test_git_tree_preflight_allows_only_readable_pack_hardlinks(
+def test_git_tree_repair_detaches_only_valid_pack_hardlinks(
     tmp_path: Path,
 ) -> None:
     git_root = tmp_path / "git"
@@ -333,13 +333,26 @@ def test_git_tree_preflight_allows_only_readable_pack_hardlinks(
     outside = tmp_path / "pack-source"
     outside.write_text("immutable pack", encoding="utf-8")
     outside.chmod(0o644)
-    os.link(outside, pack / "pack-test.pack")
+    canonical = pack / ("pack-" + "a" * 40 + ".pack")
+    os.link(outside, canonical)
+    outside_inode = outside.stat().st_ino
 
-    counts = doctor_cli._scan_shared_git_tree(
+    preflight = doctor_cli._scan_shared_git_tree(
         git_root, os.getgid(), mutate=False
     )
+    repaired = doctor_cli._scan_shared_git_tree(
+        git_root, os.getgid(), mutate=True
+    )
 
-    assert counts["immutable_pack_hardlinks_untouched"] == 1
+    assert preflight["pack_hardlinks_seen"] == 1
+    assert preflight["pack_hardlinks_detached"] == 0
+    assert repaired["pack_hardlinks_seen"] == 1
+    assert repaired["pack_hardlinks_detached"] == 1
+    assert canonical.read_bytes() == outside.read_bytes() == b"immutable pack"
+    assert canonical.stat().st_ino != outside_inode
+    assert outside.stat().st_ino == outside_inode
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o644
+    assert stat.S_IMODE(canonical.stat().st_mode) == 0o444
 
     mutable = git_root / "index"
     os.link(outside, mutable)
@@ -352,31 +365,112 @@ def test_coding_quiescence_masks_and_verifies_every_local_unit(
 ) -> None:
     commands = []
     masked = False
+    active = {
+        "tgw-codex-implement-worker.service",
+        "tgw-coding-local-foreman.timer",
+    }
 
     def run(command, **_kwargs):
         nonlocal masked
         commands.append(command)
         if command[1] == "mask":
             masked = True
+            active.clear()
         elif command[1] == "unmask":
             masked = False
+        elif command[1] == "start":
+            active.update(command[2:])
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(doctor_cli, "_run", run)
     monkeypatch.setattr(
         doctor_cli,
         "_unit_state",
-        lambda _unit: {
+        lambda unit: {
             "LoadState": "masked" if masked else "loaded",
-            "ActiveState": "inactive",
+            "ActiveState": "active" if unit in active else "inactive",
         },
     )
 
     with doctor_cli._coding_quiescence():
-        pass
+        assert not active
 
     assert commands[0][:4] == ["systemctl", "mask", "--runtime", "--now"]
-    assert commands[-1][:3] == ["systemctl", "unmask", "--runtime"]
+    assert commands[-2][:3] == ["systemctl", "unmask", "--runtime"]
+    assert commands[-1] == [
+        "systemctl",
+        "start",
+        "tgw-codex-implement-worker.service",
+        "tgw-coding-local-foreman.timer",
+    ]
+    assert active == {
+        "tgw-codex-implement-worker.service",
+        "tgw-coding-local-foreman.timer",
+    }
+
+
+def test_coding_quiescence_refuses_preexisting_runtime_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda unit: {
+            "LoadState": (
+                "masked"
+                if unit == "tgw-controller-verify-worker.service"
+                else "loaded"
+            ),
+            "ActiveState": "inactive",
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("systemctl must not be called"),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="pre-existing coding unit masks"):
+        with doctor_cli._coding_quiescence():
+            pass
+
+
+def test_coding_quiescence_restores_active_units_after_mask_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands = []
+    active = {"tgw-controller-verify-worker.service"}
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        if command[1] == "mask":
+            active.clear()
+            return subprocess.CompletedProcess(command, 1, "", "partial mask failure")
+        if command[1] == "start":
+            active.update(command[2:])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda unit: {
+            "LoadState": "loaded",
+            "ActiveState": "active" if unit in active else "inactive",
+        },
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="partial mask failure"):
+        with doctor_cli._coding_quiescence():
+            pass
+
+    assert commands[-2][:3] == ["systemctl", "unmask", "--runtime"]
+    assert commands[-1] == [
+        "systemctl",
+        "start",
+        "tgw-controller-verify-worker.service",
+    ]
+    assert active == {"tgw-controller-verify-worker.service"}
 
 
 def test_worker_unit_exactness_includes_immutable_metadata(tmp_path: Path) -> None:
