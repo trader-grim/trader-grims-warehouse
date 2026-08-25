@@ -56,6 +56,7 @@ _ACTIVE_CODING_UNITS = (
 )
 _CODING_UNITS = (*_ACTIVE_CODING_UNITS, "tgw-coding-local-foreman.service")
 _PLAN_RENDER_UNIT = "tgw-plan-render-local.service"
+_PLAN_RENDER_DIRECTORY_MODE = 0o2770
 _SYSTEMD_UNIT_ROOTS = (
     Path("/etc/systemd/system"),
     Path("/run/systemd/system"),
@@ -121,6 +122,8 @@ class DoctorPaths:
     worktrees: Path = Path("/opt/TGW/var/worktrees")
     coding_config: Path = Path("/opt/TGW/tgw-lib/config/tgw-coding-local.json")
     plan_render_config: Path = Path("/opt/TGW/tgw-lib/config/tgw-plan-render-local.json")
+    plan_render_root: Path = Path("/opt/TGW/var/plan-render")
+    plan_render_log_root: Path = Path("/opt/TGW/var/plan-render/log")
     runtime_root: Path = Path("/opt/TGW/tgw-lib/coding-runtime")
     local_bin: Path = Path("/opt/TGW/tgw-lib/bin")
     operator_cli: Path = Path("/usr/local/bin/tgw")
@@ -1147,6 +1150,63 @@ def _runtime_selector_identity(
     }
 
 
+def _directory_identity(
+    path: Path, *, uid: int, gid: int, mode: int
+) -> dict[str, Any]:
+    try:
+        observed = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return {
+            "path": str(path),
+            "kind": "missing",
+            "uid": None,
+            "gid": None,
+            "mode": None,
+            "expected_uid": uid,
+            "expected_gid": gid,
+            "expected_mode": mode,
+            "exact": False,
+        }
+    kind = "directory" if stat.S_ISDIR(observed.st_mode) else "unsafe"
+    observed_mode = stat.S_IMODE(observed.st_mode)
+    exact = (
+        kind == "directory"
+        and observed.st_uid == uid
+        and observed.st_gid == gid
+        and observed_mode == mode
+    )
+    return {
+        "path": str(path),
+        "kind": kind,
+        "uid": observed.st_uid,
+        "gid": observed.st_gid,
+        "mode": observed_mode,
+        "expected_uid": uid,
+        "expected_gid": gid,
+        "expected_mode": mode,
+        "exact": exact,
+    }
+
+
+def _plan_render_storage_identity(paths: DoctorPaths) -> dict[str, Any]:
+    owner = pwd.getpwnam("db")
+    group = grp.getgrnam("tgw-coders")
+    mode = _PLAN_RENDER_DIRECTORY_MODE
+    directories = [
+        _directory_identity(path, uid=owner.pw_uid, gid=group.gr_gid, mode=mode)
+        for path in (paths.plan_render_root, paths.plan_render_log_root)
+    ]
+    return {
+        "owner": "db",
+        "owner_uid": owner.pw_uid,
+        "group": "tgw-coders",
+        "group_gid": group.gr_gid,
+        "mode": mode,
+        "directories": directories,
+        "exact": all(item["exact"] for item in directories),
+    }
+
+
 def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
     repair = "sudo -n tgw doctor repair plan-render-worker"
     try:
@@ -1155,6 +1215,7 @@ def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
         state = _unit_state(_PLAN_RENDER_UNIT)
         definition = _unit_definition(paths, _PLAN_RENDER_UNIT, state)
         config = _json(paths.plan_render_config)
+        storage = _plan_render_storage_identity(paths)
         source = release / "config/tgw-plan-render-local.json"
         exact_config = (
             not source.is_symlink()
@@ -1165,12 +1226,15 @@ def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
         )
         healthy = (state.get("LoadState") == "loaded"
                    and state.get("ActiveState") == "active"
-                   and definition["exact"] and exact_config and runtime["exact"])
+                   and definition["exact"] and exact_config and runtime["exact"]
+                   and storage["exact"])
         reasons = list(definition["reasons"])
         if not exact_config:
             reasons.append("immutable config path or bytes differ")
         if not runtime["exact"]:
             reasons.append("immutable runtime selector differs")
+        if not storage["exact"]:
+            reasons.append("plan_render output directories differ")
         if state.get("ActiveState") != "active":
             reasons.append("service is not active")
         return _check(
@@ -1182,6 +1246,7 @@ def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
                 "definition": definition,
                 "config": config,
                 "runtime": runtime,
+                "storage": storage,
             },
             repair=None if healthy else repair,
         )
@@ -3261,6 +3326,80 @@ def repair_workers(paths: DoctorPaths) -> dict[str, Any]:
     }
 
 
+def _repair_managed_directory(
+    path: Path, *, uid: int, gid: int, mode: int
+) -> bool:
+    if not path.is_absolute() or path.name in ("", ".", ".."):
+        raise DoctorError(f"unsafe managed directory path: {path}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    root_descriptor = -1
+    try:
+        root_descriptor = os.open(path.anchor, flags)
+        parent_descriptor = _open_relative_directory(
+            root_descriptor, path.parent.relative_to(path.anchor)
+        )
+    except OSError as exc:
+        raise DoctorError(f"unsafe managed directory parent: {path.parent}") from exc
+    finally:
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+    descriptor = -1
+    created = False
+    changed = False
+    try:
+        try:
+            os.mkdir(path.name, mode=mode, dir_fd=parent_descriptor)
+            created = True
+            changed = True
+        except FileExistsError:
+            pass
+        try:
+            descriptor = os.open(path.name, flags, dir_fd=parent_descriptor)
+        except OSError as exc:
+            raise DoctorError(f"unsafe managed directory destination: {path}") from exc
+        observed = os.fstat(descriptor)
+        observed_mode = stat.S_IMODE(observed.st_mode)
+        if not stat.S_ISDIR(observed.st_mode):
+            raise DoctorError(f"unsafe managed directory destination: {path}")
+        if observed.st_uid != uid or observed.st_gid != gid:
+            os.fchown(descriptor, uid, gid)
+            changed = True
+        if observed_mode != mode or changed:
+            os.fchmod(descriptor, mode)
+            changed = True
+        os.fsync(descriptor)
+        os.fsync(parent_descriptor)
+    except Exception:
+        if created:
+            try:
+                os.rmdir(path.name, dir_fd=parent_descriptor)
+            except OSError:
+                pass
+        raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_descriptor)
+    return changed
+
+
+def _repair_plan_render_storage(paths: DoctorPaths) -> bool:
+    owner = pwd.getpwnam("db")
+    group = grp.getgrnam("tgw-coders")
+    changed = False
+    for path in (paths.plan_render_root, paths.plan_render_log_root):
+        changed = _repair_managed_directory(
+            path,
+            uid=owner.pw_uid,
+            gid=group.gr_gid,
+            mode=_PLAN_RENDER_DIRECTORY_MODE,
+        ) or changed
+    after = _plan_render_storage_identity(paths)
+    if not after["exact"]:
+        raise DoctorError("plan_render output directories remain unsafe after repair")
+    return changed
+
+
 def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
     _require_root()
     desired, release, _task = _desired_runtime(paths)
@@ -3280,12 +3419,17 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
         or not unit_source.is_file()
     ):
         raise DoctorError("immutable runtime lacks plan_render config or unit")
-    changed = False
     if paths.plan_render_config.is_symlink() or (
         paths.plan_render_config.exists()
         and not paths.plan_render_config.is_file()
     ):
         raise DoctorError("refusing unsafe plan_render config destination")
+    destination = paths.systemd_install_root / _PLAN_RENDER_UNIT
+    if destination.is_symlink() or (
+        destination.exists() and not destination.is_file()
+    ):
+        raise DoctorError("refusing unsafe plan_render unit destination")
+    changed = _repair_plan_render_storage(paths)
     if (
         not paths.plan_render_config.is_file()
         or paths.plan_render_config.read_bytes() != config_source.read_bytes()
@@ -3293,9 +3437,6 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
         _atomic_bytes(paths.plan_render_config, config_source.read_bytes(),
                       mode=0o444, uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
         changed = True
-    destination = paths.systemd_install_root / _PLAN_RENDER_UNIT
-    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
-        raise DoctorError("refusing unsafe plan_render unit destination")
     if not _unit_destination_exact(paths, destination, unit_source):
         _atomic_bytes(destination, unit_source.read_bytes(), mode=paths.systemd_unit_mode,
                       uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)

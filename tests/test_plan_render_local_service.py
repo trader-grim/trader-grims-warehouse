@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -82,9 +85,30 @@ def _plan_render_check_fixture(
     (runtime_root / "current").symlink_to(Path("releases") / desired)
     installed_config = tmp_path / "tgw-plan-render-local.json"
     installed_config.write_bytes(source_config.read_bytes())
+    plan_render_root = tmp_path / "plan-render"
+    plan_render_log_root = plan_render_root / "log"
+    plan_render_log_root.mkdir(parents=True)
+    plan_render_root.chmod(0o2770)
+    plan_render_log_root.chmod(0o2770)
     paths = doctor_cli.DoctorPaths(
         runtime_root=runtime_root,
         plan_render_config=installed_config,
+        plan_render_root=plan_render_root,
+        plan_render_log_root=plan_render_log_root,
+    )
+    monkeypatch.setattr(
+        doctor_cli.pwd,
+        "getpwnam",
+        lambda name: SimpleNamespace(pw_uid=os.getuid())
+        if name == "db"
+        else None,
+    )
+    monkeypatch.setattr(
+        doctor_cli.grp,
+        "getgrnam",
+        lambda name: SimpleNamespace(gr_gid=os.getgid())
+        if name == "tgw-coders"
+        else None,
     )
     monkeypatch.setattr(
         doctor_cli,
@@ -186,3 +210,76 @@ def test_plan_render_repair_refuses_runtime_selector_before_effects(
         doctor_cli.repair_plan_render_worker(paths)
 
     assert effects == []
+
+
+def test_doctor_reports_missing_plan_render_output_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _release = _plan_render_check_fixture(tmp_path, monkeypatch)
+    paths.plan_render_log_root.rmdir()
+
+    result = doctor_cli.check_plan_render_worker(paths)
+
+    assert result["state"] == "FAIL"
+    assert "plan_render output directories differ" in result["detail"]
+    storage = result["evidence"]["storage"]
+    assert storage["exact"] is False
+    assert storage["directories"][1]["kind"] == "missing"
+
+
+def test_plan_render_storage_repair_is_exact_and_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = doctor_cli.DoctorPaths(
+        plan_render_root=tmp_path / "plan-render",
+        plan_render_log_root=tmp_path / "plan-render/log",
+    )
+    monkeypatch.setattr(
+        doctor_cli.pwd,
+        "getpwnam",
+        lambda name: SimpleNamespace(pw_uid=os.getuid())
+        if name == "db"
+        else None,
+    )
+    monkeypatch.setattr(
+        doctor_cli.grp,
+        "getgrnam",
+        lambda name: SimpleNamespace(gr_gid=os.getgid())
+        if name == "tgw-coders"
+        else None,
+    )
+
+    assert doctor_cli._repair_plan_render_storage(paths) is True
+    assert doctor_cli._repair_plan_render_storage(paths) is False
+    for path in (paths.plan_render_root, paths.plan_render_log_root):
+        observed = path.stat(follow_symlinks=False)
+        assert stat.S_ISDIR(observed.st_mode)
+        assert observed.st_uid == os.getuid()
+        assert observed.st_gid == os.getgid()
+        assert stat.S_IMODE(observed.st_mode) == 0o2770
+
+
+def test_plan_render_storage_repair_refuses_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    root = tmp_path / "plan-render"
+    root.symlink_to(target, target_is_directory=True)
+    paths = doctor_cli.DoctorPaths(
+        plan_render_root=root,
+        plan_render_log_root=root / "log",
+    )
+    monkeypatch.setattr(
+        doctor_cli.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=os.getuid()),
+    )
+    monkeypatch.setattr(
+        doctor_cli.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=os.getgid()),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="unsafe managed directory"):
+        doctor_cli._repair_plan_render_storage(paths)
