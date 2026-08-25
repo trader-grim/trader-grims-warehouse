@@ -132,6 +132,7 @@ class DoctorPaths:
         Path("/opt/TGW/tgw-lib/config"),
     )
     trusted_release_owners: tuple[int, ...] = (0, 65534)
+    systemd_install_root: Path = Path("/etc/systemd/system")
     systemd_unit_roots: tuple[Path, ...] = _SYSTEMD_UNIT_ROOTS
     archive_discovery_roots: tuple[Path, ...] = _ARCHIVE_DISCOVERY_ROOTS
     archive_discovery_max_depth: int = _ARCHIVE_DISCOVERY_MAX_DEPTH
@@ -437,33 +438,79 @@ def _actor_path_access(actor: str, path: Path) -> bool:
     )
 
 
+def _shared_git_directory(path: Path, group_gid: int) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_dir():
+        return {
+            "path": str(path),
+            "exact": False,
+            "reason": "missing, symlinked, or not a directory",
+        }
+    state = path.stat(follow_symlinks=False)
+    mode = stat.S_IMODE(state.st_mode)
+    exact = (
+        state.st_gid == group_gid
+        and bool(mode & stat.S_ISGID)
+        and mode & stat.S_IRWXG == stat.S_IRWXG
+    )
+    return {
+        "path": str(path),
+        "exact": exact,
+        "uid": state.st_uid,
+        "gid": state.st_gid,
+        "mode": f"{mode:04o}",
+        "reason": None if exact else "group, setgid, or group access differs",
+    }
+
+
 def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
     try:
         actor = _operator_actor()
-        actor_record = pwd.getpwnam(actor)
         group = grp.getgrnam("tgw-coders")
-        memberships = set(os.getgrouplist(actor, actor_record.pw_gid))
-        member = group.gr_gid in memberships or actor in group.gr_mem
-        writable = {
-            "repository": _actor_path_access(actor, paths.repository),
-            "worktree_root": _actor_path_access(actor, paths.worktrees),
+        git_common = paths.repository / ".git"
+        actors = {}
+        for name in sorted({actor, "codex", "db"}):
+            record = pwd.getpwnam(name)
+            memberships = set(os.getgrouplist(name, record.pw_gid))
+            member = group.gr_gid in memberships or name in group.gr_mem
+            access = {
+                "git_common": _actor_path_access(name, git_common),
+                "worktree_root": _actor_path_access(name, paths.worktrees),
+            }
+            actors[name] = {
+                "member": member,
+                "access": access,
+                "exact": member and all(access.values()),
+            }
+        directories = {
+            "repository": _shared_git_directory(paths.repository, group.gr_gid),
+            "git_common": _shared_git_directory(git_common, group.gr_gid),
+            "worktree_root": _shared_git_directory(paths.worktrees, group.gr_gid),
         }
-        state = "PASS" if member and all(writable.values()) else "FAIL"
+        exact = all(row["exact"] for row in actors.values()) and all(
+            row["exact"] for row in directories.values()
+        )
         return _check(
             "access.unix-group",
-            state,
-            f"{actor} {'is' if member else 'is not'} in tgw-coders; local paths "
-            f"are {'accessible' if all(writable.values()) else 'not writable'}",
+            "PASS" if exact else "FAIL",
+            "ordinary Unix tgw-coders access is exact for operator and workers"
+            if exact
+            else "ordinary Unix tgw-coders access or shared Git directories differ",
             evidence={
                 "actor": actor,
                 "group": "tgw-coders",
                 "group_gid": group.gr_gid,
                 "members": sorted(group.gr_mem),
-                "access": writable,
+                "actors": actors,
+                "directories": directories,
             },
+            repair=None if exact else "sudo -n tgw doctor repair unix-git-access",
         )
     except Exception as exc:
-        return _failed("access.unix-group", exc)
+        return _failed(
+            "access.unix-group",
+            exc,
+            repair="sudo -n tgw doctor repair unix-git-access",
+        )
 
 
 def check_worktrees(paths: DoctorPaths) -> dict[str, Any]:
@@ -1830,33 +1877,107 @@ def repair_database(paths: DoctorPaths) -> dict[str, Any]:
     return {"ok": True, "operation": "database", "changed": before != after, "receipt": receipt}
 
 
+def _set_shared_group(path: Path, group_gid: int, *, directory: bool) -> None:
+    os.chown(path, -1, group_gid, follow_symlinks=False)
+    if path.is_symlink():
+        return
+    mode = stat.S_IMODE(path.stat(follow_symlinks=False).st_mode)
+    if directory:
+        os.chmod(path, mode | stat.S_ISGID | stat.S_IRWXG)
+    else:
+        os.chmod(path, mode | stat.S_IRGRP | stat.S_IWGRP)
+
+
+def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
+    """Restore only the shared local Git directories to tgw-coders access."""
+    _require_root()
+    before = check_unix_access(paths)
+    group_gid = grp.getgrnam("tgw-coders").gr_gid
+    repository = paths.repository.resolve(strict=True)
+    worktree_root = paths.worktrees.resolve(strict=True)
+    git_common = repository / ".git"
+    if git_common.is_symlink() or not git_common.is_dir():
+        raise DoctorError("canonical Git common directory is not a real directory")
+    if paths.repository.is_symlink() or paths.worktrees.is_symlink():
+        raise DoctorError("shared Git repair refuses symlinked configured roots")
+
+    _set_shared_group(repository, group_gid, directory=True)
+    _set_shared_group(worktree_root, group_gid, directory=True)
+    for parent, directories, files in os.walk(git_common, followlinks=False):
+        parent_path = Path(parent)
+        _set_shared_group(parent_path, group_gid, directory=True)
+        directories[:] = [
+            name for name in directories if not (parent_path / name).is_symlink()
+        ]
+        for name in files:
+            _set_shared_group(parent_path / name, group_gid, directory=False)
+
+    raw = _git(repository, "worktree", "list", "--porcelain")
+    outside_untouched: list[str] = []
+    for line in raw.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        location = Path(line.removeprefix("worktree ")).resolve(strict=True)
+        if location == repository:
+            continue
+        if worktree_root not in location.parents:
+            outside_untouched.append(str(location))
+            continue
+        if location.is_symlink() or not location.is_dir():
+            raise DoctorError(f"linked worktree root is unsafe: {location}")
+        _set_shared_group(location, group_gid, directory=True)
+
+    after = check_unix_access(paths)
+    if after["state"] != "PASS":
+        raise DoctorError("ordinary Unix Git access remains incomplete after repair")
+    receipt = _receipt(paths, "unix-git-access", before, after)
+    return {
+        "ok": True,
+        "operation": "unix-git-access",
+        "changed": before != after,
+        "outside_configured_root_untouched": outside_untouched,
+        "receipt": receipt,
+    }
+
+
 def repair_workers(paths: DoctorPaths) -> dict[str, Any]:
     _require_root()
     desired, release, _task = _desired_runtime(paths)
     _verify_release_tree(paths, desired, release)
     before = check_units(paths)
-    definition_failures = [
-        unit
-        for unit, state in before.get("evidence", {}).get("units", {}).items()
-        if not state.get("definition", {}).get("exact")
-    ]
-    if definition_failures:
-        raise DoctorError(
-            "worker repair refuses non-exact unit definitions: "
-            + ", ".join(definition_failures)
-        )
+    installed: list[str] = []
+    for unit in _CODING_UNITS:
+        source = release / "systemd" / unit
+        destination = paths.systemd_install_root / unit
+        if not source.is_file():
+            raise DoctorError(f"immutable runtime lacks coding unit: {unit}")
+        if destination.is_symlink() or (
+            destination.exists() and not destination.is_file()
+        ):
+            raise DoctorError(f"refusing unsafe coding unit destination: {destination}")
+        if not destination.is_file() or destination.read_bytes() != source.read_bytes():
+            _atomic_bytes(destination, source.read_bytes(), mode=0o444)
+            installed.append(unit)
+    if installed:
+        result = _run(["systemctl", "daemon-reload"], timeout=30)
+        if result.returncode:
+            raise DoctorError(result.stderr.strip() or "systemd daemon reload failed")
     actions: list[str] = []
     for unit in _ACTIVE_CODING_UNITS:
         state = _unit_state(unit)
         definition = _unit_definition(paths, unit, state)
         if not definition["exact"]:
-            raise DoctorError(f"unit definition changed before start: {unit}")
-        if state.get("ActiveState") == "active":
+            raise DoctorError(f"installed coding unit is not exact: {unit}")
+        operation = "restart" if unit in installed else "start"
+        if operation == "start" and state.get("ActiveState") == "active":
             continue
-        result = _run(["systemctl", "start", unit], timeout=30)
+        result = _run(["systemctl", "enable", unit], timeout=30)
         if result.returncode:
-            raise DoctorError(result.stderr.strip() or f"failed to start {unit}")
-        actions.append(unit)
+            raise DoctorError(result.stderr.strip() or f"failed to enable {unit}")
+        result = _run(["systemctl", operation, unit], timeout=30)
+        if result.returncode:
+            raise DoctorError(result.stderr.strip() or f"failed to {operation} {unit}")
+        actions.append(f"{operation}:{unit}")
     after = check_units(paths)
     if after["state"] != "PASS":
         raise DoctorError("local coding units remain unhealthy after repair")
@@ -1864,8 +1985,9 @@ def repair_workers(paths: DoctorPaths) -> dict[str, Any]:
     return {
         "ok": True,
         "operation": "workers",
-        "changed": bool(actions),
-        "started": actions,
+        "changed": bool(installed or actions),
+        "installed": installed,
+        "service_actions": actions,
         "receipt": receipt,
     }
 
@@ -2881,6 +3003,7 @@ _REPAIRS: dict[str, Callable[[DoctorPaths], dict[str, Any]]] = {
     "context": repair_context,
     "runtime": repair_runtime,
     "database": repair_database,
+    "unix-git-access": repair_unix_git_access,
     "workers": repair_workers,
     "obsolete-surfaces": repair_obsolete_surfaces,
 }

@@ -20,5 +20,3 @@ ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.development.local_workfl
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only
-ProtectSystem=strict
-ReadWritePaths=/opt/TGW/var/worktrees

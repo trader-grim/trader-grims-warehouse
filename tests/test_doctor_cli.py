@@ -273,6 +273,36 @@ def test_root_database_postcheck_runs_as_the_invoking_operator(
     ]
 
 
+def test_shared_git_directory_requires_exact_group_and_setgid(tmp_path: Path) -> None:
+    path = tmp_path / "shared-git"
+    path.mkdir(mode=0o2775)
+    path.chmod(0o2775)
+
+    exact = doctor_cli._shared_git_directory(path, os.getgid())
+    path.chmod(0o775)
+    missing_setgid = doctor_cli._shared_git_directory(path, os.getgid())
+
+    assert exact["exact"] is True
+    assert missing_setgid["exact"] is False
+    assert missing_setgid["reason"] == "group, setgid, or group access differs"
+
+
+def test_set_shared_group_preserves_file_kind_and_adds_group_access(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "worktree"
+    directory.mkdir(mode=0o750)
+    file_path = directory / "index"
+    file_path.write_text("git index fixture", encoding="utf-8")
+    file_path.chmod(0o640)
+
+    doctor_cli._set_shared_group(directory, os.getgid(), directory=True)
+    doctor_cli._set_shared_group(file_path, os.getgid(), directory=False)
+
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o2770
+    assert stat.S_IMODE(file_path.stat().st_mode) == 0o660
+
+
 def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -23,8 +23,6 @@ TimeoutStopSec=1900s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only
-ProtectSystem=strict
-ReadWritePaths=/opt/TGW/var/worktrees
 
 [Install]
 WantedBy=multi-user.target

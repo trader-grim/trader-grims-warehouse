@@ -23,6 +23,8 @@ def test_local_coding_units_use_unix_accounts_and_shared_group() -> None:
         assert "UMask=0002" in unit
         assert "tgw.development.local_workflow" in unit
         assert "/opt/TGW/tgw-lib/coding-runtime/current/src" in unit
+        assert "ProtectSystem=strict" not in unit
+        assert "ReadWritePaths=" not in unit
         lowered = unit.lower()
         for forbidden in ("tgw-prod", "ssh ", "api_endpoint", "actor-fleet", "execution-card"):
             assert forbidden not in lowered
