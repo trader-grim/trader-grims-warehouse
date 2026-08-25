@@ -482,10 +482,24 @@ def test_coding_quiescence_guards_and_verifies_every_local_unit(
         systemd_unit_uid=os.getuid(),
         systemd_unit_gid=os.getgid(),
     )
+    reload_count = 0
 
     def run(command, **_kwargs):
+        nonlocal reload_count
         commands.append(command)
-        if command[1] == "stop":
+        if command[1] == "daemon-reload":
+            reload_count += 1
+            if reload_count == 1:
+                assert (quiescence_root / doctor_cli._QUIESCENCE_MARKER).is_file()
+                assert all(
+                    (
+                        runtime_root
+                        / f"{unit}.d"
+                        / doctor_cli._QUIESCENCE_DROPIN
+                    ).is_file()
+                    for unit in doctor_cli._CODING_UNITS
+                )
+        elif command[1] == "stop":
             active.clear()
         elif command[1] == "start":
             active.update(command[2:])
@@ -637,6 +651,162 @@ def test_coding_quiescence_restores_active_units_after_stop_failure(
         "tgw-controller-verify-worker.service",
     ]
     assert active == {"tgw-controller-verify-worker.service"}
+    assert not quiescence_root.exists()
+    assert not any(runtime_root.iterdir())
+
+
+def test_coding_quiescence_recovers_exact_stale_interrupted_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_root = tmp_path / "systemd"
+    runtime_root.mkdir()
+    runtime_root.chmod(0o755)
+    quiescence_root = tmp_path / "tgw-doctor"
+    quiescence_root.mkdir(mode=0o755)
+    paths = doctor_cli.DoctorPaths(
+        systemd_runtime_root=runtime_root,
+        quiescence_root=quiescence_root,
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+    units = list(doctor_cli._CODING_UNITS)
+    state_path, marker, dropins, dropin_value = doctor_cli._quiescence_layout(
+        paths, units
+    )
+    state = {
+        "schema": doctor_cli._QUIESCENCE_SCHEMA,
+        "boot_id": doctor_cli._boot_id(),
+        "owner_pid": 999999999,
+        "owner_start_ticks": "1",
+        "units": units,
+        "initially_active": ["tgw-controller-verify-worker.service"],
+        "state_path": str(state_path),
+        "marker": str(marker),
+        "dropins": {unit: str(dropins[unit]) for unit in units},
+    }
+    doctor_cli._create_quiescence_file(
+        state_path,
+        doctor_cli._canonical(state) + b"\n",
+        mode=0o400,
+        uid=os.getuid(),
+        gid=os.getgid(),
+    )
+    doctor_cli._create_quiescence_file(
+        marker,
+        b"tgw doctor unix-git-access active\n",
+        mode=0o400,
+        uid=os.getuid(),
+        gid=os.getgid(),
+    )
+    for dropin in dropins.values():
+        dropin.parent.mkdir(mode=0o755)
+        doctor_cli._create_quiescence_file(
+            dropin,
+            dropin_value,
+            mode=0o444,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+
+    active: set[str] = set()
+
+    def run(command, **_kwargs):
+        if command[1] == "stop":
+            active.clear()
+        elif command[1] == "start":
+            active.update(command[2:])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def unit_state(unit):
+        dropin = dropins[unit]
+        return {
+            "LoadState": "loaded",
+            "ActiveState": "active" if unit in active else "inactive",
+            "DropInPaths": str(dropin) if dropin.exists() else "",
+        }
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
+
+    with doctor_cli._coding_quiescence(paths) as evidence:
+        assert evidence["recovered_stale_quiescence"]["recovered"] is True
+        assert not active
+
+    assert active == {"tgw-controller-verify-worker.service"}
+    assert not quiescence_root.exists()
+    assert not any(runtime_root.iterdir())
+
+
+def test_coding_quiescence_reload_failure_restores_and_is_recoverable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_root = tmp_path / "systemd"
+    runtime_root.mkdir()
+    runtime_root.chmod(0o755)
+    quiescence_root = tmp_path / "tgw-doctor"
+    paths = doctor_cli.DoctorPaths(
+        systemd_runtime_root=runtime_root,
+        quiescence_root=quiescence_root,
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+    active = {"tgw-codex-implement-worker.service"}
+    reload_count = 0
+    fail_release_reload = True
+
+    def run(command, **_kwargs):
+        nonlocal reload_count
+        if command[1] == "daemon-reload":
+            reload_count += 1
+            if fail_release_reload and reload_count == 2:
+                return subprocess.CompletedProcess(command, 1, "", "reload failed")
+        elif command[1] == "stop":
+            active.clear()
+        elif command[1] == "start":
+            active.update(command[2:])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def unit_state(unit):
+        dropin = (
+            runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN
+        )
+        return {
+            "LoadState": "loaded",
+            "ActiveState": "active" if unit in active else "inactive",
+            "DropInPaths": str(dropin) if dropin.exists() else "",
+        }
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
+
+    with pytest.raises(doctor_cli.DoctorError, match="reload failed"):
+        with doctor_cli._coding_quiescence(paths):
+            assert not active
+
+    state_path = quiescence_root / doctor_cli._QUIESCENCE_STATE
+    marker = quiescence_root / doctor_cli._QUIESCENCE_MARKER
+    assert active == {"tgw-codex-implement-worker.service"}
+    assert state_path.is_file()
+    assert not marker.exists()
+    assert not any(runtime_root.rglob(doctor_cli._QUIESCENCE_DROPIN))
+
+    state = json.loads(state_path.read_bytes())
+    state["owner_pid"] = 999999999
+    state["owner_start_ticks"] = "1"
+    doctor_cli._atomic_bytes(
+        state_path,
+        doctor_cli._canonical(state) + b"\n",
+        mode=0o400,
+        uid=os.getuid(),
+        gid=os.getgid(),
+    )
+    fail_release_reload = False
+
+    with doctor_cli._coding_quiescence(paths) as evidence:
+        assert evidence["recovered_stale_quiescence"]["recovered"] is True
+        assert not active
+
+    assert active == {"tgw-codex-implement-worker.service"}
     assert not quiescence_root.exists()
     assert not any(runtime_root.iterdir())
 

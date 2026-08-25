@@ -2275,6 +2275,8 @@ def _verify_bound_directory(path: Path, descriptor: int) -> None:
 
 _QUIESCENCE_DROPIN = "90-tgw-doctor-unix-git-access.conf"
 _QUIESCENCE_MARKER = "unix-git-access.active"
+_QUIESCENCE_STATE = "unix-git-access.state.json"
+_QUIESCENCE_SCHEMA = "tgw-doctor-quiescence/v1"
 
 
 def _secure_runtime_directory(path: Path, *, uid: int, gid: int) -> bool:
@@ -2362,6 +2364,447 @@ def _quiescence_file_exact(
     )
 
 
+def _fsync_parent(path: Path) -> None:
+    descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _unlink_quiescence_file(
+    path: Path, value: bytes, *, mode: int, uid: int, gid: int
+) -> None:
+    if not _quiescence_file_exact(path, value, mode=mode, uid=uid, gid=gid):
+        raise DoctorError(f"quiescence guard changed; refusing removal: {path}")
+    path.unlink()
+    _fsync_parent(path)
+
+
+def _process_start_ticks(pid: int) -> str | None:
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    _prefix, separator, tail = raw.rpartition(") ")
+    fields = tail.split() if separator else []
+    return fields[19] if len(fields) > 19 else None
+
+
+def _boot_id() -> str:
+    try:
+        value = Path("/proc/sys/kernel/random/boot_id").read_text(
+            encoding="utf-8"
+        ).strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise DoctorError(f"cannot read the local boot identity: {exc}") from exc
+    if not value or "\n" in value:
+        raise DoctorError("local boot identity is malformed")
+    return value
+
+
+def _quiescence_layout(
+    paths: DoctorPaths, units: Sequence[str]
+) -> tuple[Path, Path, dict[str, Path], bytes]:
+    state_path = paths.quiescence_root / _QUIESCENCE_STATE
+    marker = paths.quiescence_root / _QUIESCENCE_MARKER
+    dropins = {
+        unit: paths.systemd_runtime_root / f"{unit}.d" / _QUIESCENCE_DROPIN
+        for unit in units
+    }
+    dropin_value = f"[Unit]\nConditionPathExists=!{marker}\n".encode()
+    return state_path, marker, dropins, dropin_value
+
+
+def _new_quiescence_state(
+    units: Sequence[str],
+    initially_active: Sequence[str],
+    state_path: Path,
+    marker: Path,
+    dropins: Mapping[str, Path],
+) -> tuple[dict[str, Any], bytes]:
+    pid = os.getpid()
+    start_ticks = _process_start_ticks(pid)
+    if start_ticks is None:
+        raise DoctorError("cannot bind the local coding quiescence owner process")
+    value = {
+        "schema": _QUIESCENCE_SCHEMA,
+        "boot_id": _boot_id(),
+        "owner_pid": pid,
+        "owner_start_ticks": start_ticks,
+        "units": list(units),
+        "initially_active": list(initially_active),
+        "state_path": str(state_path),
+        "marker": str(marker),
+        "dropins": {unit: str(dropins[unit]) for unit in units},
+    }
+    return value, _canonical(value) + b"\n"
+
+
+def _read_quiescence_state(
+    state_path: Path,
+    *,
+    units: Sequence[str],
+    marker: Path,
+    dropins: Mapping[str, Path],
+    uid: int,
+    gid: int,
+) -> tuple[dict[str, Any], bytes]:
+    root = state_path.parent
+    root_state = root.stat(follow_symlinks=False)
+    if (
+        root.is_symlink()
+        or not stat.S_ISDIR(root_state.st_mode)
+        or root_state.st_uid != uid
+        or root_state.st_gid != gid
+        or root_state.st_mode & 0o022
+    ):
+        raise DoctorError("pre-existing coding quiescence directory is unsafe")
+    if (
+        not os.path.lexists(state_path)
+        or state_path.is_symlink()
+        or not state_path.is_file()
+    ):
+        raise DoctorError("pre-existing coding quiescence has no trusted state file")
+    before = state_path.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != uid
+        or before.st_gid != gid
+        or stat.S_IMODE(before.st_mode) != 0o400
+        or before.st_nlink != 1
+    ):
+        raise DoctorError("pre-existing coding quiescence state metadata is unsafe")
+    raw = state_path.read_bytes()
+    after = state_path.stat(follow_symlinks=False)
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise DoctorError("pre-existing coding quiescence state changed while reading")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DoctorError("pre-existing coding quiescence state is malformed") from exc
+    expected_dropins = {unit: str(dropins[unit]) for unit in units}
+    required = {
+        "schema": _QUIESCENCE_SCHEMA,
+        "units": list(units),
+        "state_path": str(state_path),
+        "marker": str(marker),
+        "dropins": expected_dropins,
+    }
+    if not isinstance(value, dict) or any(value.get(key) != item for key, item in required.items()):
+        raise DoctorError("pre-existing coding quiescence state has the wrong binding")
+    active = value.get("initially_active")
+    pid = value.get("owner_pid")
+    start_ticks = value.get("owner_start_ticks")
+    boot_id = value.get("boot_id")
+    if (
+        not isinstance(active, list)
+        or any(not isinstance(unit, str) for unit in active)
+        or len(active) != len(set(active))
+        or any(unit not in _ACTIVE_CODING_UNITS for unit in active)
+        or not isinstance(pid, int)
+        or pid <= 0
+        or not isinstance(start_ticks, str)
+        or not start_ticks.isdigit()
+        or not isinstance(boot_id, str)
+        or not boot_id
+    ):
+        raise DoctorError("pre-existing coding quiescence state fields are unsafe")
+    if raw != _canonical(value) + b"\n":
+        raise DoctorError("pre-existing coding quiescence state is not canonical")
+    return value, raw
+
+
+def _quiescence_owner_active(state: Mapping[str, Any]) -> bool:
+    return (
+        state.get("boot_id") == _boot_id()
+        and _process_start_ticks(int(state["owner_pid"]))
+        == state.get("owner_start_ticks")
+    )
+
+
+def _validate_systemd_runtime(paths: DoctorPaths, *, uid: int, gid: int) -> None:
+    state = paths.systemd_runtime_root.stat(follow_symlinks=False)
+    if (
+        paths.systemd_runtime_root.is_symlink()
+        or not stat.S_ISDIR(state.st_mode)
+        or state.st_uid != uid
+        or state.st_gid != gid
+        or state.st_mode & 0o022
+    ):
+        raise DoctorError(
+            f"unsafe systemd runtime directory: {paths.systemd_runtime_root}"
+        )
+
+
+def _activate_quiescence(
+    paths: DoctorPaths,
+    *,
+    units: Sequence[str],
+    marker: Path,
+    dropins: Mapping[str, Path],
+    dropin_value: bytes,
+    uid: int,
+    gid: int,
+) -> None:
+    marker_value = b"tgw doctor unix-git-access active\n"
+    _validate_systemd_runtime(paths, uid=uid, gid=gid)
+    _secure_runtime_directory(paths.quiescence_root, uid=uid, gid=gid)
+    if os.path.lexists(marker):
+        if not _quiescence_file_exact(
+            marker, marker_value, mode=0o400, uid=uid, gid=gid
+        ):
+            raise DoctorError("pre-existing coding quiescence marker is unsafe")
+    else:
+        _create_quiescence_file(
+            marker, marker_value, mode=0o400, uid=uid, gid=gid
+        )
+    for dropin in dropins.values():
+        _secure_runtime_directory(dropin.parent, uid=uid, gid=gid)
+        if os.path.lexists(dropin):
+            if not _quiescence_file_exact(
+                dropin, dropin_value, mode=0o444, uid=uid, gid=gid
+            ):
+                raise DoctorError(
+                    f"pre-existing coding quiescence drop-in is unsafe: {dropin}"
+                )
+        else:
+            _create_quiescence_file(
+                dropin, dropin_value, mode=0o444, uid=uid, gid=gid
+            )
+    loaded = _run(["systemctl", "daemon-reload"], timeout=30)
+    if loaded.returncode:
+        raise DoctorError(
+            loaded.stderr.strip() or "cannot load local coding quiescence guards"
+        )
+    stopped = _run(["systemctl", "stop", *units], timeout=30)
+    if stopped.returncode:
+        raise DoctorError(stopped.stderr.strip() or "cannot stop local coding units")
+    unsettled = []
+    for unit, dropin in dropins.items():
+        state = _unit_state(unit)
+        loaded_dropins = state.get("DropInPaths", "").split()
+        if (
+            state.get("ActiveState") != "inactive"
+            or str(dropin) not in loaded_dropins
+            or not _quiescence_file_exact(
+                dropin, dropin_value, mode=0o444, uid=uid, gid=gid
+            )
+        ):
+            unsettled.append(unit)
+    if not _quiescence_file_exact(
+        marker, marker_value, mode=0o400, uid=uid, gid=gid
+    ):
+        unsettled.append("quiescence-marker")
+    if unsettled:
+        raise DoctorError(
+            "local coding units did not reach guarded/inactive state: "
+            + ", ".join(unsettled)
+        )
+
+
+def _release_quiescence(
+    paths: DoctorPaths,
+    *,
+    units: Sequence[str],
+    initially_active: Sequence[str],
+    state_path: Path,
+    state_raw: bytes,
+    marker: Path,
+    dropins: Mapping[str, Path],
+    dropin_value: bytes,
+    uid: int,
+    gid: int,
+) -> dict[str, Any]:
+    errors: list[str] = []
+    marker_value = b"tgw doctor unix-git-access active\n"
+    if os.path.lexists(marker):
+        try:
+            _unlink_quiescence_file(
+                marker, marker_value, mode=0o400, uid=uid, gid=gid
+            )
+        except (OSError, DoctorError) as exc:
+            errors.append(str(exc))
+    for dropin in reversed(list(dropins.values())):
+        if not os.path.lexists(dropin):
+            continue
+        try:
+            _unlink_quiescence_file(
+                dropin, dropin_value, mode=0o444, uid=uid, gid=gid
+            )
+        except (OSError, DoctorError) as exc:
+            errors.append(str(exc))
+    reloaded = _run(["systemctl", "daemon-reload"], timeout=30)
+    if reloaded.returncode:
+        errors.append(
+            reloaded.stderr.strip()
+            or "cannot reload systemd after local coding quiescence"
+        )
+
+    marker_absent = not os.path.lexists(marker)
+    if marker_absent:
+        undesired = [
+            unit
+            for unit in units
+            if unit not in initially_active
+            and _unit_state(unit).get("ActiveState") == "active"
+        ]
+        if undesired:
+            stopped = _run(["systemctl", "stop", *undesired], timeout=30)
+            if stopped.returncode:
+                errors.append(
+                    stopped.stderr.strip()
+                    or "cannot restore initially inactive local coding units"
+                )
+        if initially_active:
+            started = _run(["systemctl", "start", *initially_active], timeout=30)
+            if started.returncode:
+                errors.append(
+                    started.stderr.strip()
+                    or "cannot restore initially active local coding units"
+                )
+    else:
+        errors.append("quiescence marker remains; refusing to start local coding units")
+
+    wrong = [
+        unit
+        for unit in units
+        if (_unit_state(unit).get("ActiveState") == "active")
+        != (unit in initially_active)
+    ]
+    if wrong:
+        errors.append(
+            "local coding units did not return to their initial state: "
+            + ", ".join(wrong)
+        )
+
+    remaining_guards = [
+        str(path)
+        for path in (marker, *dropins.values())
+        if os.path.lexists(path)
+    ]
+    if remaining_guards:
+        errors.append("quiescence guards remain: " + ", ".join(remaining_guards))
+
+    if not errors:
+        try:
+            _unlink_quiescence_file(
+                state_path, state_raw, mode=0o400, uid=uid, gid=gid
+            )
+        except (OSError, DoctorError) as exc:
+            errors.append(str(exc))
+    if not errors:
+        for directory in [
+            *(dropin.parent for dropin in reversed(list(dropins.values()))),
+            paths.quiescence_root,
+        ]:
+            try:
+                directory.rmdir()
+                _fsync_parent(directory)
+            except OSError as exc:
+                if exc.errno not in (errno.ENOENT, errno.ENOTEMPTY):
+                    errors.append(f"cannot remove quiescence directory {directory}: {exc}")
+    result = {
+        "initially_active": list(initially_active),
+        "restored": not wrong and marker_absent,
+        "guards_remaining": remaining_guards,
+        "state_retained": os.path.lexists(state_path),
+    }
+    if errors:
+        raise DoctorError("; ".join(errors))
+    return result
+
+
+def _recover_stale_quiescence(
+    paths: DoctorPaths, *, units: Sequence[str], uid: int, gid: int
+) -> dict[str, Any] | None:
+    state_path, marker, dropins, dropin_value = _quiescence_layout(paths, units)
+    existing = [
+        str(path)
+        for path in (state_path, marker, *dropins.values())
+        if os.path.lexists(path)
+    ]
+    if not existing:
+        return None
+    state, state_raw = _read_quiescence_state(
+        state_path,
+        units=units,
+        marker=marker,
+        dropins=dropins,
+        uid=uid,
+        gid=gid,
+    )
+    if _quiescence_owner_active(state):
+        raise DoctorError("another local coding quiescence owner is still active")
+    for path, value, mode in (
+        (marker, b"tgw doctor unix-git-access active\n", 0o400),
+        *((dropin, dropin_value, 0o444) for dropin in dropins.values()),
+    ):
+        if os.path.lexists(path) and not _quiescence_file_exact(
+            path, value, mode=mode, uid=uid, gid=gid
+        ):
+            raise DoctorError(f"stale coding quiescence guard is unsafe: {path}")
+    initially_active = list(state["initially_active"])
+    try:
+        _activate_quiescence(
+            paths,
+            units=units,
+            marker=marker,
+            dropins=dropins,
+            dropin_value=dropin_value,
+            uid=uid,
+            gid=gid,
+        )
+    except Exception as activation_error:
+        try:
+            _release_quiescence(
+                paths,
+                units=units,
+                initially_active=initially_active,
+                state_path=state_path,
+                state_raw=state_raw,
+                marker=marker,
+                dropins=dropins,
+                dropin_value=dropin_value,
+                uid=uid,
+                gid=gid,
+            )
+        except DoctorError as release_error:
+            raise DoctorError(
+                f"stale quiescence activation failed: {activation_error}; "
+                f"release failed: {release_error}"
+            ) from release_error
+        raise
+    release = _release_quiescence(
+        paths,
+        units=units,
+        initially_active=initially_active,
+        state_path=state_path,
+        state_raw=state_raw,
+        marker=marker,
+        dropins=dropins,
+        dropin_value=dropin_value,
+        uid=uid,
+        gid=gid,
+    )
+    return {
+        "recovered": True,
+        "stale_owner_pid": state["owner_pid"],
+        "stale_boot_id": state["boot_id"],
+        "release": release,
+    }
+
+
 @contextmanager
 def _coding_quiescence(paths: DoctorPaths):
     """Block starts with exact runtime conditions while shared Git data changes.
@@ -2374,6 +2817,9 @@ def _coding_quiescence(paths: DoctorPaths):
     active set.
     """
     units = list(_CODING_UNITS)
+    uid = paths.systemd_unit_uid
+    gid = paths.systemd_unit_gid
+    recovered = _recover_stale_quiescence(paths, units=units, uid=uid, gid=gid)
     initial_states = {unit: _unit_state(unit) for unit in units}
     preexisting_masks = [
         unit
@@ -2385,136 +2831,59 @@ def _coding_quiescence(paths: DoctorPaths):
             "refusing to alter pre-existing coding unit masks: "
             + ", ".join(preexisting_masks)
         )
+    transient_active = [
+        unit
+        for unit, state in initial_states.items()
+        if unit not in _ACTIVE_CODING_UNITS and state.get("ActiveState") == "active"
+    ]
+    if transient_active:
+        raise DoctorError(
+            "local coding one-shot is active; retry after it exits: "
+            + ", ".join(transient_active)
+        )
     initially_active = [
         unit
         for unit, state in initial_states.items()
-        if state.get("ActiveState") == "active"
+        if unit in _ACTIVE_CODING_UNITS and state.get("ActiveState") == "active"
     ]
-    uid = paths.systemd_unit_uid
-    gid = paths.systemd_unit_gid
-    marker = paths.quiescence_root / _QUIESCENCE_MARKER
-    marker_value = b"tgw doctor unix-git-access active\n"
-    dropin_value = f"[Unit]\nConditionPathExists=!{marker}\n".encode()
-    dropins = {
-        unit: paths.systemd_runtime_root / f"{unit}.d" / _QUIESCENCE_DROPIN
-        for unit in units
+    state_path, marker, dropins, dropin_value = _quiescence_layout(paths, units)
+    _secure_runtime_directory(paths.quiescence_root, uid=uid, gid=gid)
+    state, state_raw = _new_quiescence_state(
+        units, initially_active, state_path, marker, dropins
+    )
+    _create_quiescence_file(
+        state_path, state_raw, mode=0o400, uid=uid, gid=gid
+    )
+    evidence = {
+        "recovered_stale_quiescence": recovered,
+        "owner_pid": state["owner_pid"],
+        "boot_id": state["boot_id"],
+        "initially_active": list(initially_active),
     }
-    preexisting_guards = [
-        str(path)
-        for path in (marker, *dropins.values())
-        if os.path.lexists(path)
-    ]
-    if preexisting_guards:
-        raise DoctorError(
-            "refusing to alter pre-existing coding quiescence guards: "
-            + ", ".join(preexisting_guards)
-        )
-
-    created_directories: list[Path] = []
-    created_files: list[tuple[Path, bytes, int]] = []
-
-    def create_file(path: Path, value: bytes, mode: int) -> None:
-        _create_quiescence_file(path, value, mode=mode, uid=uid, gid=gid)
-        created_files.append((path, value, mode))
-
-    def restore_initial_state() -> None:
-        errors: list[str] = []
-        for path, value, mode in reversed(created_files):
-            if not _quiescence_file_exact(
-                path, value, mode=mode, uid=uid, gid=gid
-            ):
-                errors.append(f"quiescence guard changed; refusing removal: {path}")
-                continue
-            try:
-                path.unlink()
-            except OSError as exc:
-                errors.append(f"cannot remove quiescence guard {path}: {exc}")
-        for directory in reversed(created_directories):
-            try:
-                directory.rmdir()
-            except OSError as exc:
-                errors.append(f"cannot remove quiescence directory {directory}: {exc}")
-        reloaded = _run(["systemctl", "daemon-reload"], timeout=30)
-        if reloaded.returncode:
-            errors.append(
-                reloaded.stderr.strip()
-                or "cannot reload systemd after local coding quiescence"
-            )
-        if not errors and initially_active:
-            started = _run(["systemctl", "start", *initially_active], timeout=30)
-            if started.returncode:
-                errors.append(
-                    started.stderr.strip()
-                    or "cannot restore initially active local coding units"
-                )
-        if not errors:
-            wrong = [
-                unit
-                for unit in units
-                if (_unit_state(unit).get("ActiveState") == "active")
-                != (unit in initially_active)
-            ]
-            if wrong:
-                errors.append(
-                    "local coding units did not return to their initial state: "
-                    + ", ".join(wrong)
-                )
-        if errors:
-            raise DoctorError("; ".join(errors))
-
     try:
-        runtime_state = paths.systemd_runtime_root.stat(follow_symlinks=False)
-        if (
-            paths.systemd_runtime_root.is_symlink()
-            or not stat.S_ISDIR(runtime_state.st_mode)
-            or runtime_state.st_uid != uid
-            or runtime_state.st_gid != gid
-            or runtime_state.st_mode & 0o022
-        ):
-            raise DoctorError(
-                f"unsafe systemd runtime directory: {paths.systemd_runtime_root}"
-            )
-        for path in dropins.values():
-            if _secure_runtime_directory(path.parent, uid=uid, gid=gid):
-                created_directories.append(path.parent)
-            create_file(path, dropin_value, 0o444)
-        loaded = _run(["systemctl", "daemon-reload"], timeout=30)
-        if loaded.returncode:
-            raise DoctorError(
-                loaded.stderr.strip() or "cannot load local coding quiescence guards"
-            )
-        if _secure_runtime_directory(paths.quiescence_root, uid=uid, gid=gid):
-            created_directories.append(paths.quiescence_root)
-        create_file(marker, marker_value, 0o400)
-        stopped = _run(["systemctl", "stop", *units], timeout=30)
-        if stopped.returncode:
-            raise DoctorError(
-                stopped.stderr.strip() or "cannot stop local coding units"
-            )
-        unsettled = []
-        for unit, dropin in dropins.items():
-            state = _unit_state(unit)
-            loaded_dropins = state.get("DropInPaths", "").split()
-            if (
-                state.get("ActiveState") != "inactive"
-                or str(dropin) not in loaded_dropins
-                or not _quiescence_file_exact(
-                    dropin, dropin_value, mode=0o444, uid=uid, gid=gid
-                )
-            ):
-                unsettled.append(unit)
-        if not _quiescence_file_exact(
-            marker, marker_value, mode=0o400, uid=uid, gid=gid
-        ):
-            unsettled.append("quiescence-marker")
-        if unsettled:
-            raise DoctorError(
-                "local coding units did not reach guarded/inactive state: "
-                + ", ".join(unsettled)
-            )
-        yield
+        _activate_quiescence(
+            paths,
+            units=units,
+            marker=marker,
+            dropins=dropins,
+            dropin_value=dropin_value,
+            uid=uid,
+            gid=gid,
+        )
+        yield evidence
     finally:
-        restore_initial_state()
+        evidence["release"] = _release_quiescence(
+            paths,
+            units=units,
+            initially_active=initially_active,
+            state_path=state_path,
+            state_raw=state_raw,
+            marker=marker,
+            dropins=dropins,
+            dropin_value=dropin_value,
+            uid=uid,
+            gid=gid,
+        )
 
 
 def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
@@ -2573,7 +2942,7 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
 
         # Runtime condition guards are the shared worker lock. Recheck every visible
         # binding after acquisition, then mutate only through retained descriptors.
-        with _coding_quiescence(paths):
+        with _coding_quiescence(paths) as quiescence:
             for path, descriptor in bound:
                 _verify_bound_directory(path, descriptor)
             _set_shared_fd(worktree_root_fd, group_gid, directory=True)
@@ -2596,13 +2965,19 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
     after = check_unix_access(paths)
     if after["state"] != "PASS":
         raise DoctorError("ordinary Unix Git access remains incomplete after repair")
-    receipt = _receipt(paths, "unix-git-access", before, after)
+    receipt = _receipt(
+        paths,
+        "unix-git-access",
+        before,
+        {"access": after, "quiescence": quiescence},
+    )
     return {
         "ok": True,
         "operation": "unix-git-access",
         "changed": before != after,
         "preflight": preflight,
         "git_tree_changes": tree_changes,
+        "quiescence": quiescence,
         "outside_configured_root_untouched": outside_untouched,
         "receipt": receipt,
     }
