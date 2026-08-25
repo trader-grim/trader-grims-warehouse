@@ -244,6 +244,101 @@ def test_runner_refuses_ignored_mutable_files(tmp_path, monkeypatch):
         )
 
 
+def test_runner_removes_only_generated_caches_before_and_after_model(
+    tmp_path, monkeypatch
+):
+    repo = _repo(tmp_path)
+    (repo / ".gitignore").write_text(
+        "__pycache__/\n.pytest_cache/\n.ruff_cache/\nprivate-cache/\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "ignore generated caches"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    (repo / ".ruff_cache").mkdir()
+    (repo / ".ruff_cache/state").write_text("generated\n", encoding="utf-8")
+    pycache = repo / "src/package/__pycache__"
+    pycache.mkdir(parents=True)
+    (pycache / "module.cpython-313.pyc").write_bytes(b"generated")
+    nested = repo / "tests/__pycache__"
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+
+    def edit(path: Path) -> None:
+        (path / "feature.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (path / ".pytest_cache").mkdir()
+        (path / ".pytest_cache/state").write_text("generated\n", encoding="utf-8")
+        nested.mkdir(parents=True)
+        (nested / "test_feature.cpython-313.pyc").write_bytes(b"generated")
+
+    result = codex_implement.run(
+        _job(),
+        repo,
+        invoke=_invoke(
+            {
+                "status": "implemented",
+                "summary": "added feature",
+                "tests": ["focused tests passed"],
+            },
+            edit=edit,
+        ),
+    )
+
+    assert result["outcome"] == "satisfied"
+    cleanup = next(
+        artifact
+        for artifact in result["artifacts"]
+        if artifact["kind"] == "transient_cache_cleanup"
+    )
+    assert cleanup["paths"] == [
+        ".pytest_cache",
+        ".ruff_cache",
+        "src/package/__pycache__",
+        "tests/__pycache__",
+    ]
+    assert not (repo / ".ruff_cache").exists()
+    assert not (repo / ".pytest_cache").exists()
+    assert not pycache.exists()
+    assert not nested.exists()
+
+
+def test_runner_still_refuses_noncache_ignored_work_with_generated_caches(
+    tmp_path, monkeypatch
+):
+    repo = _repo(tmp_path)
+    (repo / ".gitignore").write_text(
+        ".ruff_cache/\nprivate-cache/\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "ignore cache classes"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    (repo / ".ruff_cache").mkdir()
+    (repo / ".ruff_cache/state").write_text("generated\n", encoding="utf-8")
+    (repo / "private-cache").mkdir()
+    (repo / "private-cache/unique").write_text("preserve\n", encoding="utf-8")
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")
+
+    with pytest.raises(codex_implement.HardFailure, match="source-clean worktree"):
+        codex_implement.run(
+            _job(),
+            repo,
+            invoke=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("called")
+            ),
+        )
+
+    assert not (repo / ".ruff_cache").exists()
+    assert (repo / "private-cache/unique").read_text(encoding="utf-8") == "preserve\n"
+
+
 def test_runner_refuses_a_concurrent_worktree_lease(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")

@@ -14,7 +14,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from tgw.development.worktree_lease import exclusive_worktree_lease as _exclusive_worktree_lease
@@ -149,6 +149,73 @@ _RECEIPT_FILES = frozenset(
         "operator-admit-pending.json",
     }
 )
+
+_TRANSIENT_CACHE_ROOTS = frozenset({".pytest_cache", ".ruff_cache"})
+
+
+def _ignored_paths(cwd: Path) -> tuple[str, ...]:
+    """Return ignored untracked paths without lossy newline parsing."""
+    completed = subprocess.run(
+        [
+            "git", "ls-files", "-z", "--others", "--ignored",
+            "--exclude-standard",
+        ],
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode:
+        detail = completed.stderr.decode("utf-8", errors="replace")[-300:]
+        raise HardFailure(
+            f"Codex implementation ignored-file probe failed: {detail}"
+        )
+    return tuple(
+        item.decode("utf-8", errors="surrogateescape")
+        for item in completed.stdout.split(b"\0")
+        if item
+    )
+
+
+def _transient_cache_roots(paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Select exact generated-cache roots while retaining every other ignore."""
+    roots: set[PurePosixPath] = set()
+    for value in paths:
+        relative = PurePosixPath(value)
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            raise HardFailure("Codex implementation received an unsafe ignored path")
+        if relative.parts[0] in _TRANSIENT_CACHE_ROOTS:
+            roots.add(PurePosixPath(relative.parts[0]))
+            continue
+        try:
+            cache_index = relative.parts.index("__pycache__")
+        except ValueError:
+            continue
+        roots.add(PurePosixPath(*relative.parts[: cache_index + 1]))
+    return tuple(str(root) for root in sorted(roots, key=str))
+
+
+def _purge_transient_caches(cwd: Path) -> tuple[str, ...]:
+    """Remove only known generated caches from the leased coding worktree."""
+    roots = _transient_cache_roots(_ignored_paths(cwd))
+    for root in roots:
+        completed = subprocess.run(
+            ["git", "clean", "-fdX", "--", f":(literal){root}"],
+            cwd=cwd,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if completed.returncode:
+            raise HardFailure(
+                "Codex implementation could not remove generated worktree cache: "
+                f"{completed.stderr[-300:]}"
+            )
+    remaining = _transient_cache_roots(_ignored_paths(cwd))
+    if remaining:
+        raise HardFailure(
+            "Codex implementation could not clean generated worktree caches"
+        )
+    return roots
 
 
 def _source_status(cwd: Path) -> tuple[str, ...]:
@@ -306,6 +373,7 @@ def _recover_existing_candidate(
 def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
     task = _validated_task(job)
     before_head = _git(cwd, "rev-parse", "HEAD")
+    cleaned_caches = set(_purge_transient_caches(cwd))
     if _source_status(cwd):
         recovered = _recover_existing_candidate(
             job, cwd, todo_id=task["todo_id"]
@@ -353,6 +421,7 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
                 "artifacts": [{"kind": "codex_failure", "detail": f"invalid final report: {exc}"}],
             }
 
+    cleaned_caches.update(_purge_transient_caches(cwd))
     after_head = _git(cwd, "rev-parse", "HEAD")
     if after_head != before_head:
         return {
@@ -379,6 +448,14 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
         {"kind": "tests_reported", "tests": report["tests"]},
         {"kind": "git_diff", "detail": diff_stat},
     ]
+    if cleaned_caches:
+        artifacts.append(
+            {
+                "kind": "transient_cache_cleanup",
+                "paths": sorted(cleaned_caches),
+                "detail": "removed generated caches without touching ignored work",
+            }
+        )
     if report["status"] != "implemented" or not changed:
         return {"outcome": "partial", "established_conditions": [], "artifacts": artifacts}
     candidate, tree, recovery = _close_candidate(
