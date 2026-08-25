@@ -35,6 +35,7 @@ from typing import Any, Dict, Generator, List, Optional
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.sql
 
 log = logging.getLogger(__name__)
 
@@ -211,6 +212,87 @@ def todo_add(
     if warning:
         result['warning'] = warning
     return result
+
+
+def todo_import_projection(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Idempotently import one exact Todo projection into a local store.
+
+    This is used by independent development fixtures when an operator selects
+    a canonical Todo that is present in the standalone Plan Taskboard but not
+    yet present in the local execution database.  Conflicting rows are never
+    overwritten, and the SERIAL sequence is advanced without moving backwards.
+    """
+    required = {"id", "agent", "priority", "body", "source"}
+    if not required.issubset(item) or not isinstance(item["id"], int) or item["id"] <= 0:
+        raise ValueError("Todo projection is incomplete")
+    if not isinstance(item["source"], str) or not item["source"].startswith("standalone-plan-taskboard@"):
+        raise ValueError("Todo projection source is invalid")
+    expected = {
+        "id": item["id"],
+        "agent": item["agent"],
+        "priority": item["priority"],
+        "body": item["body"],
+        "source": item["source"],
+        "pp_ref": item.get("pp_ref"),
+        "depends_on": item.get("depends_on") or [],
+        "plan_anchor": item.get("plan_anchor"),
+        "reasoning": item.get("reasoning", "normal"),
+    }
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, agent, priority, body, source, pp_ref, depends_on, "
+                "plan_anchor, reasoning FROM todo_items WHERE id = %s FOR UPDATE",
+                (item["id"],),
+            )
+            row = cur.fetchone()
+            created = row is None
+            if row is not None:
+                observed = dict(row)
+                observed["depends_on"] = observed.get("depends_on") or []
+                observed_source = observed.pop("source", None)
+                expected_without_source = dict(expected)
+                expected_without_source.pop("source")
+                if (
+                    not isinstance(observed_source, str)
+                    or not observed_source.startswith("standalone-plan-taskboard@")
+                    or observed != expected_without_source
+                ):
+                    raise ValueError(f"local Todo {item['id']} conflicts with standalone Plan projection")
+                if observed_source != expected["source"]:
+                    cur.execute(
+                        "UPDATE todo_items SET source = %s WHERE id = %s",
+                        (expected["source"], item["id"]),
+                    )
+            else:
+                cur.execute(
+                    "INSERT INTO todo_items "
+                    "(id, agent, priority, body, source, pp_ref, depends_on, plan_anchor, reasoning) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        expected["id"], expected["agent"], expected["priority"],
+                        expected["body"], expected["source"], expected["pp_ref"],
+                        expected["depends_on"], expected["plan_anchor"], expected["reasoning"],
+                    ),
+                )
+                cur.execute(
+                    "SELECT pg_get_serial_sequence('todo_items', 'id') AS sequence_name"
+                )
+                sequence = cur.fetchone()["sequence_name"]
+                if not isinstance(sequence, str) or not sequence:
+                    raise ValueError("Todo projection sequence is unavailable")
+                sequence_parts = sequence.split(".", 1)
+                identifier = (
+                    psycopg2.sql.Identifier(*sequence_parts)
+                    if len(sequence_parts) == 2
+                    else psycopg2.sql.Identifier(sequence)
+                )
+                cur.execute(
+                    psycopg2.sql.SQL("SELECT last_value AS sequence_value FROM {}").format(identifier)
+                )
+                last_value = int(cur.fetchone()["sequence_value"])
+                cur.execute("SELECT setval(%s, %s, true)", (sequence, max(last_value, item["id"])))
+    return {"ok": True, "created": created, **expected}
 
 
 def todo_done(item_id: int) -> Dict[str, Any]:

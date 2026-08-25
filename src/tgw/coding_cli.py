@@ -27,6 +27,8 @@ from tgw.development.local_workflow import (
     require_coder_account,
     status_command,
 )
+from tgw.development.plan_todo_source import PlanTodoSourceError
+from tgw.development.plan_todo_source import resolve as resolve_plan_todo
 from tgw.development.treatments import CODEX_IMPLEMENT, CONTROLLER_VERIFY
 from tgw.queue import state_machine
 
@@ -35,6 +37,7 @@ DEFAULT_SOLUTION = (
     / "agent-services/plan-runtime/GOVERNED-EXECUTION-PLATFORM-058e2f98.json"
 )
 DEFAULT_TREATMENT = "establish:workflow.condition-derived-convergence@1"
+DEFAULT_PLAN_REPOSITORY = Path("/opt/TGW/library/plans")
 _LOCAL_QUEUES = ("codex-implement", "controller-verify")
 
 
@@ -101,8 +104,20 @@ def start(
     todo_id = _todo_id(todo_id)
     config = _initialize(config_path)
     item = todo.todo_get(todo_id)
+    projection = None
     if item is None:
-        raise CodingCLIError(f"Todo {todo_id} does not exist")
+        solution = __import__(
+            "tgw.development.local_workflow", fromlist=["load_solution"]
+        ).load_solution(solution_path)
+        projection = resolve_plan_todo(
+            todo_id,
+            repository=config.get("plan_repository_root", DEFAULT_PLAN_REPOSITORY),
+            approved_commit=solution["plan_commit"],
+        )
+        todo.todo_import_projection(projection)
+        item = todo.todo_get(todo_id)
+        if item is None:
+            raise CodingCLIError(f"Todo {todo_id} projection was not materialized")
     if item.get("done_at") is not None:
         raise CodingCLIError(f"Todo {todo_id} is already complete")
 
@@ -140,6 +155,13 @@ def start(
         "source_commit": binding["binding"]["source_commit"],
         "plan_commit": binding["binding"]["plan_commit"],
         "solution_hash": binding["binding"]["solution_hash"],
+        "todo_projection": None if projection is None else {
+            "source": projection["source"],
+            "plan_repository": projection["plan_repository"],
+            "plan_evidence_commit": projection["plan_evidence_commit"],
+            "taskboard_path": projection["taskboard_path"],
+            "taskboard_blob": projection["taskboard_blob"],
+        },
         "foreman": dataclasses.asdict(result),
         "jobs": jobs,
         "session": {
@@ -229,7 +251,10 @@ def run(args: argparse.Namespace) -> int:
             raise CodingCLIError(f"unknown coding operation: {args.coding_op}")
         print(json.dumps(result, sort_keys=True, default=_json_default))
         return 0 if result.get("ok", True) else 1
-    except (CodingCLIError, LocalCodingWorkflowError, OSError, ValueError) as exc:
+    except (
+        CodingCLIError, LocalCodingWorkflowError, PlanTodoSourceError,
+        OSError, ValueError,
+    ) as exc:
         print(f"tgw coding: {exc}", file=__import__("sys").stderr)
         return 1
 

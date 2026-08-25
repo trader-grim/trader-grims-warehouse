@@ -1962,6 +1962,65 @@ def test_local_coding_start_binds_and_ticks_only_the_selected_todo(monkeypatch):
     assert observed["todo_ids"] == {1732}
 
 
+def test_local_coding_start_projects_missing_todo_from_standalone_plan(monkeypatch):
+    projected = {
+        "id": 1732,
+        "agent": "claude",
+        "priority": 3,
+        "body": "build the operator CLI",
+        "source": "standalone-plan-taskboard@" + "a" * 40,
+        "pp_ref": "PP-WORKFLOW-001",
+        "depends_on": [],
+        "plan_anchor": None,
+        "reasoning": "normal",
+        "plan_repository": "/opt/TGW/library/plans",
+        "plan_evidence_commit": "a" * 40,
+        "taskboard_path": "plan/TGW-Taskboard.md",
+        "taskboard_blob": "b" * 40,
+    }
+    observed = {}
+    rows = iter([None, projected])
+    monkeypatch.setattr(
+        coding_cli,
+        "_initialize",
+        lambda _path: {"coding": {}, "plan_repository_root": "/opt/TGW/library/plans"},
+    )
+    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda _todo_id: next(rows))
+    monkeypatch.setattr(
+        "tgw.development.local_workflow.load_solution",
+        lambda _path: {"plan_commit": "c" * 40},
+    )
+    monkeypatch.setattr(
+        coding_cli,
+        "resolve_plan_todo",
+        lambda todo_id, **kwargs: observed.update(todo_id=todo_id, **kwargs) or projected,
+    )
+    monkeypatch.setattr(
+        coding_cli.todo,
+        "todo_import_projection",
+        lambda item: observed.update(imported=item) or {"ok": True},
+    )
+    monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
+    monkeypatch.setattr(coding_cli, "bind_command", lambda _args: {
+        "binding": {
+            "worktree": "/opt/TGW/var/worktrees/todo-1732-plan-test",
+            "worktree_identity": {"branch": "coding/codex/todo-1732-plan-test"},
+            "source_commit": "d" * 40,
+            "plan_commit": "c" * 40,
+            "solution_hash": "sha256:" + "e" * 64,
+        }
+    })
+    monkeypatch.setattr(coding_cli, "tick", lambda *_args, **_kwargs: TickResult(dispatched=1))
+    monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: [])
+
+    result = coding_cli.start(1732, config_path=Path("/tmp/coding.json"))
+
+    assert observed["todo_id"] == 1732
+    assert observed["approved_commit"] == "c" * 40
+    assert observed["imported"] == projected
+    assert result["todo_projection"]["taskboard_blob"] == "b" * 40
+
+
 def test_execution_boundary_accepts_only_local_allowed_argv_runner(tmp_path):
     worker = CodingWorker(
         "claude-review",
