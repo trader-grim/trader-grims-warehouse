@@ -295,6 +295,22 @@ def test_context_repair_refuses_writable_context_runtime(
         doctor_cli.repair_context(paths)
 
 
+def test_context_repair_refuses_symlinked_context_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    configured_source = paths.context_runtime_source
+    real_source = configured_source.parent / "real-src"
+    configured_source.rename(real_source)
+    configured_source.symlink_to(real_source)
+    paths = replace(paths, context_runtime_source=configured_source)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+
+    with pytest.raises(doctor_cli.DoctorError, match="not trusted-owner immutable"):
+        doctor_cli.repair_context(paths)
+
+
 def test_context_repair_detects_snapshot_race_and_restores_both_records(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

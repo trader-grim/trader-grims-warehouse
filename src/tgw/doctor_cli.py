@@ -1321,7 +1321,12 @@ def _require_trusted_root_program(
 
 
 def _require_trusted_context_runtime(paths: DoctorPaths) -> Path:
-    source = paths.context_runtime_source.resolve(strict=True)
+    configured_source = paths.context_runtime_source
+    if configured_source.is_symlink():
+        raise DoctorError(
+            f"Context runtime path is not trusted-owner immutable: {configured_source}"
+        )
+    source = configured_source.resolve(strict=True)
     module = source / "tgw/current_context_snapshot.py"
     for path, expected_kind in (
         (source, "directory"),
