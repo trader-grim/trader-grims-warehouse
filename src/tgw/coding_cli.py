@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import fcntl
 import json
 from datetime import date, datetime
 from pathlib import Path
@@ -109,44 +110,70 @@ def start(
     if isinstance(todo_id, str) and todo_id == PP_REF:
         config = _initialize(config_path)
         actor = require_coder_account()
-        result = reconcile_pp_workflow(todo_rows=todo.todo_list(show_all=True))
+        coding = config["coding"]
+        repository = Path(coding["repository_root"])
+        commit = source_commit or __import__(
+            "tgw.development.local_workflow", fromlist=["_git"]
+        )._git(repository, "rev-parse", "HEAD")
+        tree = __import__("tgw.development.local_workflow", fromlist=["_git"])._git(
+            repository, "rev-parse", f"{commit}^{{tree}}")
+        result = reconcile_pp_workflow(
+            todo_rows=todo.todo_list(show_all=True), repository=repository,
+            source_root=repository, selected_commit=commit, selected_tree=tree,
+            runtime_mode="source-worktree",
+        )
         materialized = []
         if result["unmet_capabilities"]:
             solution = result["solution"]
             compiled = compile_solution_runtime(solution, current_plan_commit=solution["plan_commit"])
-            coding = config["coding"]
-            repository = Path(coding["repository_root"])
             worktree_root = Path(coding["worktree_root"])
-            commit = source_commit or __import__(
-                "tgw.development.local_workflow", fromlist=["_git"]
-            )._git(repository, "rev-parse", "HEAD")
             root = {"schema": "tgw-execution-root/v1", "kind": "pp", "pp_ref": PP_REF}
-            for unit in solution["work_units"]:
-                capability = unit["capability"]
-                materialized.append(bind_leaf(
+            lock_path = worktree_root / ".pp-workflow-001-materialize.lock"
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with lock_path.open("a") as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                for unit in solution["work_units"]:
+                    capability = unit["capability"]
+                    materialized.append(bind_leaf(
                     compiled, solution=solution, treatment_id=unit["id"],
                     source_commit=commit, worktree_identity=solution["closure_hash"],
                     agent=actor, body=f"{PP_REF}: establish genuinely unmet {capability}",
                     priority=50,
                     create_todo=lambda agent, body, priority, source, pp, anchor: todo.todo_add(
-                        agent, body, priority, source, pp_ref=pp, plan_anchor=anchor),
+                        agent, body, priority, source, pp_ref=pp, plan_anchor=anchor,
+                        suppress_plan_render=True),
                     list_todos=lambda: todo.todo_list(show_all=True),
                     allocate_worktree=lambda item, request, source: allocate_worktree(
                         repository, worktree_root, actor, item, request, source),
                     set_status_note=lambda item, note: todo.todo_set_status_note(
                         item, note, suppress_plan_render=True),
                     execution_root=root,
-                ))
-            tick(
+                    ))
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            created_ids = {item["todo_id"] for item in materialized if item["created"]}
+            foreman = tick(
                 ForemanConfig(
                     coding_config=dict(coding),
                     treatments=(CODEX_IMPLEMENT, CONTROLLER_VERIFY),
                     receipt_backed_conditions=frozenset({"tested", "linted"}),
                 ),
-                todo_ids={item["todo_id"] for item in materialized},
+                todo_ids=created_ids,
             )
+            result["dimensions"] = {"reconciliation_complete": False,
+                                    "operation_success": True,
+                                    "materialization_attempted": True}
+            result["effects"] = {
+                "todo_created": any(item["created"] for item in materialized),
+                "worktree_created": any(
+                    item.get("binding", {}).get("worktree_identity", {}).get("created") is True
+                    for item in materialized
+                ),
+                "job_created": getattr(foreman, "dispatched", 0) > 0,
+                "plan_publication": False,
+            }
         return {
-            "schema": "tgw-local-coding-start-pp/v1", "ok": result["ok"],
+            "schema": "tgw-local-coding-start-pp/v1", "ok": True,
+            "reconciliation_complete": result["ok"],
             "target": PP_REF, "actor": actor, "group": "tgw-coders",
             "reconciliation": result,
             "materialized": materialized,

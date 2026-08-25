@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -19,6 +20,7 @@ REJECTED_TREE = "66b788709ff94c52db91f29893987be923a87296"
 REVIEW_SHA256 = "sha256:812d21b875a2c1cc730c3d45b5555dc62bc91846f3707c1ca5a2cfeabb913ba8"
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "agent-services/catalogs/pp-workflow-001-v1.json"
+CATALOG_SHA256 = "sha256:2435f40a7721e5c776bac73de09c53a86d3e2b4a6da298539fd0f3536b615038"
 APPROVED_PLAN_ROOT = Path("/opt/TGW/library/approved") / PLAN_COMMIT
 
 
@@ -40,7 +42,9 @@ def _git(*args: str) -> str:
     return proc.stdout.strip()
 
 
-def load_catalog(path: Path | str = CATALOG) -> dict[str, Any]:
+def load_catalog(path: Path | str = CATALOG, *, expected_sha256: str = CATALOG_SHA256) -> dict[str, Any]:
+    if _sha(Path(path)) != expected_sha256:
+        raise PPWorkflowReconcileError("whole PP capability catalog hash drift")
     try:
         value = json.loads(Path(path).read_bytes())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -64,14 +68,54 @@ def _verify_plan_source(plan_root: Path) -> None:
         raise PPWorkflowReconcileError("approved PP source content hash drift")
 
 
-def _verify_source_identity() -> dict[str, str]:
-    if (_git("rev-parse", f"{REJECTED_CANDIDATE}^") != REJECTED_PARENT
-            or _git("rev-parse", f"{REJECTED_CANDIDATE}^{{tree}}") != REJECTED_TREE
-            or _git("cat-file", "-t", REJECTED_CANDIDATE) != "commit"):
-        raise PPWorkflowReconcileError("rejected candidate/parent identity drift")
-    return {"rejected_candidate": REJECTED_CANDIDATE, "candidate_tree": REJECTED_TREE,
-            "parent": REJECTED_PARENT,
-            "review_sha256": REVIEW_SHA256}
+def _repository_git(repository: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", "-c", f"safe.directory={repository.resolve()}", *args], cwd=repository,
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode:
+        raise PPWorkflowReconcileError("selected runtime Git identity is unavailable")
+    return proc.stdout.strip()
+
+
+def verify_selected_runtime(*, repository: Path, source_root: Path, commit: str,
+                            tree: str, mode: str) -> dict[str, Any]:
+    """Verify the caller-selected exact reachable source before any allocation."""
+    if mode not in {"source-worktree", "immutable-release"}:
+        raise PPWorkflowReconcileError("selected runtime mode is unsupported")
+    if _repository_git(repository, "cat-file", "-t", commit) != "commit":
+        raise PPWorkflowReconcileError("selected runtime commit is not reachable")
+    observed_tree = _repository_git(repository, "rev-parse", f"{commit}^{{tree}}")
+    if observed_tree != tree:
+        raise PPWorkflowReconcileError("selected runtime commit/tree binding differs")
+    common = Path(_repository_git(repository, "rev-parse", "--git-common-dir"))
+    if not common.is_absolute():
+        common = repository / common
+    root_common = Path(_repository_git(ROOT, "rev-parse", "--git-common-dir"))
+    if not root_common.is_absolute():
+        root_common = ROOT / root_common
+    if common.resolve() != root_common.resolve():
+        raise PPWorkflowReconcileError("selected runtime is not bound to the canonical repository")
+    if mode == "source-worktree":
+        if Path(_repository_git(source_root, "rev-parse", "--show-toplevel")).resolve() != source_root.resolve():
+            raise PPWorkflowReconcileError("selected source worktree root differs")
+        if (_repository_git(source_root, "rev-parse", "HEAD") != commit
+                or _repository_git(source_root, "status", "--porcelain", "--untracked-files=all")):
+            raise PPWorkflowReconcileError("selected source worktree is not the exact clean commit")
+        evidence = {"verified": True, "manifest_source": "git-worktree", "file_count": None}
+    else:
+        # Reuse Doctor's full path/mode/blob verifier; PP reconciliation does
+        # not maintain a second, weaker release verifier.
+        from tgw.doctor_cli import DoctorError, DoctorPaths, _verify_release_tree
+        try:
+            evidence = _verify_release_tree(
+                DoctorPaths(repository=repository, runtime_root=source_root.parent.parent,
+                            trusted_release_owners=(0, os.geteuid())), commit, source_root,
+            )
+        except DoctorError as exc:
+            raise PPWorkflowReconcileError("selected immutable release differs from exact Git tree") from exc
+    return {**evidence, "mode": mode, "commit": commit, "tree": tree,
+            "repository": str(repository.resolve()), "source_root": str(source_root.resolve())}
 
 
 def _verified_graph(catalog: Mapping[str, Any], *, source_root: Path,
@@ -116,11 +160,18 @@ def _verified_graph(catalog: Mapping[str, Any], *, source_root: Path,
 
 def reconcile(*, catalog_path: Path | str = CATALOG, plan_root: Path = APPROVED_PLAN_ROOT,
               source_root: Path = ROOT, todo_rows: Sequence[Mapping[str, Any]] = (),
-              conform_fn: Callable[..., Mapping[str, Any]] = conform) -> dict[str, Any]:
+              conform_fn: Callable[..., Mapping[str, Any]] = conform,
+              repository: Path = ROOT, selected_commit: str | None = None,
+              selected_tree: str | None = None, runtime_mode: str = "source-worktree",
+              catalog_sha256: str = CATALOG_SHA256,
+              runtime_verifier: Callable[..., Mapping[str, Any]] = verify_selected_runtime) -> dict[str, Any]:
     """Content-verify evidence and solve the same PP graph with native and pinned Luet."""
-    catalog = load_catalog(catalog_path)
+    catalog = load_catalog(catalog_path, expected_sha256=catalog_sha256)
     _verify_plan_source(plan_root)
-    candidate = _verify_source_identity()
+    commit = selected_commit or _repository_git(source_root, "rev-parse", "HEAD")
+    tree = selected_tree or _repository_git(repository, "rev-parse", f"{commit}^{{tree}}")
+    runtime = dict(runtime_verifier(repository=repository, source_root=source_root,
+                                    commit=commit, tree=tree, mode=runtime_mode))
     graph, providers = _verified_graph(catalog, source_root=source_root, todo_rows=todo_rows)
     binding = load_direct_development_luet_binding()
     if binding.plan_commit != PLAN_COMMIT:
@@ -138,12 +189,18 @@ def reconcile(*, catalog_path: Path | str = CATALOG, plan_root: Path = APPROVED_
     return {
         "schema": "tgw-pp-runtime-projection/v2", "ok": complete, "pp_ref": PP_REF,
         "source_identity": {"plan_commit": PLAN_COMMIT, "plan_source_sha256": PP_SOURCE_SHA256,
-                            **candidate},
+                            "catalog_sha256": catalog_sha256, "runtime": runtime,
+                            "rejected_candidate": REJECTED_CANDIDATE,
+                            "rejected_parent": REJECTED_PARENT, "rejected_tree": REJECTED_TREE,
+                            "review_sha256": REVIEW_SHA256},
         "resolver_binding": {"native": solution["resolver"], "luet": luet["provider_id"],
                              "agreement": "verified", "executable_path": str(binding.executable_path),
                              "executable_sha256": binding.sha256, "version": binding.version},
         "providers": providers,
         "unmet_capabilities": [item["capability"] for item in solution.get("work_units", ())],
         "solution": solution,
-        "effects": {"todo_created": False, "worktree_created": False, "job_created": False},
+        "dimensions": {"reconciliation_complete": complete, "operation_success": True,
+                       "materialization_attempted": False},
+        "effects": {"todo_created": False, "worktree_created": False, "job_created": False,
+                    "plan_publication": False},
     }

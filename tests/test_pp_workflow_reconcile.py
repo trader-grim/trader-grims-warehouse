@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import pytest
@@ -13,8 +14,11 @@ from tgw.pp_workflow_reconcile import (
 
 
 def test_real_pinned_luet_executes_and_agrees_on_pp_specific_closure():
-    first = reconcile()
-    second = reconcile()
+    def verified(**kwargs):
+        return {"verified": True, **kwargs}
+
+    first = reconcile(runtime_verifier=verified)
+    second = reconcile(runtime_verifier=verified)
     assert first == second
     assert first["ok"] and first["unmet_capabilities"] == []
     assert first["solution"]["conformance_verified"]
@@ -29,7 +33,7 @@ def test_catalog_and_plan_content_tampering_fail_closed(tmp_path):
     catalog["identity"]["review_sha256"] = "sha256:" + "0" * 64
     bad_catalog = tmp_path / "catalog.json"
     bad_catalog.write_text(json.dumps(catalog))
-    with pytest.raises(PPWorkflowReconcileError, match="identity drift"):
+    with pytest.raises(PPWorkflowReconcileError, match="whole PP capability catalog hash drift"):
         load_catalog(bad_catalog)
 
     plan = tmp_path / "plan/pp"
@@ -42,7 +46,7 @@ def test_catalog_and_plan_content_tampering_fail_closed(tmp_path):
 def test_source_tree_tampering_fails_closed(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
-    with pytest.raises(PPWorkflowReconcileError, match="evidence source"):
+    with pytest.raises(PPWorkflowReconcileError, match="selected runtime Git identity"):
         reconcile(source_root=source)
 
 
@@ -54,7 +58,7 @@ def test_solver_disagreement_never_claims_metadata_agreement():
         }
 
     with pytest.raises(PPWorkflowReconcileError, match="disagreement"):
-        reconcile(conform_fn=disagree)
+        reconcile(conform_fn=disagree, runtime_verifier=lambda **kwargs: {"verified": True, **kwargs})
 
 
 def test_incomplete_evidence_is_conformant_work_not_satisfied(tmp_path):
@@ -67,7 +71,9 @@ def test_incomplete_evidence_is_conformant_work_not_satisfied(tmp_path):
     }]
     path = tmp_path / "catalog.json"
     path.write_text(json.dumps(catalog))
-    value = reconcile(catalog_path=path, todo_rows=[{
+    digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    value = reconcile(catalog_path=path, catalog_sha256=digest,
+                      runtime_verifier=lambda **kwargs: {"verified": True, **kwargs}, todo_rows=[{
         "id": 1738, "source": "unrelated-adapter", "body": "canonical body",
         "pp_ref": PP_REF,
     }])
@@ -85,11 +91,16 @@ def test_canonical_todo_identity_accepts_exact_row_not_coincident_number(tmp_pat
     provider["local_todos"] = [identity]
     path = tmp_path / "catalog.json"
     path.write_text(json.dumps(catalog))
-    assert reconcile(catalog_path=path, todo_rows=[identity])["ok"]
+    digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    assert reconcile(catalog_path=path, catalog_sha256=digest,
+                     runtime_verifier=lambda **kwargs: {"verified": True, **kwargs},
+                     todo_rows=[identity])["ok"]
 
 
 def test_fully_satisfied_pp_start_has_no_materialization(monkeypatch):
-    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {}})
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {
+        "repository_root": str(CATALOG.parents[2]), "worktree_root": str(CATALOG.parents[2]),
+    }})
     monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
     monkeypatch.setattr(coding_cli.todo, "todo_list", lambda **_kwargs: [])
     monkeypatch.setattr(coding_cli, "reconcile_pp_workflow", lambda **_kwargs: {
@@ -115,6 +126,10 @@ def test_incomplete_pp_start_calls_explicit_bridge_only_for_unmet_work(monkeypat
         "ok": False, "unmet_capabilities": ["missing@1"], "solution": solution,
     })
     monkeypatch.setattr(coding_cli, "compile_solution_runtime", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        __import__("tgw.development.local_workflow", fromlist=["_git"]), "_git",
+        lambda _repository, *_args: "b" * 40,
+    )
     calls = []
 
     def bridge(*_args, **kwargs):
@@ -130,4 +145,10 @@ def test_incomplete_pp_start_calls_explicit_bridge_only_for_unmet_work(monkeypat
     assert calls[0]["execution_root"]["pp_ref"] == PP_REF
     assert calls[0]["treatment_id"] == "establish:missing@1"
     assert ticks == [{"todo_ids": {42}}]
+    assert value["ok"] and not value["reconciliation_complete"]
+    assert value["reconciliation"]["dimensions"] == {
+        "reconciliation_complete": False,
+        "operation_success": True,
+        "materialization_attempted": True,
+    }
     assert value["materialized"] == [{"todo_id": 42, "created": True}]

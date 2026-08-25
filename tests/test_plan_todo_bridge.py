@@ -31,6 +31,7 @@ def _compiled(conformant=True, root_id="x"):
 def test_luet_leaf_creates_one_bound_todo_and_is_idempotent():
     solution, compiled = _compiled()
     rows = []
+    allocations = []
 
     def create(agent, body, priority, source, pp, anchor):
         row = {"id": len(rows) + 1, "agent": agent, "body": body, "status_note": ""}
@@ -41,6 +42,7 @@ def test_luet_leaf_creates_one_bound_todo_and_is_idempotent():
         rows[todo_id - 1]["status_note"] = value
 
     def allocator(todo_id, request_id, source):
+        allocations.append((todo_id, request_id, source))
         return {
             "worktree": f"/worktrees/todo-{todo_id}-{request_id}",
             "todo_id": todo_id,
@@ -75,6 +77,7 @@ def test_luet_leaf_creates_one_bound_todo_and_is_idempotent():
         set_status_note=note,
     )
     assert first["created"] and not second["created"] and first["todo_id"] == second["todo_id"]
+    assert len(rows) == 1 and len(allocations) == 1
     assert first["binding"]["worktree_identity"]["todo_id"] == first["todo_id"]
     assert first["binding"]["execution_root"]["kind"] == "plan"
     assert rows[0].get("pp_ref") is None
