@@ -1119,25 +1119,53 @@ def check_units(paths: DoctorPaths) -> dict[str, Any]:
 def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
     repair = "sudo -n tgw doctor repair plan-render-worker"
     try:
-        _desired, release, _task = _desired_runtime(paths)
+        desired, release, _task = _desired_runtime(paths)
+        current_link = paths.runtime_root / "current"
+        expected_selector = str(Path("releases") / desired)
+        installed_selector = (
+            os.readlink(current_link) if current_link.is_symlink() else None
+        )
+        exact_runtime = (
+            installed_selector == expected_selector
+            and current_link.resolve(strict=True) == release.resolve(strict=True)
+        )
         state = _unit_state(_PLAN_RENDER_UNIT)
         definition = _unit_definition(paths, _PLAN_RENDER_UNIT, state)
         config = _json(paths.plan_render_config)
         source = release / "config/tgw-plan-render-local.json"
-        exact_config = source.is_file() and source.read_bytes() == paths.plan_render_config.read_bytes()
+        exact_config = (
+            not source.is_symlink()
+            and source.is_file()
+            and not paths.plan_render_config.is_symlink()
+            and paths.plan_render_config.is_file()
+            and source.read_bytes() == paths.plan_render_config.read_bytes()
+        )
         healthy = (state.get("LoadState") == "loaded"
                    and state.get("ActiveState") == "active"
-                   and definition["exact"] and exact_config)
+                   and definition["exact"] and exact_config and exact_runtime)
         reasons = list(definition["reasons"])
         if not exact_config:
-            reasons.append("immutable config bytes differ")
+            reasons.append("immutable config path or bytes differ")
+        if not exact_runtime:
+            reasons.append("immutable runtime selector differs")
         if state.get("ActiveState") != "active":
             reasons.append("service is not active")
         return _check(
             "services.plan-render", "PASS" if healthy else "FAIL",
             "local plan_render consumer is exact and active" if healthy
             else "; ".join(reasons),
-            evidence={"unit": state, "definition": definition, "config": config},
+            evidence={
+                "unit": state,
+                "definition": definition,
+                "config": config,
+                "runtime": {
+                    "desired": desired,
+                    "release": str(release),
+                    "expected_selector": expected_selector,
+                    "installed_selector": installed_selector,
+                    "exact": exact_runtime,
+                },
+            },
             repair=None if healthy else repair,
         )
     except Exception as exc:
@@ -3223,12 +3251,23 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
     before = check_plan_render_worker(paths)
     config_source = release / "config/tgw-plan-render-local.json"
     unit_source = release / "systemd" / _PLAN_RENDER_UNIT
-    if not config_source.is_file() or not unit_source.is_file():
+    if (
+        config_source.is_symlink()
+        or not config_source.is_file()
+        or unit_source.is_symlink()
+        or not unit_source.is_file()
+    ):
         raise DoctorError("immutable runtime lacks plan_render config or unit")
     changed = False
-    if not paths.plan_render_config.is_file() or paths.plan_render_config.read_bytes() != config_source.read_bytes():
-        if paths.plan_render_config.is_symlink():
-            raise DoctorError("refusing unsafe plan_render config destination")
+    if paths.plan_render_config.is_symlink() or (
+        paths.plan_render_config.exists()
+        and not paths.plan_render_config.is_file()
+    ):
+        raise DoctorError("refusing unsafe plan_render config destination")
+    if (
+        not paths.plan_render_config.is_file()
+        or paths.plan_render_config.read_bytes() != config_source.read_bytes()
+    ):
         _atomic_bytes(paths.plan_render_config, config_source.read_bytes(),
                       mode=0o444, uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
         changed = True

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tgw import doctor_cli
 
 ROOT = Path(__file__).parents[1]
@@ -26,6 +28,7 @@ def test_local_plan_render_unit_reuses_existing_worker_as_db_user() -> None:
     unit = (ROOT / "systemd/tgw-plan-render-local.service").read_text(encoding="utf-8")
     assert "User=db\n" in unit
     assert "SupplementaryGroups=tgw-coders" in unit
+    assert "WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current" in unit
     assert "PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src" in unit
     assert "-m tgw.workers.plan_render --config " in unit
     assert "/opt/TGW/tgw-lib/config/tgw-plan-render-local.json" in unit
@@ -63,3 +66,87 @@ def test_doctor_reports_stopped_plan_render_service(tmp_path: Path, monkeypatch)
     result = doctor_cli.check_plan_render_worker(paths)
     assert result["state"] == "FAIL"
     assert result["operator_action"].endswith("repair plan-render-worker")
+
+
+def _plan_render_check_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[doctor_cli.DoctorPaths, Path]:
+    desired = "a" * 40
+    runtime_root = tmp_path / "runtime"
+    release = runtime_root / "releases" / desired
+    (release / "config").mkdir(parents=True)
+    source_config = ROOT / "config/tgw-plan-render-local.json"
+    (release / "config/tgw-plan-render-local.json").write_bytes(
+        source_config.read_bytes()
+    )
+    (runtime_root / "current").symlink_to(Path("releases") / desired)
+    installed_config = tmp_path / "tgw-plan-render-local.json"
+    installed_config.write_bytes(source_config.read_bytes())
+    paths = doctor_cli.DoctorPaths(
+        runtime_root=runtime_root,
+        plan_render_config=installed_config,
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_desired_runtime",
+        lambda _paths: (desired, release, {}),
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda _unit: {"LoadState": "loaded", "ActiveState": "active"},
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_definition",
+        lambda *_args: {"exact": True, "reasons": []},
+    )
+    return paths, release
+
+
+def test_doctor_requires_exact_plan_render_runtime_selector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _release = _plan_render_check_fixture(tmp_path, monkeypatch)
+    (paths.runtime_root / "current").unlink()
+    (paths.runtime_root / "current").symlink_to("releases/" + "b" * 40)
+
+    result = doctor_cli.check_plan_render_worker(paths)
+
+    assert result["state"] == "FAIL"
+    assert "immutable runtime selector differs" in result["detail"]
+
+
+def test_doctor_rejects_matching_plan_render_config_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _release = _plan_render_check_fixture(tmp_path, monkeypatch)
+    target = tmp_path / "mutable-plan-render.json"
+    target.write_bytes(paths.plan_render_config.read_bytes())
+    paths.plan_render_config.unlink()
+    paths.plan_render_config.symlink_to(target)
+
+    result = doctor_cli.check_plan_render_worker(paths)
+
+    assert result["state"] == "FAIL"
+    assert "immutable config path or bytes differ" in result["detail"]
+
+
+def test_plan_render_repair_refuses_matching_config_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, release = _plan_render_check_fixture(tmp_path, monkeypatch)
+    (release / "systemd").mkdir()
+    (release / "systemd" / doctor_cli._PLAN_RENDER_UNIT).write_text(
+        "[Service]\nExecStart=/bin/true\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "mutable-plan-render.json"
+    target.write_bytes(paths.plan_render_config.read_bytes())
+    paths.plan_render_config.unlink()
+    paths.plan_render_config.symlink_to(target)
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli, "_verify_release_tree", lambda *_args: {})
+
+    with pytest.raises(doctor_cli.DoctorError, match="unsafe plan_render config"):
+        doctor_cli.repair_plan_render_worker(paths)

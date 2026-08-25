@@ -11,7 +11,7 @@ User=db
 Group=db
 SupplementaryGroups=tgw-coders
 UMask=0002
-WorkingDirectory=/opt/TGW/tgw-lib/src/trader-grims-warehouse
+WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current
 Environment=HOME=/home/db
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src
