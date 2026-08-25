@@ -296,7 +296,9 @@ def test_descriptor_anchored_git_tree_repair_adds_group_access(
     file_path.write_text("git index fixture", encoding="utf-8")
     file_path.chmod(0o640)
 
-    changes = doctor_cli._repair_shared_git_tree(directory, os.getgid())
+    changes = doctor_cli._scan_shared_git_tree(
+        directory, os.getgid(), mutate=True
+    )
 
     assert stat.S_IMODE(directory.stat().st_mode) == 0o2770
     assert stat.S_IMODE(file_path.stat().st_mode) == 0o660
@@ -314,10 +316,67 @@ def test_descriptor_anchored_git_tree_repair_never_follows_symlinks(
     outside.chmod(0o600)
     (directory / "link").symlink_to(outside)
 
-    changes = doctor_cli._repair_shared_git_tree(directory, os.getgid())
+    changes = doctor_cli._scan_shared_git_tree(
+        directory, os.getgid(), mutate=True
+    )
 
     assert stat.S_IMODE(outside.stat().st_mode) == 0o600
     assert changes["symlinks_untouched"] == 1
+
+
+def test_git_tree_preflight_allows_only_readable_pack_hardlinks(
+    tmp_path: Path,
+) -> None:
+    git_root = tmp_path / "git"
+    pack = git_root / "objects/pack"
+    pack.mkdir(parents=True)
+    outside = tmp_path / "pack-source"
+    outside.write_text("immutable pack", encoding="utf-8")
+    outside.chmod(0o644)
+    os.link(outside, pack / "pack-test.pack")
+
+    counts = doctor_cli._scan_shared_git_tree(
+        git_root, os.getgid(), mutate=False
+    )
+
+    assert counts["immutable_pack_hardlinks_untouched"] == 1
+
+    mutable = git_root / "index"
+    os.link(outside, mutable)
+    with pytest.raises(doctor_cli.DoctorError, match="mutable or unreadable hardlink"):
+        doctor_cli._scan_shared_git_tree(git_root, os.getgid(), mutate=False)
+
+
+def test_coding_quiescence_masks_and_verifies_every_local_unit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands = []
+    masked = False
+
+    def run(command, **_kwargs):
+        nonlocal masked
+        commands.append(command)
+        if command[1] == "mask":
+            masked = True
+        elif command[1] == "unmask":
+            masked = False
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda _unit: {
+            "LoadState": "masked" if masked else "loaded",
+            "ActiveState": "inactive",
+        },
+    )
+
+    with doctor_cli._coding_quiescence():
+        pass
+
+    assert commands[0][:4] == ["systemctl", "mask", "--runtime", "--now"]
+    assert commands[-1][:3] == ["systemctl", "unmask", "--runtime"]
 
 
 def test_worker_unit_exactness_includes_immutable_metadata(tmp_path: Path) -> None:
