@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -61,6 +62,8 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         path.write_text(content, encoding="utf-8")
         if relative.startswith("bin/"):
             path.chmod(0o755)
+        else:
+            path.chmod(0o644)
     _git(repository, "add", ".")
     _git(repository, "commit", "-m", "source")
     head = _git(repository, "rev-parse", "HEAD")
@@ -79,6 +82,8 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, path)
         path.chmod(source.stat().st_mode & 0o777)
+    for directory in [release, *[path for path in release.rglob("*") if path.is_dir()]]:
+        directory.chmod(0o555)
     runtime_root.mkdir(parents=True, exist_ok=True)
     (runtime_root / "current").symlink_to(Path("releases") / head)
     local_bin.mkdir(parents=True, exist_ok=True)
@@ -134,9 +139,15 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     _write_json(cursor_path, cursor)
     _write_json(snapshot_path, _snapshot(task, cursor))
     launcher = local_bin / "tgw-context-mcp"
-    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launcher.write_text(
+        f"#!/bin/sh\n# runtime snapshot: {snapshot_path}\nexit 0\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o555)
     publisher = local_bin / "tgw-context-publish"
     publisher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    catalog_path = root / "config/tgw-context-debian-v1.json"
+    _write_json(catalog_path, {"schema": "fixture", "actors": {"codex": {}}})
     paths = doctor_cli.DoctorPaths(
         repository=repository,
         worktrees=worktrees,
@@ -149,8 +160,9 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         context_cursor=cursor_path,
         context_launcher=launcher,
         context_publisher=publisher,
-        context_catalog=root / "config/tgw-context-debian-v1.json",
+        context_catalog=catalog_path,
         receipts=root / "doctor-receipts",
+        trusted_release_owners=(os.getuid(),),
     )
     return paths, head, tree
 
@@ -213,7 +225,7 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(
 
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
     monkeypatch.setattr(doctor_cli, "_run", run)
-    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda _path: None)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
 
     result = doctor_cli.repair_context(paths)
 
@@ -242,7 +254,7 @@ def test_context_publisher_failure_leaves_live_inputs_unchanged_and_is_receipted
 
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
     monkeypatch.setattr(doctor_cli, "_run", run)
-    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda _path: None)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
 
     with pytest.raises(doctor_cli.DoctorError, match="failure receipt"):
         doctor_cli.repair("context", paths)
@@ -250,6 +262,51 @@ def test_context_publisher_failure_leaves_live_inputs_unchanged_and_is_receipted
     assert paths.context_cursor.read_bytes() == cursor_before
     assert paths.context_snapshot.read_bytes() == snapshot_before
     assert len(list(paths.receipts.glob("*context-failed.json"))) == 1
+
+
+def test_context_repair_detects_snapshot_race_and_restores_both_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    cursor_before = paths.context_cursor.read_bytes()
+    snapshot_before = paths.context_snapshot.read_bytes()
+    original_run = doctor_cli._run
+    original_atomic = doctor_cli._atomic_json
+
+    def run(command, **kwargs):
+        if command[0] == str(paths.context_publisher):
+            task_path = Path(command[command.index("--task") + 1])
+            cursor_path = Path(command[command.index("--cursor") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            _write_json(
+                output_path,
+                _snapshot(
+                    json.loads(task_path.read_text()),
+                    json.loads(cursor_path.read_text()),
+                ),
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original_run(command, **kwargs)
+
+    raced = False
+
+    def atomic(path, value, **kwargs):
+        nonlocal raced
+        original_atomic(path, value, **kwargs)
+        if path == paths.context_cursor and not raced:
+            raced = True
+            _write_json(paths.context_snapshot, {"concurrent": True})
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_atomic_json", atomic)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+
+    with pytest.raises(doctor_cli.DoctorError, match="changed before atomic cutover"):
+        doctor_cli.repair_context(paths)
+
+    assert paths.context_cursor.read_bytes() == cursor_before
+    assert paths.context_snapshot.read_bytes() == snapshot_before
 
 
 def test_runtime_check_requires_exact_release_selector_and_launchers(tmp_path: Path) -> None:
@@ -272,7 +329,7 @@ def test_runtime_check_rejects_mutated_immutable_release(tmp_path: Path) -> None
     assert "release tree differs from Git" in result["detail"]
 
 
-def test_runtime_repair_installs_stable_links_then_switches_one_selector(
+def test_runtime_repair_switches_only_one_selector_behind_stable_links(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths, head, _tree = _fixture(tmp_path)
@@ -281,9 +338,6 @@ def test_runtime_repair_installs_stable_links_then_switches_one_selector(
     current = paths.runtime_root / "current"
     current.unlink()
     current.symlink_to(Path("releases/previous"))
-    stale = paths.local_bin / "tgw-coding"
-    stale.unlink()
-    stale.write_text("old launcher\n", encoding="utf-8")
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
 
     result = doctor_cli.repair_runtime(paths)
@@ -296,13 +350,62 @@ def test_runtime_repair_installs_stable_links_then_switches_one_selector(
         assert destination.readlink() == target
 
 
+def test_runtime_repair_refuses_online_launcher_surface_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    stale = paths.local_bin / "tgw-coding"
+    stale.unlink()
+    stale.write_text("old launcher\n", encoding="utf-8")
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+
+    with pytest.raises(doctor_cli.DoctorError, match="bounded bootstrap"):
+        doctor_cli.repair_runtime(paths)
+
+
+def test_runtime_selector_rolls_back_if_post_switch_release_check_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    previous = paths.runtime_root / "releases/previous"
+    previous.mkdir()
+    current = paths.runtime_root / "current"
+    current.unlink()
+    current.symlink_to(Path("releases/previous"))
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    original_verify = doctor_cli._verify_release_tree
+    calls = 0
+
+    def verify(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise doctor_cli.DoctorError("release changed after selector switch")
+        return original_verify(*args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli, "_verify_release_tree", verify)
+
+    with pytest.raises(doctor_cli.DoctorError, match="original selector restored"):
+        doctor_cli.repair_runtime(paths)
+
+    assert current.readlink() == Path("releases/previous")
+
+
 def test_unit_definition_requires_exact_fragment_and_no_dropins(tmp_path: Path) -> None:
     paths, head, _tree = _fixture(tmp_path)
     unit = "tgw-codex-implement-worker.service"
     source = paths.runtime_root / "releases" / head / "systemd" / unit
     fragment = tmp_path / "installed.service"
     shutil.copyfile(source, fragment)
-    state = {"FragmentPath": str(fragment), "DropInPaths": ""}
+    fragment.chmod(0o644)
+    state = {
+        "FragmentPath": str(fragment),
+        "DropInPaths": "",
+        "NeedDaemonReload": "no",
+        "ExecStart": " ".join(doctor_cli._UNIT_ARGV[unit]),
+        "ActiveState": "inactive",
+        "MainPID": "0",
+    }
 
     exact = doctor_cli._unit_definition(paths, unit, state)
     with_dropin = doctor_cli._unit_definition(
@@ -312,6 +415,28 @@ def test_unit_definition_requires_exact_fragment_and_no_dropins(tmp_path: Path) 
     assert exact["exact"] is True
     assert with_dropin["exact"] is False
     assert "unexpected systemd drop-in" in with_dropin["reasons"]
+
+
+def test_unit_definition_rejects_active_process_with_different_argv(tmp_path: Path) -> None:
+    paths, head, _tree = _fixture(tmp_path)
+    unit = "tgw-codex-implement-worker.service"
+    source = paths.runtime_root / "releases" / head / "systemd" / unit
+    fragment = tmp_path / "installed.service"
+    shutil.copyfile(source, fragment)
+    fragment.chmod(0o644)
+    state = {
+        "FragmentPath": str(fragment),
+        "DropInPaths": "",
+        "NeedDaemonReload": "no",
+        "ExecStart": " ".join(doctor_cli._UNIT_ARGV[unit]),
+        "ActiveState": "active",
+        "MainPID": str(os.getpid()),
+    }
+
+    result = doctor_cli._unit_definition(paths, unit, state)
+
+    assert result["exact"] is False
+    assert "active process argv differs" in result["reasons"]
 
 
 def test_inventory_marks_unique_work_for_preservation(tmp_path: Path) -> None:
@@ -329,6 +454,25 @@ def test_inventory_marks_unique_work_for_preservation(tmp_path: Path) -> None:
     assert candidate["unique_commits"] == 1
     assert candidate["merged_into_canonical"] is False
     assert candidate["preservation_required"] is True
+
+
+def test_inventory_derives_harnesses_from_catalog(tmp_path: Path) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    _write_json(paths.context_catalog, {"actors": {"future-harness": {}}})
+
+    result = doctor_cli.inventory(paths)
+    future = next(row for row in result["harnesses"] if row["name"] == "future-harness")
+
+    assert future["catalog_actor"] is True
+    assert future["tgw_coders_member"] is False
+
+
+def test_database_check_source_covers_every_granted_object_and_execute_privilege() -> None:
+    source = Path(doctor_cli.__file__).read_text(encoding="utf-8")
+
+    assert "history_access" in source
+    assert "history_sequence_access" in source
+    assert "has_function_privilege" in source
 
 
 def test_runtime_check_rejects_remote_or_authority_dependency(tmp_path: Path) -> None:
