@@ -343,6 +343,44 @@ def check_context_snapshot(paths: DoctorPaths) -> dict[str, Any]:
         return _failed("context.snapshot", exc, repair=repair)
 
 
+def _selected_context_launcher(paths: DoctorPaths) -> tuple[str, Path]:
+    desired, release, _task = _desired_runtime(paths)
+    _verify_release_tree(paths, desired, release)
+    source = release / "scripts/tgw_context_debian_stdio.py"
+    if not source.is_file() or source.is_symlink():
+        raise DoctorError("selected immutable runtime has no exact Context launcher")
+    observed = source.stat(follow_symlinks=False)
+    if observed.st_mode & 0o022:
+        raise DoctorError("selected immutable runtime Context launcher is writable")
+    return desired, source
+
+
+def check_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
+    repair = "sudo -n tgw doctor repair context-launcher"
+    try:
+        desired, source = _selected_context_launcher(paths)
+        if paths.context_launcher.is_symlink() or not paths.context_launcher.is_file():
+            raise DoctorError("installed Context launcher is missing or indirect")
+        if paths.context_launcher.read_bytes() != source.read_bytes():
+            raise DoctorError("installed Context launcher differs from selected runtime")
+        observed = paths.context_launcher.stat(follow_symlinks=False)
+        if observed.st_mode & 0o022 or not observed.st_mode & 0o111:
+            raise DoctorError("installed Context launcher mode is not immutable executable")
+        return _check(
+            "context.launcher",
+            "PASS",
+            f"Context launcher is exact at runtime {desired[:12]}",
+            evidence={
+                "runtime_commit": desired,
+                "source": str(source),
+                "installed": str(paths.context_launcher),
+                "sha256": _file_hash(source),
+            },
+        )
+    except Exception as exc:
+        return _failed("context.launcher", exc, repair=repair)
+
+
 def _boot_time() -> float:
     for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines():
         if line.startswith("btime "):
@@ -1680,6 +1718,7 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         check_host(paths),
         check_source(paths),
         check_context_snapshot(paths),
+        check_context_launcher(paths),
         check_context_processes(paths),
         check_unix_access(paths),
         check_worktrees(paths),
@@ -1841,6 +1880,43 @@ def _receipt(paths: DoctorPaths, operation: str, before: Any, after: Any) -> str
     path = paths.receipts / f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{operation}.json"
     _atomic_json(path, body)
     return str(path)
+
+
+def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
+    """Install only the selected launcher's bytes; clients hand off on restart."""
+    _require_root()
+    desired, source = _selected_context_launcher(paths)
+    expected = source.read_bytes()
+    before_hash = (
+        _file_hash(paths.context_launcher)
+        if paths.context_launcher.is_file() and not paths.context_launcher.is_symlink()
+        else None
+    )
+    changed = before_hash != _file_hash(source)
+    if changed:
+        _atomic_bytes(
+            paths.context_launcher,
+            expected,
+            mode=0o555,
+            uid=source.stat(follow_symlinks=False).st_uid,
+            gid=source.stat(follow_symlinks=False).st_gid,
+        )
+    if paths.context_launcher.read_bytes() != expected:
+        raise DoctorError("Context launcher atomic replacement did not converge")
+    clients = _context_processes(paths)
+    affected = [item for item in clients if item["predates_launcher"]]
+    return {
+        "ok": True,
+        "operation": "context-launcher",
+        "changed": changed,
+        "runtime_commit": desired,
+        "source": str(source),
+        "installed": str(paths.context_launcher),
+        "sha256": _file_hash(source),
+        "client_processes_mutated": False,
+        "restart_required": [item["pid"] for item in affected],
+        "restart_scope": "affected parent harness sessions only",
+    }
 
 
 def repair_context(paths: DoctorPaths) -> dict[str, Any]:
@@ -4550,6 +4626,7 @@ def repair_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
 
 _REPAIRS: dict[str, Callable[[DoctorPaths], dict[str, Any]]] = {
     "context": repair_context,
+    "context-launcher": repair_context_launcher,
     "runtime": repair_runtime,
     "database": repair_database,
     "unix-git-access": repair_unix_git_access,
