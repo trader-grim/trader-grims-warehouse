@@ -1,0 +1,15 @@
+{
+  "schema": "tgw-local-plan-render/v1",
+  "postgres_dsn": "dbname=tgw_lib_dev_state_machine",
+  "standalone_plan_root": "/opt/TGW/library/approved/058e2f980201cc78245358e4901cf007063f2c29",
+  "plan_repository_root": "/opt/TGW/library/plans",
+  "plan_approved_commit": "058e2f980201cc78245358e4901cf007063f2c29",
+  "plan_approved_solution_hash": "sha256:ecce15aad2699492c0c5577bff1af7005ffbbec6ae6166b325b34c1cc7e70e9f",
+  "plan_git_path": "/usr/bin/git",
+  "plan_render_root": "/opt/TGW/var/plan-render",
+  "log_root": "/opt/TGW/var/plan-render/log",
+  "queue": {
+    "poll_interval_s": 2,
+    "lease_seconds": 300
+  }
+}

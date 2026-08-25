@@ -1,0 +1,65 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from tgw import doctor_cli
+
+ROOT = Path(__file__).parents[1]
+
+
+def test_local_plan_render_config_is_exact_and_independent() -> None:
+    config = json.loads((ROOT / "config/tgw-plan-render-local.json").read_text(encoding="utf-8"))
+    assert config["postgres_dsn"] == "dbname=tgw_lib_dev_state_machine"
+    assert config["standalone_plan_root"] == ("/opt/TGW/library/approved/058e2f980201cc78245358e4901cf007063f2c29")
+    assert config["plan_repository_root"] == "/opt/TGW/library/plans"
+    assert config["plan_approved_commit"] == ("058e2f980201cc78245358e4901cf007063f2c29")
+    assert config["plan_approved_solution_hash"] == ("sha256:ecce15aad2699492c0c5577bff1af7005ffbbec6ae6166b325b34c1cc7e70e9f")
+    assert config["plan_render_root"] == "/opt/TGW/var/plan-render"
+    text = json.dumps(config).lower()
+    assert "tgw-prod" not in text
+    assert "ssh" not in text
+    assert "provider" not in text
+
+
+def test_local_plan_render_unit_reuses_existing_worker_as_db_user() -> None:
+    unit = (ROOT / "systemd/tgw-plan-render-local.service").read_text(encoding="utf-8")
+    assert "User=db\n" in unit
+    assert "SupplementaryGroups=tgw-coders" in unit
+    assert "PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src" in unit
+    assert "-m tgw.workers.plan_render --config " in unit
+    assert "/opt/TGW/tgw-lib/config/tgw-plan-render-local.json" in unit
+    assert "ReadOnlyPaths=/opt/TGW/library/approved/058e2f" in unit
+    assert "ReadWritePaths=/opt/TGW/var/plan-render" in unit
+
+
+def test_doctor_exposes_separately_named_plan_render_repair() -> None:
+    assert doctor_cli._PLAN_RENDER_UNIT == "tgw-plan-render-local.service"
+    assert doctor_cli._REPAIRS["plan-render-worker"] is (doctor_cli.repair_plan_render_worker)
+    parser = doctor_cli._parser()
+    args = parser.parse_args(["repair", "plan-render-worker"])
+    assert args.target == "plan-render-worker"
+
+
+def test_doctor_reports_stopped_plan_render_service(tmp_path: Path, monkeypatch) -> None:
+    release = tmp_path / "release"
+    (release / "config").mkdir(parents=True)
+    source_config = ROOT / "config/tgw-plan-render-local.json"
+    installed_config = tmp_path / "tgw-plan-render-local.json"
+    installed_config.write_bytes(source_config.read_bytes())
+    (release / "config/tgw-plan-render-local.json").write_bytes(source_config.read_bytes())
+    paths = doctor_cli.DoctorPaths(plan_render_config=installed_config)
+    monkeypatch.setattr(doctor_cli, "_desired_runtime", lambda _paths: ("a" * 40, release, {}))
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda _unit: {"LoadState": "loaded", "ActiveState": "inactive"},
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_definition",
+        lambda *_args: {"exact": True, "reasons": []},
+    )
+    result = doctor_cli.check_plan_render_worker(paths)
+    assert result["state"] == "FAIL"
+    assert result["operator_action"].endswith("repair plan-render-worker")

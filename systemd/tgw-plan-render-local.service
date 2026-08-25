@@ -1,0 +1,29 @@
+[Unit]
+Description=TGW local Plan Taskboard projection worker
+After=postgresql.service
+Requires=postgresql.service
+ConditionPathExists=/opt/TGW/tgw-lib/config/tgw-plan-render-local.json
+ConditionPathExists=/opt/TGW/tgw-lib/coding-runtime/current/src/tgw/workers/plan_render.py
+
+[Service]
+Type=simple
+User=db
+Group=db
+SupplementaryGroups=tgw-coders
+UMask=0002
+WorkingDirectory=/opt/TGW/tgw-lib/src/trader-grims-warehouse
+Environment=HOME=/home/db
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src
+ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.workers.plan_render --config /opt/TGW/tgw-lib/config/tgw-plan-render-local.json
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadOnlyPaths=/opt/TGW/library/approved/058e2f980201cc78245358e4901cf007063f2c29
+ReadWritePaths=/opt/TGW/var/plan-render
+
+[Install]
+WantedBy=multi-user.target

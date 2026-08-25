@@ -55,6 +55,7 @@ _ACTIVE_CODING_UNITS = (
     "tgw-coding-local-foreman.timer",
 )
 _CODING_UNITS = (*_ACTIVE_CODING_UNITS, "tgw-coding-local-foreman.service")
+_PLAN_RENDER_UNIT = "tgw-plan-render-local.service"
 _SYSTEMD_UNIT_ROOTS = (
     Path("/etc/systemd/system"),
     Path("/run/systemd/system"),
@@ -104,6 +105,10 @@ _UNIT_ARGV = {
     ),
     "tgw-coding-local-foreman.service": (*_LOCAL_WORKFLOW_ARGV, "foreman"),
 }
+_UNIT_ARGV[_PLAN_RENDER_UNIT] = (
+    "/opt/TGW/.venvs/controller/bin/python3", "-m", "tgw.workers.plan_render",
+    "--config", "/opt/TGW/tgw-lib/config/tgw-plan-render-local.json",
+)
 
 
 class DoctorError(RuntimeError):
@@ -115,6 +120,7 @@ class DoctorPaths:
     repository: Path = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
     worktrees: Path = Path("/opt/TGW/var/worktrees")
     coding_config: Path = Path("/opt/TGW/tgw-lib/config/tgw-coding-local.json")
+    plan_render_config: Path = Path("/opt/TGW/tgw-lib/config/tgw-plan-render-local.json")
     runtime_root: Path = Path("/opt/TGW/tgw-lib/coding-runtime")
     local_bin: Path = Path("/opt/TGW/tgw-lib/bin")
     operator_cli: Path = Path("/usr/local/bin/tgw")
@@ -1035,7 +1041,7 @@ def _unit_definition(paths: DoctorPaths, unit: str, state: Mapping[str, str]) ->
             if loaded_exec_path != expected_argv[0] or loaded_exec_argv != expected_argv:
                 reasons.append("loaded ExecStart differs")
     process_argv: list[str] | None = None
-    if unit in _ACTIVE_CODING_UNITS and unit.endswith(".service"):
+    if (unit in _ACTIVE_CODING_UNITS or unit == _PLAN_RENDER_UNIT) and unit.endswith(".service"):
         try:
             pid = int(state.get("MainPID", "0"))
         except ValueError:
@@ -1108,6 +1114,34 @@ def check_units(paths: DoctorPaths) -> dict[str, Any]:
             str(exc),
             repair=repair,
         )
+
+
+def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
+    repair = "sudo -n tgw doctor repair plan-render-worker"
+    try:
+        _desired, release, _task = _desired_runtime(paths)
+        state = _unit_state(_PLAN_RENDER_UNIT)
+        definition = _unit_definition(paths, _PLAN_RENDER_UNIT, state)
+        config = _json(paths.plan_render_config)
+        source = release / "config/tgw-plan-render-local.json"
+        exact_config = source.is_file() and source.read_bytes() == paths.plan_render_config.read_bytes()
+        healthy = (state.get("LoadState") == "loaded"
+                   and state.get("ActiveState") == "active"
+                   and definition["exact"] and exact_config)
+        reasons = list(definition["reasons"])
+        if not exact_config:
+            reasons.append("immutable config bytes differ")
+        if state.get("ActiveState") != "active":
+            reasons.append("service is not active")
+        return _check(
+            "services.plan-render", "PASS" if healthy else "FAIL",
+            "local plan_render consumer is exact and active" if healthy
+            else "; ".join(reasons),
+            evidence={"unit": state, "definition": definition, "config": config},
+            repair=None if healthy else repair,
+        )
+    except Exception as exc:
+        return _failed("services.plan-render", exc, repair=repair)
 
 
 def _desired_runtime(paths: DoctorPaths) -> tuple[str, Path, dict[str, Any]]:
@@ -1508,6 +1542,7 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         check_worktrees(paths),
         check_database(paths),
         check_units(paths),
+        check_plan_render_worker(paths),
         check_runtime(paths),
         check_obsolete_surfaces(paths),
     ]
@@ -3181,6 +3216,50 @@ def repair_workers(paths: DoctorPaths) -> dict[str, Any]:
     }
 
 
+def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
+    _require_root()
+    desired, release, _task = _desired_runtime(paths)
+    _verify_release_tree(paths, desired, release)
+    before = check_plan_render_worker(paths)
+    config_source = release / "config/tgw-plan-render-local.json"
+    unit_source = release / "systemd" / _PLAN_RENDER_UNIT
+    if not config_source.is_file() or not unit_source.is_file():
+        raise DoctorError("immutable runtime lacks plan_render config or unit")
+    changed = False
+    if not paths.plan_render_config.is_file() or paths.plan_render_config.read_bytes() != config_source.read_bytes():
+        if paths.plan_render_config.is_symlink():
+            raise DoctorError("refusing unsafe plan_render config destination")
+        _atomic_bytes(paths.plan_render_config, config_source.read_bytes(),
+                      mode=0o444, uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
+        changed = True
+    destination = paths.systemd_install_root / _PLAN_RENDER_UNIT
+    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+        raise DoctorError("refusing unsafe plan_render unit destination")
+    if not _unit_destination_exact(paths, destination, unit_source):
+        _atomic_bytes(destination, unit_source.read_bytes(), mode=paths.systemd_unit_mode,
+                      uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
+        result = _run(["systemctl", "daemon-reload"], timeout=30)
+        if result.returncode:
+            raise DoctorError(result.stderr.strip() or "systemd daemon reload failed")
+        changed = True
+    state = _unit_state(_PLAN_RENDER_UNIT)
+    if not _unit_definition(paths, _PLAN_RENDER_UNIT, state)["exact"]:
+        raise DoctorError("installed plan_render unit is not exact")
+    action = None
+    if changed or state.get("ActiveState") != "active":
+        for command in (["systemctl", "enable", _PLAN_RENDER_UNIT],
+                        ["systemctl", "restart" if state.get("ActiveState") == "active" else "start", _PLAN_RENDER_UNIT]):
+            result = _run(command, timeout=30)
+            if result.returncode:
+                raise DoctorError(result.stderr.strip() or "plan_render service repair failed")
+        action = command[1]
+    after = check_plan_render_worker(paths)
+    if after["state"] != "PASS":
+        raise DoctorError("plan_render unit remains unhealthy after repair")
+    return {"ok": True, "operation": "plan-render-worker", "changed": changed or action is not None,
+            "service_action": action, "receipt": _receipt(paths, "plan-render-worker", before, after)}
+
+
 def _cleanup_references(
     paths: DoctorPaths, surfaces: Sequence[Mapping[str, Any]]
 ) -> list[dict[str, str]]:
@@ -4194,6 +4273,7 @@ _REPAIRS: dict[str, Callable[[DoctorPaths], dict[str, Any]]] = {
     "database": repair_database,
     "unix-git-access": repair_unix_git_access,
     "workers": repair_workers,
+    "plan-render-worker": repair_plan_render_worker,
     "obsolete-surfaces": repair_obsolete_surfaces,
 }
 
