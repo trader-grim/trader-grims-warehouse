@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -163,6 +164,8 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         context_catalog=catalog_path,
         receipts=root / "doctor-receipts",
         trusted_release_owners=(os.getuid(),),
+        systemd_unit_roots=(tmp_path / "systemd-units",),
+        archive_discovery_roots=(tmp_path / "archive-discovery",),
     )
     return paths, head, tree
 
@@ -417,6 +420,34 @@ def test_unit_definition_requires_exact_fragment_and_no_dropins(tmp_path: Path) 
     assert "unexpected systemd drop-in" in with_dropin["reasons"]
 
 
+def test_unit_definition_rejects_loaded_exec_start_with_extra_argument(
+    tmp_path: Path,
+) -> None:
+    paths, head, _tree = _fixture(tmp_path)
+    unit = "tgw-codex-implement-worker.service"
+    source = paths.runtime_root / "releases" / head / "systemd" / unit
+    fragment = tmp_path / "installed.service"
+    shutil.copyfile(source, fragment)
+    fragment.chmod(0o644)
+    expected = doctor_cli._UNIT_ARGV[unit]
+    state = {
+        "FragmentPath": str(fragment),
+        "DropInPaths": "",
+        "NeedDaemonReload": "no",
+        "ExecStart": (
+            f"{{ path={expected[0]} ; argv[]={' '.join(expected)} --extra ; "
+            "ignore_errors=no ; start_time=[n/a] ; }}"
+        ),
+        "ActiveState": "inactive",
+        "MainPID": "0",
+    }
+
+    result = doctor_cli._unit_definition(paths, unit, state)
+
+    assert result["exact"] is False
+    assert "loaded ExecStart differs" in result["reasons"]
+
+
 def test_unit_definition_rejects_active_process_with_different_argv(tmp_path: Path) -> None:
     paths, head, _tree = _fixture(tmp_path)
     unit = "tgw-codex-implement-worker.service"
@@ -467,12 +498,51 @@ def test_inventory_derives_harnesses_from_catalog(tmp_path: Path) -> None:
     assert future["tgw_coders_member"] is False
 
 
+def test_inventory_scans_all_declared_systemd_and_archive_roots(
+    tmp_path: Path,
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    runtime_units = tmp_path / "run-systemd"
+    vendor_units = tmp_path / "usr-lib-systemd"
+    archive_parent = tmp_path / "external-root/project/archive"
+    runtime_units.mkdir()
+    vendor_units.mkdir()
+    archive_parent.mkdir(parents=True)
+    (runtime_units / "tgw-runtime.service").write_text("runtime\n")
+    (vendor_units / "tgw-vendor.service").write_text("vendor\n")
+    paths = replace(
+        paths,
+        systemd_unit_roots=(runtime_units, vendor_units),
+        archive_discovery_roots=(tmp_path / "external-root",),
+    )
+
+    result = doctor_cli.inventory(paths)
+
+    surface_paths = {row["path"] for row in result["active_surfaces"]}
+    archive_paths = {row["path"] for row in result["archive_roots"]}
+    assert str(runtime_units / "tgw-runtime.service") in surface_paths
+    assert str(vendor_units / "tgw-vendor.service") in surface_paths
+    assert str(archive_parent) in archive_paths
+    assert result["archive_discovery"] == [
+        {
+            "path": str(tmp_path / "external-root"),
+            "exists": True,
+            "scanned": True,
+            "complete": True,
+            "max_depth": paths.archive_discovery_max_depth,
+            "error": None,
+        }
+    ]
+
+
 def test_database_check_source_covers_every_granted_object_and_execute_privilege() -> None:
     source = Path(doctor_cli.__file__).read_text(encoding="utf-8")
 
     assert "history_access" in source
     assert "history_sequence_access" in source
     assert "has_function_privilege" in source
+    assert "has_database_privilege" in source
+    assert "has_schema_privilege" in source
 
 
 def test_runtime_check_rejects_remote_or_authority_dependency(tmp_path: Path) -> None:

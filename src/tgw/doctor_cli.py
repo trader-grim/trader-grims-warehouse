@@ -17,6 +17,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import socket
 import stat
 import subprocess
@@ -48,6 +49,33 @@ _ACTIVE_CODING_UNITS = (
     "tgw-coding-local-foreman.timer",
 )
 _CODING_UNITS = (*_ACTIVE_CODING_UNITS, "tgw-coding-local-foreman.service")
+_SYSTEMD_UNIT_ROOTS = (
+    Path("/etc/systemd/system"),
+    Path("/run/systemd/system"),
+    Path("/usr/local/lib/systemd/system"),
+    Path("/usr/lib/systemd/system"),
+    Path("/lib/systemd/system"),
+)
+_ARCHIVE_DISCOVERY_ROOTS = (
+    Path("/opt/TGW"),
+    Path("/home"),
+    Path("/srv"),
+    Path("/var/local"),
+    Path("/var/lib"),
+    Path("/mnt"),
+    Path("/media"),
+)
+_ARCHIVE_DISCOVERY_MAX_DEPTH = 5
+_ARCHIVE_DISCOVERY_PRUNE = {
+    ".cache",
+    ".git",
+    ".local",
+    ".npm",
+    ".rustup",
+    "__pycache__",
+    "node_modules",
+    "proc",
+}
 _LOCAL_WORKFLOW_ARGV = (
     "/opt/TGW/.venvs/controller/bin/python3",
     "-m",
@@ -92,6 +120,9 @@ class DoctorPaths:
     context_catalog: Path = Path("/opt/TGW/tgw-lib/config/tgw-context-debian-v1.json")
     receipts: Path = Path("/opt/TGW/tgw-lib/doctor-receipts")
     trusted_release_owners: tuple[int, ...] = (0, 65534)
+    systemd_unit_roots: tuple[Path, ...] = _SYSTEMD_UNIT_ROOTS
+    archive_discovery_roots: tuple[Path, ...] = _ARCHIVE_DISCOVERY_ROOTS
+    archive_discovery_max_depth: int = _ARCHIVE_DISCOVERY_MAX_DEPTH
 
 
 def _canonical(value: Any) -> bytes:
@@ -549,7 +580,10 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         [
             ("operator-libexec", Path("/usr/local/libexec"), "tgw*"),
             ("development-command", paths.local_bin, "tgw*"),
-            ("systemd-unit", Path("/etc/systemd/system"), "tgw-*"),
+            *(
+                ("systemd-unit", parent, "tgw-*")
+                for parent in paths.systemd_unit_roots
+            ),
         ]
     )
     active_surfaces = []
@@ -642,17 +676,53 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         )
 
     archive_candidates: set[Path] = set()
-    archive_names = {"archive", "archives", "attempts", "migration-verify"}
-    discovery_root = Path("/opt/TGW")
-    if discovery_root.is_dir():
-        for parent, directories, _files in os.walk(discovery_root):
-            relative_depth = len(Path(parent).relative_to(discovery_root).parts)
-            if relative_depth >= 4:
-                directories[:] = []
-                continue
-            for name in directories:
-                if name in archive_names:
-                    archive_candidates.add(Path(parent) / name)
+    archive_names = {
+        "archive",
+        "archives",
+        "attempts",
+        "backup",
+        "backups",
+        "migration-verify",
+        "quarantine",
+    }
+    archive_discovery = []
+    for discovery_root in paths.archive_discovery_roots:
+        row: dict[str, Any] = {
+            "path": str(discovery_root),
+            "exists": discovery_root.is_dir(),
+            "scanned": False,
+            "complete": False,
+            "max_depth": paths.archive_discovery_max_depth,
+            "error": None,
+        }
+        if discovery_root.is_dir():
+            walk_errors: list[OSError] = []
+            try:
+                for parent, directories, _files in os.walk(
+                    discovery_root, onerror=walk_errors.append
+                ):
+                    relative_depth = len(
+                        Path(parent).relative_to(discovery_root).parts
+                    )
+                    for name in directories:
+                        if name.lower() in archive_names:
+                            archive_candidates.add(Path(parent) / name)
+                    directories[:] = [
+                        name
+                        for name in directories
+                        if relative_depth < paths.archive_discovery_max_depth
+                        and name not in _ARCHIVE_DISCOVERY_PRUNE
+                        and not name.startswith(".")
+                    ]
+                row["scanned"] = True
+                row["complete"] = not walk_errors
+                if walk_errors:
+                    row["error"] = "; ".join(
+                        f"{type(exc).__name__}: {exc}" for exc in walk_errors
+                    )
+            except OSError as exc:
+                row["error"] = f"{type(exc).__name__}: {exc}"
+        archive_discovery.append(row)
     archives = []
     for path in sorted(archive_candidates):
         try:
@@ -673,6 +743,7 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         "active_surfaces": active_surfaces,
         "harnesses": harnesses,
         "archive_roots": archives,
+        "archive_discovery": archive_discovery,
         "counts": {
             "worktrees": len(worktrees),
             "outside_configured_root": sum(
@@ -690,7 +761,8 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         },
         "cleanup_boundary": (
             "inventory is read-only; archive dirty or unique work before unlinking any "
-            "worktree, and never infer inactivity from age"
+            "worktree, never infer inactivity from age, and classify filesystem roots "
+            "outside archive_discovery as unknown rather than absent"
         ),
     }
 
@@ -711,6 +783,8 @@ def check_database(paths: DoctorPaths) -> dict[str, Any]:
                 cursor.execute(
                     """
                     SELECT current_user AS actor,
+                           has_database_privilege(current_user, current_database(), 'CONNECT') AS database_connect,
+                           has_schema_privilege(current_user, 'public', 'USAGE') AS schema_usage,
                            pg_has_role(current_user, 'tgw_coding', 'member') AS role_member,
                            has_table_privilege(current_user, 'public.todo_items', 'SELECT,INSERT,UPDATE,DELETE') AS todo_access,
                            has_table_privilege(current_user, 'public.queue_jobs', 'SELECT,INSERT,UPDATE,DELETE') AS queue_access,
@@ -729,6 +803,8 @@ def check_database(paths: DoctorPaths) -> dict[str, Any]:
                 )
                 active = int(cursor.fetchone()["active"])
         required = (
+            "database_connect",
+            "schema_usage",
             "role_member",
             "todo_access",
             "queue_access",
@@ -771,6 +847,29 @@ def _unit_state(unit: str) -> dict[str, Any]:
     return values
 
 
+def _loaded_exec_identity(raw: str) -> tuple[str, tuple[str, ...]]:
+    """Return the exact path and argv represented by systemctl's ExecStart value."""
+    value = raw.strip()
+    if not value:
+        raise DoctorError("loaded ExecStart is empty")
+    if "argv[]=" not in value:
+        argv = tuple(shlex.split(value))
+        if not argv:
+            raise DoctorError("loaded ExecStart has no argv")
+        return argv[0], argv
+    if value.count("argv[]=") != 1:
+        raise DoctorError("loaded ExecStart contains multiple commands")
+    path_match = re.search(r"(?:^|\{)\s*path=([^;]+?)\s*;", value)
+    argv_match = re.search(r"argv\[\]=(.*?)(?=\s*;\s*[A-Za-z_][A-Za-z0-9_]*=)", value)
+    if path_match is None or argv_match is None:
+        raise DoctorError("loaded ExecStart format is not exact-parseable")
+    executable = path_match.group(1).strip()
+    argv = tuple(shlex.split(argv_match.group(1).strip()))
+    if not executable or not argv:
+        raise DoctorError("loaded ExecStart has no command identity")
+    return executable, argv
+
+
 def _unit_definition(paths: DoctorPaths, unit: str, state: Mapping[str, str]) -> dict[str, Any]:
     desired, release, _task = _desired_runtime(paths)
     source = release / "systemd" / unit
@@ -796,8 +895,18 @@ def _unit_definition(paths: DoctorPaths, unit: str, state: Mapping[str, str]) ->
     if state.get("NeedDaemonReload") != "no":
         reasons.append("systemd has not loaded the installed definition")
     expected_argv = _UNIT_ARGV.get(unit)
-    if expected_argv and " ".join(expected_argv) not in state.get("ExecStart", ""):
-        reasons.append("loaded ExecStart differs")
+    loaded_exec_path: str | None = None
+    loaded_exec_argv: tuple[str, ...] | None = None
+    if expected_argv:
+        try:
+            loaded_exec_path, loaded_exec_argv = _loaded_exec_identity(
+                state.get("ExecStart", "")
+            )
+        except (DoctorError, ValueError) as exc:
+            reasons.append(str(exc))
+        else:
+            if loaded_exec_path != expected_argv[0] or loaded_exec_argv != expected_argv:
+                reasons.append("loaded ExecStart differs")
     process_argv: list[str] | None = None
     if unit in _ACTIVE_CODING_UNITS and unit.endswith(".service"):
         try:
@@ -831,6 +940,8 @@ def _unit_definition(paths: DoctorPaths, unit: str, state: Mapping[str, str]) ->
         "need_daemon_reload": state.get("NeedDaemonReload"),
         "expected_argv": list(expected_argv) if expected_argv else None,
         "loaded_exec_start": state.get("ExecStart") or None,
+        "loaded_exec_path": loaded_exec_path,
+        "loaded_exec_argv": list(loaded_exec_argv) if loaded_exec_argv else None,
         "process_argv": process_argv,
         "reasons": reasons,
     }
