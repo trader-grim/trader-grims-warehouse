@@ -249,6 +249,13 @@ def test_runner_refuses_a_concurrent_worktree_lease(tmp_path, monkeypatch):
     assert not (repo / ".git/tgw-coding.lock").exists()
 
 
+def test_worktree_lease_accepts_a_normal_repository_common_dir(tmp_path):
+    repo = _repo(tmp_path)
+
+    with codex_implement._exclusive_worktree_lease(repo):
+        assert (repo / ".git").is_dir()
+
+
 def test_candidate_close_disables_hooks_and_signing(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     monkeypatch.setattr(codex_implement, "_codex_binary", lambda: "/bin/true")

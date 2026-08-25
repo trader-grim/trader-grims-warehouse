@@ -145,6 +145,11 @@ def _run_check(name: str, command: list[str]) -> dict[str, Any]:
     inherited = env.get("PYTHONPATH")
     env["PYTHONPATH"] = worktree_source + (os.pathsep + inherited if inherited else "")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # The outer worker payload controls this controller process.  It must not
+    # leak into pytest, where unit calls to ``main`` would otherwise mistake
+    # themselves for a dispatched controller and acquire the live worktree
+    # lease through mocked subprocess probes.
+    env.pop("TGW_CODING_JOB", None)
     try:
         completed = subprocess.run(command, check=False, text=True, capture_output=True, env=env)
     except OSError as exc:

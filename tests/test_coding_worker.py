@@ -510,6 +510,24 @@ def test_controller_verify_runner_does_not_establish_conditions_when_a_check_fai
     ]
 
 
+def test_controller_check_does_not_leak_outer_job_payload(monkeypatch):
+    from tgw.workers import controller_verify
+
+    observed = {}
+    monkeypatch.setenv("TGW_CODING_JOB", '{"todo_id": 1735}')
+
+    def run(command, **kwargs):
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="passed\n", stderr="")
+
+    monkeypatch.setattr(controller_verify.subprocess, "run", run)
+
+    result = controller_verify._run_check("pytest", [sys.executable, "-m", "pytest"])
+
+    assert result["status"] == "passed"
+    assert "TGW_CODING_JOB" not in observed["env"]
+
+
 def test_controller_verify_scope_is_bound_to_changed_source_and_tests(
     tmp_path,
     monkeypatch,

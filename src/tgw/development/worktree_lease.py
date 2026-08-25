@@ -49,7 +49,7 @@ def _metadata_directory(worktree: Path) -> Path:
     common = raw_common.resolve()
     if top != resolved_worktree:
         raise HardFailure("coding worktree lease target is not the Git top-level")
-    if raw_gitdir != gitdir or raw_common.absolute() != common:
+    if raw_gitdir != gitdir or raw_common != common:
         raise HardFailure("coding worktree lease refuses symlinked Git metadata")
     if gitdir != common and gitdir.parent != common / "worktrees":
         raise HardFailure("coding worktree lease metadata escapes the repository")
