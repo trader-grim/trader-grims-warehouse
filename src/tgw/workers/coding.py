@@ -632,7 +632,7 @@ class CodingWorker(QueueWorker):
                     },
                 )
                 receipt_value = json.loads(receipt_path_for_treatment(worktree, "codex-implement").read_text(encoding="utf-8"))
-                validate_implementation_lineage(
+                latest = validate_implementation_lineage(
                     worktree, base_commit=plan_binding["source_commit"],
                     candidate_commit=candidate["head"], candidate_tree=candidate["tree"],
                     receipt=receipt_value,
@@ -643,6 +643,10 @@ class CodingWorker(QueueWorker):
                         "worktree": str(worktree), "treatment_id": "codex-implement", "treatment_version": "1",
                     },
                 )
+                if payload.get("implementation_attempt_hash") != latest.get("attempt_hash"):
+                    raise ValueError(
+                        "controller implementation attempt hash is absent or stale"
+                    )
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 raise HardFailure(f"controller verification requires exact implementation lineage: {exc}") from exc
 
@@ -788,6 +792,11 @@ class CodingWorker(QueueWorker):
             "artifacts": artifacts,
             "receipt_schema_id": "receipt/tgw-development/v1",
             **({"plan_binding": plan_binding} if plan_binding else {}),
+            **(
+                {"implementation_attempt_hash": payload.get("implementation_attempt_hash")}
+                if treatment_id == "controller-verify"
+                else {}
+            ),
         }
         self._raise_if_cancelled(job)
         if attempt_binding is not None and outcome == OUTCOME_SATISFIED and job.get("lease_token"):

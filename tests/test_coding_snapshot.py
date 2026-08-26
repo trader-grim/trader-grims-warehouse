@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 # Ensure src/ is on the path so we can import tgw.workflow
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -26,6 +28,7 @@ from tgw.development.coding_snapshot import (  # noqa: E402
 )
 from tgw.development.partial_resume import preservation_manifest, source_tree  # noqa: E402
 from tgw.workflow import (  # noqa: E402
+    EvidenceReference,
     FingerprintResult,
     GoalProfile,
     ObjectSnapshot,
@@ -469,11 +472,29 @@ class TestCheckReceipt:
         assert result is FingerprintResult.TRUE
 
     def test_controller_harness_receipt(self, tmp_path):
+        attempt_hash = "sha256:" + "a" * 64
         (tmp_path / "controller-harness-receipt.json").write_text(
-            json.dumps({"status": "PASS", "outcome": "satisfied", "established_conditions": ["controller_verified"], "graph_id": "g", "object_id": "o", "object_generation": "x"})
+            json.dumps({
+                "status": "PASS", "outcome": "satisfied",
+                "established_conditions": ["controller_verified"],
+                "graph_id": "g", "object_id": "o", "object_generation": "x",
+                "implementation_attempt_hash": attempt_hash,
+            })
         )
-        result, reasons, _ = _check_receipt(tmp_path, "controller_verified", "o", "x")
+        result, reasons, _ = _check_receipt(tmp_path, "controller_verified", "o", "x", attempt_hash)
         assert result is FingerprintResult.TRUE
+
+    @pytest.mark.parametrize("supplied", [None, "sha256:" + "b" * 64])
+    def test_controller_harness_receipt_rejects_missing_or_old_attempt_hash(self, tmp_path, supplied):
+        current = "sha256:" + "a" * 64
+        (tmp_path / "controller-harness-receipt.json").write_text(json.dumps({
+            "status": "PASS", "outcome": "satisfied",
+            "established_conditions": ["controller_verified"], "graph_id": "g",
+            "object_id": "o", "object_generation": "x",
+            **({"implementation_attempt_hash": supplied} if supplied else {}),
+        }))
+        result, _, _ = _check_receipt(tmp_path, "controller_verified", "o", "x", current)
+        assert result is FingerprintResult.STALE
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +558,11 @@ class TestBuildCodingSnapshot:
         receipt = {"status": "PASS", "graph_id": "g", "object_id": str(tmp_path.resolve()), "object_generation": first.generation, "outcome": "satisfied"}
         (tmp_path / "review-receipt.json").write_text(json.dumps({**receipt, "established_conditions": ["reviewed"]}))
         (tmp_path / "controller-harness-receipt.json").write_text(json.dumps({**receipt, "established_conditions": ["controller_verified"]}))
-        assert all(a.result is FingerprintResult.TRUE for a in build_coding_snapshot(tmp_path, _goal("reviewed", "controller_verified")).assertions)
+        current = build_coding_snapshot(tmp_path, _goal("reviewed", "controller_verified"))
+        assert {a.condition_id: a.result for a in current.assertions} == {
+            "controller_verified": FingerprintResult.STALE,
+            "reviewed": FingerprintResult.TRUE,
+        }
         _git_write_file(tmp_path, "x.py", "x = 2")
         stale = build_coding_snapshot(tmp_path, _goal("reviewed", "controller_verified"))
         assert all(a.result is FingerprintResult.STALE for a in stale.assertions)
@@ -583,10 +608,32 @@ class TestBuildCodingSnapshot:
             receipt_backed_conditions=frozenset({"tested", "linted"}),
         )
 
-        assert all(
-            assertion.result is FingerprintResult.TRUE
-            for assertion in snapshot.assertions
+        assert all(assertion.result is FingerprintResult.STALE for assertion in snapshot.assertions)
+
+    def test_controller_conditions_require_current_implemented_assertion_hash(
+        self, tmp_path, monkeypatch,
+    ):
+        _git_init(tmp_path)
+        _git_commit(tmp_path, "initial", allow_empty=True)
+        attempt_hash = "sha256:" + "a" * 64
+        generation = build_coding_snapshot(tmp_path, _goal("implemented")).generation
+        (tmp_path / "controller-harness-receipt.json").write_text(json.dumps({
+            "status": "PASS", "outcome": "satisfied",
+            "established_conditions": ["tested", "linted", "controller_verified"],
+            "graph_id": "controller", "object_id": str(tmp_path.resolve()),
+            "object_generation": generation,
+            "implementation_attempt_hash": attempt_hash,
+        }))
+        monkeypatch.setitem(_CHECKERS, "implemented", lambda *_args: (
+            FingerprintResult.TRUE, ("current",),
+            (EvidenceReference("head", "implementation", "tree", attempt_hash),),
+        ))
+
+        snapshot = build_coding_snapshot(
+            tmp_path, _goal("implemented", "tested", "linted", "controller_verified"),
+            receipt_backed_conditions=frozenset({"tested", "linted"}),
         )
+        assert all(item.result is FingerprintResult.TRUE for item in snapshot.assertions)
 
     def test_stitch_receipt_does_not_dirty_or_change_generation(self, tmp_path):
         _git_init(tmp_path)

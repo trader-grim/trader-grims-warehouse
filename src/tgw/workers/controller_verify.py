@@ -133,6 +133,8 @@ def _assert_implementation_lineage(
                 "treatment_version": "1",
             },
         )
+        if job.get("implementation_attempt_hash") != latest.get("attempt_hash"):
+            raise ValueError("controller implementation attempt hash is absent or stale")
         expected_plan = job.get("plan_binding")
         if (
             not isinstance(expected_plan, dict)

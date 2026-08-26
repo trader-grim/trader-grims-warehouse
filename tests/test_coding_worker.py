@@ -88,6 +88,7 @@ def _install_controller_lineage(
     }))
     return {
         "todo_id": 1798, "todo_agent": "codex", "plan_binding": plan_binding,
+        "implementation_attempt_hash": attempt["attempt_hash"],
         "object_generation": __import__("hashlib").sha256(
             f"{head}|{tree}".encode()
         ).hexdigest()[:16],
@@ -633,6 +634,34 @@ def test_controller_lineage_fails_before_checks_for_missing_or_contradictory_evi
     with pytest.raises(controller_verify.ControllerVerificationError, match="does not match"):
         controller_verify._assert_implementation_lineage(
             tmp_path.resolve(), job, "c" * 40, "e" * 40, "f" * 40,
+        )
+
+
+@pytest.mark.parametrize("replacement", [None, "sha256:" + "f" * 64])
+def test_controller_requires_current_implementation_attempt_hash(tmp_path, replacement):
+    from tgw.workers import controller_verify
+
+    _git_worktree(tmp_path)
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    (tmp_path / "feature.py").write_text("implemented = True\n")
+    subprocess.run(["git", "add", "feature.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "candidate"], cwd=tmp_path, check=True, capture_output=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, text=True, capture_output=True).stdout.strip()
+    tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=tmp_path, check=True, text=True, capture_output=True).stdout.strip()
+    current = _install_controller_lineage(tmp_path, baseline, head, tree)
+
+    controller_verify._assert_implementation_lineage(tmp_path.resolve(), current, baseline, head, tree)
+    substituted = dict(current)
+    if replacement is None:
+        substituted.pop("implementation_attempt_hash")
+    else:
+        substituted["implementation_attempt_hash"] = replacement
+    with pytest.raises(controller_verify.ControllerVerificationError, match="attempt hash"):
+        controller_verify._assert_implementation_lineage(
+            tmp_path.resolve(), substituted, baseline, head, tree,
         )
 
 

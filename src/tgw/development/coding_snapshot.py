@@ -628,6 +628,7 @@ def _check_linted(
 def _check_receipt(
     worktree: Path, condition_id: str, object_id: str | None = None,
     object_generation: str | None = None,
+    implementation_attempt_hash: str | None = None,
 ) -> tuple[FingerprintResult, tuple[str, ...], tuple[EvidenceReference, ...]]:
     """Check for a receipt file containing PASS status."""
     receipt_rel = _RECEIPT_PATHS.get(condition_id)
@@ -669,7 +670,15 @@ def _check_receipt(
         and all(isinstance(item, str) for item in established)
         and condition_id in established
     )
-    if status == "PASS" and bound and valid_outcome and establishes_condition:
+    controller_bound = (
+        condition_id not in {"tested", "linted", "controller_verified"}
+        or (
+            re.fullmatch(r"sha256:[0-9a-f]{64}", implementation_attempt_hash or "")
+            is not None
+            and data.get("implementation_attempt_hash") == implementation_attempt_hash
+        )
+    )
+    if status == "PASS" and bound and valid_outcome and establishes_condition and controller_bound:
         return FingerprintResult.TRUE, (
             f"{condition_id} receipt: PASS",
         ), (
@@ -682,6 +691,16 @@ def _check_receipt(
     if not bound:
         return FingerprintResult.STALE, (
             f"{condition_id} receipt is not bound to this worktree generation",
+        ), (
+            EvidenceReference(
+                identity=identity,
+                source_class="receipt",
+                source_generation=receipt_rel,
+            ),
+        )
+    if not controller_bound:
+        return FingerprintResult.STALE, (
+            f"{condition_id} controller receipt implementation attempt is stale",
         ), (
             EvidenceReference(
                 identity=identity,
@@ -838,10 +857,24 @@ def build_coding_snapshot(
     generation = hashlib.sha256(gen_input).hexdigest()[:16]
 
     assertions: list[EvidenceAssertion] = []
+    current_implementation_attempt_hash: str | None = None
     condition_ids = set(goal_profile.required)
     for treatment in treatments:
         condition_ids.update(requirement.condition_id for requirement in treatment.requires)
         condition_ids.update(treatment.may_establish)
+
+    implemented_result = None
+    if "implemented" in condition_ids:
+        implemented_result = _CHECKERS["implemented"](
+            worktree, implementation_baseline_commit, expected_implementation,
+        )
+        result, _reasons, evidence = implemented_result
+        if result is FingerprintResult.TRUE:
+            hashes = [item.freshness_identity for item in evidence if re.fullmatch(
+                r"sha256:[0-9a-f]{64}", item.freshness_identity
+            )]
+            if len(hashes) == 1:
+                current_implementation_attempt_hash = hashes[0]
 
     for condition_id in sorted(condition_ids):
         checker = _CHECKERS.get(condition_id)
@@ -857,16 +890,17 @@ def build_coding_snapshot(
             )
             continue
 
-        if condition_id in receipt_backed_conditions:
+        if condition_id == "implemented":
+            assert implemented_result is not None
+            result, reasons, evidence = implemented_result
+        elif condition_id in {"tested", "linted", "controller_verified"} and condition_id in receipt_backed_conditions | {"controller_verified"}:
             result, reasons, evidence = _check_receipt(
-                worktree,
-                condition_id,
-                object_id,
-                generation,
+                worktree, condition_id, object_id, generation,
+                current_implementation_attempt_hash,
             )
-        elif condition_id == "implemented":
-            result, reasons, evidence = checker(
-                worktree, implementation_baseline_commit, expected_implementation,
+        elif condition_id in receipt_backed_conditions:
+            result, reasons, evidence = _check_receipt(
+                worktree, condition_id, object_id, generation,
             )
         elif condition_id in {"reviewed", "controller_verified", "deployed"}:
             result, reasons, evidence = checker(worktree, object_id, generation)

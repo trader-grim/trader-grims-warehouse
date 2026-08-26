@@ -151,6 +151,7 @@ class _EligibleTreatment:
     graph: RuntimeWorkGraph
     disposition: TreatmentDisposition
     dedupe_key: str
+    implementation_attempt_hash: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -273,8 +274,8 @@ def _resume_dedupe_key(base: str, authority: Mapping[str, str]) -> str:
     )
 
 
-def _controller_dedupe_key(base: str, snapshot: Any) -> str:
-    """Fence controller retries by canonical implementation evidence, not manifests."""
+def _implementation_attempt_hash(snapshot: Any) -> str:
+    """Return the one canonical latest implementation attempt bound to a snapshot."""
     assertion = next(
         (item for item in snapshot.assertions if item.condition_id == "implemented"),
         None,
@@ -285,7 +286,14 @@ def _controller_dedupe_key(base: str, snapshot: Any) -> str:
     )
     if len(identities) != 1:
         raise ValueError("controller dispatch requires one exact implementation attempt hash")
-    return f"{base}:implementation:{identities[0].removeprefix('sha256:')}"
+    return identities[0]
+
+
+def _controller_dedupe_key(base: str, implementation_attempt_hash: str) -> str:
+    """Fence controller retries by canonical implementation evidence, not manifests."""
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", implementation_attempt_hash) is None:
+        raise ValueError("controller dispatch requires one exact implementation attempt hash")
+    return f"{base}:implementation:{implementation_attempt_hash.removeprefix('sha256:')}"
 
 
 # ---------------------------------------------------------------------------
@@ -587,6 +595,7 @@ def tick(
             continue
 
         for disposition in graph.eligible_treatments:
+            implementation_attempt_hash = None
             dedupe_key = treatment_dedupe_key(
                 disposition,
                 entity_type="coding_task",
@@ -597,7 +606,10 @@ def tick(
             if disposition.treatment_id == "codex-implement" and authority is not None:
                 dedupe_key = _resume_dedupe_key(dedupe_key, authority)
             elif disposition.treatment_id == "controller-verify":
-                dedupe_key = _controller_dedupe_key(dedupe_key, snapshot)
+                implementation_attempt_hash = _implementation_attempt_hash(snapshot)
+                dedupe_key = _controller_dedupe_key(
+                    dedupe_key, implementation_attempt_hash
+                )
             if _has_active_job(dedupe_key, check_active_fn):
                 result = replace(result, skipped_active=result.skipped_active + 1)
                 continue
@@ -612,6 +624,7 @@ def tick(
                     graph=graph,
                     disposition=disposition,
                     dedupe_key=dedupe_key,
+                    implementation_attempt_hash=implementation_attempt_hash,
                 )
             )
 
@@ -657,6 +670,10 @@ def tick(
                 authority = cfg.resume_bindings.get(chosen.todo.todo_id)
                 if authority:
                     payload_extra.update(authority)
+            elif disposition.treatment_id == "controller-verify":
+                payload_extra["implementation_attempt_hash"] = (
+                    chosen.implementation_attempt_hash
+                )
             dispatch_lease = (
                 exclusive_worktree_lease(Path(chosen.todo.worktree))
                 if cfg.coding_config
@@ -698,6 +715,15 @@ def tick(
                         receipt_backed_conditions=cfg.receipt_backed_conditions,
                     )
                     if current.generation != chosen.graph.object_generation:
+                        result = replace(
+                            result, skipped_active=result.skipped_active + 1
+                        )
+                        continue
+                    if (
+                        disposition.treatment_id == "controller-verify"
+                        and _implementation_attempt_hash(current)
+                        != chosen.implementation_attempt_hash
+                    ):
                         result = replace(
                             result, skipped_active=result.skipped_active + 1
                         )

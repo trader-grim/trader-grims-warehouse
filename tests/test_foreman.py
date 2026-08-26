@@ -21,6 +21,7 @@ from tgw.development.foreman import (
     _has_active_job,
     _has_active_worktree_job,
     _has_terminal_job,
+    _implementation_attempt_hash,
     tick,
 )
 from tgw.development.plan_binding import execution_root_hash
@@ -155,8 +156,8 @@ def test_controller_dedupe_tracks_attempt_hash_and_ignores_unchanged_evidence():
         "implemented", FingerprintResult.TRUE, ("implemented",),
         (EvidenceReference("candidate", "implementation", "tree", "sha256:" + "b" * 64),),
     ),))
-    assert _controller_dedupe_key("controller", first) == _controller_dedupe_key("controller", same)
-    assert _controller_dedupe_key("controller", first) != _controller_dedupe_key("controller", replacement)
+    assert _controller_dedupe_key("controller", _implementation_attempt_hash(first)) == _controller_dedupe_key("controller", _implementation_attempt_hash(same))
+    assert _controller_dedupe_key("controller", _implementation_attempt_hash(first)) != _controller_dedupe_key("controller", _implementation_attempt_hash(replacement))
 
 
 def test_plan_bound_todo_uses_bound_source_as_uncommitted_implementation_baseline():
@@ -869,6 +870,12 @@ def test_tick_routes_post_implementation_treatments_by_identity():
         assert result.dispatched == 1
         assert enqueue.call_args.kwargs["queue_name"] == treatment_id
         assert enqueue.call_args.kwargs["handler_family"] == treatment_id
+        if treatment_id == "controller-verify":
+            attempt_hash = "sha256:" + "a" * 64
+            assert enqueue.call_args.kwargs["payload"]["implementation_attempt_hash"] == attempt_hash
+            assert enqueue.call_args.kwargs["dedupe_key"].endswith(
+                ":implementation:" + "a" * 64
+            )
 
 
 def test_real_evaluator_dispatches_stitch_after_review_and_verification():
