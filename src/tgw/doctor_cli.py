@@ -3945,9 +3945,27 @@ def _activate_quiescence(
     loaded = _run(["systemctl", "daemon-reload"], timeout=30)
     if loaded.returncode:
         raise DoctorError(loaded.stderr.strip() or "cannot load local coding quiescence guards")
-    stopped = _run(["systemctl", "stop", *units], timeout=30)
+    timer = "tgw-coding-local-foreman.timer"
+    stopped = _run(["systemctl", "stop", timer], timeout=30)
     if stopped.returncode:
-        raise DoctorError(stopped.stderr.strip() or "cannot stop local coding units")
+        raise DoctorError(stopped.stderr.strip() or "cannot stop local coding Foreman timer")
+    timer_state = _unit_state(timer)
+    timer_dropin = dropins[timer]
+    if (
+        timer_state.get("ActiveState") != "inactive"
+        or str(timer_dropin) not in timer_state.get("DropInPaths", "").split()
+        or not _quiescence_file_exact(
+            timer_dropin, dropin_value, mode=0o444, uid=uid, gid=gid
+        )
+        or not _quiescence_file_exact(
+            marker, marker_value, mode=0o400, uid=uid, gid=gid
+        )
+    ):
+        raise DoctorError("local coding Foreman timer did not reach guarded/inactive state")
+    remaining = [unit for unit in units if unit != timer]
+    stopped = _run(["systemctl", "stop", *remaining], timeout=30)
+    if stopped.returncode:
+        raise DoctorError(stopped.stderr.strip() or "cannot stop remaining local coding units")
     unsettled = []
     for unit, dropin in dropins.items():
         state = _unit_state(unit)
@@ -3993,7 +4011,12 @@ def _release_quiescence(
 
     marker_absent = not os.path.lexists(marker)
     if marker_absent:
-        undesired = [unit for unit in units if unit not in initially_active and _unit_state(unit).get("ActiveState") == "active"]
+        undesired = [
+            unit
+            for unit in units
+            if unit not in initially_active
+            and _unit_state(unit).get("ActiveState") != "inactive"
+        ]
         if undesired:
             stopped = _run(["systemctl", "stop", *undesired], timeout=30)
             if stopped.returncode:
@@ -4005,7 +4028,12 @@ def _release_quiescence(
     else:
         errors.append("quiescence marker remains; refusing to start local coding units")
 
-    wrong = [unit for unit in units if (_unit_state(unit).get("ActiveState") == "active") != (unit in initially_active)]
+    wrong = [
+        unit
+        for unit in units
+        if _unit_state(unit).get("ActiveState")
+        != ("active" if unit in initially_active else "inactive")
+    ]
     if wrong:
         errors.append("local coding units did not return to their initial state: " + ", ".join(wrong))
 

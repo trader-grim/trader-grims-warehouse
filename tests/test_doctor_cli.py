@@ -1170,7 +1170,20 @@ def test_coding_quiescence_guards_and_verifies_every_local_unit(
         assert all((runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN).is_file() for unit in doctor_cli._CODING_UNITS)
 
     assert commands[0] == ["systemctl", "daemon-reload"]
-    assert commands[1] == ["systemctl", "stop", *doctor_cli._CODING_UNITS]
+    assert commands[1] == [
+        "systemctl",
+        "stop",
+        "tgw-coding-local-foreman.timer",
+    ]
+    assert commands[2] == [
+        "systemctl",
+        "stop",
+        *(
+            unit
+            for unit in doctor_cli._CODING_UNITS
+            if unit != "tgw-coding-local-foreman.timer"
+        ),
+    ]
     assert commands[-2] == ["systemctl", "daemon-reload"]
     assert commands[-1] == [
         "systemctl",
@@ -1184,6 +1197,103 @@ def test_coding_quiescence_guards_and_verifies_every_local_unit(
     }
     assert not quiescence_root.exists()
     assert not any(runtime_root.iterdir())
+
+
+def test_coding_quiescence_stops_timer_before_timer_triggered_activating_one_shot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands = []
+    states = {
+        unit: ("active" if unit == "tgw-coding-local-foreman.timer" else "inactive")
+        for unit in doctor_cli._CODING_UNITS
+    }
+    runtime_root = tmp_path / "systemd"
+    runtime_root.mkdir(mode=0o755)
+    paths = doctor_cli.DoctorPaths(
+        systemd_runtime_root=runtime_root,
+        quiescence_root=tmp_path / "tgw-doctor",
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        if command[1:] == ["stop", "tgw-coding-local-foreman.timer"]:
+            states["tgw-coding-local-foreman.timer"] = "inactive"
+            states["tgw-coding-local-foreman.service"] = "activating"
+        elif command[1] == "stop":
+            for unit in command[2:]:
+                states[unit] = "inactive"
+        elif command[1] == "start":
+            for unit in command[2:]:
+                states[unit] = "active"
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def unit_state(unit):
+        dropin = runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN
+        return {
+            "LoadState": "loaded",
+            "ActiveState": states[unit],
+            "DropInPaths": str(dropin) if dropin.exists() else "",
+        }
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
+
+    with doctor_cli._coding_quiescence(paths):
+        assert set(states.values()) == {"inactive"}
+
+    assert commands[1] == ["systemctl", "stop", "tgw-coding-local-foreman.timer"]
+    assert "tgw-coding-local-foreman.service" in commands[2]
+    assert states["tgw-coding-local-foreman.timer"] == "active"
+
+
+def test_coding_quiescence_fails_closed_when_activating_one_shot_cleanup_cannot_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    states = {unit: "inactive" for unit in doctor_cli._CODING_UNITS}
+    states["tgw-coding-local-foreman.timer"] = "active"
+    runtime_root = tmp_path / "systemd"
+    runtime_root.mkdir(mode=0o755)
+    quiescence_root = tmp_path / "tgw-doctor"
+    paths = doctor_cli.DoctorPaths(
+        systemd_runtime_root=runtime_root,
+        quiescence_root=quiescence_root,
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+
+    def run(command, **_kwargs):
+        if command[1:] == ["stop", "tgw-coding-local-foreman.timer"]:
+            states["tgw-coding-local-foreman.timer"] = "inactive"
+            states["tgw-coding-local-foreman.service"] = "activating"
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[1] == "stop":
+            return subprocess.CompletedProcess(command, 1, "", "injected stop failure")
+        if command[1] == "start":
+            for unit in command[2:]:
+                states[unit] = "active"
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def unit_state(unit):
+        dropin = runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN
+        return {
+            "LoadState": "loaded",
+            "ActiveState": states[unit],
+            "DropInPaths": str(dropin) if dropin.exists() else "",
+        }
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
+
+    with pytest.raises(doctor_cli.DoctorError, match="injected stop failure"):
+        with doctor_cli._coding_quiescence(paths):
+            pass
+
+    assert states["tgw-coding-local-foreman.service"] == "activating"
+    assert (quiescence_root / doctor_cli._QUIESCENCE_STATE).is_file()
 
 
 def test_coding_quiescence_refuses_preexisting_runtime_mask(
