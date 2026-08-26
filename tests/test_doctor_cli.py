@@ -2129,6 +2129,80 @@ def test_database_check_fails_until_progress_note_exists(tmp_path, monkeypatch) 
     assert result["operator_action"] == "sudo -n tgw doctor repair database"
 
 
+def test_database_repair_pipes_verified_sql_across_private_release_ancestry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, head, _tree = _fixture(tmp_path)
+    release = paths.runtime_root / "releases" / head
+    migration = (release / "config/tgw-coding-local-roles.sql").read_text()
+    paths.runtime_root.chmod(0o700)
+    reports = iter([
+        {"state": "FAIL", "evidence": {"progress_note_column": False}},
+        {
+            "state": "PASS",
+            "evidence": {
+                "progress_note_column": True,
+                "todo_access": True,
+                "todo_sequence_access": True,
+            },
+        },
+    ])
+    observed: dict[str, object] = {}
+    verified: list[tuple[str, Path]] = []
+
+    def run(command, **kwargs):
+        observed["command"] = command
+        observed["input"] = kwargs.get("input")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(
+        doctor_cli, "_verify_release_tree",
+        lambda _paths, desired, selected: verified.append((desired, selected)),
+    )
+    monkeypatch.setattr(doctor_cli, "check_database", lambda _paths: next(reports))
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_receipt", lambda *_args: "receipt.json")
+
+    result = doctor_cli.repair_database(paths)
+
+    assert result["ok"] is True
+    assert verified == [(head, release)]
+    assert observed["input"] == migration
+    assert "--file" not in observed["command"]
+    assert str(release) not in observed["command"]
+    assert observed["command"][:5] == ["sudo", "-n", "-u", "postgres", "psql"]
+
+
+def test_database_stdin_failure_is_receipted_and_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    receipts: list[str] = []
+
+    def run(command, **kwargs):
+        assert kwargs.get("input") == "SELECT 1;\n"
+        return subprocess.CompletedProcess(command, 1, "", "migration rejected")
+
+    def receipt(_paths, operation, *_args):
+        receipts.append(operation)
+        return operation + ".json"
+
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli, "_verify_release_tree", lambda *_args: None)
+    monkeypatch.setattr(
+        doctor_cli, "check_database",
+        lambda _paths: {"state": "FAIL", "evidence": {"progress_note_column": False}},
+    )
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_receipt", receipt)
+
+    with pytest.raises(doctor_cli.DoctorError, match="migration rejected.*failure receipt"):
+        doctor_cli.repair("database", paths)
+
+    assert receipts == ["database-started", "database-failed"]
+
+
 def test_doctor_launcher_is_local_and_provider_independent() -> None:
     root = Path(__file__).resolve().parents[1]
     launcher = (root / "bin/tgw-doctor").read_text(encoding="utf-8")

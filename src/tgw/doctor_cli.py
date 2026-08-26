@@ -256,6 +256,7 @@ def _run(
     cwd: Path | None = None,
     timeout: int = 15,
     env: Mapping[str, str] | None = None,
+    input: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(command),
@@ -264,6 +265,7 @@ def _run(
         check=False,
         capture_output=True,
         text=True,
+        input=input,
         timeout=timeout,
     )
 
@@ -2744,6 +2746,10 @@ def repair_database(paths: DoctorPaths) -> dict[str, Any]:
     sql = release / "config/tgw-coding-local-roles.sql"
     if not sql.is_file():
         raise DoctorError(f"runtime {desired} lacks the coding role SQL")
+    try:
+        migration = sql.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise DoctorError(f"cannot read the verified coding role SQL: {exc}") from exc
     before = check_database(paths)
     result = _run(
         [
@@ -2753,10 +2759,9 @@ def repair_database(paths: DoctorPaths) -> dict[str, Any]:
             "postgres",
             "psql",
             "--dbname=tgw_lib_dev_state_machine",
-            "--file",
-            str(sql),
         ],
         timeout=30,
+        input=migration,
     )
     if result.returncode:
         raise DoctorError(result.stderr.strip() or "database role repair failed")
