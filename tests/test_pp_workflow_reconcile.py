@@ -69,6 +69,56 @@ def test_catalog_and_plan_content_tampering_fail_closed(tmp_path):
         reconcile(plan_root=tmp_path)
 
 
+def test_exact_current_provider_catalog_reconciles_and_source_tamper_fails_closed(
+        tmp_path):
+    catalog = load_catalog()
+    declared_sources = [
+        source
+        for provider in catalog["provider_evidence"].values()
+        for source in provider.get("sources", ())
+    ]
+    assert len(declared_sources) == 10
+    for source in declared_sources:
+        raw = (CATALOG.parents[2] / source["path"]).read_bytes()
+        assert source["sha256"] == "sha256:" + hashlib.sha256(raw).hexdigest()
+
+    def verified(**kwargs):
+        return {"verified": True, **kwargs}
+
+    current = reconcile(runtime_verifier=verified)
+    assert current["dimensions"] == {
+        "reconciliation_complete": False,
+        "operation_success": True,
+        "materialization_attempted": False,
+    }
+    assert current["effects"] == {
+        "todo_created": False,
+        "worktree_created": False,
+        "job_created": False,
+        "plan_publication": False,
+    }
+    assert all(provider["state"] == "IMPLEMENTED_UNVERIFIED"
+               for provider in current["providers"])
+
+    source_root = tmp_path / "source"
+    for source in declared_sources:
+        destination = source_root / source["path"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(CATALOG.parents[2] / source["path"], destination)
+    foreman = source_root / "src/tgw/development/foreman.py"
+    foreman.write_bytes(foreman.read_bytes() + b"\n# tampered\n")
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=CATALOG.parents[2], text=True,
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=CATALOG.parents[2], text=True,
+    ).strip()
+    with pytest.raises(PPWorkflowReconcileError,
+                       match="source evidence content drift: src/tgw/development/foreman.py"):
+        reconcile(source_root=source_root, selected_commit=commit, selected_tree=tree,
+                  runtime_verifier=verified)
+
+
 def test_source_tree_tampering_fails_closed(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
