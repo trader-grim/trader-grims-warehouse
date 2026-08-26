@@ -1947,6 +1947,23 @@ def test_local_coding_start_binds_and_ticks_only_the_selected_todo(monkeypatch):
 
     monkeypatch.setattr(coding_cli, "tick", local_tick)
     monkeypatch.setattr(coding_cli, "_jobs", lambda todo_id, *, limit: [{"todo_id": todo_id}])
+    monkeypatch.setattr(
+        coding_cli,
+        "source_tree",
+        lambda path, commit: observed.update(source_tree=(path, commit)) or "d" * 40,
+    )
+    monkeypatch.setattr(
+        coding_cli,
+        "exclusive_worktree_lease",
+        lambda path: observed.update(lease=path) or contextlib.nullcontext(),
+    )
+    classifications = []
+    monkeypatch.setattr(
+        coding_cli,
+        "classify",
+        lambda path, expected: classifications.append((path, expected))
+        or {"state": "ABANDONED_CLEAN"},
+    )
 
     result = coding_cli.start(1732, config_path=Path("/tmp/coding.json"))
 
@@ -1961,6 +1978,11 @@ def test_local_coding_start_binds_and_ticks_only_the_selected_todo(monkeypatch):
         "approval_card": False,
     }
     assert observed["todo_ids"] == {1732}
+    worktree = Path(result["worktree"])
+    assert observed["source_tree"] == (worktree, "a" * 40)
+    assert observed["lease"] == worktree
+    assert [path for path, _expected in classifications] == [worktree, worktree]
+    assert all(expected["source_tree"] == "d" * 40 for _path, expected in classifications)
 
 
 def test_1747_resume_validates_before_cas_preserves_bytes_and_repeat_dispatches_zero(
@@ -2095,6 +2117,23 @@ def test_local_coding_start_projects_missing_todo_from_standalone_plan(monkeypat
     })
     monkeypatch.setattr(coding_cli, "tick", lambda *_args, **_kwargs: TickResult(dispatched=1))
     monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        coding_cli,
+        "source_tree",
+        lambda path, commit: observed.update(source_tree=(path, commit)) or "f" * 40,
+    )
+    monkeypatch.setattr(
+        coding_cli,
+        "exclusive_worktree_lease",
+        lambda path: observed.update(lease=path) or contextlib.nullcontext(),
+    )
+    classifications = []
+    monkeypatch.setattr(
+        coding_cli,
+        "classify",
+        lambda path, expected: classifications.append((path, expected))
+        or {"state": "ABANDONED_CLEAN"},
+    )
 
     result = coding_cli.start(1732, config_path=Path("/tmp/coding.json"))
 
@@ -2102,6 +2141,11 @@ def test_local_coding_start_projects_missing_todo_from_standalone_plan(monkeypat
     assert observed["approved_commit"] == "c" * 40
     assert observed["imported"] == projected
     assert result["todo_projection"]["taskboard_blob"] == "b" * 40
+    worktree = Path(result["worktree"])
+    assert observed["source_tree"] == (worktree, "d" * 40)
+    assert observed["lease"] == worktree
+    assert [path for path, _expected in classifications] == [worktree, worktree]
+    assert all(expected["source_tree"] == "f" * 40 for _path, expected in classifications)
 
 
 def test_execution_boundary_accepts_only_local_allowed_argv_runner(tmp_path):

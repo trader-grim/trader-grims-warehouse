@@ -32,14 +32,29 @@ from tgw.workflow import (  # noqa: E402
 
 
 def test_test_and_lint_checks_use_controller_python(tmp_path):
-    """Coding snapshots must not depend on an arbitrary PATH python."""
+    """Coding snapshots use controller Python without mutating cache state."""
     completed = subprocess.CompletedProcess([], 0, "", "")
     with patch("tgw.development.coding_snapshot.subprocess.run", return_value=completed) as run:
         _CHECKERS["tested"](tmp_path)
         _CHECKERS["linted"](tmp_path)
 
-    assert run.call_args_list[0].args[0][:2] == [CONTROLLER_PYTHON, "-m"]
-    assert run.call_args_list[1].args[0][:2] == [CONTROLLER_PYTHON, "-m"]
+    assert run.call_args_list[0].args[0] == [
+        CONTROLLER_PYTHON,
+        "-m",
+        "pytest",
+        "-q",
+        "--tb=short",
+        "-p",
+        "no:cacheprovider",
+    ]
+    assert run.call_args_list[1].args[0] == [
+        CONTROLLER_PYTHON,
+        "-m",
+        "ruff",
+        "check",
+        "--no-cache",
+        ".",
+    ]
 
 # ---------------------------------------------------------------------------
 # Fixtures

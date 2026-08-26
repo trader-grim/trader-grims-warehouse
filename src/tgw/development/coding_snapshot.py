@@ -404,7 +404,15 @@ def _check_tested(
     """Pytest passes."""
     try:
         proc = subprocess.run(
-            [CONTROLLER_PYTHON, "-m", "pytest", "-q", "--tb=short"],
+            [
+                CONTROLLER_PYTHON,
+                "-m",
+                "pytest",
+                "-q",
+                "--tb=short",
+                "-p",
+                "no:cacheprovider",
+            ],
             capture_output=True,
             text=True,
             timeout=120,
@@ -455,7 +463,7 @@ def _check_linted(
     """Ruff passes."""
     try:
         proc = subprocess.run(
-            [CONTROLLER_PYTHON, "-m", "ruff", "check", "."],
+            [CONTROLLER_PYTHON, "-m", "ruff", "check", "--no-cache", "."],
             capture_output=True,
             text=True,
             timeout=60,
