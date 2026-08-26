@@ -17,7 +17,13 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
-from tgw.development.partial_resume import HISTORY, PRESERVATION, classify, source_tree
+from tgw.development.partial_resume import (
+    HISTORY,
+    PRESERVATION,
+    candidate_changed_paths,
+    classify,
+    source_tree,
+)
 from tgw.development.worktree_lease import exclusive_worktree_lease as _exclusive_worktree_lease
 from tgw.development.worktree_lease import inherited_worktree_lease
 from tgw.errors import HardFailure
@@ -32,7 +38,8 @@ _FINAL_SCHEMA = {
         "status": {"enum": ["implemented", "blocked"]},
         "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
         "tests": {
-            "type": "array", "maxItems": 50,
+            "type": "array",
+            "maxItems": 50,
             "items": {"type": "string", "maxLength": 1000},
         },
     },
@@ -74,7 +81,11 @@ def _write_isolated_config(codex_home: Path) -> None:
 
 def _git(cwd: Path, *args: str) -> str:
     result = subprocess.run(
-        ["git", *args], cwd=cwd, check=False, text=True, capture_output=True,
+        ["git", *args],
+        cwd=cwd,
+        check=False,
+        text=True,
+        capture_output=True,
     )
     if result.returncode:
         raise HardFailure(f"Codex implementation worktree Git probe failed: {result.stderr[-300:]}")
@@ -128,11 +139,11 @@ def _prompt(task: dict[str, Any], continuation: dict[str, Any] | None = None) ->
     if continuation:
         continuation_brief = f"""
 This is an exact bounded continuation of a preserved partial attempt.
-Preserve every current source byte. Continue from attempt {continuation['resume_of']}
-with source fingerprint {continuation['resume_fingerprint']}. Do not restart,
+Preserve every current source byte. Continue from attempt {continuation["resume_of"]}
+with source fingerprint {continuation["resume_fingerprint"]}. Do not restart,
 clean, reset, stash, or replace the existing implementation.
 """
-    return f"""You are the Codex implementation treatment for TGW Todo #{task['todo_id']}.
+    return f"""You are the Codex implementation treatment for TGW Todo #{task["todo_id"]}.
 
 Repository AGENTS.md is your actor contract. CLAUDE.md does not govern Codex.
 Work only in the current request-bound worktree. Do not commit, deploy, change
@@ -141,7 +152,7 @@ memory, or create workflow receipt files. Implement only this bounded task and
 run proportionate offline tests:
 {continuation_brief}
 
-{task['body']}
+{task["body"]}
 
 Return the requested JSON report. Use status=blocked if the task cannot be
 implemented inside these boundaries. The wrapper independently determines
@@ -177,7 +188,11 @@ def _ignored_paths(cwd: Path) -> tuple[str, ...]:
     """Return ignored untracked paths without lossy newline parsing."""
     completed = subprocess.run(
         [
-            "git", "ls-files", "-z", "--others", "--ignored",
+            "git",
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
             "--exclude-standard",
         ],
         cwd=cwd,
@@ -186,14 +201,8 @@ def _ignored_paths(cwd: Path) -> tuple[str, ...]:
     )
     if completed.returncode:
         detail = completed.stderr.decode("utf-8", errors="replace")[-300:]
-        raise HardFailure(
-            f"Codex implementation ignored-file probe failed: {detail}"
-        )
-    return tuple(
-        item.decode("utf-8", errors="surrogateescape")
-        for item in completed.stdout.split(b"\0")
-        if item
-    )
+        raise HardFailure(f"Codex implementation ignored-file probe failed: {detail}")
+    return tuple(item.decode("utf-8", errors="surrogateescape") for item in completed.stdout.split(b"\0") if item)
 
 
 def _transient_cache_roots(paths: tuple[str, ...]) -> tuple[str, ...]:
@@ -226,15 +235,10 @@ def _purge_transient_caches(cwd: Path) -> tuple[str, ...]:
             capture_output=True,
         )
         if completed.returncode:
-            raise HardFailure(
-                "Codex implementation could not remove generated worktree cache: "
-                f"{completed.stderr[-300:]}"
-            )
+            raise HardFailure(f"Codex implementation could not remove generated worktree cache: {completed.stderr[-300:]}")
     remaining = _transient_cache_roots(_ignored_paths(cwd))
     if remaining:
-        raise HardFailure(
-            "Codex implementation could not clean generated worktree caches"
-        )
+        raise HardFailure("Codex implementation could not clean generated worktree caches")
     return roots
 
 
@@ -247,10 +251,7 @@ def _source_status(cwd: Path) -> tuple[str, ...]:
         "--untracked-files=all",
         "--ignored=matching",
     )
-    return tuple(line for line in status.splitlines()
-                 if line[3:] not in _RECEIPT_FILES
-                 and not line[3:].startswith(HISTORY + "/")
-                 and not line[3:].startswith(PRESERVATION + "/"))
+    return tuple(line for line in status.splitlines() if line[3:] not in _RECEIPT_FILES and not line[3:].startswith(HISTORY + "/") and not line[3:].startswith(PRESERVATION + "/"))
 
 
 def _reset_index(cwd: Path) -> None:
@@ -263,9 +264,7 @@ def _reset_index(cwd: Path) -> None:
         capture_output=True,
     )
     if completed.returncode:
-        raise HardFailure(
-            f"Codex implementation could not recover its Git index: {completed.stderr[-300:]}"
-        )
+        raise HardFailure(f"Codex implementation could not recover its Git index: {completed.stderr[-300:]}")
 
 
 def _preserve_late_source(cwd: Path, *, todo_id: int, candidate: str) -> str | None:
@@ -274,7 +273,10 @@ def _preserve_late_source(cwd: Path, *, todo_id: int, candidate: str) -> str | N
         return None
     before = subprocess.run(
         ["git", "rev-parse", "--verify", "refs/stash"],
-        cwd=cwd, check=False, text=True, capture_output=True,
+        cwd=cwd,
+        check=False,
+        text=True,
+        capture_output=True,
     ).stdout.strip()
     pathspec = _source_pathspec()
     _git(
@@ -293,9 +295,7 @@ def _preserve_late_source(cwd: Path, *, todo_id: int, candidate: str) -> str | N
     return recovery
 
 
-def _close_candidate(
-    cwd: Path, *, todo_id: int, baseline: str
-) -> tuple[str, str, str | None]:
+def _close_candidate(cwd: Path, *, todo_id: int, baseline: str) -> tuple[str, str, str | None]:
     """Commit only the implementation bytes and return the exact commit/tree."""
     pathspec = _source_pathspec()
     try:
@@ -309,16 +309,10 @@ def _close_candidate(
         untracked = tuple(
             item
             for item in _git(cwd, "ls-files", "--others", "--exclude-standard").splitlines()
-            if item not in _RECEIPT_FILES
-            and not item.startswith(HISTORY + "/")
-            and not item.startswith(PRESERVATION + "/")
+            if item not in _RECEIPT_FILES and not item.startswith(HISTORY + "/") and not item.startswith(PRESERVATION + "/")
         )
         ignored = "\n".join(
-            item for item in _git(
-                cwd, "ls-files", "--others", "--ignored", "--exclude-standard"
-            ).splitlines()
-            if not item.startswith(HISTORY + "/")
-            and not item.startswith(PRESERVATION + "/")
+            item for item in _git(cwd, "ls-files", "--others", "--ignored", "--exclude-standard").splitlines() if not item.startswith(HISTORY + "/") and not item.startswith(PRESERVATION + "/")
         )
         if unstaged or untracked or ignored:
             raise HardFailure("Codex implementation source changed while closing its candidate")
@@ -351,9 +345,7 @@ def _close_candidate(
     return head, tree, recovery
 
 
-def _recover_existing_candidate(
-    job: dict[str, Any], cwd: Path, *, todo_id: int
-) -> dict[str, Any] | None:
+def _recover_existing_candidate(job: dict[str, Any], cwd: Path, *, todo_id: int) -> dict[str, Any] | None:
     """Converge a dirty but already-closed descendant without rerunning Codex."""
     binding = job.get("plan_binding")
     baseline = binding.get("source_commit") if isinstance(binding, dict) else None
@@ -364,7 +356,9 @@ def _recover_existing_candidate(
         return None
     ancestor = subprocess.run(
         ["git", "merge-base", "--is-ancestor", baseline, head],
-        cwd=cwd, check=False, capture_output=True,
+        cwd=cwd,
+        check=False,
+        capture_output=True,
     )
     if ancestor.returncode:
         return None
@@ -381,18 +375,15 @@ def _recover_existing_candidate(
             "commit": head,
             "tree": tree,
             "base_commit": baseline,
-            "changed_paths": sorted(
-                item for item in _git(
-                    cwd, "diff", "--name-only", f"{baseline}..{head}", "--", "."
-                ).splitlines() if item
-            ),
+            "changed_paths": candidate_changed_paths(cwd, baseline, head),
             "detail": "existing closed descendant recovered without rerunning the model",
         }
     ]
     if recovery:
         artifacts.append(
             {
-                "kind": "late_source_recovery", "stash": recovery,
+                "kind": "late_source_recovery",
+                "stash": recovery,
                 "detail": "late source preserved outside the active worktree",
             }
         )
@@ -411,29 +402,24 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
     if _source_status(cwd):
         binding = job.get("plan_binding")
         expected = {
-            "job_id": None, "attempt_count": None,
+            "job_id": None,
+            "attempt_count": None,
             "todo_id": job.get("todo_id"),
             "plan_commit": binding.get("plan_commit") if isinstance(binding, dict) else None,
             "solution_hash": binding.get("solution_hash") if isinstance(binding, dict) else None,
             "source_commit": binding.get("source_commit") if isinstance(binding, dict) else None,
-            "source_tree": (
-                source_tree(cwd, binding["source_commit"])
-                if isinstance(binding, dict) and isinstance(binding.get("source_commit"), str)
-                else None
-            ),
-            "actor": job.get("todo_agent"), "worktree": str(cwd.resolve()),
-            "treatment_id": "codex-implement", "treatment_version": str(job.get("treatment_version", "1")),
+            "source_tree": (source_tree(cwd, binding["source_commit"]) if isinstance(binding, dict) and isinstance(binding.get("source_commit"), str) else None),
+            "actor": job.get("todo_agent"),
+            "worktree": str(cwd.resolve()),
+            "treatment_id": "codex-implement",
+            "treatment_version": str(job.get("treatment_version", "1")),
         }
         state = classify(cwd, expected)
-        if (not state["resumable"] or job.get("resume_of") != state.get("resume_of")
-                or job.get("resume_fingerprint") != state.get("fingerprint")):
+        if not state["resumable"] or job.get("resume_of") != state.get("resume_of") or job.get("resume_fingerprint") != state.get("fingerprint"):
             recovered = _recover_existing_candidate(job, cwd, todo_id=task["todo_id"])
             if recovered is not None:
                 return recovered
-            raise HardFailure(
-                "Codex implementation requires a source-clean worktree unless the dirty "
-                "resume binding and fingerprint are exact"
-            )
+            raise HardFailure("Codex implementation requires a source-clean worktree unless the dirty resume binding and fingerprint are exact")
         continuation = {"resume_of": state["resume_of"], "resume_fingerprint": state["fingerprint"]}
     # Keep ephemeral auth and result files inside the isolated request worktree
     # rather than the host-wide /tmp namespace.  The directory is removed before
@@ -455,29 +441,43 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
             _write_isolated_config(codex_home)
             schema_path.write_text(json.dumps(_FINAL_SCHEMA, sort_keys=True), encoding="utf-8")
             command = [
-                _codex_binary(), "--ask-for-approval", "never",
-                "--sandbox", "danger-full-access", "exec", "--ephemeral",
-                "-C", str(cwd),
-                "--output-schema", str(schema_path), "-o", str(output_path), "-",
+                _codex_binary(),
+                "--ask-for-approval",
+                "never",
+                "--sandbox",
+                "danger-full-access",
+                "exec",
+                "--ephemeral",
+                "-C",
+                str(cwd),
+                "--output-schema",
+                str(schema_path),
+                "-o",
+                str(output_path),
+                "-",
             ]
             completed = invoke(
-                command, cwd=cwd, input=_prompt(task, continuation), text=True,
-                capture_output=True, check=False,
+                command,
+                cwd=cwd,
+                input=_prompt(task, continuation),
+                text=True,
+                capture_output=True,
+                check=False,
                 env={**os.environ, "CODEX_HOME": str(codex_home)},
             )
             if completed.returncode:
                 early_result = {
-                    "outcome": "failed", "established_conditions": [],
-                    "artifacts": [
-                        {"kind": "codex_failure", "detail": completed.stderr[-1000:]}
-                    ],
+                    "outcome": "failed",
+                    "established_conditions": [],
+                    "artifacts": [{"kind": "codex_failure", "detail": completed.stderr[-1000:]}],
                 }
             else:
                 try:
                     report = json.loads(output_path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError) as exc:
                     early_result = {
-                        "outcome": "failed", "established_conditions": [],
+                        "outcome": "failed",
+                        "established_conditions": [],
                         "artifacts": [
                             {
                                 "kind": "codex_failure",
@@ -504,7 +504,8 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
     after_head = _git(cwd, "rev-parse", "HEAD")
     if after_head != before_head:
         return {
-            "outcome": "conflict", "established_conditions": [],
+            "outcome": "conflict",
+            "established_conditions": [],
             "artifacts": [{"kind": "boundary_violation", "detail": "Codex changed Git HEAD"}],
         }
     changed = bool(_source_status(cwd))
@@ -518,7 +519,8 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
     )
     if not valid_report:
         return {
-            "outcome": "failed", "established_conditions": [],
+            "outcome": "failed",
+            "established_conditions": [],
             "artifacts": [{"kind": "codex_failure", "detail": "final report violates runner contract"}],
         }
     diff_stat = _git(cwd, "diff", "--stat")
@@ -531,24 +533,21 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
         artifacts.append(cleanup_artifact)
     if report["status"] != "implemented" or not changed:
         return {"outcome": "partial", "established_conditions": [], "artifacts": artifacts}
-    candidate, tree, recovery = _close_candidate(
-        cwd, todo_id=task["todo_id"], baseline=before_head
-    )
+    candidate, tree, recovery = _close_candidate(cwd, todo_id=task["todo_id"], baseline=before_head)
     artifacts.append(
         {
-            "kind": "closed_candidate", "commit": candidate, "tree": tree,
+            "kind": "closed_candidate",
+            "commit": candidate,
+            "tree": tree,
             "base_commit": before_head,
-            "changed_paths": sorted(
-                item for item in _git(
-                    cwd, "diff", "--name-only", f"{before_head}..{candidate}", "--", "."
-                ).splitlines() if item
-            ),
+            "changed_paths": candidate_changed_paths(cwd, before_head, candidate),
         }
     )
     if recovery:
         artifacts.append(
             {
-                "kind": "late_source_recovery", "stash": recovery,
+                "kind": "late_source_recovery",
+                "stash": recovery,
                 "detail": "lease-violating late source preserved outside the active worktree",
             }
         )
@@ -578,7 +577,8 @@ def main() -> int:
         result = run(_job_from_environment(), Path.cwd())
     except Exception as exc:  # runner protocol must remain structured
         result = {
-            "outcome": "failed", "established_conditions": [],
+            "outcome": "failed",
+            "established_conditions": [],
             "artifacts": [{"kind": "runner_failure", "detail": str(exc)}],
         }
     print(json.dumps(result, sort_keys=True))

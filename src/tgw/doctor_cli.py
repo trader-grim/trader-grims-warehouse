@@ -107,8 +107,11 @@ _UNIT_ARGV = {
     "tgw-coding-local-foreman.service": (*_LOCAL_WORKFLOW_ARGV, "foreman"),
 }
 _UNIT_ARGV[_PLAN_RENDER_UNIT] = (
-    "/opt/TGW/.venvs/controller/bin/python3", "-m", "tgw.workers.plan_render",
-    "--config", "/opt/TGW/tgw-lib/config/tgw-plan-render-local.json",
+    "/opt/TGW/.venvs/controller/bin/python3",
+    "-m",
+    "tgw.workers.plan_render",
+    "--config",
+    "/opt/TGW/tgw-lib/config/tgw-plan-render-local.json",
 )
 
 
@@ -160,9 +163,7 @@ class DoctorPaths:
 
 
 def _canonical(value: Any) -> bytes:
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode()
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
 def _hash(value: Any) -> str:
@@ -372,17 +373,10 @@ def check_context_snapshot(paths: DoctorPaths) -> dict[str, Any]:
         snapshot = _json(paths.context_snapshot)
         task = _json(paths.context_task)
         cursor = _json(paths.context_cursor)
-        _require_trusted_root_program(
-            paths.context_launcher, paths.trusted_release_owners
-        )
+        _require_trusted_root_program(paths.context_launcher, paths.trusted_release_owners)
         launcher_text = paths.context_launcher.read_text(encoding="utf-8")
-        if (
-            str(paths.context_snapshot) not in launcher_text
-            or str(paths.context_cursor) in launcher_text
-        ):
-            raise DoctorError(
-                "Context launcher does not preserve the single-snapshot runtime boundary"
-            )
+        if str(paths.context_snapshot) not in launcher_text or str(paths.context_cursor) in launcher_text:
+            raise DoctorError("Context launcher does not preserve the single-snapshot runtime boundary")
         _validate_snapshot(snapshot)
         if snapshot.get("task") != task or snapshot.get("cursor") != cursor:
             raise DoctorError("published context does not contain the current input records")
@@ -414,15 +408,8 @@ def _selected_context_artifacts(paths: DoctorPaths) -> dict[str, Any]:
     for runtime_path in (release, *release.rglob("*")):
         observed = runtime_path.stat(follow_symlinks=False)
         relative = str(runtime_path.relative_to(release)) or "."
-        if (
-            runtime_path.is_symlink()
-            or observed.st_uid != paths.context_install_uid
-            or observed.st_gid != paths.context_install_gid
-            or observed.st_mode & 0o022
-        ):
-            raise DoctorError(
-                "selected Context release is not root:root immutable: " + relative
-            )
+        if runtime_path.is_symlink() or observed.st_uid != paths.context_install_uid or observed.st_gid != paths.context_install_gid or observed.st_mode & 0o022:
+            raise DoctorError("selected Context release is not root:root immutable: " + relative)
     launcher = release / "scripts/tgw_context_debian_stdio.py"
     runtime_source = release / "src"
     modules = {
@@ -438,13 +425,8 @@ def _selected_context_artifacts(paths: DoctorPaths) -> dict[str, Any]:
         if not source.is_file() or source.is_symlink():
             raise DoctorError(f"selected immutable runtime has no exact Context {name}")
         observed = source.stat(follow_symlinks=False)
-        if (
-            observed.st_uid not in paths.trusted_release_owners
-            or observed.st_mode & 0o022
-        ):
-            raise DoctorError(
-                f"selected immutable runtime Context {name} is not immutable"
-            )
+        if observed.st_uid not in paths.trusted_release_owners or observed.st_mode & 0o022:
+            raise DoctorError(f"selected immutable runtime Context {name} is not immutable")
     return {
         "commit": desired,
         "release": release,
@@ -471,17 +453,9 @@ def check_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
         if installed["kind"] != "file":
             raise DoctorError("installed Context launcher is missing or indirect")
         if installed["sha256"] != selected["hashes"]["launcher"]:
-            raise DoctorError(
-                "installed Context launcher differs from selected runtime"
-            )
-        if (
-            installed["uid"] != paths.context_install_uid
-            or installed["gid"] != paths.context_install_gid
-            or installed["mode"] != paths.context_launcher_mode
-        ):
-            raise DoctorError(
-                "installed Context launcher owner or mode differs from root:root 0555"
-            )
+            raise DoctorError("installed Context launcher differs from selected runtime")
+        if installed["uid"] != paths.context_install_uid or installed["gid"] != paths.context_install_gid or installed["mode"] != paths.context_launcher_mode:
+            raise DoctorError("installed Context launcher owner or mode differs from root:root 0555")
         return _check(
             "context.launcher",
             "PASS",
@@ -527,10 +501,7 @@ def _is_context_process(argv: Sequence[str]) -> bool:
         return False
     if len(argv) > 1 and Path(argv[1]).name == "tgw-context-mcp":
         return True
-    return any(
-        argv[index : index + 2] == ["-m", "tgw.context_mcp_server"]
-        for index in range(max(0, len(argv) - 1))
-    )
+    return any(argv[index : index + 2] == ["-m", "tgw.context_mcp_server"] for index in range(max(0, len(argv) - 1)))
 
 
 def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
@@ -542,11 +513,7 @@ def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
         if not entry.name.isdigit():
             continue
         try:
-            argv = [
-                value.decode(errors="replace")
-                for value in (entry / "cmdline").read_bytes().split(b"\0")
-                if value
-            ]
+            argv = [value.decode(errors="replace") for value in (entry / "cmdline").read_bytes().split(b"\0") if value]
             if not _is_context_process(argv):
                 continue
             raw = (entry / "stat").read_text(encoding="utf-8")
@@ -615,11 +582,7 @@ def _actor_path_access(actor: str, path: Path) -> bool:
     current = pwd.getpwuid(os.geteuid()).pw_name
     if actor == current:
         return os.access(path, os.R_OK | os.W_OK | os.X_OK)
-    return all(
-        _run(["sudo", "-n", "-u", actor, "/usr/bin/test", flag, str(path)]).returncode
-        == 0
-        for flag in ("-r", "-w", "-x")
-    )
+    return all(_run(["sudo", "-n", "-u", actor, "/usr/bin/test", flag, str(path)]).returncode == 0 for flag in ("-r", "-w", "-x"))
 
 
 def _shared_git_directory(path: Path, group_gid: int) -> dict[str, Any]:
@@ -631,11 +594,7 @@ def _shared_git_directory(path: Path, group_gid: int) -> dict[str, Any]:
         }
     state = path.stat(follow_symlinks=False)
     mode = stat.S_IMODE(state.st_mode)
-    exact = (
-        state.st_gid == group_gid
-        and bool(mode & stat.S_ISGID)
-        and mode & stat.S_IRWXG == stat.S_IRWXG
-    )
+    exact = state.st_gid == group_gid and bool(mode & stat.S_ISGID) and mode & stat.S_IRWXG == stat.S_IRWXG
     return {
         "path": str(path),
         "exact": exact,
@@ -671,15 +630,11 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
             "worktree_root": _shared_git_directory(paths.worktrees, group.gr_gid),
         }
         shared_trees = _inspect_shared_git_trees(paths, group.gr_gid)
-        exact = all(row["exact"] for row in actors.values()) and all(
-            row["exact"] for row in directories.values()
-        ) and shared_trees["exact"]
+        exact = all(row["exact"] for row in actors.values()) and all(row["exact"] for row in directories.values()) and shared_trees["exact"]
         return _check(
             "access.unix-group",
             "PASS" if exact else "FAIL",
-            "ordinary Unix tgw-coders access is exact for operator and workers"
-            if exact
-            else "ordinary Unix tgw-coders access or shared Git directories differ",
+            "ordinary Unix tgw-coders access is exact for operator and workers" if exact else "ordinary Unix tgw-coders access or shared Git directories differ",
             evidence={
                 "actor": actor,
                 "group": "tgw-coders",
@@ -716,9 +671,16 @@ def _todo_binding_rows(paths: DoctorPaths) -> list[dict[str, Any]]:
     if actor != current:
         result = _run(
             [
-                "sudo", "-n", "-u", actor, "/usr/bin/psql",
+                "sudo",
+                "-n",
+                "-u",
+                actor,
+                "/usr/bin/psql",
                 f"--dbname={config['postgres_dsn']}",
-                "--no-align", "--tuples-only", "--command", _TODO_BINDINGS_SQL,
+                "--no-align",
+                "--tuples-only",
+                "--command",
+                _TODO_BINDINGS_SQL,
             ],
             timeout=30,
         )
@@ -736,19 +698,13 @@ def _todo_binding_rows(paths: DoctorPaths) -> list[dict[str, Any]]:
     return rows
 
 
-def _bound_coding_states(
-    paths: DoctorPaths, locations: Sequence[Path]
-) -> dict[str, dict[str, Any]]:
+def _bound_coding_states(paths: DoctorPaths, locations: Sequence[Path]) -> dict[str, dict[str, Any]]:
     from tgw.development.partial_resume import classify as classify_coding
     from tgw.development.partial_resume import source_tree
     from tgw.development.plan_binding import parse_plan_binding
 
     requested = {
-        location.resolve()
-        for location in locations
-        if location.is_dir()
-        and paths.worktrees.resolve() in location.resolve().parents
-        and re.fullmatch(r"todo-[0-9]+-plan-[0-9a-f]+", location.name)
+        location.resolve() for location in locations if location.is_dir() and paths.worktrees.resolve() in location.resolve().parents and re.fullmatch(r"todo-[0-9]+-plan-[0-9a-f]+", location.name)
     }
     if not requested:
         return {}
@@ -781,7 +737,9 @@ def _bound_coding_states(
     for location in sorted(requested):
         expected = expected_by_path.get(location)
         classified = (
-            classify_coding(location, expected) if expected is not None else {
+            classify_coding(location, expected)
+            if expected is not None
+            else {
                 "state": "STALE_RECEIPT",
                 "resumable": False,
                 "error": "worktree has no exact current Todo Plan binding",
@@ -803,6 +761,115 @@ def _bound_coding_states(
             "error": classified.get("error"),
         }
     return states
+
+
+def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = None) -> dict[str, Any]:
+    """Append exact evidence for an older runner's already-closed successor."""
+    from tgw.development.partial_resume import (
+        append_attempt,
+        candidate_changed_paths,
+        history,
+        make_attempt,
+        source_fingerprint,
+        source_tree,
+        validate_closed_candidate,
+    )
+    from tgw.development.plan_binding import parse_plan_binding
+
+    paths = paths or DoctorPaths()
+    matches = [row for row in _todo_binding_rows(paths) if row.get("id") == todo_id]
+    if len(matches) != 1:
+        raise DoctorError("Todo reconciliation requires one exact durable Plan binding")
+    row = matches[0]
+    try:
+        plan = parse_plan_binding(row.get("status_note"), todo_id=todo_id)
+    except ValueError as exc:
+        raise DoctorError("Todo reconciliation Plan binding is malformed") from exc
+    if plan is None:
+        raise DoctorError("Todo reconciliation Plan binding is absent")
+    worktree = Path(plan["worktree"]).resolve(strict=True)
+    if paths.worktrees.resolve() not in worktree.parents:
+        raise DoctorError("Todo reconciliation worktree is outside the managed root")
+    attempts = history(worktree)
+    if not attempts:
+        raise DoctorError("Todo reconciliation has no durable implementation attempt")
+    latest = attempts[-1]
+    required = {
+        "todo_id": todo_id,
+        "plan_commit": plan["plan_commit"],
+        "solution_hash": plan["solution_hash"],
+        "source_commit": plan["source_commit"],
+        "source_tree": source_tree(worktree, plan["source_commit"]),
+        "actor": row.get("agent") or "codex",
+        "worktree": str(worktree),
+        "treatment_id": "codex-implement",
+        "treatment_version": "1",
+    }
+    if any(latest.get(key) != value for key, value in required.items()):
+        raise DoctorError("implementation attempt contradicts the current Todo binding")
+    current = source_fingerprint(worktree)
+    if current["changed_paths"] or current["head"] == required["source_commit"]:
+        raise DoctorError("implementation reconciliation requires one clean closed successor")
+    closed = {
+        "kind": "closed_candidate",
+        "commit": current["head"],
+        "tree": current["tree"],
+        "base_commit": required["source_commit"],
+        "changed_paths": candidate_changed_paths(worktree, required["source_commit"], current["head"]),
+        "detail": "mechanically reconciled from immutable Git and durable attempt/job evidence",
+    }
+    validate_closed_candidate(worktree, closed, base_commit=required["source_commit"], candidate_commit=current["head"], candidate_tree=current["tree"])
+    config = _coding_config(paths)
+    with psycopg2.connect(config["postgres_dsn"]) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT job_id::text, state::text FROM queue_jobs
+                    WHERE job_id = %s::uuid OR payload_json->>'worktree' = %s
+                       OR payload_json#>>'{task_spec,worktree}' = %s FOR SHARE""",
+                (latest.get("job_id"), str(worktree), str(worktree)),
+            )
+            jobs = cursor.fetchall()
+    if any(job[1] not in {"succeeded", "failed", "cancelled"} for job in jobs):
+        raise DoctorError("implementation reconciliation refuses active work")
+    if sum(job[0] == latest.get("job_id") for job in jobs) != 1:
+        raise DoctorError("implementation reconciliation job identity is absent or ambiguous")
+    prior_closed = [item for item in latest.get("artifacts", []) if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"]
+    if len(prior_closed) == 1:
+        try:
+            validate_closed_candidate(worktree, prior_closed[0], base_commit=required["source_commit"], candidate_commit=current["head"], candidate_tree=current["tree"])
+            return {
+                "schema": "tgw-implementation-reconciliation/v1",
+                "ok": True,
+                "changed": False,
+                "todo_id": todo_id,
+                "job_id": latest["job_id"],
+                "attempt_hash": latest["attempt_hash"],
+                "worktree": str(worktree),
+            }
+        except ValueError:
+            pass
+    keys = ("job_id", "attempt_count", "todo_id", "plan_commit", "solution_hash", "source_commit", "source_tree", "actor", "worktree", "treatment_id", "treatment_version")
+    reconciliation = {
+        "kind": "implementation_reconciliation",
+        "schema": "tgw-implementation-reconciliation/v1",
+        "prior_receipt_hash": latest["attempt_hash"],
+        "job_id": latest["job_id"],
+        "todo_id": todo_id,
+        "plan_commit": required["plan_commit"],
+    }
+    reconciled = make_attempt({key: latest[key] for key in keys}, worktree, outcome="satisfied", predecessor=latest["attempt_hash"], artifacts=[closed, reconciliation])
+    receipt_path = append_attempt(worktree, reconciled)
+    return {
+        "schema": "tgw-implementation-reconciliation/v1",
+        "ok": True,
+        "changed": True,
+        "todo_id": todo_id,
+        "job_id": latest["job_id"],
+        "prior_receipt_hash": latest["attempt_hash"],
+        "attempt_hash": reconciled["attempt_hash"],
+        "worktree": str(worktree),
+        "receipt": str(receipt_path),
+    }
 
 
 def check_worktrees(paths: DoctorPaths) -> dict[str, Any]:
@@ -833,8 +900,11 @@ def check_worktrees(paths: DoctorPaths) -> dict[str, Any]:
         coding_counts = {
             name: sum(item.get("state") == name for item in coding_states.values())
             for name in (
-                "ABANDONED_CLEAN", "RESUMABLE_PARTIAL", "CLOSED_CANDIDATE",
-                "UNSAFE_DIRTY", "STALE_RECEIPT",
+                "ABANDONED_CLEAN",
+                "RESUMABLE_PARTIAL",
+                "CLOSED_CANDIDATE",
+                "UNSAFE_DIRTY",
+                "STALE_RECEIPT",
             )
         }
         same_filesystem = paths.repository.stat().st_dev == paths.worktrees.stat().st_dev
@@ -843,10 +913,7 @@ def check_worktrees(paths: DoctorPaths) -> dict[str, Any]:
         return _check(
             "git.worktrees",
             state,
-            f"{len(rows)} linked worktree(s); "
-            f"{'same' if same_filesystem else 'different'} filesystem; "
-            f"{len(outside)} outside root; {len(prunable)} prunable; "
-            f"coding states {coding_counts}",
+            f"{len(rows)} linked worktree(s); {'same' if same_filesystem else 'different'} filesystem; {len(outside)} outside root; {len(prunable)} prunable; coding states {coding_counts}",
             evidence={
                 "repository": str(repository),
                 "worktree_root": str(root),
@@ -886,11 +953,7 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         location = Path(str(row.get("worktree", ""))).resolve()
         head = str(row.get("HEAD", ""))
         branch_ref = row.get("branch")
-        branch = (
-            str(branch_ref).removeprefix("refs/heads/")
-            if isinstance(branch_ref, str)
-            else None
-        )
+        branch = str(branch_ref).removeprefix("refs/heads/") if isinstance(branch_ref, str) else None
         exists = location.is_dir()
         dirty: bool | None = None
         unique_commits: int | None = None
@@ -939,12 +1002,7 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
                 unique_commits = int(count.stdout.strip())
         is_canonical = location == repository
         inside_root = location == root or root in location.parents
-        preservation_required = (
-            dirty is not False
-            or unique_commits is None
-            or unique_commits > 0
-            or bool(errors)
-        )
+        preservation_required = dirty is not False or unique_commits is None or unique_commits > 0 or bool(errors)
         worktrees.append(
             {
                 "path": str(location),
@@ -963,22 +1021,13 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
             }
         )
 
-    path_roots = {
-        Path(value)
-        for value in os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin").split(":")
-        if value and Path(value).is_absolute()
-    }
-    surface_roots = [
-        ("effective-path-command", parent, "tgw*") for parent in sorted(path_roots)
-    ]
+    path_roots = {Path(value) for value in os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin").split(":") if value and Path(value).is_absolute()}
+    surface_roots = [("effective-path-command", parent, "tgw*") for parent in sorted(path_roots)]
     surface_roots.extend(
         [
             ("operator-libexec", Path("/usr/local/libexec"), "tgw*"),
             ("development-command", paths.local_bin, "tgw*"),
-            *(
-                ("systemd-unit", parent, "tgw-*")
-                for parent in paths.systemd_unit_roots
-            ),
+            *(("systemd-unit", parent, "tgw-*") for parent in paths.systemd_unit_roots),
         ]
     )
     active_surfaces = []
@@ -995,9 +1044,7 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
                     "kind": kind,
                     "path": str(path),
                     "symlink": path.is_symlink(),
-                    "target": str(path.resolve(strict=False))
-                    if path.is_symlink()
-                    else None,
+                    "target": str(path.resolve(strict=False)) if path.is_symlink() else None,
                     "sha256": _file_hash(path) if path.is_file() else None,
                 }
             )
@@ -1032,11 +1079,7 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
     try:
         coding_group = grp.getgrnam("tgw-coders")
         unix_actors = set(coding_group.gr_mem)
-        unix_actors.update(
-            record.pw_name
-            for record in pwd.getpwall()
-            if record.pw_gid == coding_group.gr_gid
-        )
+        unix_actors.update(record.pw_name for record in pwd.getpwall() if record.pw_gid == coding_group.gr_gid)
     except KeyError:
         unix_actors = set()
     harness_names = sorted(catalog_actors | unix_actors)
@@ -1056,9 +1099,7 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
             try:
                 marker_rows.append({"path": str(path), "exists": path.exists()})
             except OSError as exc:
-                marker_rows.append(
-                    {"path": str(path), "exists": None, "error": type(exc).__name__}
-                )
+                marker_rows.append({"path": str(path), "exists": None, "error": type(exc).__name__})
         harnesses.append(
             {
                 "name": name,
@@ -1093,28 +1134,16 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         if discovery_root.is_dir():
             walk_errors: list[OSError] = []
             try:
-                for parent, directories, _files in os.walk(
-                    discovery_root, onerror=walk_errors.append
-                ):
-                    relative_depth = len(
-                        Path(parent).relative_to(discovery_root).parts
-                    )
+                for parent, directories, _files in os.walk(discovery_root, onerror=walk_errors.append):
+                    relative_depth = len(Path(parent).relative_to(discovery_root).parts)
                     for name in directories:
                         if name.lower() in archive_names:
                             archive_candidates.add(Path(parent) / name)
-                    directories[:] = [
-                        name
-                        for name in directories
-                        if relative_depth < paths.archive_discovery_max_depth
-                        and name not in _ARCHIVE_DISCOVERY_PRUNE
-                        and not name.startswith(".")
-                    ]
+                    directories[:] = [name for name in directories if relative_depth < paths.archive_discovery_max_depth and name not in _ARCHIVE_DISCOVERY_PRUNE and not name.startswith(".")]
                 row["scanned"] = True
                 row["complete"] = not walk_errors
                 if walk_errors:
-                    row["error"] = "; ".join(
-                        f"{type(exc).__name__}: {exc}" for exc in walk_errors
-                    )
+                    row["error"] = "; ".join(f"{type(exc).__name__}: {exc}" for exc in walk_errors)
             except OSError as exc:
                 row["error"] = f"{type(exc).__name__}: {exc}"
         archive_discovery.append(row)
@@ -1141,25 +1170,21 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         "archive_discovery": archive_discovery,
         "counts": {
             "worktrees": len(worktrees),
-            "outside_configured_root": sum(
-                not row["canonical"] and not row["inside_configured_root"]
-                for row in worktrees
-            ),
-            "preservation_required": sum(
-                row["preservation_required"] for row in worktrees
-            ),
+            "outside_configured_root": sum(not row["canonical"] and not row["inside_configured_root"] for row in worktrees),
+            "preservation_required": sum(row["preservation_required"] for row in worktrees),
             "active_surfaces": len(active_surfaces),
             "harness_homes": sum(row["home_exists"] for row in harnesses),
             "archive_roots": sum(row["exists"] is True for row in archives),
             "catalog_actors": len(catalog_actors),
             "unix_coding_actors": len(unix_actors),
             "coding_states": {
-                name: sum(
-                    item.get("state") == name for item in coding_states.values()
-                )
+                name: sum(item.get("state") == name for item in coding_states.values())
                 for name in (
-                    "ABANDONED_CLEAN", "RESUMABLE_PARTIAL", "CLOSED_CANDIDATE",
-                    "UNSAFE_DIRTY", "STALE_RECEIPT",
+                    "ABANDONED_CLEAN",
+                    "RESUMABLE_PARTIAL",
+                    "CLOSED_CANDIDATE",
+                    "UNSAFE_DIRTY",
+                    "STALE_RECEIPT",
                 )
             },
         },
@@ -1259,8 +1284,7 @@ def check_database(paths: DoctorPaths) -> dict[str, Any]:
         return _check(
             "database.local-coding",
             "PASS" if ok else "FAIL",
-            f"peer actor {row.get('actor')} has "
-            f"{'all' if ok else 'incomplete'} local coding grants; {active} active job(s)",
+            f"peer actor {row.get('actor')} has {'all' if ok else 'incomplete'} local coding grants; {active} active job(s)",
             evidence={**row, "active_jobs": active, "database": config["postgres_dsn"]},
             repair=None if ok else repair,
         )
@@ -1332,9 +1356,7 @@ def _unit_definition(paths: DoctorPaths, unit: str, state: Mapping[str, str]) ->
     loaded_exec_argv: tuple[str, ...] | None = None
     if expected_argv:
         try:
-            loaded_exec_path, loaded_exec_argv = _loaded_exec_identity(
-                state.get("ExecStart", "")
-            )
+            loaded_exec_path, loaded_exec_argv = _loaded_exec_identity(state.get("ExecStart", ""))
         except (DoctorError, ValueError) as exc:
             reasons.append(str(exc))
         else:
@@ -1348,11 +1370,7 @@ def _unit_definition(paths: DoctorPaths, unit: str, state: Mapping[str, str]) ->
             pid = 0
         if pid > 0:
             try:
-                process_argv = [
-                    value.decode(errors="replace")
-                    for value in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-                    if value
-                ]
+                process_argv = [value.decode(errors="replace") for value in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if value]
             except OSError:
                 reasons.append("active process identity is unreadable")
             else:
@@ -1366,9 +1384,7 @@ def _unit_definition(paths: DoctorPaths, unit: str, state: Mapping[str, str]) ->
         "source": str(source),
         "source_sha256": _file_hash(source) if source.is_file() else None,
         "fragment": fragment_text or None,
-        "fragment_sha256": _file_hash(fragment)
-        if fragment is not None and fragment.is_file()
-        else None,
+        "fragment_sha256": _file_hash(fragment) if fragment is not None and fragment.is_file() else None,
         "drop_ins": state.get("DropInPaths") or None,
         "need_daemon_reload": state.get("NeedDaemonReload"),
         "expected_argv": list(expected_argv) if expected_argv else None,
@@ -1391,19 +1407,12 @@ def check_units(paths: DoctorPaths) -> dict[str, Any]:
         unhealthy = [
             unit
             for unit, state in observed.items()
-            if state.get("LoadState") != "loaded"
-            or not state["definition"]["exact"]
-            or (
-                unit in _ACTIVE_CODING_UNITS
-                and state.get("ActiveState") != "active"
-            )
+            if state.get("LoadState") != "loaded" or not state["definition"]["exact"] or (unit in _ACTIVE_CODING_UNITS and state.get("ActiveState") != "active")
         ]
         return _check(
             "services.local-coding",
             "PASS" if not unhealthy else "FAIL",
-            "all local coding definitions are exact and required units are active"
-            if not unhealthy
-            else "inactive or missing units: " + ", ".join(unhealthy),
+            "all local coding definitions are exact and required units are active" if not unhealthy else "inactive or missing units: " + ", ".join(unhealthy),
             evidence={"units": observed},
             repair=None if not unhealthy else repair,
         )
@@ -1416,14 +1425,10 @@ def check_units(paths: DoctorPaths) -> dict[str, Any]:
         )
 
 
-def _runtime_selector_identity(
-    paths: DoctorPaths, desired: str, release: Path
-) -> dict[str, Any]:
+def _runtime_selector_identity(paths: DoctorPaths, desired: str, release: Path) -> dict[str, Any]:
     current_link = paths.runtime_root / "current"
     expected_selector = str(Path("releases") / desired)
-    installed_selector = (
-        os.readlink(current_link) if current_link.is_symlink() else None
-    )
+    installed_selector = os.readlink(current_link) if current_link.is_symlink() else None
     resolved: Path | None = None
     release_resolved: Path | None = None
     try:
@@ -1432,11 +1437,7 @@ def _runtime_selector_identity(
             release_resolved = release.resolve(strict=True)
     except OSError:
         pass
-    exact = (
-        installed_selector == expected_selector
-        and resolved is not None
-        and resolved == release_resolved
-    )
+    exact = installed_selector == expected_selector and resolved is not None and resolved == release_resolved
     return {
         "desired": desired,
         "release": str(release),
@@ -1447,9 +1448,7 @@ def _runtime_selector_identity(
     }
 
 
-def _directory_identity(
-    path: Path, *, uid: int, gid: int, mode: int
-) -> dict[str, Any]:
+def _directory_identity(path: Path, *, uid: int, gid: int, mode: int) -> dict[str, Any]:
     expected = {
         "path": str(path),
         "expected_uid": uid,
@@ -1471,9 +1470,7 @@ def _directory_identity(
     descriptor = -1
     try:
         root_descriptor = os.open(path.anchor, flags)
-        descriptor = _open_relative_directory(
-            root_descriptor, path.relative_to(path.anchor)
-        )
+        descriptor = _open_relative_directory(root_descriptor, path.relative_to(path.anchor))
         _verify_bound_directory(path, descriptor)
         observed = os.fstat(descriptor)
     except FileNotFoundError:
@@ -1502,12 +1499,7 @@ def _directory_identity(
             os.close(root_descriptor)
     kind = "directory" if stat.S_ISDIR(observed.st_mode) else "unsafe"
     observed_mode = stat.S_IMODE(observed.st_mode)
-    exact = (
-        kind == "directory"
-        and observed.st_uid == uid
-        and observed.st_gid == gid
-        and observed_mode == mode
-    )
+    exact = kind == "directory" and observed.st_uid == uid and observed.st_gid == gid and observed_mode == mode
     return {
         **expected,
         "kind": kind,
@@ -1522,10 +1514,7 @@ def _plan_render_storage_identity(paths: DoctorPaths) -> dict[str, Any]:
     owner = pwd.getpwnam("db")
     group = grp.getgrnam("tgw-coders")
     mode = _PLAN_RENDER_DIRECTORY_MODE
-    directories = [
-        _directory_identity(path, uid=owner.pw_uid, gid=group.gr_gid, mode=mode)
-        for path in (paths.plan_render_root, paths.plan_render_log_root)
-    ]
+    directories = [_directory_identity(path, uid=owner.pw_uid, gid=group.gr_gid, mode=mode) for path in (paths.plan_render_root, paths.plan_render_log_root)]
     return {
         "owner": "db",
         "owner_uid": owner.pw_uid,
@@ -1554,10 +1543,7 @@ def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
             and paths.plan_render_config.is_file()
             and source.read_bytes() == paths.plan_render_config.read_bytes()
         )
-        healthy = (state.get("LoadState") == "loaded"
-                   and state.get("ActiveState") == "active"
-                   and definition["exact"] and exact_config and runtime["exact"]
-                   and storage["exact"])
+        healthy = state.get("LoadState") == "loaded" and state.get("ActiveState") == "active" and definition["exact"] and exact_config and runtime["exact"] and storage["exact"]
         reasons = list(definition["reasons"])
         if not exact_config:
             reasons.append("immutable config path or bytes differ")
@@ -1568,9 +1554,9 @@ def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
         if state.get("ActiveState") != "active":
             reasons.append("service is not active")
         return _check(
-            "services.plan-render", "PASS" if healthy else "FAIL",
-            "local plan_render consumer is exact and active" if healthy
-            else "; ".join(reasons),
+            "services.plan-render",
+            "PASS" if healthy else "FAIL",
+            "local plan_render consumer is exact and active" if healthy else "; ".join(reasons),
             evidence={
                 "unit": state,
                 "definition": definition,
@@ -1601,19 +1587,13 @@ def _git_blob_oid(data: bytes) -> str:
     return hashlib.sha1(framed, usedforsecurity=False).hexdigest()
 
 
-def _verify_release_tree(
-    paths: DoctorPaths, desired: str, release: Path
-) -> dict[str, Any]:
+def _verify_release_tree(paths: DoctorPaths, desired: str, release: Path) -> dict[str, Any]:
     """Verify every released path and mode against the exact Git commit tree."""
     releases_root = (paths.runtime_root / "releases").resolve(strict=True)
     if release.is_symlink() or release.resolve(strict=True).parent != releases_root:
         raise DoctorError("release path escapes the immutable releases directory")
     release_before = release.stat(follow_symlinks=False)
-    if (
-        release_before.st_uid not in paths.trusted_release_owners
-        or release_before.st_mode & 0o022
-        or not stat.S_ISDIR(release_before.st_mode)
-    ):
+    if release_before.st_uid not in paths.trusted_release_owners or release_before.st_mode & 0o022 or not stat.S_ISDIR(release_before.st_mode):
         raise DoctorError("release root ownership or permissions are not immutable")
     result = _run(
         [
@@ -1642,11 +1622,7 @@ def _verify_release_tree(
         mode, _kind, object_id = fields
         expected[relative] = (mode, object_id)
 
-    actual = {
-        str(path.relative_to(release))
-        for path in release.rglob("*")
-        if path.is_file() or path.is_symlink()
-    }
+    actual = {str(path.relative_to(release)) for path in release.rglob("*") if path.is_file() or path.is_symlink()}
     unsafe_paths: list[str] = []
     for path in release.rglob("*"):
         observed = path.stat(follow_symlinks=False)
@@ -1772,14 +1748,9 @@ def check_runtime(paths: DoctorPaths) -> dict[str, Any]:
                 "source_sha256": source_hash,
                 "installed_sha256": destination_hash,
                 "expected_link": str(target),
-                "installed_link": os.readlink(destination)
-                if destination.is_symlink()
-                else None,
+                "installed_link": os.readlink(destination) if destination.is_symlink() else None,
             }
-            if (
-                not destination.is_symlink()
-                or os.readlink(destination) != str(target)
-            ):
+            if not destination.is_symlink() or os.readlink(destination) != str(target):
                 mismatches.append(str(destination))
                 launcher_surface_drift = True
             elif destination_hash != source_hash:
@@ -1791,9 +1762,7 @@ def check_runtime(paths: DoctorPaths) -> dict[str, Any]:
         return _check(
             "runtime.local-coding",
             "PASS" if not mismatches else "FAIL",
-            f"runtime {desired[:12]} and local launchers are exact"
-            if not mismatches
-            else "runtime drift: " + "; ".join(mismatches),
+            f"runtime {desired[:12]} and local launchers are exact" if not mismatches else "runtime drift: " + "; ".join(mismatches),
             evidence={
                 "desired_commit": desired,
                 "canonical_commit": head,
@@ -1805,13 +1774,7 @@ def check_runtime(paths: DoctorPaths) -> dict[str, Any]:
                 "release_tree": release_tree,
                 "forbidden_dependencies": forbidden,
             },
-            repair=None
-            if not mismatches
-            else (
-                "install the exact fixed launcher links during a bounded local bootstrap"
-                if launcher_surface_drift
-                else repair
-            ),
+            repair=None if not mismatches else ("install the exact fixed launcher links during a bounded local bootstrap" if launcher_surface_drift else repair),
         )
     except Exception as exc:
         message = str(exc)
@@ -1827,11 +1790,7 @@ def check_runtime(paths: DoctorPaths) -> dict[str, Any]:
         return _failed(
             "runtime.local-coding",
             exc,
-            repair=(
-                "materialize the exact root-protected release during bounded local bootstrap"
-                if bootstrap
-                else repair
-            ),
+            repair=("materialize the exact root-protected release during bounded local bootstrap" if bootstrap else repair),
         )
 
 
@@ -1843,10 +1802,7 @@ _OBSOLETE_FILE_HASHES = {
     "tgw-context-mcp-candidate-6813c302": "sha256:a1a1d637414e4afa881af03d0d0574e44733985a13b33f4acfff3bc443923e5b",
     "tgw-context-mcp-candidate-6865ce87": "sha256:9821db48b5205bbc06ccb6bd32697fbf25532c81b3292ddb5e0bae78fcda6009",
 }
-_OBSOLETE_ACTOR_TARGET = (
-    "/opt/TGW/tgw-lib/actor-runtime/releases/"
-    "w18-9634e8a7-20260822/scripts/tgw_actor_startup.py"
-)
+_OBSOLETE_ACTOR_TARGET = "/opt/TGW/tgw-lib/actor-runtime/releases/w18-9634e8a7-20260822/scripts/tgw_actor_startup.py"
 _UNBOUND_OBSOLETE_NAMES = ("tgw-coding", "tgw-coding-helper")
 
 
@@ -1871,11 +1827,7 @@ def _declared_obsolete_surfaces(paths: DoctorPaths) -> list[dict[str, Any]]:
             "declared_target": _OBSOLETE_ACTOR_TARGET,
         }
     )
-    candidate_names = sorted(
-        name
-        for name in _OBSOLETE_FILE_HASHES
-        if name.startswith("tgw-context-mcp-candidate-")
-    )
+    candidate_names = sorted(name for name in _OBSOLETE_FILE_HASHES if name.startswith("tgw-context-mcp-candidate-"))
     for name in candidate_names:
         rows.append(
             {
@@ -1888,22 +1840,10 @@ def _declared_obsolete_surfaces(paths: DoctorPaths) -> list[dict[str, Any]]:
 
 
 def _unbound_obsolete_surfaces(paths: DoctorPaths) -> list[str]:
-    unbound = [
-        str(path)
-        for name in _UNBOUND_OBSOLETE_NAMES
-        if _lexists(path := paths.cleanup_system_bin / name)
-    ]
-    declared_candidates = {
-        name
-        for name in _OBSOLETE_FILE_HASHES
-        if name.startswith("tgw-context-mcp-candidate-")
-    }
+    unbound = [str(path) for name in _UNBOUND_OBSOLETE_NAMES if _lexists(path := paths.cleanup_system_bin / name)]
+    declared_candidates = {name for name in _OBSOLETE_FILE_HASHES if name.startswith("tgw-context-mcp-candidate-")}
     if paths.local_bin.is_dir():
-        unbound.extend(
-            str(path)
-            for path in paths.local_bin.glob("tgw-context-mcp-candidate-*")
-            if path.name not in declared_candidates
-        )
+        unbound.extend(str(path) for path in paths.local_bin.glob("tgw-context-mcp-candidate-*") if path.name not in declared_candidates)
     return sorted(unbound)
 
 
@@ -1923,26 +1863,17 @@ def _surface_observation(item: Mapping[str, Any]) -> dict[str, Any]:
     return row
 
 
-def _surface_matches_declaration(
-    item: Mapping[str, Any], observation: Mapping[str, Any]
-) -> bool:
+def _surface_matches_declaration(item: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
     if item["kind"] == "symlink":
         return observation.get("target") == item.get("declared_target")
-    return (
-        isinstance(item.get("declared_sha256"), str)
-        and observation.get("sha256") == item["declared_sha256"]
-    )
+    return isinstance(item.get("declared_sha256"), str) and observation.get("sha256") == item["declared_sha256"]
 
 
 def check_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
     declared = _declared_obsolete_surfaces(paths)
     present = [item for item in declared if _lexists(item["path"])]
     visible = [_surface_observation(item) for item in present]
-    mismatched = [
-        observation
-        for item, observation in zip(present, visible, strict=True)
-        if not _surface_matches_declaration(item, observation)
-    ]
+    mismatched = [observation for item, observation in zip(present, visible, strict=True) if not _surface_matches_declaration(item, observation)]
     unbound = _unbound_obsolete_surfaces(paths)
     if mismatched or unbound:
         state = "FAIL"
@@ -1950,9 +1881,7 @@ def check_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
         repair = None
     elif visible:
         state = "WARN"
-        detail = "verified obsolete active surfaces remain: " + ", ".join(
-            item["path"] for item in visible
-        )
+        detail = "verified obsolete active surfaces remain: " + ", ".join(item["path"] for item in visible)
         repair = "sudo -n tgw doctor repair obsolete-surfaces"
     else:
         state = "PASS"
@@ -2022,20 +1951,13 @@ def _require_root() -> None:
         raise DoctorError("repair requires the operator to rerun this exact command with sudo -n")
 
 
-def _require_trusted_root_program(
-    path: Path, trusted_owners: Sequence[int] = (0, 65534)
-) -> None:
+def _require_trusted_root_program(path: Path, trusted_owners: Sequence[int] = (0, 65534)) -> None:
     try:
         resolved = path.resolve(strict=True)
         state = resolved.stat()
     except OSError as exc:
         raise DoctorError(f"trusted repair program is unavailable: {path}") from exc
-    if (
-        not resolved.is_file()
-        or state.st_uid not in trusted_owners
-        or state.st_mode & 0o022
-        or not os.access(resolved, os.X_OK)
-    ):
+    if not resolved.is_file() or state.st_uid not in trusted_owners or state.st_mode & 0o022 or not os.access(resolved, os.X_OK):
         raise DoctorError(f"repair program is not trusted-owner immutable: {resolved}")
 
 
@@ -2142,9 +2064,7 @@ def _surface_snapshot_at(directory_descriptor: int, name: str) -> dict[str, Any]
         os.close(descriptor)
 
 
-def _same_regular_surface(
-    observed: Mapping[str, Any], expected: Mapping[str, Any]
-) -> bool:
+def _same_regular_surface(observed: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
     """Compare a file across rename-exchange while allowing rename ctime updates."""
     keys = (
         "kind",
@@ -2184,11 +2104,7 @@ def _cas_regular_file(
     try:
         staged_descriptor = os.open(
             temporary,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | os.O_NOFOLLOW
-            | os.O_CLOEXEC,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
             mode,
             dir_fd=parent,
         )
@@ -2208,17 +2124,13 @@ def _cas_regular_file(
         exchanged = True
         displaced = _surface_snapshot_at(parent, temporary)
         current = _surface_snapshot_at(parent, path.name)
-        if not _same_regular_surface(
-            displaced, expected
-        ) or not _same_regular_surface(current, staged):
+        if not _same_regular_surface(displaced, expected) or not _same_regular_surface(current, staged):
             if _same_regular_surface(current, staged):
                 _rename_exchange(parent, temporary, path.name)
                 exchanged = False
                 restored = _surface_snapshot_at(parent, path.name)
                 if not _same_regular_surface(restored, expected):
-                    raise DoctorError(
-                        f"Context CAS could not restore a concurrent change: {path}"
-                    )
+                    raise DoctorError(f"Context CAS could not restore a concurrent change: {path}")
                 os.fsync(parent)
             raise DoctorError(f"Context CAS detected a concurrent change: {path}")
         os.fsync(parent)
@@ -2230,24 +2142,16 @@ def _cas_regular_file(
             try:
                 current = _surface_snapshot_at(parent, path.name)
                 displaced = _surface_snapshot_at(parent, temporary)
-                if not _same_regular_surface(
-                    current, staged
-                ) or not _same_regular_surface(displaced, expected):
-                    raise DoctorError(
-                        f"Context CAS rollback refused a concurrent change: {path}"
-                    )
+                if not _same_regular_surface(current, staged) or not _same_regular_surface(displaced, expected):
+                    raise DoctorError(f"Context CAS rollback refused a concurrent change: {path}")
                 _rename_exchange(parent, temporary, path.name)
                 exchanged = False
                 restored = _surface_snapshot_at(parent, path.name)
                 if not _same_regular_surface(restored, expected):
-                    raise DoctorError(
-                        f"Context CAS rollback did not restore the expected file: {path}"
-                    )
+                    raise DoctorError(f"Context CAS rollback did not restore the expected file: {path}")
                 os.fsync(parent)
             except Exception as rollback_exc:
-                raise DoctorError(
-                    f"Context CAS failed: {exc}; rollback failed: {rollback_exc}"
-                ) from exc
+                raise DoctorError(f"Context CAS failed: {exc}; rollback failed: {rollback_exc}") from exc
         raise
     finally:
         if staged_descriptor >= 0:
@@ -2342,9 +2246,7 @@ def _restore_surface(path: Path, surface: Mapping[str, Any]) -> None:
     if kind == "missing":
         if path.is_file() or path.is_symlink():
             path.unlink()
-            directory = os.open(
-                path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-            )
+            directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             try:
                 os.fsync(directory)
             finally:
@@ -2368,13 +2270,9 @@ def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
     try:
         selected_before_commit = _selected_context_artifacts(paths)
         if _context_artifact_signature(selected_before_commit) != signature:
-            raise DoctorError(
-                "selected Context runtime changed before repair; no live file was replaced"
-            )
+            raise DoctorError("selected Context runtime changed before repair; no live file was replaced")
         if _surface_snapshot(paths.context_launcher) != before:
-            raise DoctorError(
-                "installed Context launcher changed concurrently; no live file was replaced"
-            )
+            raise DoctorError("installed Context launcher changed concurrently; no live file was replaced")
         if changed:
             replacement_attempted = True
             _atomic_bytes(
@@ -2411,32 +2309,18 @@ def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
                 if current == before:
                     rollback_state = "original launcher unchanged"
                 elif installed_snapshot is not None and current != installed_snapshot:
-                    raise DoctorError(
-                        "launcher changed concurrently after replacement; refused rollback overwrite"
-                    )
-                elif installed_snapshot is None and not _launcher_surface_exact(
-                    current, expected, paths
-                ):
-                    raise DoctorError(
-                        "launcher changed unexpectedly during replacement; refused rollback overwrite"
-                    )
+                    raise DoctorError("launcher changed concurrently after replacement; refused rollback overwrite")
+                elif installed_snapshot is None and not _launcher_surface_exact(current, expected, paths):
+                    raise DoctorError("launcher changed unexpectedly during replacement; refused rollback overwrite")
                 else:
                     _restore_surface(paths.context_launcher, before)
                     restored = _surface_snapshot(paths.context_launcher)
                     if _surface_semantics(restored) != _surface_semantics(before):
-                        raise DoctorError(
-                            "original launcher surface was not restored exactly"
-                        )
+                        raise DoctorError("original launcher surface was not restored exactly")
                     rollback_state = "original launcher restored"
             except Exception as rollback_exc:
                 rollback_errors.append(str(rollback_exc))
-        suffix = (
-            "; rollback errors: " + "; ".join(rollback_errors)
-            if rollback_errors
-            else f"; {rollback_state}"
-            if rollback_state
-            else ""
-        )
+        suffix = "; rollback errors: " + "; ".join(rollback_errors) if rollback_errors else f"; {rollback_state}" if rollback_state else ""
         raise DoctorError(f"Context launcher repair failed: {exc}{suffix}") from exc
     try:
         clients = _context_processes(paths)
@@ -2482,18 +2366,14 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
     cursor = dict(before["cursor"])
     task_source = task.get("implementation", {}).get("development_source", {}).get("commit")
     if task_source != head:
-        raise DoctorError(
-            "current task and canonical source disagree; explicit operator disposition is required"
-        )
+        raise DoctorError("current task and canonical source disagree; explicit operator disposition is required")
     if cursor.get("plan_commit") != task.get("plan", {}).get("approved_commit"):
         raise DoctorError("task and cursor Plan commits disagree; source-only repair is unsafe")
     capability = task.get("implementation", {}).get("development_source", {}).get("next_leaf")
     treatment = cursor.get("resolved", {}).get("next_treatment")
     if not isinstance(capability, str) or not isinstance(treatment, str) or treatment.rsplit(":", 1)[-1] != capability:
         raise DoctorError("task capability and cursor treatment disagree; repair is ambiguous")
-    source_changed = (
-        cursor.get("source_commit") != head or cursor.get("source_tree") != tree
-    )
+    source_changed = cursor.get("source_commit") != head or cursor.get("source_tree") != tree
     if source_changed:
         cursor["source_commit"] = head
         cursor["source_tree"] = tree
@@ -2541,11 +2421,7 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
         current_head, current_tree, current_status = _source_identity(paths)
         if current_status or (current_head, current_tree) != (head, tree):
             raise DoctorError("canonical source changed during context repair")
-        if (
-            _surface_snapshot(paths.context_task) != task_surface
-            or _surface_snapshot(paths.context_cursor) != cursor_surface
-            or _surface_snapshot(paths.context_snapshot) != snapshot_surface
-        ):
+        if _surface_snapshot(paths.context_task) != task_surface or _surface_snapshot(paths.context_cursor) != cursor_surface or _surface_snapshot(paths.context_snapshot) != snapshot_surface:
             raise DoctorError("context inputs changed concurrently; no live file was replaced")
         committed_cursor: dict[str, Any] | None = None
         committed_snapshot: dict[str, Any] | None = None
@@ -2563,10 +2439,7 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
                     uid=cursor_surface["uid"],
                     gid=cursor_surface["gid"],
                 )
-            if (
-                _surface_snapshot(paths.context_task) != task_surface
-                or _surface_snapshot(paths.context_cursor) != committed_cursor
-            ):
+            if _surface_snapshot(paths.context_task) != task_surface or _surface_snapshot(paths.context_cursor) != committed_cursor:
                 raise DoctorError("Context inputs changed before atomic snapshot cutover")
             if before["snapshot"] == after:
                 committed_snapshot = snapshot_surface
@@ -2579,11 +2452,7 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
                     uid=snapshot_surface["uid"],
                     gid=snapshot_surface["gid"],
                 )
-            if (
-                _surface_snapshot(paths.context_task) != task_surface
-                or _surface_snapshot(paths.context_cursor) != committed_cursor
-                or _surface_snapshot(paths.context_snapshot) != committed_snapshot
-            ):
+            if _surface_snapshot(paths.context_task) != task_surface or _surface_snapshot(paths.context_cursor) != committed_cursor or _surface_snapshot(paths.context_snapshot) != committed_snapshot:
                 raise DoctorError("final Context transaction verification failed")
             receipt = _receipt(
                 paths,
@@ -2611,9 +2480,7 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
                         rollback_states.append(f"{label} already original")
                         continue
                     if current != committed:
-                        raise DoctorError(
-                            f"{label} changed concurrently; refused rollback overwrite"
-                        )
+                        raise DoctorError(f"{label} changed concurrently; refused rollback overwrite")
                     restored = _cas_regular_file(
                         path,
                         current,
@@ -2624,19 +2491,11 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
                     )
                     expected_semantics = _surface_semantics(original)
                     if _surface_semantics(restored) != expected_semantics:
-                        raise DoctorError(
-                            f"{label} rollback did not restore original semantics"
-                        )
+                        raise DoctorError(f"{label} rollback did not restore original semantics")
                     rollback_states.append(f"{label} restored")
                 except Exception as rollback_exc:
                     rollback_errors.append(f"{label}: {rollback_exc}")
-            suffix = (
-                "; rollback errors: " + "; ".join(rollback_errors)
-                if rollback_errors
-                else "; " + ", ".join(rollback_states)
-                if rollback_states
-                else "; no live file was replaced"
-            )
+            suffix = "; rollback errors: " + "; ".join(rollback_errors) if rollback_errors else "; " + ", ".join(rollback_states) if rollback_states else "; no live file was replaced"
             raise DoctorError(f"context commit failed: {exc}{suffix}") from exc
     finally:
         staged_cursor.unlink(missing_ok=True)
@@ -2673,9 +2532,7 @@ def repair_runtime(paths: DoctorPaths) -> dict[str, Any]:
         if not source.is_file():
             raise DoctorError(f"declared release lacks launcher {source}")
         if not destination.is_symlink() or os.readlink(destination) != str(target):
-            raise DoctorError(
-                f"fixed launcher drift requires bounded bootstrap repair: {destination}"
-            )
+            raise DoctorError(f"fixed launcher drift requires bounded bootstrap repair: {destination}")
     previous_selector = os.readlink(current_link) if current_link.is_symlink() else None
     before = {
         "current_link": previous_selector,
@@ -2706,19 +2563,12 @@ def repair_runtime(paths: DoctorPaths) -> dict[str, Any]:
                 current_link.unlink()
             except Exception as rollback_exc:
                 rollback_errors.append(str(rollback_exc))
-        suffix = (
-            "; rollback errors: " + "; ".join(rollback_errors)
-            if rollback_errors
-            else "; original selector restored"
-        )
+        suffix = "; rollback errors: " + "; ".join(rollback_errors) if rollback_errors else "; original selector restored"
         raise DoctorError(f"runtime commit failed: {exc}{suffix}") from exc
     after = {
         "current_link": os.readlink(current_link),
         "current": str(current_link.resolve(strict=True)),
-        "launchers": {
-            str(path): {"target": os.readlink(path), "sha256": _file_hash(path)}
-            for path in launcher_links
-        },
+        "launchers": {str(path): {"target": os.readlink(path), "sha256": _file_hash(path)} for path in launcher_links},
         "release_tree": release_tree,
     }
     receipt = _receipt(paths, "runtime", before, after)
@@ -2774,15 +2624,11 @@ def _set_shared_directory(path: Path, group_gid: int) -> None:
         os.close(descriptor)
 
 
-_PACK_COMPONENT = re.compile(
-    r"pack-[0-9a-f]{40}(?:[0-9a-f]{24})?\.(?:pack|idx|rev|bitmap)\Z"
-)
+_PACK_COMPONENT = re.compile(r"pack-[0-9a-f]{40}(?:[0-9a-f]{24})?\.(?:pack|idx|rev|bitmap)\Z")
 _RENAME_EXCHANGE = 2
 
 
-def _rename_exchange(
-    directory_descriptor: int, first: str, second: str
-) -> None:
+def _rename_exchange(directory_descriptor: int, first: str, second: str) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
@@ -2818,11 +2664,7 @@ def _detach_pack_hardlink(
     temporary = f".{name}.tgw-doctor-{os.getpid()}-{secrets.token_hex(8)}"
     destination = os.open(
         temporary,
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | os.O_NOFOLLOW
-        | os.O_CLOEXEC,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
         0o400,
         dir_fd=parent_descriptor,
     )
@@ -2863,18 +2705,13 @@ def _detach_pack_hardlink(
         os.fsync(destination)
         _rename_exchange(parent_descriptor, temporary, name)
         exchanged = True
-        displaced = os.stat(
-            temporary, dir_fd=parent_descriptor, follow_symlinks=False
-        )
+        displaced = os.stat(temporary, dir_fd=parent_descriptor, follow_symlinks=False)
         if (displaced.st_dev, displaced.st_ino) != (before.st_dev, before.st_ino):
             try:
                 _rename_exchange(parent_descriptor, temporary, name)
                 exchanged = False
             except DoctorError as rollback_error:
-                raise DoctorError(
-                    f"Git pack path raced and exchange rollback failed: {name}; "
-                    f"{rollback_error}"
-                ) from rollback_error
+                raise DoctorError(f"Git pack path raced and exchange rollback failed: {name}; {rollback_error}") from rollback_error
             raise DoctorError(f"Git pack path raced during detachment: {name}")
         try:
             os.unlink(temporary, dir_fd=parent_descriptor)
@@ -2884,13 +2721,8 @@ def _detach_pack_hardlink(
                 _rename_exchange(parent_descriptor, temporary, name)
                 exchanged = False
             except DoctorError as rollback_error:
-                raise DoctorError(
-                    f"cannot remove detached Git pack alias or roll back: {name}; "
-                    f"{rollback_error}"
-                ) from unlink_error
-            raise DoctorError(
-                f"cannot remove detached Git pack alias; original restored: {name}"
-            ) from unlink_error
+                raise DoctorError(f"cannot remove detached Git pack alias or roll back: {name}; {rollback_error}") from unlink_error
+            raise DoctorError(f"cannot remove detached Git pack alias; original restored: {name}") from unlink_error
         committed = True
         os.fsync(parent_descriptor)
     finally:
@@ -2910,9 +2742,7 @@ def _scan_shared_git_tree(
     excluded_root_entries: Sequence[str] = (),
 ) -> dict[str, int]:
     """Preflight or repair descriptor-pinned shared Git/worktree entries."""
-    root_descriptor = (
-        os.dup(root) if isinstance(root, int) else _open_direct_directory(root)
-    )
+    root_descriptor = os.dup(root) if isinstance(root, int) else _open_direct_directory(root)
     pending = [(root_descriptor, Path())]
     counts = {
         "directories": 0,
@@ -2934,11 +2764,7 @@ def _scan_shared_git_tree(
             try:
                 directory_state = os.fstat(directory_descriptor)
                 directory_mode = stat.S_IMODE(directory_state.st_mode)
-                if not (
-                    directory_state.st_gid == group_gid
-                    and bool(directory_mode & stat.S_ISGID)
-                    and directory_mode & stat.S_IRWXG == stat.S_IRWXG
-                ):
+                if not (directory_state.st_gid == group_gid and bool(directory_mode & stat.S_ISGID) and directory_mode & stat.S_IRWXG == stat.S_IRWXG):
                     counts["directories_inexact"] += 1
                 if mutate:
                     _set_shared_fd(directory_descriptor, group_gid, directory=True)
@@ -2966,37 +2792,15 @@ def _scan_shared_git_tree(
                         continue
                     try:
                         if not stat.S_ISREG(state.st_mode):
-                            raise DoctorError(
-                                "unsupported entry in canonical Git directory: "
-                                f"{relative}"
-                            )
+                            raise DoctorError(f"unsupported entry in canonical Git directory: {relative}")
                         parts = relative.parts
-                        pack_component = (
-                            len(parts) == 3
-                            and parts[:2] == ("objects", "pack")
-                            and _PACK_COMPONENT.fullmatch(parts[2]) is not None
-                        )
-                        loose_object = (
-                            len(parts) == 3
-                            and parts[0] == "objects"
-                            and _LOOSE_OBJECT_DIRECTORY.fullmatch(parts[1]) is not None
-                            and _LOOSE_OBJECT_NAME.fullmatch(parts[2]) is not None
-                        )
+                        pack_component = len(parts) == 3 and parts[:2] == ("objects", "pack") and _PACK_COMPONENT.fullmatch(parts[2]) is not None
+                        loose_object = len(parts) == 3 and parts[0] == "objects" and _LOOSE_OBJECT_DIRECTORY.fullmatch(parts[1]) is not None and _LOOSE_OBJECT_NAME.fullmatch(parts[2]) is not None
                         if pack_component:
-                            if not bool(state.st_mode & stat.S_IROTH) or bool(
-                                state.st_mode & 0o111
-                            ):
-                                raise DoctorError(
-                                    "unreadable or executable pack component in canonical Git "
-                                    f"directory: {relative}"
-                                )
+                            if not bool(state.st_mode & stat.S_IROTH) or bool(state.st_mode & 0o111):
+                                raise DoctorError(f"unreadable or executable pack component in canonical Git directory: {relative}")
                             counts["pack_components"] += 1
-                            pack_exact = (
-                                state.st_nlink == 1
-                                and state.st_gid == group_gid
-                                and not bool(state.st_mode & 0o222)
-                                and bool(state.st_mode & stat.S_IRGRP)
-                            )
+                            pack_exact = state.st_nlink == 1 and state.st_gid == group_gid and not bool(state.st_mode & 0o222) and bool(state.st_mode & stat.S_IRGRP)
                             if not pack_exact:
                                 counts["pack_components_inexact"] += 1
                             if state.st_nlink > 1:
@@ -3013,27 +2817,15 @@ def _scan_shared_git_tree(
                                 os.fchown(descriptor, -1, group_gid)
                                 os.fchmod(
                                     descriptor,
-                                    (
-                                        stat.S_IMODE(state.st_mode)
-                                        | stat.S_IRGRP
-                                        | stat.S_IROTH
-                                    )
-                                    & ~0o222,
+                                    (stat.S_IMODE(state.st_mode) | stat.S_IRGRP | stat.S_IROTH) & ~0o222,
                                 )
                             continue
                         if loose_object:
                             if state.st_nlink > 1:
-                                raise DoctorError(
-                                    "hardlinked loose object in canonical Git directory: "
-                                    f"{relative}"
-                                )
+                                raise DoctorError(f"hardlinked loose object in canonical Git directory: {relative}")
                             mode = stat.S_IMODE(state.st_mode)
                             counts["loose_objects"] += 1
-                            loose_exact = (
-                                state.st_gid == group_gid
-                                and bool(mode & stat.S_IRGRP)
-                                and not bool(mode & 0o111)
-                            )
+                            loose_exact = state.st_gid == group_gid and bool(mode & stat.S_IRGRP) and not bool(mode & 0o111)
                             if not loose_exact:
                                 counts["loose_objects_inexact"] += 1
                             if mutate:
@@ -3044,16 +2836,9 @@ def _scan_shared_git_tree(
                                 )
                             continue
                         if state.st_nlink > 1:
-                            raise DoctorError(
-                                "mutable or unreadable hardlink in canonical Git "
-                                f"directory: {relative}"
-                            )
+                            raise DoctorError(f"mutable or unreadable hardlink in canonical Git directory: {relative}")
                         mode = stat.S_IMODE(state.st_mode)
-                        if not (
-                            state.st_gid == group_gid
-                            and mode & (stat.S_IRGRP | stat.S_IWGRP)
-                            == (stat.S_IRGRP | stat.S_IWGRP)
-                        ):
+                        if not (state.st_gid == group_gid and mode & (stat.S_IRGRP | stat.S_IWGRP) == (stat.S_IRGRP | stat.S_IWGRP)):
                             counts["files_inexact"] += 1
                         if mutate:
                             _set_shared_fd(descriptor, group_gid, directory=False)
@@ -3111,9 +2896,7 @@ def _shared_tree_exact(counts: Mapping[str, int]) -> bool:
     )
 
 
-def _inspect_shared_git_trees(
-    paths: DoctorPaths, group_gid: int
-) -> dict[str, Any]:
+def _inspect_shared_git_trees(paths: DoctorPaths, group_gid: int) -> dict[str, Any]:
     local, outside = _configured_worktree_locations(paths)
     trees: dict[str, dict[str, int]] = {
         "canonical_worktree": _scan_shared_git_tree(
@@ -3122,14 +2905,10 @@ def _inspect_shared_git_trees(
             mutate=False,
             excluded_root_entries=(".git",),
         ),
-        "git_common": _scan_shared_git_tree(
-            paths.repository / ".git", group_gid, mutate=False
-        ),
+        "git_common": _scan_shared_git_tree(paths.repository / ".git", group_gid, mutate=False),
     }
     for location, relative in local:
-        trees[f"linked:{relative}"] = _scan_shared_git_tree(
-            location, group_gid, mutate=False
-        )
+        trees[f"linked:{relative}"] = _scan_shared_git_tree(location, group_gid, mutate=False)
     return {
         "exact": all(_shared_tree_exact(counts) for counts in trees.values()),
         "trees": trees,
@@ -3162,9 +2941,7 @@ def _verify_bound_directory(path: Path, descriptor: int) -> None:
     visible_descriptor = -1
     try:
         root_descriptor = os.open(path.anchor, flags)
-        visible_descriptor = _open_relative_directory(
-            root_descriptor, path.relative_to(path.anchor)
-        )
+        visible_descriptor = _open_relative_directory(root_descriptor, path.relative_to(path.anchor))
         visible = os.fstat(visible_descriptor)
     except OSError as exc:
         raise DoctorError(f"bound shared directory is no longer visible: {path}") from exc
@@ -3173,10 +2950,7 @@ def _verify_bound_directory(path: Path, descriptor: int) -> None:
             os.close(visible_descriptor)
         if root_descriptor >= 0:
             os.close(root_descriptor)
-    if (
-        not stat.S_ISDIR(visible.st_mode)
-        or (visible.st_dev, visible.st_ino) != (bound.st_dev, bound.st_ino)
-    ):
+    if not stat.S_ISDIR(visible.st_mode) or (visible.st_dev, visible.st_ino) != (bound.st_dev, bound.st_ino):
         raise DoctorError(f"bound shared directory changed before repair: {path}")
 
 
@@ -3190,23 +2964,11 @@ def _secure_runtime_directory(path: Path, *, uid: int, gid: int) -> bool:
     """Create one trusted runtime directory without following a replaced parent."""
     parent = path.parent
     parent_state = parent.stat(follow_symlinks=False)
-    if (
-        parent.is_symlink()
-        or not stat.S_ISDIR(parent_state.st_mode)
-        or parent_state.st_uid != uid
-        or parent_state.st_gid != gid
-        or parent_state.st_mode & 0o022
-    ):
+    if parent.is_symlink() or not stat.S_ISDIR(parent_state.st_mode) or parent_state.st_uid != uid or parent_state.st_gid != gid or parent_state.st_mode & 0o022:
         raise DoctorError(f"unsafe quiescence parent directory: {parent}")
     if os.path.lexists(path):
         state = path.stat(follow_symlinks=False)
-        if (
-            path.is_symlink()
-            or not stat.S_ISDIR(state.st_mode)
-            or state.st_uid != uid
-            or state.st_gid != gid
-            or state.st_mode & 0o022
-        ):
+        if path.is_symlink() or not stat.S_ISDIR(state.st_mode) or state.st_uid != uid or state.st_gid != gid or state.st_mode & 0o022:
             raise DoctorError(f"unsafe quiescence directory: {path}")
         return False
     os.mkdir(path, 0o755)
@@ -3215,9 +2977,7 @@ def _secure_runtime_directory(path: Path, *, uid: int, gid: int) -> bool:
     return True
 
 
-def _create_quiescence_file(
-    path: Path, value: bytes, *, mode: int, uid: int, gid: int
-) -> None:
+def _create_quiescence_file(path: Path, value: bytes, *, mode: int, uid: int, gid: int) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, 0o600)
@@ -3242,19 +3002,11 @@ def _create_quiescence_file(
         raise
 
 
-def _quiescence_file_exact(
-    path: Path, value: bytes, *, mode: int, uid: int, gid: int
-) -> bool:
+def _quiescence_file_exact(path: Path, value: bytes, *, mode: int, uid: int, gid: int) -> bool:
     if not os.path.lexists(path) or path.is_symlink() or not path.is_file():
         return False
     before = path.stat(follow_symlinks=False)
-    if (
-        not stat.S_ISREG(before.st_mode)
-        or before.st_uid != uid
-        or before.st_gid != gid
-        or stat.S_IMODE(before.st_mode) != mode
-        or before.st_nlink != 1
-    ):
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != uid or before.st_gid != gid or stat.S_IMODE(before.st_mode) != mode or before.st_nlink != 1:
         return False
     observed = path.read_bytes()
     after = path.stat(follow_symlinks=False)
@@ -3279,9 +3031,7 @@ def _fsync_parent(path: Path) -> None:
         os.close(descriptor)
 
 
-def _unlink_quiescence_file(
-    path: Path, value: bytes, *, mode: int, uid: int, gid: int
-) -> None:
+def _unlink_quiescence_file(path: Path, value: bytes, *, mode: int, uid: int, gid: int) -> None:
     if not _quiescence_file_exact(path, value, mode=mode, uid=uid, gid=gid):
         raise DoctorError(f"quiescence guard changed; refusing removal: {path}")
     path.unlink()
@@ -3300,9 +3050,7 @@ def _process_start_ticks(pid: int) -> str | None:
 
 def _boot_id() -> str:
     try:
-        value = Path("/proc/sys/kernel/random/boot_id").read_text(
-            encoding="utf-8"
-        ).strip()
+        value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError) as exc:
         raise DoctorError(f"cannot read the local boot identity: {exc}") from exc
     if not value or "\n" in value:
@@ -3310,15 +3058,10 @@ def _boot_id() -> str:
     return value
 
 
-def _quiescence_layout(
-    paths: DoctorPaths, units: Sequence[str]
-) -> tuple[Path, Path, dict[str, Path], bytes]:
+def _quiescence_layout(paths: DoctorPaths, units: Sequence[str]) -> tuple[Path, Path, dict[str, Path], bytes]:
     state_path = paths.quiescence_root / _QUIESCENCE_STATE
     marker = paths.quiescence_root / _QUIESCENCE_MARKER
-    dropins = {
-        unit: paths.systemd_runtime_root / f"{unit}.d" / _QUIESCENCE_DROPIN
-        for unit in units
-    }
+    dropins = {unit: paths.systemd_runtime_root / f"{unit}.d" / _QUIESCENCE_DROPIN for unit in units}
     dropin_value = f"[Unit]\nConditionPathExists=!{marker}\n".encode()
     return state_path, marker, dropins, dropin_value
 
@@ -3341,18 +3084,12 @@ def _unexpected_quiescence_entries(
             continue
         directory_state = directory.stat(follow_symlinks=False)
         if directory.is_symlink() or not stat.S_ISDIR(directory_state.st_mode):
-            raise DoctorError(
-                f"unsafe coding quiescence directory while inspecting: {directory}"
-            )
+            raise DoctorError(f"unsafe coding quiescence directory while inspecting: {directory}")
         try:
             entries = list(directory.iterdir())
         except OSError as exc:
-            raise DoctorError(
-                f"cannot inspect coding quiescence directory {directory}: {exc}"
-            ) from exc
-        unexpected.extend(
-            entry for entry in entries if entry.name not in allowed_names
-        )
+            raise DoctorError(f"cannot inspect coding quiescence directory {directory}: {exc}") from exc
+        unexpected.extend(entry for entry in entries if entry.name not in allowed_names)
     return sorted(unexpected, key=lambda path: str(path))
 
 
@@ -3370,31 +3107,16 @@ def _assert_known_quiescence_layout(
         dropins=dropins,
     )
     if unexpected:
-        raise DoctorError(
-            "unexpected coding quiescence remnants; refusing alteration: "
-            + ", ".join(str(path) for path in unexpected)
-        )
+        raise DoctorError("unexpected coding quiescence remnants; refusing alteration: " + ", ".join(str(path) for path in unexpected))
 
 
 def _assert_quiescence_units_safe(states: Mapping[str, Mapping[str, str]]) -> None:
-    preexisting_masks = [
-        unit for unit, state in states.items() if state.get("LoadState") == "masked"
-    ]
+    preexisting_masks = [unit for unit, state in states.items() if state.get("LoadState") == "masked"]
     if preexisting_masks:
-        raise DoctorError(
-            "refusing to alter pre-existing coding unit masks: "
-            + ", ".join(preexisting_masks)
-        )
-    transient_active = [
-        unit
-        for unit, state in states.items()
-        if unit not in _ACTIVE_CODING_UNITS and state.get("ActiveState") == "active"
-    ]
+        raise DoctorError("refusing to alter pre-existing coding unit masks: " + ", ".join(preexisting_masks))
+    transient_active = [unit for unit, state in states.items() if unit not in _ACTIVE_CODING_UNITS and state.get("ActiveState") == "active"]
     if transient_active:
-        raise DoctorError(
-            "local coding one-shot is active; retry after it exits: "
-            + ", ".join(transient_active)
-        )
+        raise DoctorError("local coding one-shot is active; retry after it exits: " + ", ".join(transient_active))
 
 
 def _new_quiescence_state(
@@ -3433,28 +3155,12 @@ def _read_quiescence_state(
 ) -> tuple[dict[str, Any], bytes]:
     root = state_path.parent
     root_state = root.stat(follow_symlinks=False)
-    if (
-        root.is_symlink()
-        or not stat.S_ISDIR(root_state.st_mode)
-        or root_state.st_uid != uid
-        or root_state.st_gid != gid
-        or root_state.st_mode & 0o022
-    ):
+    if root.is_symlink() or not stat.S_ISDIR(root_state.st_mode) or root_state.st_uid != uid or root_state.st_gid != gid or root_state.st_mode & 0o022:
         raise DoctorError("pre-existing coding quiescence directory is unsafe")
-    if (
-        not os.path.lexists(state_path)
-        or state_path.is_symlink()
-        or not state_path.is_file()
-    ):
+    if not os.path.lexists(state_path) or state_path.is_symlink() or not state_path.is_file():
         raise DoctorError("pre-existing coding quiescence has no trusted state file")
     before = state_path.stat(follow_symlinks=False)
-    if (
-        not stat.S_ISREG(before.st_mode)
-        or before.st_uid != uid
-        or before.st_gid != gid
-        or stat.S_IMODE(before.st_mode) != 0o400
-        or before.st_nlink != 1
-    ):
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != uid or before.st_gid != gid or stat.S_IMODE(before.st_mode) != 0o400 or before.st_nlink != 1:
         raise DoctorError("pre-existing coding quiescence state metadata is unsafe")
     raw = state_path.read_bytes()
     after = state_path.stat(follow_symlinks=False)
@@ -3507,25 +3213,13 @@ def _read_quiescence_state(
 
 
 def _quiescence_owner_active(state: Mapping[str, Any]) -> bool:
-    return (
-        state.get("boot_id") == _boot_id()
-        and _process_start_ticks(int(state["owner_pid"]))
-        == state.get("owner_start_ticks")
-    )
+    return state.get("boot_id") == _boot_id() and _process_start_ticks(int(state["owner_pid"])) == state.get("owner_start_ticks")
 
 
 def _validate_systemd_runtime(paths: DoctorPaths, *, uid: int, gid: int) -> None:
     state = paths.systemd_runtime_root.stat(follow_symlinks=False)
-    if (
-        paths.systemd_runtime_root.is_symlink()
-        or not stat.S_ISDIR(state.st_mode)
-        or state.st_uid != uid
-        or state.st_gid != gid
-        or state.st_mode & 0o022
-    ):
-        raise DoctorError(
-            f"unsafe systemd runtime directory: {paths.systemd_runtime_root}"
-        )
+    if paths.systemd_runtime_root.is_symlink() or not stat.S_ISDIR(state.st_mode) or state.st_uid != uid or state.st_gid != gid or state.st_mode & 0o022:
+        raise DoctorError(f"unsafe systemd runtime directory: {paths.systemd_runtime_root}")
 
 
 def _activate_quiescence(
@@ -3542,32 +3236,20 @@ def _activate_quiescence(
     _validate_systemd_runtime(paths, uid=uid, gid=gid)
     _secure_runtime_directory(paths.quiescence_root, uid=uid, gid=gid)
     if os.path.lexists(marker):
-        if not _quiescence_file_exact(
-            marker, marker_value, mode=0o400, uid=uid, gid=gid
-        ):
+        if not _quiescence_file_exact(marker, marker_value, mode=0o400, uid=uid, gid=gid):
             raise DoctorError("pre-existing coding quiescence marker is unsafe")
     else:
-        _create_quiescence_file(
-            marker, marker_value, mode=0o400, uid=uid, gid=gid
-        )
+        _create_quiescence_file(marker, marker_value, mode=0o400, uid=uid, gid=gid)
     for dropin in dropins.values():
         _secure_runtime_directory(dropin.parent, uid=uid, gid=gid)
         if os.path.lexists(dropin):
-            if not _quiescence_file_exact(
-                dropin, dropin_value, mode=0o444, uid=uid, gid=gid
-            ):
-                raise DoctorError(
-                    f"pre-existing coding quiescence drop-in is unsafe: {dropin}"
-                )
+            if not _quiescence_file_exact(dropin, dropin_value, mode=0o444, uid=uid, gid=gid):
+                raise DoctorError(f"pre-existing coding quiescence drop-in is unsafe: {dropin}")
         else:
-            _create_quiescence_file(
-                dropin, dropin_value, mode=0o444, uid=uid, gid=gid
-            )
+            _create_quiescence_file(dropin, dropin_value, mode=0o444, uid=uid, gid=gid)
     loaded = _run(["systemctl", "daemon-reload"], timeout=30)
     if loaded.returncode:
-        raise DoctorError(
-            loaded.stderr.strip() or "cannot load local coding quiescence guards"
-        )
+        raise DoctorError(loaded.stderr.strip() or "cannot load local coding quiescence guards")
     stopped = _run(["systemctl", "stop", *units], timeout=30)
     if stopped.returncode:
         raise DoctorError(stopped.stderr.strip() or "cannot stop local coding units")
@@ -3575,23 +3257,12 @@ def _activate_quiescence(
     for unit, dropin in dropins.items():
         state = _unit_state(unit)
         loaded_dropins = state.get("DropInPaths", "").split()
-        if (
-            state.get("ActiveState") != "inactive"
-            or str(dropin) not in loaded_dropins
-            or not _quiescence_file_exact(
-                dropin, dropin_value, mode=0o444, uid=uid, gid=gid
-            )
-        ):
+        if state.get("ActiveState") != "inactive" or str(dropin) not in loaded_dropins or not _quiescence_file_exact(dropin, dropin_value, mode=0o444, uid=uid, gid=gid):
             unsettled.append(unit)
-    if not _quiescence_file_exact(
-        marker, marker_value, mode=0o400, uid=uid, gid=gid
-    ):
+    if not _quiescence_file_exact(marker, marker_value, mode=0o400, uid=uid, gid=gid):
         unsettled.append("quiescence-marker")
     if unsettled:
-        raise DoctorError(
-            "local coding units did not reach guarded/inactive state: "
-            + ", ".join(unsettled)
-        )
+        raise DoctorError("local coding units did not reach guarded/inactive state: " + ", ".join(unsettled))
 
 
 def _release_quiescence(
@@ -3611,69 +3282,39 @@ def _release_quiescence(
     marker_value = b"tgw doctor unix-git-access active\n"
     if os.path.lexists(marker):
         try:
-            _unlink_quiescence_file(
-                marker, marker_value, mode=0o400, uid=uid, gid=gid
-            )
+            _unlink_quiescence_file(marker, marker_value, mode=0o400, uid=uid, gid=gid)
         except (OSError, DoctorError) as exc:
             errors.append(str(exc))
     for dropin in reversed(list(dropins.values())):
         if not os.path.lexists(dropin):
             continue
         try:
-            _unlink_quiescence_file(
-                dropin, dropin_value, mode=0o444, uid=uid, gid=gid
-            )
+            _unlink_quiescence_file(dropin, dropin_value, mode=0o444, uid=uid, gid=gid)
         except (OSError, DoctorError) as exc:
             errors.append(str(exc))
     reloaded = _run(["systemctl", "daemon-reload"], timeout=30)
     if reloaded.returncode:
-        errors.append(
-            reloaded.stderr.strip()
-            or "cannot reload systemd after local coding quiescence"
-        )
+        errors.append(reloaded.stderr.strip() or "cannot reload systemd after local coding quiescence")
 
     marker_absent = not os.path.lexists(marker)
     if marker_absent:
-        undesired = [
-            unit
-            for unit in units
-            if unit not in initially_active
-            and _unit_state(unit).get("ActiveState") == "active"
-        ]
+        undesired = [unit for unit in units if unit not in initially_active and _unit_state(unit).get("ActiveState") == "active"]
         if undesired:
             stopped = _run(["systemctl", "stop", *undesired], timeout=30)
             if stopped.returncode:
-                errors.append(
-                    stopped.stderr.strip()
-                    or "cannot restore initially inactive local coding units"
-                )
+                errors.append(stopped.stderr.strip() or "cannot restore initially inactive local coding units")
         if initially_active:
             started = _run(["systemctl", "start", *initially_active], timeout=30)
             if started.returncode:
-                errors.append(
-                    started.stderr.strip()
-                    or "cannot restore initially active local coding units"
-                )
+                errors.append(started.stderr.strip() or "cannot restore initially active local coding units")
     else:
         errors.append("quiescence marker remains; refusing to start local coding units")
 
-    wrong = [
-        unit
-        for unit in units
-        if (_unit_state(unit).get("ActiveState") == "active")
-        != (unit in initially_active)
-    ]
+    wrong = [unit for unit in units if (_unit_state(unit).get("ActiveState") == "active") != (unit in initially_active)]
     if wrong:
-        errors.append(
-            "local coding units did not return to their initial state: "
-            + ", ".join(wrong)
-        )
+        errors.append("local coding units did not return to their initial state: " + ", ".join(wrong))
 
-    remaining_guards = [
-        str(path)
-        for path in (marker, *dropins.values())
-        if os.path.lexists(path)
-    ]
+    remaining_guards = [str(path) for path in (marker, *dropins.values()) if os.path.lexists(path)]
     if remaining_guards:
         errors.append("quiescence guards remain: " + ", ".join(remaining_guards))
 
@@ -3684,29 +3325,20 @@ def _release_quiescence(
         dropins=dropins,
     )
     if unexpected:
-        errors.append(
-            "unexpected coding quiescence remnants remain: "
-            + ", ".join(str(path) for path in unexpected)
-        )
+        errors.append("unexpected coding quiescence remnants remain: " + ", ".join(str(path) for path in unexpected))
 
     if not errors:
-        dropin_directories = sorted(
-            {dropin.parent for dropin in dropins.values()}, key=lambda path: str(path)
-        )
+        dropin_directories = sorted({dropin.parent for dropin in dropins.values()}, key=lambda path: str(path))
         for directory in reversed(dropin_directories):
             try:
                 directory.rmdir()
                 _fsync_parent(directory)
             except OSError as exc:
                 if exc.errno != errno.ENOENT:
-                    errors.append(
-                        f"cannot remove quiescence directory {directory}: {exc}"
-                    )
+                    errors.append(f"cannot remove quiescence directory {directory}: {exc}")
     if not errors:
         try:
-            _unlink_quiescence_file(
-                state_path, state_raw, mode=0o400, uid=uid, gid=gid
-            )
+            _unlink_quiescence_file(state_path, state_raw, mode=0o400, uid=uid, gid=gid)
         except (OSError, DoctorError) as exc:
             errors.append(str(exc))
     if not errors:
@@ -3715,9 +3347,7 @@ def _release_quiescence(
             _fsync_parent(paths.quiescence_root)
         except OSError as exc:
             if exc.errno != errno.ENOENT:
-                errors.append(
-                    f"cannot remove quiescence directory {paths.quiescence_root}: {exc}"
-                )
+                errors.append(f"cannot remove quiescence directory {paths.quiescence_root}: {exc}")
     result = {
         "initially_active": list(initially_active),
         "restored": not wrong and marker_absent,
@@ -3729,9 +3359,7 @@ def _release_quiescence(
     return result
 
 
-def _recover_stale_quiescence(
-    paths: DoctorPaths, *, units: Sequence[str], uid: int, gid: int
-) -> dict[str, Any] | None:
+def _recover_stale_quiescence(paths: DoctorPaths, *, units: Sequence[str], uid: int, gid: int) -> dict[str, Any] | None:
     state_path, marker, dropins, dropin_value = _quiescence_layout(paths, units)
     _assert_known_quiescence_layout(
         paths,
@@ -3739,11 +3367,7 @@ def _recover_stale_quiescence(
         marker=marker,
         dropins=dropins,
     )
-    existing = [
-        str(path)
-        for path in (state_path, marker, *dropins.values())
-        if os.path.lexists(path)
-    ]
+    existing = [str(path) for path in (state_path, marker, *dropins.values()) if os.path.lexists(path)]
     if not existing:
         return None
     state, state_raw = _read_quiescence_state(
@@ -3760,9 +3384,7 @@ def _recover_stale_quiescence(
         (marker, b"tgw doctor unix-git-access active\n", 0o400),
         *((dropin, dropin_value, 0o444) for dropin in dropins.values()),
     ):
-        if os.path.lexists(path) and not _quiescence_file_exact(
-            path, value, mode=mode, uid=uid, gid=gid
-        ):
+        if os.path.lexists(path) and not _quiescence_file_exact(path, value, mode=mode, uid=uid, gid=gid):
             raise DoctorError(f"stale coding quiescence guard is unsafe: {path}")
     initially_active = list(state["initially_active"])
     try:
@@ -3790,10 +3412,7 @@ def _recover_stale_quiescence(
                 gid=gid,
             )
         except DoctorError as release_error:
-            raise DoctorError(
-                f"stale quiescence activation failed: {activation_error}; "
-                f"release failed: {release_error}"
-            ) from release_error
+            raise DoctorError(f"stale quiescence activation failed: {activation_error}; release failed: {release_error}") from release_error
         raise
     release = _release_quiescence(
         paths,
@@ -3840,18 +3459,10 @@ def _coding_quiescence(paths: DoctorPaths):
     recovered = _recover_stale_quiescence(paths, units=units, uid=uid, gid=gid)
     initial_states = {unit: _unit_state(unit) for unit in units}
     _assert_quiescence_units_safe(initial_states)
-    initially_active = [
-        unit
-        for unit, state in initial_states.items()
-        if unit in _ACTIVE_CODING_UNITS and state.get("ActiveState") == "active"
-    ]
+    initially_active = [unit for unit, state in initial_states.items() if unit in _ACTIVE_CODING_UNITS and state.get("ActiveState") == "active"]
     _secure_runtime_directory(paths.quiescence_root, uid=uid, gid=gid)
-    state, state_raw = _new_quiescence_state(
-        units, initially_active, state_path, marker, dropins
-    )
-    _create_quiescence_file(
-        state_path, state_raw, mode=0o400, uid=uid, gid=gid
-    )
+    state, state_raw = _new_quiescence_state(units, initially_active, state_path, marker, dropins)
+    _create_quiescence_file(state_path, state_raw, mode=0o400, uid=uid, gid=gid)
     evidence = {
         "recovered_stale_quiescence": recovered,
         "owner_pid": state["owner_pid"],
@@ -3929,14 +3540,10 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
                 mutate=False,
                 excluded_root_entries=(".git",),
             ),
-            "git_common": _scan_shared_git_tree(
-                git_common_fd, group_gid, mutate=False
-            ),
+            "git_common": _scan_shared_git_tree(git_common_fd, group_gid, mutate=False),
         }
         for _location, relative, descriptor in linked_descriptors:
-            preflight[f"linked:{relative}"] = _scan_shared_git_tree(
-                descriptor, group_gid, mutate=False
-            )
+            preflight[f"linked:{relative}"] = _scan_shared_git_tree(descriptor, group_gid, mutate=False)
 
         # Runtime condition guards are the shared worker lock. Recheck every visible
         # binding after acquisition, then mutate only through retained descriptors.
@@ -3951,14 +3558,10 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
                     mutate=True,
                     excluded_root_entries=(".git",),
                 ),
-                "git_common": _scan_shared_git_tree(
-                    git_common_fd, group_gid, mutate=True
-                ),
+                "git_common": _scan_shared_git_tree(git_common_fd, group_gid, mutate=True),
             }
             for _location, relative, descriptor in linked_descriptors:
-                tree_changes[f"linked:{relative}"] = _scan_shared_git_tree(
-                    descriptor, group_gid, mutate=True
-                )
+                tree_changes[f"linked:{relative}"] = _scan_shared_git_tree(descriptor, group_gid, mutate=True)
 
     after = check_unix_access(paths)
     if after["state"] != "PASS":
@@ -3981,9 +3584,7 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
     }
 
 
-def _unit_destination_exact(
-    paths: DoctorPaths, destination: Path, source: Path
-) -> bool:
+def _unit_destination_exact(paths: DoctorPaths, destination: Path, source: Path) -> bool:
     if destination.is_symlink() or not destination.is_file():
         return False
     state = destination.stat(follow_symlinks=False)
@@ -4008,9 +3609,7 @@ def repair_workers(paths: DoctorPaths) -> dict[str, Any]:
         destination = paths.systemd_install_root / unit
         if not source.is_file():
             raise DoctorError(f"immutable runtime lacks coding unit: {unit}")
-        if destination.is_symlink() or (
-            destination.exists() and not destination.is_file()
-        ):
+        if destination.is_symlink() or (destination.exists() and not destination.is_file()):
             raise DoctorError(f"refusing unsafe coding unit destination: {destination}")
         if not _unit_destination_exact(paths, destination, source):
             _atomic_bytes(
@@ -4055,18 +3654,14 @@ def repair_workers(paths: DoctorPaths) -> dict[str, Any]:
     }
 
 
-def _repair_managed_directory(
-    path: Path, *, uid: int, gid: int, mode: int
-) -> bool:
+def _repair_managed_directory(path: Path, *, uid: int, gid: int, mode: int) -> bool:
     if not path.is_absolute() or path.name in ("", ".", ".."):
         raise DoctorError(f"unsafe managed directory path: {path}")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     root_descriptor = -1
     try:
         root_descriptor = os.open(path.anchor, flags)
-        parent_descriptor = _open_relative_directory(
-            root_descriptor, path.parent.relative_to(path.anchor)
-        )
+        parent_descriptor = _open_relative_directory(root_descriptor, path.parent.relative_to(path.anchor))
     except OSError as exc:
         raise DoctorError(f"unsafe managed directory parent: {path.parent}") from exc
     finally:
@@ -4117,12 +3712,15 @@ def _repair_plan_render_storage(paths: DoctorPaths) -> bool:
     group = grp.getgrnam("tgw-coders")
     changed = False
     for path in (paths.plan_render_root, paths.plan_render_log_root):
-        changed = _repair_managed_directory(
-            path,
-            uid=owner.pw_uid,
-            gid=group.gr_gid,
-            mode=_PLAN_RENDER_DIRECTORY_MODE,
-        ) or changed
+        changed = (
+            _repair_managed_directory(
+                path,
+                uid=owner.pw_uid,
+                gid=group.gr_gid,
+                mode=_PLAN_RENDER_DIRECTORY_MODE,
+            )
+            or changed
+        )
     after = _plan_render_storage_identity(paths)
     if not after["exact"]:
         raise DoctorError("plan_render output directories remain unsafe after repair")
@@ -4135,40 +3733,23 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
     _verify_release_tree(paths, desired, release)
     runtime = _runtime_selector_identity(paths, desired, release)
     if not runtime["exact"]:
-        raise DoctorError(
-            "immutable runtime selector differs; repair runtime before plan_render"
-        )
+        raise DoctorError("immutable runtime selector differs; repair runtime before plan_render")
     before = check_plan_render_worker(paths)
     config_source = release / "config/tgw-plan-render-local.json"
     unit_source = release / "systemd" / _PLAN_RENDER_UNIT
-    if (
-        config_source.is_symlink()
-        or not config_source.is_file()
-        or unit_source.is_symlink()
-        or not unit_source.is_file()
-    ):
+    if config_source.is_symlink() or not config_source.is_file() or unit_source.is_symlink() or not unit_source.is_file():
         raise DoctorError("immutable runtime lacks plan_render config or unit")
-    if paths.plan_render_config.is_symlink() or (
-        paths.plan_render_config.exists()
-        and not paths.plan_render_config.is_file()
-    ):
+    if paths.plan_render_config.is_symlink() or (paths.plan_render_config.exists() and not paths.plan_render_config.is_file()):
         raise DoctorError("refusing unsafe plan_render config destination")
     destination = paths.systemd_install_root / _PLAN_RENDER_UNIT
-    if destination.is_symlink() or (
-        destination.exists() and not destination.is_file()
-    ):
+    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
         raise DoctorError("refusing unsafe plan_render unit destination")
     changed = False
-    if (
-        not paths.plan_render_config.is_file()
-        or paths.plan_render_config.read_bytes() != config_source.read_bytes()
-    ):
-        _atomic_bytes(paths.plan_render_config, config_source.read_bytes(),
-                      mode=0o444, uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
+    if not paths.plan_render_config.is_file() or paths.plan_render_config.read_bytes() != config_source.read_bytes():
+        _atomic_bytes(paths.plan_render_config, config_source.read_bytes(), mode=0o444, uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
         changed = True
     if not _unit_destination_exact(paths, destination, unit_source):
-        _atomic_bytes(destination, unit_source.read_bytes(), mode=paths.systemd_unit_mode,
-                      uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
+        _atomic_bytes(destination, unit_source.read_bytes(), mode=paths.systemd_unit_mode, uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
         result = _run(["systemctl", "daemon-reload"], timeout=30)
         if result.returncode:
             raise DoctorError(result.stderr.strip() or "systemd daemon reload failed")
@@ -4186,9 +3767,7 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
     try:
         changed = _repair_plan_render_storage(paths) or changed
         storage_after = _plan_render_storage_identity(paths)
-        storage_receipt = _receipt(
-            paths, "plan-render-storage", storage_before, storage_after
-        )
+        storage_receipt = _receipt(paths, "plan-render-storage", storage_before, storage_after)
     except Exception as exc:
         try:
             storage_failed = _plan_render_storage_identity(paths)
@@ -4200,15 +3779,10 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
             storage_before,
             {"error": str(exc), "storage": storage_failed},
         )
-        raise DoctorError(
-            f"plan_render storage repair failed: {exc}; "
-            f"started receipt: {storage_started_receipt}; "
-            f"failure receipt: {storage_failure_receipt}"
-        ) from exc
+        raise DoctorError(f"plan_render storage repair failed: {exc}; started receipt: {storage_started_receipt}; failure receipt: {storage_failure_receipt}") from exc
     action = None
     if changed or state.get("ActiveState") != "active":
-        for command in (["systemctl", "enable", _PLAN_RENDER_UNIT],
-                        ["systemctl", "restart" if state.get("ActiveState") == "active" else "start", _PLAN_RENDER_UNIT]):
+        for command in (["systemctl", "enable", _PLAN_RENDER_UNIT], ["systemctl", "restart" if state.get("ActiveState") == "active" else "start", _PLAN_RENDER_UNIT]):
             result = _run(command, timeout=30)
             if result.returncode:
                 raise DoctorError(result.stderr.strip() or "plan_render service repair failed")
@@ -4216,16 +3790,18 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
     after = check_plan_render_worker(paths)
     if after["state"] != "PASS":
         raise DoctorError("plan_render unit remains unhealthy after repair")
-    return {"ok": True, "operation": "plan-render-worker", "changed": changed or action is not None,
-            "service_action": action,
-            "storage_started_receipt": storage_started_receipt,
-            "storage_receipt": storage_receipt,
-            "receipt": _receipt(paths, "plan-render-worker", before, after)}
+    return {
+        "ok": True,
+        "operation": "plan-render-worker",
+        "changed": changed or action is not None,
+        "service_action": action,
+        "storage_started_receipt": storage_started_receipt,
+        "storage_receipt": storage_receipt,
+        "receipt": _receipt(paths, "plan-render-worker", before, after),
+    }
 
 
-def _cleanup_references(
-    paths: DoctorPaths, surfaces: Sequence[Mapping[str, Any]]
-) -> list[dict[str, str]]:
+def _cleanup_references(paths: DoctorPaths, surfaces: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
     needles = {
         value
         for item in surfaces
@@ -4250,10 +3826,7 @@ def _cleanup_references(
         actor_home / ".gemini/settings.json",
         actor_home / ".antigravity/settings.json",
     )
-    evidence_records = {
-        path.resolve(strict=False)
-        for path in (paths.context_snapshot, paths.context_task, paths.context_cursor)
-    }
+    evidence_records = {path.resolve(strict=False) for path in (paths.context_snapshot, paths.context_task, paths.context_cursor)}
     roots = tuple(dict.fromkeys((*paths.cleanup_reference_roots, *actor_configuration)))
     for root in roots:
         if root.resolve(strict=False) in evidence_records:
@@ -4275,9 +3848,7 @@ def _cleanup_references(
                 else:
                     continue
             except OSError as exc:
-                raise DoctorError(
-                    f"cannot completely inspect active configuration: {candidate}"
-                ) from exc
+                raise DoctorError(f"cannot completely inspect active configuration: {candidate}") from exc
             for needle in sorted(needles):
                 if needle.encode() in raw:
                     references.append({"path": str(candidate), "reference": needle})
@@ -4298,15 +3869,11 @@ def _configuration_candidates(root: Path) -> list[Path]:
                     if entry.is_dir(follow_symlinks=False):
                         pending.append(candidate)
         except OSError as exc:
-            raise DoctorError(
-                f"cannot completely scan active configuration: {directory}"
-            ) from exc
+            raise DoctorError(f"cannot completely scan active configuration: {directory}") from exc
     return candidates
 
 
-def _cleanup_process_references(
-    surfaces: Sequence[Mapping[str, Any]], proc_root: Path = Path("/proc")
-) -> list[dict[str, Any]]:
+def _cleanup_process_references(surfaces: Sequence[Mapping[str, Any]], proc_root: Path = Path("/proc")) -> list[dict[str, Any]]:
     needles = {
         value
         for item in surfaces
@@ -4314,9 +3881,7 @@ def _cleanup_process_references(
             str(item["path"]),
             Path(item["path"]).name,
             item.get("declared_target"),
-            Path(item["declared_target"]).name
-            if isinstance(item.get("declared_target"), str)
-            else None,
+            Path(item["declared_target"]).name if isinstance(item.get("declared_target"), str) else None,
         )
         if isinstance(value, str) and value
     }
@@ -4327,26 +3892,14 @@ def _cleanup_process_references(
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
             continue
         try:
-            argv = [
-                value.decode(errors="replace")
-                for value in (entry / "cmdline").read_bytes().split(b"\0")
-                if value
-            ]
+            argv = [value.decode(errors="replace") for value in (entry / "cmdline").read_bytes().split(b"\0") if value]
         except OSError as exc:
             if exc.errno in (errno.ENOENT, errno.ESRCH):
                 continue
-            raise DoctorError(
-                f"cannot completely inspect process activity: {entry}"
-            ) from exc
-        matched = sorted(
-            needle
-            for needle in needles
-            if any(argument == needle or argument.startswith(needle + " ") for argument in argv)
-        )
+            raise DoctorError(f"cannot completely inspect process activity: {entry}") from exc
+        matched = sorted(needle for needle in needles if any(argument == needle or argument.startswith(needle + " ") for argument in argv))
         if matched:
-            references.append(
-                {"pid": int(entry.name), "command": " ".join(argv), "references": matched}
-            )
+            references.append({"pid": int(entry.name), "command": " ".join(argv), "references": matched})
     return references
 
 
@@ -4376,9 +3929,7 @@ def _open_direct_directory(path: Path) -> int:
             try:
                 child = os.open(component, flags, dir_fd=descriptor)
             except OSError as exc:
-                raise DoctorError(
-                    f"cleanup parent path is not a direct directory: {traversed}"
-                ) from exc
+                raise DoctorError(f"cleanup parent path is not a direct directory: {traversed}") from exc
             os.close(descriptor)
             descriptor = child
         return descriptor
@@ -4388,9 +3939,7 @@ def _open_direct_directory(path: Path) -> int:
 
 
 @contextmanager
-def _bind_cleanup_parent(
-    path: Path, item: Mapping[str, Any]
-) -> Iterator[_CleanupBinding]:
+def _bind_cleanup_parent(path: Path, item: Mapping[str, Any]) -> Iterator[_CleanupBinding]:
     parent_fd = _open_direct_directory(path.parent)
     try:
         bound_parent = os.fstat(parent_fd)
@@ -4473,17 +4022,9 @@ def _bind_cleanup_surface(item: Mapping[str, Any]) -> Iterator[_CleanupBinding]:
 def _read_xattrs(path_or_fd: Path | int, *, follow_symlinks: bool = True) -> dict[str, str]:
     if isinstance(path_or_fd, int):
         names = os.listxattr(path_or_fd)
-        return {
-            name: base64.b64encode(os.getxattr(path_or_fd, name)).decode("ascii")
-            for name in sorted(names)
-        }
+        return {name: base64.b64encode(os.getxattr(path_or_fd, name)).decode("ascii") for name in sorted(names)}
     names = os.listxattr(path_or_fd, follow_symlinks=follow_symlinks)
-    return {
-        name: base64.b64encode(
-            os.getxattr(path_or_fd, name, follow_symlinks=follow_symlinks)
-        ).decode("ascii")
-        for name in sorted(names)
-    }
+    return {name: base64.b64encode(os.getxattr(path_or_fd, name, follow_symlinks=follow_symlinks)).decode("ascii") for name in sorted(names)}
 
 
 def _metadata(state: os.stat_result, xattrs: Mapping[str, str]) -> dict[str, Any]:
@@ -4545,9 +4086,7 @@ def _verify_bound_cleanup_surface(binding: _CleanupBinding) -> dict[str, Any]:
             raise DoctorError(f"obsolete surface is not the declared symlink: {binding.path}")
         target = os.readlink(binding.path.name, dir_fd=binding.parent_fd)
         if target != binding.item["declared_target"]:
-            raise DoctorError(
-                f"obsolete symlink target changed; refusing cleanup: {binding.path}"
-            )
+            raise DoctorError(f"obsolete symlink target changed; refusing cleanup: {binding.path}")
         xattrs = _read_xattrs(binding.path, follow_symlinks=False)
         after = os.stat(binding.path.name, dir_fd=binding.parent_fd, follow_symlinks=False)
         if (after.st_dev, after.st_ino, after.st_ctime_ns) != (
@@ -4567,9 +4106,7 @@ def _verify_bound_cleanup_surface(binding: _CleanupBinding) -> dict[str, Any]:
             raise DoctorError(f"obsolete surface is not the declared regular file: {binding.path}")
         digest = _hash_fd(binding.source_fd, binding.path)
         if not binding.item.get("declared_sha256"):
-            raise DoctorError(
-                f"obsolete surface has no declared file hash; refusing cleanup: {binding.path}"
-            )
+            raise DoctorError(f"obsolete surface has no declared file hash; refusing cleanup: {binding.path}")
         if digest != binding.item["declared_sha256"]:
             raise DoctorError(f"obsolete surface bytes changed; refusing cleanup: {binding.path}")
         opened = os.fstat(binding.source_fd)
@@ -4609,9 +4146,7 @@ def _fsync_directory_fd(descriptor: int) -> None:
     os.fsync(descriptor)
 
 
-def _durable_mkdir(
-    path: Path, *, mode: int = 0o755, require_new: bool = False
-) -> None:
+def _durable_mkdir(path: Path, *, mode: int = 0o755, require_new: bool = False) -> None:
     if not path.is_absolute():
         raise DoctorError(f"archive path is not absolute: {path}")
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -4637,9 +4172,7 @@ def _durable_mkdir(
                 try:
                     os.mkdir(component, mode=mode, dir_fd=descriptor)
                 except OSError as exc:
-                    raise DoctorError(
-                        f"cannot durably create archive directory: {traversed}"
-                    ) from exc
+                    raise DoctorError(f"cannot durably create archive directory: {traversed}") from exc
                 created = True
                 child = os.open(component, flags, dir_fd=descriptor)
             except OSError as exc:
@@ -4741,9 +4274,7 @@ def _verify_archived_surface(path: Path, identity: Mapping[str, Any]) -> None:
         raise DoctorError(f"recovery archive identity differs: {path}")
 
 
-def _apply_bound_symlink_metadata(
-    parent_fd: int, name: str, metadata: Mapping[str, Any]
-) -> None:
+def _apply_bound_symlink_metadata(parent_fd: int, name: str, metadata: Mapping[str, Any]) -> None:
     os.chown(
         name,
         int(metadata["uid"]),
@@ -4761,9 +4292,7 @@ def _apply_bound_symlink_metadata(
     )
 
 
-def _copy_cleanup_surface(
-    binding: _CleanupBinding, destination: Path
-) -> dict[str, Any]:
+def _copy_cleanup_surface(binding: _CleanupBinding, destination: Path) -> dict[str, Any]:
     before = _verify_bound_cleanup_surface(binding)
     _durable_mkdir(destination.parent)
     archive_parent_fd = _open_direct_directory(destination.parent)
@@ -4778,9 +4307,7 @@ def _copy_cleanup_surface(
         if before["kind"] == "symlink":
             os.symlink(before["target"], destination.name, dir_fd=archive_parent_fd)
             final = _verify_bound_cleanup_surface(binding)
-            _apply_bound_symlink_metadata(
-                archive_parent_fd, destination.name, final["metadata"]
-            )
+            _apply_bound_symlink_metadata(archive_parent_fd, destination.name, final["metadata"])
         else:
             if binding.source_fd is None:
                 raise DoctorError(f"obsolete file binding is unavailable: {binding.path}")
@@ -4801,20 +4328,14 @@ def _copy_cleanup_surface(
                         view = view[written:]
                 os.fsync(destination_fd)
                 if "sha256:" + digest.hexdigest() != before["sha256"]:
-                    raise DoctorError(
-                        f"obsolete surface changed while archiving: {binding.path}"
-                    )
+                    raise DoctorError(f"obsolete surface changed while archiving: {binding.path}")
                 final = _verify_bound_cleanup_surface(binding)
                 if final["sha256"] != before["sha256"]:
-                    raise DoctorError(
-                        f"obsolete surface changed while archiving: {binding.path}"
-                    )
+                    raise DoctorError(f"obsolete surface changed while archiving: {binding.path}")
                 _apply_fd_metadata(destination_fd, final["metadata"])
             finally:
                 os.close(destination_fd)
-        archived_state = os.stat(
-            destination.name, dir_fd=archive_parent_fd, follow_symlinks=False
-        )
+        archived_state = os.stat(destination.name, dir_fd=archive_parent_fd, follow_symlinks=False)
         archived_binding = _CleanupBinding(
             item=final,
             path=destination,
@@ -4835,9 +4356,7 @@ def _copy_cleanup_surface(
         os.close(archive_parent_fd)
 
 
-def _restore_cleanup_surface(
-    destination: Path, archived: Path, identity: Mapping[str, Any]
-) -> None:
+def _restore_cleanup_surface(destination: Path, archived: Path, identity: Mapping[str, Any]) -> None:
     with _bind_cleanup_parent(destination, identity) as binding:
         _restore_bound_cleanup_surface(binding, archived, identity)
         _assert_parent_binding(binding)
@@ -4851,9 +4370,7 @@ def _bound_recovery_identity(binding: _CleanupBinding) -> dict[str, Any]:
             "path": str(binding.path),
             "kind": "symlink",
             "target": os.readlink(binding.path.name, dir_fd=binding.parent_fd),
-            "metadata": _metadata(
-                state, _read_xattrs(proc_path, follow_symlinks=False)
-            ),
+            "metadata": _metadata(state, _read_xattrs(proc_path, follow_symlinks=False)),
         }
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -4875,9 +4392,7 @@ def _bound_recovery_identity(binding: _CleanupBinding) -> dict[str, Any]:
         os.close(descriptor)
 
 
-def _restore_bound_cleanup_surface(
-    binding: _CleanupBinding, archived: Path, identity: Mapping[str, Any]
-) -> None:
+def _restore_bound_cleanup_surface(binding: _CleanupBinding, archived: Path, identity: Mapping[str, Any]) -> None:
     try:
         os.stat(binding.path.name, dir_fd=binding.parent_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -4890,9 +4405,7 @@ def _restore_bound_cleanup_surface(
     _verify_archived_surface(archived, identity)
     if identity["kind"] == "symlink":
         os.symlink(identity["target"], binding.path.name, dir_fd=binding.parent_fd)
-        _apply_bound_symlink_metadata(
-            binding.parent_fd, binding.path.name, identity["metadata"]
-        )
+        _apply_bound_symlink_metadata(binding.parent_fd, binding.path.name, identity["metadata"])
     else:
         source_fd = _open_path_noatime(archived)
         destination_fd = os.open(
@@ -4918,12 +4431,8 @@ def _restore_bound_cleanup_surface(
     _fsync_directory_fd(binding.parent_fd)
 
 
-def _unlink_bound_surface(
-    binding: _CleanupBinding, identity: Mapping[str, Any]
-) -> None:
-    if _stable_bound_identity(
-        _verify_bound_cleanup_surface(binding)
-    ) != _stable_bound_identity(identity):
+def _unlink_bound_surface(binding: _CleanupBinding, identity: Mapping[str, Any]) -> None:
+    if _stable_bound_identity(_verify_bound_cleanup_surface(binding)) != _stable_bound_identity(identity):
         raise DoctorError(f"obsolete surface changed at removal: {binding.path}")
     os.unlink(binding.path.name, dir_fd=binding.parent_fd)
 
@@ -4975,9 +4484,7 @@ def _incomplete_cleanup_archives(paths: DoctorPaths) -> list[Path]:
     return sorted(incomplete)
 
 
-def _write_archive_state(
-    archive: Path, name: str, value: Mapping[str, Any]
-) -> str:
+def _write_archive_state(archive: Path, name: str, value: Mapping[str, Any]) -> str:
     path = archive / f"{name}.json"
     body = {
         "schema": "tgw-doctor-obsolete-surface-state/v1",
@@ -4989,17 +4496,12 @@ def _write_archive_state(
     return str(path)
 
 
-def _reconcile_incomplete_cleanup(
-    paths: DoctorPaths, declared: Sequence[Mapping[str, Any]]
-) -> dict[str, Any] | None:
+def _reconcile_incomplete_cleanup(paths: DoctorPaths, declared: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     incomplete = _incomplete_cleanup_archives(paths)
     if not incomplete:
         return None
     if len(incomplete) != 1:
-        raise DoctorError(
-            "multiple incomplete obsolete-surface archives require bounded recovery: "
-            + ", ".join(str(path) for path in incomplete)
-        )
+        raise DoctorError("multiple incomplete obsolete-surface archives require bounded recovery: " + ", ".join(str(path) for path in incomplete))
     archive = incomplete[0]
     manifest = _validate_cleanup_archive(paths, archive)
     declaration_by_path = {str(item["path"]): item for item in declared}
@@ -5010,9 +4512,7 @@ def _reconcile_incomplete_cleanup(
     for identity in present:
         observed = _verify_cleanup_surface(declaration_by_path[identity["path"]])
         if _stable_restorable_identity(observed) != _stable_restorable_identity(identity):
-            raise DoctorError(
-                f"active surface differs from incomplete archive: {identity['path']}"
-            )
+            raise DoctorError(f"active surface differs from incomplete archive: {identity['path']}")
     if not present:
         receipt = _receipt(
             paths,
@@ -5066,9 +4566,7 @@ def repair_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
         return reconciled
     unbound = _unbound_obsolete_surfaces(paths)
     if unbound:
-        raise DoctorError(
-            "obsolete cleanup refuses unbound active surfaces: " + ", ".join(unbound)
-        )
+        raise DoctorError("obsolete cleanup refuses unbound active surfaces: " + ", ".join(unbound))
     present = [item for item in declared if _lexists(Path(item["path"]))]
     if not present:
         receipt = _receipt(paths, "obsolete-surfaces", [], {"state": "ALREADY_ABSENT"})
@@ -5082,15 +4580,10 @@ def repair_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
     references = _cleanup_references(paths, present)
     processes = _cleanup_process_references(present)
     if references or processes:
-        raise DoctorError(
-            "obsolete cleanup refused because active references remain: "
-            + json.dumps({"configuration": references, "processes": processes}, sort_keys=True)
-        )
+        raise DoctorError("obsolete cleanup refused because active references remain: " + json.dumps({"configuration": references, "processes": processes}, sort_keys=True))
 
     now = datetime.now(UTC)
-    archive = paths.cleanup_archive_root / now.strftime("%Y-%m-%d") / now.strftime(
-        "%Y%m%dT%H%M%S%fZ"
-    )
+    archive = paths.cleanup_archive_root / now.strftime("%Y-%m-%d") / now.strftime("%Y%m%dT%H%M%S%fZ")
     archived_rows = []
     with ExitStack() as stack:
         bindings = [stack.enter_context(_bind_cleanup_surface(item)) for item in present]
@@ -5102,10 +4595,7 @@ def repair_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
             destination = archive / "active-root" / _archive_relative(binding.path)
             identity = _copy_cleanup_surface(binding, destination)
             archived_rows.append({**identity, "archive_path": str(destination)})
-        identities = [
-            {key: value for key, value in row.items() if key != "archive_path"}
-            for row in archived_rows
-        ]
+        identities = [{key: value for key, value in row.items() if key != "archive_path"} for row in archived_rows]
         manifest = {
             "schema": "tgw-doctor-obsolete-surface-archive/v1",
             "created_at": now.isoformat(),
@@ -5176,10 +4666,7 @@ def repair_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
                         parent_visible = False
                     _restore_bound_cleanup_surface(binding, archived, identity)
                     if not parent_visible:
-                        rollback_errors.append(
-                            f"bound parent no longer visible at {binding.path.parent}; "
-                            "surface restored only to its original directory inode"
-                        )
+                        rollback_errors.append(f"bound parent no longer visible at {binding.path.parent}; surface restored only to its original directory inode")
                 except Exception as rollback_exc:
                     rollback_errors.append(str(rollback_exc))
             rollback_receipt = _receipt(
@@ -5197,12 +4684,8 @@ def repair_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
                         "manifest_sha256": manifest["manifest_sha256"],
                     },
                 )
-            suffix = (
-                "original active view restored" if not rollback_errors else "rollback incomplete"
-            )
-            raise DoctorError(
-                f"obsolete cleanup failed; {suffix}; receipt: {rollback_receipt}"
-            ) from exc
+            suffix = "original active view restored" if not rollback_errors else "rollback incomplete"
+            raise DoctorError(f"obsolete cleanup failed; {suffix}; receipt: {rollback_receipt}") from exc
 
     # Once every source removal is durable, failure to record completion must
     # leave the PREPARED archive intact for deterministic next-run reconciliation.
@@ -5267,9 +4750,7 @@ def repair(operation: str, paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]
                 )
             except Exception as receipt_exc:
                 receipt = f"unavailable ({receipt_exc})"
-            raise DoctorError(
-                f"{exc}; started receipt: {started_receipt}; failure receipt: {receipt}"
-            ) from exc
+            raise DoctorError(f"{exc}; started receipt: {started_receipt}; failure receipt: {receipt}") from exc
     return {
         "schema": "tgw-local-doctor-repair/v1",
         "ok": True,
@@ -5301,10 +4782,10 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="operation")
     sub.add_parser("check", help="run read-only diagnosis (default)")
     sub.add_parser("inventory", help="inventory linked and active-path remnants read-only")
-    resume_parser = sub.add_parser(
-        "coding-resume", help="resume one exact local RESUMABLE_PARTIAL Todo"
-    )
+    resume_parser = sub.add_parser("coding-resume", help="resume one exact local RESUMABLE_PARTIAL Todo")
     resume_parser.add_argument("todo_id", type=int)
+    reconcile_parser = sub.add_parser("coding-reconcile", help="reconcile one older-runner closed implementation receipt")
+    reconcile_parser.add_argument("todo_id", type=int)
     repair_parser = sub.add_parser("repair", help="restore an exact declared local state")
     repair_parser.add_argument("target", choices=[*_REPAIRS])
     repair_parser.add_argument("--json", action="store_true", dest="repair_json_output")
@@ -5323,9 +4804,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.operation == "coding-resume":
             from tgw.coding_cli import resume
+
             result = resume(args.todo_id)
             print(json.dumps(result, indent=2, sort_keys=True, default=str))
             return 0 if result.get("ok", True) else 1
+        if args.operation == "coding-reconcile":
+            result = reconcile_implementation_receipt(args.todo_id)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
         result = diagnose()
         if args.json_output:
             print(json.dumps(result, indent=2, sort_keys=True))

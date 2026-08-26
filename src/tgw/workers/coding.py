@@ -26,6 +26,7 @@ from tgw.development.partial_resume import (
     make_attempt,
     preservation_manifest,
     source_fingerprint,
+    validate_closed_candidate,
 )
 from tgw.development.plan_binding import MalformedPlanBindingError, validate_plan_binding
 from tgw.development.worktree_lease import exclusive_worktree_lease
@@ -80,27 +81,27 @@ def _run_bounded_process_group(
     runner_identity: dict[str, Any] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one launcher and terminate its complete descendant group on timeout."""
-    with tempfile.TemporaryFile(mode="w+t") as stdout_file, tempfile.TemporaryFile(
-        mode="w+t"
-    ) as stderr_file:
+    with tempfile.TemporaryFile(mode="w+t") as stdout_file, tempfile.TemporaryFile(mode="w+t") as stderr_file:
         process = subprocess.Popen(
-            command, cwd=cwd, env=env, text=True,
-            stdout=stdout_file, stderr=stderr_file,
-            start_new_session=True, pass_fds=pass_fds,
+            command,
+            cwd=cwd,
+            env=env,
+            text=True,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            start_new_session=True,
+            pass_fds=pass_fds,
         )
         identity = dict(runner_identity or {})
         try:
             if runner_manifest is not None:
-                identity.update({"schema": "tgw-coding-runner/v2", "pid": process.pid,
-                                 "pgid": process.pid, "state": "running"})
+                identity.update({"schema": "tgw-coding-runner/v2", "pid": process.pid, "pgid": process.pid, "state": "running"})
                 _write_json_atomic(runner_manifest, identity)
             deadline = time.monotonic() + timeout
             while True:
                 # WNOWAIT observes exit without reaping.  The zombie reserves
                 # its PID/PGID until the cancellation decision is final.
-                exited = os.waitid(
-                    os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
-                )
+                exited = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
                 cancelled = cancellation_check is not None and cancellation_check()
                 if cancelled:
                     _terminate_process_group(process)
@@ -109,7 +110,8 @@ def _run_bounded_process_group(
                         _write_json_atomic(runner_manifest, identity)
                     raise JobCancelled(
                         "durable cancellation won exact process scope",
-                        reason="stopped", reaped=process.returncode is not None,
+                        reason="stopped",
+                        reaped=process.returncode is not None,
                         runner=dict(identity),
                     )
                 if exited is not None:
@@ -143,8 +145,7 @@ def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
     """Publish diagnostics without following or accepting mutable names."""
     path.parent.mkdir(mode=0o770, parents=True, exist_ok=True)
     parent = path.parent.lstat()
-    if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid()
-            or parent.st_mode & stat.S_IWOTH):
+    if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid() or parent.st_mode & stat.S_IWOTH:
         raise OSError("runner diagnostic directory is not protected")
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     temporary = f".{path.name}.{os.getpid()}.tmp"
@@ -313,13 +314,14 @@ class CodingWorker(QueueWorker):
             active_job = getattr(self, "_active_job", {})
             job_id = str(active_job.get("job_id") or payload.get("job_id") or "")
             coding = self._coding_config()
-            manifest = Path(self._coding_config().get(
-                "runner_state_root", Path(coding.get("worktree_root", DEFAULT_WORKTREE_ROOT)) / ".tgw-runner-control"
-            )) / f"{job_id}.json"
-            identity = {"job_id": job_id, "queue_name": treatment_id,
-                        "lease_owner": self.owner,
-                        "lease_token": str(active_job.get("lease_token") or payload.get("lease_token") or ""),
-                        "worktree": str(worktree)}
+            manifest = Path(self._coding_config().get("runner_state_root", Path(coding.get("worktree_root", DEFAULT_WORKTREE_ROOT)) / ".tgw-runner-control")) / f"{job_id}.json"
+            identity = {
+                "job_id": job_id,
+                "queue_name": treatment_id,
+                "lease_owner": self.owner,
+                "lease_token": str(active_job.get("lease_token") or payload.get("lease_token") or ""),
+                "worktree": str(worktree),
+            }
             completed = _run_bounded_process_group(
                 command,
                 cwd=worktree,
@@ -328,16 +330,10 @@ class CodingWorker(QueueWorker):
                     **os.environ,
                     "TGW_CODING_JOB": json.dumps(payload),
                     "TGW_CODING_WORKTREE_SRC": str(worktree / "src"),
-                    **(
-                        {"TGW_CODING_WORKTREE_LEASE_FD": str(lease_fd)}
-                        if lease_fd is not None
-                        else {}
-                    ),
+                    **({"TGW_CODING_WORKTREE_LEASE_FD": str(lease_fd)} if lease_fd is not None else {}),
                 },
                 pass_fds=(lease_fd,) if lease_fd is not None else (),
-                cancellation_check=lambda: (
-                    (worker_base.state_machine.get_job(job_id) or {}).get("state") == "cancelled"
-                ),
+                cancellation_check=lambda: (worker_base.state_machine.get_job(job_id) or {}).get("state") == "cancelled",
                 runner_manifest=manifest,
                 runner_identity=identity,
             )
@@ -390,18 +386,19 @@ class CodingWorker(QueueWorker):
         if current.get("state") == "cancelled":
             raise JobCancelled(
                 "durable cancellation suppresses coding receipt",
-                reason="no_runner", reaped=True,
+                reason="no_runner",
+                reaped=True,
                 runner={
-                    "schema": "tgw-coding-runner/v2", "kind": "no_runner",
+                    "schema": "tgw-coding-runner/v2",
+                    "kind": "no_runner",
                     "job_id": str(job.get("job_id") or ""),
-                    "queue_name": self.queue_name, "lease_owner": self.owner,
+                    "queue_name": self.queue_name,
+                    "lease_owner": self.owner,
                     "lease_token": str(job.get("lease_token") or ""),
                 },
             )
 
-    def _persist_success_receipt(
-        self, job: dict[str, Any], path: Path, receipt: dict[str, Any]
-    ) -> None:
+    def _persist_success_receipt(self, job: dict[str, Any], path: Path, receipt: dict[str, Any]) -> None:
         """Defer real leased receipts until durable success wins cancellation."""
         if job.get("lease_token"):
             self._pending_success_receipt = (str(job.get("job_id")), path, receipt)
@@ -409,17 +406,19 @@ class CodingWorker(QueueWorker):
             _write_receipt(path, receipt)
 
     def _on_direct_local_success(
-        self, job: dict[str, Any], receipt: dict[str, Any] | None,
+        self,
+        job: dict[str, Any],
+        receipt: dict[str, Any] | None,
         register_undo: Callable[[Callable[[], None]], None],
     ) -> None:
         pending = getattr(self, "_pending_success_receipt", None)
-        if (pending is None or pending[0] != str(job.get("job_id"))
-                or pending[2] is not receipt):
+        if pending is None or pending[0] != str(job.get("job_id")) or pending[2] is not receipt:
             raise RuntimeError("coding success has no exact pending receipt")
         pending_attempt = getattr(self, "_pending_success_attempt", None)
         created_attempt: Path | None = None
         receipt_path = pending[1]
         previous_receipt = receipt_path.read_bytes() if receipt_path.exists() else None
+
         def rollback_publication() -> None:
             errors: list[BaseException] = []
             if created_attempt is not None:
@@ -475,18 +474,17 @@ class CodingWorker(QueueWorker):
         register_undo(rollback_publication)
         if pending_attempt is not None:
             attempt = make_attempt(
-                pending_attempt[1], pending_attempt[0],
+                pending_attempt[1],
+                pending_attempt[0],
                 outcome=OUTCOME_SATISFIED,
-                predecessor=pending_attempt[2], artifacts=pending_attempt[3],
+                predecessor=pending_attempt[2],
+                artifacts=pending_attempt[3],
             )
             # Bind the exact target before append_attempt creates it: an fsync
             # failure after O_EXCL must still be compensatable.  The registered
             # authoritative caller in close_local_success invokes rollback once.
             digest = attempt["attempt_hash"].removeprefix("sha256:")
-            created_attempt = (
-                pending_attempt[0] / ".tgw-coding-history" / "implementation"
-                / f"{len(history(pending_attempt[0])) + 1:06d}-{digest}.json"
-            )
+            created_attempt = pending_attempt[0] / ".tgw-coding-history" / "implementation" / f"{len(history(pending_attempt[0])) + 1:06d}-{digest}.json"
             actual_attempt = append_attempt(pending_attempt[0], attempt)
             if actual_attempt != created_attempt:
                 raise RuntimeError("attempt publication target changed")
@@ -507,8 +505,12 @@ class CodingWorker(QueueWorker):
         try:
             probe = subprocess.run(
                 [
-                    "git", "-c", f"safe.directory={path.resolve()}",
-                    "rev-parse", "--show-toplevel", "--git-common-dir",
+                    "git",
+                    "-c",
+                    f"safe.directory={path.resolve()}",
+                    "rev-parse",
+                    "--show-toplevel",
+                    "--git-common-dir",
                 ],
                 cwd=path,
                 check=False,
@@ -585,22 +587,16 @@ class CodingWorker(QueueWorker):
         worktree = self._validated_worktree(payload)
         plan_binding = self._validated_plan_binding(payload, worktree)
 
-        tracked_implementation = (
-            treatment_id == "codex-implement" and payload.get("todo_id") is not None
-        )
+        tracked_implementation = treatment_id == "codex-implement" and payload.get("todo_id") is not None
         if tracked_implementation:
             with exclusive_worktree_lease(worktree) as descriptor:
                 previous = self._worktree_lease_fd
                 self._worktree_lease_fd = descriptor
                 try:
-                    return self._handle_under_lease(
-                        job, payload, treatment_id, worktree, plan_binding
-                    )
+                    return self._handle_under_lease(job, payload, treatment_id, worktree, plan_binding)
                 finally:
                     self._worktree_lease_fd = previous
-        return self._handle_under_lease(
-            job, payload, treatment_id, worktree, plan_binding
-        )
+        return self._handle_under_lease(job, payload, treatment_id, worktree, plan_binding)
 
     def _handle_under_lease(
         self,
@@ -620,23 +616,29 @@ class CodingWorker(QueueWorker):
                 raise HardFailure("Codex implementation attempt requires an exact Plan binding")
             source_commit = plan_binding["source_commit"]
             source_tree = subprocess.run(
-                ["git", "rev-parse", f"{source_commit}^{{tree}}"], cwd=worktree,
-                check=True, text=True, capture_output=True,
+                ["git", "rev-parse", f"{source_commit}^{{tree}}"],
+                cwd=worktree,
+                check=True,
+                text=True,
+                capture_output=True,
             ).stdout.strip()
             attempt_binding = {
                 "job_id": str(job.get("job_id") or payload.get("job_id") or ""),
                 "attempt_count": job.get("attempt_count", payload.get("attempt_count")),
-                "todo_id": payload.get("todo_id"), "plan_commit": plan_binding["plan_commit"],
-                "solution_hash": plan_binding["solution_hash"], "source_commit": source_commit,
-                "source_tree": source_tree, "actor": payload.get("todo_agent"),
-                "worktree": str(worktree), "treatment_id": treatment_id,
+                "todo_id": payload.get("todo_id"),
+                "plan_commit": plan_binding["plan_commit"],
+                "solution_hash": plan_binding["solution_hash"],
+                "source_commit": source_commit,
+                "source_tree": source_tree,
+                "actor": payload.get("todo_agent"),
+                "worktree": str(worktree),
+                "treatment_id": treatment_id,
                 "treatment_version": str(payload.get("treatment_version", "1")),
             }
             lineage_binding = {**attempt_binding, "job_id": None, "attempt_count": None}
             state = classify(worktree, lineage_binding)
             if state["state"] == "RESUMABLE_PARTIAL":
-                if (payload.get("resume_of") != state.get("resume_of")
-                        or payload.get("resume_fingerprint") != state.get("fingerprint")):
+                if payload.get("resume_of") != state.get("resume_of") or payload.get("resume_fingerprint") != state.get("fingerprint"):
                     preservation_manifest(worktree, state, attempt_binding)
                     raise HardFailure("dirty Codex worktree is resumable only with its exact attempt hash and fingerprint")
                 predecessor = state["predecessor"]
@@ -667,9 +669,7 @@ class CodingWorker(QueueWorker):
                     "receipt_schema_id": "receipt/tgw-development/v1",
                     "plan_binding": plan_binding,
                 }
-                self._persist_success_receipt(
-                    job, receipt_path_for_treatment(worktree, treatment_id), receipt
-                )
+                self._persist_success_receipt(job, receipt_path_for_treatment(worktree, treatment_id), receipt)
                 return receipt
             else:
                 preservation_manifest(worktree, state, attempt_binding)
@@ -683,14 +683,14 @@ class CodingWorker(QueueWorker):
             )
             if attempt_binding is not None and outcome == OUTCOME_SATISFIED:
                 candidate = source_fingerprint(worktree)
-                closed = [
-                    item for item in artifacts
-                    if isinstance(item, dict) and item.get("kind") == "closed_candidate"
-                ]
+                closed = [item for item in artifacts if isinstance(item, dict) and item.get("kind") == "closed_candidate"]
                 ancestor = subprocess.run(
                     [
-                        "git", "merge-base", "--is-ancestor",
-                        attempt_binding["source_commit"], candidate["head"],
+                        "git",
+                        "merge-base",
+                        "--is-ancestor",
+                        attempt_binding["source_commit"],
+                        candidate["head"],
                     ],
                     cwd=worktree,
                     check=False,
@@ -704,9 +704,17 @@ class CodingWorker(QueueWorker):
                     or closed[0].get("tree") != candidate["tree"]
                     or ancestor.returncode != 0
                 ):
-                    raise HardFailure(
-                        "satisfied Codex outcome is not the exact closed source descendant"
+                    raise HardFailure("satisfied Codex outcome is not the exact closed source descendant")
+                try:
+                    validate_closed_candidate(
+                        worktree,
+                        closed[0],
+                        base_commit=attempt_binding["source_commit"],
+                        candidate_commit=candidate["head"],
+                        candidate_tree=candidate["tree"],
                     )
+                except ValueError as exc:
+                    raise HardFailure(str(exc)) from exc
         except JobCancelled:
             raise
         except (HardFailure, RuntimeError) as exc:
@@ -726,9 +734,7 @@ class CodingWorker(QueueWorker):
                 **({"plan_binding": plan_binding} if plan_binding else {}),
             }
             if attempt_binding is not None:
-                append_attempt(worktree, make_attempt(attempt_binding, worktree,
-                    outcome=OUTCOME_FAILED, predecessor=predecessor,
-                    artifacts=receipt["artifacts"]))
+                append_attempt(worktree, make_attempt(attempt_binding, worktree, outcome=OUTCOME_FAILED, predecessor=predecessor, artifacts=receipt["artifacts"]))
             _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
             raise HardFailure(f"coding treatment mechanical failure: {exc}") from exc
         receipt = {
@@ -747,15 +753,15 @@ class CodingWorker(QueueWorker):
         self._raise_if_cancelled(job)
         if attempt_binding is not None and outcome == OUTCOME_SATISFIED and job.get("lease_token"):
             self._pending_success_attempt = (
-                worktree, attempt_binding, predecessor, artifacts,
+                worktree,
+                attempt_binding,
+                predecessor,
+                artifacts,
             )
         elif attempt_binding is not None:
-            append_attempt(worktree, make_attempt(attempt_binding, worktree,
-                outcome=outcome, predecessor=predecessor, artifacts=artifacts))
+            append_attempt(worktree, make_attempt(attempt_binding, worktree, outcome=outcome, predecessor=predecessor, artifacts=artifacts))
         if outcome == OUTCOME_SATISFIED:
-            self._persist_success_receipt(
-                job, receipt_path_for_treatment(worktree, treatment_id), receipt
-            )
+            self._persist_success_receipt(job, receipt_path_for_treatment(worktree, treatment_id), receipt)
         else:
             _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
         if outcome != OUTCOME_SATISFIED:
@@ -770,11 +776,13 @@ def execute_treatment(config: dict[str, Any], payload: dict[str, Any]) -> dict[s
     treatment_id = payload.get("treatment_id")
     if not isinstance(treatment_id, str) or treatment_id not in CODING_TREATMENTS:
         raise HardFailure("coding job payload has no registered treatment")
-    return CodingWorker(treatment_id, config).handle({
-        "job_id": payload.get("job_id") or payload.get("graph_id"),
-        "attempt_count": payload.get("attempt_count", 1),
-        "payload_json": payload,
-    })
+    return CodingWorker(treatment_id, config).handle(
+        {
+            "job_id": payload.get("job_id") or payload.get("graph_id"),
+            "attempt_count": payload.get("attempt_count", 1),
+            "payload_json": payload,
+        }
+    )
 
 
 def main() -> int:

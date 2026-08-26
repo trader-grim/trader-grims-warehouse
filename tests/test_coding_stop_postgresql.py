@@ -7,7 +7,6 @@ delete only those rows; they never truncate shared test state.
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 import time
@@ -18,9 +17,7 @@ import pytest
 
 from tgw.queue import state_machine
 
-DSN = os.environ.get(
-    "TGW_TEST_STATE_MACHINE_DSN", "dbname=state_machine_test user=tgw"
-)
+DSN = os.environ.get("TGW_TEST_STATE_MACHINE_DSN", "dbname=state_machine_test user=tgw")
 
 
 def _available() -> bool:
@@ -90,6 +87,15 @@ class _CommitFaultConnection:
             self._connection.commit()
             self._broken_after_commit = True
         elif self._mode == "delayed":
+
+            def commit_original_transaction():
+                try:
+                    self._connection.commit()
+                finally:
+                    self._connection.close()
+
+            self._commit_thread = threading.Thread(target=commit_original_transaction)
+            self._commit_thread.start()
             self._broken_after_commit = True
         raise psycopg2.OperationalError("injected final commit client error")
 
@@ -99,9 +105,26 @@ class _CommitFaultConnection:
         return self._connection.cursor(*args, **kwargs)
 
     def close(self):
-        self._connection.close()
+        if self._mode != "delayed" or self._commit_thread is None:
+            self._connection.close()
         if self._after_close is not None:
             self._commit_thread = self._after_close()
+
+
+def _delayed_commit_trigger(job_id: str):
+    suffix = uuid.uuid4().hex
+    function, trigger = f"tgw_commit_delay_{suffix}", f"tgw_commit_delay_trigger_{suffix}"
+    with psycopg2.connect(DSN) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$
+                    BEGIN PERFORM pg_sleep(0.3); RETURN NEW; END $$;
+                    CREATE CONSTRAINT TRIGGER {trigger} AFTER UPDATE ON queue_jobs
+                    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+                    WHEN (NEW.job_id = '{job_id}'::uuid AND NEW.state::text = 'succeeded')
+                    EXECUTE FUNCTION {function}()"""
+            )
+    return trigger, function
 
 
 def _failure_trigger(job_id: str, *, deferred: bool):
@@ -156,16 +179,17 @@ def test_real_postgresql_cancellation_winner_isolated_from_other_job(job_rows):
     cancelled_id, token = _insert(job_rows)
     other_id, _ = _insert(job_rows)
     stopped = state_machine.cancel_job(
-        cancelled_id, result={"stop_control": {
-            "schema": "tgw-coding-stop/v1", "kind": "runner_cancel_requested"
-        }},
+        cancelled_id,
+        result={"stop_control": {"schema": "tgw-coding-stop/v1", "kind": "runner_cancel_requested"}},
     )
     assert stopped["state"] == "cancelled"
     identity = stopped["payload_json"]["result"]["stop_control"]["request_identity"]
-    assert identity == {"job_id": cancelled_id, "queue_name": "codex-implement",
-                        "lease_owner": "worker:race", "lease_token": token}
+    assert identity == {"job_id": cancelled_id, "queue_name": "codex-implement", "lease_owner": "worker:race", "lease_token": token}
     assert not state_machine.close_local_success(
-        cancelled_id, "worker:race", token, {"outcome": "satisfied"},
+        cancelled_id,
+        "worker:race",
+        token,
+        {"outcome": "satisfied"},
         lambda register: register(lambda: None),
     )
     assert _row(other_id)[0] == "running"
@@ -180,16 +204,17 @@ def test_real_postgresql_success_winner_blocks_stop_and_preserves_exact_job(job_
 
     def complete():
         results["success"] = state_machine.close_local_success(
-            job_id, "worker:race", token, {"outcome": "satisfied"},
+            job_id,
+            "worker:race",
+            token,
+            {"outcome": "satisfied"},
             lambda register: (register(lambda: None), published.set(), release.wait(5)),
         )
 
     success_thread = threading.Thread(target=complete)
     success_thread.start()
     assert published.wait(5)
-    stop_thread = threading.Thread(
-        target=lambda: results.setdefault("stop", state_machine.cancel_job(job_id))
-    )
+    stop_thread = threading.Thread(target=lambda: results.setdefault("stop", state_machine.cancel_job(job_id)))
     stop_thread.start()
     release.set()
     success_thread.join(5)
@@ -208,9 +233,11 @@ def test_real_postgresql_sql_and_commit_failures_rollback_publication(job_rows, 
     try:
         with pytest.raises(psycopg2.Error, match="injected stop closure failure"):
             state_machine.close_local_success(
-                job_id, "worker:race", token, {"outcome": "satisfied"},
-                lambda register: (register(lambda: evidence.update(exists=False)),
-                                  evidence.update(exists=True)),
+                job_id,
+                "worker:race",
+                token,
+                {"outcome": "satisfied"},
+                lambda register: (register(lambda: evidence.update(exists=False)), evidence.update(exists=True)),
             )
         assert evidence["exists"] is False
         assert _row(job_id)[0] == "running"
@@ -234,7 +261,10 @@ def test_real_postgresql_commit_and_cleanup_failure_fences_before_stop(job_rows)
     def complete():
         try:
             state_machine.close_local_success(
-                job_id, "worker:race", token, {"outcome": "satisfied"},
+                job_id,
+                "worker:race",
+                token,
+                {"outcome": "satisfied"},
                 lambda register: register(cleanup),
             )
         except Exception as exc:
@@ -243,9 +273,7 @@ def test_real_postgresql_commit_and_cleanup_failure_fences_before_stop(job_rows)
     completion = threading.Thread(target=complete)
     completion.start()
     assert cleanup_started.wait(5)
-    stop = threading.Thread(
-        target=lambda: results.setdefault("stop", state_machine.cancel_job(job_id))
-    )
+    stop = threading.Thread(target=lambda: results.setdefault("stop", state_machine.cancel_job(job_id)))
     stop.start()
     completion.join(5)
     stop.join(5)
@@ -286,7 +314,10 @@ def test_real_postgresql_initial_cleanup_and_fence_failure_remains_non_cancellab
     def complete():
         try:
             state_machine.close_local_success(
-                job_id, "worker:race", token, {"outcome": "satisfied"},
+                job_id,
+                "worker:race",
+                token,
+                {"outcome": "satisfied"},
                 lambda register: register(cleanup),
             )
         except Exception as exc:
@@ -295,9 +326,7 @@ def test_real_postgresql_initial_cleanup_and_fence_failure_remains_non_cancellab
     completion = threading.Thread(target=complete)
     completion.start()
     assert cleanup_started.wait(5)
-    stop = threading.Thread(
-        target=lambda: results.setdefault("stop", state_machine.cancel_job(job_id))
-    )
+    stop = threading.Thread(target=lambda: results.setdefault("stop", state_machine.cancel_job(job_id)))
     stop.start()
     completion.join(5)
     stop.join(5)
@@ -324,81 +353,41 @@ def test_real_postgresql_initial_cleanup_and_fence_failure_remains_non_cancellab
 
 def test_real_postgresql_ack_is_exact_identity_bound_and_single_use(job_rows):
     job_id, token = _insert(job_rows)
-    stopped = state_machine.cancel_job(job_id, result={"stop_control": {
-        "schema": "tgw-coding-stop/v1", "kind": "runner_cancel_requested"
-    }})
+    stopped = state_machine.cancel_job(job_id, result={"stop_control": {"schema": "tgw-coding-stop/v1", "kind": "runner_cancel_requested"}})
     identity = stopped["payload_json"]["result"]["stop_control"]["request_identity"]
     acknowledgement = {
-        "schema": "tgw-coding-stop-ack/v1", "job_id": job_id,
-        "ack_id": str(uuid.uuid4()), "worker": identity["lease_owner"],
-        "observed_at": "2026-08-26T07:00:00+00:00", "reason": "no_runner",
-        "reaped": True, "runner": {"schema": "tgw-coding-runner/v2",
-            "kind": "no_runner", **identity},
+        "schema": "tgw-coding-stop-ack/v1",
+        "job_id": job_id,
+        "ack_id": str(uuid.uuid4()),
+        "worker": identity["lease_owner"],
+        "observed_at": "2026-08-26T07:00:00+00:00",
+        "reason": "no_runner",
+        "reaped": True,
+        "runner": {"schema": "tgw-coding-runner/v2", "kind": "no_runner", **identity},
     }
     assert state_machine.acknowledge_cancellation(job_id, acknowledgement) is not None
     assert state_machine.acknowledge_cancellation(job_id, acknowledgement) is None
-    replay = {**acknowledgement, "ack_id": str(uuid.uuid4()),
-              "runner": {**acknowledgement["runner"], "lease_token": str(uuid.uuid4())}}
+    replay = {**acknowledgement, "ack_id": str(uuid.uuid4()), "runner": {**acknowledgement["runner"], "lease_token": str(uuid.uuid4())}}
     assert state_machine.acknowledge_cancellation(job_id, replay) is None
 
 
 @pytest.mark.parametrize(
-    "mode", ["committed", "delayed", "uncommitted"],
+    "mode",
+    ["committed", "delayed", "uncommitted"],
     ids=["committed-client-error", "commit-in-flight", "uncommitted-failure"],
 )
 def test_real_postgresql_final_commit_fault_reconciles_before_compensation(
-    job_rows, monkeypatch, mode,
+    job_rows,
+    monkeypatch,
+    mode,
 ):
     job_id, token = _insert(job_rows)
     original_connect = psycopg2.connect
-    finisher_threads = []
-
-    def finish_after_close():
-        """Model an independent backend still resolving durable COMMIT.
-
-        It owns the exact advisory boundary before replacement reconciliation
-        starts, then makes the success identity durable and releases the lock.
-        An unlocked reconciliation would read ``closing`` and compensate.
-        """
-        finisher = original_connect(DSN)
-        with finisher.cursor() as cursor:
-            cursor.execute(
-                "SELECT pg_advisory_lock(hashtextextended(%s, 1792))", (job_id,),
-            )
-
-        def finish():
-            time.sleep(0.2)
-            with finisher.cursor() as cursor:
-                cursor.execute(
-                    """UPDATE queue_jobs
-                          SET state='succeeded', finished_at=NOW(),
-                              lease_owner=NULL, lease_token=NULL,
-                              lease_expires_at=NULL, error_code=NULL,
-                              error_detail=NULL,
-                              payload_json=(payload_json-'publication_reconciliation')
-                                || jsonb_build_object(
-                                  'result', %s::jsonb, 'publication_commit',
-                                  jsonb_build_object(
-                                    'schema','tgw-publication-commit/v1',
-                                    'job_id',%s,'lease_owner','worker:race',
-                                    'lease_token',%s))
-                        WHERE job_id=%s AND state='running'
-                          AND lease_owner='worker:race'
-                          AND lease_token=%s::uuid""",
-                    (json.dumps({"outcome": "satisfied"}), job_id, token,
-                     job_id, token),
-                )
-            finisher.commit()
-            finisher.close()
-
-        thread = threading.Thread(target=finish)
-        thread.start()
-        finisher_threads.append(thread)
-        return thread
+    delayed_trigger = _delayed_commit_trigger(job_id) if mode == "delayed" else None
 
     primary = _CommitFaultConnection(
-        original_connect(DSN), mode=mode,
-        after_close=finish_after_close if mode == "delayed" else None,
+        original_connect(DSN),
+        mode=mode,
     )
     connections = iter([primary])
 
@@ -416,29 +405,41 @@ def test_real_postgresql_final_commit_fault_reconciles_before_compensation(
         def cleanup():
             cleanup_calls.append(True)
             publication["exists"] = False
+
         register(cleanup)
         publication["exists"] = True
 
-    if mode in {"committed", "delayed"}:
-        assert state_machine.close_local_success(
-            job_id, "worker:race", token, {"outcome": "satisfied"}, publish,
-        )
-        assert publication["exists"] is True
-        assert cleanup_calls == []
-        state, payload = _row(job_id)
-        assert state == "succeeded"
-        assert payload["publication_commit"] == {
-            "schema": "tgw-publication-commit/v1", "job_id": job_id,
-            "lease_owner": "worker:race", "lease_token": token,
-        }
-    else:
-        with pytest.raises(psycopg2.OperationalError, match="injected final commit"):
-            state_machine.close_local_success(
-                job_id, "worker:race", token, {"outcome": "satisfied"}, publish,
-            )
-        assert publication["exists"] is False
-        assert cleanup_calls == [True]
-        assert _row(job_id)[0] == "running"
-    for thread in finisher_threads:
-        thread.join(5)
-        assert not thread.is_alive()
+    started = time.monotonic()
+    try:
+        if mode in {"committed", "delayed"}:
+            assert state_machine.close_local_success(job_id, "worker:race", token, {"outcome": "satisfied"}, publish)
+            if mode == "delayed":
+                assert time.monotonic() - started >= 0.25
+            assert publication["exists"] is True
+            assert cleanup_calls == []
+            state, payload = _row(job_id)
+            assert state == "succeeded"
+            assert payload["publication_commit"] == {
+                "schema": "tgw-publication-commit/v1",
+                "job_id": job_id,
+                "lease_owner": "worker:race",
+                "lease_token": token,
+            }
+        else:
+            with pytest.raises(psycopg2.OperationalError, match="injected final commit"):
+                state_machine.close_local_success(
+                    job_id,
+                    "worker:race",
+                    token,
+                    {"outcome": "satisfied"},
+                    publish,
+                )
+            assert publication["exists"] is False
+            assert cleanup_calls == [True]
+            assert _row(job_id)[0] == "running"
+    finally:
+        if primary._commit_thread is not None:
+            primary._commit_thread.join(5)
+            assert not primary._commit_thread.is_alive()
+        if delayed_trigger is not None:
+            _drop_failure_trigger(*delayed_trigger)

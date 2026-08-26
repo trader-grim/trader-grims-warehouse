@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path, PurePosixPath
@@ -71,6 +72,63 @@ def source_tree(worktree: Path, source_commit: str) -> str:
     if not isinstance(source_commit, str) or len(source_commit) != 40:
         raise PartialResumeError("source commit is malformed")
     return _git(worktree, "rev-parse", f"{source_commit}^{{tree}}").decode().strip()
+
+
+def candidate_changed_paths(worktree: Path, base_commit: str, candidate_commit: str) -> list[str]:
+    """Return the one canonical base-to-candidate path set.
+
+    NUL framing is required so new files and unusual (but UTF-8) Git names are
+    evidence rather than presentation-dependent ``--name-only`` text.
+    """
+    if not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) for value in (base_commit, candidate_commit)):
+        raise PartialResumeError("candidate commit identity is malformed")
+    raw = _git(
+        worktree,
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        f"{base_commit}..{candidate_commit}",
+        "--",
+        ".",
+    )
+    values = []
+    for item in raw.split(b"\0"):
+        if not item:
+            continue
+        try:
+            values.append(_safe_path(item))
+        except UnicodeEncodeError as exc:  # pragma: no cover - defensive
+            raise PartialResumeError("candidate path is not canonical UTF-8") from exc
+    try:
+        for value in values:
+            value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise PartialResumeError("candidate path is not canonical UTF-8") from exc
+    return sorted(set(values), key=os.fsencode)
+
+
+def validate_closed_candidate(
+    worktree: Path,
+    artifact: Mapping[str, Any],
+    *,
+    base_commit: str,
+    candidate_commit: str,
+    candidate_tree: str,
+) -> None:
+    """Reject incomplete, contradictory, or noncanonical implementation evidence."""
+    if set(artifact) - {"kind", "commit", "tree", "base_commit", "changed_paths", "detail"}:
+        raise PartialResumeError("closed candidate has unknown evidence fields")
+    expected_paths = candidate_changed_paths(worktree, base_commit, candidate_commit)
+    if (
+        artifact.get("kind") != "closed_candidate"
+        or artifact.get("commit") != candidate_commit
+        or artifact.get("tree") != candidate_tree
+        or artifact.get("base_commit") != base_commit
+        or artifact.get("changed_paths") != expected_paths
+        or not expected_paths
+    ):
+        raise PartialResumeError("closed candidate evidence is absent, contradictory, or noncanonical")
 
 
 def _fsync_directory(path: Path) -> None:
@@ -177,12 +235,7 @@ def append_attempt(worktree: Path, attempt: Mapping[str, Any]) -> Path:
     unsigned = dict(attempt)
     claimed = unsigned.pop("attempt_hash", None)
     actual = "sha256:" + hashlib.sha256(_canonical(unsigned)).hexdigest()
-    if (
-        attempt.get("schema") != SCHEMA
-        or claimed != actual
-        or attempt.get("predecessor")
-        != (existing[-1]["attempt_hash"] if existing else None)
-    ):
+    if attempt.get("schema") != SCHEMA or claimed != actual or attempt.get("predecessor") != (existing[-1]["attempt_hash"] if existing else None):
         raise PartialResumeError("attempt append is not the next exact lineage entry")
     sequence = len(existing) + 1
     digest = str(attempt.get("attempt_hash", "")).removeprefix("sha256:")
@@ -203,9 +256,7 @@ def history(worktree: Path, expected: Mapping[str, Any] | None = None) -> list[d
         required = tuple(key for key in _BINDINGS if key not in {"job_id", "attempt_count"})
         missing = [key for key in required if expected.get(key) in (None, "")]
         if missing:
-            raise PartialResumeError(
-                "incomplete expected attempt binding: " + ",".join(missing)
-            )
+            raise PartialResumeError("incomplete expected attempt binding: " + ",".join(missing))
     result, predecessor = [], None
     paths = sorted((worktree / HISTORY).glob("*.json")) if (worktree / HISTORY).is_dir() else ()
     for sequence, path in enumerate(paths, 1):
@@ -241,10 +292,7 @@ def classify(worktree: Path, expected: Mapping[str, Any] | None = None) -> dict[
     latest = attempts[-1]
     resumable = next((item for item in reversed(attempts) if item["outcome"] == "partial" and item["fingerprint"] == current["fingerprint"]), None)
     if latest["outcome"] == "satisfied":
-        closed = [
-            item for item in latest.get("artifacts", [])
-            if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"
-        ]
+        closed = [item for item in latest.get("artifacts", []) if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"]
         exact_closed = (
             len(closed) == 1
             and not current["changed_paths"]
@@ -253,6 +301,17 @@ def classify(worktree: Path, expected: Mapping[str, Any] | None = None) -> dict[
             and current["tree"] == latest.get("tree") == closed[0].get("tree")
             and current["head"] != latest.get("source_commit")
         )
+        if exact_closed:
+            try:
+                validate_closed_candidate(
+                    worktree,
+                    closed[0],
+                    base_commit=latest["source_commit"],
+                    candidate_commit=current["head"],
+                    candidate_tree=current["tree"],
+                )
+            except PartialResumeError:
+                exact_closed = False
         if exact_closed:
             try:
                 _git(
@@ -264,13 +323,7 @@ def classify(worktree: Path, expected: Mapping[str, Any] | None = None) -> dict[
                 )
             except PartialResumeError:
                 exact_closed = False
-        state = (
-            "CLOSED_CANDIDATE"
-            if exact_closed
-            else "UNSAFE_DIRTY"
-            if current["changed_paths"]
-            else "STALE_RECEIPT"
-        )
+        state = "CLOSED_CANDIDATE" if exact_closed else "UNSAFE_DIRTY" if current["changed_paths"] else "STALE_RECEIPT"
     elif resumable is not None and all(item["fingerprint"] == current["fingerprint"] and item["outcome"] in {"partial", "failed"} for item in attempts[attempts.index(resumable) :]):
         state = "RESUMABLE_PARTIAL"
     else:
@@ -319,12 +372,8 @@ def migrate_todo_1747(worktree: Path, binding: Mapping[str, Any], jobs: list[Map
     ):
         raise PartialResumeError("migration is restricted to exact Todo 1747")
     expected_jobs = {
-        "dfdfd643-312e-46ef-a33c-1542340e9b9c": (
-            "partial", 1, "HardFailure('coding treatment reported partial')"
-        ),
-        "2b1f9f04-a09f-489e-aade-f21ab1e4aaa9": (
-            "failed", 1, "HardFailure('coding treatment reported failed')"
-        ),
+        "dfdfd643-312e-46ef-a33c-1542340e9b9c": ("partial", 1, "HardFailure('coding treatment reported partial')"),
+        "2b1f9f04-a09f-489e-aade-f21ab1e4aaa9": ("failed", 1, "HardFailure('coding treatment reported failed')"),
     }
     if len(jobs) != len(expected_jobs):
         raise PartialResumeError("Todo 1747 requires exactly two durable jobs")
@@ -336,8 +385,7 @@ def migrate_todo_1747(worktree: Path, binding: Mapping[str, Any], jobs: list[Map
         expected = expected_jobs.get(job_id)
         if (
             expected is None
-            or expected
-            != (outcome, job.get("attempt_count"), job.get("error_detail"))
+            or expected != (outcome, job.get("attempt_count"), job.get("error_detail"))
             or job.get("state") != "dead_letter"
             or job.get("error_code") != "HARD_FAILURE"
             or not isinstance(job.get("payload"), Mapping)
@@ -409,7 +457,8 @@ def migrate_todo_1747(worktree: Path, binding: Mapping[str, Any], jobs: list[Map
             or source_hash != LEGACY_1747_FINGERPRINT
             or installed_source.get("head") != LEGACY_1747_SOURCE_COMMIT
             or installed_source.get("tree") != binding.get("source_tree")
-            or installed_source.get("changed_paths") != [
+            or installed_source.get("changed_paths")
+            != [
                 "src/tgw/coding_cli.py",
                 "src/tgw/pp_workflow_reconcile.py",
                 "tests/test_pp_workflow_reconcile.py",
@@ -419,9 +468,7 @@ def migrate_todo_1747(worktree: Path, binding: Mapping[str, Any], jobs: list[Map
         attempts = history(worktree, {**binding, "job_id": None, "attempt_count": None})
         if len(attempts) < 2:
             raise PartialResumeError("Todo 1747 historical attempt lineage is incomplete")
-        for attempt, job in zip(
-            attempts[:2], sorted(normalized, key=lambda item: item["outcome"] != "partial"), strict=True
-        ):
+        for attempt, job in zip(attempts[:2], sorted(normalized, key=lambda item: item["outcome"] != "partial"), strict=True):
             if (
                 attempt.get("job_id") != job["job_id"]
                 or attempt.get("outcome") != job["outcome"]
@@ -434,15 +481,11 @@ def migrate_todo_1747(worktree: Path, binding: Mapping[str, Any], jobs: list[Map
             return path
         raise PartialResumeError("Todo 1747 installed migration is not bound to the current worktree")
     state = source_fingerprint(worktree)
-    if (
-        state["fingerprint"] != LEGACY_1747_FINGERPRINT
-        or state["changed_paths"]
-        != [
-            "src/tgw/coding_cli.py",
-            "src/tgw/pp_workflow_reconcile.py",
-            "tests/test_pp_workflow_reconcile.py",
-        ]
-    ):
+    if state["fingerprint"] != LEGACY_1747_FINGERPRINT or state["changed_paths"] != [
+        "src/tgw/coding_cli.py",
+        "src/tgw/pp_workflow_reconcile.py",
+        "tests/test_pp_workflow_reconcile.py",
+    ]:
         raise PartialResumeError("Todo 1747 exact three-path binding mismatch")
     receipt = worktree / "implementation-receipt.json"
     receipt_hash = hashlib.sha256(receipt.read_bytes()).hexdigest() if receipt.is_file() else None
@@ -474,9 +517,7 @@ def migrate_todo_1747(worktree: Path, binding: Mapping[str, Any], jobs: list[Map
         predecessor = attempt["attempt_hash"]
     existing = history(worktree, {**binding, "job_id": None, "attempt_count": None})
     if existing != expected_attempts[: len(existing)]:
-        raise PartialResumeError(
-            "Todo 1747 existing attempt history is not an exact migration prefix"
-        )
+        raise PartialResumeError("Todo 1747 existing attempt history is not an exact migration prefix")
     root.mkdir(exist_ok=True)
     if path.exists():
         try:

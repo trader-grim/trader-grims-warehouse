@@ -378,7 +378,8 @@ def test_1747_manifest_survives_closed_receipt_and_rejects_tampering(tmp_path: P
     satisfied = partial_resume.make_attempt(
         {**binding, "job_id": "resume-job", "attempt_count": 1}, root,
         outcome="satisfied", predecessor=partial_resume.history(root)[-1]["attempt_hash"],
-        artifacts=[{"kind": "closed_candidate", "commit": candidate, "tree": candidate_tree}],
+        artifacts=[{"kind": "closed_candidate", "commit": candidate, "tree": candidate_tree,
+                    "base_commit": head, "changed_paths": sorted(changed)}],
     )
     partial_resume.append_attempt(root, satisfied)
     closed_receipt = b'{"outcome":"satisfied","candidate":"closed"}\n'
@@ -434,7 +435,8 @@ def test_satisfied_attempt_closes_only_its_exact_candidate(tmp_path: Path) -> No
         binding,
         root,
         outcome="satisfied",
-        artifacts=[{"kind": "closed_candidate", "commit": candidate, "tree": candidate_tree}],
+        artifacts=[{"kind": "closed_candidate", "commit": candidate, "tree": candidate_tree,
+                    "base_commit": baseline, "changed_paths": ["candidate.py"]}],
     )
     append_attempt(root, attempt)
     expected = {**binding, "job_id": None, "attempt_count": None}
@@ -451,6 +453,38 @@ def test_satisfied_attempt_closes_only_its_exact_candidate(tmp_path: Path) -> No
         check=True,
     )
     assert classify(root, expected)["state"] == "STALE_RECEIPT"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda artifact: artifact.pop("base_commit"),
+        lambda artifact: artifact.update(base_commit="f" * 40),
+        lambda artifact: artifact.pop("changed_paths"),
+        lambda artifact: artifact.update(changed_paths=[]),
+        lambda artifact: artifact.update(changed_paths=["candidate.py", "candidate.py"]),
+    ],
+    ids=["missing-base", "wrong-base", "missing-paths", "wrong-paths", "noncanonical-paths"],
+)
+def test_closed_candidate_rejects_inexact_implementation_evidence(
+    tmp_path: Path, mutation
+) -> None:
+    root, baseline, tree = _repo(tmp_path)
+    (root / "candidate.py").write_text("candidate = 1\n")
+    subprocess.run(["git", "add", "candidate.py"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-qm", "candidate"],
+        cwd=root,
+        check=True,
+    )
+    candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    candidate_tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=root, text=True).strip()
+    artifact = {"kind": "closed_candidate", "commit": candidate, "tree": candidate_tree,
+                "base_commit": baseline, "changed_paths": ["candidate.py"]}
+    mutation(artifact)
+    binding = _binding(root, baseline, tree)
+    append_attempt(root, make_attempt(binding, root, outcome="satisfied", artifacts=[artifact]))
+    assert classify(root, {**binding, "job_id": None, "attempt_count": None})["state"] == "STALE_RECEIPT"
 
 
 def test_worker_recovers_exact_closed_candidate_without_launcher(tmp_path: Path, monkeypatch) -> None:
@@ -473,7 +507,8 @@ def test_worker_recovers_exact_closed_candidate_without_launcher(tmp_path: Path,
             binding,
             root,
             outcome="satisfied",
-            artifacts=[{"kind": "closed_candidate", "commit": candidate, "tree": candidate_tree}],
+            artifacts=[{"kind": "closed_candidate", "commit": candidate, "tree": candidate_tree,
+                        "base_commit": baseline, "changed_paths": ["candidate.py"]}],
         ),
     )
     plan_binding = {
