@@ -15,6 +15,7 @@ from tgw.development.foreman import (
     ForemanConfig,
     TickResult,
     TodoRecord,
+    _controller_dedupe_key,
     _default_fetch_open_todos,
     _extract_worktree,
     _has_active_job,
@@ -129,6 +130,11 @@ def _assertion(condition_id, result, *reasons):
                 identity="test-1",
                 source_class="test",
                 source_generation="1",
+                freshness_identity=(
+                    "sha256:" + "a" * 64
+                    if condition_id == "implemented" and result is FingerprintResult.TRUE
+                    else ""
+                ),
             ),
         ),
     )
@@ -140,6 +146,17 @@ def _implemented():
 
 def _implemented_true():
     return (_assertion("implemented", FingerprintResult.TRUE, "implemented"),)
+
+
+def test_controller_dedupe_tracks_attempt_hash_and_ignores_unchanged_evidence():
+    first = _snapshot(assertions=_implemented_true())
+    same = _snapshot(assertions=_implemented_true())
+    replacement = _snapshot(assertions=(EvidenceAssertion(
+        "implemented", FingerprintResult.TRUE, ("implemented",),
+        (EvidenceReference("candidate", "implementation", "tree", "sha256:" + "b" * 64),),
+    ),))
+    assert _controller_dedupe_key("controller", first) == _controller_dedupe_key("controller", same)
+    assert _controller_dedupe_key("controller", first) != _controller_dedupe_key("controller", replacement)
 
 
 def test_plan_bound_todo_uses_bound_source_as_uncommitted_implementation_baseline():

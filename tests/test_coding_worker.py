@@ -87,11 +87,53 @@ def _install_controller_lineage(
         "plan_binding": plan_binding, "artifacts": [closed],
     }))
     return {
-        "todo_id": 1798, "plan_binding": plan_binding,
+        "todo_id": 1798, "todo_agent": "codex", "plan_binding": plan_binding,
         "object_generation": __import__("hashlib").sha256(
             f"{head}|{tree}".encode()
         ).hexdigest()[:16],
     }
+
+
+@pytest.mark.parametrize(
+    "field,wrong",
+    [
+        ("plan_commit", "f" * 40),
+        ("solution_hash", "sha256:" + "f" * 64),
+        ("todo_id", 9999),
+        ("source_commit", "f" * 40),
+        ("source_tree", "f" * 40),
+        ("actor", "legacy"),
+        ("worktree", "/tmp/substituted"),
+        ("treatment_id", "legacy-implement"),
+        ("treatment_version", "0"),
+    ],
+)
+def test_canonical_lineage_rejects_every_expected_binding_substitution(tmp_path, field, wrong):
+    from tgw.development.partial_resume import validate_implementation_lineage
+
+    _git_worktree(tmp_path)
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    (tmp_path / "feature.py").write_text("implemented = True\n")
+    subprocess.run(["git", "add", "feature.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "candidate"], cwd=tmp_path, check=True, capture_output=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, text=True, capture_output=True).stdout.strip()
+    tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=tmp_path, check=True, text=True, capture_output=True).stdout.strip()
+    job = _install_controller_lineage(tmp_path, baseline, head, tree)
+    receipt = json.loads((tmp_path / "implementation-receipt.json").read_text())
+    expected = {
+        "todo_id": job["todo_id"], **job["plan_binding"], "actor": "codex",
+        "worktree": str(tmp_path.resolve()), "treatment_id": "codex-implement",
+        "treatment_version": "1",
+    }
+    expected[field] = wrong
+    with pytest.raises(ValueError, match="binding mismatch"):
+        validate_implementation_lineage(
+            tmp_path, base_commit=baseline, candidate_commit=head,
+            candidate_tree=tree, receipt=receipt, expected=expected,
+        )
 
 
 def _worker(treatment_id: str, root: Path, launcher, repository_root: Path | None = None):
@@ -587,6 +629,7 @@ def test_controller_lineage_fails_before_checks_for_missing_or_contradictory_evi
             "worktree": str(tmp_path.resolve()),
         },
     )
+    monkeypatch.setattr(controller_verify, "_git_text", lambda *_args: "d" * 40)
     with pytest.raises(controller_verify.ControllerVerificationError, match="does not match"):
         controller_verify._assert_implementation_lineage(
             tmp_path.resolve(), job, "c" * 40, "e" * 40, "f" * 40,

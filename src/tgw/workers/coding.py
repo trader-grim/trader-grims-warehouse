@@ -27,6 +27,7 @@ from tgw.development.partial_resume import (
     preservation_manifest,
     recover_implementation_receipt_projection,
     source_fingerprint,
+    source_tree,
     validate_closed_candidate,
     validate_implementation_lineage,
 )
@@ -618,12 +619,29 @@ class CodingWorker(QueueWorker):
                 recover_implementation_receipt_projection(
                     worktree, base_commit=plan_binding["source_commit"],
                     candidate_commit=candidate["head"], candidate_tree=candidate["tree"],
+                    expected={
+                        "todo_id": payload.get("todo_id"),
+                        "plan_commit": plan_binding["plan_commit"],
+                        "solution_hash": plan_binding["solution_hash"],
+                        "source_commit": plan_binding["source_commit"],
+                        "source_tree": source_tree(worktree, plan_binding["source_commit"]),
+                        "actor": payload.get("todo_agent"),
+                        "worktree": str(worktree),
+                        "treatment_id": "codex-implement",
+                        "treatment_version": "1",
+                    },
                 )
                 receipt_value = json.loads(receipt_path_for_treatment(worktree, "codex-implement").read_text(encoding="utf-8"))
                 validate_implementation_lineage(
                     worktree, base_commit=plan_binding["source_commit"],
                     candidate_commit=candidate["head"], candidate_tree=candidate["tree"],
                     receipt=receipt_value,
+                    expected={
+                        "todo_id": payload.get("todo_id"), "plan_commit": plan_binding["plan_commit"],
+                        "solution_hash": plan_binding["solution_hash"], "source_commit": plan_binding["source_commit"],
+                        "source_tree": source_tree(worktree, plan_binding["source_commit"]), "actor": payload.get("todo_agent"),
+                        "worktree": str(worktree), "treatment_id": "codex-implement", "treatment_version": "1",
+                    },
                 )
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 raise HardFailure(f"controller verification requires exact implementation lineage: {exc}") from exc
@@ -636,7 +654,7 @@ class CodingWorker(QueueWorker):
             if not isinstance(plan_binding, dict):
                 raise HardFailure("Codex implementation attempt requires an exact Plan binding")
             source_commit = plan_binding["source_commit"]
-            source_tree = subprocess.run(
+            baseline_tree = subprocess.run(
                 ["git", "rev-parse", f"{source_commit}^{{tree}}"],
                 cwd=worktree,
                 check=True,
@@ -650,7 +668,7 @@ class CodingWorker(QueueWorker):
                 "plan_commit": plan_binding["plan_commit"],
                 "solution_hash": plan_binding["solution_hash"],
                 "source_commit": source_commit,
-                "source_tree": source_tree,
+                "source_tree": baseline_tree,
                 "actor": payload.get("todo_agent"),
                 "worktree": str(worktree),
                 "treatment_id": treatment_id,

@@ -121,7 +121,17 @@ def _assert_implementation_lineage(
             raise ValueError("implementation receipt is not an object")
         latest = validate_implementation_lineage(
             cwd, base_commit=baseline, candidate_commit=head,
-            candidate_tree=tree, receipt=receipt,
+            candidate_tree=tree, receipt=receipt, expected={
+                "todo_id": job.get("todo_id"),
+                "plan_commit": job.get("plan_binding", {}).get("plan_commit"),
+                "solution_hash": job.get("plan_binding", {}).get("solution_hash"),
+                "source_commit": baseline,
+                "source_tree": _git_text(cwd, "rev-parse", f"{baseline}^{{tree}}"),
+                "actor": job.get("todo_agent") or job.get("agent"),
+                "worktree": str(cwd),
+                "treatment_id": "codex-implement",
+                "treatment_version": "1",
+            },
         )
         expected_plan = job.get("plan_binding")
         if (
@@ -130,7 +140,7 @@ def _assert_implementation_lineage(
             or latest.get("plan_commit") != expected_plan.get("plan_commit")
             or latest.get("solution_hash") != expected_plan.get("solution_hash")
             or latest.get("source_commit") != expected_plan.get("source_commit")
-            or latest.get("source_tree") != expected_plan.get("source_tree")
+            or latest.get("source_tree") != _git_text(cwd, "rev-parse", f"{baseline}^{{tree}}")
             or latest.get("todo_id") != job.get("todo_id")
             or latest.get("worktree") != str(cwd)
         ):

@@ -139,6 +139,7 @@ def validate_implementation_lineage(
     candidate_commit: str,
     candidate_tree: str,
     receipt: Mapping[str, Any] | None = None,
+    expected: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the exact latest successful implementation attempt.
 
@@ -150,6 +151,18 @@ def validate_implementation_lineage(
     if not attempts:
         raise PartialResumeError("implementation attempt lineage is absent")
     latest = attempts[-1]
+    required = (
+        "todo_id", "plan_commit", "solution_hash", "source_commit", "source_tree",
+        "actor", "worktree", "treatment_id", "treatment_version",
+    )
+    if expected is None or any(expected.get(key) in (None, "") for key in required):
+        raise PartialResumeError("complete expected implementation binding is absent")
+    canonical_root = str(_canonical_worktree(worktree))
+    normalized_expected = dict(expected)
+    if normalized_expected.get("worktree") != canonical_root:
+        raise PartialResumeError("expected implementation worktree binding mismatch")
+    if any(latest.get(key) != normalized_expected.get(key) for key in required):
+        raise PartialResumeError("latest implementation attempt binding mismatch")
     closed = [
         item for item in latest.get("artifacts", [])
         if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"
@@ -162,6 +175,24 @@ def validate_implementation_lineage(
     )
     if latest.get("source_commit") != base_commit or latest.get("head") != candidate_commit or latest.get("tree") != candidate_tree:
         raise PartialResumeError("latest implementation attempt source lineage is stale")
+    reconciliations = [
+        item for item in latest.get("artifacts", [])
+        if isinstance(item, Mapping) and item.get("kind") == "implementation_reconciliation"
+    ]
+    if reconciliations:
+        if len(reconciliations) != 1:
+            raise PartialResumeError("implementation reconciliation lineage is ambiguous")
+        reconciliation = reconciliations[0]
+        try:
+            prior_bytes = base64.b64decode(reconciliation["prior_receipt_b64"], validate=True)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PartialResumeError("implementation reconciliation prior receipt bytes are absent") from exc
+        prior_sha256 = "sha256:" + hashlib.sha256(prior_bytes).hexdigest()
+        if (
+            reconciliation.get("prior_attempt_hash") != latest.get("predecessor")
+            or reconciliation.get("prior_receipt_sha256") != prior_sha256
+        ):
+            raise PartialResumeError("implementation reconciliation semantic link is invalid")
     if receipt is not None:
         receipt_closed = [
             item for item in receipt.get("artifacts", [])
@@ -171,19 +202,24 @@ def validate_implementation_lineage(
             receipt.get("status") != "PASS"
             or receipt.get("outcome") != "satisfied"
             or receipt.get("treatment_id") != "codex-implement"
-            or receipt.get("object_id") != str(_canonical_worktree(worktree))
+            or receipt.get("object_id") != canonical_root
             or len(receipt_closed) != 1
             or dict(receipt_closed[0]) != dict(closed[0])
         ):
             raise PartialResumeError("implementation receipt is stale, substituted, or contradictory")
         plan = receipt.get("plan_binding")
-        if not isinstance(plan, Mapping) or plan.get("source_commit") != base_commit or plan.get("worktree") != str(_canonical_worktree(worktree)):
+        plan_required = ("plan_commit", "solution_hash", "source_commit", "worktree")
+        if (
+            not isinstance(plan, Mapping)
+            or any(plan.get(key) != normalized_expected.get(key) for key in plan_required)
+        ):
             raise PartialResumeError("implementation receipt Plan binding is stale or absent")
     return latest
 
 
 def recover_implementation_receipt_projection(
     worktree: Path, *, base_commit: str, candidate_commit: str, candidate_tree: str,
+    expected: Mapping[str, Any],
 ) -> bool:
     """Regenerate a stale top-level projection from canonical reconciled history."""
     root = _canonical_worktree(worktree)
@@ -198,14 +234,14 @@ def recover_implementation_receipt_projection(
     try:
         validate_implementation_lineage(
             root, base_commit=base_commit, candidate_commit=candidate_commit,
-            candidate_tree=candidate_tree, receipt=receipt,
+            candidate_tree=candidate_tree, receipt=receipt, expected=expected,
         )
         return False
     except PartialResumeError:
         pass
     latest = validate_implementation_lineage(
         root, base_commit=base_commit, candidate_commit=candidate_commit,
-        candidate_tree=candidate_tree,
+        candidate_tree=candidate_tree, expected=expected,
     )
     reconciliations = [
         item for item in latest.get("artifacts", [])

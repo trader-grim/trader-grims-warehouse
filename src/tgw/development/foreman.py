@@ -273,6 +273,21 @@ def _resume_dedupe_key(base: str, authority: Mapping[str, str]) -> str:
     )
 
 
+def _controller_dedupe_key(base: str, snapshot: Any) -> str:
+    """Fence controller retries by canonical implementation evidence, not manifests."""
+    assertion = next(
+        (item for item in snapshot.assertions if item.condition_id == "implemented"),
+        None,
+    )
+    identities = tuple(
+        evidence.freshness_identity for evidence in (assertion.evidence if assertion else ())
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", evidence.freshness_identity)
+    )
+    if len(identities) != 1:
+        raise ValueError("controller dispatch requires one exact implementation attempt hash")
+    return f"{base}:implementation:{identities[0].removeprefix('sha256:')}"
+
+
 # ---------------------------------------------------------------------------
 # Todo fetcher
 # ---------------------------------------------------------------------------
@@ -465,14 +480,17 @@ def tick(
                         skipped_active=result.skipped_active + 1,
                     )
                     continue
+                expected_attempt = {
+                    "todo_id": todo.todo_id, "plan_commit": binding["plan_commit"],
+                    "solution_hash": binding["solution_hash"], "source_commit": binding["source_commit"],
+                    "source_tree": (
+                        binding.get("source_tree")
+                        or (source_tree(worktree, binding["source_commit"]) if cfg.coding_config else None)
+                    ), "actor": todo.agent,
+                    "worktree": str(worktree), "treatment_id": "codex-implement",
+                    "treatment_version": "1",
+                }
                 if cfg.coding_config:
-                    expected_attempt = {
-                        "todo_id": todo.todo_id, "plan_commit": binding["plan_commit"],
-                        "solution_hash": binding["solution_hash"], "source_commit": binding["source_commit"],
-                        "source_tree": source_tree(worktree, binding["source_commit"]),
-                        "actor": todo.agent, "worktree": str(worktree),
-                        "treatment_id": "codex-implement", "treatment_version": "1",
-                    }
                     resume_state = classify(worktree, expected_attempt)
                     authority = cfg.resume_bindings.get(todo.todo_id)
                     exact_resume = (
@@ -508,6 +526,7 @@ def tick(
                     cfg.goal_profile,
                     cfg.treatments,
                     implementation_baseline_commit=implementation_baseline,
+                    expected_implementation=expected_attempt,
                     receipt_backed_conditions=cfg.receipt_backed_conditions,
                 )
         except WorktreeLeaseBusy:
@@ -577,6 +596,8 @@ def tick(
             authority = cfg.resume_bindings.get(todo.todo_id)
             if disposition.treatment_id == "codex-implement" and authority is not None:
                 dedupe_key = _resume_dedupe_key(dedupe_key, authority)
+            elif disposition.treatment_id == "controller-verify":
+                dedupe_key = _controller_dedupe_key(dedupe_key, snapshot)
             if _has_active_job(dedupe_key, check_active_fn):
                 result = replace(result, skipped_active=result.skipped_active + 1)
                 continue
@@ -660,6 +681,20 @@ def tick(
                         cfg.goal_profile,
                         cfg.treatments,
                         implementation_baseline_commit=chosen.todo.plan_binding["source_commit"],
+                        expected_implementation={
+                            "todo_id": chosen.todo.todo_id,
+                            "plan_commit": chosen.todo.plan_binding["plan_commit"],
+                            "solution_hash": chosen.todo.plan_binding["solution_hash"],
+                            "source_commit": chosen.todo.plan_binding["source_commit"],
+                            "source_tree": (
+                                chosen.todo.plan_binding.get("source_tree")
+                                or source_tree(Path(chosen.todo.worktree), chosen.todo.plan_binding["source_commit"])
+                            ),
+                            "actor": chosen.todo.agent,
+                            "worktree": chosen.todo.worktree,
+                            "treatment_id": "codex-implement",
+                            "treatment_version": "1",
+                        },
                         receipt_backed_conditions=cfg.receipt_backed_conditions,
                     )
                     if current.generation != chosen.graph.object_generation:

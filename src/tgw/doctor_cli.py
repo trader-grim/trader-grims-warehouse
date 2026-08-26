@@ -788,6 +788,7 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
         source_fingerprint,
         source_tree,
         validate_closed_candidate,
+        validate_implementation_lineage,
     )
     from tgw.development.plan_binding import parse_plan_binding
     from tgw.development.worktree_lease import exclusive_worktree_lease
@@ -919,6 +920,11 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
                     changed = prior_receipt_bytes != expected_bytes
                     if changed:
                         _atomic_json(implementation_receipt, recovered_receipt, mode=stat.S_IMODE(implementation_receipt.stat().st_mode))
+                    validate_implementation_lineage(
+                        worktree, base_commit=required["source_commit"],
+                        candidate_commit=current["head"], candidate_tree=current["tree"],
+                        receipt=recovered_receipt, expected=required,
+                    )
                     return {
                         "schema": "tgw-implementation-reconciliation/v1", "ok": True,
                         "changed": changed, "todo_id": todo_id, "job_id": latest["job_id"],
@@ -931,6 +937,7 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
                     "schema": "tgw-implementation-reconciliation/v1",
                     "prior_attempt_hash": latest["attempt_hash"],
                     "prior_receipt_sha256": prior_receipt_sha256,
+                    "prior_receipt_b64": base64.b64encode(prior_receipt_bytes).decode("ascii"),
                     "job_id": latest["job_id"], "todo_id": todo_id,
                     "plan_commit": required["plan_commit"],
                 }
@@ -943,6 +950,11 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
                 receipt_path = _publish_reconciled_implementation(
                     worktree, reconciled, implementation_receipt, recovered_receipt,
                     mode=stat.S_IMODE(implementation_receipt.stat().st_mode),
+                )
+                validate_implementation_lineage(
+                    worktree, base_commit=required["source_commit"],
+                    candidate_commit=current["head"], candidate_tree=current["tree"],
+                    receipt=recovered_receipt, expected=required,
                 )
         return {
             "schema": "tgw-implementation-reconciliation/v1", "ok": True,

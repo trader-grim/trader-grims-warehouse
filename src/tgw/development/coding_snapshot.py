@@ -356,6 +356,7 @@ def _find_canonical_branch(worktree: Path) -> Optional[str]:
 def _check_implemented(
     worktree: Path,
     baseline_commit: str | None = None,
+    expected_implementation: dict[str, object] | None = None,
 ) -> tuple[FingerprintResult, tuple[str, ...], tuple[EvidenceReference, ...]]:
     """Task branch exists and diff is non-empty."""
     head = _git_rev_parse(worktree, "HEAD")
@@ -424,6 +425,7 @@ def _check_implemented(
             latest = validate_implementation_lineage(
                 worktree, base_commit=baseline_commit,
                 candidate_commit=head, candidate_tree=tree, receipt=receipt,
+                expected=expected_implementation,
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return FingerprintResult.FALSE, (
@@ -805,6 +807,7 @@ def build_coding_snapshot(
     treatments: tuple[TreatmentContract, ...] = (),
     *,
     implementation_baseline_commit: str | None = None,
+    expected_implementation: dict[str, object] | None = None,
     receipt_backed_conditions: frozenset[str] = frozenset(),
 ) -> ObjectSnapshot:
     """Build a read-only ObjectSnapshot by checking coding conditions in a
@@ -863,7 +866,7 @@ def build_coding_snapshot(
             )
         elif condition_id == "implemented":
             result, reasons, evidence = checker(
-                worktree, implementation_baseline_commit,
+                worktree, implementation_baseline_commit, expected_implementation,
             )
         elif condition_id in {"reviewed", "controller_verified", "deployed"}:
             result, reasons, evidence = checker(worktree, object_id, generation)
