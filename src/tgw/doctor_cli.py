@@ -763,10 +763,25 @@ def _bound_coding_states(paths: DoctorPaths, locations: Sequence[Path]) -> dict[
     return states
 
 
+def _publish_reconciled_implementation(
+    worktree: Path,
+    attempt: Mapping[str, Any],
+    receipt_path: Path,
+    receipt: Mapping[str, Any],
+    *,
+    mode: int,
+) -> Path:
+    """Durably append canonical history before refreshing its projection."""
+    from tgw.development.partial_resume import append_attempt
+
+    history_path = append_attempt(worktree, attempt)
+    _atomic_json(receipt_path, receipt, mode=mode)
+    return history_path
+
+
 def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = None) -> dict[str, Any]:
     """Append exact evidence for an older runner's already-closed successor."""
     from tgw.development.partial_resume import (
-        append_attempt,
         candidate_changed_paths,
         history,
         make_attempt,
@@ -824,7 +839,13 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
             raise DoctorError("implementation reconciliation requires the attempt's exact clean closed successor")
         prior_closed = [item for item in latest.get("artifacts", []) if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"]
         already_reconciled = False
-        if len(prior_closed) != 1 or set(prior_closed[0]) != {"kind", "commit", "tree", "detail"} or prior_closed[0].get("commit") != current["head"] or prior_closed[0].get("tree") != current["tree"]:
+        legacy_closed = (
+            len(prior_closed) == 1
+            and set(prior_closed[0]) == {"kind", "commit", "tree"}
+            and prior_closed[0].get("commit") == current["head"]
+            and prior_closed[0].get("tree") == current["tree"]
+        )
+        if not legacy_closed:
             try:
                 if len(prior_closed) == 1:
                     validate_closed_candidate(worktree, prior_closed[0], base_commit=required["source_commit"], candidate_commit=current["head"], candidate_tree=current["tree"])
@@ -870,7 +891,7 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
                     result_closed = [item for item in result.get("artifacts", []) if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"]
                     result_matches_receipt = (
                         len(result_closed) == 1
-                        and set(result_closed[0]) == {"kind", "commit", "tree", "detail"}
+                        and set(result_closed[0]) == {"kind", "commit", "tree"}
                         and result_closed[0].get("commit") == current["head"]
                         and result_closed[0].get("tree") == current["tree"]
                     )
@@ -893,9 +914,14 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
                         or reconciliation_items[0].get("prior_attempt_hash") != latest.get("predecessor")
                     ):
                         raise DoctorError("existing reconciliation receipt-byte or attempt lineage is invalid")
+                    recovered_receipt = {**prior_receipt, "artifacts": list(latest["artifacts"])}
+                    expected_bytes = (json.dumps(recovered_receipt, indent=2, sort_keys=True) + "\n").encode()
+                    changed = prior_receipt_bytes != expected_bytes
+                    if changed:
+                        _atomic_json(implementation_receipt, recovered_receipt, mode=stat.S_IMODE(implementation_receipt.stat().st_mode))
                     return {
                         "schema": "tgw-implementation-reconciliation/v1", "ok": True,
-                        "changed": False, "todo_id": todo_id, "job_id": latest["job_id"],
+                        "changed": changed, "todo_id": todo_id, "job_id": latest["job_id"],
                         "prior_attempt_hash": latest.get("predecessor"),
                         "prior_receipt_sha256": durable_prior_receipt_sha256,
                         "attempt_hash": latest["attempt_hash"], "worktree": str(worktree),
@@ -911,12 +937,13 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
                 keys = ("job_id", "attempt_count", "todo_id", "plan_commit", "solution_hash", "source_commit", "source_tree", "actor", "worktree", "treatment_id", "treatment_version")
                 reconciled = make_attempt({key: latest[key] for key in keys}, worktree, outcome="satisfied", predecessor=latest["attempt_hash"], artifacts=[closed, reconciliation])
                 recovered_receipt = {**prior_receipt, "artifacts": [closed, reconciliation]}
-                _atomic_json(implementation_receipt, recovered_receipt, mode=stat.S_IMODE(implementation_receipt.stat().st_mode))
-                try:
-                    receipt_path = append_attempt(worktree, reconciled)
-                except BaseException:
-                    _atomic_bytes(implementation_receipt, prior_receipt_bytes, mode=stat.S_IMODE(implementation_receipt.stat().st_mode))
-                    raise
+                # History is canonical and durable first.  A crash or receipt
+                # publication failure leaves a deterministically recoverable
+                # append-only successor, never a top-level-first window.
+                receipt_path = _publish_reconciled_implementation(
+                    worktree, reconciled, implementation_receipt, recovered_receipt,
+                    mode=stat.S_IMODE(implementation_receipt.stat().st_mode),
+                )
         return {
             "schema": "tgw-implementation-reconciliation/v1", "ok": True,
             "changed": True, "todo_id": todo_id, "job_id": latest["job_id"],

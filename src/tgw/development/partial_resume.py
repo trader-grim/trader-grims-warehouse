@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import subprocess
+import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
@@ -179,6 +180,67 @@ def validate_implementation_lineage(
         if not isinstance(plan, Mapping) or plan.get("source_commit") != base_commit or plan.get("worktree") != str(_canonical_worktree(worktree)):
             raise PartialResumeError("implementation receipt Plan binding is stale or absent")
     return latest
+
+
+def recover_implementation_receipt_projection(
+    worktree: Path, *, base_commit: str, candidate_commit: str, candidate_tree: str,
+) -> bool:
+    """Regenerate a stale top-level projection from canonical reconciled history."""
+    root = _canonical_worktree(worktree)
+    path = root / "implementation-receipt.json"
+    try:
+        raw = path.read_bytes()
+        receipt = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PartialResumeError("implementation receipt recovery source is unavailable") from exc
+    if not isinstance(receipt, dict):
+        raise PartialResumeError("implementation receipt recovery source is malformed")
+    try:
+        validate_implementation_lineage(
+            root, base_commit=base_commit, candidate_commit=candidate_commit,
+            candidate_tree=candidate_tree, receipt=receipt,
+        )
+        return False
+    except PartialResumeError:
+        pass
+    latest = validate_implementation_lineage(
+        root, base_commit=base_commit, candidate_commit=candidate_commit,
+        candidate_tree=candidate_tree,
+    )
+    reconciliations = [
+        item for item in latest.get("artifacts", [])
+        if isinstance(item, Mapping) and item.get("kind") == "implementation_reconciliation"
+    ]
+    plan = receipt.get("plan_binding")
+    if (
+        len(reconciliations) != 1
+        or receipt.get("status") != "PASS"
+        or receipt.get("outcome") != "satisfied"
+        or receipt.get("treatment_id") != "codex-implement"
+        or receipt.get("object_id") != str(root)
+        or not isinstance(plan, Mapping)
+        or plan.get("source_commit") != base_commit
+        or plan.get("worktree") != str(root)
+    ):
+        raise PartialResumeError("implementation receipt recovery binding is contradictory")
+    recovered = {**receipt, "artifacts": list(latest["artifacts"])}
+    value = json.dumps(recovered, indent=2, sort_keys=True).encode() + b"\n"
+    if value == raw:
+        return False
+    mode = stat.S_IMODE(path.stat().st_mode)
+    descriptor, temporary_text = tempfile.mkstemp(prefix=path.name + ".", dir=root)
+    temporary = Path(temporary_text)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fchmod(stream.fileno(), mode)
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(root)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
 
 
 def _fsync_directory(path: Path) -> None:

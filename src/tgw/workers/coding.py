@@ -25,6 +25,7 @@ from tgw.development.partial_resume import (
     history,
     make_attempt,
     preservation_manifest,
+    recover_implementation_receipt_projection,
     source_fingerprint,
     validate_closed_candidate,
     validate_implementation_lineage,
@@ -614,6 +615,10 @@ class CodingWorker(QueueWorker):
         if treatment_id == "controller-verify" and plan_binding is not None:
             candidate = source_fingerprint(worktree)
             try:
+                recover_implementation_receipt_projection(
+                    worktree, base_commit=plan_binding["source_commit"],
+                    candidate_commit=candidate["head"], candidate_tree=candidate["tree"],
+                )
                 receipt_value = json.loads(receipt_path_for_treatment(worktree, "codex-implement").read_text(encoding="utf-8"))
                 validate_implementation_lineage(
                     worktree, base_commit=plan_binding["source_commit"],

@@ -110,6 +110,37 @@ def _assert_source_status_clean(cwd: Path) -> None:
             )
 
 
+def _assert_implementation_lineage(
+    cwd: Path, job: dict[str, Any], baseline: str, head: str, tree: str,
+) -> None:
+    """Bind controller consumption to the exact published implementation."""
+    try:
+        from tgw.development.partial_resume import validate_implementation_lineage
+        receipt = json.loads((cwd / "implementation-receipt.json").read_text(encoding="utf-8"))
+        if not isinstance(receipt, dict):
+            raise ValueError("implementation receipt is not an object")
+        latest = validate_implementation_lineage(
+            cwd, base_commit=baseline, candidate_commit=head,
+            candidate_tree=tree, receipt=receipt,
+        )
+        expected_plan = job.get("plan_binding")
+        if (
+            not isinstance(expected_plan, dict)
+            or receipt.get("plan_binding") != expected_plan
+            or latest.get("plan_commit") != expected_plan.get("plan_commit")
+            or latest.get("solution_hash") != expected_plan.get("solution_hash")
+            or latest.get("source_commit") != expected_plan.get("source_commit")
+            or latest.get("source_tree") != expected_plan.get("source_tree")
+            or latest.get("todo_id") != job.get("todo_id")
+            or latest.get("worktree") != str(cwd)
+        ):
+            raise ValueError("implementation lineage does not match controller job")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ControllerVerificationError(
+            f"exact implementation lineage is absent or stale: {exc}"
+        ) from exc
+
+
 def _source_bound_candidate_files() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], str, str]:
     try:
         job = json.loads(os.environ["TGW_CODING_JOB"])
@@ -135,6 +166,7 @@ def _source_bound_candidate_files() -> tuple[tuple[str, ...], tuple[str, ...], t
     actual_generation = hashlib.sha256(f"{head}|{tree}".encode()).hexdigest()[:16]
     if expected_generation != actual_generation:
         raise ControllerVerificationError("controller candidate commit/tree differs from its dispatched generation")
+    _assert_implementation_lineage(cwd, job, baseline, head, tree)
     tracked = _git_paths(
         cwd,
         "diff",

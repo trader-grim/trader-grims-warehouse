@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -52,6 +53,45 @@ def _git_worktree(path: Path) -> None:
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
     subprocess.run(["git", "commit", "--allow-empty", "-m", "initial"], cwd=path, check=True, capture_output=True)
+
+
+def _install_controller_lineage(
+    worktree: Path, baseline: str, head: str, tree: str,
+) -> dict:
+    from tgw.development.partial_resume import append_attempt, candidate_changed_paths, make_attempt
+
+    plan_binding = {
+        "plan_commit": "a" * 40,
+        "solution_hash": "sha256:" + "b" * 64,
+        "source_commit": baseline,
+        "source_tree": subprocess.run(
+            ["git", "rev-parse", f"{baseline}^{{tree}}"], cwd=worktree,
+            check=True, text=True, capture_output=True,
+        ).stdout.strip(),
+        "worktree": str(worktree.resolve()),
+    }
+    closed = {
+        "kind": "closed_candidate", "commit": head, "tree": tree,
+        "base_commit": baseline,
+        "changed_paths": candidate_changed_paths(worktree, baseline, head),
+    }
+    attempt = make_attempt({
+        "job_id": "job", "attempt_count": 1, "todo_id": 1798,
+        **plan_binding, "actor": "codex", "worktree": str(worktree.resolve()),
+        "treatment_id": "codex-implement", "treatment_version": "1",
+    }, worktree, outcome="satisfied", artifacts=[closed])
+    append_attempt(worktree, attempt)
+    (worktree / "implementation-receipt.json").write_text(json.dumps({
+        "status": "PASS", "outcome": "satisfied",
+        "treatment_id": "codex-implement", "object_id": str(worktree.resolve()),
+        "plan_binding": plan_binding, "artifacts": [closed],
+    }))
+    return {
+        "todo_id": 1798, "plan_binding": plan_binding,
+        "object_generation": __import__("hashlib").sha256(
+            f"{head}|{tree}".encode()
+        ).hexdigest()[:16],
+    }
 
 
 def _worker(treatment_id: str, root: Path, launcher, repository_root: Path | None = None):
@@ -516,6 +556,64 @@ def test_controller_git_probe_trusts_only_the_exact_worktree(tmp_path, monkeypat
     assert observed["cwd"] == tmp_path
 
 
+def test_controller_lineage_fails_before_checks_for_missing_or_contradictory_evidence(
+    tmp_path, monkeypatch,
+):
+    from tgw.workers import controller_verify
+
+    job = {
+        "todo_id": 1798,
+        "plan_binding": {
+            "plan_commit": "a" * 40,
+            "solution_hash": "sha256:" + "b" * 64,
+            "source_commit": "c" * 40,
+            "source_tree": "d" * 40,
+        },
+    }
+    with pytest.raises(controller_verify.ControllerVerificationError, match="lineage is absent"):
+        controller_verify._assert_implementation_lineage(
+            tmp_path, job, "c" * 40, "e" * 40, "f" * 40,
+        )
+
+    (tmp_path / "implementation-receipt.json").write_text(json.dumps({
+        "plan_binding": {**job["plan_binding"], "solution_hash": "substituted"},
+    }))
+    monkeypatch.setattr(
+        "tgw.development.partial_resume.validate_implementation_lineage",
+        lambda *_args, **_kwargs: {
+            "todo_id": 1798, "plan_commit": "a" * 40,
+            "solution_hash": "sha256:" + "b" * 64,
+            "source_commit": "c" * 40, "source_tree": "d" * 40,
+            "worktree": str(tmp_path.resolve()),
+        },
+    )
+    with pytest.raises(controller_verify.ControllerVerificationError, match="does not match"):
+        controller_verify._assert_implementation_lineage(
+            tmp_path.resolve(), job, "c" * 40, "e" * 40, "f" * 40,
+        )
+
+
+def test_controller_rejects_lineage_before_running_tests_or_lint(monkeypatch, capsys):
+    from tgw.workers import controller_verify
+
+    monkeypatch.setenv("TGW_CODING_JOB", "{}")
+    monkeypatch.setattr(controller_verify, "exclusive_worktree_lease", lambda *_args: nullcontext())
+    monkeypatch.setattr(
+        controller_verify, "_verification_commands",
+        lambda: (_ for _ in ()).throw(
+            controller_verify.ControllerVerificationError("exact implementation lineage is absent")
+        ),
+    )
+    called = []
+    monkeypatch.setattr(controller_verify, "_run_check", lambda *_args: called.append(True))
+
+    assert controller_verify.main() == 0
+    assert called == []
+    result = json.loads(capsys.readouterr().out)
+    assert result["outcome"] == "failed"
+    assert "lineage is absent" in result["artifacts"][0]["detail"]
+
+
 def test_controller_verify_runner_does_not_establish_conditions_when_a_check_fails(monkeypatch, capsys):
     from tgw.workers import controller_verify
 
@@ -592,12 +690,7 @@ def test_controller_verify_scope_is_bound_to_changed_source_and_tests(
     monkeypatch.chdir(worktree)
     monkeypatch.setenv(
         "TGW_CODING_JOB",
-        json.dumps(
-            {
-                "plan_binding": {"source_commit": baseline},
-                "object_generation": __import__("hashlib").sha256(f"{head}|{tree}".encode()).hexdigest()[:16],
-            }
-        ),
+        json.dumps(_install_controller_lineage(worktree, baseline, head, tree)),
     )
 
     python_files, tests = controller_verify._source_bound_python_files()
@@ -640,10 +733,10 @@ def test_controller_final_recheck_rejects_mutation_during_checks(
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, check=True, text=True, capture_output=True).stdout.strip()
     tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=worktree, check=True, text=True, capture_output=True).stdout.strip()
     monkeypatch.chdir(worktree)
-    monkeypatch.setenv("TGW_CODING_JOB", json.dumps({
-        "plan_binding": {"source_commit": baseline},
-        "object_generation": __import__("hashlib").sha256(f"{head}|{tree}".encode()).hexdigest()[:16],
-    }))
+    monkeypatch.setenv(
+        "TGW_CODING_JOB",
+        json.dumps(_install_controller_lineage(worktree, baseline, head, tree)),
+    )
     calls = 0
 
     def pass_then_mutate(name, command):
@@ -682,12 +775,7 @@ def test_controller_diff_check_covers_non_python_candidate_paths(tmp_path, monke
     monkeypatch.chdir(worktree)
     monkeypatch.setenv(
         "TGW_CODING_JOB",
-        json.dumps(
-            {
-                "plan_binding": {"source_commit": baseline},
-                "object_generation": __import__("hashlib").sha256(f"{head}|{tree}".encode()).hexdigest()[:16],
-            }
-        ),
+        json.dumps(_install_controller_lineage(worktree, baseline, head, tree)),
     )
 
     commands = dict(controller_verify._verification_commands())

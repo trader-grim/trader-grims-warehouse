@@ -42,6 +42,40 @@ def _write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+def test_reconciliation_publication_is_history_first_and_failure_atomic(tmp_path, monkeypatch):
+    receipt = tmp_path / "implementation-receipt.json"
+    receipt.write_bytes(b"legacy\n")
+    attempt = {"attempt_hash": "sha256:" + "a" * 64}
+
+    monkeypatch.setattr(
+        "tgw.development.partial_resume.append_attempt",
+        lambda *_args: (_ for _ in ()).throw(OSError("append failed")),
+    )
+    with pytest.raises(OSError, match="append failed"):
+        doctor_cli._publish_reconciled_implementation(
+            tmp_path, attempt, receipt, {"new": True}, mode=0o640,
+        )
+    assert receipt.read_bytes() == b"legacy\n"
+
+    history_path = tmp_path / ".tgw-coding-history/implementation/attempt.json"
+    order = []
+    monkeypatch.setattr(
+        "tgw.development.partial_resume.append_attempt",
+        lambda *_args: order.append("history") or history_path,
+    )
+    monkeypatch.setattr(
+        doctor_cli, "_atomic_json",
+        lambda *_args, **_kwargs: order.append("top-level")
+        or (_ for _ in ()).throw(OSError("projection failed")),
+    )
+    with pytest.raises(OSError, match="projection failed"):
+        doctor_cli._publish_reconciled_implementation(
+            tmp_path, attempt, receipt, {"new": True}, mode=0o640,
+        )
+    assert order == ["history", "top-level"]
+    assert receipt.read_bytes() == b"legacy\n"
+
+
 def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     repository = tmp_path / "source"
     repository.mkdir()
