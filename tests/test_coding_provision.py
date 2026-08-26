@@ -2009,7 +2009,6 @@ def test_1747_resume_validates_before_cas_preserves_bytes_and_repeat_dispatches_
            "done_at": None, "status_note": json.dumps(accidental)}
     jobs = [{"payload": {"plan_binding": historical}} for _ in range(2)]
     events = []
-    dispatches = iter((1, 0))
     monkeypatch.setattr(coding_cli, "LEGACY_1747", worktree)
     monkeypatch.setattr(coding_cli, "_ACCIDENTAL_1747_WORKTREE", Path(accidental["worktree"]))
     monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {}})
@@ -2037,16 +2036,21 @@ def test_1747_resume_validates_before_cas_preserves_bytes_and_repeat_dispatches_
 
     monkeypatch.setattr(coding_cli, "migrate_todo_1747", migrate)
     monkeypatch.setattr(coding_cli.todo, "todo_compare_and_set_status_note", cas)
-    monkeypatch.setattr(coding_cli, "classify", lambda *_args: {
-        "state": "RESUMABLE_PARTIAL", "resume_of": "sha256:attempt",
-        "fingerprint": "sha256:fingerprint",
-    })
-    monkeypatch.setattr(coding_cli, "tick", lambda *_args, **_kwargs: TickResult(dispatched=next(dispatches)))
+    classifications = iter((
+        {"state": "RESUMABLE_PARTIAL", "resume_of": "sha256:attempt", "fingerprint": "sha256:fingerprint"},
+        {"state": "RESUMABLE_PARTIAL", "resume_of": "sha256:attempt", "fingerprint": "sha256:fingerprint"},
+        {"state": "CLOSED_CANDIDATE"},
+        {"state": "CLOSED_CANDIDATE"},
+    ))
+    monkeypatch.setattr(coding_cli, "classify", lambda *_args: next(classifications))
+    tick_calls = []
+    monkeypatch.setattr(coding_cli, "tick", lambda *_args, **_kwargs: tick_calls.append(True) or TickResult(dispatched=1))
     monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
     first = coding_cli.resume(1747, config_path=tmp_path / "config.json")
     second = coding_cli.resume(1747, config_path=tmp_path / "config.json")
     assert first["foreman"]["dispatched"] == 1 and second["foreman"]["dispatched"] == 0
+    assert tick_calls == [True]
     assert events == ["migrate", "cas", "migrate"]
     assert original.read_bytes() == b"historical partial bytes\n"
     assert first["dependencies"] == {"tgw_prod": False, "ssh": False, "sudo": False,

@@ -20,7 +20,7 @@ from typing import Any
 import psycopg2.extras
 
 from tgw import todo
-from tgw.development.foreman import ForemanConfig, tick
+from tgw.development.foreman import ForemanConfig, TickResult, tick
 from tgw.development.local_workflow import (
     DEFAULT_CONFIG,
     LocalCodingWorkflowError,
@@ -334,6 +334,7 @@ def start(
         "treatment_id": "codex-implement", "treatment_version": "1",
     }
     migration: str | None = None
+    resume_noop = False
     with exclusive_worktree_lease(worktree):
         if legacy_jobs is not None:
             migration = str(
@@ -353,6 +354,8 @@ def start(
                 "resume_of": resume_state["resume_of"],
                 "resume_fingerprint": resume_state["fingerprint"],
             }
+        elif resume_only and legacy_jobs is not None and resume_state["state"] == "CLOSED_CANDIDATE":
+            resume_noop = True
         elif resume_only:
             manifest = None
             if resume_state["state"] in {"UNSAFE_DIRTY", "STALE_RECEIPT"}:
@@ -367,7 +370,7 @@ def start(
             raise CodingCLIError(
                 f"Todo {todo_id} is {resume_state['state']}; preserved at {manifest} and not dispatched"
             )
-    result = tick(
+    result = TickResult(dispatched=0) if resume_noop else tick(
         ForemanConfig(
             coding_config=dict(coding),
             treatments=(CODEX_IMPLEMENT, CONTROLLER_VERIFY),

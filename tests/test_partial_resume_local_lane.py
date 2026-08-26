@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -228,7 +229,12 @@ def test_exact_1747_migration_uses_copy_and_binds_both_jobs(tmp_path: Path, monk
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(relative + "\n")
     (root / "implementation-receipt.json").write_text('{"outcome":"partial"}\n')
+    binding = {**_binding(root, head, tree), "todo_id": 1747}
     monkeypatch.setattr(partial_resume, "LEGACY_1747", root.resolve())
+    monkeypatch.setattr(partial_resume, "LEGACY_1747_SOURCE_COMMIT", head)
+    monkeypatch.setattr(partial_resume, "LEGACY_1747_SOURCE_TREE", tree)
+    monkeypatch.setattr(partial_resume, "LEGACY_1747_PLAN_COMMIT", binding["plan_commit"])
+    monkeypatch.setattr(partial_resume, "LEGACY_1747_SOLUTION_HASH", binding["solution_hash"])
     monkeypatch.setattr(
         partial_resume,
         "LEGACY_1747_FINGERPRINT",
@@ -241,7 +247,6 @@ def test_exact_1747_migration_uses_copy_and_binds_both_jobs(tmp_path: Path, monk
             (root / "implementation-receipt.json").read_bytes()
         ).hexdigest(),
     )
-    binding = {**_binding(root, head, tree), "todo_id": 1747}
 
     def job(job_id: str, outcome: str, count: int) -> dict:
         return {
@@ -285,6 +290,83 @@ def test_exact_1747_migration_uses_copy_and_binds_both_jobs(tmp_path: Path, monk
         )
     jobs[1]["payload"]["todo_agent"] = "claude"
     with pytest.raises(Exception):
+        partial_resume.migrate_todo_1747(root, binding, jobs)
+
+
+def test_1747_manifest_survives_closed_receipt_and_rejects_tampering(tmp_path: Path, monkeypatch) -> None:
+    """Exercise the real filesystem/Git migration, closure, and repeat transition."""
+    from tgw.development import partial_resume
+
+    root, head, tree = _repo(tmp_path)
+    changed = [
+        "src/tgw/coding_cli.py",
+        "src/tgw/pp_workflow_reconcile.py",
+        "tests/test_pp_workflow_reconcile.py",
+    ]
+    for relative in changed:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(relative + "\n")
+    receipt = root / "implementation-receipt.json"
+    receipt.write_bytes(b'{"outcome":"partial"}\n')
+    binding = {**_binding(root, head, tree), "todo_id": 1747}
+    monkeypatch.setattr(partial_resume, "LEGACY_1747", root.resolve())
+    monkeypatch.setattr(partial_resume, "LEGACY_1747_SOURCE_COMMIT", head)
+    monkeypatch.setattr(partial_resume, "LEGACY_1747_SOURCE_TREE", tree)
+    monkeypatch.setattr(partial_resume, "LEGACY_1747_PLAN_COMMIT", binding["plan_commit"])
+    monkeypatch.setattr(partial_resume, "LEGACY_1747_SOLUTION_HASH", binding["solution_hash"])
+    monkeypatch.setattr(partial_resume, "LEGACY_1747_FINGERPRINT", partial_resume.source_fingerprint(root)["fingerprint"])
+    monkeypatch.setattr(partial_resume, "LEGACY_1747_RECEIPT_SHA256", hashlib.sha256(receipt.read_bytes()).hexdigest())
+
+    def job(job_id: str, outcome: str) -> dict:
+        return {
+            "job_id": job_id, "outcome": outcome, "attempt_count": 1,
+            "state": "dead_letter", "error_code": "HARD_FAILURE",
+            "error_detail": f"HardFailure('coding treatment reported {outcome}')",
+            "payload": {
+                "todo_id": 1747, "todo_agent": "codex", "worktree": str(root),
+                "object_id": str(root), "treatment_id": "codex-implement",
+                "plan_binding": {
+                    **{key: binding[key] for key in ("plan_commit", "solution_hash", "source_commit")},
+                    "worktree": str(root),
+                    "worktree_identity": {"actor": "codex", "worktree": str(root), "head": head},
+                },
+            },
+        }
+
+    jobs = [job("dfdfd643-312e-46ef-a33c-1542340e9b9c", "partial"), job("2b1f9f04-a09f-489e-aade-f21ab1e4aaa9", "failed")]
+    manifest = partial_resume.migrate_todo_1747(root, binding, jobs)
+    initial = {path: path.read_bytes() for path in [manifest, *sorted((root / partial_resume.HISTORY).glob("*.json"))]}
+    subprocess.run(["git", "add", *changed], cwd=root, check=True)
+    subprocess.run(["git", "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-qm", "candidate"], cwd=root, check=True)
+    candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    candidate_tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=root, text=True).strip()
+    satisfied = partial_resume.make_attempt(
+        {**binding, "job_id": "resume-job", "attempt_count": 1}, root,
+        outcome="satisfied", predecessor=partial_resume.history(root)[-1]["attempt_hash"],
+        artifacts=[{"kind": "closed_candidate", "commit": candidate, "tree": candidate_tree}],
+    )
+    partial_resume.append_attempt(root, satisfied)
+    closed_receipt = b'{"outcome":"satisfied","candidate":"closed"}\n'
+    receipt.write_bytes(closed_receipt)
+
+    assert partial_resume.classify(root, {**binding, "job_id": None, "attempt_count": None})["state"] == "CLOSED_CANDIDATE"
+    assert partial_resume.migrate_todo_1747(root, binding, jobs) == manifest
+    assert receipt.read_bytes() == closed_receipt
+    assert all(path.read_bytes() == content for path, content in initial.items())
+
+    pristine = manifest.read_bytes()
+    value = json.loads(pristine)
+    value["source"]["nodes"] = []
+    unsigned = dict(value); unsigned.pop("manifest_hash")
+    value["manifest_hash"] = "sha256:" + hashlib.sha256(partial_resume._canonical(unsigned)).hexdigest()
+    manifest.chmod(0o640); manifest.write_text(json.dumps(value, sort_keys=True) + "\n")
+    with pytest.raises(Exception, match="manifest differs"):
+        partial_resume.migrate_todo_1747(root, binding, jobs)
+    manifest.write_bytes(pristine)
+    history_path = sorted((root / partial_resume.HISTORY).glob("*.json"))[0]
+    history_path.chmod(0o640); history_path.write_bytes(history_path.read_bytes().replace(b'"partial"', b'"failed"', 1))
+    with pytest.raises(Exception, match="lineage"):
         partial_resume.migrate_todo_1747(root, binding, jobs)
 
 

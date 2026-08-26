@@ -18,6 +18,10 @@ PRESERVATION = ".tgw-coding-preservation"
 LEGACY_1747 = Path("/opt/TGW/var/worktrees/todo-1747-plan-52b355efbebde5d607a2b055")
 LEGACY_1747_FINGERPRINT = "sha256:1682aca6df1d147169a7d7aa9bce000a270546d57cf765c1002aecaa9071d733"
 LEGACY_1747_RECEIPT_SHA256 = "0d58f8e21f3b89a89c3e242c7a96827534242989dd3ec751aa0e46c97b57742c"
+LEGACY_1747_SOURCE_COMMIT = "14753ce93bfc5d29253611719377a717112db750"
+LEGACY_1747_SOURCE_TREE = "25ce0a73657dfe8d89569149178113e0d1affa32"
+LEGACY_1747_PLAN_COMMIT = "058e2f980201cc78245358e4901cf007063f2c29"
+LEGACY_1747_SOLUTION_HASH = "sha256:ecce15aad2699492c0c5577bff1af7005ffbbec6ae6166b325b34c1cc7e70e9f"
 RECEIPT_FILES = frozenset(
     {
         "implementation-receipt.json",
@@ -286,6 +290,10 @@ def migrate_todo_1747(worktree: Path, binding: Mapping[str, Any], jobs: list[Map
         or binding.get("actor") != "codex"
         or binding.get("treatment_id") != "codex-implement"
         or binding.get("treatment_version") != "1"
+        or binding.get("source_commit") != LEGACY_1747_SOURCE_COMMIT
+        or binding.get("source_tree") != LEGACY_1747_SOURCE_TREE
+        or binding.get("plan_commit") != LEGACY_1747_PLAN_COMMIT
+        or binding.get("solution_hash") != LEGACY_1747_SOLUTION_HASH
     ):
         raise PartialResumeError("migration is restricted to exact Todo 1747")
     expected_jobs = {
@@ -344,6 +352,55 @@ def migrate_todo_1747(worktree: Path, binding: Mapping[str, Any], jobs: list[Map
         )
     if len({item["job_id"] for item in normalized}) != len(expected_jobs):
         raise PartialResumeError("Todo 1747 requires both exact durable jobs")
+    root = worktree / PRESERVATION
+    path = root / "todo-1747-migration.json"
+    if path.exists():
+        try:
+            installed_bytes = path.read_bytes()
+            installed = json.loads(installed_bytes)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PartialResumeError("Todo 1747 migration manifest is unreadable") from exc
+        unsigned_installed = dict(installed)
+        claimed_hash = unsigned_installed.pop("manifest_hash", None)
+        installed_source = installed.get("source")
+        source_body = dict(installed_source) if isinstance(installed_source, Mapping) else {}
+        source_claim = source_body.pop("fingerprint", None)
+        source_hash = "sha256:" + hashlib.sha256(_canonical(source_body)).hexdigest()
+        if (
+            installed.get("schema") != "tgw-coding-1747-migration/v1"
+            or claimed_hash != "sha256:" + hashlib.sha256(_canonical(unsigned_installed)).hexdigest()
+            or installed_bytes != (json.dumps(installed, sort_keys=True) + "\n").encode()
+            or installed.get("binding") != dict(binding)
+            or installed.get("jobs") != sorted(normalized, key=lambda item: item["job_id"])
+            or installed.get("legacy_receipt_sha256") != LEGACY_1747_RECEIPT_SHA256
+            or source_claim != LEGACY_1747_FINGERPRINT
+            or source_hash != LEGACY_1747_FINGERPRINT
+            or installed_source.get("head") != LEGACY_1747_SOURCE_COMMIT
+            or installed_source.get("tree") != binding.get("source_tree")
+            or installed_source.get("changed_paths") != [
+                "src/tgw/coding_cli.py",
+                "src/tgw/pp_workflow_reconcile.py",
+                "tests/test_pp_workflow_reconcile.py",
+            ]
+        ):
+            raise PartialResumeError("Todo 1747 migration manifest differs")
+        attempts = history(worktree, {**binding, "job_id": None, "attempt_count": None})
+        if len(attempts) < 2:
+            raise PartialResumeError("Todo 1747 historical attempt lineage is incomplete")
+        for attempt, job in zip(
+            attempts[:2], sorted(normalized, key=lambda item: item["outcome"] != "partial"), strict=True
+        ):
+            if (
+                attempt.get("job_id") != job["job_id"]
+                or attempt.get("outcome") != job["outcome"]
+                or attempt.get("attempt_count") != job["attempt_count"]
+                or attempt.get("fingerprint") != LEGACY_1747_FINGERPRINT
+            ):
+                raise PartialResumeError("Todo 1747 historical attempt lineage differs")
+        current = classify(worktree, {**binding, "job_id": None, "attempt_count": None})
+        if current.get("state") in {"RESUMABLE_PARTIAL", "CLOSED_CANDIDATE"}:
+            return path
+        raise PartialResumeError("Todo 1747 installed migration is not bound to the current worktree")
     state = source_fingerprint(worktree)
     if (
         state["fingerprint"] != LEGACY_1747_FINGERPRINT
@@ -388,9 +445,7 @@ def migrate_todo_1747(worktree: Path, binding: Mapping[str, Any], jobs: list[Map
         raise PartialResumeError(
             "Todo 1747 existing attempt history is not an exact migration prefix"
         )
-    root = worktree / PRESERVATION
     root.mkdir(exist_ok=True)
-    path = root / "todo-1747-migration.json"
     if path.exists():
         try:
             installed = json.loads(path.read_text(encoding="utf-8"))
