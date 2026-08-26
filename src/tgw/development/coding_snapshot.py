@@ -13,6 +13,7 @@ import os
 import re
 import stat
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Optional
 
@@ -651,6 +652,10 @@ def _check_receipt(
     except Exception as exc:
         return FingerprintResult.FALSE, (
             f"receipt file unreadable: {exc}",
+        ), ()
+    if not isinstance(data, Mapping):
+        return FingerprintResult.FALSE, (
+            "receipt file malformed: expected JSON object",
         ), ()
 
     status = data.get("status", "").upper()

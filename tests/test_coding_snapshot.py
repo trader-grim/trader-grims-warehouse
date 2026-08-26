@@ -484,6 +484,57 @@ class TestCheckReceipt:
         result, reasons, _ = _check_receipt(tmp_path, "controller_verified", "o", "x", attempt_hash)
         assert result is FingerprintResult.TRUE
 
+    @pytest.mark.parametrize("condition_id", ["tested", "linted", "controller_verified"])
+    @pytest.mark.parametrize(
+        "content",
+        ["null", "[]", '"receipt"', "42", "true", "false"],
+        ids=["null", "array", "string", "number", "true", "false"],
+    )
+    def test_controller_receipt_rejects_every_non_object_json_type(
+        self, tmp_path, condition_id, content,
+    ):
+        (tmp_path / "controller-harness-receipt.json").write_text(content)
+
+        result, reasons, evidence = _check_receipt(
+            tmp_path, condition_id, "o", "x", "sha256:" + "a" * 64,
+        )
+
+        assert result is FingerprintResult.FALSE
+        assert reasons == ("receipt file malformed: expected JSON object",)
+        assert evidence == ()
+
+    @pytest.mark.parametrize("condition_id", ["tested", "linted", "controller_verified"])
+    def test_controller_receipt_rejects_invalid_json(self, tmp_path, condition_id):
+        (tmp_path / "controller-harness-receipt.json").write_text("{invalid")
+
+        result, reasons, evidence = _check_receipt(
+            tmp_path, condition_id, "o", "x", "sha256:" + "a" * 64,
+        )
+
+        assert result is FingerprintResult.FALSE
+        assert reasons[0].startswith("receipt file unreadable:")
+        assert evidence == ()
+
+    @pytest.mark.parametrize("condition_id", ["tested", "linted", "controller_verified"])
+    def test_controller_receipt_accepts_valid_exact_object(self, tmp_path, condition_id):
+        attempt_hash = "sha256:" + "a" * 64
+        (tmp_path / "controller-harness-receipt.json").write_text(json.dumps({
+            "status": "PASS",
+            "outcome": "satisfied",
+            "established_conditions": [condition_id],
+            "graph_id": "g",
+            "object_id": "o",
+            "object_generation": "x",
+            "implementation_attempt_hash": attempt_hash,
+        }))
+
+        result, reasons, _ = _check_receipt(
+            tmp_path, condition_id, "o", "x", attempt_hash,
+        )
+
+        assert result is FingerprintResult.TRUE
+        assert reasons == (f"{condition_id} receipt: PASS",)
+
     @pytest.mark.parametrize("supplied", [None, "sha256:" + "b" * 64])
     def test_controller_harness_receipt_rejects_missing_or_old_attempt_hash(self, tmp_path, supplied):
         current = "sha256:" + "a" * 64
