@@ -16,13 +16,14 @@ from tgw.development.worktree_lease import exclusive_worktree_lease
 from tgw.errors import HardFailure
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
-_PORCELAIN_STATUS = re.compile(r"[ MADRCUT?!]{2}\Z")
 _RECEIPTS = frozenset({
     "implementation-receipt.json", "controller-harness-receipt.json",
     "review-receipt.json", "deployment-receipt.json", "stitch-receipt.json",
     "operator-admit-pending.json",
 })
-_HISTORY_ROOT = ".tgw-coding-history"
+_HISTORY_FILE = re.compile(
+    r"\.tgw-coding-history/implementation/[0-9]{6}-[0-9a-f]{64}\.json\Z"
+)
 
 
 class ControllerVerificationError(RuntimeError):
@@ -39,7 +40,20 @@ def _git_paths(cwd: Path, *args: str) -> tuple[str, ...]:
     if completed.returncode:
         detail = completed.stderr.decode("utf-8", errors="replace")[-500:]
         raise ControllerVerificationError(f"Git verification probe failed: {detail}")
-    return tuple(item.decode("utf-8", errors="surrogateescape") for item in completed.stdout.split(b"\0") if item)
+    raw = completed.stdout
+    if not raw:
+        return ()
+    if not raw.endswith(b"\0"):
+        raise ControllerVerificationError("Git verification probe returned malformed NUL output")
+    fields = raw[:-1].split(b"\0")
+    if any(not item for item in fields):
+        raise ControllerVerificationError("Git verification probe returned malformed NUL output")
+    try:
+        return tuple(item.decode("utf-8", errors="strict") for item in fields)
+    except UnicodeDecodeError as exc:
+        raise ControllerVerificationError(
+            "Git verification probe returned an undecodable path"
+        ) from exc
 
 
 def _git_text(cwd: Path, *args: str) -> str:
@@ -57,16 +71,7 @@ def _git_text(cwd: Path, *args: str) -> str:
 
 def _is_workflow_evidence_path(relative: str) -> bool:
     """Return whether a safe repository-relative path is controller-owned evidence."""
-    if relative == f"{_HISTORY_ROOT}/":
-        return True
-    parts = relative.split("/")
-    if not relative or relative.startswith("/") or any(
-        part in {"", ".", ".."} for part in parts
-    ):
-        return False
-    if len(parts) == 1:
-        return relative in _RECEIPTS
-    return parts[0] == _HISTORY_ROOT
+    return relative in _RECEIPTS or _HISTORY_FILE.fullmatch(relative) is not None
 
 
 def _assert_source_status_clean(cwd: Path) -> None:
@@ -80,14 +85,13 @@ def _assert_source_status_clean(cwd: Path) -> None:
         "--ignored=matching",
     )
     for item in status:
-        # Porcelain v1 records are ``XY SP path``. Rename/copy records have a
-        # second NUL-delimited path and are never workflow evidence mutations.
+        # Wrapper evidence is untracked or ignored. A staged, tracked, renamed,
+        # copied, unmerged, malformed, or undecodable entry is source mutation,
+        # even when its path resembles an evidence filename.
         if (
             len(item) < 4
             or item[2] != " "
-            or _PORCELAIN_STATUS.fullmatch(item[:2]) is None
-            or "R" in item[:2]
-            or "C" in item[:2]
+            or item[:2] not in {"??", "!!"}
         ):
             raise ControllerVerificationError(
                 "controller candidate source is mutable or uncommitted"

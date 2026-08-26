@@ -742,11 +742,11 @@ def test_controller_refuses_ignored_mutable_candidate_state(tmp_path, monkeypatc
 @pytest.mark.parametrize(
     "raw_status",
     [
-        b"!! .tgw-coding-history/\0",
-        b"?? .tgw-coding-history/implementation/attempt.json\0",
-        b"!! .tgw-coding-history/controller/check.log\0",
+        b"?? .tgw-coding-history/implementation/000001-"
+        + (b"a" * 64)
+        + b".json\0",
         b"?? implementation-receipt.json\0",
-        b" M controller-harness-receipt.json\0",
+        b"!! controller-harness-receipt.json\0",
     ],
 )
 def test_controller_nul_status_accepts_only_owned_workflow_evidence(
@@ -769,16 +769,25 @@ def test_controller_nul_status_accepts_only_owned_workflow_evidence(
     [
         b"?? .tgw-coding-history-evil/attempt.json\0",
         b"?? .tgw-coding-history\0",
+        b"!! .tgw-coding-history/\0",
+        b"?? .tgw-coding-history/controller/check.log\0",
+        b"?? .tgw-coding-history/implementation/attempt.json\0",
         b"?? nested/implementation-receipt.json\0",
         b"?? implementation-receipt.json.bak\0",
         b"?? ../implementation-receipt.json\0",
         b"?? .tgw-coding-history/../src.py\0",
         b"?? .tgw-coding-history//attempt.json\0",
         b"A  src/staged.py\0",
+        b"M  implementation-receipt.json\0",
+        b" M controller-harness-receipt.json\0",
         b"!! ignored/value\0",
         b"R  .tgw-coding-history/new\0.tgw-coding-history/old\0",
         b"ZZ implementation-receipt.json\0",
+        b"   implementation-receipt.json\0",
         b"malformed\0",
+        b"?? implementation-receipt.json",
+        b"?? implementation-receipt.json\0\0",
+        b"?? .tgw-coding-history/implementation/000001-\xff.json\0",
     ],
 )
 def test_controller_nul_status_rejects_prefixes_renames_and_unsafe_paths(
@@ -794,7 +803,7 @@ def test_controller_nul_status_rejects_prefixes_renames_and_unsafe_paths(
         ),
     )
 
-    with pytest.raises(controller_verify.ControllerVerificationError, match="mutable or uncommitted"):
+    with pytest.raises(controller_verify.ControllerVerificationError):
         controller_verify._assert_source_status_clean(tmp_path)
 
 
