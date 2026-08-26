@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -358,14 +358,19 @@ def test_1747_manifest_survives_closed_receipt_and_rejects_tampering(tmp_path: P
     pristine = manifest.read_bytes()
     value = json.loads(pristine)
     value["source"]["nodes"] = []
-    unsigned = dict(value); unsigned.pop("manifest_hash")
+    unsigned = dict(value)
+    unsigned.pop("manifest_hash")
     value["manifest_hash"] = "sha256:" + hashlib.sha256(partial_resume._canonical(unsigned)).hexdigest()
-    manifest.chmod(0o640); manifest.write_text(json.dumps(value, sort_keys=True) + "\n")
+    manifest.chmod(0o640)
+    manifest.write_text(json.dumps(value, sort_keys=True) + "\n")
     with pytest.raises(Exception, match="manifest differs"):
         partial_resume.migrate_todo_1747(root, binding, jobs)
     manifest.write_bytes(pristine)
     history_path = sorted((root / partial_resume.HISTORY).glob("*.json"))[0]
-    history_path.chmod(0o640); history_path.write_bytes(history_path.read_bytes().replace(b'"partial"', b'"failed"', 1))
+    history_path.chmod(0o640)
+    history_path.write_bytes(
+        history_path.read_bytes().replace(b'"partial"', b'"failed"', 1)
+    )
     with pytest.raises(Exception, match="lineage"):
         partial_resume.migrate_todo_1747(root, binding, jobs)
 
