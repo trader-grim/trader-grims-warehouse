@@ -15,6 +15,7 @@ from tgw.development.partial_resume import (
     make_attempt,
     preservation_manifest,
     source_fingerprint,
+    source_tree,
 )
 
 
@@ -89,6 +90,39 @@ def test_fingerprint_excludes_every_workflow_receipt(tmp_path: Path) -> None:
 
     assert after["fingerprint"] == before["fingerprint"]
     assert after["changed_paths"] == []
+
+
+def test_every_partial_resume_git_probe_uses_exact_canonical_safe_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from tgw.development import partial_resume
+
+    root, head, tree = _repo(tmp_path)
+    alias = tmp_path / "worktree-alias"
+    alias.symlink_to(root, target_is_directory=True)
+    canonical = root.resolve()
+    real_run = subprocess.run
+    probes: list[tuple[tuple[str, ...], Path]] = []
+
+    def recording_run(command, **kwargs):
+        if command[0] == "git":
+            probes.append((tuple(command), Path(kwargs["cwd"])))
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(partial_resume.subprocess, "run", recording_run)
+
+    assert source_tree(alias, head) == tree
+    fingerprint = source_fingerprint(alias)
+    assert fingerprint["head"] == head
+    assert classify(alias)["state"] == "ABANDONED_CLEAN"
+
+    assert probes
+    for argv, cwd in probes:
+        assert argv[:3] == ("git", "-c", f"safe.directory={canonical}")
+        assert argv[2] != "safe.directory=*"
+        assert cwd == canonical
+    status = next(argv for argv, _cwd in probes if "status" in argv)
+    assert status[status.index("--") + 1] == "."
 
 
 def test_tamper_refuses_resume_and_writes_bound_preservation(tmp_path: Path) -> None:

@@ -42,8 +42,25 @@ def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
 
 
+def _canonical_worktree(worktree: Path) -> Path:
+    """Return the exact existing request-bound worktree root."""
+    try:
+        root = worktree.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise PartialResumeError("request-bound worktree is unavailable") from exc
+    if not root.is_dir():
+        raise PartialResumeError("request-bound worktree is not a directory")
+    return root
+
+
 def _git(root: Path, *args: str) -> bytes:
-    result = subprocess.run(("git", *args), cwd=root, check=False, capture_output=True)
+    root = _canonical_worktree(root)
+    result = subprocess.run(
+        ("git", "-c", f"safe.directory={root}", *args),
+        cwd=root,
+        check=False,
+        capture_output=True,
+    )
     if result.returncode:
         raise PartialResumeError(result.stderr.decode(errors="replace")[-500:])
     return result.stdout
@@ -118,6 +135,7 @@ def _node(root: Path, relative: str) -> dict[str, Any]:
 
 
 def source_fingerprint(worktree: Path) -> dict[str, Any]:
+    worktree = _canonical_worktree(worktree)
     exclusions = (
         *(f":(exclude){name}" for name in sorted(RECEIPT_FILES)),
         f":(exclude){HISTORY}",
@@ -211,6 +229,7 @@ def history(worktree: Path, expected: Mapping[str, Any] | None = None) -> list[d
 
 
 def classify(worktree: Path, expected: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    worktree = _canonical_worktree(worktree)
     current = source_fingerprint(worktree)
     try:
         attempts = history(worktree, expected)
@@ -235,13 +254,16 @@ def classify(worktree: Path, expected: Mapping[str, Any] | None = None) -> dict[
             and current["head"] != latest.get("source_commit")
         )
         if exact_closed:
-            ancestor = subprocess.run(
-                ["git", "merge-base", "--is-ancestor", latest["source_commit"], current["head"]],
-                cwd=worktree,
-                check=False,
-                capture_output=True,
-            )
-            exact_closed = ancestor.returncode == 0
+            try:
+                _git(
+                    worktree,
+                    "merge-base",
+                    "--is-ancestor",
+                    latest["source_commit"],
+                    current["head"],
+                )
+            except PartialResumeError:
+                exact_closed = False
         state = (
             "CLOSED_CANDIDATE"
             if exact_closed
