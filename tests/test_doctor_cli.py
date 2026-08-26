@@ -959,6 +959,85 @@ def _unix_repair_transaction_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyP
     return paths
 
 
+def _authenticated_pre_ledger_repair_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    paths = _unix_repair_transaction_fixture(tmp_path, monkeypatch)
+    linked = paths.worktrees / "todo"
+    _git(paths.repository, "worktree", "add", "-b", "todo", str(linked))
+    preservation = linked / ".tgw-coding-preservation"
+    preservation.mkdir(mode=0o2775)
+    manifest = preservation / ("a" * 64 + ".json")
+    manifest.write_bytes(b'{"authenticated":true}\n')
+    manifest.chmod(0o460)
+    before = manifest.stat()
+
+    def authenticate(location, descriptor, _group_gid):
+        assert location == linked
+        preservation_descriptor = os.open(preservation, os.O_RDONLY | os.O_DIRECTORY)
+        manifest_descriptor = os.open(manifest, os.O_RDONLY)
+        return {
+            "todo_id": 1824,
+            "relative": Path(".tgw-coding-preservation") / manifest.name,
+            "descriptor": manifest_descriptor,
+            "before": os.fstat(manifest_descriptor),
+            "preservation_descriptor": preservation_descriptor,
+            "preservation_before": os.fstat(preservation_descriptor),
+            "manifest_hash": "sha256:" + "a" * 64,
+            "receipt_sha256": "sha256:" + "b" * 64,
+        }
+
+    monkeypatch.setattr(doctor_cli, "_authenticate_pre_ledger_preservation", authenticate)
+    monkeypatch.setattr(doctor_cli, "_receipt", lambda *_args, **_kwargs: str(tmp_path / "receipt.json"))
+    return paths, linked, manifest, before
+
+
+def test_unix_git_repair_compares_authenticated_0460_inventory_before_0440_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _linked, manifest, before = _authenticated_pre_ledger_repair_fixture(tmp_path, monkeypatch)
+
+    result = doctor_cli.repair_unix_git_access(paths)
+
+    after = manifest.stat()
+    stable_fields = ("st_ino", "st_uid", "st_gid", "st_nlink", "st_size", "st_atime_ns", "st_mtime_ns")
+    assert stat.S_IMODE(before.st_mode) == 0o460
+    assert stat.S_IMODE(after.st_mode) == 0o440
+    assert all(getattr(before, field) == getattr(after, field) for field in stable_fields)
+    assert manifest.read_bytes() == b'{"authenticated":true}\n'
+    assert result["pre_ledger_preservation"]["todo"]["mode_repaired"] is True
+    for name, preflight in result["preflight"].items():
+        assert result["git_tree_changes"][name]["inventory_sha256"] == preflight["inventory_sha256"]
+        assert result["git_tree_changes"][name]["content_sha256"] == preflight["content_sha256"]
+
+
+def test_unix_git_repair_real_content_drift_fails_closed_before_manifest_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, linked, manifest, _before = _authenticated_pre_ledger_repair_fixture(tmp_path, monkeypatch)
+    drift = linked / "README"
+    repair_target = linked / "repair-target"
+    repair_target.mkdir(mode=0o700)
+    original_scan = doctor_cli._scan_shared_git_tree
+    injected = False
+
+    def scan(root, group_gid, *, mutate, **kwargs):
+        nonlocal injected
+        if mutate and not injected and os.fstat(root).st_ino == linked.stat().st_ino:
+            injected = True
+            drift.write_text("injected real content drift\n", encoding="utf-8")
+        return original_scan(root, group_gid, mutate=mutate, **kwargs)
+
+    monkeypatch.setattr(doctor_cli, "_scan_shared_git_tree", scan)
+
+    with pytest.raises(doctor_cli.DoctorError, match="inventory or content changed"):
+        doctor_cli.repair_unix_git_access(paths)
+
+    assert injected is True
+    assert stat.S_IMODE(manifest.stat().st_mode) == 0o460
+    assert stat.S_IMODE(repair_target.stat().st_mode) == 0o700
+
+
 def test_unix_git_success_receipt_is_strictly_after_commit_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

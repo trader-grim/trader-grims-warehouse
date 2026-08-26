@@ -4295,10 +4295,6 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
                 current = os.fstat(item["descriptor"])
                 if any(getattr(item["before"], field) != getattr(current, field) for field in stable_fields):
                     raise DoctorError(f"Todo {item['todo_id']} preservation manifest changed after preflight")
-                if stat.S_IMODE(current.st_mode) == 0o460:
-                    journal.append({"kind": "metadata", "descriptor": os.dup(item["descriptor"]), "before": current})
-                    os.fchmod(item["descriptor"], 0o440)
-                    repaired_preservation.append(item)
             revalidate_preservation_directories()
             root_before = os.fstat(worktree_root_fd)
             journal.append({"kind": "metadata", "descriptor": os.dup(worktree_root_fd), "before": root_before})
@@ -4326,6 +4322,18 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
             revalidate_preservation_directories()
             if any(tree_changes[name][field] != preflight[name][field] for name in preflight for field in ("inventory_sha256", "content_sha256")):
                 raise DoctorError("shared Git inventory or content changed after immutable preflight")
+            # The authenticated legacy 0460 mode is part of the descriptor-pinned
+            # preflight inventory.  Compare that exact tree before performing the
+            # one explicitly-authorized preservation-manifest transition.
+            for item in pre_ledger.values():
+                current = os.fstat(item["descriptor"])
+                if any(getattr(item["before"], field) != getattr(current, field) for field in stable_fields):
+                    raise DoctorError(f"Todo {item['todo_id']} preservation manifest changed after preflight")
+                if stat.S_IMODE(current.st_mode) == 0o460:
+                    journal.append({"kind": "metadata", "descriptor": os.dup(item["descriptor"]), "before": current})
+                    os.fchmod(item["descriptor"], 0o440)
+                    repaired_preservation.append(item)
+            revalidate_preservation_directories()
             for item in repaired_preservation:
                 after_state = os.fstat(item["descriptor"])
                 if stat.S_IMODE(after_state.st_mode) != 0o440 or any(getattr(item["before"], field) != getattr(after_state, field) for field in stable_fields):
