@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -669,7 +670,8 @@ def test_controller_rejects_lineage_before_running_tests_or_lint(monkeypatch, ca
     from tgw.workers import controller_verify
 
     monkeypatch.setenv("TGW_CODING_JOB", "{}")
-    monkeypatch.setattr(controller_verify, "exclusive_worktree_lease", lambda *_args: nullcontext())
+    monkeypatch.setenv("TGW_CODING_WORKTREE_LEASE_FD", "41")
+    monkeypatch.setattr(controller_verify, "inherited_worktree_lease", lambda *_args: nullcontext())
     monkeypatch.setattr(
         controller_verify, "_verification_commands",
         lambda: (_ for _ in ()).throw(
@@ -684,6 +686,169 @@ def test_controller_rejects_lineage_before_running_tests_or_lint(monkeypatch, ca
     result = json.loads(capsys.readouterr().out)
     assert result["outcome"] == "failed"
     assert "lineage is absent" in result["artifacts"][0]["detail"]
+
+
+def test_controller_uses_exact_inherited_worker_lease(tmp_path, monkeypatch, capsys):
+    from tgw.development.worktree_lease import exclusive_worktree_lease
+    from tgw.workers import controller_verify
+
+    _git_worktree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TGW_CODING_JOB", "{}")
+    monkeypatch.setattr(controller_verify, "_verification_commands", lambda: ())
+    monkeypatch.setattr(controller_verify, "_source_bound_candidate_files", lambda: ())
+
+    with exclusive_worktree_lease(tmp_path) as descriptor:
+        monkeypatch.setenv("TGW_CODING_WORKTREE_LEASE_FD", str(descriptor))
+        assert controller_verify.main() == 0
+
+    assert json.loads(capsys.readouterr().out)["outcome"] == "satisfied"
+
+
+def test_controller_fails_closed_for_untrusted_inherited_descriptor(monkeypatch, capsys):
+    from tgw.workers import controller_verify
+
+    monkeypatch.setenv("TGW_CODING_JOB", "{}")
+    monkeypatch.setenv("TGW_CODING_WORKTREE_LEASE_FD", "41")
+    monkeypatch.setattr(
+        controller_verify,
+        "inherited_worktree_lease",
+        lambda *_args: (_ for _ in ()).throw(
+            HardFailure("lease metadata is not shared with this Unix actor")
+        ),
+    )
+    monkeypatch.setattr(controller_verify, "_verification_commands", lambda: pytest.fail("checks ran"))
+
+    assert controller_verify.main() == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["outcome"] == "failed"
+    assert "not shared with this Unix actor" in result["artifacts"][0]["detail"]
+
+
+def test_inherited_lease_uses_descriptor_bound_linux_lock_state(tmp_path):
+    from tgw.development.worktree_lease import exclusive_worktree_lease, inherited_worktree_lease
+
+    _git_worktree(tmp_path)
+    with exclusive_worktree_lease(tmp_path) as descriptor:
+        with inherited_worktree_lease(tmp_path, descriptor) as inherited:
+            assert inherited == descriptor
+
+
+def test_inherited_lease_survives_real_subprocess_fd_inheritance(tmp_path):
+    from tgw.development.worktree_lease import exclusive_worktree_lease
+
+    _git_worktree(tmp_path)
+    script = (
+        "import pathlib,sys; "
+        "from tgw.development.worktree_lease import inherited_worktree_lease; "
+        "w=pathlib.Path(sys.argv[1]); fd=int(sys.argv[2]); "
+        "c=inherited_worktree_lease(w,fd); c.__enter__(); print('inherited')"
+    )
+    with exclusive_worktree_lease(tmp_path) as descriptor:
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path), str(descriptor)],
+            check=False, text=True, capture_output=True, pass_fds=(descriptor,),
+        )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "inherited"
+
+
+def test_inherited_lease_rejects_unlocked_descriptor_during_other_holder_release(tmp_path):
+    """Reproduce the rejected probe/acquire TOCTOU without timing or polling."""
+    from tgw.development.worktree_lease import inherited_worktree_lease
+
+    _git_worktree(tmp_path)
+    gitdir = tmp_path / ".git"
+    unlocked = os.open(gitdir, os.O_RDONLY | os.O_DIRECTORY)
+    holder = os.open(gitdir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        import fcntl
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # This release is the exact rejected-candidate window between its
+        # blocked probe and flock(unlocked), which would then acquire the lock.
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        with pytest.raises(HardFailure, match="absent worktree lease state"):
+            with inherited_worktree_lease(tmp_path, unlocked):
+                pass
+        probe = os.open(gitdir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            fcntl.flock(probe, fcntl.LOCK_UN)
+            os.close(probe)
+    finally:
+        os.close(holder)
+        os.close(unlocked)
+
+
+@pytest.mark.parametrize(
+    "record,detail",
+    [
+        ("", "ambiguous or absent"),
+        (
+            "lock:\t1: FLOCK ADVISORY WRITE 1 00:01:1 0 EOF\n"
+            "lock:\t2: FLOCK ADVISORY WRITE 1 00:01:1 0 EOF\n",
+            "ambiguous or absent",
+        ),
+        ("lock:\tbroken\n", "malformed"),
+        ("lock:\t1: POSIX ADVISORY WRITE 1 00:01:1 0 EOF\n", "malformed"),
+        ("lock:\t1: FLOCK ADVISORY READ 1 00:01:1 0 EOF\n", "malformed"),
+        ("lock:\t1: FLOCK ADVISORY WRITE 1 00:01:1 1 EOF\n", "malformed"),
+        ("lock:\t1: FLOCK ADVISORY WRITE 1 00:01:1 0 99\n", "malformed"),
+        ("lock:\t1: FLOCK ADVISORY WRITE 1 00:01:1 0 EOF\n", "wrong inode"),
+    ],
+)
+def test_inherited_lease_rejects_bad_descriptor_bound_lock_records(
+    tmp_path, monkeypatch, record, detail,
+):
+    from tgw.development.worktree_lease import _validate_inherited_flock
+
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: record)
+        with pytest.raises(HardFailure, match=detail):
+            _validate_inherited_flock(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def test_inherited_flock_accepts_namespace_remapped_device_identity(tmp_path, monkeypatch):
+    from tgw.development.worktree_lease import _validate_inherited_flock
+
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        inode = os.fstat(descriptor).st_ino
+        record = f"lock:\t1: FLOCK ADVISORY WRITE 1 dead:beef:{inode} 0 EOF\n"
+        monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: record)
+        _validate_inherited_flock(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("value", [None, "", "not-an-fd", "-1", "2147483648"])
+def test_controller_fails_closed_for_invalid_inherited_lease_fd(value, monkeypatch, capsys):
+    from tgw.workers import controller_verify
+
+    monkeypatch.setenv("TGW_CODING_JOB", "{}")
+    if value is None:
+        monkeypatch.delenv("TGW_CODING_WORKTREE_LEASE_FD", raising=False)
+    else:
+        monkeypatch.setenv("TGW_CODING_WORKTREE_LEASE_FD", value)
+    monkeypatch.setattr(controller_verify, "_verification_commands", lambda: pytest.fail("checks ran"))
+    assert controller_verify.main() == 0
+    assert json.loads(capsys.readouterr().out)["outcome"] == "failed"
+
+
+def test_controller_fails_closed_for_amplified_numeric_inherited_lease_fd(monkeypatch, capsys):
+    from tgw.workers import controller_verify
+
+    monkeypatch.setenv("TGW_CODING_JOB", "{}")
+    monkeypatch.setenv("TGW_CODING_WORKTREE_LEASE_FD", "9" * 5000)
+    monkeypatch.setattr(controller_verify, "_verification_commands", lambda: pytest.fail("checks ran"))
+    assert controller_verify.main() == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["outcome"] == "failed"
+    assert "malformed lease descriptor" in result["artifacts"][0]["detail"]
 
 
 def test_controller_verify_runner_does_not_establish_conditions_when_a_check_fails(monkeypatch, capsys):
@@ -769,7 +934,10 @@ def test_controller_verify_scope_is_bound_to_changed_source_and_tests(
 
     assert python_files == ("src/feature.py", "tests/test_feature.py")
     assert tests == ("tests/test_feature.py",)
-    assert controller_verify.main() == 0
+    from tgw.development.worktree_lease import exclusive_worktree_lease
+    with exclusive_worktree_lease(worktree) as descriptor:
+        monkeypatch.setenv("TGW_CODING_WORKTREE_LEASE_FD", str(descriptor))
+        assert controller_verify.main() == 0
     result = json.loads(capsys.readouterr().out)
     assert result["artifacts"][0] == {
         "kind": "check",
@@ -820,7 +988,10 @@ def test_controller_final_recheck_rejects_mutation_during_checks(
 
     monkeypatch.setattr(controller_verify, "_run_check", pass_then_mutate)
 
-    assert controller_verify.main() == 0
+    from tgw.development.worktree_lease import exclusive_worktree_lease
+    with exclusive_worktree_lease(worktree) as descriptor:
+        monkeypatch.setenv("TGW_CODING_WORKTREE_LEASE_FD", str(descriptor))
+        assert controller_verify.main() == 0
     result = json.loads(capsys.readouterr().out)
     assert result["outcome"] == "failed"
     assert "mutable or uncommitted" in result["artifacts"][0]["detail"]
@@ -1093,6 +1264,53 @@ def test_configured_worker_passes_exact_worktree_lease_to_runner(tmp_path, monke
 
     assert observed["pass_fds"] == (37,)
     assert observed["env"]["TGW_CODING_WORKTREE_LEASE_FD"] == "37"
+
+
+def test_automatic_worker_controller_path_passes_exact_closed_candidate(tmp_path, monkeypatch):
+    from tgw.development.worktree_lease import exclusive_worktree_lease
+
+    worktree = tmp_path / "worktree"
+    _git_worktree(worktree)
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=worktree, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    (worktree / "src").mkdir()
+    (worktree / "tests").mkdir()
+    (worktree / "src/feature.py").write_text("implemented = True\n", encoding="utf-8")
+    (worktree / "tests/test_feature.py").write_text(
+        "def test_feature():\n    assert True\n", encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "exact closed candidate"], cwd=worktree,
+        check=True, capture_output=True,
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=worktree, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=worktree, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    payload = _install_controller_lineage(worktree, baseline, head, tree)
+    worker = CodingWorker(
+        "controller-verify",
+        {"coding": {
+            "commands": {"controller-verify": [sys.executable, "-m", "tgw.workers.controller_verify"]},
+            "allowed_runners": [sys.executable],
+            "timeout_s": 60,
+        }},
+    )
+    monkeypatch.setattr("tgw.workers.coding.worker_base.state_machine.get_job", lambda _job_id: None)
+
+    with exclusive_worktree_lease(worktree) as descriptor:
+        worker._worktree_lease_fd = descriptor
+        result = worker._launch_configured_command("controller-verify", payload, worktree)
+
+    assert result["outcome"] == "satisfied"
+    assert result["established_conditions"] == ["tested", "linted", "controller_verified"]
 
 
 def test_coding_worker_entrypoint_loads_config_file_and_starts_allowed_local_runner(tmp_path, monkeypatch):

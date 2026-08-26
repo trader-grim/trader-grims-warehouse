@@ -12,7 +12,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-from tgw.development.worktree_lease import exclusive_worktree_lease
+from tgw.development.worktree_lease import inherited_worktree_lease
 from tgw.errors import HardFailure
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -269,11 +269,18 @@ def main() -> int:
         # Unit callers without a dispatched job remain pure. Every production
         # controller job has TGW_CODING_JOB and holds the same inode lease used
         # by implementation from the first identity check through the last.
-        lease = (
-            exclusive_worktree_lease(Path.cwd().resolve())
-            if "TGW_CODING_JOB" in os.environ
-            else nullcontext()
-        )
+        if "TGW_CODING_JOB" in os.environ:
+            raw_descriptor = os.environ.get("TGW_CODING_WORKTREE_LEASE_FD")
+            if raw_descriptor is None:
+                raise HardFailure("controller runner has no inherited worktree lease descriptor")
+            if not re.fullmatch(r"[0-9]{1,10}", raw_descriptor):
+                raise HardFailure("controller runner inherited a malformed lease descriptor")
+            descriptor = int(raw_descriptor)
+            if descriptor > 2**31 - 1:
+                raise HardFailure("controller runner inherited an overflow lease descriptor")
+            lease = inherited_worktree_lease(Path.cwd().resolve(), descriptor)
+        else:
+            lease = nullcontext()
         with lease:
             checks = _verification_commands()
             artifacts: list[dict[str, Any]] = []

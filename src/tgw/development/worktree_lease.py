@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import re
 import stat
 import subprocess
 from contextlib import contextmanager
@@ -82,6 +83,47 @@ def _validate_descriptor(worktree: Path, descriptor: int) -> None:
         raise HardFailure("coding worktree lease descriptor does not match Git metadata")
 
 
+def _validate_inherited_flock(descriptor: int) -> None:
+    """Prove that *descriptor*'s open description already owns our lease."""
+    try:
+        fdinfo = Path(f"/proc/self/fdinfo/{descriptor}").read_text(encoding="ascii")
+    except (OSError, UnicodeError) as exc:
+        raise HardFailure("coding runner cannot inspect inherited worktree lease state") from exc
+
+    records = [
+        line.removeprefix("lock:").strip()
+        for line in fdinfo.splitlines()
+        if line.startswith("lock:")
+    ]
+    if len(records) != 1:
+        raise HardFailure("coding runner inherited ambiguous or absent worktree lease state")
+    fields = records[0].split()
+    # Linux renders flock state as:
+    # id FLOCK ADVISORY WRITE pid major:minor:inode 0 EOF
+    if (
+        len(fields) != 8
+        or not re.fullmatch(r"[0-9]{1,32}:", fields[0])
+        or fields[1:4] != ["FLOCK", "ADVISORY", "WRITE"]
+        or not re.fullmatch(r"-?[0-9]{1,32}", fields[4])
+        or fields[6:] != ["0", "EOF"]
+    ):
+        raise HardFailure("coding runner inherited malformed worktree lease state")
+    identity = re.fullmatch(
+        r"[0-9a-fA-F]{1,32}:[0-9a-fA-F]{1,32}:([0-9]{1,32})", fields[5]
+    )
+    if identity is None:
+        raise HardFailure("coding runner inherited malformed worktree lease identity")
+    try:
+        opened = os.fstat(descriptor)
+    except OSError as exc:
+        raise HardFailure("coding runner inherited a closed worktree lease descriptor") from exc
+    # fdinfo is bound to this exact open file description. Validate the rendered
+    # device syntax above, but do not compare it with namespace-remapped st_dev.
+    rendered_inode = identity.group(1).lstrip("0") or "0"
+    if rendered_inode != str(opened.st_ino):
+        raise HardFailure("coding runner inherited worktree lease state for the wrong inode")
+
+
 @contextmanager
 def exclusive_worktree_lease(worktree: Path) -> Iterator[int]:
     """Lock the verified Git worktree-metadata inode, not a replaceable file."""
@@ -114,11 +156,15 @@ def inherited_worktree_lease(worktree: Path, descriptor: int) -> Iterator[int]:
     ``pass_fds`` gives the runner the same open file description as the worker.
     The child must never unlock it: doing so would release the parent's lock too.
     """
-    if not isinstance(descriptor, int) or descriptor < 0:
+    if (
+        not isinstance(descriptor, int)
+        or isinstance(descriptor, bool)
+        or not 0 <= descriptor <= 2**31 - 1
+    ):
         raise HardFailure("coding runner inherited an invalid worktree lease descriptor")
     try:
         _validate_descriptor(worktree, descriptor)
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (OSError, BlockingIOError) as exc:
+        _validate_inherited_flock(descriptor)
+    except OSError as exc:
         raise HardFailure("coding runner did not inherit the worker worktree lease") from exc
     yield descriptor
