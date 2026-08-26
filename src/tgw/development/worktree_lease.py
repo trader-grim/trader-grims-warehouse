@@ -63,7 +63,8 @@ def _metadata_directory(worktree: Path) -> Path:
     if metadata_stat.st_mode & stat.S_IWOTH:
         raise HardFailure("coding worktree lease metadata is world-writable")
     if (
-        metadata_stat.st_uid != os.geteuid()
+        os.geteuid() != 0
+        and metadata_stat.st_uid != os.geteuid()
         and metadata_stat.st_gid not in os.getgroups()
     ):
         raise HardFailure("coding worktree lease metadata is not shared with this Unix actor")
