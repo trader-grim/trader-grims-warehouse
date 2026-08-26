@@ -5,4 +5,5 @@ runtime=/opt/TGW/tgw-lib/coding-runtime/current
 python=/opt/TGW/.venvs/controller/bin/python3
 
 export PYTHONPATH="$runtime/src"
+export PYTHONDONTWRITEBYTECODE=1
 exec "$python" -m tgw.coding_cli "$@"

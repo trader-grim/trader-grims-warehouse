@@ -1,24 +1,36 @@
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
 import os
 import shutil
 import stat
 import subprocess
+import tempfile
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Iterator
 
 import pytest
 
 from tgw import doctor_cli
 
 
+@pytest.fixture
+def btrfs_tmp_path() -> Iterator[Path]:
+    root = Path(tempfile.mkdtemp(prefix="pytest-doctor-reflink-", dir="/opt/TGW/var/tmp"))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root)
+
+
 def _git(path: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args], cwd=path, check=True, text=True, capture_output=True
-    )
+    result = subprocess.run(["git", *args], cwd=path, check=True, text=True, capture_output=True)
     return result.stdout.strip()
 
 
@@ -53,7 +65,11 @@ def test_reconciliation_publication_is_history_first_and_failure_atomic(tmp_path
     )
     with pytest.raises(OSError, match="append failed"):
         doctor_cli._publish_reconciled_implementation(
-            tmp_path, attempt, receipt, {"new": True}, mode=0o640,
+            tmp_path,
+            attempt,
+            receipt,
+            {"new": True},
+            mode=0o640,
         )
     assert receipt.read_bytes() == b"legacy\n"
 
@@ -64,13 +80,17 @@ def test_reconciliation_publication_is_history_first_and_failure_atomic(tmp_path
         lambda *_args: order.append("history") or history_path,
     )
     monkeypatch.setattr(
-        doctor_cli, "_atomic_json",
-        lambda *_args, **_kwargs: order.append("top-level")
-        or (_ for _ in ()).throw(OSError("projection failed")),
+        doctor_cli,
+        "_atomic_json",
+        lambda *_args, **_kwargs: order.append("top-level") or (_ for _ in ()).throw(OSError("projection failed")),
     )
     with pytest.raises(OSError, match="projection failed"):
         doctor_cli._publish_reconciled_implementation(
-            tmp_path, attempt, receipt, {"new": True}, mode=0o640,
+            tmp_path,
+            attempt,
+            receipt,
+            {"new": True},
+            mode=0o640,
         )
     assert order == ["history", "top-level"]
     assert receipt.read_bytes() == b"legacy\n"
@@ -95,9 +115,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         "systemd/tgw-controller-verify-worker.service": "[Service]\nExecStart=/bin/true\n",
         "systemd/tgw-coding-local-foreman.timer": "[Timer]\nOnBootSec=1s\n",
         "systemd/tgw-coding-local-foreman.service": "[Service]\nType=oneshot\nExecStart=/bin/true\n",
-        "scripts/tgw_context_debian_stdio.py": (
-            f"#!/bin/sh\n# runtime snapshot: {snapshot_fixture_path}\nexit 0\n"
-        ),
+        "scripts/tgw_context_debian_stdio.py": (f"#!/bin/sh\n# runtime snapshot: {snapshot_fixture_path}\nexit 0\n"),
         "src/tgw/context_mcp_server.py": "# context server fixture\n",
         "src/tgw/current_context_snapshot.py": "# snapshot fixture\n",
         "src/tgw/local_context_runtime.py": "# local runtime fixture\n",
@@ -133,15 +151,9 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     runtime_root.mkdir(parents=True, exist_ok=True)
     (runtime_root / "current").symlink_to(Path("releases") / head)
     local_bin.mkdir(parents=True, exist_ok=True)
-    (local_bin / "tgw-coding").symlink_to(
-        runtime_root / "current/bin/tgw-coding-local-operator"
-    )
-    (local_bin / "tgw-todo").symlink_to(
-        runtime_root / "current/bin/tgw-todo-local-operator"
-    )
-    (local_bin / "tgw-coding-mcp").symlink_to(
-        runtime_root / "current/bin/tgw-coding-mcp"
-    )
+    (local_bin / "tgw-coding").symlink_to(runtime_root / "current/bin/tgw-coding-local-operator")
+    (local_bin / "tgw-todo").symlink_to(runtime_root / "current/bin/tgw-todo-local-operator")
+    (local_bin / "tgw-coding-mcp").symlink_to(runtime_root / "current/bin/tgw-coding-mcp")
     (local_bin / "tgw-doctor").symlink_to(runtime_root / "current/bin/tgw-doctor")
     operator_cli.symlink_to(runtime_root / "current/bin/tgw-operator")
 
@@ -253,15 +265,9 @@ def test_context_snapshot_detects_cursor_drift_with_exact_repair(tmp_path: Path)
 
 
 def test_context_process_match_ignores_parent_shell_command_text() -> None:
-    assert doctor_cli._is_context_process(
-        ["python3", "/opt/TGW/tgw-lib/bin/tgw-context-mcp"]
-    )
-    assert doctor_cli._is_context_process(
-        ["python3", "-m", "tgw.context_mcp_server"]
-    )
-    assert not doctor_cli._is_context_process(
-        ["bash", "-c", "/opt/TGW/tgw-lib/bin/tgw-context-mcp"]
-    )
+    assert doctor_cli._is_context_process(["python3", "/opt/TGW/tgw-lib/bin/tgw-context-mcp"])
+    assert doctor_cli._is_context_process(["python3", "-m", "tgw.context_mcp_server"])
+    assert not doctor_cli._is_context_process(["bash", "-c", "/opt/TGW/tgw-lib/bin/tgw-context-mcp"])
 
 
 def test_root_post_repair_checks_use_the_invoking_operator(
@@ -273,9 +279,7 @@ def test_root_post_repair_checks_use_the_invoking_operator(
     assert doctor_cli._operator_actor() == "codex"
 
 
-def test_root_database_postcheck_runs_as_the_invoking_operator(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_root_database_postcheck_runs_as_the_invoking_operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     observed = {}
 
@@ -339,15 +343,434 @@ def test_descriptor_anchored_git_tree_repair_adds_group_access(
     file_path.write_text("git index fixture", encoding="utf-8")
     file_path.chmod(0o640)
 
-    changes = doctor_cli._scan_shared_git_tree(
-        directory, os.getgid(), mutate=True
-    )
+    changes = doctor_cli._scan_shared_git_tree(directory, os.getgid(), mutate=True)
 
     assert stat.S_IMODE(directory.stat().st_mode) == 0o2770
     assert stat.S_IMODE(nested.stat().st_mode) == 0o2770
     assert stat.S_IMODE(file_path.stat().st_mode) == 0o660
     assert changes["directories"] == 2
     assert changes["files"] == 1
+
+
+def test_mutation_journal_restores_complete_ordinary_tree_metadata(tmp_path: Path) -> None:
+    root = tmp_path / "tree"
+    root.mkdir(mode=0o700)
+    target = root / "index"
+    target.write_bytes(b"unchanged")
+    target.chmod(0o600)
+    before_root = root.stat()
+    before_target = target.stat()
+    journal = []
+
+    doctor_cli._scan_shared_git_tree(root, os.getgid(), mutate=True, journal=journal)
+    assert doctor_cli._close_mutation_journal(journal, rollback=True) == []
+
+    after_root = root.stat()
+    after_target = target.stat()
+    fields = ("st_dev", "st_ino", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime_ns", "st_mtime_ns")
+    assert all(getattr(before_root, field) == getattr(after_root, field) for field in fields)
+    assert all(getattr(before_target, field) == getattr(after_target, field) for field in fields)
+    assert stat.S_IMODE(before_root.st_mode) == stat.S_IMODE(after_root.st_mode)
+    assert stat.S_IMODE(before_target.st_mode) == stat.S_IMODE(after_target.st_mode)
+    assert target.read_bytes() == b"unchanged"
+
+
+def test_mutation_journal_restores_detached_pack_hardlink(tmp_path: Path) -> None:
+    git_root = tmp_path / "git"
+    pack_root = git_root / "objects/pack"
+    pack_root.mkdir(parents=True)
+    external = tmp_path / "external.pack"
+    external.write_bytes(b"pack")
+    pack = pack_root / ("pack-" + "a" * 40 + ".pack")
+    os.link(external, pack)
+    before_inode = pack.stat().st_ino
+    journal = []
+
+    doctor_cli._scan_shared_git_tree(git_root, os.getgid(), mutate=True, journal=journal)
+    assert pack.stat().st_ino != before_inode
+    assert doctor_cli._close_mutation_journal(journal, rollback=True) == []
+
+    assert pack.stat().st_ino == external.stat().st_ino == before_inode
+    assert pack.read_bytes() == external.read_bytes() == b"pack"
+
+
+def test_stable_descriptor_read_proves_two_identical_reads_and_metadata(tmp_path: Path) -> None:
+    target = tmp_path / "manifest.json"
+    target.write_bytes(b'{"exact":true}\n')
+    descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        raw, before, after = doctor_cli._stable_descriptor_bytes(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert raw == b'{"exact":true}\n'
+    fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime_ns", "st_mtime_ns", "st_ctime_ns")
+    assert all(getattr(before, field) == getattr(after, field) for field in fields)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("st_mode", stat.S_IFREG | 0o2775),
+        ("st_nlink", 2),
+        ("st_uid", 1001),
+        ("st_gid", 984),
+        ("st_mode", stat.S_IFDIR | 0o2770),
+    ],
+)
+def test_preservation_directory_requires_exact_pinned_attributes(field: str, value: int) -> None:
+    exact = {
+        "st_mode": stat.S_IFDIR | 0o2775,
+        "st_nlink": 1,
+        "st_uid": 1000,
+        "st_gid": 983,
+    }
+    assert doctor_cli._trusted_preservation_directory(
+        SimpleNamespace(**exact),
+        db_uid=1000,
+        group_gid=983,
+    )
+    exact[field] = value
+    assert not doctor_cli._trusted_preservation_directory(
+        SimpleNamespace(**exact),
+        db_uid=1000,
+        group_gid=983,
+    )
+
+
+def test_noatime_permission_fallback_reflinks_without_source_atime_or_remnant(
+    btrfs_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path = btrfs_tmp_path
+    snapshot_root = tmp_path / "snapshots"
+    snapshot_root.mkdir()
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    target = source_root / "manifest.json"
+    expected = b'{"exact":"db-owned"}\n'
+    target.write_bytes(expected)
+    old_ns = 1_600_000_000_000_000_000
+    os.utime(target, ns=(old_ns, old_ns))
+    original_open = doctor_cli.os.open
+    noatime = getattr(os, "O_NOATIME", 0)
+
+    def deny_noatime(path, flags, *args, **kwargs):
+        if path == target.name and noatime and flags & noatime:
+            raise PermissionError(errno.EPERM, "forced O_NOATIME denial")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "open", deny_noatime)
+    parent = original_open(source_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    snapshot_parent = original_open(snapshot_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    before = os.stat(target, follow_symlinks=False)
+    try:
+        read_fd, identity_fd, source_generation = doctor_cli._open_preservation_file(
+            parent,
+            target.name,
+            snapshot_parent=snapshot_parent,
+            snapshot_group_gid=os.fstat(snapshot_parent).st_gid,
+        )
+        try:
+            raw, identity_before, identity_after = doctor_cli._stable_descriptor_bytes(
+                read_fd,
+                identity_descriptor=identity_fd,
+                source_generation=source_generation,
+            )
+        finally:
+            os.close(read_fd)
+            os.close(identity_fd)
+    finally:
+        os.close(parent)
+        os.close(snapshot_parent)
+
+    after = os.stat(target, follow_symlinks=False)
+    assert raw == expected
+    assert hashlib.sha256(raw).hexdigest() == hashlib.sha256(expected).hexdigest()
+    fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime_ns", "st_mtime_ns", "st_ctime_ns")
+    assert all(getattr(before, field) == getattr(after, field) for field in fields)
+    assert all(getattr(identity_before, field) == getattr(identity_after, field) for field in fields)
+    assert list(snapshot_root.iterdir()) == []
+
+
+def test_noatime_fallback_pins_original_across_path_and_content_replacement(
+    btrfs_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path = btrfs_tmp_path
+    snapshot_root = tmp_path / "snapshots"
+    snapshot_root.mkdir()
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    target = source_root / "manifest.json"
+    target.write_bytes(b"authenticated bytes")
+    original_open = doctor_cli.os.open
+    noatime = getattr(os, "O_NOATIME", 0)
+
+    def deny_noatime(path, flags, *args, **kwargs):
+        if path == target.name and noatime and flags & noatime:
+            raise PermissionError(errno.EPERM, "forced O_NOATIME denial")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "open", deny_noatime)
+    parent = original_open(source_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    snapshot_parent = original_open(snapshot_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        read_fd, identity_fd, source_generation = doctor_cli._open_preservation_file(
+            parent,
+            target.name,
+            snapshot_parent=snapshot_parent,
+            snapshot_group_gid=os.fstat(snapshot_parent).st_gid,
+        )
+        replacement = source_root / "replacement"
+        replacement.write_bytes(b"attacker replacement")
+        os.replace(replacement, target)
+        try:
+            path_state = os.stat(target.name, dir_fd=parent, follow_symlinks=False)
+            with pytest.raises(doctor_cli.DoctorError, match="changed before stable read"):
+                doctor_cli._stable_descriptor_bytes(
+                    read_fd,
+                    identity_descriptor=identity_fd,
+                    source_generation=source_generation,
+                )
+        finally:
+            os.close(read_fd)
+            os.close(identity_fd)
+    finally:
+        os.close(parent)
+        os.close(snapshot_parent)
+
+    assert (path_state.st_dev, path_state.st_ino) != (source_generation.st_dev, source_generation.st_ino)
+    assert list(snapshot_root.iterdir()) == []
+
+
+def test_noatime_fallback_fails_closed_when_reflink_is_unsupported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_root = tmp_path / "snapshots"
+    snapshot_root.mkdir()
+    target = tmp_path / "manifest.json"
+    target.write_bytes(b"evidence")
+    original_open = doctor_cli.os.open
+    noatime = getattr(os, "O_NOATIME", 0)
+
+    def deny_noatime(path, flags, *args, **kwargs):
+        if path == target.name and noatime and flags & noatime:
+            raise PermissionError(errno.EPERM, "forced O_NOATIME denial")
+        return original_open(path, flags, *args, **kwargs)
+
+    def reject_reflink(*args, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "forced unsupported reflink")
+
+    monkeypatch.setattr(doctor_cli.os, "open", deny_noatime)
+    monkeypatch.setattr(doctor_cli.fcntl, "ioctl", reject_reflink)
+    parent = original_open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    snapshot_parent = original_open(snapshot_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    before = os.stat(target, follow_symlinks=False)
+    try:
+        with pytest.raises(doctor_cli.DoctorError, match="reflink is unsupported"):
+            doctor_cli._open_preservation_file(
+                parent,
+                target.name,
+                snapshot_parent=snapshot_parent,
+                snapshot_group_gid=os.fstat(snapshot_parent).st_gid,
+            )
+    finally:
+        os.close(parent)
+        os.close(snapshot_parent)
+    after = os.stat(target, follow_symlinks=False)
+    assert before.st_atime_ns == after.st_atime_ns
+    assert list(snapshot_root.iterdir()) == []
+
+
+def test_noatime_fallback_fails_closed_when_anonymous_files_are_unsupported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_root = tmp_path / "snapshots"
+    snapshot_root.mkdir()
+    target = tmp_path / "manifest.json"
+    target.write_bytes(b"evidence")
+    original_open = doctor_cli.os.open
+    noatime = getattr(os, "O_NOATIME", 0)
+    tmpfile = getattr(os, "O_TMPFILE", 0)
+
+    def reject_anonymous(path, flags, *args, **kwargs):
+        if path == target.name and noatime and flags & noatime:
+            raise PermissionError(errno.EPERM, "forced O_NOATIME denial")
+        if path == "." and tmpfile and flags & tmpfile:
+            raise OSError(errno.EOPNOTSUPP, "forced O_TMPFILE denial")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "open", reject_anonymous)
+    parent = original_open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    snapshot_parent = original_open(snapshot_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    before = os.stat(target, follow_symlinks=False)
+    try:
+        with pytest.raises(doctor_cli.DoctorError, match="anonymous preservation snapshots are unsupported"):
+            doctor_cli._open_preservation_file(
+                parent,
+                target.name,
+                snapshot_parent=snapshot_parent,
+                snapshot_group_gid=os.fstat(snapshot_parent).st_gid,
+            )
+    finally:
+        os.close(parent)
+        os.close(snapshot_parent)
+    after = os.stat(target, follow_symlinks=False)
+    assert before.st_atime_ns == after.st_atime_ns
+    assert list(snapshot_root.iterdir()) == []
+
+
+def test_noatime_fallback_rejects_same_size_mutation_inside_clone_window(
+    btrfs_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = btrfs_tmp_path / "source"
+    snapshot_root = btrfs_tmp_path / "snapshots"
+    source_root.mkdir()
+    snapshot_root.mkdir()
+    target = source_root / "manifest.json"
+    target.write_bytes(b"generation-one")
+    original_open = doctor_cli.os.open
+    original_ioctl = doctor_cli.fcntl.ioctl
+    noatime = getattr(os, "O_NOATIME", 0)
+
+    def deny_noatime(path, flags, *args, **kwargs):
+        if path == target.name and noatime and flags & noatime:
+            raise PermissionError(errno.EPERM, "forced O_NOATIME denial")
+        return original_open(path, flags, *args, **kwargs)
+
+    def mutate_during_clone(destination, operation, source):
+        before = os.fstat(source)
+        target.write_bytes(b"generation-two")
+        os.utime(
+            target,
+            ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000),
+        )
+        return original_ioctl(destination, operation, source)
+
+    monkeypatch.setattr(doctor_cli.os, "open", deny_noatime)
+    monkeypatch.setattr(doctor_cli.fcntl, "ioctl", mutate_during_clone)
+    parent = original_open(source_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    snapshot_parent = original_open(snapshot_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        with pytest.raises(doctor_cli.DoctorError, match="changed inside the reflink window"):
+            doctor_cli._open_preservation_file(
+                parent,
+                target.name,
+                snapshot_parent=snapshot_parent,
+                snapshot_group_gid=os.fstat(snapshot_parent).st_gid,
+            )
+    finally:
+        os.close(parent)
+        os.close(snapshot_parent)
+    assert list(snapshot_root.iterdir()) == []
+
+
+def test_noatime_fallback_uses_pinned_snapshot_directory_after_path_replacement(
+    btrfs_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = btrfs_tmp_path / "source"
+    snapshot_root = btrfs_tmp_path / "preservation"
+    source_root.mkdir()
+    snapshot_root.mkdir()
+    target = source_root / "manifest.json"
+    target.write_bytes(b"pinned generation")
+    original_open = doctor_cli.os.open
+    noatime = getattr(os, "O_NOATIME", 0)
+
+    def deny_noatime(path, flags, *args, **kwargs):
+        if path == target.name and noatime and flags & noatime:
+            raise PermissionError(errno.EPERM, "forced O_NOATIME denial")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "open", deny_noatime)
+    parent = original_open(source_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    snapshot_parent = original_open(snapshot_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    pinned_path = btrfs_tmp_path / "pinned-away"
+    os.rename(snapshot_root, pinned_path)
+    snapshot_root.mkdir()
+    try:
+        read_fd, identity_fd, source_generation = doctor_cli._open_preservation_file(
+            parent,
+            target.name,
+            snapshot_parent=snapshot_parent,
+            snapshot_group_gid=os.fstat(snapshot_parent).st_gid,
+        )
+        try:
+            raw, _, _ = doctor_cli._stable_descriptor_bytes(
+                read_fd,
+                identity_descriptor=identity_fd,
+                source_generation=source_generation,
+            )
+        finally:
+            os.close(read_fd)
+            os.close(identity_fd)
+    finally:
+        os.close(parent)
+        os.close(snapshot_parent)
+    assert raw == b"pinned generation"
+    assert list(pinned_path.iterdir()) == []
+    assert list(snapshot_root.iterdir()) == []
+
+
+def test_git_tree_inventory_is_independent_of_directory_enumeration_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "tree"
+    root.mkdir()
+    (root / "a").write_bytes(b"a")
+    (root / "b").write_bytes(b"b")
+    original_listdir = os.listdir
+    reverse = False
+
+    def alternating_listdir(path):
+        nonlocal reverse
+        reverse = not reverse
+        return sorted(original_listdir(path), reverse=reverse)
+
+    monkeypatch.setattr(doctor_cli.os, "listdir", alternating_listdir)
+    first = doctor_cli._scan_shared_git_tree(root, os.getgid(), mutate=False)
+    second = doctor_cli._scan_shared_git_tree(root, os.getgid(), mutate=False)
+
+    assert first["inventory_sha256"] == second["inventory_sha256"]
+    assert first["content_sha256"] == second["content_sha256"]
+
+
+def test_local_operator_launchers_disable_bytecode_before_runtime_import() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    for relative in ("bin/tgw-coding-local-operator", "bin/tgw-todo-local-operator"):
+        lines = (repository / relative).read_text(encoding="utf-8").splitlines()
+        export = lines.index("export PYTHONDONTWRITEBYTECODE=1")
+        runtime_import = next(index for index, line in enumerate(lines) if line.startswith('exec "$python"'))
+        assert export < runtime_import
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="root-owned immutable-runtime regression")
+def test_root_invoked_local_launcher_cannot_create_runtime_bytecode(tmp_path: Path) -> None:
+    repository = Path(__file__).resolve().parents[1]
+    runtime = tmp_path / "runtime"
+    package = runtime / "src/tgw"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "coding_cli.py").write_text("assert __cached__ is not None\n", encoding="utf-8")
+    for path in (runtime, runtime / "src", package):
+        path.chmod(0o555)
+    for path in package.iterdir():
+        path.chmod(0o444)
+    launcher = tmp_path / "launcher"
+    source = (repository / "bin/tgw-coding-local-operator").read_text(encoding="utf-8")
+    source = source.replace("/opt/TGW/tgw-lib/coding-runtime/current", str(runtime))
+    source = source.replace("/opt/TGW/.venvs/controller/bin/python3", os.environ.get("PYTHON", "/usr/bin/python3"))
+    launcher.write_text(source, encoding="utf-8")
+    launcher.chmod(0o555)
+
+    completed = subprocess.run([str(launcher)], check=False, capture_output=True, text=True)
+
+    assert completed.returncode == 0, completed.stderr
+    assert not list(runtime.rglob("*.pyc"))
+    assert not list(runtime.rglob("__pycache__"))
 
 
 def test_descriptor_anchored_git_tree_repair_keeps_bound_root(
@@ -369,9 +792,7 @@ def test_descriptor_anchored_git_tree_repair_keeps_bound_root(
     replacement.write_text("replacement", encoding="utf-8")
     replacement.chmod(0o600)
     try:
-        doctor_cli._scan_shared_git_tree(
-            descriptor, os.getgid(), mutate=True
-        )
+        doctor_cli._scan_shared_git_tree(descriptor, os.getgid(), mutate=True)
     finally:
         os.close(descriptor)
 
@@ -390,9 +811,7 @@ def test_descriptor_anchored_git_tree_repair_never_follows_symlinks(
     outside.chmod(0o600)
     (directory / "link").symlink_to(outside)
 
-    changes = doctor_cli._scan_shared_git_tree(
-        directory, os.getgid(), mutate=True
-    )
+    changes = doctor_cli._scan_shared_git_tree(directory, os.getgid(), mutate=True)
 
     assert stat.S_IMODE(outside.stat().st_mode) == 0o600
     assert changes["symlinks_untouched"] == 1
@@ -431,15 +850,9 @@ def test_git_tree_repair_detaches_only_valid_pack_hardlinks(
     os.link(outside, canonical)
     outside_inode = outside.stat().st_ino
 
-    preflight = doctor_cli._scan_shared_git_tree(
-        git_root, os.getgid(), mutate=False
-    )
-    repaired = doctor_cli._scan_shared_git_tree(
-        git_root, os.getgid(), mutate=True
-    )
-    idempotent = doctor_cli._scan_shared_git_tree(
-        git_root, os.getgid(), mutate=False
-    )
+    preflight = doctor_cli._scan_shared_git_tree(git_root, os.getgid(), mutate=False)
+    repaired = doctor_cli._scan_shared_git_tree(git_root, os.getgid(), mutate=True)
+    idempotent = doctor_cli._scan_shared_git_tree(git_root, os.getgid(), mutate=False)
 
     assert preflight["pack_hardlinks_seen"] == 1
     assert preflight["pack_hardlinks_detached"] == 0
@@ -468,9 +881,7 @@ def test_git_tree_accepts_standard_read_only_loose_objects(tmp_path: Path) -> No
     loose.write_bytes(b"immutable loose object")
     loose.chmod(0o444)
 
-    counts = doctor_cli._scan_shared_git_tree(
-        git_root, os.getgid(), mutate=False
-    )
+    counts = doctor_cli._scan_shared_git_tree(git_root, os.getgid(), mutate=False)
 
     assert counts["loose_objects"] == 1
     assert counts["loose_objects_inexact"] == 0
@@ -478,9 +889,7 @@ def test_git_tree_accepts_standard_read_only_loose_objects(tmp_path: Path) -> No
     assert doctor_cli._shared_tree_exact(counts) is True
 
 
-def test_unix_git_repair_recurses_into_configured_linked_worktrees(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_unix_git_repair_recurses_into_configured_linked_worktrees(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repository = tmp_path / "source"
     repository.mkdir()
     _git(repository, "init", "-b", "main")
@@ -512,9 +921,7 @@ def test_unix_git_repair_recurses_into_configured_linked_worktrees(
         lambda _name: type("Group", (), {"gr_gid": os.getgid()})(),
     )
     monkeypatch.setattr(doctor_cli, "check_unix_access", lambda _paths: next(reports))
-    monkeypatch.setattr(
-        doctor_cli, "_coding_quiescence", lambda _paths: nullcontext()
-    )
+    monkeypatch.setattr(doctor_cli, "_coding_quiescence", lambda _paths: nullcontext())
 
     result = doctor_cli.repair_unix_git_access(paths)
 
@@ -524,8 +931,116 @@ def test_unix_git_repair_recurses_into_configured_linked_worktrees(
     assert result["git_tree_changes"]["linked:todo"]["files"] > 0
 
 
+def _unix_repair_transaction_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repository = tmp_path / "source"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.name", "test")
+    _git(repository, "config", "user.email", "test@example.invalid")
+    (repository / "README").write_text("source\n", encoding="utf-8")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-m", "source")
+    worktrees = tmp_path / "worktrees"
+    worktrees.mkdir()
+    paths = doctor_cli.DoctorPaths(
+        repository=repository,
+        worktrees=worktrees,
+        receipts=tmp_path / "receipts",
+    )
+    reports = iter(({"state": "FAIL"}, {"state": "PASS"}))
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(
+        doctor_cli.grp,
+        "getgrnam",
+        lambda _name: type("Group", (), {"gr_gid": os.getgid()})(),
+    )
+    monkeypatch.setattr(doctor_cli, "check_unix_access", lambda _paths: next(reports))
+    monkeypatch.setattr(doctor_cli, "_coding_quiescence", lambda _paths: nullcontext())
+    return paths
+
+
+def test_unix_git_success_receipt_is_strictly_after_commit_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _unix_repair_transaction_fixture(tmp_path, monkeypatch)
+    events = []
+    close = doctor_cli._close_mutation_journal
+    receipt = doctor_cli._receipt
+
+    def ordered_close(journal, *, rollback):
+        events.append("rollback" if rollback else "commit-cleanup")
+        return close(journal, rollback=rollback)
+
+    def ordered_receipt(*args, **kwargs):
+        events.append("success-receipt")
+        return receipt(*args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli, "_close_mutation_journal", ordered_close)
+    monkeypatch.setattr(doctor_cli, "_receipt", ordered_receipt)
+
+    result = doctor_cli.repair_unix_git_access(paths)
+
+    assert result["ok"] is True
+    assert events[-2:] == ["commit-cleanup", "success-receipt"]
+    assert Path(result["receipt"]).is_file()
+
+
+def test_unix_git_commit_cleanup_failure_has_no_success_receipt_and_contradiction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _unix_repair_transaction_fixture(tmp_path, monkeypatch)
+    observed_journal = []
+
+    def failed_cleanup(journal, *, rollback):
+        assert rollback is False
+        observed_journal.extend(journal)
+        return ["injected retained cleanup evidence"]
+
+    monkeypatch.setattr(doctor_cli, "_close_mutation_journal", failed_cleanup)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_receipt",
+        lambda *_args, **_kwargs: pytest.fail("success receipt must follow successful cleanup"),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="transaction cleanup incomplete"):
+        doctor_cli.repair_unix_git_access(paths)
+
+    assert observed_journal
+    assert not paths.receipts.exists()
+
+
+def test_unix_git_receipt_publication_failure_occurs_only_after_committed_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _unix_repair_transaction_fixture(tmp_path, monkeypatch)
+    events = []
+    close = doctor_cli._close_mutation_journal
+
+    def ordered_close(journal, *, rollback):
+        events.append("rollback" if rollback else "commit-cleanup")
+        return close(journal, rollback=rollback)
+
+    def failed_receipt(*_args, **_kwargs):
+        events.append("receipt-publication")
+        raise OSError("injected receipt publication failure")
+
+    monkeypatch.setattr(doctor_cli, "_close_mutation_journal", ordered_close)
+    monkeypatch.setattr(doctor_cli, "_receipt", failed_receipt)
+
+    with pytest.raises(OSError, match="receipt publication failure"):
+        doctor_cli.repair_unix_git_access(paths)
+
+    assert events == ["commit-cleanup", "receipt-publication"]
+    assert not paths.receipts.exists()
+
+
 def test_coding_quiescence_guards_and_verifies_every_local_unit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands = []
     active = {
@@ -551,14 +1066,7 @@ def test_coding_quiescence_guards_and_verifies_every_local_unit(
             reload_count += 1
             if reload_count == 1:
                 assert (quiescence_root / doctor_cli._QUIESCENCE_MARKER).is_file()
-                assert all(
-                    (
-                        runtime_root
-                        / f"{unit}.d"
-                        / doctor_cli._QUIESCENCE_DROPIN
-                    ).is_file()
-                    for unit in doctor_cli._CODING_UNITS
-                )
+                assert all((runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN).is_file() for unit in doctor_cli._CODING_UNITS)
         elif command[1] == "stop":
             active.clear()
         elif command[1] == "start":
@@ -579,14 +1087,7 @@ def test_coding_quiescence_guards_and_verifies_every_local_unit(
     with doctor_cli._coding_quiescence(paths):
         assert not active
         assert (quiescence_root / doctor_cli._QUIESCENCE_MARKER).is_file()
-        assert all(
-            (
-                runtime_root
-                / f"{unit}.d"
-                / doctor_cli._QUIESCENCE_DROPIN
-            ).is_file()
-            for unit in doctor_cli._CODING_UNITS
-        )
+        assert all((runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN).is_file() for unit in doctor_cli._CODING_UNITS)
 
     assert commands[0] == ["systemctl", "daemon-reload"]
     assert commands[1] == ["systemctl", "stop", *doctor_cli._CODING_UNITS]
@@ -612,11 +1113,7 @@ def test_coding_quiescence_refuses_preexisting_runtime_mask(
         doctor_cli,
         "_unit_state",
         lambda unit: {
-            "LoadState": (
-                "masked"
-                if unit == "tgw-controller-verify-worker.service"
-                else "loaded"
-            ),
+            "LoadState": ("masked" if unit == "tgw-controller-verify-worker.service" else "loaded"),
             "ActiveState": "inactive",
         },
     )
@@ -632,7 +1129,8 @@ def test_coding_quiescence_refuses_preexisting_runtime_mask(
 
 
 def test_coding_quiescence_refuses_preexisting_guard(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime_root = tmp_path / "systemd"
     runtime_root.mkdir(mode=0o755)
@@ -665,7 +1163,8 @@ def test_coding_quiescence_refuses_preexisting_guard(
 
 
 def test_coding_quiescence_restores_active_units_after_stop_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands = []
     active = {"tgw-controller-verify-worker.service"}
@@ -716,7 +1215,8 @@ def test_coding_quiescence_restores_active_units_after_stop_failure(
 
 
 def test_coding_quiescence_recovers_exact_stale_interrupted_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime_root = tmp_path / "systemd"
     runtime_root.mkdir()
@@ -730,9 +1230,7 @@ def test_coding_quiescence_recovers_exact_stale_interrupted_state(
         systemd_unit_gid=os.getgid(),
     )
     units = list(doctor_cli._CODING_UNITS)
-    state_path, marker, dropins, dropin_value = doctor_cli._quiescence_layout(
-        paths, units
-    )
+    state_path, marker, dropins, dropin_value = doctor_cli._quiescence_layout(paths, units)
     state = {
         "schema": doctor_cli._QUIESCENCE_SCHEMA,
         "boot_id": doctor_cli._boot_id(),
@@ -798,7 +1296,8 @@ def test_coding_quiescence_recovers_exact_stale_interrupted_state(
 
 
 def test_coding_quiescence_refuses_stale_recovery_while_foreman_is_active(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime_root = tmp_path / "systemd"
     runtime_root.mkdir(mode=0o755)
@@ -811,9 +1310,7 @@ def test_coding_quiescence_refuses_stale_recovery_while_foreman_is_active(
         systemd_unit_gid=os.getgid(),
     )
     units = list(doctor_cli._CODING_UNITS)
-    state_path, marker, dropins, _dropin_value = doctor_cli._quiescence_layout(
-        paths, units
-    )
+    state_path, marker, dropins, _dropin_value = doctor_cli._quiescence_layout(paths, units)
     state = {
         "schema": doctor_cli._QUIESCENCE_SCHEMA,
         "boot_id": doctor_cli._boot_id(),
@@ -839,11 +1336,7 @@ def test_coding_quiescence_refuses_stale_recovery_while_foreman_is_active(
         "_unit_state",
         lambda unit: {
             "LoadState": "loaded",
-            "ActiveState": (
-                "active"
-                if unit == "tgw-coding-local-foreman.service"
-                else "inactive"
-            ),
+            "ActiveState": ("active" if unit == "tgw-coding-local-foreman.service" else "inactive"),
         },
     )
     monkeypatch.setattr(
@@ -877,9 +1370,7 @@ def test_coding_quiescence_retains_state_for_unexpected_runtime_remnant(
         systemd_unit_gid=os.getgid(),
     )
     units = list(doctor_cli._CODING_UNITS)
-    state_path, _marker, dropins, _dropin_value = doctor_cli._quiescence_layout(
-        paths, units
-    )
+    state_path, _marker, dropins, _dropin_value = doctor_cli._quiescence_layout(paths, units)
 
     def unit_state(unit):
         dropin = dropins[unit]
@@ -896,9 +1387,7 @@ def test_coding_quiescence_retains_state_for_unexpected_runtime_remnant(
         lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "", ""),
     )
 
-    with pytest.raises(
-        doctor_cli.DoctorError, match="unexpected coding quiescence remnants remain"
-    ):
+    with pytest.raises(doctor_cli.DoctorError, match="unexpected coding quiescence remnants remain"):
         with doctor_cli._coding_quiescence(paths):
             if extra_location == "state-root":
                 extra = quiescence_root / "unexpected.guard"
@@ -911,7 +1400,8 @@ def test_coding_quiescence_retains_state_for_unexpected_runtime_remnant(
 
 
 def test_coding_quiescence_reload_failure_restores_and_is_recoverable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime_root = tmp_path / "systemd"
     runtime_root.mkdir()
@@ -940,9 +1430,7 @@ def test_coding_quiescence_reload_failure_restores_and_is_recoverable(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     def unit_state(unit):
-        dropin = (
-            runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN
-        )
+        dropin = runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN
         return {
             "LoadState": "loaded",
             "ActiveState": "active" if unit in active else "inactive",
@@ -1023,9 +1511,7 @@ def test_atomic_bytes_applies_exact_descriptor_metadata(tmp_path: Path) -> None:
     assert state.st_nlink == 1
 
 
-def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, head, tree = _fixture(tmp_path)
     cursor = json.loads(paths.context_cursor.read_text())
     cursor["source_commit"] = "b" * 40
@@ -1068,9 +1554,7 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(
     assert receipt["receipt_sha256"].startswith("sha256:")
 
 
-def test_context_repair_is_semantically_idempotent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_context_repair_is_semantically_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     cursor_inode = paths.context_cursor.stat().st_ino
     snapshot_inode = paths.context_snapshot.stat().st_ino
@@ -1102,9 +1586,7 @@ def test_context_repair_is_semantically_idempotent(
     assert paths.context_snapshot.stat().st_ino == snapshot_inode
 
 
-def test_context_publisher_failure_leaves_live_inputs_unchanged_and_is_receipted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_context_publisher_failure_leaves_live_inputs_unchanged_and_is_receipted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     cursor_before = paths.context_cursor.read_bytes()
     snapshot_before = paths.context_snapshot.read_bytes()
@@ -1127,13 +1609,9 @@ def test_context_publisher_failure_leaves_live_inputs_unchanged_and_is_receipted
     assert len(list(paths.receipts.glob("*context-failed.json"))) == 1
 
 
-def test_context_repair_refuses_writable_context_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_context_repair_refuses_writable_context_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, head, _tree = _fixture(tmp_path)
-    module = (
-        paths.runtime_root / "releases" / head / "src/tgw/current_context_snapshot.py"
-    )
+    module = paths.runtime_root / "releases" / head / "src/tgw/current_context_snapshot.py"
     module.chmod(0o666)
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
     monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
@@ -1152,13 +1630,9 @@ def test_context_repair_requires_the_exact_context_release_group(
         doctor_cli._selected_context_artifacts(paths)
 
 
-def test_context_repair_refuses_symlinked_context_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_context_repair_refuses_symlinked_context_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, head, _tree = _fixture(tmp_path)
-    module = (
-        paths.runtime_root / "releases" / head / "src/tgw/current_context_snapshot.py"
-    )
+    module = paths.runtime_root / "releases" / head / "src/tgw/current_context_snapshot.py"
     outside = tmp_path / "outside-context-module.py"
     outside.write_text("# outside\n", encoding="utf-8")
     module.parent.chmod(0o755)
@@ -1171,9 +1645,7 @@ def test_context_repair_refuses_symlinked_context_runtime(
         doctor_cli.repair_context(paths)
 
 
-def test_context_repair_preserves_concurrent_snapshot_and_restores_its_cursor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_context_repair_preserves_concurrent_snapshot_and_restores_its_cursor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     task = json.loads(paths.context_task.read_text())
     cursor = json.loads(paths.context_cursor.read_text())
@@ -1222,9 +1694,7 @@ def test_context_repair_preserves_concurrent_snapshot_and_restores_its_cursor(
     assert json.loads(paths.context_snapshot.read_text()) == concurrent_snapshot
 
 
-def test_context_repair_never_overwrites_concurrent_cursor_during_rollback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_context_repair_never_overwrites_concurrent_cursor_during_rollback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     task = json.loads(paths.context_task.read_text())
     cursor = json.loads(paths.context_cursor.read_text())
@@ -1298,9 +1768,7 @@ def test_runtime_check_rejects_mutated_immutable_release(tmp_path: Path) -> None
     assert "release tree differs from Git" in result["detail"]
 
 
-def test_runtime_repair_switches_only_one_selector_behind_stable_links(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_runtime_repair_switches_only_one_selector_behind_stable_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, head, _tree = _fixture(tmp_path)
     previous = paths.runtime_root / "releases/previous"
     previous.mkdir()
@@ -1319,9 +1787,7 @@ def test_runtime_repair_switches_only_one_selector_behind_stable_links(
         assert destination.readlink() == target
 
 
-def test_runtime_repair_refuses_online_launcher_surface_rewrite(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_runtime_repair_refuses_online_launcher_surface_rewrite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     stale = paths.local_bin / "tgw-coding"
     stale.unlink()
@@ -1332,9 +1798,7 @@ def test_runtime_repair_refuses_online_launcher_surface_rewrite(
         doctor_cli.repair_runtime(paths)
 
 
-def test_runtime_selector_rolls_back_if_post_switch_release_check_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_runtime_selector_rolls_back_if_post_switch_release_check_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     previous = paths.runtime_root / "releases/previous"
     previous.mkdir()
@@ -1362,9 +1826,7 @@ def test_runtime_selector_rolls_back_if_post_switch_release_check_changes(
 
 def test_unit_definition_requires_exact_fragment_and_no_dropins(tmp_path: Path) -> None:
     paths, head, _tree = _fixture(tmp_path)
-    paths = replace(
-        paths, systemd_unit_uid=os.getuid(), systemd_unit_gid=os.getgid()
-    )
+    paths = replace(paths, systemd_unit_uid=os.getuid(), systemd_unit_gid=os.getgid())
     unit = "tgw-codex-implement-worker.service"
     source = paths.runtime_root / "releases" / head / "systemd" / unit
     fragment = tmp_path / "installed.service"
@@ -1380,9 +1842,7 @@ def test_unit_definition_requires_exact_fragment_and_no_dropins(tmp_path: Path) 
     }
 
     exact = doctor_cli._unit_definition(paths, unit, state)
-    with_dropin = doctor_cli._unit_definition(
-        paths, unit, {**state, "DropInPaths": "/etc/systemd/system/x.conf"}
-    )
+    with_dropin = doctor_cli._unit_definition(paths, unit, {**state, "DropInPaths": "/etc/systemd/system/x.conf"})
 
     assert exact["exact"] is True
     assert with_dropin["exact"] is False
@@ -1393,9 +1853,7 @@ def test_unit_definition_rejects_loaded_exec_start_with_extra_argument(
     tmp_path: Path,
 ) -> None:
     paths, head, _tree = _fixture(tmp_path)
-    paths = replace(
-        paths, systemd_unit_uid=os.getuid(), systemd_unit_gid=os.getgid()
-    )
+    paths = replace(paths, systemd_unit_uid=os.getuid(), systemd_unit_gid=os.getgid())
     unit = "tgw-codex-implement-worker.service"
     source = paths.runtime_root / "releases" / head / "systemd" / unit
     fragment = tmp_path / "installed.service"
@@ -1406,10 +1864,7 @@ def test_unit_definition_rejects_loaded_exec_start_with_extra_argument(
         "FragmentPath": str(fragment),
         "DropInPaths": "",
         "NeedDaemonReload": "no",
-        "ExecStart": (
-            f"{{ path={expected[0]} ; argv[]={' '.join(expected)} --extra ; "
-            "ignore_errors=no ; start_time=[n/a] ; }}"
-        ),
+        "ExecStart": (f"{{ path={expected[0]} ; argv[]={' '.join(expected)} --extra ; ignore_errors=no ; start_time=[n/a] ; }}}}"),
         "ActiveState": "inactive",
         "MainPID": "0",
     }
@@ -1422,9 +1877,7 @@ def test_unit_definition_rejects_loaded_exec_start_with_extra_argument(
 
 def test_unit_definition_rejects_active_process_with_different_argv(tmp_path: Path) -> None:
     paths, head, _tree = _fixture(tmp_path)
-    paths = replace(
-        paths, systemd_unit_uid=os.getuid(), systemd_unit_gid=os.getgid()
-    )
+    paths = replace(paths, systemd_unit_uid=os.getuid(), systemd_unit_gid=os.getgid())
     unit = "tgw-codex-implement-worker.service"
     source = paths.runtime_root / "releases" / head / "systemd" / unit
     fragment = tmp_path / "installed.service"
@@ -1578,9 +2031,7 @@ def test_doctor_launcher_is_local_and_provider_independent() -> None:
     assert "ssh" not in launcher.lower()
 
 
-def _obsolete_fixture(
-    paths: doctor_cli.DoctorPaths, monkeypatch: pytest.MonkeyPatch
-) -> list[Path]:
+def _obsolete_fixture(paths: doctor_cli.DoctorPaths, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     hashes = dict(doctor_cli._OBSOLETE_FILE_HASHES)
     created = []
     for name in hashes:
@@ -1640,9 +2091,7 @@ def test_obsolete_cleanup_production_scope_is_exactly_seven_pinned_surfaces() ->
     }
 
 
-def test_obsolete_cleanup_diagnoses_warn_and_moves_exact_surfaces(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_diagnoses_warn_and_moves_exact_surfaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
     timestamp = 1_700_000_000_123_456_789
@@ -1689,9 +2138,7 @@ def test_obsolete_cleanup_preserves_posix_acl_xattr(
     restored = {}
     monkeypatch.setattr(doctor_cli.os, "listxattr", lambda _fd: list(source))
     monkeypatch.setattr(doctor_cli.os, "getxattr", lambda _fd, name: source[name])
-    monkeypatch.setattr(
-        doctor_cli.os, "setxattr", lambda _fd, name, value: restored.__setitem__(name, value)
-    )
+    monkeypatch.setattr(doctor_cli.os, "setxattr", lambda _fd, name, value: restored.__setitem__(name, value))
     monkeypatch.setattr(doctor_cli.os, "removexattr", lambda _fd, _name: None)
 
     encoded = doctor_cli._read_xattrs(42)
@@ -1701,9 +2148,7 @@ def test_obsolete_cleanup_preserves_posix_acl_xattr(
     assert restored == source
 
 
-def test_obsolete_cleanup_refuses_changed_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_refuses_changed_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
     sources[0].write_text("changed\n")
@@ -1733,9 +2178,7 @@ def test_obsolete_cleanup_keeps_detecting_unbound_legacy_launchers(
     assert "operator_action" not in diagnosis
 
 
-def test_obsolete_cleanup_refuses_unbound_candidate_without_expanding_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_refuses_unbound_candidate_without_expanding_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
     unexpected = paths.local_bin / "tgw-context-mcp-candidate-unbound"
@@ -1751,9 +2194,7 @@ def test_obsolete_cleanup_refuses_unbound_candidate_without_expanding_scope(
     assert all(path.exists() or path.is_symlink() for path in sources)
 
 
-def test_obsolete_cleanup_ignores_context_evidence_but_detects_active_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_ignores_context_evidence_but_detects_active_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
     paths.context_snapshot.write_text(f'{{"historical_path": "{sources[0]}"}}')
@@ -1764,11 +2205,7 @@ def test_obsolete_cleanup_ignores_context_evidence_but_detects_active_config(
             paths.cleanup_reference_roots[0],
         ),
     )
-    present = [
-        item
-        for item in doctor_cli._declared_obsolete_surfaces(paths)
-        if doctor_cli._lexists(item["path"])
-    ]
+    present = [item for item in doctor_cli._declared_obsolete_surfaces(paths) if doctor_cli._lexists(item["path"])]
 
     assert doctor_cli._cleanup_references(paths, present) == []
 
@@ -1782,9 +2219,7 @@ def test_obsolete_cleanup_ignores_context_evidence_but_detects_active_config(
     }
 
 
-def test_obsolete_cleanup_configuration_scan_fails_on_unreadable_subdirectory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_configuration_scan_fails_on_unreadable_subdirectory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     _obsolete_fixture(paths, monkeypatch)
     nested = paths.cleanup_reference_roots[0] / "nested"
@@ -1797,19 +2232,13 @@ def test_obsolete_cleanup_configuration_scan_fails_on_unreadable_subdirectory(
         return original_scandir(path)
 
     monkeypatch.setattr(doctor_cli.os, "scandir", scandir)
-    present = [
-        item
-        for item in doctor_cli._declared_obsolete_surfaces(paths)
-        if doctor_cli._lexists(item["path"])
-    ]
+    present = [item for item in doctor_cli._declared_obsolete_surfaces(paths) if doctor_cli._lexists(item["path"])]
 
     with pytest.raises(doctor_cli.DoctorError, match="completely scan"):
         doctor_cli._cleanup_references(paths, present)
 
 
-def test_obsolete_cleanup_refuses_unknown_process_visibility(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_refuses_unknown_process_visibility(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     proc_root = tmp_path / "proc"
     cmdline = proc_root / "42/cmdline"
@@ -1854,15 +2283,11 @@ def test_obsolete_cleanup_detects_path_launched_process(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("blocker", ["configuration", "process"])
-def test_obsolete_cleanup_refuses_active_reference_or_process(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocker: str
-) -> None:
+def test_obsolete_cleanup_refuses_active_reference_or_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocker: str) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
     if blocker == "configuration":
-        (paths.cleanup_reference_roots[0] / "active.service").write_text(
-            f"ExecStart={sources[0]}\n"
-        )
+        (paths.cleanup_reference_roots[0] / "active.service").write_text(f"ExecStart={sources[0]}\n")
     else:
         monkeypatch.setattr(
             doctor_cli,
@@ -1876,9 +2301,7 @@ def test_obsolete_cleanup_refuses_active_reference_or_process(
     assert all(path.exists() or path.is_symlink() for path in sources)
 
 
-def test_obsolete_cleanup_rolls_back_active_view_on_remove_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_rolls_back_active_view_on_remove_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
     original_unlink = doctor_cli._unlink_bound_surface
@@ -1899,9 +2322,7 @@ def test_obsolete_cleanup_rolls_back_active_view_on_remove_failure(
     assert list(paths.receipts.glob("*obsolete-surfaces-rolled-back.json"))
 
 
-def test_obsolete_cleanup_rolls_back_when_parent_fsync_fails_after_unlink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_rolls_back_when_parent_fsync_fails_after_unlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
     original_fsync = doctor_cli._fsync_directory_fd
@@ -1923,9 +2344,7 @@ def test_obsolete_cleanup_rolls_back_when_parent_fsync_fails_after_unlink(
     assert all(path.exists() or path.is_symlink() for path in sources)
 
 
-def test_obsolete_cleanup_post_unlink_parent_replacement_never_mutates_replacement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_post_unlink_parent_replacement_never_mutates_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
     parent = sources[0].parent
@@ -1952,16 +2371,10 @@ def test_obsolete_cleanup_post_unlink_parent_replacement_never_mutates_replaceme
     assert (original_parent / sources[1].name).is_file()
 
 
-def test_obsolete_cleanup_binding_rejects_replaced_parent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_binding_rejects_replaced_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
-    declaration = next(
-        item
-        for item in doctor_cli._declared_obsolete_surfaces(paths)
-        if item["path"] == sources[0]
-    )
+    declaration = next(item for item in doctor_cli._declared_obsolete_surfaces(paths) if item["path"] == sources[0])
     original_parent = sources[0].parent.with_name(sources[0].parent.name + "-bound")
 
     with doctor_cli._bind_cleanup_surface(declaration) as binding:
@@ -1971,9 +2384,7 @@ def test_obsolete_cleanup_binding_rejects_replaced_parent(
             doctor_cli._verify_bound_cleanup_surface(binding)
 
 
-def test_obsolete_cleanup_secure_open_rejects_prebind_ancestor_replacement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_secure_open_rejects_prebind_ancestor_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "binding"
     ancestor = root / "ancestor"
     parent = ancestor / "bin"
@@ -2006,9 +2417,7 @@ def test_obsolete_cleanup_secure_open_rejects_prebind_ancestor_replacement(
     assert replaced is True
 
 
-def test_obsolete_cleanup_archive_path_rejects_symlink_and_failed_intermediate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_archive_path_rejects_symlink_and_failed_intermediate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     real = tmp_path / "real"
     real.mkdir()
     symlink = tmp_path / "archive-link"
@@ -2030,9 +2439,7 @@ def test_obsolete_cleanup_archive_path_rejects_symlink_and_failed_intermediate(
     assert not target.exists()
 
 
-def test_obsolete_cleanup_archive_name_collision_refuses_without_removal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_archive_name_collision_refuses_without_removal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
 
@@ -2042,11 +2449,7 @@ def test_obsolete_cleanup_archive_name_collision_refuses_without_removal(
             return cls(2026, 8, 25, 12, 34, 56, 789000, tzinfo=tz or UTC)
 
     monkeypatch.setattr(doctor_cli, "datetime", FixedDatetime)
-    collision = (
-        paths.cleanup_archive_root
-        / "2026-08-25"
-        / "20260825T123456789000Z"
-    )
+    collision = paths.cleanup_archive_root / "2026-08-25" / "20260825T123456789000Z"
     collision.mkdir(parents=True)
 
     with pytest.raises(doctor_cli.DoctorError, match="archive name collision"):
@@ -2055,9 +2458,7 @@ def test_obsolete_cleanup_archive_name_collision_refuses_without_removal(
     assert all(path.exists() or path.is_symlink() for path in sources)
 
 
-def test_obsolete_cleanup_reconciles_interrupted_prepared_archive(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_reconciles_interrupted_prepared_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
     original_state = doctor_cli._write_archive_state
@@ -2082,9 +2483,7 @@ def test_obsolete_cleanup_reconciles_interrupted_prepared_archive(
     assert idempotent["changed"] is False
 
 
-def test_obsolete_cleanup_is_idempotent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     _obsolete_fixture(paths, monkeypatch)
 
@@ -2096,9 +2495,7 @@ def test_obsolete_cleanup_is_idempotent(
     assert second["archive"] is None
 
 
-def test_obsolete_cleanup_has_no_production_provider_plan_business_or_worktree_effect(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_obsolete_cleanup_has_no_production_provider_plan_business_or_worktree_effect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     _obsolete_fixture(paths, monkeypatch)
     preserved = {}
@@ -2127,32 +2524,28 @@ def test_obsolete_cleanup_has_no_production_provider_plan_business_or_worktree_e
 
     assert {path: path.read_bytes() for path in sentinels} == sentinels
     assert _git(paths.repository, "worktree", "list", "--porcelain") == worktrees_before
-    assert {
-        path: os.readlink(path) if path.is_symlink() else path.read_bytes()
-        for path in preserved
-    } == preserved
+    assert {path: os.readlink(path) if path.is_symlink() else path.read_bytes() for path in preserved} == preserved
 
 
-def test_doctor_coding_resume_uses_resume_only_surface(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_doctor_coding_resume_uses_resume_only_surface(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     from tgw import coding_cli
 
     called = []
     monkeypatch.setattr(
         coding_cli,
         "resume",
-        lambda todo_id: called.append(todo_id) or {
-            "ok": True,
-            "coding_state": {"state": "RESUMABLE_PARTIAL"},
-        },
+        lambda todo_id: (
+            called.append(todo_id)
+            or {
+                "ok": True,
+                "coding_state": {"state": "RESUMABLE_PARTIAL"},
+            }
+        ),
     )
     monkeypatch.setattr(
         coding_cli,
         "start",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("Doctor must not use unrestricted coding start")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Doctor must not use unrestricted coding start")),
     )
 
     assert doctor_cli.main(["coding-resume", "1752"]) == 0
@@ -2160,9 +2553,7 @@ def test_doctor_coding_resume_uses_resume_only_surface(
     assert json.loads(capsys.readouterr().out)["coding_state"]["state"] == "RESUMABLE_PARTIAL"
 
 
-def test_doctor_classifies_coding_history_against_todo_plan_binding(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_doctor_classifies_coding_history_against_todo_plan_binding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from tgw.development import partial_resume
     from tgw.development import plan_binding as plan_binding_module
 
@@ -2180,16 +2571,20 @@ def test_doctor_classifies_coding_history_against_todo_plan_binding(
     head = _git(worktree, "rev-parse", "HEAD")
     tree = _git(worktree, "rev-parse", "HEAD^{tree}")
     expected = {
-        "job_id": "job-1", "attempt_count": 1, "todo_id": 1752,
-        "plan_commit": "a" * 40, "solution_hash": "sha256:" + "b" * 64,
-        "source_commit": head, "source_tree": tree, "actor": "codex",
-        "worktree": str(worktree), "treatment_id": "codex-implement",
+        "job_id": "job-1",
+        "attempt_count": 1,
+        "todo_id": 1752,
+        "plan_commit": "a" * 40,
+        "solution_hash": "sha256:" + "b" * 64,
+        "source_commit": head,
+        "source_tree": tree,
+        "actor": "codex",
+        "worktree": str(worktree),
+        "treatment_id": "codex-implement",
         "treatment_version": "1",
     }
     (worktree / "partial.py").write_text("partial = True\n")
-    partial_resume.append_attempt(
-        worktree, partial_resume.make_attempt(expected, worktree, outcome="partial")
-    )
+    partial_resume.append_attempt(worktree, partial_resume.make_attempt(expected, worktree, outcome="partial"))
     binding = {
         "plan_commit": expected["plan_commit"],
         "solution_hash": expected["solution_hash"],
@@ -2217,3 +2612,264 @@ def test_doctor_classifies_coding_history_against_todo_plan_binding(
     )
     stale = doctor_cli._bound_coding_states(paths, [worktree])[str(worktree)]
     assert stale["state"] == "STALE_RECEIPT"
+
+def test_preservation_clone_generation_rejects_same_inode_mutation_before_read(
+    tmp_path: Path,
+) -> None:
+    evidence = tmp_path / "evidence.json"
+    evidence.write_bytes(b"original\n")
+    parent = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    read_fd = identity_fd = -1
+    try:
+        read_fd, identity_fd, generation = doctor_cli._open_preservation_file(
+            parent,
+            evidence.name,
+            snapshot_parent=parent,
+            snapshot_group_gid=os.getgid(),
+        )
+        with evidence.open("r+b", buffering=0) as stream:
+            stream.write(b"mutated!\n")
+        os.utime(
+            evidence,
+            ns=(generation.st_atime_ns, generation.st_mtime_ns + 1_000_000_000),
+        )
+        with pytest.raises(doctor_cli.DoctorError, match="changed before stable read"):
+            doctor_cli._stable_descriptor_bytes(
+                read_fd,
+                identity_descriptor=identity_fd,
+                source_generation=generation,
+            )
+    finally:
+        if read_fd >= 0:
+            os.close(read_fd)
+        if identity_fd >= 0 and identity_fd != read_fd:
+            os.close(identity_fd)
+        os.close(parent)
+
+
+def test_preservation_directory_descriptor_metadata_mutation_is_rejected(
+    tmp_path: Path,
+) -> None:
+    preservation = tmp_path / ".tgw-coding-preservation"
+    preservation.mkdir()
+    worktree_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    preservation_fd = os.open(preservation, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        generation = os.fstat(preservation_fd)
+        os.fchmod(preservation_fd, 0o700)
+        with pytest.raises(doctor_cli.DoctorError, match="directory metadata changed"):
+            doctor_cli._revalidate_preservation_directory(
+                worktree_fd,
+                preservation_fd,
+                generation,
+                todo_id=1752,
+            )
+    finally:
+        os.close(preservation_fd)
+        os.close(worktree_fd)
+
+
+def test_mutation_journal_closes_each_descriptor_once_when_rollbacks_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.write_text("value")
+    metadata_fd = os.open(target, os.O_RDONLY)
+    parent_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    before = os.fstat(metadata_fd)
+    closed: list[int] = []
+    real_close = os.close
+
+    monkeypatch.setattr(
+        doctor_cli.os,
+        "fchown",
+        lambda *_args: (_ for _ in ()).throw(OSError("fchown failed")),
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_rename_exchange",
+        lambda *_args: (_ for _ in ()).throw(doctor_cli.DoctorError("exchange failed")),
+    )
+
+    def tracking_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    monkeypatch.setattr(doctor_cli.os, "close", tracking_close)
+    errors = doctor_cli._close_mutation_journal(
+        [
+            {"kind": "metadata", "descriptor": metadata_fd, "before": before},
+            {"kind": "exchange", "parent": parent_fd, "name": "target", "backup": "backup"},
+        ],
+        rollback=True,
+    )
+
+    assert errors == ["exchange failed", "fchown failed"]
+    assert closed.count(metadata_fd) == 1
+    assert closed.count(parent_fd) == 1
+
+def test_shared_tree_never_mutates_concurrent_protected_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preservation = tmp_path / ".tgw-coding-preservation"
+    preservation.mkdir(mode=0o700)
+    child = preservation / "concurrent"
+    mutations: list[tuple[int, bool]] = []
+    real_set_shared_fd = doctor_cli._set_shared_fd
+    real_listdir = os.listdir
+    introduced = False
+    child_before: list[os.stat_result] = []
+    journal: list[dict[str, object]] = []
+
+    def introducing_listdir(descriptor: int) -> list[str]:
+        nonlocal introduced
+        if not introduced and os.fstat(descriptor).st_ino == preservation.stat().st_ino:
+            child.write_bytes(b"untouched\n")
+            child.chmod(0o600)
+            child_before.append(child.stat())
+            introduced = True
+        return real_listdir(descriptor)
+
+    def recording_set_shared_fd(descriptor: int, group_gid: int, *, directory: bool) -> None:
+        mutations.append((os.fstat(descriptor).st_ino, directory))
+        real_set_shared_fd(descriptor, group_gid, directory=directory)
+
+    monkeypatch.setattr(doctor_cli, "_set_shared_fd", recording_set_shared_fd)
+    monkeypatch.setattr(doctor_cli.os, "listdir", introducing_listdir)
+    result = doctor_cli._scan_shared_git_tree(
+        tmp_path,
+        os.getgid(),
+        mutate=True,
+        immutable_directories=[Path(".tgw-coding-preservation")],
+        journal=journal,
+    )
+
+    assert introduced and len(child_before) == 1
+    before = child_before[0]
+    monkeypatch.setattr(
+        doctor_cli.os,
+        "fchown",
+        lambda *_args: (_ for _ in ()).throw(OSError("rollback failed")),
+    )
+    assert doctor_cli._close_mutation_journal(journal, rollback=True) == ["rollback failed"]
+    after = child.stat()
+    assert result["immutable_files"] == 1
+    assert before.st_ino not in {inode for inode, _directory in mutations}
+    assert (after.st_dev, after.st_ino, after.st_uid, after.st_gid) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_uid,
+        before.st_gid,
+    )
+    assert stat.S_IMODE(after.st_mode) == stat.S_IMODE(before.st_mode)
+    assert child.read_bytes() == b"untouched\n"
+
+
+def test_shared_tree_noatime_denial_fails_closed_for_protected_directory_and_descendant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preservation = tmp_path / ".tgw-coding-preservation"
+    preservation.mkdir(mode=0o700)
+    evidence = preservation / "evidence.json"
+    evidence_bytes = b'{"preserved":true}\n'
+    evidence.write_bytes(evidence_bytes)
+    old_atime_ns = 1_600_000_000_123_456_789
+    os.utime(evidence, ns=(old_atime_ns, evidence.stat().st_mtime_ns))
+    before_names = tuple(sorted(path.name for path in preservation.iterdir()))
+    before_directory = preservation.stat()
+    before_evidence = evidence.stat()
+    noatime = getattr(os, "O_NOATIME", 0)
+    assert noatime
+    real_open = os.open
+    real_listdir = os.listdir
+    denied_name = preservation.name
+    protected_enumerations = 0
+    attempts: list[tuple[str, int]] = []
+    mutations: list[int] = []
+    journal: list[dict[str, object]] = []
+
+    def denying_open(path, flags, *args, **kwargs):
+        if path == denied_name:
+            attempts.append((str(path), flags))
+            if flags & noatime:
+                raise PermissionError(errno.EPERM, "forced O_NOATIME denial")
+        return real_open(path, flags, *args, **kwargs)
+
+    def tracking_listdir(path) -> list[str]:
+        nonlocal protected_enumerations
+        if isinstance(path, int) and os.fstat(path).st_ino == before_directory.st_ino:
+            protected_enumerations += 1
+        return real_listdir(path)
+
+    monkeypatch.setattr(doctor_cli.os, "open", denying_open)
+    monkeypatch.setattr(doctor_cli.os, "listdir", tracking_listdir)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_set_shared_fd",
+        lambda descriptor, _group_gid, *, directory: mutations.append(os.fstat(descriptor).st_ino),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="without O_NOATIME"):
+        doctor_cli._scan_shared_git_tree(
+            tmp_path,
+            os.getgid(),
+            mutate=True,
+            immutable_directories=[Path(), Path(preservation.name)],
+            journal=journal,
+        )
+    assert attempts == [(preservation.name, attempts[0][1])]
+    assert attempts[0][1] & noatime
+    assert protected_enumerations == 0
+
+    denied_name = evidence.name
+    attempts.clear()
+    with pytest.raises(doctor_cli.DoctorError, match="without O_NOATIME"):
+        doctor_cli._scan_shared_git_tree(
+            tmp_path,
+            os.getgid(),
+            mutate=True,
+            immutable_directories=[Path(), Path(preservation.name)],
+            journal=journal,
+        )
+    assert attempts == [(evidence.name, attempts[0][1])]
+    assert attempts[0][1] & noatime
+    assert protected_enumerations == 1
+    assert mutations == []
+    assert journal == []
+
+    after_directory = preservation.stat()
+    after_evidence = evidence.stat()
+    for before, after in ((before_directory, after_directory), (before_evidence, after_evidence)):
+        assert (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_uid,
+            after.st_gid,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+            after.st_atime_ns,
+        ) == (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_uid,
+            before.st_gid,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+            before.st_atime_ns,
+        )
+    assert after_evidence.st_atime_ns == old_atime_ns
+    assert tuple(sorted(path.name for path in preservation.iterdir())) == before_names
+    descriptor = real_open(evidence, os.O_RDONLY | os.O_CLOEXEC | noatime)
+    try:
+        assert os.pread(descriptor, len(evidence_bytes), 0) == evidence_bytes
+    finally:
+        os.close(descriptor)

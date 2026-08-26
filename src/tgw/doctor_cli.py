@@ -736,16 +736,49 @@ def _bound_coding_states(paths: DoctorPaths, locations: Sequence[Path]) -> dict[
     states = {}
     for location in sorted(requested):
         expected = expected_by_path.get(location)
-        classified = (
-            classify_coding(location, expected)
-            if expected is not None
-            else {
+        legacy = None
+        descriptor = -1
+        try:
+            if expected is not None and expected.get("todo_id") in _PRE_LEDGER_PRESERVATION:
+                descriptor = _open_direct_directory(location)
+                legacy = _authenticate_pre_ledger_preservation(location, descriptor, grp.getgrnam("tgw-coders").gr_gid)
+                fixture = _PRE_LEDGER_PRESERVATION[expected["todo_id"]]
+                if legacy is not None and any(
+                    (
+                        expected.get("plan_commit") != _PRE_LEDGER_PLAN_COMMIT,
+                        expected.get("solution_hash") != _PRE_LEDGER_SOLUTION_HASH,
+                        expected.get("source_commit") != fixture["source_commit"],
+                        expected.get("source_tree") != fixture["source_tree"],
+                        expected.get("actor") != "codex",
+                        expected.get("worktree") != str(location),
+                    )
+                ):
+                    os.close(legacy["descriptor"])
+                    os.close(legacy["preservation_descriptor"])
+                    legacy = None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if legacy is not None:
+            os.close(legacy["descriptor"])
+            os.close(legacy["preservation_descriptor"])
+            fixture = _PRE_LEDGER_PRESERVATION[expected["todo_id"]]
+            classified = {
+                "state": "CLOSED_CANDIDATE",
+                "resumable": False,
+                "history": [],
+                "source": {"head": fixture["candidate_commit"], "tree": fixture["candidate_tree"], "changed_paths": []},
+                "legacy_pre_ledger": True,
+            }
+        elif expected is not None:
+            classified = classify_coding(location, expected)
+        else:
+            classified = {
                 "state": "STALE_RECEIPT",
                 "resumable": False,
                 "error": "worktree has no exact current Todo Plan binding",
                 "history": [],
             }
-        )
         source = classified.get("source")
         history_rows = classified.get("history")
         states[str(location)] = {
@@ -759,6 +792,7 @@ def _bound_coding_states(paths: DoctorPaths, locations: Sequence[Path]) -> dict[
             "source_tree": source.get("tree") if isinstance(source, dict) else None,
             "changed_paths": source.get("changed_paths") if isinstance(source, dict) else None,
             "error": classified.get("error"),
+            "legacy_pre_ledger": classified.get("legacy_pre_ledger", False),
         }
     return states
 
@@ -825,11 +859,15 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
             raise DoctorError("Todo reconciliation has no durable implementation attempt")
         latest = attempts[-1]
         required = {
-            "todo_id": todo_id, "plan_commit": plan["plan_commit"],
-            "solution_hash": plan["solution_hash"], "source_commit": plan["source_commit"],
+            "todo_id": todo_id,
+            "plan_commit": plan["plan_commit"],
+            "solution_hash": plan["solution_hash"],
+            "source_commit": plan["source_commit"],
             "source_tree": source_tree(worktree, plan["source_commit"]),
-            "actor": locked_row.get("agent") or "codex", "worktree": str(worktree),
-            "treatment_id": "codex-implement", "treatment_version": "1",
+            "actor": locked_row.get("agent") or "codex",
+            "worktree": str(worktree),
+            "treatment_id": "codex-implement",
+            "treatment_version": "1",
         }
         if any(latest.get(key) != value for key, value in required.items()):
             raise DoctorError("implementation attempt contradicts the current Todo binding")
@@ -841,10 +879,7 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
         prior_closed = [item for item in latest.get("artifacts", []) if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"]
         already_reconciled = False
         legacy_closed = (
-            len(prior_closed) == 1
-            and set(prior_closed[0]) == {"kind", "commit", "tree"}
-            and prior_closed[0].get("commit") == current["head"]
-            and prior_closed[0].get("tree") == current["tree"]
+            len(prior_closed) == 1 and set(prior_closed[0]) == {"kind", "commit", "tree"} and prior_closed[0].get("commit") == current["head"] and prior_closed[0].get("tree") == current["tree"]
         )
         if not legacy_closed:
             try:
@@ -855,13 +890,19 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
                 pass
             if not already_reconciled:
                 raise DoctorError("implementation reconciliation requires exactly one permissible legacy closed candidate")
-        closed = dict(prior_closed[0]) if already_reconciled else {
-            **dict(prior_closed[0]),
-            "base_commit": required["source_commit"],
-            "changed_paths": candidate_changed_paths(
-                worktree, required["source_commit"], current["head"],
-            ),
-        }
+        closed = (
+            dict(prior_closed[0])
+            if already_reconciled
+            else {
+                **dict(prior_closed[0]),
+                "base_commit": required["source_commit"],
+                "changed_paths": candidate_changed_paths(
+                    worktree,
+                    required["source_commit"],
+                    current["head"],
+                ),
+            }
+        )
         validate_closed_candidate(worktree, closed, base_commit=required["source_commit"], candidate_commit=current["head"], candidate_tree=current["tree"])
         implementation_receipt = worktree / "implementation-receipt.json"
         try:
@@ -900,9 +941,12 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
                     raise DoctorError("implementation reconciliation requires the exact durable succeeded job result")
                 if payload.get("todo_id") != todo_id or payload.get("worktree") != str(worktree) or payload.get("plan_binding") != prior_receipt.get("plan_binding"):
                     raise DoctorError("implementation job/result binding contradicts Todo or Plan")
-                durable_prior_receipt_sha256 = "sha256:" + hashlib.sha256(
-                    (json.dumps(result, sort_keys=True) + "\n").encode(),
-                ).hexdigest()
+                durable_prior_receipt_sha256 = (
+                    "sha256:"
+                    + hashlib.sha256(
+                        (json.dumps(result, sort_keys=True) + "\n").encode(),
+                    ).hexdigest()
+                )
                 # Revalidate every mutable input immediately before the append
                 # while both the worktree lease and durable job row lock remain held.
                 if history(worktree)[-1]["attempt_hash"] != latest["attempt_hash"] or source_fingerprint(worktree) != current or implementation_receipt.read_bytes() != prior_receipt_bytes:
@@ -921,16 +965,23 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
                     if changed:
                         _atomic_json(implementation_receipt, recovered_receipt, mode=stat.S_IMODE(implementation_receipt.stat().st_mode))
                     validate_implementation_lineage(
-                        worktree, base_commit=required["source_commit"],
-                        candidate_commit=current["head"], candidate_tree=current["tree"],
-                        receipt=recovered_receipt, expected=required,
+                        worktree,
+                        base_commit=required["source_commit"],
+                        candidate_commit=current["head"],
+                        candidate_tree=current["tree"],
+                        receipt=recovered_receipt,
+                        expected=required,
                     )
                     return {
-                        "schema": "tgw-implementation-reconciliation/v1", "ok": True,
-                        "changed": changed, "todo_id": todo_id, "job_id": latest["job_id"],
+                        "schema": "tgw-implementation-reconciliation/v1",
+                        "ok": True,
+                        "changed": changed,
+                        "todo_id": todo_id,
+                        "job_id": latest["job_id"],
                         "prior_attempt_hash": latest.get("predecessor"),
                         "prior_receipt_sha256": durable_prior_receipt_sha256,
-                        "attempt_hash": latest["attempt_hash"], "worktree": str(worktree),
+                        "attempt_hash": latest["attempt_hash"],
+                        "worktree": str(worktree),
                     }
                 reconciliation = {
                     "kind": "implementation_reconciliation",
@@ -938,7 +989,8 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
                     "prior_attempt_hash": latest["attempt_hash"],
                     "prior_receipt_sha256": prior_receipt_sha256,
                     "prior_receipt_b64": base64.b64encode(prior_receipt_bytes).decode("ascii"),
-                    "job_id": latest["job_id"], "todo_id": todo_id,
+                    "job_id": latest["job_id"],
+                    "todo_id": todo_id,
                     "plan_commit": required["plan_commit"],
                 }
                 keys = ("job_id", "attempt_count", "todo_id", "plan_commit", "solution_hash", "source_commit", "source_tree", "actor", "worktree", "treatment_id", "treatment_version")
@@ -948,20 +1000,30 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
                 # publication failure leaves a deterministically recoverable
                 # append-only successor, never a top-level-first window.
                 receipt_path = _publish_reconciled_implementation(
-                    worktree, reconciled, implementation_receipt, recovered_receipt,
+                    worktree,
+                    reconciled,
+                    implementation_receipt,
+                    recovered_receipt,
                     mode=stat.S_IMODE(implementation_receipt.stat().st_mode),
                 )
                 validate_implementation_lineage(
-                    worktree, base_commit=required["source_commit"],
-                    candidate_commit=current["head"], candidate_tree=current["tree"],
-                    receipt=recovered_receipt, expected=required,
+                    worktree,
+                    base_commit=required["source_commit"],
+                    candidate_commit=current["head"],
+                    candidate_tree=current["tree"],
+                    receipt=recovered_receipt,
+                    expected=required,
                 )
         return {
-            "schema": "tgw-implementation-reconciliation/v1", "ok": True,
-            "changed": True, "todo_id": todo_id, "job_id": latest["job_id"],
+            "schema": "tgw-implementation-reconciliation/v1",
+            "ok": True,
+            "changed": True,
+            "todo_id": todo_id,
+            "job_id": latest["job_id"],
             "prior_attempt_hash": latest["attempt_hash"],
             "prior_receipt_sha256": prior_receipt_sha256,
-            "attempt_hash": reconciled["attempt_hash"], "worktree": str(worktree),
+            "attempt_hash": reconciled["attempt_hash"],
+            "worktree": str(worktree),
             "receipt": str(receipt_path),
         }
 
@@ -2721,6 +2783,387 @@ def _set_shared_directory(path: Path, group_gid: int) -> None:
 _PACK_COMPONENT = re.compile(r"pack-[0-9a-f]{40}(?:[0-9a-f]{24})?\.(?:pack|idx|rev|bitmap)\Z")
 _RENAME_EXCHANGE = 2
 
+_PRE_LEDGER_PLAN_COMMIT = "058e2f980201cc78245358e4901cf007063f2c29"
+_PRE_LEDGER_SOLUTION_HASH = "sha256:ecce15aad2699492c0c5577bff1af7005ffbbec6ae6166b325b34c1cc7e70e9f"
+_PRE_LEDGER_PRESERVATION = {
+    1744: {
+        "worktree": "/opt/TGW/var/worktrees/todo-1744-plan-4bc1dcdb201d08f581311b1a",
+        "source_commit": "c29d29d9844b0c37a1a68f6951a62c1f88c9db60",
+        "source_tree": "a67b2f180baeb1d20a4be024ebd385191d47be4e",
+        "candidate_commit": "14753ce93bfc5d29253611719377a717112db750",
+        "candidate_tree": "25ce0a73657dfe8d89569149178113e0d1affa32",
+        "receipt_sha256": "976d6497be352fa71af1706f9e0addae3caaa6306f4b677d7263679428c2dcd3",
+        "manifest": "77aa72359e34ca25dbbc7e0822b7a787851d7c00d5286813e1dc7b12629a5b78.json",
+    },
+    1752: {
+        "worktree": "/opt/TGW/var/worktrees/todo-1752-plan-e34c4dec66cae45bc97a2d77",
+        "source_commit": "14753ce93bfc5d29253611719377a717112db750",
+        "source_tree": "25ce0a73657dfe8d89569149178113e0d1affa32",
+        "candidate_commit": "529f05e2205a3c83036874f58a03a9842807e463",
+        "candidate_tree": "c5a85c30304a72652dee38cea883d186a954eae2",
+        "receipt_sha256": "6ad3106c43ba0d510b5d90b593bf6bc5bd7d1c75760c85d9680ec28289aa4598",
+        "manifest": "0b8262d95ad0d57df9173b4a3c56f86c8475c19d06b6b17dcf2f3e09b1ce026e.json",
+    },
+}
+
+_FICLONE = 0x40049409
+_STABLE_FILE_FIELDS = (
+    "st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid",
+    "st_size", "st_atime_ns", "st_mtime_ns", "st_ctime_ns",
+)
+_STABLE_DIRECTORY_FIELDS = (
+    "st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid",
+    "st_size", "st_mtime_ns", "st_ctime_ns",
+)
+
+
+def _trusted_preservation_directory(state: os.stat_result, *, db_uid: int, group_gid: int) -> bool:
+    return (
+        stat.S_ISDIR(state.st_mode)
+        and state.st_nlink == 1
+        and state.st_uid == db_uid
+        and state.st_gid == group_gid
+        and stat.S_IMODE(state.st_mode) == 0o2775
+    )
+
+
+def _revalidate_preservation_directory(
+    worktree_descriptor: int,
+    preservation_descriptor: int,
+    expected: os.stat_result,
+    *,
+    todo_id: int,
+) -> None:
+    """Prove the authenticated preservation directory and path are unchanged."""
+    current = os.fstat(preservation_descriptor)
+    # Directory enumeration can legitimately advance atime on filesystems
+    # where O_NOATIME is unavailable.  Every trust-bearing metadata mutation
+    # still changes one of mode/ownership/size/mtime/ctime below.
+    fields = _STABLE_DIRECTORY_FIELDS
+    if any(getattr(expected, field) != getattr(current, field) for field in fields):
+        raise DoctorError(f"Todo {todo_id} preservation directory metadata changed")
+    visible = os.stat(
+        ".tgw-coding-preservation",
+        dir_fd=worktree_descriptor,
+        follow_symlinks=False,
+    )
+    if any(getattr(expected, field) != getattr(visible, field) for field in fields):
+        raise DoctorError(f"Todo {todo_id} preservation directory binding changed")
+
+
+def _stable_descriptor_bytes(
+    descriptor: int,
+    *,
+    identity_descriptor: int | None = None,
+    source_generation: os.stat_result | None = None,
+    maximum: int = 128 * 1024 * 1024,
+) -> tuple[bytes, os.stat_result, os.stat_result]:
+    """Read a pinned regular file twice and prove metadata/content stability."""
+    identity_descriptor = descriptor if identity_descriptor is None else identity_descriptor
+    before = os.fstat(identity_descriptor)
+    if source_generation is not None and any(
+        getattr(source_generation, field) != getattr(before, field)
+        for field in _STABLE_FILE_FIELDS
+    ):
+        raise DoctorError("preservation source changed before stable read")
+    if not stat.S_ISREG(before.st_mode) or before.st_size < 0 or before.st_size > maximum:
+        raise DoctorError("preservation evidence is not a bounded regular file")
+    offset = os.lseek(descriptor, 0, os.SEEK_CUR)
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        reads: list[bytes] = []
+        for _pass in range(2):
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            raw = bytearray()
+            while len(raw) < before.st_size:
+                chunk = os.read(descriptor, min(1024 * 1024, before.st_size - len(raw)))
+                if not chunk:
+                    raise DoctorError("preservation evidence was truncated while pinned")
+                raw.extend(chunk)
+            if os.read(descriptor, 1):
+                raise DoctorError("preservation evidence grew while pinned")
+            reads.append(bytes(raw))
+        after = os.fstat(identity_descriptor)
+        if any(getattr(before, field) != getattr(after, field) for field in _STABLE_FILE_FIELDS):
+            raise DoctorError("preservation evidence changed while pinned")
+        if reads[0] != reads[1] or hashlib.sha256(reads[0]).digest() != hashlib.sha256(reads[1]).digest():
+            raise DoctorError("preservation evidence content changed while pinned")
+        return reads[0], before, after
+    finally:
+        os.lseek(descriptor, offset, os.SEEK_SET)
+
+
+def _open_preservation_file(
+    parent: int,
+    name: str,
+    *,
+    snapshot_parent: int,
+    snapshot_group_gid: int,
+) -> tuple[int, int, os.stat_result]:
+    """Open evidence without changing source metadata.
+
+    When the kernel denies O_NOATIME, pin the source descriptor and reflink it
+    into private, same-filesystem disposable storage.  The unlinked clone is the
+    read descriptor and the original descriptor remains pinned for complete
+    before/after identity and metadata checks.
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | getattr(os, "O_NOATIME", 0)
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent)
+        return descriptor, descriptor, os.fstat(descriptor)
+    except PermissionError:
+        source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    snapshot = -1
+    try:
+        source_state = os.fstat(source)  # immediately before FICLONE
+        directory_state = os.fstat(snapshot_parent)
+        if not stat.S_ISREG(source_state.st_mode) or directory_state.st_dev != source_state.st_dev:
+            raise DoctorError("pinned preservation snapshot directory is not on the source filesystem")
+        anonymous_flags = os.O_RDWR | os.O_CLOEXEC | getattr(os, "O_TMPFILE", 0)
+        if not getattr(os, "O_TMPFILE", 0):
+            raise DoctorError("anonymous preservation snapshots are unsupported")
+        try:
+            snapshot = os.open(".", anonymous_flags, 0o600, dir_fd=snapshot_parent)
+        except OSError as exc:
+            raise DoctorError("anonymous preservation snapshots are unsupported") from exc
+        clone_before = os.fstat(snapshot)
+        if (
+            clone_before.st_dev != source_state.st_dev
+            or not stat.S_ISREG(clone_before.st_mode)
+            or stat.S_IMODE(clone_before.st_mode) != 0o600
+            or clone_before.st_nlink != 0
+            or clone_before.st_uid != os.geteuid()
+            or clone_before.st_gid != snapshot_group_gid
+        ):
+            raise DoctorError("anonymous preservation snapshot identity is untrusted")
+        try:
+            fcntl.ioctl(snapshot, _FICLONE, source)
+        except OSError as exc:
+            raise DoctorError("permission-safe preservation reflink is unsupported") from exc
+        source_after = os.fstat(source)  # immediately after FICLONE
+        if any(getattr(source_state, field) != getattr(source_after, field) for field in _STABLE_FILE_FIELDS):
+            raise DoctorError("preservation source changed inside the reflink window")
+        clone_state = os.fstat(snapshot)
+        if (
+            clone_state.st_dev != clone_before.st_dev
+            or clone_state.st_ino != clone_before.st_ino
+            or clone_state.st_mode != clone_before.st_mode
+            or clone_state.st_nlink != 0
+            or clone_state.st_uid != clone_before.st_uid
+            or clone_state.st_gid != clone_before.st_gid
+            or clone_state.st_size != source_state.st_size
+        ):
+            raise DoctorError("preservation reflink identity is ambiguous")
+        # Carry the exact source generation captured at the clone boundary to
+        # the later stable read.  Reflink bytes are not trusted if the pinned
+        # source changes after FICLONE, even when it remains the same inode.
+        return snapshot, source, source_after
+    except BaseException:
+        if snapshot >= 0:
+            os.close(snapshot)
+        os.close(source)
+        raise
+
+
+def _git_at_descriptor(descriptor: int, *arguments: str) -> str:
+    location = f"/proc/self/fd/{descriptor}"
+    result = subprocess.run(
+        ["git", "-c", f"safe.directory={location}", "-C", location, *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        pass_fds=(descriptor,),
+    )
+    if result.returncode:
+        raise DoctorError(result.stderr.strip() or "descriptor-bound Git identity failed")
+    return result.stdout.strip()
+
+
+def _authenticate_pre_ledger_preservation(worktree: Path, descriptor: int, group_gid: int) -> dict[str, Any] | None:
+    fixture_row = next(((todo, row) for todo, row in _PRE_LEDGER_PRESERVATION.items() if row["worktree"] == str(worktree)), None)
+    if fixture_row is None:
+        return None
+    todo_id, expected = fixture_row
+    preservation_fd = -1
+    receipt_fd = -1
+    receipt_identity_fd = -1
+    manifest_fd = -1
+    manifest_identity_fd = -1
+    try:
+        preservation_fd = os.open(
+            ".tgw-coding-preservation",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=descriptor,
+        )
+        preservation_state = os.fstat(preservation_fd)
+        if not _trusted_preservation_directory(
+            preservation_state,
+            db_uid=pwd.getpwnam("db").pw_uid,
+            group_gid=group_gid,
+        ):
+            raise DoctorError(f"Todo {todo_id} preservation directory is untrusted")
+        try:
+            history = os.stat(".tgw-coding-history", dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            history = None
+        if history is not None:
+            return None
+        if (_git_at_descriptor(descriptor, "rev-parse", "HEAD"), _git_at_descriptor(descriptor, "rev-parse", "HEAD^{tree}")) != (expected["candidate_commit"], expected["candidate_tree"]):
+            raise DoctorError(f"Todo {todo_id} pre-ledger Git candidate identity differs")
+        receipt_fd, receipt_identity_fd, receipt_generation = _open_preservation_file(
+            descriptor,
+            "implementation-receipt.json",
+            snapshot_parent=preservation_fd,
+            snapshot_group_gid=group_gid,
+        )
+        names = os.listdir(preservation_fd)
+        if len(names) != 1 or names[0] != expected["manifest"]:
+            raise DoctorError(f"Todo {todo_id} pre-ledger preservation set differs")
+        manifest_fd, manifest_identity_fd, manifest_generation = _open_preservation_file(
+            preservation_fd,
+            expected["manifest"],
+            snapshot_parent=preservation_fd,
+            snapshot_group_gid=group_gid,
+        )
+        receipt_raw, receipt_before, receipt_state = _stable_descriptor_bytes(
+            receipt_fd,
+            identity_descriptor=receipt_identity_fd,
+            source_generation=receipt_generation,
+        )
+        manifest_raw, manifest_before, manifest_state = _stable_descriptor_bytes(
+            manifest_fd,
+            identity_descriptor=manifest_identity_fd,
+            source_generation=manifest_generation,
+        )
+        try:
+            receipt, manifest = json.loads(receipt_raw), json.loads(manifest_raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DoctorError(f"Todo {todo_id} pre-ledger evidence is malformed") from exc
+        binding = receipt.get("plan_binding") if isinstance(receipt, dict) else None
+        identity = binding.get("worktree_identity") if isinstance(binding, dict) else None
+        root = binding.get("execution_root") if isinstance(binding, dict) else None
+        closed = [row for row in receipt.get("artifacts", []) if isinstance(row, dict) and row.get("kind") == "closed_candidate"] if isinstance(receipt, dict) else []
+        manifest_binding = manifest.get("binding") if isinstance(manifest, dict) else None
+        unsigned = dict(manifest) if isinstance(manifest, dict) else {}
+        claimed_hash = unsigned.pop("manifest_hash", None)
+        actual_hash = "sha256:" + hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+        exact = (
+            isinstance(receipt, dict)
+            and receipt.get("receipt_schema_id") == "receipt/tgw-development/v1"
+            and receipt.get("status") == "PASS"
+            and receipt.get("outcome") == "satisfied"
+            and receipt.get("treatment_id") == "codex-implement"
+            and receipt.get("treatment_version") == "1"
+            and isinstance(binding, dict)
+            and binding.get("plan_commit") == _PRE_LEDGER_PLAN_COMMIT
+            and binding.get("solution_hash") == _PRE_LEDGER_SOLUTION_HASH
+            and binding.get("source_commit") == expected["source_commit"]
+            and binding.get("worktree") == str(worktree)
+            and binding.get("requested_worktree_identity") == "unix:codex"
+            and isinstance(root, dict)
+            and root.get("schema") == "tgw-execution-root/v1"
+            and root.get("kind") == "todo"
+            and root.get("todo_id") == todo_id
+            and set(root) == {"identity_hash", "kind", "schema", "todo_id"}
+            and isinstance(identity, dict)
+            and identity.get("actor") == "codex"
+            and identity.get("todo_id") == todo_id
+            and identity.get("worktree") == str(worktree)
+            and identity.get("head") == expected["source_commit"]
+            and identity.get("repository_root") == "/opt/TGW/tgw-lib/src/trader-grims-warehouse"
+            and identity.get("branch") == f"coding/codex/{worktree.name}"
+            and closed == [{"kind": "closed_candidate", "commit": expected["candidate_commit"], "tree": expected["candidate_tree"]}]
+            and manifest.get("schema") == "tgw-coding-preservation-manifest/v2"
+            and manifest_binding
+            == {
+                "actor": "codex",
+                "plan_commit": _PRE_LEDGER_PLAN_COMMIT,
+                "solution_hash": _PRE_LEDGER_SOLUTION_HASH,
+                "source_commit": expected["source_commit"],
+                "source_tree": expected["source_tree"],
+                "todo_id": todo_id,
+                "treatment_id": "codex-implement",
+                "treatment_version": "1",
+                "worktree": str(worktree),
+            }
+            and manifest.get("source", {}).get("head") == expected["candidate_commit"]
+            and manifest.get("source", {}).get("tree") == expected["candidate_tree"]
+            and hashlib.sha256(receipt_raw).hexdigest() == expected["receipt_sha256"]
+            and manifest_raw == (json.dumps(manifest, sort_keys=True) + "\n").encode()
+            and claimed_hash == actual_hash
+            and expected["manifest"] == actual_hash.removeprefix("sha256:") + ".json"
+        )
+        db_uid, codex_uid = pwd.getpwnam("db").pw_uid, pwd.getpwnam("codex").pw_uid
+        if (
+            not exact
+            or receipt_state.st_nlink != 1
+            or receipt_state.st_uid != codex_uid
+            or receipt_state.st_gid != group_gid
+            or manifest_state.st_nlink != 1
+            or manifest_state.st_uid != db_uid
+            or manifest_state.st_gid != group_gid
+            or stat.S_IMODE(manifest_state.st_mode) not in {0o440, 0o460}
+        ):
+            raise DoctorError(f"Todo {todo_id} pre-ledger receipt ownership or binding differs")
+        # Close every post-read race while all evidence descriptors remain pinned.
+        # A newly-created modern ledger, ref movement, directory-entry replacement,
+        # or preservation-set addition makes the legacy exception inapplicable.
+        try:
+            os.stat(".tgw-coding-history", dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise DoctorError(f"Todo {todo_id} acquired coding history during authentication")
+        if sorted(os.listdir(preservation_fd)) != [expected["manifest"]]:
+            raise DoctorError(f"Todo {todo_id} pre-ledger preservation set changed")
+        receipt_path_state = os.stat("implementation-receipt.json", dir_fd=descriptor, follow_symlinks=False)
+        manifest_path_state = os.stat(expected["manifest"], dir_fd=preservation_fd, follow_symlinks=False)
+        if (receipt_path_state.st_dev, receipt_path_state.st_ino) != (receipt_state.st_dev, receipt_state.st_ino):
+            raise DoctorError(f"Todo {todo_id} pre-ledger receipt path changed")
+        if (manifest_path_state.st_dev, manifest_path_state.st_ino) != (manifest_state.st_dev, manifest_state.st_ino):
+            raise DoctorError(f"Todo {todo_id} pre-ledger manifest path changed")
+        if (_git_at_descriptor(descriptor, "rev-parse", "HEAD"), _git_at_descriptor(descriptor, "rev-parse", "HEAD^{tree}")) != (
+            expected["candidate_commit"],
+            expected["candidate_tree"],
+        ):
+            raise DoctorError(f"Todo {todo_id} pre-ledger Git candidate changed during authentication")
+        _revalidate_preservation_directory(
+            descriptor,
+            preservation_fd,
+            preservation_state,
+            todo_id=todo_id,
+        )
+        return {
+            "todo_id": todo_id,
+            "relative": Path(".tgw-coding-preservation") / expected["manifest"],
+            "descriptor": os.dup(manifest_fd),
+            "before": manifest_state,
+            "preservation_descriptor": os.dup(preservation_fd),
+            "preservation_before": preservation_state,
+            "stable_read": {
+                "receipt_before": receipt_before,
+                "receipt_after": receipt_state,
+                "manifest_before": manifest_before,
+                "manifest_after": manifest_state,
+                "receipt_sha256": "sha256:" + hashlib.sha256(receipt_raw).hexdigest(),
+                "manifest_sha256": "sha256:" + hashlib.sha256(manifest_raw).hexdigest(),
+            },
+            "receipt_sha256": "sha256:" + hashlib.sha256(receipt_raw).hexdigest(),
+            "manifest_hash": actual_hash,
+        }
+    finally:
+        if manifest_fd >= 0:
+            os.close(manifest_fd)
+            if manifest_identity_fd >= 0 and manifest_identity_fd != manifest_fd:
+                os.close(manifest_identity_fd)
+        if preservation_fd >= 0:
+            os.close(preservation_fd)
+        if receipt_fd >= 0:
+            os.close(receipt_fd)
+        if receipt_identity_fd >= 0 and receipt_identity_fd != receipt_fd:
+            os.close(receipt_identity_fd)
+
 
 def _rename_exchange(directory_descriptor: int, first: str, second: str) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
@@ -2752,6 +3195,7 @@ def _detach_pack_hardlink(
     name: str,
     source_descriptor: int,
     group_gid: int,
+    journal: list[dict[str, Any]] | None = None,
 ) -> None:
     """Replace one canonical pack alias without changing its external hardlink."""
     before = os.fstat(source_descriptor)
@@ -2807,16 +3251,20 @@ def _detach_pack_hardlink(
             except DoctorError as rollback_error:
                 raise DoctorError(f"Git pack path raced and exchange rollback failed: {name}; {rollback_error}") from rollback_error
             raise DoctorError(f"Git pack path raced during detachment: {name}")
-        try:
-            os.unlink(temporary, dir_fd=parent_descriptor)
+        if journal is not None:
+            journal.append({"kind": "exchange", "parent": os.dup(parent_descriptor), "name": name, "backup": temporary})
             exchanged = False
-        except OSError as unlink_error:
+        else:
             try:
-                _rename_exchange(parent_descriptor, temporary, name)
+                os.unlink(temporary, dir_fd=parent_descriptor)
                 exchanged = False
-            except DoctorError as rollback_error:
-                raise DoctorError(f"cannot remove detached Git pack alias or roll back: {name}; {rollback_error}") from unlink_error
-            raise DoctorError(f"cannot remove detached Git pack alias; original restored: {name}") from unlink_error
+            except OSError as unlink_error:
+                try:
+                    _rename_exchange(parent_descriptor, temporary, name)
+                    exchanged = False
+                except DoctorError as rollback_error:
+                    raise DoctorError(f"cannot remove detached Git pack alias or roll back: {name}; {rollback_error}") from unlink_error
+                raise DoctorError(f"cannot remove detached Git pack alias; original restored: {name}") from unlink_error
         committed = True
         os.fsync(parent_descriptor)
     finally:
@@ -2834,9 +3282,17 @@ def _scan_shared_git_tree(
     *,
     mutate: bool,
     excluded_root_entries: Sequence[str] = (),
-) -> dict[str, int]:
+    immutable_files: Sequence[Path] = (),
+    immutable_directories: Sequence[Path] = (),
+    journal: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Preflight or repair descriptor-pinned shared Git/worktree entries."""
+    def in_immutable_directory(relative: Path) -> bool:
+        return any(relative == protected or protected in relative.parents for protected in immutable_directories)
+
     root_descriptor = os.dup(root) if isinstance(root, int) else _open_direct_directory(root)
+    inventory = hashlib.sha256()
+    content_inventory = hashlib.sha256()
     pending = [(root_descriptor, Path())]
     counts = {
         "directories": 0,
@@ -2851,24 +3307,46 @@ def _scan_shared_git_tree(
         "pack_hardlinks_seen": 0,
         "pack_hardlinks_detached": 0,
         "excluded_root_entries": 0,
+        "immutable_files": 0,
     }
     try:
         while pending:
             directory_descriptor, relative_parent = pending.pop()
             try:
                 directory_state = os.fstat(directory_descriptor)
+                inventory.update(
+                    json.dumps(
+                        [str(relative_parent), "d", directory_state.st_dev, directory_state.st_ino, directory_state.st_mode, directory_state.st_nlink, directory_state.st_uid, directory_state.st_gid],
+                        separators=(",", ":"),
+                    ).encode()
+                )
+                content_inventory.update(("d\0" + str(relative_parent) + "\0").encode())
                 directory_mode = stat.S_IMODE(directory_state.st_mode)
-                if not (directory_state.st_gid == group_gid and bool(directory_mode & stat.S_ISGID) and directory_mode & stat.S_IRWXG == stat.S_IRWXG):
+                protected_directory = in_immutable_directory(relative_parent)
+                if not protected_directory and not (directory_state.st_gid == group_gid and bool(directory_mode & stat.S_ISGID) and directory_mode & stat.S_IRWXG == stat.S_IRWXG):
                     counts["directories_inexact"] += 1
-                if mutate:
+                if mutate and not protected_directory:
+                    if journal is not None:
+                        journal.append({"kind": "metadata", "descriptor": os.dup(directory_descriptor), "before": directory_state})
                     _set_shared_fd(directory_descriptor, group_gid, directory=True)
                 counts["directories"] += 1
                 os.lseek(directory_descriptor, 0, os.SEEK_SET)
-                for name in os.listdir(directory_descriptor):
+                for name in sorted(os.listdir(directory_descriptor)):
                     if not relative_parent.parts and name in excluded_root_entries:
                         counts["excluded_root_entries"] += 1
                         continue
+                    relative = relative_parent / name
                     try:
+                        descriptor = os.open(
+                            name,
+                            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOATIME", 0),
+                            dir_fd=directory_descriptor,
+                        )
+                    except PermissionError:
+                        if in_immutable_directory(relative):
+                            raise DoctorError(
+                                f"cannot safely inventory immutable directory entry without O_NOATIME: {relative}"
+                            )
                         descriptor = os.open(
                             name,
                             os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
@@ -2880,13 +3358,57 @@ def _scan_shared_git_tree(
                             continue
                         raise
                     state = os.fstat(descriptor)
-                    relative = relative_parent / name
+                    inventory.update(
+                        json.dumps(
+                            [
+                                str(relative),
+                                "d" if stat.S_ISDIR(state.st_mode) else "f",
+                                state.st_dev,
+                                state.st_ino,
+                                state.st_mode,
+                                state.st_nlink,
+                                state.st_uid,
+                                state.st_gid,
+                                state.st_size,
+                                state.st_mtime_ns,
+                            ],
+                            separators=(",", ":"),
+                        ).encode()
+                    )
                     if stat.S_ISDIR(state.st_mode):
                         pending.append((descriptor, relative))
                         continue
                     try:
                         if not stat.S_ISREG(state.st_mode):
                             raise DoctorError(f"unsupported entry in canonical Git directory: {relative}")
+                        content = hashlib.sha256()
+                        offset = 0
+                        while offset < state.st_size:
+                            chunk = os.pread(descriptor, min(1024 * 1024, state.st_size - offset), offset)
+                            if not chunk:
+                                raise DoctorError(f"file truncated during immutable inventory: {relative}")
+                            content.update(chunk)
+                            offset += len(chunk)
+                        stable = os.fstat(descriptor)
+                        if any(getattr(state, field) != getattr(stable, field) for field in ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")):
+                            raise DoctorError(f"file changed during immutable inventory: {relative}")
+                        inventory.update(content.digest())
+                        content_inventory.update(("f\0" + str(relative) + "\0").encode() + content.digest())
+                        if in_immutable_directory(relative):
+                            # Authenticated preservation is readable inventory, never
+                            # shared-tree repair surface.  This applies to every
+                            # descendant, including an entry introduced after
+                            # authentication; transaction-level inventory and
+                            # directory-generation checks then fail closed.
+                            counts["immutable_files"] += 1
+                            counts["files"] += 1
+                            continue
+                        if relative in immutable_files:
+                            if state.st_nlink != 1 or stat.S_IMODE(state.st_mode) != 0o440:
+                                counts["files_inexact"] += 1
+                            counts["immutable_files"] += 1
+                            counts["files"] += 1
+                            continue
                         parts = relative.parts
                         pack_component = len(parts) == 3 and parts[:2] == ("objects", "pack") and _PACK_COMPONENT.fullmatch(parts[2]) is not None
                         loose_object = len(parts) == 3 and parts[0] == "objects" and _LOOSE_OBJECT_DIRECTORY.fullmatch(parts[1]) is not None and _LOOSE_OBJECT_NAME.fullmatch(parts[2]) is not None
@@ -2905,9 +3427,12 @@ def _scan_shared_git_tree(
                                     name,
                                     descriptor,
                                     group_gid,
+                                    journal,
                                 )
                                 counts["pack_hardlinks_detached"] += 1
                             elif mutate:
+                                if journal is not None:
+                                    journal.append({"kind": "metadata", "descriptor": os.dup(descriptor), "before": state})
                                 os.fchown(descriptor, -1, group_gid)
                                 os.fchmod(
                                     descriptor,
@@ -2923,6 +3448,8 @@ def _scan_shared_git_tree(
                             if not loose_exact:
                                 counts["loose_objects_inexact"] += 1
                             if mutate:
+                                if journal is not None:
+                                    journal.append({"kind": "metadata", "descriptor": os.dup(descriptor), "before": state})
                                 os.fchown(descriptor, -1, group_gid)
                                 os.fchmod(
                                     descriptor,
@@ -2935,6 +3462,8 @@ def _scan_shared_git_tree(
                         if not (state.st_gid == group_gid and mode & (stat.S_IRGRP | stat.S_IWGRP) == (stat.S_IRGRP | stat.S_IWGRP)):
                             counts["files_inexact"] += 1
                         if mutate:
+                            if journal is not None:
+                                journal.append({"kind": "metadata", "descriptor": os.dup(descriptor), "before": state})
                             _set_shared_fd(descriptor, group_gid, directory=False)
                         counts["files"] += 1
                     finally:
@@ -2944,7 +3473,51 @@ def _scan_shared_git_tree(
     finally:
         for descriptor, _relative in pending:
             os.close(descriptor)
+    counts["inventory_sha256"] = "sha256:" + inventory.hexdigest()
+    counts["content_sha256"] = "sha256:" + content_inventory.hexdigest()
     return counts
+
+
+def _close_mutation_journal(journal: Sequence[Mapping[str, Any]], *, rollback: bool) -> list[str]:
+    """Commit or reverse every descriptor-pinned mutation, returning failures."""
+    errors: list[str] = []
+    for item in reversed(journal):
+        descriptors = [
+            value
+            for key in ("descriptor", "parent")
+            if isinstance((value := item.get(key)), int)
+        ]
+        try:
+            if item["kind"] == "metadata":
+                descriptor, before = item["descriptor"], item["before"]
+                if rollback:
+                    os.fchown(descriptor, before.st_uid, before.st_gid)
+                    os.fchmod(descriptor, stat.S_IMODE(before.st_mode))
+                    os.utime(descriptor, ns=(before.st_atime_ns, before.st_mtime_ns))
+                    after = os.fstat(descriptor)
+                    fields = ("st_dev", "st_ino", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime_ns", "st_mtime_ns")
+                    if any(getattr(before, field) != getattr(after, field) for field in fields) or stat.S_IMODE(before.st_mode) != stat.S_IMODE(after.st_mode):
+                        raise DoctorError("metadata rollback evidence differs")
+            elif item["kind"] == "exchange":
+                parent, name, backup = item["parent"], item["name"], item["backup"]
+                if rollback:
+                    _rename_exchange(parent, backup, name)
+                os.unlink(backup, dir_fd=parent)
+                os.fsync(parent)
+            else:
+                raise DoctorError("mutation journal entry kind is invalid")
+        except Exception as exc:
+            errors.append(str(exc))
+        finally:
+            # Rollback is best-effort, descriptor disposal is unconditional.
+            # Each journal entry owns its duplicated descriptor and attempts
+            # exactly one close even if rename/chown/chmod/unlink/fsync fails.
+            for descriptor in dict.fromkeys(descriptors):
+                try:
+                    os.close(descriptor)
+                except Exception as exc:
+                    errors.append(str(exc))
+    return errors
 
 
 def _configured_worktree_locations(
@@ -3002,7 +3575,24 @@ def _inspect_shared_git_trees(paths: DoctorPaths, group_gid: int) -> dict[str, A
         "git_common": _scan_shared_git_tree(paths.repository / ".git", group_gid, mutate=False),
     }
     for location, relative in local:
-        trees[f"linked:{relative}"] = _scan_shared_git_tree(location, group_gid, mutate=False)
+        descriptor = _open_direct_directory(location)
+        try:
+            authenticated = _authenticate_pre_ledger_preservation(location, descriptor, group_gid)
+            try:
+                protected = [authenticated["relative"]] if authenticated is not None else []
+                trees[f"linked:{relative}"] = _scan_shared_git_tree(
+                    descriptor,
+                    group_gid,
+                    mutate=False,
+                    immutable_files=protected,
+                    immutable_directories=[Path(".tgw-coding-preservation")] if authenticated is not None else [],
+                )
+            finally:
+                if authenticated is not None:
+                    os.close(authenticated["descriptor"])
+                    os.close(authenticated["preservation_descriptor"])
+        finally:
+            os.close(descriptor)
     return {
         "exact": all(_shared_tree_exact(counts) for counts in trees.values()),
         "trees": trees,
@@ -3591,17 +4181,24 @@ def _coding_quiescence(paths: DoctorPaths):
 
 def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
     """Restore only the shared local Git directories to tgw-coders access."""
+    from tgw.development.worktree_lease import exclusive_worktree_lease
+
     _require_root()
-    before = check_unix_access(paths)
     group_gid = grp.getgrnam("tgw-coders").gr_gid
     repository = paths.repository.absolute()
     worktree_root = paths.worktrees.absolute()
     git_common = repository / ".git"
-    local_worktrees, outside_untouched = _configured_worktree_locations(paths)
-
-    # Bind every declared root once. All recursive preflight passes finish while
-    # these exact descriptors remain open; mutation later uses only those roots.
-    with ExitStack() as stack:
+    # Discovery grants no mutation authority.  Quiescence and every cooperating
+    # Git lease are acquired before the authoritative inventory/preflight.
+    discovered_worktrees, _discovered_outside = _configured_worktree_locations(paths)
+    with _coding_quiescence(paths) as quiescence, ExitStack() as stack:
+        stack.enter_context(exclusive_worktree_lease(repository))
+        for location, _relative in discovered_worktrees:
+            stack.enter_context(exclusive_worktree_lease(location))
+        local_worktrees, outside_untouched = _configured_worktree_locations(paths)
+        if local_worktrees != discovered_worktrees:
+            raise DoctorError("linked worktree inventory changed while acquiring leases")
+        before = check_unix_access(paths)
         repository_fd = _open_direct_directory(repository)
         stack.callback(os.close, repository_fd)
         worktree_root_fd = _open_direct_directory(worktree_root)
@@ -3627,6 +4224,27 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
         for path, descriptor in bound:
             _verify_bound_directory(path, descriptor)
 
+        pre_ledger: dict[str, dict[str, Any]] = {}
+        for location, relative, descriptor in linked_descriptors:
+            authenticated = _authenticate_pre_ledger_preservation(location, descriptor, group_gid)
+            if authenticated is not None:
+                stack.callback(os.close, authenticated["descriptor"])
+                stack.callback(os.close, authenticated["preservation_descriptor"])
+                pre_ledger[str(relative)] = authenticated
+
+        linked_by_relative = {str(relative): descriptor for _location, relative, descriptor in linked_descriptors}
+
+        def revalidate_preservation_directories() -> None:
+            for relative, item in pre_ledger.items():
+                _revalidate_preservation_directory(
+                    linked_by_relative[relative],
+                    item["preservation_descriptor"],
+                    item["preservation_before"],
+                    todo_id=item["todo_id"],
+                )
+
+        revalidate_preservation_directories()
+
         preflight: dict[str, dict[str, int]] = {
             "canonical_worktree": _scan_shared_git_tree(
                 repository_fd,
@@ -3637,13 +4255,53 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
             "git_common": _scan_shared_git_tree(git_common_fd, group_gid, mutate=False),
         }
         for _location, relative, descriptor in linked_descriptors:
-            preflight[f"linked:{relative}"] = _scan_shared_git_tree(descriptor, group_gid, mutate=False)
+            protected = [pre_ledger[str(relative)]["relative"]] if str(relative) in pre_ledger else []
+            preflight[f"linked:{relative}"] = _scan_shared_git_tree(
+                descriptor,
+                group_gid,
+                mutate=False,
+                immutable_files=protected,
+                immutable_directories=[Path(".tgw-coding-preservation")] if protected else [],
+            )
+        revalidate_preservation_directories()
 
-        # Runtime condition guards are the shared worker lock. Recheck every visible
-        # binding after acquisition, then mutate only through retained descriptors.
-        with _coding_quiescence(paths) as quiescence:
+        # Rewalk once without mutation and require an identical immutable inventory
+        # summary; additions or replacements after preflight fail closed.
+        repeated = {
+            "canonical_worktree": _scan_shared_git_tree(repository_fd, group_gid, mutate=False, excluded_root_entries=(".git",)),
+            "git_common": _scan_shared_git_tree(git_common_fd, group_gid, mutate=False),
+        }
+        for _location, relative, descriptor in linked_descriptors:
+            protected = [pre_ledger[str(relative)]["relative"]] if str(relative) in pre_ledger else []
+            repeated[f"linked:{relative}"] = _scan_shared_git_tree(
+                descriptor,
+                group_gid,
+                mutate=False,
+                immutable_files=protected,
+                immutable_directories=[Path(".tgw-coding-preservation")] if protected else [],
+            )
+        revalidate_preservation_directories()
+        if repeated != preflight:
+            raise DoctorError("shared Git inventory changed after preflight")
+
+        journal: list[dict[str, Any]] = []
+        repaired_preservation: list[dict[str, Any]] = []
+        try:
             for path, descriptor in bound:
                 _verify_bound_directory(path, descriptor)
+            revalidate_preservation_directories()
+            stable_fields = ("st_dev", "st_ino", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime_ns", "st_mtime_ns")
+            for item in pre_ledger.values():
+                current = os.fstat(item["descriptor"])
+                if any(getattr(item["before"], field) != getattr(current, field) for field in stable_fields):
+                    raise DoctorError(f"Todo {item['todo_id']} preservation manifest changed after preflight")
+                if stat.S_IMODE(current.st_mode) == 0o460:
+                    journal.append({"kind": "metadata", "descriptor": os.dup(item["descriptor"]), "before": current})
+                    os.fchmod(item["descriptor"], 0o440)
+                    repaired_preservation.append(item)
+            revalidate_preservation_directories()
+            root_before = os.fstat(worktree_root_fd)
+            journal.append({"kind": "metadata", "descriptor": os.dup(worktree_root_fd), "before": root_before})
             _set_shared_fd(worktree_root_fd, group_gid, directory=True)
             tree_changes: dict[str, dict[str, int]] = {
                 "canonical_worktree": _scan_shared_git_tree(
@@ -3651,27 +4309,68 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
                     group_gid,
                     mutate=True,
                     excluded_root_entries=(".git",),
+                    journal=journal,
                 ),
-                "git_common": _scan_shared_git_tree(git_common_fd, group_gid, mutate=True),
+                "git_common": _scan_shared_git_tree(git_common_fd, group_gid, mutate=True, journal=journal),
             }
             for _location, relative, descriptor in linked_descriptors:
-                tree_changes[f"linked:{relative}"] = _scan_shared_git_tree(descriptor, group_gid, mutate=True)
-
-    after = check_unix_access(paths)
-    if after["state"] != "PASS":
-        raise DoctorError("ordinary Unix Git access remains incomplete after repair")
-    receipt = _receipt(
-        paths,
-        "unix-git-access",
-        before,
-        {"access": after, "quiescence": quiescence},
-    )
+                protected = [pre_ledger[str(relative)]["relative"]] if str(relative) in pre_ledger else []
+                tree_changes[f"linked:{relative}"] = _scan_shared_git_tree(
+                    descriptor,
+                    group_gid,
+                    mutate=True,
+                    immutable_files=protected,
+                    immutable_directories=[Path(".tgw-coding-preservation")] if protected else [],
+                    journal=journal,
+                )
+            revalidate_preservation_directories()
+            if any(tree_changes[name][field] != preflight[name][field] for name in preflight for field in ("inventory_sha256", "content_sha256")):
+                raise DoctorError("shared Git inventory or content changed after immutable preflight")
+            for item in repaired_preservation:
+                after_state = os.fstat(item["descriptor"])
+                if stat.S_IMODE(after_state.st_mode) != 0o440 or any(getattr(item["before"], field) != getattr(after_state, field) for field in stable_fields):
+                    raise DoctorError(f"Todo {item['todo_id']} preservation manifest attributes changed")
+            for path, descriptor in bound:
+                _verify_bound_directory(path, descriptor)
+            revalidate_preservation_directories()
+            after = check_unix_access(paths)
+            if after["state"] != "PASS":
+                raise DoctorError("ordinary Unix Git access remains incomplete after repair")
+            for path, descriptor in bound:
+                _verify_bound_directory(path, descriptor)
+            revalidate_preservation_directories()
+        except Exception as exc:
+            rollback_errors = _close_mutation_journal(journal, rollback=True)
+            try:
+                revalidate_preservation_directories()
+            except Exception as preservation_exc:
+                rollback_errors.append(str(preservation_exc))
+            if rollback_errors:
+                raise DoctorError("unix Git access rollback incomplete: " + "; ".join(rollback_errors)) from exc
+            raise
+        commit_errors = _close_mutation_journal(journal, rollback=False)
+        if commit_errors:
+            raise DoctorError("unix Git access transaction cleanup incomplete: " + "; ".join(commit_errors))
+        revalidate_preservation_directories()
+        # A success receipt is durable evidence that the entire transaction,
+        # including disposal of rollback aliases and journal descriptors, has
+        # committed.  Publishing it earlier can contradict a cleanup failure.
+        receipt = _receipt(
+            paths,
+            "unix-git-access",
+            before,
+            {"access": after, "quiescence": quiescence},
+        )
     return {
         "ok": True,
         "operation": "unix-git-access",
         "changed": before != after,
         "preflight": preflight,
         "git_tree_changes": tree_changes,
+        "pre_ledger_preservation": {
+            name: {"todo_id": item["todo_id"], "manifest_hash": item["manifest_hash"], "receipt_sha256": item["receipt_sha256"], "mode_repaired": stat.S_IMODE(item["before"].st_mode) == 0o460}
+            for name, item in pre_ledger.items()
+        },
         "quiescence": quiescence,
         "outside_configured_root_untouched": outside_untouched,
         "receipt": receipt,
