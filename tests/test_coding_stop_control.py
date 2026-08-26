@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import grp
 import json
+import os
+import pwd
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -13,7 +18,84 @@ import pytest
 
 from tgw import coding_cli
 from tgw.queue.worker_base import JobCancelled
-from tgw.workers.coding import _run_bounded_process_group
+from tgw.workers.coding import _run_bounded_process_group, _write_json_atomic
+
+
+def _protected_manifest(tmp_path: Path, name: str = "runner.json") -> Path:
+    os.chown(tmp_path, -1, grp.getgrnam("tgw-coders").gr_gid)
+    tmp_path.chmod(0o2770)
+    return tmp_path / name
+
+
+def test_group_protected_manifest_is_atomic_and_shared(tmp_path):
+    manifest = _protected_manifest(tmp_path)
+    _write_json_atomic(manifest, {"writer": "first"})
+    victim = tmp_path / "victim"
+    victim.write_text("unchanged")
+    manifest.unlink()
+    os.link(victim, manifest)
+    _write_json_atomic(manifest, {"writer": "second"})
+    assert victim.read_text() == "unchanged"
+    assert json.loads(manifest.read_text()) == {"writer": "second"}
+    assert manifest.stat().st_mode & 0o777 == 0o660
+    assert manifest.stat().st_nlink == 1
+
+
+@pytest.mark.parametrize("mode", [0o0770, 0o2777])
+def test_runner_manifest_rejects_unprotected_group_directory(tmp_path, mode):
+    os.chown(tmp_path, -1, grp.getgrnam("tgw-coders").gr_gid)
+    tmp_path.chmod(mode)
+    with pytest.raises(OSError, match="not protected"):
+        _write_json_atomic(tmp_path / "runner.json", {})
+
+
+def test_runner_manifest_rejects_wrong_group_and_parent_symlink(tmp_path):
+    assert os.getegid() != grp.getgrnam("tgw-coders").gr_gid
+    os.chown(tmp_path, -1, os.getegid())
+    tmp_path.chmod(0o2770)
+    with pytest.raises(OSError, match="not protected"):
+        _write_json_atomic(tmp_path / "runner.json", {})
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    os.chown(protected, -1, grp.getgrnam("tgw-coders").gr_gid)
+    protected.chmod(0o2770)
+    link = tmp_path / "linked"
+    link.symlink_to(protected, target_is_directory=True)
+    with pytest.raises(OSError):
+        _write_json_atomic(link / "runner.json", {})
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires local identity switching")
+def test_real_codex_and_db_identities_share_source_bound_runner_manifests():
+    """Exercise the checked-out writer as both installed tgw-coders workers."""
+    group = grp.getgrnam("tgw-coders")
+    assert {"codex", "db"}.issubset(group.gr_mem)
+    root = Path(tempfile.mkdtemp(prefix=".runner-control-test-", dir="/opt/TGW/var/worktrees"))
+    control = root / "control"
+    source_root = str(Path(__file__).parents[1] / "src")
+    program = (
+        "import json,sys; from pathlib import Path; "
+        "from tgw.workers.coding import _write_json_atomic; "
+        "_write_json_atomic(Path(sys.argv[1]), {'writer':sys.argv[2]})"
+    )
+    try:
+        os.chown(root, 0, group.gr_gid)
+        root.chmod(0o2770)
+        for actor in ("codex", "db"):
+            result = subprocess.run(
+                ["runuser", "-u", actor, "--", sys.executable, "-c", program,
+                 str(control / "shared.json"), actor],
+                cwd=Path(__file__).parents[1],
+                env={**os.environ, "PYTHONPATH": source_root},
+                text=True, capture_output=True, check=False,
+            )
+            assert result.returncode == 0, result.stderr
+        assert json.loads((control / "shared.json").read_text()) == {"writer": "db"}
+        assert control.stat().st_uid == pwd.getpwnam("codex").pw_uid
+        assert control.stat().st_gid == group.gr_gid
+        assert control.stat().st_mode & 0o2777 == 0o2770
+    finally:
+        shutil.rmtree(root)
 
 
 def _job(tmp_path: Path, state: str = "running", *, job_id: str | None = None):
@@ -115,7 +197,7 @@ def test_no_proof_still_requests_database_cancellation(monkeypatch, tmp_path):
 def test_late_result_is_suppressed_and_unrelated_process_survives(tmp_path):
     cancelled = threading.Event()
     unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
-    manifest = tmp_path / "runner.json"
+    manifest = _protected_manifest(tmp_path)
     timer = threading.Timer(0.15, cancelled.set)
     timer.start()
     try:
@@ -221,7 +303,7 @@ def test_source_keeps_session_leader_unreaped_until_final_group_kill():
 
 
 def test_timeout_publishes_truthful_terminal_evidence(tmp_path):
-    manifest = tmp_path / "runner.json"
+    manifest = _protected_manifest(tmp_path)
     with pytest.raises(subprocess.TimeoutExpired):
         _run_bounded_process_group(
             [sys.executable, "-c", "import time; time.sleep(30)"],

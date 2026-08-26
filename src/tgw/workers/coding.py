@@ -8,8 +8,10 @@ target worktree, then persists a receipt which the coding snapshot reads.
 
 from __future__ import annotations
 
+import grp
 import json
 import os
+import pwd
 import signal
 import stat
 import subprocess
@@ -46,6 +48,7 @@ CODING_TREATMENTS = frozenset({"codex-implement", "claude-review", "controller-v
 
 DEFAULT_WORKTREE_ROOT = Path("/opt/TGW/var/worktrees")
 DEFAULT_REPOSITORY_ROOT = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
+RUNNER_CONTROL_GROUP = "tgw-coders"
 
 _RECEIPT_FILES = {
     "codex-implement": "implementation-receipt.json",
@@ -145,21 +148,44 @@ def _run_bounded_process_group(
 
 
 def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
-    """Publish diagnostics without following or accepting mutable names."""
-    path.parent.mkdir(mode=0o770, parents=True, exist_ok=True)
-    parent = path.parent.lstat()
-    if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid() or parent.st_mode & stat.S_IWOTH:
-        raise OSError("runner diagnostic directory is not protected")
+    """Publish diagnostics inside the protected shared coding-group boundary."""
+    coding_group = grp.getgrnam(RUNNER_CONTROL_GROUP)
+    created = False
+    try:
+        path.parent.mkdir(mode=0o2770, parents=True)
+        created = True
+    except FileExistsError:
+        pass
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     temporary = f".{path.name}.{os.getpid()}.tmp"
     try:
+        parent = os.fstat(directory)
+        try:
+            owner = pwd.getpwuid(parent.st_uid)
+        except KeyError:
+            owner_is_trusted = False
+        else:
+            owner_is_trusted = (
+                parent.st_uid == 0
+                or owner.pw_gid == coding_group.gr_gid
+                or owner.pw_name in coding_group.gr_mem
+            )
+        if created and parent.st_uid == os.geteuid() and parent.st_gid == coding_group.gr_gid:
+            # mkdir honors the caller's umask; establish the exact shared mode
+            # only on the directory this call created and owns.
+            os.fchmod(directory, 0o2770)
+            parent = os.fstat(directory)
+        protected_mode = stat.S_ISDIR(parent.st_mode) and (parent.st_mode & 0o2777) == 0o2770
+        if parent.st_gid != coding_group.gr_gid or not owner_is_trusted or not protected_mode:
+            raise OSError("runner diagnostic directory is not protected")
         descriptor = os.open(
             temporary,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
+            0o660,
             dir_fd=directory,
         )
         try:
+            os.fchmod(descriptor, 0o660)
             content = (json.dumps(value, sort_keys=True) + "\n").encode()
             os.write(descriptor, content)
             os.fsync(descriptor)
