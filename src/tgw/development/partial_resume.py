@@ -360,6 +360,16 @@ def migrate_todo_1747(worktree: Path, binding: Mapping[str, Any], jobs: list[Map
             installed = json.loads(installed_bytes)
         except (OSError, json.JSONDecodeError) as exc:
             raise PartialResumeError("Todo 1747 migration manifest is unreadable") from exc
+        expected_manifest_keys = {
+            "schema",
+            "binding",
+            "source",
+            "legacy_receipt_sha256",
+            "jobs",
+            "manifest_hash",
+        }
+        if not isinstance(installed, Mapping) or set(installed) != expected_manifest_keys:
+            raise PartialResumeError("Todo 1747 migration manifest differs")
         unsigned_installed = dict(installed)
         claimed_hash = unsigned_installed.pop("manifest_hash", None)
         installed_source = installed.get("source")
