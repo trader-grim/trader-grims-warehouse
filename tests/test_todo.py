@@ -158,6 +158,19 @@ def test_todo_set_meta_not_found():
     assert 'not found' in result['error']
 
 
+def test_todo_status_note_compare_and_set_uses_exact_observed_bytes():
+    from tgw.todo import todo_compare_and_set_status_note
+    ctx, cur = _mock_conn(fetchone_return=(1747, 'codex', 'resume'))
+    with patch('tgw.todo._conn', ctx):
+        result = todo_compare_and_set_status_note(
+            1747, 'observed bytes', 'historical bytes', suppress_plan_render=True,
+        )
+    assert result['ok'] is True
+    sql, params = cur.execute.call_args.args
+    assert 'status_note = %s' in sql
+    assert params == ('historical bytes', 1747, 'observed bytes')
+
+
 # ---------------------------------------------------------------------------
 # brief + plan-section extraction
 # ---------------------------------------------------------------------------

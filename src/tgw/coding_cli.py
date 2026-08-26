@@ -31,11 +31,13 @@ from tgw.development.local_workflow import (
     status_command,
 )
 from tgw.development.partial_resume import (
+    LEGACY_1747,
     classify,
     migrate_todo_1747,
     preservation_manifest,
     source_tree,
 )
+from tgw.development.plan_binding import parse_plan_binding, validate_plan_binding
 from tgw.development.plan_todo_bridge import bind_leaf
 from tgw.development.plan_todo_source import PlanTodoSourceError
 from tgw.development.plan_todo_source import resolve as resolve_plan_todo
@@ -58,6 +60,10 @@ _COMMIT = re.compile(r"[0-9a-f]{40}")
 _LEGACY_1747_JOBS = (
     ("dfdfd643-312e-46ef-a33c-1542340e9b9c", "partial"),
     ("2b1f9f04-a09f-489e-aade-f21ab1e4aaa9", "failed"),
+)
+_ACCIDENTAL_1747_SOURCE = "bed4a66a55173d3994f20395ee73d423a874c6d3"
+_ACCIDENTAL_1747_WORKTREE = Path(
+    "/opt/TGW/var/worktrees/todo-1747-plan-7b3ab5b80fe10535a8ea38c7"
 )
 
 
@@ -132,6 +138,37 @@ def _legacy_1747_jobs() -> list[dict[str, Any]]:
             }
         )
     return result
+
+
+def _legacy_1747_binding(item: dict[str, Any], jobs: list[dict[str, Any]]) -> tuple[dict[str, Any], str | None]:
+    """Select the historical binding and exact accidental note without effects."""
+    if item.get("id") != 1747 or item.get("agent") != "codex":
+        raise CodingCLIError("Todo 1747 historical continuation owner mismatch")
+    observed = item.get("status_note")
+    plans = []
+    for job in jobs:
+        payload = job.get("payload")
+        plan = payload.get("plan_binding") if isinstance(payload, dict) else None
+        plans.append(validate_plan_binding(plan, todo_id=1747))
+    if len(plans) != 2 or plans[0] != plans[1]:
+        raise CodingCLIError("Todo 1747 durable jobs do not share one historical binding")
+    historical = plans[0]
+    if historical.get("worktree") != str(LEGACY_1747):
+        raise CodingCLIError("Todo 1747 durable jobs do not bind the historical worktree")
+    accidental = parse_plan_binding(observed, todo_id=1747)
+    if accidental == historical:
+        return historical, None
+    if (
+        not isinstance(observed, str)
+        or accidental is None
+        or accidental.get("source_commit") != _ACCIDENTAL_1747_SOURCE
+        or accidental.get("worktree") != str(_ACCIDENTAL_1747_WORKTREE)
+        or accidental.get("worktree_identity", {}).get("created") is not True
+        or accidental.get("worktree_identity", {}).get("head") != _ACCIDENTAL_1747_SOURCE
+        or accidental.get("worktree_identity", {}).get("actor") != "codex"
+    ):
+        raise CodingCLIError("Todo 1747 status note is not the observed accidental bed4a66a binding")
+    return historical, observed
 
 
 def _pp_runtime_binding(config: dict[str, Any], source_commit: str | None = None) -> dict[str, Any]:
@@ -264,19 +301,28 @@ def start(
     if item.get("done_at") is not None:
         raise CodingCLIError(f"Todo {todo_id} is already complete")
 
-    binding = bind_command(
-        argparse.Namespace(
-            config=Path(config_path),
-            solution=Path(solution_path),
-            treatment_id=DEFAULT_TREATMENT,
-            source_commit=source_commit,
-            agent="codex",
-            body=item["body"],
-            priority=item["priority"],
-            pp_ref=None,
-            todo_id=todo_id,
+    legacy_jobs: list[dict[str, Any]] | None = None
+    accidental_note: str | None = None
+    if resume_only and todo_id == 1747:
+        if source_commit is not None:
+            raise CodingCLIError("Todo 1747 historical resume does not accept a current-source override")
+        legacy_jobs = _legacy_1747_jobs()
+        historical, accidental_note = _legacy_1747_binding(item, legacy_jobs)
+        binding = {"binding": historical}
+    else:
+        binding = bind_command(
+            argparse.Namespace(
+                config=Path(config_path),
+                solution=Path(solution_path),
+                treatment_id=DEFAULT_TREATMENT,
+                source_commit=source_commit,
+                agent="codex",
+                body=item["body"],
+                priority=item["priority"],
+                pp_ref=None,
+                todo_id=todo_id,
+            )
         )
-    )
     coding = config["coding"]
     worktree = Path(binding["binding"]["worktree"])
     expected_attempt = {
@@ -289,10 +335,17 @@ def start(
     }
     migration: str | None = None
     with exclusive_worktree_lease(worktree):
-        if resume_only and todo_id == 1747:
+        if legacy_jobs is not None:
             migration = str(
-                migrate_todo_1747(worktree, expected_attempt, _legacy_1747_jobs())
+                migrate_todo_1747(worktree, expected_attempt, legacy_jobs)
             )
+            if accidental_note is not None:
+                restored = json.dumps(binding["binding"], sort_keys=True, separators=(",", ":"))
+                changed = todo.todo_compare_and_set_status_note(
+                    1747, accidental_note, restored, suppress_plan_render=True,
+                )
+                if not changed.get("ok"):
+                    raise CodingCLIError("Todo 1747 status-note compare-and-set refused")
         resume_state = classify(worktree, expected_attempt)
         resume_bindings: dict[int, dict[str, str]] = {}
         if resume_state["state"] == "RESUMABLE_PARTIAL":

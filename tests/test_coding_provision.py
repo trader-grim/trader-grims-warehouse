@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import inspect
 import io
 import json
@@ -1960,6 +1961,88 @@ def test_local_coding_start_binds_and_ticks_only_the_selected_todo(monkeypatch):
         "approval_card": False,
     }
     assert observed["todo_ids"] == {1732}
+
+
+def test_1747_resume_validates_before_cas_preserves_bytes_and_repeat_dispatches_zero(
+    tmp_path, monkeypatch,
+):
+    worktree = tmp_path / "todo-1747-plan-historical"
+    worktree.mkdir()
+    original = worktree / "src/tgw/coding_cli.py"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"historical partial bytes\n")
+    historical = {
+        "worktree": str(worktree),
+        "worktree_identity": {"branch": "coding/codex/todo-1747-plan-historical"},
+        "source_commit": "a" * 40, "plan_commit": "b" * 40,
+        "solution_hash": "sha256:" + "c" * 64,
+    }
+    accidental = {
+        **historical, "worktree": str(tmp_path / "todo-1747-plan-accidental"),
+        "worktree_identity": {"created": True, "head": coding_cli._ACCIDENTAL_1747_SOURCE,
+                              "actor": "codex"},
+        "source_commit": coding_cli._ACCIDENTAL_1747_SOURCE,
+    }
+    row = {"id": 1747, "agent": "codex", "body": "resume", "priority": 1,
+           "done_at": None, "status_note": json.dumps(accidental)}
+    jobs = [{"payload": {"plan_binding": historical}} for _ in range(2)]
+    events = []
+    dispatches = iter((1, 0))
+    monkeypatch.setattr(coding_cli, "LEGACY_1747", worktree)
+    monkeypatch.setattr(coding_cli, "_ACCIDENTAL_1747_WORKTREE", Path(accidental["worktree"]))
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {}})
+    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda _todo_id: dict(row))
+    monkeypatch.setattr(coding_cli, "_legacy_1747_jobs", lambda: jobs)
+    monkeypatch.setattr(coding_cli, "validate_plan_binding", lambda value, **_kwargs: dict(value))
+    monkeypatch.setattr(coding_cli, "parse_plan_binding", lambda value, **_kwargs: json.loads(value))
+    monkeypatch.setattr(coding_cli, "bind_command", lambda *_args: pytest.fail("generic bind ran"))
+    monkeypatch.setattr(coding_cli, "source_tree", lambda *_args: "d" * 40)
+    monkeypatch.setattr(coding_cli, "exclusive_worktree_lease", lambda _path: contextlib.nullcontext())
+
+    def migrate(path, binding, durable):
+        assert original.read_bytes() == b"historical partial bytes\n"
+        if not events:
+            assert row["status_note"] == json.dumps(accidental)
+        assert durable is jobs and binding["worktree"] == str(worktree)
+        events.append("migrate")
+        return path / ".tgw-coding-preservation/todo-1747-migration.json"
+
+    def cas(_todo_id, expected, restored, **_kwargs):
+        assert events == ["migrate"] and expected == row["status_note"]
+        row["status_note"] = restored
+        events.append("cas")
+        return {"ok": True}
+
+    monkeypatch.setattr(coding_cli, "migrate_todo_1747", migrate)
+    monkeypatch.setattr(coding_cli.todo, "todo_compare_and_set_status_note", cas)
+    monkeypatch.setattr(coding_cli, "classify", lambda *_args: {
+        "state": "RESUMABLE_PARTIAL", "resume_of": "sha256:attempt",
+        "fingerprint": "sha256:fingerprint",
+    })
+    monkeypatch.setattr(coding_cli, "tick", lambda *_args, **_kwargs: TickResult(dispatched=next(dispatches)))
+    monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
+    first = coding_cli.resume(1747, config_path=tmp_path / "config.json")
+    second = coding_cli.resume(1747, config_path=tmp_path / "config.json")
+    assert first["foreman"]["dispatched"] == 1 and second["foreman"]["dispatched"] == 0
+    assert events == ["migrate", "cas", "migrate"]
+    assert original.read_bytes() == b"historical partial bytes\n"
+    assert first["dependencies"] == {"tgw_prod": False, "ssh": False, "sudo": False,
+                                     "remote_provision_api": False, "approval_card": False}
+
+
+def test_1747_resume_refuses_other_status_binding_before_any_effect(tmp_path, monkeypatch):
+    historical = {"worktree": str(tmp_path / "historical")}
+    item = {"id": 1747, "agent": "codex", "status_note": json.dumps({
+        "worktree": str(tmp_path / "other"), "worktree_identity": {"created": True},
+        "source_commit": "e" * 40,
+    })}
+    jobs = [{"payload": {"plan_binding": historical}} for _ in range(2)]
+    monkeypatch.setattr(coding_cli, "LEGACY_1747", Path(historical["worktree"]))
+    monkeypatch.setattr(coding_cli, "validate_plan_binding", lambda value, **_kwargs: dict(value))
+    monkeypatch.setattr(coding_cli, "parse_plan_binding", lambda value, **_kwargs: json.loads(value))
+    with pytest.raises(coding_cli.CodingCLIError, match="not the observed accidental"):
+        coding_cli._legacy_1747_binding(item, jobs)
 
 
 def test_local_coding_start_projects_missing_todo_from_standalone_plan(monkeypatch):

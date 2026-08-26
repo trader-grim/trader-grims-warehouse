@@ -396,6 +396,26 @@ def todo_set_status_note(
     return {'ok': True, 'id': row[0], 'agent': row[1], 'body': row[2], 'status_note': note}
 
 
+def todo_compare_and_set_status_note(
+    item_id: int, expected: str, note: str, *, suppress_plan_render: bool = False,
+) -> Dict[str, Any]:
+    """Replace one open Todo note only when its original bytes still match."""
+    with _conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                "UPDATE todo_items SET status_note = %s "
+                "WHERE id = %s AND done_at IS NULL AND status_note = %s "
+                "RETURNING id, agent, body",
+                (note, item_id, expected),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {'ok': False, 'error': f'item {item_id} status note changed or item is complete'}
+    if not suppress_plan_render:
+        _enqueue_plan_render('todo_compare_and_set_status_note')
+    return {'ok': True, 'id': row[0], 'agent': row[1], 'body': row[2], 'status_note': note}
+
+
 def todo_delegate(item_id: int, new_agent: str) -> Dict[str, Any]:
     with _conn() as con:
         with con.cursor() as cur:
