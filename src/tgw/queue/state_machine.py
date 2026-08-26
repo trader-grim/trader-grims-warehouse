@@ -993,6 +993,8 @@ def close_local_success(
     and Stop cannot misrepresent the row as cancelled work.
     """
     rollback_publication: Callable[[], None] | None = None
+    final_commit_attempted = False
+    durable_success_reconciled = False
     con = psycopg2.connect(_DSN)
     lock_held = False
     try:
@@ -1059,17 +1061,77 @@ def close_local_success(
                           error_detail = NULL,
                           payload_json = (COALESCE(payload_json, '{}'::jsonb)
                                           - 'publication_reconciliation')
-                                         || jsonb_build_object('result', %s::jsonb)
+                                         || jsonb_build_object(
+                                              'result', %s::jsonb,
+                                              'publication_commit',
+                                              jsonb_build_object(
+                                                'schema', 'tgw-publication-commit/v1',
+                                                'job_id', %s, 'lease_owner', %s,
+                                                'lease_token', %s))
                     WHERE job_id = %s AND state = 'running' AND lease_owner = %s
                       AND lease_token = %s::uuid
                       AND error_code = 'PUBLICATION_CLOSING'""",
-                (json.dumps(result), job_id, lease_owner, lease_token),
+                (json.dumps(result), job_id, lease_owner, lease_token,
+                 job_id, lease_owner, lease_token),
             )
             if cur.rowcount != 1:  # pragma: no cover - row lock invariant
                 raise RuntimeError("lost locked local success closure")
+        final_commit_attempted = True
         con.commit()
         return True
     except BaseException as primary_error:
+        if final_commit_attempted:
+            # A client-side commit error does not say whether PostgreSQL made
+            # the transaction durable.  End the ambiguous client session,
+            # then acquire its same serialization boundary in a new session.
+            # Obtaining that lock proves the original backend can no longer
+            # finish COMMIT after our durable read.
+            try:
+                con.close()
+                lock_held = False
+                con = psycopg2.connect(_DSN)
+                with con.cursor() as reconcile_cur:
+                    reconcile_cur.execute(
+                        "SELECT pg_advisory_lock(hashtextextended(%s, 1792))",
+                        (job_id,),
+                    )
+                    lock_held = True
+                    reconcile_cur.execute(
+                        """SELECT state::text, lease_owner,
+                                  lease_token::text, payload_json
+                             FROM queue_jobs WHERE job_id = %s""",
+                        (job_id,),
+                    )
+                    durable = reconcile_cur.fetchone()
+                # Retain this replacement session and its session lock through
+                # any proven compensation/fencing below.
+            except BaseException as reconcile_error:
+                raise RuntimeError(
+                    "coding publication commit outcome requires reconciliation"
+                ) from reconcile_error
+            expected_commit = {
+                "schema": "tgw-publication-commit/v1", "job_id": job_id,
+                "lease_owner": lease_owner, "lease_token": lease_token,
+            }
+            if (durable is not None and durable[0] == "succeeded"
+                    and durable[1] is None and durable[2] is None
+                    and isinstance(durable[3], dict)
+                    and durable[3].get("publication_commit") == expected_commit
+                    and durable[3].get("result") == result):
+                durable_success_reconciled = True
+                return True
+            if not (
+                durable is not None and durable[0] == "running"
+                and durable[1] == lease_owner and durable[2] == lease_token
+                and isinstance(durable[3], dict)
+                and durable[3].get("publication_reconciliation") == {
+                    "schema": "tgw-publication-reconciliation/v1",
+                    "job_id": job_id, "state": "closing",
+                }
+            ):
+                raise RuntimeError(
+                    "coding publication commit outcome requires reconciliation"
+                ) from primary_error
         cleanup_error: BaseException | None = None
         if rollback_publication is not None:
             try:
@@ -1141,6 +1203,13 @@ def close_local_success(
                         "SELECT pg_advisory_unlock(hashtextextended(%s, 1792))",
                         (job_id,),
                     )
+            except BaseException:
+                # A broken client session may be unable to issue the explicit
+                # unlock after a committed-but-client-error outcome. Closing
+                # the session releases its advisory lock; never turn already
+                # reconciled durable success back into a worker failure.
+                if not durable_success_reconciled:
+                    raise
             finally:
                 con.close()
 

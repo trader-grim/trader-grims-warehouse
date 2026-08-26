@@ -82,6 +82,8 @@ def test_satisfied_closes_exact_source_commit(tmp_path, monkeypatch):
     assert closed["kind"] == "closed_candidate"
     assert closed["commit"] == candidate
     assert len(closed["tree"]) == 40
+    assert closed["base_commit"] == baseline
+    assert closed["changed_paths"] == ["feature.py"]
 
 
 def test_runner_uses_ordinary_unix_boundary_without_approval_gate(

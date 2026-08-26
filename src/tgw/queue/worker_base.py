@@ -354,7 +354,27 @@ class QueueWorker:
                 log.debug('quota context switch skipped: %s', exc)
 
         try:
-            state_machine.mark_running(job_id, self.owner, lease_token)
+            try:
+                state_machine.mark_running(job_id, self.owner, lease_token)
+            except RuntimeError:
+                current = state_machine.get_job(job_id) or {}
+                stop = ((current.get("payload_json") or {}).get("result") or {}).get(
+                    "stop_control"
+                ) or {}
+                identity = stop.get("request_identity") or {}
+                if (current.get("state") == "cancelled"
+                        and stop.get("kind") == "runner_cancel_requested"
+                        and identity == {
+                            "job_id": job_id, "queue_name": self.queue_name,
+                            "lease_owner": self.owner, "lease_token": lease_token,
+                        }):
+                    raise JobCancelled(
+                        "cancelled after claim before runner start",
+                        reason="no_runner", reaped=True,
+                        runner={"schema": "tgw-coding-runner/v2",
+                                "kind": "no_runner", **identity},
+                    )
+                raise
             _handle_result = self._handle_with_deadline(job)
         except JobCancelled as exc:
             runner_identity = {

@@ -7,8 +7,10 @@ delete only those rows; they never truncate shared test state.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
+import time
 import uuid
 
 import psycopg2
@@ -66,6 +68,40 @@ def _row(job_id: str):
         with connection.cursor() as cursor:
             cursor.execute("SELECT state::text, payload_json FROM queue_jobs WHERE job_id=%s", (job_id,))
             return cursor.fetchone()
+
+
+class _CommitFaultConnection:
+    def __init__(self, connection, *, mode: str, after_close=None):
+        self._connection = connection
+        self._mode = mode
+        self._commits = 0
+        self._broken_after_commit = False
+        self._commit_thread = None
+        self._after_close = after_close
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def commit(self):
+        self._commits += 1
+        if self._commits != 2:
+            return self._connection.commit()
+        if self._mode == "committed":
+            self._connection.commit()
+            self._broken_after_commit = True
+        elif self._mode == "delayed":
+            self._broken_after_commit = True
+        raise psycopg2.OperationalError("injected final commit client error")
+
+    def cursor(self, *args, **kwargs):
+        if self._broken_after_commit:
+            raise psycopg2.InterfaceError("injected broken client session")
+        return self._connection.cursor(*args, **kwargs)
+
+    def close(self):
+        self._connection.close()
+        if self._after_close is not None:
+            self._commit_thread = self._after_close()
 
 
 def _failure_trigger(job_id: str, *, deferred: bool):
@@ -304,3 +340,105 @@ def test_real_postgresql_ack_is_exact_identity_bound_and_single_use(job_rows):
     replay = {**acknowledgement, "ack_id": str(uuid.uuid4()),
               "runner": {**acknowledgement["runner"], "lease_token": str(uuid.uuid4())}}
     assert state_machine.acknowledge_cancellation(job_id, replay) is None
+
+
+@pytest.mark.parametrize(
+    "mode", ["committed", "delayed", "uncommitted"],
+    ids=["committed-client-error", "commit-in-flight", "uncommitted-failure"],
+)
+def test_real_postgresql_final_commit_fault_reconciles_before_compensation(
+    job_rows, monkeypatch, mode,
+):
+    job_id, token = _insert(job_rows)
+    original_connect = psycopg2.connect
+    finisher_threads = []
+
+    def finish_after_close():
+        """Model an independent backend still resolving durable COMMIT.
+
+        It owns the exact advisory boundary before replacement reconciliation
+        starts, then makes the success identity durable and releases the lock.
+        An unlocked reconciliation would read ``closing`` and compensate.
+        """
+        finisher = original_connect(DSN)
+        with finisher.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_lock(hashtextextended(%s, 1792))", (job_id,),
+            )
+
+        def finish():
+            time.sleep(0.2)
+            with finisher.cursor() as cursor:
+                cursor.execute(
+                    """UPDATE queue_jobs
+                          SET state='succeeded', finished_at=NOW(),
+                              lease_owner=NULL, lease_token=NULL,
+                              lease_expires_at=NULL, error_code=NULL,
+                              error_detail=NULL,
+                              payload_json=(payload_json-'publication_reconciliation')
+                                || jsonb_build_object(
+                                  'result', %s::jsonb, 'publication_commit',
+                                  jsonb_build_object(
+                                    'schema','tgw-publication-commit/v1',
+                                    'job_id',%s,'lease_owner','worker:race',
+                                    'lease_token',%s))
+                        WHERE job_id=%s AND state='running'
+                          AND lease_owner='worker:race'
+                          AND lease_token=%s::uuid""",
+                    (json.dumps({"outcome": "satisfied"}), job_id, token,
+                     job_id, token),
+                )
+            finisher.commit()
+            finisher.close()
+
+        thread = threading.Thread(target=finish)
+        thread.start()
+        finisher_threads.append(thread)
+        return thread
+
+    primary = _CommitFaultConnection(
+        original_connect(DSN), mode=mode,
+        after_close=finish_after_close if mode == "delayed" else None,
+    )
+    connections = iter([primary])
+
+    def connect(dsn):
+        try:
+            return next(connections)
+        except StopIteration:
+            return original_connect(dsn)
+
+    monkeypatch.setattr(state_machine.psycopg2, "connect", connect)
+    publication = {"exists": False}
+    cleanup_calls = []
+
+    def publish(register):
+        def cleanup():
+            cleanup_calls.append(True)
+            publication["exists"] = False
+        register(cleanup)
+        publication["exists"] = True
+
+    if mode in {"committed", "delayed"}:
+        assert state_machine.close_local_success(
+            job_id, "worker:race", token, {"outcome": "satisfied"}, publish,
+        )
+        assert publication["exists"] is True
+        assert cleanup_calls == []
+        state, payload = _row(job_id)
+        assert state == "succeeded"
+        assert payload["publication_commit"] == {
+            "schema": "tgw-publication-commit/v1", "job_id": job_id,
+            "lease_owner": "worker:race", "lease_token": token,
+        }
+    else:
+        with pytest.raises(psycopg2.OperationalError, match="injected final commit"):
+            state_machine.close_local_success(
+                job_id, "worker:race", token, {"outcome": "satisfied"}, publish,
+            )
+        assert publication["exists"] is False
+        assert cleanup_calls == [True]
+        assert _row(job_id)[0] == "running"
+    for thread in finisher_threads:
+        thread.join(5)
+        assert not thread.is_alive()

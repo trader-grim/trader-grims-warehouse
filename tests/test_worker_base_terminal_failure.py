@@ -89,3 +89,41 @@ def test_default_on_terminal_failure_is_a_noop(monkeypatch):
 
     w = _PlainWorker()
     w._process(_job())  # must not raise
+
+
+def test_stop_after_claim_before_mark_running_persists_no_runner_and_stays_healthy(
+    monkeypatch,
+):
+    class _NeverRuns(_RecordingWorker):
+        def handle(self, job):
+            raise AssertionError("cancelled leased job reached handle")
+
+    identity = {
+        "job_id": "j1", "queue_name": "token_refresh",
+        "lease_owner": "test:1",
+        "lease_token": "33333333-3333-4333-8333-333333333333",
+    }
+    cancelled = {
+        "state": "cancelled", "payload_json": {"result": {"stop_control": {
+            "kind": "runner_cancel_requested", "request_identity": identity,
+        }}},
+    }
+    acknowledgements = []
+    monkeypatch.setattr(
+        state_machine, "mark_running",
+        lambda *_a: (_ for _ in ()).throw(RuntimeError("lost leased job")),
+    )
+    monkeypatch.setattr(state_machine, "get_job", lambda *_a: cancelled)
+    monkeypatch.setattr(
+        state_machine, "acknowledge_cancellation",
+        lambda _job_id, acknowledgement: acknowledgements.append(acknowledgement)
+        or cancelled,
+    )
+
+    worker = _NeverRuns()
+    worker._process(_job())
+    assert len(acknowledgements) == 1
+    assert all(item["reason"] == "no_runner" for item in acknowledgements)
+    assert all(item["runner"] == {"schema": "tgw-coding-runner/v2",
+                                  "kind": "no_runner", **identity}
+               for item in acknowledgements)

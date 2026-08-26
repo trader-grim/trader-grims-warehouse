@@ -380,6 +380,12 @@ def _recover_existing_candidate(
             "kind": "closed_candidate",
             "commit": head,
             "tree": tree,
+            "base_commit": baseline,
+            "changed_paths": sorted(
+                item for item in _git(
+                    cwd, "diff", "--name-only", f"{baseline}..{head}", "--", "."
+                ).splitlines() if item
+            ),
             "detail": "existing closed descendant recovered without rerunning the model",
         }
     ]
@@ -529,7 +535,15 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
         cwd, todo_id=task["todo_id"], baseline=before_head
     )
     artifacts.append(
-        {"kind": "closed_candidate", "commit": candidate, "tree": tree}
+        {
+            "kind": "closed_candidate", "commit": candidate, "tree": tree,
+            "base_commit": before_head,
+            "changed_paths": sorted(
+                item for item in _git(
+                    cwd, "diff", "--name-only", f"{before_head}..{candidate}", "--", "."
+                ).splitlines() if item
+            ),
+        }
     )
     if recovery:
         artifacts.append(
