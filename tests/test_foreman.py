@@ -2,7 +2,7 @@
 
 import json
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +20,7 @@ from tgw.development.foreman import (
     _extract_worktree,
     _has_active_job,
     _has_active_worktree_job,
+    _has_explicit_succeeded_implementation,
     _has_terminal_job,
     _implementation_attempt_hash,
     tick,
@@ -158,6 +159,62 @@ def test_controller_dedupe_tracks_attempt_hash_and_ignores_unchanged_evidence():
     ),))
     assert _controller_dedupe_key("controller", _implementation_attempt_hash(first)) == _controller_dedupe_key("controller", _implementation_attempt_hash(same))
     assert _controller_dedupe_key("controller", _implementation_attempt_hash(first)) != _controller_dedupe_key("controller", _implementation_attempt_hash(replacement))
+
+
+def test_explicit_succeeded_implementation_is_bound_to_durable_exact_scope(monkeypatch):
+    attempt_hash = "sha256:" + "a" * 64
+    todo = _todo(1803, "/tmp/selected")
+    observed = {}
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params):
+            observed["sql"] = sql
+            observed["params"] = params
+
+        def fetchone(self):
+            return (1,)
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return Cursor()
+
+    @contextmanager
+    def connection():
+        yield Connection()
+
+    monkeypatch.setattr(
+        "tgw.development.foreman.history",
+        lambda _: [{
+            "attempt_hash": attempt_hash,
+            "outcome": "satisfied",
+            "job_id": "job-explicit",
+            "attempt_count": 1,
+        }],
+    )
+    monkeypatch.setattr("tgw.queue.state_machine._conn", connection)
+
+    assert _has_explicit_succeeded_implementation(todo, attempt_hash) is True
+    assert "state = 'succeeded'" in observed["sql"]
+    assert "implementation_dispatch_scope" in observed["sql"]
+    assert observed["params"][0:4] == (
+        "job-explicit", "/tmp/selected", 1, "1803",
+    )
+    assert json.loads(observed["params"][5]) == {
+        "schema": "tgw-exact-todo-dispatch/v1",
+        "todo_id": 1803,
+    }
 
 
 def test_plan_bound_todo_uses_bound_source_as_uncommitted_implementation_baseline():
@@ -374,6 +431,7 @@ def test_tick_one_eligible_dispatches_one():
         ) as mock_dispatch,
     ):
         result = tick(
+            todo_ids={1},
             fetch_todos=fetch_todos,
             check_active_fn=check_active,
             enqueue_fn=mock_enqueue,
@@ -412,6 +470,7 @@ def test_tick_all_satisfied_dispatches_zero():
         ),
     ):
         result = tick(
+            todo_ids={1},
             fetch_todos=fetch_todos,
             check_active_fn=check_active,
         )
@@ -449,6 +508,7 @@ def test_tick_ownership_conflict_dispatches_zero():
         ),
     ):
         result = tick(
+            todo_ids={1},
             fetch_todos=fetch_todos,
             check_active_fn=check_active,
         )
@@ -486,6 +546,7 @@ def test_tick_same_generation_rerun_is_idempotent():
         ),
     ):
         result = tick(
+            todo_ids={1},
             fetch_todos=fetch_todos,
             check_active_fn=check_active,
         )
@@ -563,6 +624,7 @@ def test_tick_skips_todos_with_active_job():
         ),
     ):
         result = tick(
+            todo_ids={1, 2},
             fetch_todos=fetch_todos,
             check_active_fn=check_active,
             enqueue_fn=mock_enqueue,
@@ -623,6 +685,7 @@ def test_tick_unmet_dependencies_waits():
         ),
     ):
         result = tick(
+            todo_ids={1},
             fetch_todos=fetch_todos,
             check_active_fn=check_active,
         )
@@ -672,6 +735,7 @@ def test_tick_multiple_todos_dispatches_exactly_one():
         ),
     ):
         result = tick(
+            todo_ids={1, 2},
             fetch_todos=fetch_todos,
             check_active_fn=check_active,
         )
@@ -704,6 +768,7 @@ def test_tick_admits_most_urgent_eligible_todo():
         ),
     ):
         result = tick(
+            todo_ids={1, 2},
             fetch_todos=lambda: [less_urgent, urgent],
             check_active_fn=lambda _graph_id: False,
             enqueue_fn=enqueue,
@@ -737,7 +802,7 @@ def test_tick_equal_priority_orders_by_todo_id_then_treatment_identity():
             ],
         ),
     ):
-        result = tick(fetch_todos=lambda: [first, second], check_active_fn=lambda _: False, enqueue_fn=enqueue)
+        result = tick(todo_ids={1, 2}, fetch_todos=lambda: [first, second], check_active_fn=lambda _: False, enqueue_fn=enqueue)
 
     assert result.dispatched == 1
     assert enqueue.call_args.kwargs["dedupe_key"] == ("treatment:zeta:coding_task:/tmp/wt-z:abc123:zeta:1")
@@ -765,7 +830,7 @@ def test_tick_null_priority_is_last():
             ],
         ),
     ):
-        result = tick(fetch_todos=lambda: [missing, real], check_active_fn=lambda _: False, enqueue_fn=enqueue)
+        result = tick(todo_ids={1, 2}, fetch_todos=lambda: [missing, real], check_active_fn=lambda _: False, enqueue_fn=enqueue)
 
     assert result.dispatched == 1
     assert enqueue.call_args.kwargs["dedupe_key"] == ("treatment:codex-implement:coding_task:/tmp/wt-real:abc123:codex-implement:1")
@@ -781,6 +846,7 @@ def test_tick_retry_wait_job_is_active_and_not_reenqueued():
         patch("tgw.development.foreman.evaluate", return_value=_graph(eligible=(disposition,))),
     ):
         result = tick(
+            todo_ids={1},
             fetch_todos=lambda: [_todo()],
             check_active_fn=lambda key: observed_keys.append(key) or True,
             enqueue_fn=enqueue,
@@ -822,6 +888,7 @@ def test_tick_wires_evaluator_fingerprints_to_codex_dispatch():
         patch("tgw.development.foreman.evaluate", return_value=graph) as evaluator,
     ):
         result = tick(
+            todo_ids={1731},
             fetch_todos=lambda: [_todo(1731)],
             check_active_fn=lambda _graph_id: False,
             enqueue_fn=enqueue,
@@ -846,6 +913,192 @@ def test_tick_wires_evaluator_fingerprints_to_codex_dispatch():
     ]
 
 
+def test_recurring_tick_never_implements_untouched_open_or_stale_todos():
+    """Discovery without an exact Todo scope cannot initiate implementation."""
+    todos = [
+        _todo(1744, "/tmp/untouched"),
+        _todo(1745, "/tmp/open"),
+        _todo(1752, "/tmp/stale"),
+    ]
+    disposition = TreatmentDisposition("codex-implement", "1", ("implemented=false",))
+    enqueue = MagicMock()
+    with (
+        patch(
+            "tgw.development.foreman.build_coding_snapshot",
+            side_effect=[_snapshot(object_id=item.worktree) for item in todos],
+        ),
+        patch(
+            "tgw.development.foreman.evaluate",
+            side_effect=[
+                _graph(object_id=item.worktree, eligible=(disposition,))
+                for item in todos
+            ],
+        ),
+    ):
+        result = tick(
+            fetch_todos=lambda: todos,
+            check_active_fn=lambda _: False,
+            check_terminal_fn=lambda _: False,
+            enqueue_fn=enqueue,
+        )
+
+    assert result.dispatched == 0
+    assert result.errors == 0
+    enqueue.assert_not_called()
+
+
+def test_explicit_tick_implements_only_the_exact_todo():
+    """An explicit coding start retains implementation dispatch and exact scope."""
+    first = _todo(1744, "/tmp/old")
+    selected = _todo(1803, "/tmp/selected")
+    disposition = TreatmentDisposition("codex-implement", "1", ("implemented=false",))
+    enqueue = MagicMock(return_value="implementation-job")
+    with (
+        patch(
+            "tgw.development.foreman.build_coding_snapshot",
+            return_value=_snapshot(object_id=selected.worktree),
+        ),
+        patch(
+            "tgw.development.foreman.evaluate",
+            return_value=_graph(object_id=selected.worktree, eligible=(disposition,)),
+        ),
+    ):
+        result = tick(
+            todo_ids={selected.todo_id},
+            fetch_todos=lambda: [first, selected],
+            check_active_fn=lambda _: False,
+            check_terminal_fn=lambda _: False,
+            enqueue_fn=enqueue,
+        )
+
+    assert result.dispatched == 1
+    assert enqueue.call_args.kwargs["payload"]["todo_id"] == 1803
+    assert enqueue.call_args.kwargs["queue_name"] == "codex-implement"
+    assert enqueue.call_args.kwargs["payload"]["implementation_dispatch_scope"] == {
+        "schema": "tgw-exact-todo-dispatch/v1",
+        "todo_id": 1803,
+    }
+
+
+def test_recurring_tick_advances_latest_implementation_to_controller_once():
+    """Canonical attempt hashing and terminal dedupe converge on one controller job."""
+    todo = _todo(1803, "/tmp/selected")
+    snapshot = _snapshot(object_id=todo.worktree, assertions=_implemented_true())
+    disposition = TreatmentDisposition("controller-verify", "1", ("implemented=true",))
+    terminal_keys: set[str] = set()
+
+    def enqueue(**kwargs):
+        terminal_keys.add(kwargs["dedupe_key"])
+        return "controller-job"
+
+    def run_tick():
+        with (
+            patch("tgw.development.foreman.build_coding_snapshot", return_value=snapshot),
+            patch(
+                "tgw.development.foreman.evaluate",
+                return_value=_graph(object_id=todo.worktree, eligible=(disposition,)),
+            ),
+        ):
+            return tick(
+                fetch_todos=lambda: [todo],
+                check_active_fn=lambda _: False,
+                check_terminal_fn=lambda key: key in terminal_keys,
+                check_implementation_succeeded_fn=lambda item, attempt: (
+                    item.todo_id == todo.todo_id
+                    and attempt == "sha256:" + "a" * 64
+                ),
+                enqueue_fn=enqueue,
+            )
+
+    first = run_tick()
+    repeat = run_tick()
+
+    assert first.dispatched == 1
+    assert repeat.dispatched == 0
+    assert repeat.skipped_terminal == 1
+    assert terminal_keys == {
+        "treatment:controller-verify:coding_task:/tmp/selected:abc123:controller-verify:1:implementation:"
+        + "a" * 64
+    }
+
+
+def test_recurring_tick_refuses_controller_without_explicit_succeeded_job():
+    todo = _todo(1803, "/tmp/selected")
+    snapshot = _snapshot(object_id=todo.worktree, assertions=_implemented_true())
+    disposition = TreatmentDisposition("controller-verify", "1", ("implemented=true",))
+    enqueue = MagicMock()
+    with (
+        patch("tgw.development.foreman.build_coding_snapshot", return_value=snapshot),
+        patch(
+            "tgw.development.foreman.evaluate",
+            return_value=_graph(object_id=todo.worktree, eligible=(disposition,)),
+        ),
+    ):
+        result = tick(
+            fetch_todos=lambda: [todo],
+            check_active_fn=lambda _: False,
+            check_terminal_fn=lambda _: False,
+            check_implementation_succeeded_fn=lambda *_: False,
+            enqueue_fn=enqueue,
+        )
+
+    assert result.dispatched == 0
+    assert result.skipped_terminal == 1
+    enqueue.assert_not_called()
+
+
+def test_recurring_controller_rechecks_latest_attempt_under_dispatch_lease():
+    """A newer implementation between selection and dispatch fences the old one."""
+    todo = _todo(1803, "/tmp/selected")
+    selected = _snapshot(object_id=todo.worktree, assertions=_implemented_true())
+    replacement = _snapshot(
+        object_id=todo.worktree,
+        assertions=(EvidenceAssertion(
+            "implemented",
+            FingerprintResult.TRUE,
+            ("replacement",),
+            (EvidenceReference(
+                "replacement", "implementation", "tree",
+                "sha256:" + "b" * 64,
+            ),),
+        ),),
+    )
+    disposition = TreatmentDisposition("controller-verify", "1", ("implemented=true",))
+    enqueue = MagicMock()
+    with (
+        patch(
+            "tgw.development.foreman.build_coding_snapshot",
+            side_effect=[selected, replacement],
+        ),
+        patch(
+            "tgw.development.foreman.evaluate",
+            return_value=_graph(object_id=todo.worktree, eligible=(disposition,)),
+        ),
+        patch(
+            "tgw.development.foreman.classify",
+            return_value={"state": "CLOSED_CANDIDATE"},
+        ),
+        patch(
+            "tgw.development.foreman.exclusive_worktree_lease",
+            return_value=nullcontext(),
+        ),
+        patch("tgw.development.foreman.source_tree", return_value="d" * 40),
+    ):
+        result = tick(
+            ForemanConfig(coding_config={"worktree_root": "/tmp"}),
+            fetch_todos=lambda: [todo],
+            check_active_fn=lambda _: False,
+            check_worktree_active_fn=lambda _: False,
+            check_terminal_fn=lambda _: False,
+            check_implementation_succeeded_fn=lambda *_: True,
+            enqueue_fn=enqueue,
+        )
+
+    assert result.dispatched == 0
+    assert result.skipped_active == 1
+    enqueue.assert_not_called()
+
+
 def test_tick_routes_post_implementation_treatments_by_identity():
     """Evaluator-selected review/verification treatments reach their workers."""
     for treatment_id in ("claude-review", "controller-verify", "hermes-stitch"):
@@ -862,6 +1115,7 @@ def test_tick_routes_post_implementation_treatments_by_identity():
             ),
         ):
             result = tick(
+                todo_ids={1731},
                 fetch_todos=lambda: [_todo(1731)],
                 check_active_fn=lambda _graph_id: False,
                 enqueue_fn=enqueue,
@@ -906,6 +1160,7 @@ def test_real_evaluator_dispatches_stitch_after_review_and_verification():
         patch("tgw.development.foreman.dispatch_treatment", dispatch),
     ):
         result = tick(
+            todo_ids={1731},
             fetch_todos=lambda: [todo],
             check_active_fn=lambda _: False,
             check_terminal_fn=lambda _: False,
@@ -962,7 +1217,7 @@ def test_tick_dispatch_failure_continues_to_lower_priority_todo():
             ],
         ),
     ):
-        result = tick(fetch_todos=lambda: [first, second], check_active_fn=lambda _: False, check_terminal_fn=lambda _: False, enqueue_fn=enqueue)
+        result = tick(todo_ids={1, 2}, fetch_todos=lambda: [first, second], check_active_fn=lambda _: False, check_terminal_fn=lambda _: False, enqueue_fn=enqueue)
     assert result.dispatched == 1
     assert result.errors == 1
     assert enqueue.call_args.kwargs["dedupe_key"] == ("treatment:codex-implement:coding_task:/tmp/second:abc123:codex-implement:1")
@@ -992,7 +1247,7 @@ def test_tick_duplicate_dispatch_is_not_an_error_and_continues():
             ],
         ),
     ):
-        result = tick(fetch_todos=lambda: [first, second], check_active_fn=lambda _: False, check_terminal_fn=lambda _: False, enqueue_fn=enqueue)
+        result = tick(todo_ids={1, 2}, fetch_todos=lambda: [first, second], check_active_fn=lambda _: False, check_terminal_fn=lambda _: False, enqueue_fn=enqueue)
     assert result.dispatched == 1
     assert result.errors == 0
     assert result.skipped_active == 1
@@ -1021,6 +1276,7 @@ def test_tick_terminal_graph_is_durably_skipped_and_does_not_starve_next_todo():
     ):
         terminal_key = "treatment:codex-implement:coding_task:/tmp/first:abc123:codex-implement:1"
         result = tick(
+            todo_ids={1, 2},
             fetch_todos=lambda: [first, second],
             check_active_fn=lambda _: False,
             check_terminal_fn=lambda key: key == terminal_key,

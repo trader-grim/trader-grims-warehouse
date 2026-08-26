@@ -140,7 +140,10 @@ def run_fixture_proof(*, source_root: Path, fixture_root: Path, candidate_commit
 
     record = TodoRecord(todo.todo_id, "codex", 1, "fixture-only implementation proof", allocation.identity["worktree"], todo.binding)
     with patch("tgw.development.foreman.build_coding_snapshot", return_value=object()), patch("tgw.development.foreman.evaluate", return_value=graph):
-        result = tick(fetch_todos=lambda: [record], check_active_fn=lambda _graph_id: False,
+        result = tick(
+            todo_ids={record.todo_id},
+            fetch_todos=lambda: [record],
+            check_active_fn=lambda _graph_id: False,
             check_terminal_fn=lambda _graph_id: False, enqueue_fn=enqueue,
             config=__import__("tgw.development.foreman", fromlist=["ForemanConfig"]).ForemanConfig(coding_config=coding))
     if result.dispatched != 1 or len(jobs) != 1:

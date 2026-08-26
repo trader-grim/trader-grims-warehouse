@@ -105,7 +105,13 @@ def test_foreman_worker_and_receipt_use_local_runner_and_preserve_plan_binding(t
         patch("tgw.development.foreman.build_coding_snapshot", return_value=object()),
         patch("tgw.development.foreman.evaluate", return_value=_graph(worktree)),
     ):
-        assert tick(config, fetch_todos=lambda: [todo], check_active_fn=lambda _: False, enqueue_fn=enqueue).dispatched == 1
+        assert tick(
+            config,
+            todo_ids={todo.todo_id},
+            fetch_todos=lambda: [todo],
+            check_active_fn=lambda _: False,
+            enqueue_fn=enqueue,
+        ).dispatched == 1
     payload = enqueue.call_args.kwargs["payload"]
     assert not {"coding_role", "selected_provider", "adapter_treatment_id", "adapter_queue_name"} & payload.keys()
     assert payload["plan_binding"] == binding

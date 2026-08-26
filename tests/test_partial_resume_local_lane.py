@@ -803,6 +803,7 @@ def test_owner_resume_queues_exactly_one_resume_identity(tmp_path: Path, monkeyp
     )
     first = tick(
         config,
+        todo_ids={todo.todo_id},
         fetch_todos=lambda: [todo],
         check_active_fn=lambda _key: False,
         check_worktree_active_fn=lambda _path: False,
@@ -811,6 +812,7 @@ def test_owner_resume_queues_exactly_one_resume_identity(tmp_path: Path, monkeyp
     )
     second = tick(
         config,
+        todo_ids={todo.todo_id},
         fetch_todos=lambda: [todo],
         check_active_fn=lambda _key: False,
         check_worktree_active_fn=lambda _path: False,

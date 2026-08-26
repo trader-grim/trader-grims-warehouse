@@ -8,6 +8,7 @@ again is safe: same generation → same graph_id → skipped (idempotent).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Callable, Mapping
@@ -17,7 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from tgw.development.coding_snapshot import build_coding_snapshot
-from tgw.development.partial_resume import classify, preservation_manifest, source_tree
+from tgw.development.partial_resume import (
+    classify,
+    history,
+    preservation_manifest,
+    source_tree,
+)
 from tgw.development.plan_binding import (
     MalformedPlanBindingError,
     parse_plan_binding,
@@ -296,6 +302,63 @@ def _controller_dedupe_key(base: str, implementation_attempt_hash: str) -> str:
     return f"{base}:implementation:{implementation_attempt_hash.removeprefix('sha256:')}"
 
 
+def _has_explicit_succeeded_implementation(
+    todo: TodoRecord,
+    implementation_attempt_hash: str,
+    check_fn: Callable[[TodoRecord, str], bool] | None = None,
+) -> bool:
+    """Prove the canonical attempt came from an exact-scope successful job."""
+    if check_fn is not None:
+        return check_fn(todo, implementation_attempt_hash)
+    try:
+        attempts = history(Path(todo.worktree))
+        matching = [
+            attempt for attempt in attempts
+            if attempt.get("attempt_hash") == implementation_attempt_hash
+        ]
+        if len(matching) != 1 or matching[0].get("outcome") != "satisfied":
+            return False
+        attempt = matching[0]
+        from tgw.queue.state_machine import _conn
+
+        with _conn() as con, con.cursor() as cur:
+            cur.execute(
+                """
+                    SELECT 1 FROM queue_jobs
+                     WHERE job_id = %s
+                       AND state = 'succeeded'
+                       AND queue_name = 'codex-implement'
+                       AND handler_family = 'codex-implement'
+                       AND entity_type = 'coding_task'
+                       AND entity_id = %s
+                       AND attempt_count = %s
+                       AND payload_json->>'todo_id' = %s
+                       AND payload_json->'plan_binding' = %s::jsonb
+                       AND payload_json->'implementation_dispatch_scope' = %s::jsonb
+                       AND payload_json->'result'->>'outcome' = 'satisfied'
+                       AND payload_json->'result'->>'treatment_id' = 'codex-implement'
+                     LIMIT 1
+                """,
+                (
+                    attempt.get("job_id"), todo.worktree,
+                    attempt.get("attempt_count"), str(todo.todo_id),
+                    json.dumps(todo.plan_binding),
+                    json.dumps({
+                        "schema": "tgw-exact-todo-dispatch/v1",
+                        "todo_id": todo.todo_id,
+                    }),
+                ),
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        log.error(
+            "failed exact-scope implementation provenance check for todo %d",
+            todo.todo_id,
+            exc_info=True,
+        )
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Todo fetcher
 # ---------------------------------------------------------------------------
@@ -381,13 +444,17 @@ def tick(
     check_active_fn: Callable[[str], bool] | None = None,
     check_worktree_active_fn: Callable[[str], bool] | None = None,
     check_terminal_fn: Callable[[str], bool] | None = None,
+    check_implementation_succeeded_fn: Callable[[TodoRecord, str], bool] | None = None,
     enqueue_fn: Any = None,
 ) -> TickResult:
     """Run one foreman tick.
 
     Polls open todos, builds a ``CodingTaskSnapshot`` for each with a
     worktree path, evaluates every one against ``CODING_READY_FOR_IMPLEMENTATION``,
-    and dispatches **exactly one** eligible treatment.
+    and dispatches **exactly one** eligible treatment.  An omitted ``todo_ids``
+    is the recurring continuation lane: it may advance canonical implementation
+    evidence to controller verification, but cannot initiate implementation.
+    Explicit callers pass the exact Todo ids they intend to start.
 
     Todos that already have any active coding job for the same worktree are
     skipped before snapshotting.  The exact treatment dedupe check remains as
@@ -397,12 +464,17 @@ def tick(
         config: Foreman configuration. Defaults to ``CODING_READY_FOR_IMPLEMENTATION``
             with ``CODING_TREATMENTS``.
         limit: Maximum number of todos to process (for testing / rate-limiting).
+        todo_ids: Optional exact Todo scope.  When omitted, only an already
+            implemented Todo may advance to ``controller-verify``; implementation
+            dispatch requires a non-``None`` exact set.
         fetch_todos: Callable returning a list of ``TodoRecord``. Override for
             testing to avoid a real database call.
         check_active_fn: Callable ``(graph_id: str) -> bool``. Override for
             testing.
         check_worktree_active_fn: Callable ``(worktree: str) -> bool``.
             Override for testing the cross-treatment concurrency fence.
+        check_implementation_succeeded_fn: Read-only exact-scope successful
+            implementation provenance check. Override for tests.
         enqueue_fn: Callable with the same signature as
             ``state_machine.enqueue_job``. Override for testing.
 
@@ -595,6 +667,11 @@ def tick(
             continue
 
         for disposition in graph.eligible_treatments:
+            # Recurring/timer ticks are continuation-only.  Exact Todo scope is
+            # supplied by owner-commanded coding start and PP materialization;
+            # its absence must never discover and initiate old open work.
+            if todo_ids is None and disposition.treatment_id != "controller-verify":
+                continue
             implementation_attempt_hash = None
             dedupe_key = treatment_dedupe_key(
                 disposition,
@@ -607,6 +684,15 @@ def tick(
                 dedupe_key = _resume_dedupe_key(dedupe_key, authority)
             elif disposition.treatment_id == "controller-verify":
                 implementation_attempt_hash = _implementation_attempt_hash(snapshot)
+                if todo_ids is None and not _has_explicit_succeeded_implementation(
+                    canonical_todo,
+                    implementation_attempt_hash,
+                    check_implementation_succeeded_fn,
+                ):
+                    result = replace(
+                        result, skipped_terminal=result.skipped_terminal + 1
+                    )
+                    continue
                 dedupe_key = _controller_dedupe_key(
                     dedupe_key, implementation_attempt_hash
                 )
@@ -659,6 +745,10 @@ def tick(
                     raise ValueError("Codex implementation requires a canonical Todo task")
                 payload_extra.update(
                     {
+                        "implementation_dispatch_scope": {
+                            "schema": "tgw-exact-todo-dispatch/v1",
+                            "todo_id": chosen.todo.todo_id,
+                        },
                         "task_spec": {
                             "schema": "coding-task/v1",
                             "todo_id": chosen.todo.todo_id,
@@ -723,6 +813,19 @@ def tick(
                         disposition.treatment_id == "controller-verify"
                         and _implementation_attempt_hash(current)
                         != chosen.implementation_attempt_hash
+                    ):
+                        result = replace(
+                            result, skipped_active=result.skipped_active + 1
+                        )
+                        continue
+                    if (
+                        todo_ids is None
+                        and disposition.treatment_id == "controller-verify"
+                        and not _has_explicit_succeeded_implementation(
+                            chosen.todo,
+                            chosen.implementation_attempt_hash or "",
+                            check_implementation_succeeded_fn,
+                        )
                     ):
                         result = replace(
                             result, skipped_active=result.skipped_active + 1

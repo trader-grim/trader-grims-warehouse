@@ -447,7 +447,12 @@ def test_bridge_todo_foreman_payload_and_receipt_retain_plan_binding(tmp_path, r
         patch("tgw.development.foreman.build_coding_snapshot", return_value=object()),
         patch("tgw.development.foreman.evaluate", return_value=graph),
     ):
-        assert tick(fetch_todos=lambda: [todo], check_active_fn=lambda _: False, enqueue_fn=enqueue).dispatched == 1
+        assert tick(
+            todo_ids={todo.todo_id},
+            fetch_todos=lambda: [todo],
+            check_active_fn=lambda _: False,
+            enqueue_fn=enqueue,
+        ).dispatched == 1
     payload = enqueue.call_args.kwargs["payload"]
     assert payload["todo_id"] == result["todo_id"] and payload["worktree"] == location["worktree"] and payload["plan_binding"] == result["binding"]
     worker = CodingWorker("codex-implement", {"coding": {}}, launcher=lambda *_: {"outcome": "satisfied", "established_conditions": ["implemented"], "artifacts": []})

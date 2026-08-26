@@ -51,13 +51,34 @@ def test_fixture_baseline_is_never_applied_to_an_ordinary_todo(tmp_path):
         observed.append(implementation_baseline_commit)
         return object()
 
-    with patch("tgw.development.foreman.validated_coding_worktree", return_value=Path(ordinary.worktree)), patch("tgw.development.foreman.build_coding_snapshot", side_effect=snapshot), patch("tgw.development.foreman.evaluate", return_value=graph):
-        assert tick(ForemanConfig(), fetch_todos=lambda: [ordinary], check_active_fn=lambda _: False).skipped_waiting == 1
+    with (
+        patch(
+            "tgw.development.foreman.validated_coding_worktree",
+            return_value=Path(ordinary.worktree),
+        ),
+        patch(
+            "tgw.development.foreman.build_coding_snapshot",
+            side_effect=snapshot,
+        ),
+        patch("tgw.development.foreman.evaluate", return_value=graph),
+    ):
+        result = tick(
+            ForemanConfig(),
+            todo_ids={ordinary.todo_id},
+            fetch_todos=lambda: [ordinary],
+            check_active_fn=lambda _: False,
+        )
+        assert result.skipped_waiting == 1
     assert observed == [None]
 
 
 def test_fixture_baseline_must_equal_the_todo_bound_source_commit(tmp_path):
     fixture = TodoRecord(2, "codex", 1, "fixture", str(tmp_path / "fixture"), {"fixture_run_id": "fixture-example", "source_commit": "a" * 40})
     config = ForemanConfig(fixture_implementation_baseline_commit="b" * 40)
-    result = tick(config, fetch_todos=lambda: [fixture], check_active_fn=lambda _: False)
+    result = tick(
+        config,
+        todo_ids={fixture.todo_id},
+        fetch_todos=lambda: [fixture],
+        check_active_fn=lambda _: False,
+    )
     assert result.errors == 1
