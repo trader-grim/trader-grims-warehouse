@@ -450,7 +450,7 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
             schema_path.write_text(json.dumps(_FINAL_SCHEMA, sort_keys=True), encoding="utf-8")
             command = [
                 _codex_binary(), "--ask-for-approval", "never",
-                "--sandbox", "workspace-write", "exec", "--ephemeral",
+                "--sandbox", "danger-full-access", "exec", "--ephemeral",
                 "-C", str(cwd),
                 "--output-schema", str(schema_path), "-o", str(output_path), "-",
             ]

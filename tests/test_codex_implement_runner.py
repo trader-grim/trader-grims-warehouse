@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -82,7 +84,7 @@ def test_satisfied_closes_exact_source_commit(tmp_path, monkeypatch):
     assert len(closed["tree"]) == 40
 
 
-def test_runner_uses_noninteractive_workspace_write_without_approval_gate(
+def test_runner_uses_ordinary_unix_boundary_without_approval_gate(
     tmp_path,
     monkeypatch,
 ):
@@ -120,8 +122,52 @@ def test_runner_uses_noninteractive_workspace_write_without_approval_gate(
 
     assert "--approve-for-me" not in captured
     assert captured[captured.index("--ask-for-approval") + 1] == "never"
-    assert captured[captured.index("--sandbox") + 1] == "workspace-write"
+    assert captured[captured.index("--sandbox") + 1] == "danger-full-access"
+    assert "workspace-write" not in captured
+    assert captured[captured.index("-C") + 1] == str(repo)
+    assert not {
+        "sudo", "ssh", "tgw-prod", "remote-provision", "approval-card",
+        "execution-card", "actor-fleet",
+    }.intersection(captured)
     assert "--ignore-user-config" not in captured
+
+
+def test_actual_runner_boundary_retains_unix_identity_and_local_transports(
+    tmp_path, tmp_path_factory, monkeypatch,
+):
+    repo = _repo(tmp_path)
+    helper = tmp_path_factory.mktemp("codex-boundary") / "codex"
+    helper.write_text(
+        """#!{python}
+import json, os, socket, sys
+args = sys.argv[1:]
+assert args[args.index('--sandbox') + 1] == 'danger-full-access'
+assert args[args.index('--ask-for-approval') + 1] == 'never'
+assert os.getcwd() == args[args.index('-C') + 1]
+assert os.environ['CODEX_HOME'].startswith(os.getcwd() + '/.tgw-codex-implement-')
+unix_path = {socket_path!r}
+with socket.socket(socket.AF_UNIX) as server:
+    server.bind(unix_path); server.listen()
+    with socket.socket(socket.AF_UNIX) as client:
+        client.connect(unix_path)
+        connection, _ = server.accept(); connection.close()
+with socket.socket() as server:
+    server.bind(('127.0.0.1', 0)); server.listen()
+    port = server.getsockname()[1]
+    with socket.socket() as client:
+        client.connect(('127.0.0.1', port))
+        connection, _ = server.accept(); connection.close()
+json.dump({{'status': 'blocked', 'summary': 'identity=' + str(os.getuid()), 'tests': ['unix socket', 'loopback']}}, open(args[args.index('-o') + 1], 'w'))
+""".format(python=sys.executable, socket_path=str(helper.parent / "transport.sock")),
+        encoding="utf-8",
+    )
+    helper.chmod(0o700)
+    monkeypatch.setattr(codex_implement, "_codex_binary", lambda: str(helper))
+
+    result = codex_implement.run(_job(), repo)
+
+    assert result["outcome"] == "partial", result
+    assert f"identity={os.getuid()}" in result["artifacts"][0]["detail"]
 
 
 def test_runner_fails_closed_when_local_context_mcp_is_missing(tmp_path, monkeypatch):
