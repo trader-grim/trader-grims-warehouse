@@ -7,8 +7,9 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional
 
 import psycopg2
 import psycopg2.extras
@@ -89,13 +90,15 @@ def init(dsn: str) -> None:
 
 
 @contextmanager
-def _conn() -> Generator:
+def _conn(on_rollback: Callable[[], None] | None = None) -> Generator:
     """Open a short-lived autocommit-off connection."""
     con = psycopg2.connect(_DSN)
     try:
         yield con
         con.commit()
     except Exception:
+        if on_rollback is not None:
+            on_rollback()
         con.rollback()
         raise
     finally:
@@ -665,27 +668,160 @@ def fail_claimed_job(job_id: str, lease_owner: str, lease_token: str, error: str
 
 def cancel_job(job_id: str, message: Optional[str] = None,
                result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Cancel a named pending job and optionally persist its receipt result."""
+    """Cancel an active job, or return the terminal completion that won.
+
+    The row lock makes the returned state the durable race result.  In
+    particular, callers must never infer cancellation from their earlier
+    snapshot or overlay a successful stop result on a terminal completion.
+    """
     with _conn() as con:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute('SELECT * FROM cancel_job(%s, %s)', (job_id, message))
-            cancelled = dict(cur.fetchone())
-            if result is not None and cancelled["state"] == "cancelled":
-                cur.execute(
-                    """UPDATE queue_jobs
-                         SET payload_json = COALESCE(payload_json, '{}'::jsonb)
-                                            || jsonb_build_object('result', %s::jsonb)
-                       WHERE job_id = %s AND state = 'cancelled'
-                       RETURNING *""",
-                    (json.dumps(result), job_id),
-                )
-                updated = cur.fetchone()
-                if updated is None:
-                    raise RuntimeError(
-                        "cancelled job changed state before receipt persistence"
-                    )
-                cancelled = dict(updated)
-            return cancelled
+            # Pair with close_local_success's session lock.  Unlike a row lock,
+            # this exclusion survives rollback of an aborted success transaction
+            # while a separate transaction durably fences ambiguous publication.
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 1792))",
+                (job_id,),
+            )
+            cur.execute("SELECT * FROM queue_jobs WHERE job_id = %s FOR UPDATE", (job_id,))
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError(f"cancel_job denied for missing job {job_id}")
+            current = dict(row)
+            if (current.get("state") == "running"
+                    and current.get("error_code") in {
+                        "PUBLICATION_CLOSING",
+                        "PUBLICATION_RECONCILIATION_REQUIRED",
+                    }):
+                return current
+            if current.get("state") in {"succeeded", "failed", "dead_letter", "cancelled"}:
+                return current
+            if current.get("state") not in {"queued", "leased", "running", "retry_wait"}:
+                return current
+            durable_result = result
+            control = result.get("stop_control") if isinstance(result, dict) else None
+            if isinstance(control, dict) and control.get("kind") == "runner_cancel_requested":
+                try:
+                    request_identity = {
+                        "job_id": str(uuid.UUID(str(current["job_id"]))),
+                        "queue_name": current["queue_name"],
+                        "lease_owner": current["lease_owner"],
+                        "lease_token": str(uuid.UUID(str(current["lease_token"]))),
+                    }
+                except (KeyError, ValueError, TypeError, AttributeError) as exc:
+                    raise RuntimeError("active cancellation lacks exact durable lease identity") from exc
+                if (not isinstance(request_identity["queue_name"], str)
+                        or not request_identity["queue_name"]
+                        or not isinstance(request_identity["lease_owner"], str)
+                        or not request_identity["lease_owner"]):
+                    raise RuntimeError("active cancellation has malformed durable lease identity")
+                durable_result = {
+                    **result,
+                    "stop_control": {**control, "request_identity": request_identity},
+                }
+            cur.execute(
+                """UPDATE queue_jobs
+                      SET state = 'cancelled', finished_at = COALESCE(finished_at, NOW()),
+                          lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+                          last_heartbeat_at = NOW(), error_code = 'CANCELLED',
+                          error_detail = COALESCE(%s, error_detail),
+                          payload_json = CASE WHEN %s::jsonb IS NULL THEN payload_json
+                              ELSE COALESCE(payload_json, '{}'::jsonb)
+                                   || jsonb_build_object('result', %s::jsonb) END
+                    WHERE job_id = %s AND state IN ('queued', 'leased', 'running', 'retry_wait')
+                    RETURNING *""",
+                (message, json.dumps(durable_result) if durable_result is not None else None,
+                 json.dumps(durable_result) if durable_result is not None else None, job_id),
+            )
+            updated = cur.fetchone()
+            if updated is None:  # row lock makes this defensive only
+                raise RuntimeError("cancel_job lost locked active row")
+            return dict(updated)
+
+
+def validate_cancellation_acknowledgement(
+    job_id: str, acknowledgement: Dict[str, Any],
+    request_identity: Dict[str, Any] | None = None,
+) -> None:
+    """Validate exact, job-bound, worker-owned terminal runner evidence."""
+    _validate_json_value(acknowledgement, "acknowledgement")
+    required = {"schema", "job_id", "worker", "runner", "ack_id", "observed_at",
+                "reason", "reaped"}
+    if set(acknowledgement) != required:
+        raise ValueError("cancellation acknowledgement has invalid fields")
+    if acknowledgement["schema"] != "tgw-coding-stop-ack/v1":
+        raise ValueError("cancellation acknowledgement has invalid schema")
+    try:
+        durable_job_id = str(uuid.UUID(job_id))
+        ack_job_id = str(uuid.UUID(acknowledgement["job_id"]))
+        str(uuid.UUID(acknowledgement["ack_id"]))
+        observed = datetime.fromisoformat(acknowledgement["observed_at"])
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("cancellation acknowledgement identity is invalid") from exc
+    if durable_job_id != ack_job_id or observed.tzinfo is None:
+        raise ValueError("cancellation acknowledgement is not bound to this job")
+    if acknowledgement["reason"] not in {"stopped", "timeout", "reaped", "no_runner"}:
+        raise ValueError("cancellation acknowledgement reason is invalid")
+    if acknowledgement["reaped"] is not True:
+        raise ValueError("cancellation acknowledgement must confirm a closed runner scope")
+    worker = acknowledgement["worker"]
+    runner = acknowledgement["runner"]
+    if not isinstance(worker, str) or not worker or not isinstance(runner, dict):
+        raise ValueError("cancellation acknowledgement worker identity is invalid")
+    runner_required = {"schema", "job_id", "queue_name", "lease_owner", "lease_token"}
+    if acknowledgement["reason"] == "no_runner":
+        runner_required.add("kind")
+    if set(runner) != runner_required or runner.get("schema") != "tgw-coding-runner/v2":
+        raise ValueError("cancellation acknowledgement runner identity is invalid")
+    if runner.get("job_id") != durable_job_id or runner.get("lease_owner") != worker:
+        raise ValueError("cancellation acknowledgement runner is not worker-owned")
+    try:
+        runner_token = str(uuid.UUID(str(runner.get("lease_token"))))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("cancellation acknowledgement runner lease is invalid") from exc
+    if acknowledgement["reason"] == "no_runner" and runner.get("kind") != "no_runner":
+        raise ValueError("no-runner acknowledgement lacks no-runner evidence")
+    if request_identity is not None:
+        if set(request_identity) != {"job_id", "queue_name", "lease_owner", "lease_token"}:
+            raise ValueError("cancellation request identity has invalid fields")
+        try:
+            expected = {
+                **request_identity,
+                "job_id": str(uuid.UUID(str(request_identity["job_id"]))),
+                "lease_token": str(uuid.UUID(str(request_identity["lease_token"]))),
+            }
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("cancellation request identity is invalid") from exc
+        actual = {key: runner.get(key) for key in expected}
+        actual["lease_token"] = runner_token
+        if actual != expected or acknowledgement["worker"] != expected["lease_owner"]:
+            raise ValueError("acknowledgement does not match durable cancellation request")
+
+
+def acknowledge_cancellation(job_id: str, acknowledgement: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Persist one non-replayable worker-owned cancellation acknowledgement."""
+    validate_cancellation_acknowledgement(job_id, acknowledgement)
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """UPDATE queue_jobs
+                      SET payload_json = jsonb_set(
+                            payload_json,
+                            '{result,stop_control,acknowledgement}', %s::jsonb, true)
+                    WHERE job_id = %s AND state = 'cancelled'
+                      AND payload_json->'result'->'stop_control'->>'kind' = 'runner_cancel_requested'
+                      AND payload_json->'result'->'stop_control'->'request_identity' =
+                          jsonb_build_object(
+                              'job_id', %s, 'queue_name', %s,
+                              'lease_owner', %s, 'lease_token', %s)
+                      AND NOT (payload_json->'result'->'stop_control' ? 'acknowledgement')
+                    RETURNING *""",
+                (json.dumps(acknowledgement), job_id,
+                 acknowledgement["runner"]["job_id"], acknowledgement["runner"]["queue_name"],
+                 acknowledgement["runner"]["lease_owner"], acknowledgement["runner"]["lease_token"]),
+            )
+            row = cur.fetchone()
+            return dict(row) if row is not None else None
 
 
 def mark_running(job_id: str, lease_owner: str, lease_token: str) -> None:
@@ -838,6 +974,175 @@ def mark_succeeded(
                 )
             if cur.rowcount != 1:
                 raise RuntimeError("lost running lease while marking succeeded")
+
+
+def close_local_success(
+    job_id: str,
+    lease_owner: str,
+    lease_token: str,
+    result: Dict[str, Any],
+    publish: Callable[[Callable[[Callable[[], None]], None]], None],
+) -> bool:
+    """Serialize filesystem closure with cancellation and durable success.
+
+    Before publication can have filesystem effects, the exact row is committed
+    into a durable, non-cancellable ``PUBLICATION_CLOSING`` condition.  The
+    session advisory lock shared with ``cancel_job`` then serializes publication,
+    success, compensation, and reconciliation.  If any later transaction cannot
+    be proven, the already-committed closing condition remains repair evidence
+    and Stop cannot misrepresent the row as cancelled work.
+    """
+    rollback_publication: Callable[[], None] | None = None
+    con = psycopg2.connect(_DSN)
+    lock_held = False
+    try:
+        with con.cursor() as cur:
+            cur.execute(
+                "SELECT pg_advisory_lock(hashtextextended(%s, 1792))", (job_id,)
+            )
+            lock_held = True
+            cur.execute(
+                """SELECT 1 FROM queue_jobs
+                    WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                      AND lease_token = %s::uuid AND lease_expires_at > NOW()
+                    FOR UPDATE""",
+                (job_id, lease_owner, lease_token),
+            )
+            if cur.fetchone() is None:
+                return False
+            cur.execute(
+                """UPDATE queue_jobs
+                      SET error_code = 'PUBLICATION_CLOSING',
+                          error_detail = 'filesystem publication is fenced',
+                          payload_json = COALESCE(payload_json, '{}'::jsonb)
+                            || jsonb_build_object(
+                              'publication_reconciliation',
+                              jsonb_build_object(
+                                'schema', 'tgw-publication-reconciliation/v1',
+                                'job_id', %s,
+                                'state', 'closing'))
+                    WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                      AND lease_token = %s::uuid
+                    RETURNING 1""",
+                (job_id, job_id, lease_owner, lease_token),
+            )
+            if cur.fetchone() is None:  # pragma: no cover - row lock invariant
+                raise RuntimeError("lost locked local publication fence")
+        # This commit must return successfully before publish is invoked.  An
+        # uncertain/failed commit therefore cannot coincide with filesystem
+        # effects started by this call.
+        con.commit()
+        with con.cursor() as cur:
+            cur.execute(
+                """SELECT 1 FROM queue_jobs
+                    WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                      AND lease_token = %s::uuid
+                      AND error_code = 'PUBLICATION_CLOSING'
+                    FOR UPDATE""",
+                (job_id, lease_owner, lease_token),
+            )
+            if cur.fetchone() is None:
+                raise RuntimeError("durable local publication fence was lost")
+            def register_undo(callback: Callable[[], None]) -> None:
+                nonlocal rollback_publication
+                if rollback_publication is not None:
+                    raise RuntimeError("publication undo already registered")
+                rollback_publication = callback
+            publish(register_undo)
+            if rollback_publication is None:
+                raise RuntimeError("publication did not register undo before effects")
+            cur.execute(
+                """UPDATE queue_jobs
+                      SET state = 'succeeded', finished_at = NOW(),
+                          lease_owner = NULL, lease_token = NULL,
+                          lease_expires_at = NULL, error_code = NULL,
+                          error_detail = NULL,
+                          payload_json = (COALESCE(payload_json, '{}'::jsonb)
+                                          - 'publication_reconciliation')
+                                         || jsonb_build_object('result', %s::jsonb)
+                    WHERE job_id = %s AND state = 'running' AND lease_owner = %s
+                      AND lease_token = %s::uuid
+                      AND error_code = 'PUBLICATION_CLOSING'""",
+                (json.dumps(result), job_id, lease_owner, lease_token),
+            )
+            if cur.rowcount != 1:  # pragma: no cover - row lock invariant
+                raise RuntimeError("lost locked local success closure")
+        con.commit()
+        return True
+    except BaseException as primary_error:
+        cleanup_error: BaseException | None = None
+        if rollback_publication is not None:
+            try:
+                rollback_publication()
+            except BaseException as exc:
+                cleanup_error = exc
+        con.rollback()
+        if cleanup_error is not None:
+            # The initial closing condition is already durable.  This upgrade
+            # adds the exact failure evidence when possible; if its update or
+            # commit fails, rollback retains that non-cancellable condition.
+            try:
+                with con.cursor() as fence_cur:
+                    fence_cur.execute(
+                        """UPDATE queue_jobs
+                              SET state = 'failed', finished_at = NOW(),
+                                  lease_owner = NULL, lease_token = NULL,
+                                  lease_expires_at = NULL,
+                                  error_code = 'PUBLICATION_RECONCILIATION_REQUIRED',
+                                  error_detail = %s,
+                                  payload_json = COALESCE(payload_json, '{}'::jsonb)
+                                    || jsonb_build_object(
+                                      'publication_reconciliation',
+                                      jsonb_build_object(
+                                        'schema', 'tgw-publication-reconciliation/v1',
+                                        'job_id', %s,
+                                        'success_error', %s,
+                                        'cleanup_error', %s))
+                            WHERE job_id = %s AND state = 'running'
+                              AND error_code = 'PUBLICATION_CLOSING'
+                            RETURNING 1""",
+                        (repr(cleanup_error), job_id, repr(primary_error),
+                         repr(cleanup_error), job_id),
+                    )
+                    if fence_cur.fetchone() is None:
+                        raise RuntimeError(
+                            "lost local closure while fencing failed rollback"
+                        ) from cleanup_error
+                con.commit()
+            except BaseException:
+                con.rollback()
+            raise RuntimeError(
+                "coding publication rollback requires reconciliation"
+            ) from cleanup_error
+        # Compensation was proven.  Restore ordinary running work only through
+        # a committed exact-lease repair; an unprovable repair safely leaves the
+        # durable closing condition in place.
+        try:
+            with con.cursor() as repair_cur:
+                repair_cur.execute(
+                    """UPDATE queue_jobs
+                          SET error_code = NULL, error_detail = NULL,
+                              payload_json = COALESCE(payload_json, '{}'::jsonb)
+                                             - 'publication_reconciliation'
+                        WHERE job_id = %s AND state = 'running'
+                          AND lease_owner = %s AND lease_token = %s::uuid
+                          AND error_code = 'PUBLICATION_CLOSING'""",
+                    (job_id, lease_owner, lease_token),
+                )
+            con.commit()
+        except BaseException:
+            con.rollback()
+        raise
+    finally:
+        if lock_held:
+            try:
+                with con.cursor() as cur:
+                    cur.execute(
+                        "SELECT pg_advisory_unlock(hashtextextended(%s, 1792))",
+                        (job_id,),
+                    )
+            finally:
+                con.close()
 
 
 def complete_treatment_and_enqueue_evaluation(

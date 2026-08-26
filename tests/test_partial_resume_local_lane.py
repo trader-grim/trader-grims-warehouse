@@ -496,6 +496,10 @@ def test_worker_recovers_exact_closed_candidate_without_launcher(tmp_path: Path,
         launcher=launcher,
     )
     monkeypatch.setattr(worker, "_validated_plan_binding", lambda *_args: plan_binding)
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.get_job",
+        lambda _job_id: {"state": "running"},
+    )
     receipt = worker.handle(
         {
             "job_id": "stale-retry",
@@ -659,6 +663,10 @@ def test_configured_subprocess_runner_and_worker_share_one_lease(tmp_path: Path,
         },
     )
     monkeypatch.setattr(worker, "_validated_plan_binding", lambda *_args: plan_binding)
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.get_job",
+        lambda _job_id: {"state": "running"},
+    )
 
     with pytest.raises(Exception, match="reported partial"):
         worker.handle(

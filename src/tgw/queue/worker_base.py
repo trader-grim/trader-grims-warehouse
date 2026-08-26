@@ -24,6 +24,7 @@ import signal
 import socket
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import tgw.logging as tgw_logging
@@ -155,6 +156,17 @@ _RECOVER_INTERVAL_S = 60   # how often to call recover_expired_jobs
 
 class JobTimeoutError(RuntimeError):
     """A worker's bounded execution window elapsed."""
+
+
+class JobCancelled(RuntimeError):
+    """The exact leased job was durably cancelled while its child was active."""
+
+    def __init__(self, message: str, *, reason: str, reaped: bool,
+                 runner: Dict[str, Any]) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.reaped = reaped
+        self.runner = runner
 
 # Transient error patterns that warrant automatic requeue rather than dead-letter.
 # (substring match, case-insensitive) → requeue delay in seconds.
@@ -344,6 +356,35 @@ class QueueWorker:
         try:
             state_machine.mark_running(job_id, self.owner, lease_token)
             _handle_result = self._handle_with_deadline(job)
+        except JobCancelled as exc:
+            runner_identity = {
+                "schema": "tgw-coding-runner/v2",
+                "job_id": job_id,
+                "queue_name": self.queue_name,
+                "lease_owner": self.owner,
+                "lease_token": lease_token,
+            }
+            if exc.reason == "no_runner":
+                runner_identity["kind"] = "no_runner"
+            acknowledgement = {
+                "schema": "tgw-coding-stop-ack/v1",
+                "job_id": job_id,
+                "ack_id": str(uuid.uuid4()),
+                "worker": self.owner,
+                # Persist only the exact immutable request identity. Process
+                # diagnostics remain local and are not cancellation authority.
+                "runner": runner_identity,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "reason": exc.reason,
+                "reaped": exc.reaped,
+            }
+            acknowledged = state_machine.acknowledge_cancellation(job_id, acknowledgement)
+            if acknowledged is None:
+                raise RuntimeError(
+                    f"job {job_id} cancellation acknowledgement was not durably accepted"
+                )
+            log.info("job %s cancellation acknowledged: %s", job_id, exc)
+            tgw_logging.log_event("job_cancelled", job_id=job_id)
         except HardFailure as exc:
             log.error('job %s hard failure (dead_letter): %s', job_id, exc)
             state_machine.mark_dead_letter(
@@ -412,9 +453,19 @@ class QueueWorker:
                 # Development coding receipts are consumed directly from the
                 # request worktree by the local Foreman.  They do not enter
                 # the item-workflow evaluation queue.
-                state_machine.mark_succeeded(
-                    job_id, self.owner, lease_token, result=receipt,
+                success_hook = getattr(self, "_on_direct_local_success", None)
+                closed = state_machine.close_local_success(
+                    job_id,
+                    self.owner,
+                    lease_token,
+                    receipt or {},
+                    lambda register: success_hook(job, receipt, register)
+                    if success_hook is not None else None,
                 )
+                if not closed:
+                    log.info("job %s cancellation won local success closure", job_id)
+                    tgw_logging.log_event("job_cancelled", job_id=job_id)
+                    return
                 tgw_logging.log_event('job_succeeded', job_id=job_id)
                 log.info('job %s succeeded', job_id)
                 return

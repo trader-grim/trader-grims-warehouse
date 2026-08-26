@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from tgw import api, coding_cli, coding_execution, coding_provision, coding_provision_worker, http_server
 from tgw.development.coding_snapshot import serialize_snapshot
 from tgw.development.foreman import TickResult
+from tgw.development.plan_binding import execution_root_hash
 from tgw.development.treatments import CODING_TREATMENTS
 from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
@@ -2069,6 +2070,93 @@ def test_1747_resume_refuses_other_status_binding_before_any_effect(tmp_path, mo
     monkeypatch.setattr(coding_cli, "parse_plan_binding", lambda value, **_kwargs: json.loads(value))
     with pytest.raises(coding_cli.CodingCLIError, match="not the observed accidental"):
         coding_cli._legacy_1747_binding(item, jobs)
+
+
+def test_1792_resume_reuses_106388_attempt_after_canonical_source_advanced(
+    tmp_path, monkeypatch,
+):
+    worktree = tmp_path / "todo-1792-plan-original-106388"
+    worktree.mkdir()
+    root = {"schema": "tgw-execution-root/v1", "kind": "todo", "todo_id": 1792}
+    root["identity_hash"] = execution_root_hash(root)
+    binding = {
+        "schema": "tgw-plan-coding-todo/v1", "todo_id": 1792,
+        "plan_commit": "b" * 40, "solution_hash": "sha256:" + "c" * 64,
+        "closure_hash": "sha256:" + "e" * 64, "capability": "stop",
+        "treatment_id": "establish:stop", "idempotency_key": "todo-1792",
+        "source_commit": "106388656233d4273be3d052725e8f97cb00d203",
+        "worktree": str(worktree), "execution_root": root,
+        "worktree_identity": {
+            "branch": "coding/codex/todo-1792-plan-original",
+            "created": True, "head": "106388656233d4273be3d052725e8f97cb00d203",
+            "actor": "codex",
+        },
+    }
+    item = {"id": 1792, "agent": "codex", "body": "Stop", "priority": 1,
+            "done_at": None, "status_note": json.dumps(binding)}
+    job = {"payload_json": {"todo_id": 1792, "plan_binding": binding}}
+    effects = []
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {}})
+    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda _todo_id: item)
+    monkeypatch.setattr(coding_cli, "_jobs", lambda *_a, **_k: [job])
+    monkeypatch.setattr(coding_cli, "source_tree", lambda *_a: "d" * 40)
+    monkeypatch.setattr(
+        coding_cli, "exclusive_worktree_lease", lambda _path: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(coding_cli, "classify", lambda *_a: {
+        "state": "RESUMABLE_PARTIAL", "resume_of": "sha256:attempt",
+        "fingerprint": "sha256:fingerprint",
+    })
+    monkeypatch.setattr(
+        coding_cli, "bind_command",
+        lambda *_a, **_k: pytest.fail("current ebc source was bound"),
+    )
+    monkeypatch.setattr(coding_cli, "tick", lambda config, **_kwargs: (
+        effects.append(config.resume_bindings), TickResult(dispatched=1)
+    )[1])
+    monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
+
+    result = coding_cli.resume(1792, config_path=tmp_path / "config.json")
+
+    assert result["worktree"] == str(worktree)
+    assert result["source_commit"] == binding["source_commit"]
+    assert effects == [{1792: {
+        "resume_of": "sha256:attempt", "resume_fingerprint": "sha256:fingerprint",
+    }}]
+
+
+@pytest.mark.parametrize("state", ["CLOSED_CANDIDATE", "UNSAFE_DIRTY"])
+def test_general_resume_refuses_non_resumable_history_before_bind_or_dispatch(
+    tmp_path, monkeypatch, state,
+):
+    worktree = tmp_path / "historical"
+    worktree.mkdir()
+    root = {"schema": "tgw-execution-root/v1", "kind": "todo", "todo_id": 1792}
+    root["identity_hash"] = execution_root_hash(root)
+    binding = {
+        "schema": "tgw-plan-coding-todo/v1", "todo_id": 1792,
+        "plan_commit": "b" * 40, "solution_hash": "sha256:" + "c" * 64,
+        "closure_hash": "sha256:" + "e" * 64, "capability": "stop",
+        "treatment_id": "establish:stop", "idempotency_key": "todo-1792",
+        "source_commit": "a" * 40, "worktree": str(worktree), "execution_root": root,
+        "worktree_identity": {"branch": "coding/codex/historical"},
+    }
+    item = {"id": 1792, "agent": "codex", "body": "Stop", "priority": 1,
+            "done_at": None, "status_note": json.dumps(binding)}
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {}})
+    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda _todo_id: item)
+    monkeypatch.setattr(coding_cli, "_jobs", lambda *_a, **_k: [
+        {"payload_json": {"plan_binding": binding}}
+    ])
+    monkeypatch.setattr(coding_cli, "source_tree", lambda *_a: "d" * 40)
+    monkeypatch.setattr(coding_cli, "classify", lambda *_a: {"state": state})
+    monkeypatch.setattr(coding_cli, "bind_command", lambda *_a, **_k: effects.append("bind"))
+    monkeypatch.setattr(coding_cli, "tick", lambda *_a, **_k: effects.append("dispatch"))
+    effects = []
+
+    with pytest.raises(coding_cli.CodingCLIError, match="zero effects"):
+        coding_cli.resume(1792, config_path=tmp_path / "config.json")
+    assert effects == []
 
 
 def test_local_coding_start_projects_missing_todo_from_standalone_plan(monkeypatch):

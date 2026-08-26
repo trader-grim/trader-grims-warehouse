@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import stat
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -119,6 +121,8 @@ _RECEIPT_PATHS: dict[str, str] = {
 
 CONTROLLER_PYTHON = "/opt/TGW/.venvs/controller/bin/python"
 _ATTEMPT_EVIDENCE_ROOTS = (".tgw-coding-history/", ".tgw-coding-preservation/")
+_PRESERVATION_NAME = re.compile(r"[0-9a-f]{64}\.json")
+_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
 def _git(
@@ -157,6 +161,100 @@ def _git_branch(worktree: Path) -> Optional[str]:
     return out if code == 0 and out != "HEAD" else None
 
 
+def _preservation_evidence(worktree: Path, relative: str) -> bytes | None:
+    """Return exact valid preservation bytes, never a path-shaped exemption."""
+    prefix = ".tgw-coding-preservation/"
+    if not relative.startswith(prefix):
+        return None
+    name = relative.removeprefix(prefix)
+    if "/" in name or _PRESERVATION_NAME.fullmatch(name) is None:
+        return None
+    path = worktree / relative
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or path.is_symlink():
+            return None
+        if path.resolve(strict=True).parent != (worktree / prefix).resolve(strict=True):
+            return None
+        raw = path.read_bytes()
+        value = json.loads(raw)
+    except (OSError, RuntimeError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "binding", "classification", "source", "manifest_hash",
+    } or value.get("schema") != "tgw-coding-preservation-manifest/v2":
+        return None
+    if raw != (json.dumps(value, sort_keys=True) + "\n").encode():
+        return None
+    binding = value.get("binding")
+    required = {
+        "todo_id", "plan_commit", "solution_hash", "source_commit", "source_tree",
+        "actor", "worktree", "treatment_id", "treatment_version",
+    }
+    if (not isinstance(binding, dict) or not required.issubset(binding)
+            or binding.get("worktree") != str(worktree.resolve())
+            or binding.get("treatment_id") != "codex-implement"
+            or binding.get("treatment_version") != "1"
+            or not isinstance(binding.get("todo_id"), int)
+            or binding["todo_id"] <= 0
+            or _COMMIT.fullmatch(str(binding.get("plan_commit", ""))) is None
+            or _COMMIT.fullmatch(str(binding.get("source_commit", ""))) is None
+            or _COMMIT.fullmatch(str(binding.get("source_tree", ""))) is None
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", str(binding.get("solution_hash", ""))) is None
+            or not isinstance(binding.get("actor"), str) or not binding["actor"]
+            or value.get("classification") not in {
+                "UNSAFE_DIRTY", "STALE_RECEIPT", "RESUMABLE_PARTIAL",
+                "ABANDONED_CLEAN", "CLOSED_CANDIDATE",
+            }
+            or not isinstance(value.get("source"), dict)):
+        return None
+    unsigned = dict(value)
+    claimed = unsigned.pop("manifest_hash", None)
+    actual = "sha256:" + hashlib.sha256(json.dumps(
+        unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()).hexdigest()
+    if claimed != actual or name != actual.removeprefix("sha256:") + ".json":
+        return None
+    try:
+        from tgw.development.partial_resume import source_fingerprint
+        if value.get("source") != source_fingerprint(worktree):
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return raw
+
+
+def _workflow_evidence_fingerprint(worktree: Path) -> str:
+    root = worktree / ".tgw-coding-preservation"
+    if root.exists():
+        try:
+            if root.is_symlink() or not root.is_dir():
+                return "invalid"
+            for path in root.iterdir():
+                relative = path.relative_to(worktree).as_posix()
+                if _preservation_evidence(worktree, relative) is None:
+                    return "invalid"
+                ignored, _, _ = _git(worktree, "check-ignore", "-q", "--", relative)
+                if ignored == 0:
+                    return "invalid"
+        except (OSError, RuntimeError, ValueError):
+            return "invalid"
+    code, out, _ = _git(
+        worktree, "status", "--porcelain=v1", "--untracked-files=all",
+        "--", ".tgw-coding-preservation",
+    )
+    if code != 0:
+        return "invalid"
+    evidence = []
+    for line in out.splitlines():
+        relative = line[3:]
+        raw = _preservation_evidence(worktree, relative) if line.startswith("?? ") else None
+        if raw is None:
+            return "invalid"
+        evidence.append(relative.encode() + b"\0" + raw)
+    return hashlib.sha256(b"\0".join(sorted(evidence))).hexdigest()
+
+
 def _git_is_clean(worktree: Path) -> Optional[bool]:
     """Return True if the worktree is clean, False if dirty, None if not a repo."""
     code, out, _ = _git(
@@ -168,9 +266,20 @@ def _git_is_clean(worktree: Path) -> Optional[bool]:
     )
     if code != 0:
         return None
+    if _workflow_evidence_fingerprint(worktree) == "invalid":
+        return False
     receipt_names = set(_RECEIPT_PATHS.values())
-    changes = [line for line in out.splitlines() if line[3:] not in receipt_names
-               and not line[3:].startswith(_ATTEMPT_EVIDENCE_ROOTS)]
+    changes = []
+    for line in out.splitlines():
+        relative = line[3:]
+        if relative in receipt_names:
+            continue
+        if relative.startswith(".tgw-coding-history/"):
+            continue
+        if (line.startswith("?? ") and _preservation_evidence(worktree, relative)
+                is not None):
+            continue
+        changes.append(line)
     return not changes
 
 
@@ -181,7 +290,7 @@ def _git_source_fingerprint(worktree: Path) -> str:
     # receipt path to Git in an old worktree, and that must not make evidence
     # alter the source generation it attests.
     pathspecs = (".", *(f":(exclude){name}" for name in sorted(receipt_names)),
-                 ":(exclude).tgw-coding-history", ":(exclude).tgw-coding-preservation")
+                 ":(exclude).tgw-coding-history")
     _, tracked_diff, _ = _git(worktree, "diff", "--binary", "HEAD", "--", *pathspecs)
     _, untracked, _ = _git(worktree, "ls-files", "--others", "--exclude-standard")
     _, ignored, _ = _git(
@@ -193,7 +302,9 @@ def _git_source_fingerprint(worktree: Path) -> str:
     )
     untracked_content: list[str] = []
     for relative in (*untracked.splitlines(), *ignored.splitlines()):
-        if relative in receipt_names or relative.startswith(_ATTEMPT_EVIDENCE_ROOTS):
+        if relative in receipt_names or relative.startswith(".tgw-coding-history/"):
+            continue
+        if _preservation_evidence(worktree, relative) is not None:
             continue
         candidate = worktree / relative
         if candidate.is_file():

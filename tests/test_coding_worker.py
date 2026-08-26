@@ -402,8 +402,42 @@ def test_satisfied_local_coding_job_completes_without_item_evaluation_queue(tmp_
     }
     with patch("tgw.queue.worker_base.state_machine") as state_machine:
         worker._process(job)
-    state_machine.mark_succeeded.assert_called_once()
+    state_machine.close_local_success.assert_called_once()
     state_machine.complete_treatment_and_enqueue_evaluation.assert_not_called()
+
+
+def test_success_publication_failure_removes_attempt_and_receipt(monkeypatch, tmp_path):
+    worker = object.__new__(CodingWorker)
+    receipt = {"outcome": "satisfied"}
+    receipt_path = tmp_path / "implementation-receipt.json"
+    attempt_path = tmp_path / ".tgw-coding-history" / "implementation" / "000001-test.json"
+    worker._pending_success_receipt = ("job-1", receipt_path, receipt)
+    worker._pending_success_attempt = (tmp_path, {}, None, [])
+
+    def append(*_args):
+        attempt_path.parent.mkdir(parents=True)
+        attempt_path.write_text("attempt")
+        return attempt_path
+
+    monkeypatch.setattr(
+        "tgw.workers.coding.make_attempt",
+        lambda *_a, **_k: {"attempt_hash": "sha256:test"},
+    )
+    monkeypatch.setattr("tgw.workers.coding.history", lambda *_a, **_k: [])
+    monkeypatch.setattr("tgw.workers.coding.append_attempt", append)
+    monkeypatch.setattr(
+        "tgw.workers.coding._write_receipt",
+        lambda *_a: (_ for _ in ()).throw(OSError("publication failed")),
+    )
+    registered = []
+    with pytest.raises(OSError, match="publication failed"):
+        worker._on_direct_local_success(
+            {"job_id": "job-1"}, receipt, registered.append,
+        )
+    assert len(registered) == 1
+    registered[0]()
+    assert not attempt_path.exists()
+    assert not receipt_path.exists()
 
 
 def test_malformed_launcher_outcome_fails_closed(tmp_path):
@@ -426,6 +460,7 @@ def test_controller_verify_runner_emits_attested_success_only_after_pytest_and_r
     from tgw.workers import controller_verify
 
     calls = []
+    monkeypatch.delenv("TGW_CODING_JOB", raising=False)
     monkeypatch.setenv("PYTHONPATH", "/immutable/worker/release/src")
     monkeypatch.setenv("TGW_CODING_WORKTREE_SRC", "/claimed/worktree/src")
     checks = (
@@ -483,6 +518,8 @@ def test_controller_git_probe_trusts_only_the_exact_worktree(tmp_path, monkeypat
 
 def test_controller_verify_runner_does_not_establish_conditions_when_a_check_fails(monkeypatch, capsys):
     from tgw.workers import controller_verify
+
+    monkeypatch.delenv("TGW_CODING_JOB", raising=False)
 
     monkeypatch.setattr(
         controller_verify,
@@ -762,6 +799,29 @@ def test_controller_nul_status_accepts_only_owned_workflow_evidence(
 
     monkeypatch.setattr(controller_verify.subprocess, "run", run)
     controller_verify._assert_source_status_clean(tmp_path)
+
+
+def test_controller_accepts_exact_preservation_manifest_without_deleting_it(tmp_path):
+    from tgw.development.partial_resume import preservation_manifest, source_tree
+    from tgw.workers import controller_verify
+
+    _git_worktree(tmp_path)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    manifest = preservation_manifest(tmp_path, {"state": "UNSAFE_DIRTY"}, {
+        "todo_id": 1792, "plan_commit": "b" * 40,
+        "solution_hash": "sha256:" + "c" * 64, "source_commit": head,
+        "source_tree": source_tree(tmp_path, head), "actor": "codex",
+        "worktree": str(tmp_path.resolve()), "treatment_id": "codex-implement",
+        "treatment_version": "1",
+    })
+    original = manifest.read_bytes()
+
+    controller_verify._assert_source_status_clean(tmp_path)
+
+    assert manifest.read_bytes() == original
 
 
 @pytest.mark.parametrize(

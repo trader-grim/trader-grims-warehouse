@@ -96,7 +96,15 @@ def _assert_source_status_clean(cwd: Path) -> None:
             raise ControllerVerificationError(
                 "controller candidate source is mutable or uncommitted"
             )
-        if not _is_workflow_evidence_path(item[3:]):
+        relative = item[3:]
+        preservation = relative.startswith(".tgw-coding-preservation/")
+        if preservation:
+            from tgw.development.coding_snapshot import _preservation_evidence
+            if item[:2] != "??" or _preservation_evidence(cwd, relative) is None:
+                raise ControllerVerificationError(
+                    "controller candidate source is mutable or uncommitted"
+                )
+        elif not _is_workflow_evidence_path(relative):
             raise ControllerVerificationError(
                 "controller candidate source is mutable or uncommitted"
             )

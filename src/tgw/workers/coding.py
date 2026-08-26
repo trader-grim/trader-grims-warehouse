@@ -11,7 +11,10 @@ from __future__ import annotations
 import json
 import os
 import signal
+import stat
 import subprocess
+import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -19,13 +22,15 @@ from typing import Any
 from tgw.development.partial_resume import (
     append_attempt,
     classify,
+    history,
     make_attempt,
     preservation_manifest,
     source_fingerprint,
 )
 from tgw.development.plan_binding import MalformedPlanBindingError, validate_plan_binding
 from tgw.development.worktree_lease import exclusive_worktree_lease
-from tgw.queue.worker_base import HardFailure, QueueWorker
+from tgw.queue import worker_base
+from tgw.queue.worker_base import HardFailure, JobCancelled, QueueWorker
 from tgw.workflow_kernel.contracts import (
     OUTCOME_CONFLICT,
     OUTCOME_FAILED,
@@ -70,55 +75,120 @@ def _run_bounded_process_group(
     env: dict[str, str],
     timeout: int | float,
     pass_fds: tuple[int, ...] = (),
+    cancellation_check: Callable[[], bool] | None = None,
+    runner_manifest: Path | None = None,
+    runner_identity: dict[str, Any] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one launcher and terminate its complete descendant group on timeout."""
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-        pass_fds=pass_fds,
-    )
+    with tempfile.TemporaryFile(mode="w+t") as stdout_file, tempfile.TemporaryFile(
+        mode="w+t"
+    ) as stderr_file:
+        process = subprocess.Popen(
+            command, cwd=cwd, env=env, text=True,
+            stdout=stdout_file, stderr=stderr_file,
+            start_new_session=True, pass_fds=pass_fds,
+        )
+        identity = dict(runner_identity or {})
+        try:
+            if runner_manifest is not None:
+                identity.update({"schema": "tgw-coding-runner/v2", "pid": process.pid,
+                                 "pgid": process.pid, "state": "running"})
+                _write_json_atomic(runner_manifest, identity)
+            deadline = time.monotonic() + timeout
+            while True:
+                # WNOWAIT observes exit without reaping.  The zombie reserves
+                # its PID/PGID until the cancellation decision is final.
+                exited = os.waitid(
+                    os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+                )
+                cancelled = cancellation_check is not None and cancellation_check()
+                if cancelled:
+                    _terminate_process_group(process)
+                    if runner_manifest is not None:
+                        identity.update({"state": "stopped", "returncode": process.returncode})
+                        _write_json_atomic(runner_manifest, identity)
+                    raise JobCancelled(
+                        "durable cancellation won exact process scope",
+                        reason="stopped", reaped=process.returncode is not None,
+                        runner=dict(identity),
+                    )
+                if exited is not None:
+                    # Close any descendants that outlived the launcher while
+                    # the unreaped leader still reserves this exact PGID.
+                    _terminate_process_group(process)
+                    break
+                if time.monotonic() >= deadline:
+                    _terminate_process_group(process)
+                    if runner_manifest is not None:
+                        identity.update({"state": "timeout", "returncode": process.returncode})
+                        _write_json_atomic(runner_manifest, identity)
+                    raise subprocess.TimeoutExpired(command, timeout)
+                time.sleep(0.05)
+        except BaseException:
+            # Popen transferred ownership of an exact, unreaped session leader
+            # to this channel.  Every post-spawn failure closes that scope.
+            if process.returncode is None:
+                _terminate_process_group(process)
+            raise
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout, stderr = stdout_file.read(), stderr_file.read()
+        if runner_manifest is not None:
+            identity.update({"state": "exited", "returncode": process.returncode})
+            _write_json_atomic(runner_manifest, identity)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    """Publish diagnostics without following or accepting mutable names."""
+    path.parent.mkdir(mode=0o770, parents=True, exist_ok=True)
+    parent = path.parent.lstat()
+    if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid()
+            or parent.st_mode & stat.S_IWOTH):
+        raise OSError("runner diagnostic directory is not protected")
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary = f".{path.name}.{os.getpid()}.tmp"
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory,
+        )
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
+            content = (json.dumps(value, sort_keys=True) + "\n").encode()
+            os.write(descriptor, content)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
             pass
-        try:
-            stdout, stderr = process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            stdout = stderr = ""
-        # The session leader may exit and close its pipes while a nested
-        # descendant that ignored SIGTERM remains in the process group.  Kill
-        # the group unconditionally after the grace period/leader exit; tying
-        # SIGKILL to another communicate timeout misses descendants that have
-        # closed inherited stdout and stderr.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        if process.poll() is None:
-            try:
-                stdout, stderr = process.communicate(timeout=5)
-            except subprocess.TimeoutExpired as kill_exc:  # pragma: no cover - kernel invariant
-                raise RuntimeError("launcher process survived SIGKILL") from kill_exc
-        raise subprocess.TimeoutExpired(
-            command,
-            timeout,
-            output=stdout,
-            stderr=stderr,
-        ) from exc
-    return subprocess.CompletedProcess(
-        command,
-        process.returncode,
-        stdout,
-        stderr,
-    )
+        os.close(directory)
+
+
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    """Kill the scope while its unreaped leader reserves the PID and PGID."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    # Do not poll, wait, or communicate between signals.  Even if the leader
+    # exits on SIGTERM it remains an unreaped zombie, so Linux cannot reuse its
+    # PID as another process-group identity before our SIGKILL.
+    time.sleep(0.25)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=5)
+    except subprocess.TimeoutExpired as exc:  # pragma: no cover
+        raise RuntimeError("launcher process survived SIGKILL") from exc
 
 
 def validated_coding_worktree(
@@ -240,6 +310,16 @@ class CodingWorker(QueueWorker):
             raise HardFailure(f"coding.commands.{treatment_id} is empty")
         try:
             lease_fd = self._worktree_lease_fd
+            active_job = getattr(self, "_active_job", {})
+            job_id = str(active_job.get("job_id") or payload.get("job_id") or "")
+            coding = self._coding_config()
+            manifest = Path(self._coding_config().get(
+                "runner_state_root", Path(coding.get("worktree_root", DEFAULT_WORKTREE_ROOT)) / ".tgw-runner-control"
+            )) / f"{job_id}.json"
+            identity = {"job_id": job_id, "queue_name": treatment_id,
+                        "lease_owner": self.owner,
+                        "lease_token": str(active_job.get("lease_token") or payload.get("lease_token") or ""),
+                        "worktree": str(worktree)}
             completed = _run_bounded_process_group(
                 command,
                 cwd=worktree,
@@ -255,7 +335,14 @@ class CodingWorker(QueueWorker):
                     ),
                 },
                 pass_fds=(lease_fd,) if lease_fd is not None else (),
+                cancellation_check=lambda: (
+                    (worker_base.state_machine.get_job(job_id) or {}).get("state") == "cancelled"
+                ),
+                runner_manifest=manifest,
+                runner_identity=identity,
             )
+        except JobCancelled:
+            raise
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RuntimeError(f"coding launcher failed: {exc}") from exc
         if completed.returncode:
@@ -295,6 +382,117 @@ class CodingWorker(QueueWorker):
             payload.get("object_id"),
             self._coding_config(),
         )
+
+    def _raise_if_cancelled(self, job: dict[str, Any]) -> None:
+        if not job.get("lease_token"):
+            return
+        current = worker_base.state_machine.get_job(str(job.get("job_id") or "")) or {}
+        if current.get("state") == "cancelled":
+            raise JobCancelled(
+                "durable cancellation suppresses coding receipt",
+                reason="no_runner", reaped=True,
+                runner={
+                    "schema": "tgw-coding-runner/v2", "kind": "no_runner",
+                    "job_id": str(job.get("job_id") or ""),
+                    "queue_name": self.queue_name, "lease_owner": self.owner,
+                    "lease_token": str(job.get("lease_token") or ""),
+                },
+            )
+
+    def _persist_success_receipt(
+        self, job: dict[str, Any], path: Path, receipt: dict[str, Any]
+    ) -> None:
+        """Defer real leased receipts until durable success wins cancellation."""
+        if job.get("lease_token"):
+            self._pending_success_receipt = (str(job.get("job_id")), path, receipt)
+        else:
+            _write_receipt(path, receipt)
+
+    def _on_direct_local_success(
+        self, job: dict[str, Any], receipt: dict[str, Any] | None,
+        register_undo: Callable[[Callable[[], None]], None],
+    ) -> None:
+        pending = getattr(self, "_pending_success_receipt", None)
+        if (pending is None or pending[0] != str(job.get("job_id"))
+                or pending[2] is not receipt):
+            raise RuntimeError("coding success has no exact pending receipt")
+        pending_attempt = getattr(self, "_pending_success_attempt", None)
+        created_attempt: Path | None = None
+        receipt_path = pending[1]
+        previous_receipt = receipt_path.read_bytes() if receipt_path.exists() else None
+        def rollback_publication() -> None:
+            errors: list[BaseException] = []
+            if created_attempt is not None:
+                try:
+                    created_attempt.unlink()
+                except FileNotFoundError:
+                    pass
+                except BaseException as exc:
+                    errors.append(exc)
+            if previous_receipt is None:
+                try:
+                    receipt_path.unlink()
+                except FileNotFoundError:
+                    pass
+                except BaseException as exc:
+                    errors.append(exc)
+            else:
+                try:
+                    temporary = receipt_path.with_suffix(receipt_path.suffix + ".rollback")
+                    with temporary.open("wb") as stream:
+                        stream.write(previous_receipt)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, receipt_path)
+                except BaseException as exc:
+                    errors.append(exc)
+            for directory in {receipt_path.parent, created_attempt.parent if created_attempt else None}:
+                if directory is None:
+                    continue
+                try:
+                    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                except BaseException as exc:
+                    errors.append(exc)
+            try:
+                if created_attempt is not None and created_attempt.exists():
+                    raise OSError("published attempt remains after rollback")
+                if previous_receipt is None and receipt_path.exists():
+                    raise OSError("published receipt remains after rollback")
+                if previous_receipt is not None and receipt_path.read_bytes() != previous_receipt:
+                    raise OSError("prior receipt was not restored after rollback")
+            except BaseException as exc:
+                errors.append(exc)
+            if errors:
+                raise RuntimeError("cannot prove coding publication rollback") from errors[0]
+
+        # Install the compensator while no success evidence exists.  From this
+        # point every publication or durability failure is either proved clean
+        # by the compensator or fenced by close_local_success under the row lock.
+        register_undo(rollback_publication)
+        if pending_attempt is not None:
+            attempt = make_attempt(
+                pending_attempt[1], pending_attempt[0],
+                outcome=OUTCOME_SATISFIED,
+                predecessor=pending_attempt[2], artifacts=pending_attempt[3],
+            )
+            # Bind the exact target before append_attempt creates it: an fsync
+            # failure after O_EXCL must still be compensatable.  The registered
+            # authoritative caller in close_local_success invokes rollback once.
+            digest = attempt["attempt_hash"].removeprefix("sha256:")
+            created_attempt = (
+                pending_attempt[0] / ".tgw-coding-history" / "implementation"
+                / f"{len(history(pending_attempt[0])) + 1:06d}-{digest}.json"
+            )
+            actual_attempt = append_attempt(pending_attempt[0], attempt)
+            if actual_attempt != created_attempt:
+                raise RuntimeError("attempt publication target changed")
+        _write_receipt(receipt_path, pending[2])
+        self._pending_success_attempt = None
+        self._pending_success_receipt = None
 
     @staticmethod
     def _git_identity(path: Path) -> tuple[Path | None, Path | None]:
@@ -376,6 +574,7 @@ class CodingWorker(QueueWorker):
 
     def handle(self, job: dict[str, Any]) -> dict[str, Any]:
         payload = dict(job.get("payload_json") or {})
+        self._active_job = job
         treatment_id = str(payload.get("treatment_id") or self.queue_name)
         if treatment_id != self.queue_name:
             raise HardFailure(f"job treatment {treatment_id!r} does not match queue {self.queue_name!r}")
@@ -445,6 +644,7 @@ class CodingWorker(QueueWorker):
                 if payload.get("resume_of") or payload.get("resume_fingerprint"):
                     raise HardFailure("clean initial Codex attempt cannot carry resume authority")
             elif state["state"] == "CLOSED_CANDIDATE":
+                self._raise_if_cancelled(job)
                 latest = state["history"][-1]
                 artifacts = [
                     *latest.get("artifacts", []),
@@ -467,7 +667,9 @@ class CodingWorker(QueueWorker):
                     "receipt_schema_id": "receipt/tgw-development/v1",
                     "plan_binding": plan_binding,
                 }
-                _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
+                self._persist_success_receipt(
+                    job, receipt_path_for_treatment(worktree, treatment_id), receipt
+                )
                 return receipt
             else:
                 preservation_manifest(worktree, state, attempt_binding)
@@ -505,6 +707,8 @@ class CodingWorker(QueueWorker):
                     raise HardFailure(
                         "satisfied Codex outcome is not the exact closed source descendant"
                     )
+        except JobCancelled:
+            raise
         except (HardFailure, RuntimeError) as exc:
             # Persist a local mechanical failure so the next snapshot can
             # reevaluate from durable evidence.
@@ -540,10 +744,20 @@ class CodingWorker(QueueWorker):
             "receipt_schema_id": "receipt/tgw-development/v1",
             **({"plan_binding": plan_binding} if plan_binding else {}),
         }
-        if attempt_binding is not None:
+        self._raise_if_cancelled(job)
+        if attempt_binding is not None and outcome == OUTCOME_SATISFIED and job.get("lease_token"):
+            self._pending_success_attempt = (
+                worktree, attempt_binding, predecessor, artifacts,
+            )
+        elif attempt_binding is not None:
             append_attempt(worktree, make_attempt(attempt_binding, worktree,
                 outcome=outcome, predecessor=predecessor, artifacts=artifacts))
-        _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
+        if outcome == OUTCOME_SATISFIED:
+            self._persist_success_receipt(
+                job, receipt_path_for_treatment(worktree, treatment_id), receipt
+            )
+        else:
+            _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
         if outcome != OUTCOME_SATISFIED:
             # A negative launcher result is a terminal job outcome, not a
             # successful queue delivery with a disappointing payload.

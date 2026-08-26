@@ -171,6 +171,53 @@ def _legacy_1747_binding(item: dict[str, Any], jobs: list[dict[str, Any]]) -> tu
     return historical, observed
 
 
+def _resume_attempt_binding(todo_id: int, item: dict[str, Any]) -> dict[str, Any]:
+    """Discover and validate one exact historical attempt without effects."""
+    observed: list[dict[str, Any]] = []
+    for job in _jobs(todo_id, limit=100):
+        payload = job.get("payload_json") or job.get("payload")
+        if not isinstance(payload, dict) or "plan_binding" not in payload:
+            continue
+        try:
+            observed.append(validate_plan_binding(payload["plan_binding"], todo_id=todo_id))
+        except (TypeError, ValueError) as exc:
+            raise CodingCLIError(
+                f"Todo {todo_id} historical job has a malformed Plan binding"
+            ) from exc
+    note = parse_plan_binding(item.get("status_note"), todo_id=todo_id)
+    if note is not None:
+        observed.append(validate_plan_binding(note, todo_id=todo_id))
+    identities = {
+        json.dumps(value, sort_keys=True, separators=(",", ":")): value
+        for value in observed
+    }
+    if len(identities) != 1:
+        reason = "absent" if not identities else "ambiguous"
+        raise CodingCLIError(
+            f"Todo {todo_id} historical coding attempt is {reason}; zero effects"
+        )
+    binding = next(iter(identities.values()))
+    worktree = Path(binding["worktree"])
+    expected = {
+        "todo_id": todo_id,
+        "plan_commit": binding["plan_commit"],
+        "solution_hash": binding["solution_hash"],
+        "source_commit": binding["source_commit"],
+        "source_tree": source_tree(worktree, binding["source_commit"]),
+        "actor": item.get("agent") or "codex",
+        "worktree": str(worktree),
+        "treatment_id": "codex-implement",
+        "treatment_version": "1",
+    }
+    state = classify(worktree, expected)
+    if state.get("state") != "RESUMABLE_PARTIAL":
+        raise CodingCLIError(
+            f"Todo {todo_id} historical coding attempt is {state.get('state')}; "
+            "coding resume requires RESUMABLE_PARTIAL; zero effects"
+        )
+    return binding
+
+
 def _pp_runtime_binding(config: dict[str, Any], source_commit: str | None = None) -> dict[str, Any]:
     """Resolve the one external repository/runtime binding used by CLI and MCP."""
     local = __import__("tgw.development.local_workflow", fromlist=["_git"])
@@ -303,12 +350,14 @@ def start(
 
     legacy_jobs: list[dict[str, Any]] | None = None
     accidental_note: str | None = None
-    if resume_only and todo_id == 1747:
+    if resume_only and todo_id == 1747 and source_commit is None:
         if source_commit is not None:
             raise CodingCLIError("Todo 1747 historical resume does not accept a current-source override")
         legacy_jobs = _legacy_1747_jobs()
         historical, accidental_note = _legacy_1747_binding(item, legacy_jobs)
         binding = {"binding": historical}
+    elif resume_only and source_commit is None:
+        binding = {"binding": _resume_attempt_binding(todo_id, item)}
     else:
         binding = bind_command(
             argparse.Namespace(
@@ -502,9 +551,52 @@ def stop(
     job = state_machine.get_job(job_id)
     if job is None or job.get("queue_name") not in _LOCAL_QUEUES:
         raise CodingCLIError(f"local coding job {job_id} does not exist")
-    if job.get("state") in {"succeeded", "failed", "dead_letter", "cancelled"}:
-        raise CodingCLIError(f"local coding job {job_id} is already {job['state']}")
-    return state_machine.cancel_job(job_id, "stopped by the local operator CLI")
+    state = job.get("state")
+    if state == "cancelled":
+        payload = job.get("payload_json") or job.get("payload") or {}
+        prior = payload.get("result") if isinstance(payload, dict) else None
+        proof = prior.get("stop_control") if isinstance(prior, dict) else None
+        if isinstance(proof, dict) and proof.get("kind") == "queued_cancel":
+            return {**job, "ok": True, "stop_state": "already_cancelled_queued"}
+        acknowledgement = proof.get("acknowledgement") if isinstance(proof, dict) else None
+        if isinstance(acknowledgement, dict):
+            try:
+                state_machine.validate_cancellation_acknowledgement(
+                    str(job.get("job_id") or ""), acknowledgement,
+                    proof.get("request_identity"),
+                )
+            except (TypeError, ValueError):
+                acknowledgement = None
+        if acknowledgement is not None:
+            reason = acknowledgement.get("reason")
+            suffix = reason if reason in {"stopped", "timeout", "reaped", "no_runner"} else "invalid"
+            return {**job, "ok": True, "stop_state": f"worker_confirmed_{suffix}"}
+        return {**job, "ok": True, "stop_state": "cancellation_requested"}
+    if state in {"succeeded", "failed", "dead_letter"}:
+        raise CodingCLIError(f"local coding job {job_id} is already {state}")
+    if state == "queued":
+        stopped = state_machine.cancel_job(
+            job_id, "stopped by the local operator CLI",
+            {"stop_control": {"schema": "tgw-coding-stop/v1", "kind": "queued_cancel"}},
+        )
+        if stopped.get("state") == "cancelled":
+            return {**stopped, "ok": True, "stop_state": "cancelled_queued"}
+        if stopped.get("state") in {"succeeded", "failed", "dead_letter"}:
+            return {**stopped, "ok": False, "stop_state": f"completion_won_{stopped['state']}"}
+        return {**stopped, "ok": False, "stop_state": "cancellation_not_applied"}
+    if state not in {"leased", "running"}:
+        raise CodingCLIError(f"local coding job {job_id} has unsupported active state {state!r}")
+
+    stopped = state_machine.cancel_job(
+        job_id, "stopped by the local operator CLI",
+        {"stop_control": {"schema": "tgw-coding-stop/v1",
+                          "kind": "runner_cancel_requested"}},
+    )
+    if stopped.get("state") == "cancelled":
+        return {**stopped, "ok": True, "stop_state": "cancellation_requested"}
+    if stopped.get("state") in {"succeeded", "failed", "dead_letter"}:
+        return {**stopped, "ok": False, "stop_state": f"completion_won_{stopped['state']}"}
+    return {**stopped, "ok": False, "stop_state": "cancellation_not_applied"}
 
 
 def _target(args: argparse.Namespace) -> str | None:

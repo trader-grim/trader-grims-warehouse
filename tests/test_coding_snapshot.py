@@ -24,6 +24,7 @@ from tgw.development.coding_snapshot import (  # noqa: E402
     _git_rev_parse,
     build_coding_snapshot,
 )
+from tgw.development.partial_resume import preservation_manifest, source_tree  # noqa: E402
 from tgw.workflow import (  # noqa: E402
     FingerprintResult,
     GoalProfile,
@@ -73,6 +74,21 @@ def _git_init(path: Path) -> None:
         cwd=str(path),
         check=True,
     )
+
+
+def _preservation(path: Path) -> Path:
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=path, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    binding = {
+        "todo_id": 1792, "plan_commit": "b" * 40,
+        "solution_hash": "sha256:" + "c" * 64, "source_commit": head,
+        "source_tree": source_tree(path, head), "actor": "codex",
+        "worktree": str(path.resolve()), "treatment_id": "codex-implement",
+        "treatment_version": "1",
+    }
+    return preservation_manifest(path, {"state": "UNSAFE_DIRTY"}, binding)
 
 
 def _git_commit(path: Path, message: str, *, allow_empty: bool = False) -> str:
@@ -173,6 +189,61 @@ class TestGitHelpers:
         subprocess.run(["git", "commit", "-m", "ignore"], cwd=tmp_path, check=True, capture_output=True)
         (tmp_path / "ignored").mkdir()
         (tmp_path / "ignored/value").write_text("mutable")
+        assert _git_is_clean(tmp_path) is False
+
+    def test_only_content_addressed_binding_matching_preservation_is_evidence(self, tmp_path):
+        _git_init(tmp_path)
+        _git_commit(tmp_path, "initial", allow_empty=True)
+        manifest = _preservation(tmp_path)
+        assert _git_is_clean(tmp_path) is True
+
+        original = manifest.read_bytes()
+        manifest.chmod(0o640)
+        manifest.write_text("{}\n")
+        assert _git_is_clean(tmp_path) is False
+        manifest.write_bytes(original)
+        manifest.rename(manifest.with_name("lookalike.json"))
+        assert _git_is_clean(tmp_path) is False
+
+    def test_preservation_directories_symlinks_staged_ignored_and_renames_are_dirty(self, tmp_path):
+        _git_init(tmp_path)
+        _git_commit(tmp_path, "initial", allow_empty=True)
+        root = tmp_path / ".tgw-coding-preservation"
+        root.mkdir()
+        (root / ("a" * 64 + ".json")).mkdir()
+        assert _git_is_clean(tmp_path) is False
+        (root / ("a" * 64 + ".json")).rmdir()
+        (root / ("a" * 64 + ".json")).symlink_to("../escape")
+        assert _git_is_clean(tmp_path) is False
+        (root / ("a" * 64 + ".json")).unlink()
+
+        manifest = _preservation(tmp_path)
+        subprocess.run(["git", "add", "-f", str(manifest)], cwd=tmp_path, check=True)
+        assert _git_is_clean(tmp_path) is False
+        subprocess.run(["git", "reset", "HEAD", "--", str(manifest)], cwd=tmp_path, check=True)
+        moved = manifest.with_name("b" * 64 + ".json")
+        manifest.rename(moved)
+        assert _git_is_clean(tmp_path) is False
+
+    def test_ignored_or_late_mutated_preservation_cannot_hide_source_state(self, tmp_path):
+        _git_init(tmp_path)
+        (tmp_path / ".gitignore").write_text(".tgw-coding-preservation/\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-m", "ignore"], cwd=tmp_path, check=True,
+                       capture_output=True)
+        manifest = _preservation(tmp_path)
+        assert _git_is_clean(tmp_path) is False
+
+        subprocess.run(["git", "rm", ".gitignore"], cwd=tmp_path, check=True,
+                       capture_output=True)
+        subprocess.run(["git", "commit", "-m", "unignore"], cwd=tmp_path, check=True,
+                       capture_output=True)
+        manifest.chmod(0o640)
+        manifest.unlink()
+        manifest = _preservation(tmp_path)
+        assert _git_is_clean(tmp_path) is True
+        manifest.chmod(0o640)
+        manifest.write_bytes(manifest.read_bytes() + b" ")
         assert _git_is_clean(tmp_path) is False
 
     def test_find_canonical_main(self, tmp_path):
