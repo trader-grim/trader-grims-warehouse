@@ -1372,6 +1372,11 @@ SELECT json_build_object(
     'history_sequence_access', has_sequence_privilege(current_user, 'public.queue_job_history_history_id_seq', 'USAGE,SELECT,UPDATE'),
     'claim_function_access', COALESCE(has_function_privilege(current_user, to_regprocedure('public.claim_queue_jobs(text,text,integer,integer)'), 'EXECUTE'), false),
     'recovery_function_access', COALESCE(has_function_privilege(current_user, to_regprocedure('public.recover_expired_jobs()'), 'EXECUTE'), false),
+    'progress_note_column', EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'todo_items'
+          AND column_name = 'progress_note'
+    ),
     'active_jobs', (
         SELECT count(*)::integer
         FROM public.queue_jobs
@@ -1435,6 +1440,7 @@ def check_database(paths: DoctorPaths) -> dict[str, Any]:
             "history_sequence_access",
             "claim_function_access",
             "recovery_function_access",
+            "progress_note_column",
         )
         ok = all(row.get(key) is True for key in required)
         return _check(
@@ -2756,7 +2762,7 @@ def repair_database(paths: DoctorPaths) -> dict[str, Any]:
         raise DoctorError(result.stderr.strip() or "database role repair failed")
     after = check_database(paths)
     if after["state"] != "PASS":
-        raise DoctorError("database grants remain incomplete after repair")
+        raise DoctorError("database schema or grants remain incomplete after repair")
     receipt = _receipt(paths, "database", before, after)
     return {"ok": True, "operation": "database", "changed": before != after, "receipt": receipt}
 

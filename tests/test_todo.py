@@ -45,8 +45,22 @@ def test_todo_schema_migrations_are_explicit(monkeypatch):
     calls = []
     monkeypatch.setattr(todo, "_ensure_reasoning_column", lambda: calls.append("reasoning"))
     monkeypatch.setattr(todo, "_ensure_status_note_column", lambda: calls.append("status_note"))
+    monkeypatch.setattr(todo, "_ensure_progress_note_column", lambda: calls.append("progress_note"))
     todo.bootstrap_schema_columns()
-    assert calls == ["reasoning", "status_note"]
+    assert calls == ["reasoning", "status_note", "progress_note"]
+
+
+def test_progress_note_migration_is_idempotent_by_construction():
+    import tgw.todo as todo
+
+    ctx, cur = _mock_conn()
+    with patch("tgw.todo._conn", ctx):
+        todo._ensure_progress_note_column()
+        todo._ensure_progress_note_column()
+    assert cur.execute.call_count == 2
+    sql = cur.execute.call_args.args[0]
+    assert "ADD COLUMN progress_note TEXT" in sql
+    assert "duplicate_column" in sql
 
 
 @pytest.fixture(autouse=True)
@@ -169,6 +183,36 @@ def test_todo_status_note_compare_and_set_uses_exact_observed_bytes():
     sql, params = cur.execute.call_args.args
     assert 'status_note = %s' in sql
     assert params == ('historical bytes', 1747, 'observed bytes')
+
+
+def test_note_cli_preserves_exact_plan_binding_bytes():
+    from tgw import todo, todo_cli
+
+    binding = '{ "schema" : "tgw-plan-coding-todo/v1", "exact" : "bytes" }\n'
+    ctx, cur = _mock_conn(fetchone_return=(1829, 'codex', 'work', binding))
+    args = todo_cli.parser().parse_args(['--note', '1829', 'human', 'progress'])
+    with patch('tgw.todo._conn', ctx):
+        result = todo.cmd_todo({}, args)
+    sql, params = cur.execute.call_args.args
+    assert result['ok'] is True
+    assert 'SET progress_note = %s' in sql
+    assert 'SET status_note' not in sql
+    assert params == ('human progress', 1829)
+    assert result['status_note'] == binding
+
+
+def test_note_cli_on_completed_todo_allocates_no_work():
+    from tgw import todo, todo_cli
+
+    ctx, _cur = _mock_conn(fetchone_return=None)
+    args = todo_cli.parser().parse_args(['--note', '1829', 'late'])
+    with patch('tgw.todo._conn', ctx), \
+         patch('tgw.todo.todo_set_status_note') as binding_writer, \
+         patch('tgw.todo._enqueue_plan_render') as render:
+        result = todo.cmd_todo({}, args)
+    assert result == {'ok': False, 'error': 'item 1829 not found or already done'}
+    binding_writer.assert_not_called()
+    render.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -297,6 +297,7 @@ def test_root_database_postcheck_runs_as_the_invoking_operator(tmp_path: Path, m
             "history_sequence_access": True,
             "claim_function_access": True,
             "recovery_function_access": True,
+            "progress_note_column": True,
             "active_jobs": 0,
         }
         return subprocess.CompletedProcess(command, 0, json.dumps(result) + "\n", "")
@@ -2098,6 +2099,34 @@ def test_role_sql_persists_explicit_todo_sequence_update_grant() -> None:
 
     assert "GRANT USAGE, SELECT, UPDATE" in sql
     assert "public.todo_items_id_seq" in sql
+
+
+def test_database_repair_sql_idempotently_adds_progress_note() -> None:
+    root = Path(__file__).resolve().parents[1]
+    sql = (root / "config/tgw-coding-local-roles.sql").read_text(encoding="utf-8")
+
+    assert "ADD COLUMN progress_note TEXT" in sql
+    assert "duplicate_column" in sql
+
+
+def test_database_check_fails_until_progress_note_exists(tmp_path, monkeypatch) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    observation = {
+        key: True for key in (
+            "database_connect", "schema_usage", "role_member", "todo_access",
+            "queue_access", "history_access", "todo_sequence_access",
+            "history_sequence_access", "claim_function_access",
+            "recovery_function_access",
+        )
+    }
+    observation.update(actor="codex", progress_note_column=False)
+    monkeypatch.setattr(doctor_cli, "_database_observation", lambda _config: (observation, 0))
+
+    result = doctor_cli.check_database(paths)
+
+    assert result["state"] == "FAIL"
+    assert result["evidence"]["progress_note_column"] is False
+    assert result["operator_action"] == "sudo -n tgw doctor repair database"
 
 
 def test_doctor_launcher_is_local_and_provider_independent() -> None:

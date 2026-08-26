@@ -174,6 +174,14 @@ def _blocker_cell(item: Dict[str, Any], open_set: set) -> str:
     return '✓ deps done'
 
 
+def _task_cell(item: Dict[str, Any]) -> str:
+    from tgw.todo import _display_progress_note
+
+    task = _md_escape(item['body'])
+    progress = _display_progress_note(item)
+    return task if not progress else f'{task}<br>_{_md_escape(progress)}_'
+
+
 def build_taskboard(
     items: List[Dict[str, Any]],
     headings: Dict[str, str],
@@ -219,7 +227,7 @@ def build_taskboard(
         for i in rows:
             lines.append(
                 f'| {i["id"]} | {i["priority"]} | {_parse_size(i["body"])} '
-                f'| {_md_escape(i["body"])} | {_ref_cell(i, headings)} '
+                f'| {_task_cell(i)} | {_ref_cell(i, headings)} '
                 f'| {_blocker_cell(i, open_set)} |'
             )
         lines.append('')
@@ -237,7 +245,7 @@ def build_taskboard(
         ]
         for i in shown:
             done_str = i['done_at'].strftime('%Y-%m-%d')
-            lines.append(f'| {i["id"]} | {i["agent"]} | {done_str} | {_md_escape(i["body"])} |')
+            lines.append(f'| {i["id"]} | {i["agent"]} | {done_str} | {_task_cell(i)} |')
         if overflow:
             lines.append(f'| … | | | _…and {overflow} more — run `tgw todo --all` to see everything_ |')
     else:

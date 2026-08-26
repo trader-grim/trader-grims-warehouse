@@ -1986,6 +1986,19 @@ def test_local_coding_start_binds_and_ticks_only_the_selected_todo(monkeypatch):
     assert all(expected["source_tree"] == "d" * 40 for _path, expected in classifications)
 
 
+def test_completed_todo_coding_start_allocates_no_work(monkeypatch):
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {}})
+    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda todo_id: {
+        "id": todo_id, "body": "already shipped", "priority": 3,
+        "done_at": "2026-08-26T00:00:00Z",
+    })
+    monkeypatch.setattr(coding_cli, "bind_command", lambda _args: pytest.fail("allocated work"))
+    monkeypatch.setattr(coding_cli, "tick", lambda *_args, **_kwargs: pytest.fail("dispatched work"))
+
+    with pytest.raises(coding_cli.CodingCLIError, match="already complete"):
+        coding_cli.start(1829, config_path=Path("/tmp/coding.json"))
+
+
 def test_1747_resume_validates_before_cas_preserves_bytes_and_repeat_dispatches_zero(
     tmp_path, monkeypatch,
 ):

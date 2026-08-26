@@ -93,6 +93,22 @@ def _ensure_status_note_column() -> None:
         log.warning('_ensure_status_note_column: migration skipped — %s', exc)
 
 
+def _ensure_progress_note_column() -> None:
+    """Idempotently add the human-authored progress-note store."""
+    sql = """
+    DO $$ BEGIN
+        ALTER TABLE todo_items ADD COLUMN progress_note TEXT;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+    """
+    try:
+        with _conn() as con:
+            with con.cursor() as cur:
+                cur.execute(sql)
+    except Exception as exc:
+        log.warning('_ensure_progress_note_column: migration skipped — %s', exc)
+
+
 def bootstrap_schema_columns() -> None:
     """Explicitly apply legacy Todo compatibility migrations.
 
@@ -101,6 +117,7 @@ def bootstrap_schema_columns() -> None:
     """
     _ensure_reasoning_column()
     _ensure_status_note_column()
+    _ensure_progress_note_column()
 
 
 def _push_clipboard(text: str) -> bool:
@@ -328,7 +345,8 @@ def todo_list(
             where = ('WHERE ' + ' AND '.join(parts)) if parts else ''
             cur.execute(
                 f'SELECT id, agent, priority, body, source, added_at, done_at, '
-                f'pp_ref, depends_on, plan_anchor, reasoning, status_note '
+                f'pp_ref, depends_on, plan_anchor, reasoning, status_note, '
+                f"to_jsonb(todo_items)->>'progress_note' AS progress_note "
                 f'FROM todo_items {where} ORDER BY agent, priority, id',
                 params,
             )
@@ -341,7 +359,9 @@ def todo_get(item_id: int) -> Optional[Dict[str, Any]]:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 'SELECT id, agent, priority, body, source, added_at, done_at, '
-                'pp_ref, depends_on, plan_anchor, reasoning, status_note FROM todo_items WHERE id = %s',
+                'pp_ref, depends_on, plan_anchor, reasoning, status_note, '
+                "to_jsonb(todo_items)->>'progress_note' AS progress_note "
+                'FROM todo_items WHERE id = %s',
                 (item_id,),
             )
             row = cur.fetchone()
@@ -394,6 +414,27 @@ def todo_set_status_note(
     if not suppress_plan_render:
         _enqueue_plan_render('todo_set_status_note')
     return {'ok': True, 'id': row[0], 'agent': row[1], 'body': row[2], 'status_note': note}
+
+
+def todo_set_progress_note(item_id: int, note: str) -> Dict[str, Any]:
+    """Record human progress while preserving machine-binding bytes."""
+    try:
+        with _conn() as con:
+            with con.cursor() as cur:
+                cur.execute(
+                    "UPDATE todo_items SET progress_note = %s "
+                    "WHERE id = %s AND done_at IS NULL "
+                    "RETURNING id, agent, body, status_note",
+                    (note, item_id),
+                )
+                row = cur.fetchone()
+    except psycopg2.errors.UndefinedColumn:
+        return {'ok': False, 'error': 'progress_note column unavailable; run `sudo -n tgw doctor repair database`'}
+    if row is None:
+        return {'ok': False, 'error': f'item {item_id} not found or already done'}
+    _enqueue_plan_render('todo_set_progress_note')
+    return {'ok': True, 'id': row[0], 'agent': row[1], 'body': row[2],
+            'status_note': row[3], 'progress_note': note}
 
 
 def todo_compare_and_set_status_note(
@@ -509,6 +550,22 @@ def todo_set_meta(
 
 _PLAN_EXTRACT_CAP = 6000
 
+
+def _display_progress_note(item: Dict[str, Any]) -> Optional[str]:
+    """Return human prose, never valid or malformed machine metadata."""
+    from tgw.development.plan_binding import MalformedPlanBindingError, parse_plan_binding
+
+    for value in (item.get('progress_note'), item.get('status_note')):
+        if not isinstance(value, str) or not value:
+            continue
+        try:
+            binding = parse_plan_binding(value, todo_id=item.get('id'))
+        except MalformedPlanBindingError:
+            continue
+        if binding is None:
+            return value
+    return None
+
 _SHARED_BRIEF_CONSTRAINTS = """\
 ## Constraints
 
@@ -604,8 +661,9 @@ def todo_brief(item_id: int, plan_path: Path) -> Dict[str, Any]:
     reasoning = item.get('reasoning', 'normal')
     if reasoning and reasoning != 'normal':
         parts += [f'**Reasoning:** {reasoning}', '']
-    if item.get('status_note'):
-        parts += [f'**Status:** {item["status_note"]}', '']
+    progress_note = _display_progress_note(item)
+    if progress_note:
+        parts += [f'**Status:** {progress_note}', '']
     if item.get('pp_ref'):
         parts += [f'**Plan item:** {item["pp_ref"]}'
                   + (f' — see master-plan section "{item["plan_anchor"]}"' if item.get('plan_anchor') else ''),
@@ -895,7 +953,7 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         if not note:
             print('Error: --note requires ID and text')
             return {'ok': False, 'error': 'missing text'}
-        result = todo_set_status_note(int(item_id), note)
+        result = todo_set_progress_note(int(item_id), note)
         if result['ok']:
             print(f"Noted #{result['id']} [{result['agent']}]: {note[:60]}")
         else:
@@ -969,8 +1027,9 @@ def cmd_todo(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
             r = item.get('reasoning', 'normal')
             if r and r != 'normal':
                 badges += f' [{r}]'
-            if item.get('status_note'):
-                badges += f' ({item["status_note"][:30]})'
+            progress_note = _display_progress_note(item)
+            if progress_note:
+                badges += f' ({progress_note[:30]})'
             body_preview = item['body'][:80] + ('…' if len(item['body']) > 80 else '')
             print(f'  [{done_mark}] #{item["id"]:3d} p{item["priority"]:2d} {badges} {body_preview}')
 

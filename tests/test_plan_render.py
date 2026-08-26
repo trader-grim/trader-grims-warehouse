@@ -34,11 +34,13 @@ NOW = datetime(2026, 6, 12, 12, 0, tzinfo=timezone.utc)
 
 
 def _item(id, agent='claude', priority=50, body='task body', done_at=None,
-          pp_ref=None, depends_on=None, plan_anchor=None):
+          pp_ref=None, depends_on=None, plan_anchor=None, progress_note=None,
+          status_note=None):
     return {'id': id, 'agent': agent, 'priority': priority, 'body': body,
             'source': 'test', 'added_at': NOW, 'done_at': done_at,
             'pp_ref': pp_ref, 'depends_on': depends_on or [],
-            'plan_anchor': plan_anchor}
+            'plan_anchor': plan_anchor, 'progress_note': progress_note,
+            'status_note': status_note}
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +131,29 @@ def test_build_escapes_pipes_in_body():
     items = [_item(1, body='uses a | pipe')]
     text = build_taskboard(items, {}, now=NOW)
     assert 'uses a \\| pipe' in text
+
+
+def test_build_renders_human_progress_but_never_machine_bindings():
+    import json
+
+    from tgw.development.plan_binding import execution_root_hash
+
+    root = {'schema': 'tgw-execution-root/v1', 'kind': 'todo', 'todo_id': 1}
+    root['identity_hash'] = execution_root_hash(root)
+    valid = json.dumps({
+        'schema': 'tgw-plan-coding-todo/v1', 'plan_commit': 'p',
+        'solution_hash': 's', 'closure_hash': 'c', 'capability': 'cap',
+        'treatment_id': 't', 'source_commit': 'src', 'idempotency_key': 'i',
+        'worktree': '/work', 'worktree_identity': {}, 'execution_root': root,
+    })
+    malformed = '{"schema":"tgw-plan-coding-todo/v1"}'
+    text = build_taskboard([
+        _item(1, body='human', progress_note='review in progress', status_note=valid),
+        _item(2, body='valid binding', progress_note=valid),
+        _item(3, body='malformed binding', progress_note=malformed),
+    ], {}, now=NOW)
+    assert 'review in progress' in text
+    assert 'tgw-plan-coding-todo/v1' not in text
 
 
 def test_build_has_generated_warning():

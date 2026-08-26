@@ -1,5 +1,10 @@
 \set ON_ERROR_STOP on
 
+DO $$ BEGIN
+    ALTER TABLE public.todo_items ADD COLUMN progress_note TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
 -- Development-only peer roles for ordinary tgw-lib Unix worker accounts.
 -- Run while connected to tgw_lib_dev_state_machine as its owner.
 DO $$
