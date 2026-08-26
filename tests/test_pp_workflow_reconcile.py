@@ -71,6 +71,7 @@ def test_catalog_and_plan_content_tampering_fail_closed(tmp_path):
 
 def test_exact_current_provider_catalog_reconciles_and_source_tamper_fails_closed(
         tmp_path):
+    repository = CATALOG.parents[2].resolve()
     catalog = load_catalog()
     declared_sources = [
         source
@@ -79,7 +80,7 @@ def test_exact_current_provider_catalog_reconciles_and_source_tamper_fails_close
     ]
     assert len(declared_sources) == 10
     for source in declared_sources:
-        raw = (CATALOG.parents[2] / source["path"]).read_bytes()
+        raw = (repository / source["path"]).read_bytes()
         assert source["sha256"] == "sha256:" + hashlib.sha256(raw).hexdigest()
 
     def verified(**kwargs):
@@ -104,14 +105,16 @@ def test_exact_current_provider_catalog_reconciles_and_source_tamper_fails_close
     for source in declared_sources:
         destination = source_root / source["path"]
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(CATALOG.parents[2] / source["path"], destination)
+        shutil.copy2(repository / source["path"], destination)
     foreman = source_root / "src/tgw/development/foreman.py"
     foreman.write_bytes(foreman.read_bytes() + b"\n# tampered\n")
     commit = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=CATALOG.parents[2], text=True,
+        ["git", "-c", f"safe.directory={repository}", "rev-parse", "HEAD"],
+        cwd=repository, text=True,
     ).strip()
     tree = subprocess.check_output(
-        ["git", "rev-parse", "HEAD^{tree}"], cwd=CATALOG.parents[2], text=True,
+        ["git", "-c", f"safe.directory={repository}", "rev-parse", "HEAD^{tree}"],
+        cwd=repository, text=True,
     ).strip()
     with pytest.raises(PPWorkflowReconcileError,
                        match="source evidence content drift: src/tgw/development/foreman.py"):
