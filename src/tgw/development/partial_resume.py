@@ -131,6 +131,56 @@ def validate_closed_candidate(
         raise PartialResumeError("closed candidate evidence is absent, contradictory, or noncanonical")
 
 
+def validate_implementation_lineage(
+    worktree: Path,
+    *,
+    base_commit: str,
+    candidate_commit: str,
+    candidate_tree: str,
+    receipt: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the exact latest successful implementation attempt.
+
+    Git ancestry is necessary but never sufficient: the latest append-only
+    attempt and, when supplied, the published implementation receipt must both
+    close the same candidate with the canonical base and path set.
+    """
+    attempts = history(worktree)
+    if not attempts:
+        raise PartialResumeError("implementation attempt lineage is absent")
+    latest = attempts[-1]
+    closed = [
+        item for item in latest.get("artifacts", [])
+        if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"
+    ]
+    if latest.get("outcome") != "satisfied" or len(closed) != 1:
+        raise PartialResumeError("latest implementation attempt does not exactly satisfy one candidate")
+    validate_closed_candidate(
+        worktree, closed[0], base_commit=base_commit,
+        candidate_commit=candidate_commit, candidate_tree=candidate_tree,
+    )
+    if latest.get("source_commit") != base_commit or latest.get("head") != candidate_commit or latest.get("tree") != candidate_tree:
+        raise PartialResumeError("latest implementation attempt source lineage is stale")
+    if receipt is not None:
+        receipt_closed = [
+            item for item in receipt.get("artifacts", [])
+            if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"
+        ]
+        if (
+            receipt.get("status") != "PASS"
+            or receipt.get("outcome") != "satisfied"
+            or receipt.get("treatment_id") != "codex-implement"
+            or receipt.get("object_id") != str(_canonical_worktree(worktree))
+            or len(receipt_closed) != 1
+            or dict(receipt_closed[0]) != dict(closed[0])
+        ):
+            raise PartialResumeError("implementation receipt is stale, substituted, or contradictory")
+        plan = receipt.get("plan_binding")
+        if not isinstance(plan, Mapping) or plan.get("source_commit") != base_commit or plan.get("worktree") != str(_canonical_worktree(worktree)):
+            raise PartialResumeError("implementation receipt Plan binding is stale or absent")
+    return latest
+
+
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:

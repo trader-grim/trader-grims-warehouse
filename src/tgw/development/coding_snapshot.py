@@ -416,15 +416,28 @@ def _check_implemented(
                     supersession_identity=baseline_commit,
                 ),
             )
+        try:
+            from tgw.development.partial_resume import validate_implementation_lineage
+            receipt = json.loads((worktree / "implementation-receipt.json").read_text(encoding="utf-8"))
+            if not isinstance(receipt, dict):
+                raise ValueError("implementation receipt is not an object")
+            latest = validate_implementation_lineage(
+                worktree, base_commit=baseline_commit,
+                candidate_commit=head, candidate_tree=tree, receipt=receipt,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return FingerprintResult.FALSE, (
+                f"exact implementation lineage is absent or stale: {exc}",
+            ), ()
         return (
             FingerprintResult.TRUE,
-            ("clean committed successor descends from the source-bound commit",),
+            ("clean committed successor has exact latest implementation lineage",),
             (
                 EvidenceReference(
                     identity=head,
                     source_class="git",
                     source_generation=tree,
-                    freshness_identity=tree,
+                    freshness_identity=str(latest["attempt_hash"]),
                     supersession_identity=baseline_commit,
                 ),
             ),

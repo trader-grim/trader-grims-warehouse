@@ -775,8 +775,11 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
         validate_closed_candidate,
     )
     from tgw.development.plan_binding import parse_plan_binding
+    from tgw.development.worktree_lease import exclusive_worktree_lease
 
     paths = paths or DoctorPaths()
+    # This first lookup locates the lock only.  It grants no reconciliation
+    # authority; every byte is reread after the canonical lease is held.
     matches = [row for row in _todo_binding_rows(paths) if row.get("id") == todo_id]
     if len(matches) != 1:
         raise DoctorError("Todo reconciliation requires one exact durable Plan binding")
@@ -790,86 +793,138 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
     worktree = Path(plan["worktree"]).resolve(strict=True)
     if paths.worktrees.resolve() not in worktree.parents:
         raise DoctorError("Todo reconciliation worktree is outside the managed root")
-    attempts = history(worktree)
-    if not attempts:
-        raise DoctorError("Todo reconciliation has no durable implementation attempt")
-    latest = attempts[-1]
-    required = {
-        "todo_id": todo_id,
-        "plan_commit": plan["plan_commit"],
-        "solution_hash": plan["solution_hash"],
-        "source_commit": plan["source_commit"],
-        "source_tree": source_tree(worktree, plan["source_commit"]),
-        "actor": row.get("agent") or "codex",
-        "worktree": str(worktree),
-        "treatment_id": "codex-implement",
-        "treatment_version": "1",
-    }
-    if any(latest.get(key) != value for key, value in required.items()):
-        raise DoctorError("implementation attempt contradicts the current Todo binding")
-    current = source_fingerprint(worktree)
-    if current["changed_paths"] or current["head"] == required["source_commit"]:
-        raise DoctorError("implementation reconciliation requires one clean closed successor")
-    closed = {
-        "kind": "closed_candidate",
-        "commit": current["head"],
-        "tree": current["tree"],
-        "base_commit": required["source_commit"],
-        "changed_paths": candidate_changed_paths(worktree, required["source_commit"], current["head"]),
-        "detail": "mechanically reconciled from immutable Git and durable attempt/job evidence",
-    }
-    validate_closed_candidate(worktree, closed, base_commit=required["source_commit"], candidate_commit=current["head"], candidate_tree=current["tree"])
-    config = _coding_config(paths)
-    with psycopg2.connect(config["postgres_dsn"]) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """SELECT job_id::text, state::text FROM queue_jobs
-                    WHERE job_id = %s::uuid OR payload_json->>'worktree' = %s
-                       OR payload_json#>>'{task_spec,worktree}' = %s FOR SHARE""",
-                (latest.get("job_id"), str(worktree), str(worktree)),
-            )
-            jobs = cursor.fetchall()
-    if any(job[1] not in {"succeeded", "failed", "cancelled"} for job in jobs):
-        raise DoctorError("implementation reconciliation refuses active work")
-    if sum(job[0] == latest.get("job_id") for job in jobs) != 1:
-        raise DoctorError("implementation reconciliation job identity is absent or ambiguous")
-    prior_closed = [item for item in latest.get("artifacts", []) if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"]
-    if len(prior_closed) == 1:
+    with exclusive_worktree_lease(worktree):
+        locked_matches = [item for item in _todo_binding_rows(paths) if item.get("id") == todo_id]
+        if len(locked_matches) != 1:
+            raise DoctorError("Todo binding changed while acquiring its worktree lease")
+        locked_row = locked_matches[0]
         try:
-            validate_closed_candidate(worktree, prior_closed[0], base_commit=required["source_commit"], candidate_commit=current["head"], candidate_tree=current["tree"])
-            return {
-                "schema": "tgw-implementation-reconciliation/v1",
-                "ok": True,
-                "changed": False,
-                "todo_id": todo_id,
-                "job_id": latest["job_id"],
-                "attempt_hash": latest["attempt_hash"],
-                "worktree": str(worktree),
-            }
-        except ValueError:
-            pass
-    keys = ("job_id", "attempt_count", "todo_id", "plan_commit", "solution_hash", "source_commit", "source_tree", "actor", "worktree", "treatment_id", "treatment_version")
-    reconciliation = {
-        "kind": "implementation_reconciliation",
-        "schema": "tgw-implementation-reconciliation/v1",
-        "prior_receipt_hash": latest["attempt_hash"],
-        "job_id": latest["job_id"],
-        "todo_id": todo_id,
-        "plan_commit": required["plan_commit"],
-    }
-    reconciled = make_attempt({key: latest[key] for key in keys}, worktree, outcome="satisfied", predecessor=latest["attempt_hash"], artifacts=[closed, reconciliation])
-    receipt_path = append_attempt(worktree, reconciled)
-    return {
-        "schema": "tgw-implementation-reconciliation/v1",
-        "ok": True,
-        "changed": True,
-        "todo_id": todo_id,
-        "job_id": latest["job_id"],
-        "prior_receipt_hash": latest["attempt_hash"],
-        "attempt_hash": reconciled["attempt_hash"],
-        "worktree": str(worktree),
-        "receipt": str(receipt_path),
-    }
+            locked_plan = parse_plan_binding(locked_row.get("status_note"), todo_id=todo_id)
+        except ValueError as exc:
+            raise DoctorError("Todo reconciliation Plan binding changed or is malformed") from exc
+        if locked_plan != plan or Path(locked_plan["worktree"]).resolve(strict=True) != worktree:
+            raise DoctorError("Todo binding changed while acquiring its worktree lease")
+        attempts = history(worktree)
+        if not attempts:
+            raise DoctorError("Todo reconciliation has no durable implementation attempt")
+        latest = attempts[-1]
+        required = {
+            "todo_id": todo_id, "plan_commit": plan["plan_commit"],
+            "solution_hash": plan["solution_hash"], "source_commit": plan["source_commit"],
+            "source_tree": source_tree(worktree, plan["source_commit"]),
+            "actor": locked_row.get("agent") or "codex", "worktree": str(worktree),
+            "treatment_id": "codex-implement", "treatment_version": "1",
+        }
+        if any(latest.get(key) != value for key, value in required.items()):
+            raise DoctorError("implementation attempt contradicts the current Todo binding")
+        if latest.get("outcome") != "satisfied":
+            raise DoctorError("implementation reconciliation refuses a non-satisfied latest attempt")
+        current = source_fingerprint(worktree)
+        if current["changed_paths"] or current["head"] == required["source_commit"] or latest.get("head") != current["head"] or latest.get("tree") != current["tree"]:
+            raise DoctorError("implementation reconciliation requires the attempt's exact clean closed successor")
+        prior_closed = [item for item in latest.get("artifacts", []) if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"]
+        already_reconciled = False
+        if len(prior_closed) != 1 or set(prior_closed[0]) != {"kind", "commit", "tree", "detail"} or prior_closed[0].get("commit") != current["head"] or prior_closed[0].get("tree") != current["tree"]:
+            try:
+                if len(prior_closed) == 1:
+                    validate_closed_candidate(worktree, prior_closed[0], base_commit=required["source_commit"], candidate_commit=current["head"], candidate_tree=current["tree"])
+                    already_reconciled = True
+            except ValueError:
+                pass
+            if not already_reconciled:
+                raise DoctorError("implementation reconciliation requires exactly one permissible legacy closed candidate")
+        closed = dict(prior_closed[0]) if already_reconciled else {
+            **dict(prior_closed[0]),
+            "base_commit": required["source_commit"],
+            "changed_paths": candidate_changed_paths(
+                worktree, required["source_commit"], current["head"],
+            ),
+        }
+        validate_closed_candidate(worktree, closed, base_commit=required["source_commit"], candidate_commit=current["head"], candidate_tree=current["tree"])
+        implementation_receipt = worktree / "implementation-receipt.json"
+        try:
+            prior_receipt_bytes = implementation_receipt.read_bytes()
+            prior_receipt = json.loads(prior_receipt_bytes)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise DoctorError("durable implementation receipt is absent or unreadable") from exc
+        prior_receipt_sha256 = "sha256:" + hashlib.sha256(prior_receipt_bytes).hexdigest()
+        config = _coding_config(paths)
+        with psycopg2.connect(config["postgres_dsn"]) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """SELECT job_id::text, state::text, attempt_count, queue_name, payload_json
+                       FROM queue_jobs WHERE job_id = %s::uuid OR payload_json->>'worktree' = %s
+                         OR payload_json#>>'{task_spec,worktree}' = %s FOR SHARE""",
+                    (latest.get("job_id"), str(worktree), str(worktree)),
+                )
+                jobs = cursor.fetchall()
+                if any(job[1] not in {"succeeded", "failed", "dead_letter", "cancelled"} for job in jobs):
+                    raise DoctorError("implementation reconciliation refuses active work")
+                exact = [job for job in jobs if job[0] == latest.get("job_id")]
+                if len(exact) != 1 or exact[0][1] != "succeeded" or exact[0][2] != latest.get("attempt_count") or exact[0][3] != "codex-implement":
+                    raise DoctorError("implementation reconciliation requires one exact succeeded implementation job")
+                payload = exact[0][4]
+                result = payload.get("result") if isinstance(payload, Mapping) else None
+                result_matches_receipt = result == prior_receipt
+                if already_reconciled and isinstance(result, Mapping):
+                    result_closed = [item for item in result.get("artifacts", []) if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"]
+                    result_matches_receipt = (
+                        len(result_closed) == 1
+                        and set(result_closed[0]) == {"kind", "commit", "tree", "detail"}
+                        and result_closed[0].get("commit") == current["head"]
+                        and result_closed[0].get("tree") == current["tree"]
+                    )
+                if not isinstance(result, Mapping) or not result_matches_receipt or result.get("outcome") != "satisfied" or result.get("status") != "PASS":
+                    raise DoctorError("implementation reconciliation requires the exact durable succeeded job result")
+                if payload.get("todo_id") != todo_id or payload.get("worktree") != str(worktree) or payload.get("plan_binding") != prior_receipt.get("plan_binding"):
+                    raise DoctorError("implementation job/result binding contradicts Todo or Plan")
+                durable_prior_receipt_sha256 = "sha256:" + hashlib.sha256(
+                    (json.dumps(result, sort_keys=True) + "\n").encode(),
+                ).hexdigest()
+                # Revalidate every mutable input immediately before the append
+                # while both the worktree lease and durable job row lock remain held.
+                if history(worktree)[-1]["attempt_hash"] != latest["attempt_hash"] or source_fingerprint(worktree) != current or implementation_receipt.read_bytes() != prior_receipt_bytes:
+                    raise DoctorError("implementation source, history, or receipt changed before append")
+                if already_reconciled:
+                    reconciliation_items = [item for item in latest.get("artifacts", []) if isinstance(item, Mapping) and item.get("kind") == "implementation_reconciliation"]
+                    if (
+                        len(reconciliation_items) != 1
+                        or reconciliation_items[0].get("prior_receipt_sha256") != durable_prior_receipt_sha256
+                        or reconciliation_items[0].get("prior_attempt_hash") != latest.get("predecessor")
+                    ):
+                        raise DoctorError("existing reconciliation receipt-byte or attempt lineage is invalid")
+                    return {
+                        "schema": "tgw-implementation-reconciliation/v1", "ok": True,
+                        "changed": False, "todo_id": todo_id, "job_id": latest["job_id"],
+                        "prior_attempt_hash": latest.get("predecessor"),
+                        "prior_receipt_sha256": durable_prior_receipt_sha256,
+                        "attempt_hash": latest["attempt_hash"], "worktree": str(worktree),
+                    }
+                reconciliation = {
+                    "kind": "implementation_reconciliation",
+                    "schema": "tgw-implementation-reconciliation/v1",
+                    "prior_attempt_hash": latest["attempt_hash"],
+                    "prior_receipt_sha256": prior_receipt_sha256,
+                    "job_id": latest["job_id"], "todo_id": todo_id,
+                    "plan_commit": required["plan_commit"],
+                }
+                keys = ("job_id", "attempt_count", "todo_id", "plan_commit", "solution_hash", "source_commit", "source_tree", "actor", "worktree", "treatment_id", "treatment_version")
+                reconciled = make_attempt({key: latest[key] for key in keys}, worktree, outcome="satisfied", predecessor=latest["attempt_hash"], artifacts=[closed, reconciliation])
+                recovered_receipt = {**prior_receipt, "artifacts": [closed, reconciliation]}
+                _atomic_json(implementation_receipt, recovered_receipt, mode=stat.S_IMODE(implementation_receipt.stat().st_mode))
+                try:
+                    receipt_path = append_attempt(worktree, reconciled)
+                except BaseException:
+                    _atomic_bytes(implementation_receipt, prior_receipt_bytes, mode=stat.S_IMODE(implementation_receipt.stat().st_mode))
+                    raise
+        return {
+            "schema": "tgw-implementation-reconciliation/v1", "ok": True,
+            "changed": True, "todo_id": todo_id, "job_id": latest["job_id"],
+            "prior_attempt_hash": latest["attempt_hash"],
+            "prior_receipt_sha256": prior_receipt_sha256,
+            "attempt_hash": reconciled["attempt_hash"], "worktree": str(worktree),
+            "receipt": str(receipt_path),
+        }
 
 
 def check_worktrees(paths: DoctorPaths) -> dict[str, Any]:

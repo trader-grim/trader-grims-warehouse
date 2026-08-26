@@ -27,6 +27,7 @@ from tgw.development.partial_resume import (
     preservation_manifest,
     source_fingerprint,
     validate_closed_candidate,
+    validate_implementation_lineage,
 )
 from tgw.development.plan_binding import MalformedPlanBindingError, validate_plan_binding
 from tgw.development.worktree_lease import exclusive_worktree_lease
@@ -587,8 +588,11 @@ class CodingWorker(QueueWorker):
         worktree = self._validated_worktree(payload)
         plan_binding = self._validated_plan_binding(payload, worktree)
 
-        tracked_implementation = treatment_id == "codex-implement" and payload.get("todo_id") is not None
-        if tracked_implementation:
+        lineage_bound_treatment = (
+            treatment_id in {"codex-implement", "controller-verify"}
+            and payload.get("todo_id") is not None
+        )
+        if lineage_bound_treatment:
             with exclusive_worktree_lease(worktree) as descriptor:
                 previous = self._worktree_lease_fd
                 self._worktree_lease_fd = descriptor
@@ -606,6 +610,18 @@ class CodingWorker(QueueWorker):
         worktree: Path,
         plan_binding: dict[str, Any] | None,
     ) -> dict[str, Any]:
+
+        if treatment_id == "controller-verify" and plan_binding is not None:
+            candidate = source_fingerprint(worktree)
+            try:
+                receipt_value = json.loads(receipt_path_for_treatment(worktree, "codex-implement").read_text(encoding="utf-8"))
+                validate_implementation_lineage(
+                    worktree, base_commit=plan_binding["source_commit"],
+                    candidate_commit=candidate["head"], candidate_tree=candidate["tree"],
+                    receipt=receipt_value,
+                )
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                raise HardFailure(f"controller verification requires exact implementation lineage: {exc}") from exc
 
         attempt_binding = None
         predecessor = None

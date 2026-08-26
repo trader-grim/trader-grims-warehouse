@@ -345,7 +345,7 @@ class TestCheckImplemented:
         assert "still matches" in reasons[0]
         assert evidence[0].supersession_identity == baseline
 
-    def test_source_bound_clean_successor_is_implemented(self, tmp_path):
+    def test_source_bound_clean_successor_without_receipt_lineage_is_not_implemented(self, tmp_path):
         _git_init(tmp_path)
         baseline = _git_commit(tmp_path, "bootstrap", allow_empty=True)
         _git_write_file(tmp_path, "implementation.py", "implemented = True\n")
@@ -353,8 +353,8 @@ class TestCheckImplemented:
 
         result, reasons, _ = _check_implemented(tmp_path, baseline)
 
-        assert result is FingerprintResult.TRUE
-        assert "clean committed successor" in reasons[0]
+        assert result is FingerprintResult.FALSE
+        assert "lineage" in reasons[0]
 
     def test_source_bound_empty_successor_is_not_implemented(self, tmp_path):
         _git_init(tmp_path)
