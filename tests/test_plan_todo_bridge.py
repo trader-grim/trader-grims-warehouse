@@ -83,6 +83,83 @@ def test_luet_leaf_creates_one_bound_todo_and_is_idempotent():
     assert rows[0].get("pp_ref") is None
 
 
+@pytest.mark.parametrize(
+    "status_note",
+    ["null", "true", "false", "0", "1.5", '"binding"', "[]"],
+    ids=["null", "true", "false", "integer", "number", "string", "array"],
+)
+def test_non_object_status_note_is_ignored_without_selecting_or_overwriting(status_note):
+    solution, compiled = _compiled()
+    existing = {"id": 41, "status_note": status_note}
+    rows = [existing]
+
+    def create(agent, body, priority, source, pp_ref, anchor):
+        row = {
+            "id": 42, "agent": agent, "body": body, "priority": priority,
+            "source": source, "pp_ref": pp_ref, "plan_anchor": anchor,
+            "status_note": "",
+        }
+        rows.append(row)
+        return row
+
+    result = bind_leaf(
+        compiled,
+        solution=solution,
+        treatment_id="establish:base@1",
+        source_commit="a" * 40,
+        worktree_identity="request-a",
+        agent="codex",
+        body="implement",
+        priority=10,
+        create_todo=create,
+        list_todos=lambda: rows,
+        allocate_worktree=lambda todo_id, request_id, source: {
+            "worktree": f"/worktrees/todo-{todo_id}-{request_id}",
+            "todo_id": todo_id,
+        },
+        set_status_note=lambda todo_id, value: rows[1].update(status_note=value),
+    )
+
+    assert result["todo_id"] == 42 and result["created"]
+    assert existing == {"id": 41, "status_note": status_note}
+
+
+def test_valid_exact_status_note_binding_is_reused_without_overwrite():
+    solution, compiled = _compiled()
+    rows = []
+
+    def create(agent, body, priority, source, pp_ref, anchor):
+        row = {"id": 1, "agent": agent, "body": body, "status_note": ""}
+        rows.append(row)
+        return row
+
+    def note(todo_id, value):
+        rows[0]["status_note"] = value
+
+    common = dict(
+        solution=solution,
+        treatment_id="establish:base@1",
+        source_commit="a" * 40,
+        worktree_identity="request-a",
+        agent="codex",
+        body="implement",
+        priority=10,
+        create_todo=create,
+        list_todos=lambda: rows,
+        allocate_worktree=lambda todo_id, request_id, source: {
+            "worktree": f"/worktrees/todo-{todo_id}-{request_id}",
+            "todo_id": todo_id,
+        },
+        set_status_note=note,
+    )
+    first = bind_leaf(compiled, **common)
+    exact_note = rows[0]["status_note"]
+    second = bind_leaf(compiled, **common)
+
+    assert second == {"todo_id": 1, "binding": first["binding"], "created": False}
+    assert rows[0]["status_note"] == exact_note
+
+
 def test_held_solution_refuses_without_todo():
     solution, compiled = _compiled(False)
     try:

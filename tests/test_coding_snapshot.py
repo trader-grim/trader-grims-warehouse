@@ -486,6 +486,57 @@ class TestCheckReceipt:
 
     @pytest.mark.parametrize("condition_id", ["tested", "linted", "controller_verified"])
     @pytest.mark.parametrize(
+        "status",
+        [None, True, False, 0, 1.5, [], {}, ["PASS"]],
+        ids=["null", "true", "false", "integer", "number", "array", "object", "string-array"],
+    )
+    def test_controller_receipt_rejects_non_string_status_without_exception(
+        self, tmp_path, condition_id, status,
+    ):
+        attempt_hash = "sha256:" + "a" * 64
+        (tmp_path / "controller-harness-receipt.json").write_text(json.dumps({
+            "status": status,
+            "outcome": "satisfied",
+            "established_conditions": [condition_id],
+            "graph_id": "g",
+            "object_id": "o",
+            "object_generation": "x",
+            "implementation_attempt_hash": attempt_hash,
+        }))
+
+        result, reasons, evidence = _check_receipt(
+            tmp_path, condition_id, "o", "x", attempt_hash,
+        )
+
+        assert result is FingerprintResult.FALSE
+        assert reasons == ("receipt file malformed: status must be a string",)
+        assert evidence == ()
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [("PASS", FingerprintResult.TRUE), ("pass", FingerprintResult.TRUE),
+         ("FAIL", FingerprintResult.FALSE), ("", FingerprintResult.FALSE)],
+    )
+    def test_controller_receipt_accepts_status_strings(self, tmp_path, status, expected):
+        attempt_hash = "sha256:" + "a" * 64
+        (tmp_path / "controller-harness-receipt.json").write_text(json.dumps({
+            "status": status,
+            "outcome": "satisfied",
+            "established_conditions": ["controller_verified"],
+            "graph_id": "g",
+            "object_id": "o",
+            "object_generation": "x",
+            "implementation_attempt_hash": attempt_hash,
+        }))
+
+        result, _, _ = _check_receipt(
+            tmp_path, "controller_verified", "o", "x", attempt_hash,
+        )
+
+        assert result is expected
+
+    @pytest.mark.parametrize("condition_id", ["tested", "linted", "controller_verified"])
+    @pytest.mark.parametrize(
         "content",
         ["null", "[]", '"receipt"', "42", "true", "false"],
         ids=["null", "array", "string", "number", "true", "false"],

@@ -658,7 +658,12 @@ def _check_receipt(
             "receipt file malformed: expected JSON object",
         ), ()
 
-    status = data.get("status", "").upper()
+    raw_status = data.get("status", "")
+    if not isinstance(raw_status, str):
+        return FingerprintResult.FALSE, (
+            "receipt file malformed: status must be a string",
+        ), ()
+    status = raw_status.upper()
     identity = hashlib.sha256(content.encode()).hexdigest()[:16]
 
     bound = (

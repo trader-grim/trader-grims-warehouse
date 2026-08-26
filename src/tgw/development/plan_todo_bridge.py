@@ -139,6 +139,8 @@ def bind_leaf(
                 prior = json.loads(note)
             except ValueError:
                 continue
+            if not isinstance(prior, Mapping):
+                continue
             if prior.get("idempotency_key") == binding["idempotency_key"]:
                 return {"todo_id": row["id"], "binding": prior, "created": False}
             prior_root = prior.get("execution_root")
