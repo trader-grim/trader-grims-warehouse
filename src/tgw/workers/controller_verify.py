@@ -16,11 +16,13 @@ from tgw.development.worktree_lease import exclusive_worktree_lease
 from tgw.errors import HardFailure
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+_PORCELAIN_STATUS = re.compile(r"[ MADRCUT?!]{2}\Z")
 _RECEIPTS = frozenset({
     "implementation-receipt.json", "controller-harness-receipt.json",
     "review-receipt.json", "deployment-receipt.json", "stitch-receipt.json",
     "operator-admit-pending.json",
 })
+_HISTORY_ROOT = ".tgw-coding-history"
 
 
 class ControllerVerificationError(RuntimeError):
@@ -53,6 +55,49 @@ def _git_text(cwd: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
+def _is_workflow_evidence_path(relative: str) -> bool:
+    """Return whether a safe repository-relative path is controller-owned evidence."""
+    if relative == f"{_HISTORY_ROOT}/":
+        return True
+    parts = relative.split("/")
+    if not relative or relative.startswith("/") or any(
+        part in {"", ".", ".."} for part in parts
+    ):
+        return False
+    if len(parts) == 1:
+        return relative in _RECEIPTS
+    return parts[0] == _HISTORY_ROOT
+
+
+def _assert_source_status_clean(cwd: Path) -> None:
+    """Fail closed unless every NUL-delimited status entry is owned evidence."""
+    status = _git_paths(
+        cwd,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--ignored=matching",
+    )
+    for item in status:
+        # Porcelain v1 records are ``XY SP path``. Rename/copy records have a
+        # second NUL-delimited path and are never workflow evidence mutations.
+        if (
+            len(item) < 4
+            or item[2] != " "
+            or _PORCELAIN_STATUS.fullmatch(item[:2]) is None
+            or "R" in item[:2]
+            or "C" in item[:2]
+        ):
+            raise ControllerVerificationError(
+                "controller candidate source is mutable or uncommitted"
+            )
+        if not _is_workflow_evidence_path(item[3:]):
+            raise ControllerVerificationError(
+                "controller candidate source is mutable or uncommitted"
+            )
+
+
 def _source_bound_candidate_files() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], str, str]:
     try:
         job = json.loads(os.environ["TGW_CODING_JOB"])
@@ -73,16 +118,7 @@ def _source_bound_candidate_files() -> tuple[tuple[str, ...], tuple[str, ...], t
         cwd=cwd, check=False, capture_output=True,
     ).returncode:
         raise ControllerVerificationError("controller candidate does not descend from its bound source")
-    status = _git_paths(
-        cwd,
-        "status",
-        "--porcelain=v1",
-        "-z",
-        "--untracked-files=all",
-        "--ignored=matching",
-    )
-    if any(item[3:] not in _RECEIPTS for item in status):
-        raise ControllerVerificationError("controller candidate source is mutable or uncommitted")
+    _assert_source_status_clean(cwd)
     expected_generation = job.get("object_generation")
     actual_generation = hashlib.sha256(f"{head}|{tree}".encode()).hexdigest()[:16]
     if expected_generation != actual_generation:

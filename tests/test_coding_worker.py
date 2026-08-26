@@ -739,6 +739,65 @@ def test_controller_refuses_ignored_mutable_candidate_state(tmp_path, monkeypatc
         controller_verify._source_bound_python_files()
 
 
+@pytest.mark.parametrize(
+    "raw_status",
+    [
+        b"!! .tgw-coding-history/\0",
+        b"?? .tgw-coding-history/implementation/attempt.json\0",
+        b"!! .tgw-coding-history/controller/check.log\0",
+        b"?? implementation-receipt.json\0",
+        b" M controller-harness-receipt.json\0",
+    ],
+)
+def test_controller_nul_status_accepts_only_owned_workflow_evidence(
+    tmp_path, monkeypatch, raw_status
+):
+    from tgw.workers import controller_verify
+
+    def run(command, **_kwargs):
+        assert command[-4:] == [
+            "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching",
+        ]
+        return subprocess.CompletedProcess(command, 0, stdout=raw_status, stderr=b"")
+
+    monkeypatch.setattr(controller_verify.subprocess, "run", run)
+    controller_verify._assert_source_status_clean(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "raw_status",
+    [
+        b"?? .tgw-coding-history-evil/attempt.json\0",
+        b"?? .tgw-coding-history\0",
+        b"?? nested/implementation-receipt.json\0",
+        b"?? implementation-receipt.json.bak\0",
+        b"?? ../implementation-receipt.json\0",
+        b"?? .tgw-coding-history/../src.py\0",
+        b"?? .tgw-coding-history//attempt.json\0",
+        b"A  src/staged.py\0",
+        b"!! ignored/value\0",
+        b"R  .tgw-coding-history/new\0.tgw-coding-history/old\0",
+        b"ZZ implementation-receipt.json\0",
+        b"malformed\0",
+    ],
+)
+def test_controller_nul_status_rejects_prefixes_renames_and_unsafe_paths(
+    tmp_path, monkeypatch, raw_status
+):
+    from tgw.workers import controller_verify
+
+    monkeypatch.setattr(
+        controller_verify.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=raw_status, stderr=b""
+        ),
+    )
+
+    with pytest.raises(controller_verify.ControllerVerificationError, match="mutable or uncommitted"):
+        controller_verify._assert_source_status_clean(tmp_path)
+
+
 def test_configured_worker_launches_candidate_bytes_not_runtime_release(tmp_path, monkeypatch):
     worker = CodingWorker(
         "controller-verify",
