@@ -24,11 +24,11 @@
     "current-generation-scheduler":{"sources":[{"path":"src/tgw/workflow_kernel/scheduler.py","sha256":"sha256:b7da7d265b2afbd0337b1162f4f5e978f1082e6f6432a670e87a440cb7e256e6"}]},
     "current-receipt-runtime":{"sources":[{"path":"src/tgw/workflow/standalone_plan.py","sha256":"sha256:9087e99e746b286e653562a463251ec1decc6e79b42bbc61a7223dc527afff57"}]},
     "current-worker-migrations":{"sources":[{"path":"src/tgw/workflow/treatments.py","sha256":"sha256:77e1f2a0e9aa41a5e20226c414e6d383ee745ab380ce73cff0076c351f0a282f"}]},
-    "current-coding-foreman":{"sources":[{"path":"src/tgw/development/foreman.py","sha256":"sha256:fd1eefd00aeb675c576593d66f66aa8425f1b8ccdc256fd89696563cc338330c"}]},
+    "current-coding-foreman":{"sources":[{"path":"src/tgw/development/foreman.py","sha256":"sha256:f5ff2e572d6e7a159573aef4d9f0efa3f5f95fa8228ba372eb82c9eb4ae031d2"}]},
     "current-action-cards":{"sources":[{"path":"src/tgw/workflow/action_cards.py","sha256":"sha256:370d55c02bdd1a2553b7974f70003da71156d715978ae23aae8bc8cfbf73e78e"}]},
     "current-mandatory-fixture":{"sources":[{"path":"tests/test_pp_workflow_001_fixture.py","sha256":"sha256:cc0e1f32d40cfe3aad5c7d7101e6ddc603cfc0c94dc8cde06b7435f197f52662"}]},
     "current-native-luet-resolver":{"sources":[{"path":"src/tgw/plan_solver.py","sha256":"sha256:3149c25384ae7c533184fdae982d6068ef7b90de95edcc20328d91211d17d906"}]},
-    "current-pp-root-bridge":{"sources":[{"path":"src/tgw/development/plan_todo_bridge.py","sha256":"sha256:a3901bf1974ca81767b7ea39721c55eba5d0f9cbd7f82d7d7cfb1bc129696ce6"}]},
+    "current-pp-root-bridge":{"sources":[{"path":"src/tgw/development/plan_todo_bridge.py","sha256":"sha256:a5a54a42b6d101ed18dd8c8f294ce055c60619b5cdfca652c3908bae99b9be53"}]},
     "current-local-coding-surfaces":{"sources":[{"path":"src/tgw/coding_mcp_server.py","sha256":"sha256:7aec6e6348417dcc3d98c5ae9ab95f6422f3db4dfb8a56c7ae6443dc4f9e22b3"}]}
   }
 }

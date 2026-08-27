@@ -101,6 +101,12 @@ def test_exact_current_provider_catalog_reconciles_and_source_tamper_fails_close
     assert all(provider["state"] == "IMPLEMENTED_UNVERIFIED"
                for provider in current["providers"])
 
+    stale_catalog = tmp_path / "stale-catalog.json"
+    stale_catalog.write_bytes(CATALOG.read_bytes() + b"\n")
+    with pytest.raises(PPWorkflowReconcileError,
+                       match="whole PP capability catalog hash drift"):
+        reconcile(catalog_path=stale_catalog, runtime_verifier=verified)
+
     source_root = tmp_path / "source"
     for source in declared_sources:
         destination = source_root / source["path"]
