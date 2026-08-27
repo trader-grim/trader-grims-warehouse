@@ -7,6 +7,7 @@ import json
 import os
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
 import textwrap
@@ -755,6 +756,31 @@ def test_launcher_declares_only_narrow_bundle_and_immutable_release() -> None:
     assert 'Path("/opt/TGW/tgw-lib/context-runtime/src")' not in source
     assert "RUNTIME_RELEASES / source_commit" in source
     assert 'def tgw_context_bundle(task: str = "current", limit: int = 12)' in source
+
+
+def test_real_release_launcher_is_executable_with_trusted_bootstrap() -> None:
+    trusted_bootstrap = (
+        b"#!/opt/TGW/.venvs/controller/bin/python3\n"
+        b'"""Launch the shared read-only TGW context MCP on the Debian development host."""\n'
+    )
+
+    assert LAUNCHER.read_bytes().startswith(trusted_bootstrap)
+    assert LAUNCHER.stat().st_mode & stat.S_IXUSR
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "--stage", "--", LAUNCHER.relative_to(ROOT)],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert len(tracked) == 1
+    mode, object_id, stage_and_path = tracked[0].split(maxsplit=2)
+    stage, path = stage_and_path.split("\t", maxsplit=1)
+    assert mode == "100755"
+    assert len(object_id) == 40
+    assert stage == "0"
+    assert path == "scripts/tgw_context_debian_stdio.py"
 
 
 def test_atomic_snapshot_rejects_a_non_git_source_tree() -> None:
