@@ -89,6 +89,8 @@ def main() -> int:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(raw)
             stream.flush()
+            os.fchown(stream.fileno(), 0, 0)
+            os.fchmod(stream.fileno(), 0o444)
             os.fsync(stream.fileno())
         os.replace(temporary, args.output)
         directory = os.open(args.output.parent, os.O_RDONLY | os.O_DIRECTORY)

@@ -60,7 +60,14 @@ def _snapshot(task: dict, cursor: dict) -> dict:
 
 def _write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value), encoding="utf-8")
+    prior_mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
+    if prior_mode is not None and not prior_mode & stat.S_IWUSR:
+        path.chmod(prior_mode | stat.S_IWUSR)
+    try:
+        path.write_text(json.dumps(value), encoding="utf-8")
+    finally:
+        if prior_mode is not None:
+            path.chmod(prior_mode)
 
 
 def test_reconciliation_publication_is_history_first_and_failure_atomic(tmp_path, monkeypatch):
@@ -221,6 +228,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     _write_json(cursor_path, cursor)
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     snapshot_path.write_bytes(publish_bytes(task, cursor))
+    snapshot_path.chmod(0o444)
     launcher = local_bin / "tgw-context-mcp"
     shutil.copyfile(release / "scripts/tgw_context_debian_stdio.py", launcher)
     launcher.chmod(0o555)
@@ -319,6 +327,20 @@ def test_context_snapshot_detects_cursor_drift_with_exact_repair(tmp_path: Path)
     result = doctor_cli.check_context_snapshot(paths)
 
     assert result["state"] == "FAIL"
+    assert result["operator_action"] == "sudo -n tgw doctor repair context"
+
+
+@pytest.mark.parametrize("wrong_mode", [0o400, 0o440, 0o644])
+def test_context_snapshot_detects_metadata_drift(
+    tmp_path: Path, wrong_mode: int
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    paths.context_snapshot.chmod(wrong_mode)
+
+    result = doctor_cli.check_context_snapshot(paths)
+
+    assert result["state"] == "FAIL"
+    assert "install uid/gid 0444" in result["detail"]
     assert result["operator_action"] == "sudo -n tgw doctor repair context"
 
 
@@ -894,7 +916,7 @@ def test_context_staged_probe_invalid_actor_leaves_caller_owned_snapshot_fd_open
     monkeypatch.setattr(
         doctor_cli.os,
         "fstat",
-        lambda fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o400, st_uid=0, st_gid=0),
+        lambda fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=0),
     )
     monkeypatch.setattr(
         doctor_cli.pwd,
@@ -915,7 +937,7 @@ def test_context_staged_probe_rejects_nonmember_before_spawn(
 ) -> None:
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text("{}", encoding="utf-8")
-    snapshot.chmod(0o400)
+    snapshot.chmod(0o444)
     target = SimpleNamespace(pw_name="actor", pw_uid=1234, pw_gid=1234)
     coding_group = SimpleNamespace(gr_name="tgw-coders", gr_gid=983)
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
@@ -923,7 +945,7 @@ def test_context_staged_probe_rejects_nonmember_before_spawn(
         doctor_cli.os,
         "fstat",
         lambda _fd: SimpleNamespace(
-            st_mode=stat.S_IFREG | 0o400, st_uid=0, st_gid=0
+                st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=0
         ),
     )
     monkeypatch.setattr(doctor_cli.pwd, "getpwnam", lambda _actor: target)
@@ -951,14 +973,14 @@ def test_context_staged_probe_rejects_mismatched_group_identity(
 ) -> None:
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text("{}", encoding="utf-8")
-    snapshot.chmod(0o400)
+    snapshot.chmod(0o444)
     target = SimpleNamespace(pw_name="actor", pw_uid=1234, pw_gid=1234)
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
     monkeypatch.setattr(
         doctor_cli.os,
         "fstat",
         lambda _fd: SimpleNamespace(
-            st_mode=stat.S_IFREG | 0o400, st_uid=0, st_gid=0
+                st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=0
         ),
     )
     monkeypatch.setattr(doctor_cli.pwd, "getpwnam", lambda _actor: target)
@@ -3069,7 +3091,7 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(tmp
         metadata = os.fstat(descriptor)
         assert metadata.st_uid == paths.context_install_uid
         assert metadata.st_gid == paths.context_install_gid
-        assert stat.S_IMODE(metadata.st_mode) == 0o400
+        assert stat.S_IMODE(metadata.st_mode) == 0o444
         os.lseek(descriptor, 0, os.SEEK_SET)
         retained_raw = b""
         while chunk := os.read(descriptor, 11):
@@ -3206,7 +3228,7 @@ def test_context_repair_retained_descriptor_defeats_path_replacement_after_open(
         retained = os.fstat(descriptor)
         assert retained.st_uid == paths.context_install_uid
         assert retained.st_gid == paths.context_install_gid
-        assert stat.S_IMODE(retained.st_mode) == 0o400
+        assert stat.S_IMODE(retained.st_mode) == 0o444
         os.lseek(descriptor, 0, os.SEEK_SET)
         chunks = []
         while chunk := os.read(descriptor, 7):
@@ -3380,6 +3402,49 @@ def test_context_repair_is_semantically_idempotent(tmp_path: Path, monkeypatch: 
     assert result["changed"] is False
     assert paths.context_cursor.stat().st_ino == cursor_inode
     assert paths.context_snapshot.stat().st_ino == snapshot_inode
+
+
+def test_context_repair_replaces_metadata_drift_without_changing_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    expected = paths.context_snapshot.read_bytes()
+    paths.context_snapshot.chmod(0o644)
+    original_run = doctor_cli._run
+
+    def run(command, **kwargs):
+        if Path(command[0]).name in {"tgw-context-publish", "tgw_context_publish.py"}:
+            task_path = Path(command[command.index("--task") + 1])
+            cursor_path = Path(command[command.index("--cursor") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            output_path.write_bytes(
+                publish_bytes(
+                    json.loads(task_path.read_text()),
+                    json.loads(cursor_path.read_text()),
+                )
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(
+        doctor_cli, "_require_trusted_root_program", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: {"generation": "CURRENT"},
+    )
+
+    result = doctor_cli.repair_context(paths)
+
+    metadata = paths.context_snapshot.stat(follow_symlinks=False)
+    assert result["changed"] is True
+    assert paths.context_snapshot.read_bytes() == expected
+    assert metadata.st_uid == paths.context_install_uid
+    assert metadata.st_gid == paths.context_install_gid
+    assert stat.S_IMODE(metadata.st_mode) == 0o444
 
 
 def test_context_publisher_failure_leaves_live_inputs_unchanged_and_is_receipted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4219,6 +4284,7 @@ def test_obsolete_cleanup_refuses_unbound_candidate_without_expanding_scope(tmp_
 def test_obsolete_cleanup_ignores_context_evidence_but_detects_active_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     sources = _obsolete_fixture(paths, monkeypatch)
+    paths.context_snapshot.chmod(0o644)
     paths.context_snapshot.write_text(f'{{"historical_path": "{sources[0]}"}}')
     paths = replace(
         paths,

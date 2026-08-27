@@ -53,6 +53,7 @@ _CONTEXT_COLD_PROBE_LOCK = threading.RLock()
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
 _CODING_RUNTIME_GROUP = "tgw-coders"
+_CONTEXT_SNAPSHOT_MODE = 0o444
 _FORBIDDEN_CODING_DEPENDENCIES = (
     "tgw-prod",
     "ssh",
@@ -454,6 +455,15 @@ def _validate_snapshot(
 def check_context_snapshot(paths: DoctorPaths) -> dict[str, Any]:
     repair = "sudo -n tgw doctor repair context"
     try:
+        snapshot_state = paths.context_snapshot.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(snapshot_state.st_mode)
+            or snapshot_state.st_nlink != 1
+            or snapshot_state.st_uid != paths.context_install_uid
+            or snapshot_state.st_gid != paths.context_install_gid
+            or stat.S_IMODE(snapshot_state.st_mode) != _CONTEXT_SNAPSHOT_MODE
+        ):
+            raise DoctorError("published Context snapshot metadata is not exact install uid/gid 0444")
         snapshot_raw = paths.context_snapshot.read_bytes()
         snapshot = _json(paths.context_snapshot)
         task = _json(paths.context_task)
@@ -1050,7 +1060,7 @@ def _probe_context_stdio_process(
             not stat.S_ISREG(snapshot_state.st_mode)
             or snapshot_state.st_uid != staged_snapshot_uid
             or snapshot_state.st_gid != staged_snapshot_gid
-            or stat.S_IMODE(snapshot_state.st_mode) != 0o400
+            or stat.S_IMODE(snapshot_state.st_mode) != _CONTEXT_SNAPSHOT_MODE
         ):
             raise DoctorError("Context staged cold preflight snapshot is not install-bound")
         os.lseek(staged_snapshot_descriptor, 0, os.SEEK_SET)
@@ -4013,13 +4023,13 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
                 paths.context_install_uid,
                 paths.context_install_gid,
             )
-            os.fchmod(staged_descriptor, 0o400)
+            os.fchmod(staged_descriptor, _CONTEXT_SNAPSHOT_MODE)
             retained_state = os.fstat(staged_descriptor)
             if (
                 not stat.S_ISREG(retained_state.st_mode)
                 or retained_state.st_uid != paths.context_install_uid
                 or retained_state.st_gid != paths.context_install_gid
-                or stat.S_IMODE(retained_state.st_mode) != 0o400
+                or stat.S_IMODE(retained_state.st_mode) != _CONTEXT_SNAPSHOT_MODE
             ):
                 raise DoctorError("staged context publisher output metadata did not retain")
             # Cold-start against this same retained open-file description.  The
@@ -4054,7 +4064,13 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
             ) from close_exc
         if primary_failure is not None:
             raise primary_failure.with_traceback(primary_failure.__traceback__)
-        changed = before["cursor"] != cursor or before["snapshot"] != after
+        changed = (
+            before["cursor"] != cursor
+            or before["snapshot"] != after
+            or snapshot_surface["uid"] != paths.context_install_uid
+            or snapshot_surface["gid"] != paths.context_install_gid
+            or snapshot_surface["mode"] != _CONTEXT_SNAPSHOT_MODE
+        )
         current_head, current_tree, current_status = _source_identity(paths)
         if current_status or (current_head, current_tree) != (head, tree):
             raise DoctorError("canonical source changed during context repair")
@@ -4078,16 +4094,21 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
                 )
             if _surface_snapshot(paths.context_task) != task_surface or _surface_snapshot(paths.context_cursor) != committed_cursor:
                 raise DoctorError("Context inputs changed before atomic snapshot cutover")
-            if before["snapshot"] == after:
+            snapshot_metadata_exact = (
+                snapshot_surface["uid"] == paths.context_install_uid
+                and snapshot_surface["gid"] == paths.context_install_gid
+                and snapshot_surface["mode"] == _CONTEXT_SNAPSHOT_MODE
+            )
+            if before["snapshot"] == after and snapshot_metadata_exact:
                 committed_snapshot = snapshot_surface
             else:
                 committed_snapshot = _cas_regular_file(
                     paths.context_snapshot,
                     snapshot_surface,
                     after_raw,
-                    mode=snapshot_surface["mode"],
-                    uid=snapshot_surface["uid"],
-                    gid=snapshot_surface["gid"],
+                    mode=_CONTEXT_SNAPSHOT_MODE,
+                    uid=paths.context_install_uid,
+                    gid=paths.context_install_gid,
                 )
             if _surface_snapshot(paths.context_task) != task_surface or _surface_snapshot(paths.context_cursor) != committed_cursor or _surface_snapshot(paths.context_snapshot) != committed_snapshot:
                 raise DoctorError("final Context transaction verification failed")

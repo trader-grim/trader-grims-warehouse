@@ -273,8 +273,8 @@ def test_real_isolated_publisher_repeatedly_preserves_immutable_release(tmp_path
     before = _tree_identity(release)
     assert not any(part == "__pycache__" or Path(part).suffix == ".pyc" for part in before)
 
-    for index in range(2):
-        output = tmp_path / f"snapshot-{index}.json"
+    output = tmp_path / "snapshot.json"
+    for _index in range(2):
         completed = subprocess.run(
             [str(publisher), "--task", str(task), "--cursor", str(cursor), "--output", str(output)],
             capture_output=True,
@@ -286,6 +286,11 @@ def test_real_isolated_publisher_repeatedly_preserves_immutable_release(tmp_path
             pytest.skip("root-only publisher success path requires root")
         assert completed.returncode == 0, completed.stderr
         assert output.read_bytes() == publish_bytes(legacy["task"], legacy["cursor"])
+        metadata = output.stat(follow_symlinks=False)
+        assert metadata.st_uid == 0
+        assert metadata.st_gid == 0
+        assert stat.S_IMODE(metadata.st_mode) == 0o444
+        assert metadata.st_nlink == 1
         assert _tree_identity(release) == before
 
 
