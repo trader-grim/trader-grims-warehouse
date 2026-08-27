@@ -54,6 +54,7 @@ _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
 _CODING_RUNTIME_GROUP = "tgw-coders"
 _CONTEXT_SNAPSHOT_MODE = 0o444
+_CONTEXT_PREFLIGHT_SNAPSHOT_MODE = 0o400
 _FORBIDDEN_CODING_DEPENDENCIES = (
     "tgw-prod",
     "ssh",
@@ -1060,7 +1061,8 @@ def _probe_context_stdio_process(
             not stat.S_ISREG(snapshot_state.st_mode)
             or snapshot_state.st_uid != staged_snapshot_uid
             or snapshot_state.st_gid != staged_snapshot_gid
-            or stat.S_IMODE(snapshot_state.st_mode) != _CONTEXT_SNAPSHOT_MODE
+            or stat.S_IMODE(snapshot_state.st_mode)
+            != _CONTEXT_PREFLIGHT_SNAPSHOT_MODE
         ):
             raise DoctorError("Context staged cold preflight snapshot is not install-bound")
         os.lseek(staged_snapshot_descriptor, 0, os.SEEK_SET)
@@ -4023,13 +4025,17 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
                 paths.context_install_uid,
                 paths.context_install_gid,
             )
-            os.fchmod(staged_descriptor, _CONTEXT_SNAPSHOT_MODE)
+            # The inherited descriptor is a root-only preflight capability.  It
+            # is deliberately stricter than the separately installed live
+            # snapshot, which is published as root:root 0444 below.
+            os.fchmod(staged_descriptor, _CONTEXT_PREFLIGHT_SNAPSHOT_MODE)
             retained_state = os.fstat(staged_descriptor)
             if (
                 not stat.S_ISREG(retained_state.st_mode)
                 or retained_state.st_uid != paths.context_install_uid
                 or retained_state.st_gid != paths.context_install_gid
-                or stat.S_IMODE(retained_state.st_mode) != _CONTEXT_SNAPSHOT_MODE
+                or stat.S_IMODE(retained_state.st_mode)
+                != _CONTEXT_PREFLIGHT_SNAPSHOT_MODE
             ):
                 raise DoctorError("staged context publisher output metadata did not retain")
             # Cold-start against this same retained open-file description.  The

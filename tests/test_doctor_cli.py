@@ -813,6 +813,51 @@ def test_context_staged_probe_fstat_failure_leaves_caller_owned_snapshot_fd_open
     os.close(descriptor)
 
 
+def test_real_context_launcher_distinguishes_preflight_0400_from_live_0444(
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_bytes(b"{}")
+    launcher = ROOT / "scripts/tgw_context_debian_stdio.py"
+    # Exercise the real launcher while making only the unavailable root-owned
+    # fixture metadata explicit. The descriptor's real mode and bytes remain
+    # kernel-backed, so 0444 versus 0400 reaches the production preflight check.
+    wrapper = (
+        "import os,runpy,sys;"
+        "real_fstat=os.fstat;"
+        "os.fstat=lambda fd: os.stat_result((*real_fstat(fd)[:4],0,0,*real_fstat(fd)[6:]));"
+        "runpy.run_path(sys.argv[1],run_name='__main__')"
+    )
+
+    errors: dict[int, str] = {}
+    for mode in (0o444, 0o400):
+        snapshot.chmod(mode)
+        descriptor = os.open(snapshot, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            result = subprocess.run(
+                [sys.executable, "-B", "-c", wrapper, str(launcher)],
+                input=b"",
+                capture_output=True,
+                check=False,
+                pass_fds=(descriptor,),
+                env={
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                    "PATH": "/usr/bin:/bin",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "TGW_CONTEXT_PREFLIGHT_SNAPSHOT_FD": str(descriptor),
+                },
+            )
+        finally:
+            os.close(descriptor)
+        assert result.returncode != 0
+        errors[mode] = result.stderr.decode("utf-8", errors="replace")
+
+    assert "not stable protected root data" in errors[0o444]
+    assert "not stable protected root data" not in errors[0o400]
+    assert "current TGW context snapshot schema is invalid" in errors[0o400]
+
+
 def test_context_cold_probe_kills_real_forked_descendant(tmp_path: Path) -> None:
     descendant_pid = tmp_path / "descendant.pid"
     launcher = tmp_path / "tgw-context-mcp"
@@ -916,7 +961,7 @@ def test_context_staged_probe_invalid_actor_leaves_caller_owned_snapshot_fd_open
     monkeypatch.setattr(
         doctor_cli.os,
         "fstat",
-        lambda fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=0),
+        lambda fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o400, st_uid=0, st_gid=0),
     )
     monkeypatch.setattr(
         doctor_cli.pwd,
@@ -945,7 +990,7 @@ def test_context_staged_probe_rejects_nonmember_before_spawn(
         doctor_cli.os,
         "fstat",
         lambda _fd: SimpleNamespace(
-                st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=0
+                st_mode=stat.S_IFREG | 0o400, st_uid=0, st_gid=0
         ),
     )
     monkeypatch.setattr(doctor_cli.pwd, "getpwnam", lambda _actor: target)
@@ -980,7 +1025,7 @@ def test_context_staged_probe_rejects_mismatched_group_identity(
         doctor_cli.os,
         "fstat",
         lambda _fd: SimpleNamespace(
-                st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=0
+                st_mode=stat.S_IFREG | 0o400, st_uid=0, st_gid=0
         ),
     )
     monkeypatch.setattr(doctor_cli.pwd, "getpwnam", lambda _actor: target)
@@ -3091,7 +3136,7 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(tmp
         metadata = os.fstat(descriptor)
         assert metadata.st_uid == paths.context_install_uid
         assert metadata.st_gid == paths.context_install_gid
-        assert stat.S_IMODE(metadata.st_mode) == 0o444
+        assert stat.S_IMODE(metadata.st_mode) == 0o400
         os.lseek(descriptor, 0, os.SEEK_SET)
         retained_raw = b""
         while chunk := os.read(descriptor, 11):
@@ -3115,6 +3160,12 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(tmp
     assert result["changed"] is True
     assert repaired["source_commit"] == head
     assert repaired["source_tree"] == tree
+    live_snapshot = paths.context_snapshot.stat(follow_symlinks=False)
+    assert stat.S_ISREG(live_snapshot.st_mode)
+    assert live_snapshot.st_nlink == 1
+    assert live_snapshot.st_uid == paths.context_install_uid
+    assert live_snapshot.st_gid == paths.context_install_gid
+    assert stat.S_IMODE(live_snapshot.st_mode) == 0o444
     assert invoked_publishers == [selected_publisher]
     assert invoked_publishers[0] != stale_publisher
     assert publisher_env == {
@@ -3228,7 +3279,7 @@ def test_context_repair_retained_descriptor_defeats_path_replacement_after_open(
         retained = os.fstat(descriptor)
         assert retained.st_uid == paths.context_install_uid
         assert retained.st_gid == paths.context_install_gid
-        assert stat.S_IMODE(retained.st_mode) == 0o444
+        assert stat.S_IMODE(retained.st_mode) == 0o400
         os.lseek(descriptor, 0, os.SEEK_SET)
         chunks = []
         while chunk := os.read(descriptor, 7):
