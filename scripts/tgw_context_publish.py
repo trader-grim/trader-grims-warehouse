@@ -1,7 +1,7 @@
-#!/opt/TGW/.venvs/controller/bin/python3
-"""Publish one bounded atomic Context snapshot from exact input records."""
-
-from __future__ import annotations
+#!/bin/sh
+""":"
+exec /opt/TGW/.venvs/controller/bin/python3 -I -S "$0" "$@"
+":"""
 
 import argparse
 import importlib.util
@@ -36,7 +36,12 @@ def _snapshot_api() -> tuple[int, Any]:
     old_path = list(sys.path)
     old_pythonpath = os.environ.pop("PYTHONPATH", None)
     try:
-        sys.path[:] = [str(runtime)]
+        # The -I -S bootstrap has already excluded the script directory, cwd,
+        # PYTHONPATH, and site packages.  Preserve its interpreter-owned ZIP,
+        # stdlib, and dynload search roots before the exact generation runtime;
+        # the selected parser may use the stdlib but cannot be shadowed by the
+        # ambient process or by its own generation directory.
+        sys.path[:] = [*old_path, str(runtime)]
         spec.loader.exec_module(module)
     finally:
         sys.path[:] = old_path

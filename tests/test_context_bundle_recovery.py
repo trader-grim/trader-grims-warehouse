@@ -9,6 +9,8 @@ import pwd
 import shutil
 import subprocess
 import sys
+import textwrap
+import zipfile
 import zlib
 from dataclasses import replace
 from pathlib import Path
@@ -187,6 +189,117 @@ def test_real_publisher_emits_only_publish_bytes_and_enforces_task_boundary(
     publish_bytes(exact, legacy["cursor"])
     with pytest.raises(CurrentContextError, match="current task exceeds"):
         publish_bytes(dict(exact, padding=exact["padding"] + "x"), legacy["cursor"])
+
+
+def test_real_publisher_isolated_bootstrap_rejects_cwd_and_pythonpath_shadowing(
+    tmp_path: Path,
+) -> None:
+    legacy = _snapshot()
+    task = tmp_path / "task.json"
+    cursor = tmp_path / "cursor.json"
+    output = tmp_path / "snapshot.json"
+    hostile_cwd = tmp_path / "cwd"
+    hostile_pythonpath = tmp_path / "pythonpath"
+    hostile_cwd.mkdir()
+    hostile_pythonpath.mkdir()
+    for directory in (hostile_cwd, hostile_pythonpath):
+        for module in ("argparse", "json", "pathlib", "tempfile"):
+            (directory / f"{module}.py").write_text(
+                "raise RuntimeError('ambient shadow module executed')\n"
+            )
+    task.write_bytes(_canonical(legacy["task"]))
+    cursor.write_bytes(_canonical(legacy["cursor"]))
+
+    completed = subprocess.run(
+        [
+            str(ROOT / "scripts/tgw_context_publish.py"),
+            "--task",
+            str(task),
+            "--cursor",
+            str(cursor),
+            "--output",
+            str(output),
+        ],
+        cwd=hostile_cwd,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(hostile_pythonpath)},
+    )
+    if os.geteuid() != 0:
+        assert completed.returncode != 0
+        assert "must run as root" in completed.stderr
+        pytest.skip("root-only publisher success path requires root")
+    assert completed.returncode == 0, completed.stderr
+    assert output.read_bytes() == publish_bytes(legacy["task"], legacy["cursor"])
+
+
+def test_publisher_retains_interpreter_zip_stdlib_and_dynload_before_runtime() -> None:
+    script = (ROOT / "scripts/tgw_context_publish.py").read_text()
+    bootstrap = (
+        "exec /opt/TGW/.venvs/controller/bin/python3 -I -S \"$0\" \"$@\""
+    )
+    assert bootstrap in script
+    completed = subprocess.run(
+        [
+            "/opt/TGW/.venvs/controller/bin/python3",
+            "-I",
+            "-S",
+            "-c",
+            "import json,sys; print(json.dumps(sys.path))",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": "/hostile/site-packages"},
+    )
+    paths = json.loads(completed.stdout)
+    assert paths[0].endswith(".zip")
+    assert any(path.endswith("/lib-dynload") for path in paths)
+    assert not any("site-packages" in path for path in paths)
+    assert "/hostile/site-packages" not in paths
+
+
+def test_publisher_snapshot_api_keeps_zip_import_ahead_of_exact_runtime(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    package = runtime / "tgw"
+    package.mkdir(parents=True)
+    archive = tmp_path / "stdlib.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("publisher_zip_probe.py", "VALUE = 'zip-stdlib'\n")
+    (package / "current_context_snapshot.py").write_text(
+        "import publisher_zip_probe\n"
+        "MAX_TASK_BYTES = 17\n"
+        "def publish_bytes(task, cursor):\n"
+        "    return publisher_zip_probe.VALUE.encode()\n"
+    )
+    helper = textwrap.dedent(
+        f"""
+        import os, runpy, sys
+        archive = {str(archive)!r}
+        runtime = {str(runtime)!r}
+        original = [*sys.path]
+        sys.path.append(archive)
+        os.environ['PYTHONPATH'] = '/hostile/site-packages'
+        namespace = runpy.run_path({str(ROOT / 'scripts/tgw_context_publish.py')!r})
+        api = namespace['_snapshot_api']
+        api.__globals__['_selected_runtime'] = lambda: namespace['Path'](runtime)
+        maximum, publish = api()
+        assert maximum == 17
+        assert publish({{}}, {{}}) == b'zip-stdlib'
+        assert sys.path == [*original, archive]
+        assert os.environ['PYTHONPATH'] == '/hostile/site-packages'
+        """
+    )
+    completed = subprocess.run(
+        ["/opt/TGW/.venvs/controller/bin/python3", "-I", "-S", "-c", helper],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": "/ignored/by/isolated/mode"},
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_real_publisher_subprocess_root_guard(tmp_path: Path) -> None:
