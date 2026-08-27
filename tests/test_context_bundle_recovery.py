@@ -273,6 +273,9 @@ def _launcher_module(
     *,
     tamper_runtime: str | None = None,
     preflight_task_updates: dict[str, Any] | None = None,
+    legacy_parser_api: str | None = None,
+    snapshot_raw: bytes | None = None,
+    snapshot_task_updates: dict[str, Any] | None = None,
 ) -> ModuleType:
     context_source = tmp_path / "source"
     context_source.mkdir()
@@ -300,7 +303,19 @@ def _launcher_module(
         "local_context_runtime.py",
     ):
         if name == "current_context_snapshot.py":
-            shutil.copyfile(ROOT / "src/tgw/current_context_snapshot.py", source_runtime / name)
+            if legacy_parser_api is not None:
+                source = subprocess.run(
+                    ["git", "show", "99416bfb:src/tgw/current_context_snapshot.py"],
+                    cwd=ROOT,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout + legacy_parser_api
+                source_runtime.joinpath(name).write_text(source, encoding="utf-8")
+            else:
+                shutil.copyfile(
+                    ROOT / "src/tgw/current_context_snapshot.py", source_runtime / name
+                )
         else:
             (source_runtime / name).write_text("# immutable test runtime\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=context_source, check=True)
@@ -325,6 +340,13 @@ def _launcher_module(
         text=True,
     ).stdout.strip()
     snapshot = _snapshot(source_commit, source_tree)
+    if snapshot_task_updates is not None:
+        snapshot["task"].update(snapshot_task_updates)
+        body = dict(snapshot)
+        body.pop("snapshot_sha256")
+        snapshot["snapshot_sha256"] = (
+            "sha256:" + hashlib.sha256(_canonical(body)).hexdigest()
+        )
     preflight_fd = -1
     preflight_raw = b""
     real_fstat = os.fstat
@@ -380,7 +402,7 @@ def _launcher_module(
     for directory in (runtime, runtime.parent, runtime.parent.parent):
         directory.chmod(0o555)
     current = tmp_path / "tgw-context-current.json"
-    current.write_bytes(_canonical(snapshot) + b"\n")
+    current.write_bytes(snapshot_raw if snapshot_raw is not None else _canonical(snapshot) + b"\n")
     current.chmod(0o444)
     catalog = tmp_path / "catalog.json"
     catalog.write_text("{}", encoding="utf-8")
@@ -728,6 +750,54 @@ def test_launcher_rejects_an_invalid_preflight_descriptor_at_import(
     monkeypatch.setenv("TGW_CONTEXT_PREFLIGHT_SNAPSHOT_FD", "2")
     with pytest.raises(ValueError, match="descriptor is invalid"):
         _launcher_module(tmp_path, monkeypatch)
+
+
+def test_launcher_cold_starts_with_exact_real_99416_legacy_api_non_ascii(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _launcher_module(
+        tmp_path,
+        monkeypatch,
+        legacy_parser_api="",
+        snapshot_task_updates={"operator_note": "café 東京"},
+    )
+    assert module._current_context()["task"]["operator_note"] == "café 東京"
+    assert module._current_context()["snapshot_sha256"] == module._test_snapshot[
+        "snapshot_sha256"
+    ]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b' {"schema":"tgw-current-context-snapshot/v1"}\n',
+        b'{"schema":"tgw-current-context-snapshot/v1"} \n',
+        b'{"schema":"tgw-current-context-snapshot/v1"}',
+        b'{malformed}\n',
+        b'{}\n{}\n',
+        b'x' * (256 * 1024 + 1),
+    ],
+    ids=["leading", "trailing", "missing-lf", "malformed", "extra-stream", "oversized"],
+)
+def test_launcher_real_99416_legacy_api_rejects_noncanonical_wire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: bytes
+) -> None:
+    with pytest.raises((ValueError, CurrentContextError)):
+        _launcher_module(
+            tmp_path, monkeypatch, legacy_parser_api="", snapshot_raw=raw
+        )
+
+
+@pytest.mark.parametrize(
+    "api_suffix",
+    ["\nparse_bytes = parse\n", "\nMAX_SNAPSHOT_BYTES = 262144\n"],
+    ids=["parse-bytes-hybrid", "maximum-hybrid"],
+)
+def test_launcher_rejects_hybrid_real_99416_legacy_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, api_suffix: str
+) -> None:
+    with pytest.raises(ValueError, match="parser API is invalid"):
+        _launcher_module(tmp_path, monkeypatch, legacy_parser_api=api_suffix)
 
 
 def test_differing_staged_snapshot_binds_status_and_task_through_cold_launcher(

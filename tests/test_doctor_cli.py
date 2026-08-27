@@ -354,6 +354,96 @@ def test_doctor_selected_parser_has_exact_inline_non_ascii_byte_parity() -> None
         doctor_cli._validate_snapshot(value, json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() + b"\n", parser_path=parser)
 
 
+def _real_99416_legacy_parser(tmp_path: Path, suffix: str = "") -> Path:
+    parser = tmp_path / "legacy_snapshot.py"
+    source = subprocess.run(
+        ["git", "show", "99416bfb:src/tgw/current_context_snapshot.py"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    parser.write_text(source + suffix, encoding="utf-8")
+    return parser
+
+
+def _legacy_fixture_value(paths: doctor_cli.DoctorPaths) -> dict[str, Any]:
+    task = json.loads(paths.context_task.read_text(encoding="utf-8"))
+    cursor = json.loads(paths.context_cursor.read_text(encoding="utf-8"))
+    value = {
+        "schema": "tgw-current-context-snapshot/v1",
+        "plan_commit": cursor["plan_commit"],
+        "source_commit": cursor["source_commit"],
+        "source_tree": cursor["source_tree"],
+        "active_capability": task["implementation"]["development_source"]["next_leaf"],
+        "active_treatment": cursor["resolved"]["next_treatment"],
+        "task": task,
+        "cursor": cursor,
+    }
+    value["snapshot_sha256"] = "sha256:" + hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    return value
+
+
+def test_doctor_real_99416_legacy_parser_accepts_canonical_non_ascii(
+    tmp_path: Path,
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    value = _legacy_fixture_value(paths)
+    value["task"]["operator_note"] = "café 東京"
+    body = dict(value)
+    body.pop("snapshot_sha256")
+    value["snapshot_sha256"] = "sha256:" + hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    raw = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode() + b"\n"
+    assert doctor_cli._validate_snapshot(
+        value, raw, parser_path=_real_99416_legacy_parser(tmp_path)
+    )["task"]["operator_note"] == "café 東京"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda raw: b" " + raw,
+        lambda raw: raw[:-1] + b" \n",
+        lambda raw: raw[:-1],
+        lambda raw: b"{malformed}\n",
+        lambda raw: raw + b"{}\n",
+        lambda raw: b"x" * (256 * 1024 + 1),
+    ],
+    ids=["leading", "trailing", "missing-lf", "malformed", "extra-stream", "oversized"],
+)
+def test_doctor_real_99416_legacy_parser_rejects_invalid_wire(
+    tmp_path: Path, mutate: Any
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    value = _legacy_fixture_value(paths)
+    raw = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode() + b"\n"
+    with pytest.raises(doctor_cli.DoctorError):
+        doctor_cli._validate_snapshot(
+            value, mutate(raw), parser_path=_real_99416_legacy_parser(tmp_path)
+        )
+
+
+@pytest.mark.parametrize("suffix", ["\nparse_bytes = parse\n", "\nMAX_SNAPSHOT_BYTES = 262144\n"])
+def test_doctor_rejects_hybrid_real_99416_legacy_api(
+    tmp_path: Path, suffix: str
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    value = _legacy_fixture_value(paths)
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    with pytest.raises(doctor_cli.DoctorError, match="parser API is invalid"):
+        doctor_cli._validate_snapshot(
+            value, raw, parser_path=_real_99416_legacy_parser(tmp_path, suffix)
+        )
+
+
 def test_context_process_match_ignores_parent_shell_command_text() -> None:
     assert doctor_cli._is_context_process(["python3", "/opt/TGW/tgw-lib/bin/tgw-context-mcp"])
     assert doctor_cli._is_context_process(["python3", "-m", "tgw.context_mcp_server"])

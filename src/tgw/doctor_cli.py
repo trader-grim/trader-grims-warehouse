@@ -363,10 +363,43 @@ def _validate_snapshot(
             raise DoctorError("selected immutable Context parser cannot be loaded")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        CurrentContextError, parse_bytes = (
-            module.CurrentContextError,
-            module.parse_bytes,
-        )
+        CurrentContextError = module.CurrentContextError
+        has_parse_bytes = hasattr(module, "parse_bytes")
+        has_maximum = hasattr(module, "MAX_SNAPSHOT_BYTES")
+        selected_parse_bytes = getattr(module, "parse_bytes", None)
+        if has_parse_bytes and has_maximum and callable(selected_parse_bytes):
+            if module.MAX_SNAPSHOT_BYTES != 256 * 1024:
+                raise DoctorError("Context launcher and selected runtime size bounds differ")
+            parse_bytes = selected_parse_bytes
+        else:
+            legacy_parse = getattr(module, "parse", None)
+            if has_parse_bytes or has_maximum or not callable(legacy_parse):
+                raise DoctorError("selected Context runtime parser API is invalid")
+
+            def parse_bytes(selected_raw: bytes) -> dict[str, Any]:
+                if not isinstance(selected_raw, bytes) or len(selected_raw) > 256 * 1024:
+                    raise CurrentContextError(
+                        "current context snapshot wire format is invalid"
+                    )
+                try:
+                    selected_value = json.loads(
+                        selected_raw.decode("utf-8", errors="strict")
+                    )
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise CurrentContextError(
+                        "current context snapshot is invalid"
+                    ) from exc
+                canonical = json.dumps(
+                    selected_value,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8") + b"\n"
+                if selected_raw != canonical:
+                    raise CurrentContextError(
+                        "current context snapshot wire format is invalid"
+                    )
+                return legacy_parse(selected_value)
 
     try:
         if raw is None:

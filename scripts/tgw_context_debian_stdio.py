@@ -292,15 +292,38 @@ if _snapshot_spec is None or _snapshot_spec.loader is None:
 _snapshot_runtime = importlib.util.module_from_spec(_snapshot_spec)
 _snapshot_spec.loader.exec_module(_snapshot_runtime)
 CurrentContextError = _snapshot_runtime.CurrentContextError
-MAX_SNAPSHOT_BYTES = _snapshot_runtime.MAX_SNAPSHOT_BYTES
-parse_snapshot_bytes = _snapshot_runtime.parse_bytes
+
+
+def _selected_snapshot_parser(raw: bytes) -> dict[str, Any]:
+    """Validate with either the modern API or the one verified legacy API."""
+    has_parse_bytes = hasattr(_snapshot_runtime, "parse_bytes")
+    has_maximum = hasattr(_snapshot_runtime, "MAX_SNAPSHOT_BYTES")
+    parse_bytes = getattr(_snapshot_runtime, "parse_bytes", None)
+    if has_parse_bytes and has_maximum and callable(parse_bytes):
+        if _snapshot_runtime.MAX_SNAPSHOT_BYTES != MAX_CONTEXT_SNAPSHOT_BYTES:
+            raise ValueError("Context launcher and selected runtime size bounds differ")
+        return parse_bytes(raw)
+
+    legacy_parse = getattr(_snapshot_runtime, "parse", None)
+    if has_parse_bytes or has_maximum or not callable(legacy_parse):
+        raise ValueError("selected Context runtime parser API is invalid")
+    if not isinstance(raw, bytes) or len(raw) > MAX_CONTEXT_SNAPSHOT_BYTES:
+        raise CurrentContextError("current context snapshot wire format is invalid")
+    try:
+        value = json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CurrentContextError("current context snapshot is invalid") from exc
+    canonical = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8") + b"\n"
+    if raw != canonical:
+        raise CurrentContextError("current context snapshot wire format is invalid")
+    return legacy_parse(value)
 
 sys.path.insert(0, str(SERVER_SOURCE))
 
-if MAX_SNAPSHOT_BYTES != MAX_CONTEXT_SNAPSHOT_BYTES:
-    raise ValueError("Context launcher and selected runtime size bounds differ")
 try:
-    _STARTUP_SNAPSHOT_SHA256 = parse_snapshot_bytes(_STARTUP_CONTEXT_RAW)[
+    _STARTUP_SNAPSHOT_SHA256 = _selected_snapshot_parser(_STARTUP_CONTEXT_RAW)[
         "snapshot_sha256"
     ]
 except CurrentContextError as exc:
@@ -319,7 +342,7 @@ def _current_context() -> dict[str, Any]:
     if _protected_snapshot_raw() != _STARTUP_CONTEXT_RAW:
         raise ValueError("TGW Context generation changed; restart this harness session")
     try:
-        value = parse_snapshot_bytes(_STARTUP_CONTEXT_RAW)
+        value = _selected_snapshot_parser(_STARTUP_CONTEXT_RAW)
     except CurrentContextError as exc:
         raise ValueError("current TGW context snapshot is invalid") from exc
     value["record_path"] = str(CURRENT_CONTEXT)
