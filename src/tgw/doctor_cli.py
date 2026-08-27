@@ -16,12 +16,14 @@ import errno
 import fcntl
 import grp
 import hashlib
+import importlib.util
 import json
 import os
 import pwd
 import re
 import secrets
 import shlex
+import shutil
 import socket
 import stat
 import subprocess
@@ -135,6 +137,8 @@ class DoctorPaths:
     context_cursor: Path = Path("/opt/TGW/tgw-lib/context-input/plan-cycle-cursor.json")
     context_launcher: Path = Path("/opt/TGW/tgw-lib/bin/tgw-context-mcp")
     context_publisher: Path = Path("/opt/TGW/tgw-lib/bin/tgw-context-publish")
+    context_generation_root: Path = Path("/opt/TGW/tgw-lib/context-entrypoints/generations")
+    context_generation_pointer: Path = Path("/opt/TGW/tgw-lib/context-entrypoints/current")
     context_runtime_source: Path = Path("/opt/TGW/tgw-lib/context-runtime/src")
     context_catalog: Path = Path("/opt/TGW/tgw-lib/config/tgw-context-debian-v1.json")
     receipts: Path = Path("/opt/TGW/tgw-lib/doctor-receipts")
@@ -346,41 +350,67 @@ def check_source(paths: DoctorPaths) -> dict[str, Any]:
         return _failed("source.canonical", exc)
 
 
-def _validate_snapshot(value: Mapping[str, Any]) -> None:
-    if value.get("schema") != "tgw-current-context-snapshot/v1":
-        raise DoctorError("published context snapshot schema is invalid")
-    claimed = value.get("snapshot_sha256")
-    body = dict(value)
-    body.pop("snapshot_sha256", None)
-    if not isinstance(claimed, str) or claimed != _hash(body):
-        raise DoctorError("published context snapshot hash differs")
-    task = value.get("task")
+def _validate_snapshot(
+    value: Mapping[str, Any], raw: bytes | None = None, *, parser_path: Path | None = None
+) -> dict[str, Any]:
+    if parser_path is None:
+        from tgw.current_context_snapshot import CurrentContextError, parse_bytes
+    else:
+        spec = importlib.util.spec_from_file_location(
+            "_tgw_doctor_selected_context_parser", parser_path
+        )
+        if spec is None or spec.loader is None:
+            raise DoctorError("selected immutable Context parser cannot be loaded")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        CurrentContextError, parse_bytes = (
+            module.CurrentContextError,
+            module.parse_bytes,
+        )
+
+    try:
+        if raw is None:
+            raise DoctorError("published context raw bytes are missing")
+        expanded = parse_bytes(raw)
+    except CurrentContextError as exc:
+        raise DoctorError(str(exc)) from exc
+    task = expanded.get("task")
     cursor = value.get("cursor")
     if not isinstance(task, Mapping) or not isinstance(cursor, Mapping):
         raise DoctorError("published context task/cursor is missing")
     development = task.get("implementation", {}).get("development_source", {})
     if (
-        value.get("source_commit") != development.get("commit")
-        or value.get("source_commit") != cursor.get("source_commit")
-        or value.get("source_tree") != cursor.get("source_tree")
-        or value.get("plan_commit") != task.get("plan", {}).get("approved_commit")
-        or value.get("plan_commit") != cursor.get("plan_commit")
+        expanded.get("source_commit") != development.get("commit")
+        or expanded.get("source_commit") != cursor.get("source_commit")
+        or expanded.get("source_tree") != cursor.get("source_tree")
+        or expanded.get("plan_commit") != task.get("plan", {}).get("approved_commit")
+        or expanded.get("plan_commit") != cursor.get("plan_commit")
     ):
         raise DoctorError("published task, cursor, Plan, and source identities diverge")
+    return expanded
 
 
 def check_context_snapshot(paths: DoctorPaths) -> dict[str, Any]:
     repair = "sudo -n tgw doctor repair context"
     try:
+        snapshot_raw = paths.context_snapshot.read_bytes()
         snapshot = _json(paths.context_snapshot)
         task = _json(paths.context_task)
         cursor = _json(paths.context_cursor)
         _require_trusted_root_program(paths.context_launcher, paths.trusted_release_owners)
-        launcher_text = paths.context_launcher.read_text(encoding="utf-8")
+        pair = _context_pair(paths)
+        launcher_text = (pair["generation"] / "tgw-context-mcp").read_text(
+            encoding="utf-8"
+        )
         if str(paths.context_snapshot) not in launcher_text or str(paths.context_cursor) in launcher_text:
             raise DoctorError("Context launcher does not preserve the single-snapshot runtime boundary")
-        _validate_snapshot(snapshot)
-        if snapshot.get("task") != task or snapshot.get("cursor") != cursor:
+        selected = _selected_context_artifacts(paths)
+        expanded = _validate_snapshot(
+            snapshot,
+            snapshot_raw,
+            parser_path=selected["modules"]["current_context_snapshot"],
+        )
+        if expanded.get("task") != task or expanded.get("cursor") != cursor:
             raise DoctorError("published context does not contain the current input records")
         head, tree, _status = _source_identity(paths)
         if snapshot.get("source_commit") != head or snapshot.get("source_tree") != tree:
@@ -413,6 +443,7 @@ def _selected_context_artifacts(paths: DoctorPaths) -> dict[str, Any]:
         if runtime_path.is_symlink() or observed.st_uid != paths.context_install_uid or observed.st_gid != paths.context_install_gid or observed.st_mode & 0o022:
             raise DoctorError("selected Context release is not root:root immutable: " + relative)
     launcher = release / "scripts/tgw_context_debian_stdio.py"
+    publisher = release / "scripts/tgw_context_publish.py"
     runtime_source = release / "src"
     modules = {
         name: runtime_source / f"tgw/{name}.py"
@@ -422,21 +453,28 @@ def _selected_context_artifacts(paths: DoctorPaths) -> dict[str, Any]:
             "local_context_runtime",
         )
     }
-    required = {"launcher": launcher, **modules}
+    required = {"launcher": launcher, "publisher": publisher, **modules}
     for name, source in required.items():
         if not source.is_file() or source.is_symlink():
             raise DoctorError(f"selected immutable runtime has no exact Context {name}")
         observed = source.stat(follow_symlinks=False)
         if observed.st_uid not in paths.trusted_release_owners or observed.st_mode & 0o022:
             raise DoctorError(f"selected immutable runtime Context {name} is not immutable")
+    runtime_inventory = _context_runtime_inventory(
+        runtime_source,
+        uid=paths.context_install_uid,
+        gid=paths.context_install_gid,
+    )
     return {
         "commit": desired,
         "release": release,
         "release_tree": release_tree,
         "launcher": launcher,
+        "publisher": publisher,
         "runtime_source": runtime_source,
         "modules": modules,
         "hashes": {name: _file_hash(source) for name, source in required.items()},
+        "runtime_inventory": runtime_inventory,
     }
 
 
@@ -445,19 +483,371 @@ def _selected_context_launcher(paths: DoctorPaths) -> tuple[str, Path]:
     return selected["commit"], selected["launcher"]
 
 
+def _context_runtime_inventory(
+    root: Path, *, uid: int | None = None, gid: int | None = None
+) -> list[dict[str, Any]]:
+    """Describe every copied descendant using its installed identity."""
+    inventory: list[dict[str, Any]] = []
+    for entry in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        observed = entry.stat(follow_symlinks=False)
+        relative = entry.relative_to(root).as_posix()
+        if entry.is_symlink():
+            raise DoctorError(f"Context runtime inventory contains a symlink: {relative}")
+        if stat.S_ISDIR(observed.st_mode):
+            inventory.append(
+                {
+                    "path": relative,
+                    "type": "directory",
+                    "uid": observed.st_uid if uid is None else uid,
+                    "gid": observed.st_gid if gid is None else gid,
+                    "mode": stat.S_IMODE(observed.st_mode) if uid is None else 0o555,
+                }
+            )
+        elif stat.S_ISREG(observed.st_mode):
+            inventory.append(
+                {
+                    "path": relative,
+                    "type": "file",
+                    "uid": observed.st_uid if uid is None else uid,
+                    "gid": observed.st_gid if gid is None else gid,
+                    "mode": stat.S_IMODE(observed.st_mode) if uid is None else 0o444,
+                    "sha256": _file_hash(entry),
+                }
+            )
+        else:
+            raise DoctorError(f"Context runtime inventory contains an unsupported type: {relative}")
+    return inventory
+
+
+def _descriptor_context_tree(root: Path, *, fsync: bool = False) -> list[dict[str, Any]]:
+    """Describe a generation through O_NOFOLLOW parent-relative descriptors."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    records: list[dict[str, Any]] = []
+    directories: list[int] = []
+
+    def walk(parent_fd: int, relative: str) -> None:
+        for name in sorted(os.listdir(parent_fd), key=os.fsencode):
+            child = f"{relative}/{name}" if relative else name
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            flags = os.O_RDONLY | nofollow
+            if stat.S_ISDIR(before.st_mode):
+                flags |= os.O_DIRECTORY
+            elif not stat.S_ISREG(before.st_mode):
+                raise DoctorError(f"Context generation contains an unsupported type: {child}")
+            fd = os.open(name, flags, dir_fd=parent_fd)
+            try:
+                pinned = os.fstat(fd)
+                identity = (
+                    stat.S_IFMT(pinned.st_mode), pinned.st_uid, pinned.st_gid,
+                    stat.S_IMODE(pinned.st_mode), pinned.st_size, pinned.st_dev,
+                    pinned.st_ino, pinned.st_nlink,
+                )
+                path_identity = (
+                    stat.S_IFMT(before.st_mode), before.st_uid, before.st_gid,
+                    stat.S_IMODE(before.st_mode), before.st_size, before.st_dev,
+                    before.st_ino, before.st_nlink,
+                )
+                if identity != path_identity or (stat.S_ISREG(pinned.st_mode) and pinned.st_nlink != 1):
+                    raise DoctorError(f"Context generation descendant identity is unsafe: {child}")
+                record = {
+                    "path": child,
+                    "type": "directory" if stat.S_ISDIR(pinned.st_mode) else "file",
+                    "uid": pinned.st_uid, "gid": pinned.st_gid,
+                    "mode": stat.S_IMODE(pinned.st_mode), "size": pinned.st_size,
+                    "device": pinned.st_dev, "inode": pinned.st_ino,
+                    "nlink": pinned.st_nlink,
+                }
+                if stat.S_ISDIR(pinned.st_mode):
+                    walk(fd, child)
+                    directories.append(os.dup(fd))
+                else:
+                    digest = hashlib.sha256()
+                    while chunk := os.read(fd, 1024 * 1024):
+                        digest.update(chunk)
+                    record["sha256"] = digest.hexdigest()
+                    if fsync:
+                        os.fsync(fd)
+                after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                final = os.fstat(fd)
+                final_identity = (
+                    stat.S_IFMT(final.st_mode), final.st_uid, final.st_gid,
+                    stat.S_IMODE(final.st_mode), final.st_size, final.st_dev,
+                    final.st_ino, final.st_nlink,
+                )
+                after_identity = (
+                    stat.S_IFMT(after.st_mode), after.st_uid, after.st_gid,
+                    stat.S_IMODE(after.st_mode), after.st_size, after.st_dev,
+                    after.st_ino, after.st_nlink,
+                )
+                if final_identity != identity or after_identity != identity:
+                    raise DoctorError(f"Context generation descendant changed: {child}")
+                records.append(record)
+            finally:
+                os.close(fd)
+
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+    try:
+        walk(root_fd, "")
+        if fsync:
+            for fd in directories:
+                os.fsync(fd)
+            os.fsync(root_fd)
+    finally:
+        for fd in directories:
+            os.close(fd)
+        os.close(root_fd)
+    return sorted(records, key=lambda row: os.fsencode(row["path"]))
+
+
+def _context_generation_manifest(selected: Mapping[str, Any]) -> bytes:
+    payload = {
+        "schema": "tgw-context-generation/v1",
+        "commit": selected["commit"],
+        "selected_hashes": selected["hashes"],
+        "runtime_inventory": selected["runtime_inventory"],
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+
+def _context_generation_name(selected: Mapping[str, Any]) -> str:
+    return "context-" + hashlib.sha256(_context_generation_manifest(selected)).hexdigest()
+
+
+_CONTEXT_DISPATCH_SHIM = b"""#!/opt/TGW/.venvs/controller/bin/python3
+import os
+import sys
+from pathlib import Path
+
+name = Path(__file__).name
+target = Path(__file__).parent.parent / "context-entrypoints" / "current" / name
+os.execv(target, [str(target), *sys.argv[1:]])
+"""
+
+
+def _context_repair_phase(_phase: str, _paths: DoctorPaths) -> None:
+    """Test observation point for crash/replay reconstruction; never an effect gate."""
+
+
+def _context_old_generation_name(artifacts: Mapping[str, bytes]) -> str:
+    digest = hashlib.sha256()
+    for name in ("launcher", "publisher"):
+        digest.update(name.encode() + b"\0" + artifacts[name])
+    return "context-old-" + digest.hexdigest()
+
+
+def _validate_context_parent(path: Path, paths: DoctorPaths) -> None:
+    """Require the complete managed entrypoint chain to be direct and trusted."""
+    stop = paths.context_generation_pointer.parent.parent
+    current = path
+    while True:
+        observed = current.stat(follow_symlinks=False)
+        if current.is_symlink() or not stat.S_ISDIR(observed.st_mode):
+            raise DoctorError(f"Context entrypoint parent is not a direct directory: {current}")
+        if (
+            observed.st_uid != paths.context_install_uid
+            or observed.st_gid != paths.context_install_gid
+            or observed.st_mode & 0o022
+        ):
+            raise DoctorError(f"Context entrypoint parent is not trusted immutable data: {current}")
+        if current == stop:
+            return
+        if stop not in current.parents:
+            raise DoctorError("Context entrypoint parent escaped its managed root")
+        current = current.parent
+
+
+def _validate_context_generation(
+    generation: Path,
+    paths: DoctorPaths,
+    hashes: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    _validate_context_parent(generation.parent, paths)
+    observed = generation.stat(follow_symlinks=False)
+    if (
+        generation.is_symlink()
+        or not stat.S_ISDIR(observed.st_mode)
+        or observed.st_uid != paths.context_install_uid
+        or observed.st_gid != paths.context_install_gid
+        or stat.S_IMODE(observed.st_mode) != 0o555
+    ):
+        raise DoctorError("Context entrypoint generation is not root-owned immutable data")
+    names = {entry.name for entry in generation.iterdir()}
+    expected_names = {"tgw-context-mcp", "tgw-context-publish"}
+    managed_names = expected_names | {"runtime", "generation-manifest.json"}
+    if names not in (expected_names, managed_names):
+        raise DoctorError("Context entrypoint generation has an ambiguous inventory")
+    _descriptor_context_tree(generation)
+    result: dict[str, Any] = {}
+    for key, name in (("launcher", "tgw-context-mcp"), ("publisher", "tgw-context-publish")):
+        entry = generation / name
+        surface = _surface_snapshot(entry)
+        if (
+            surface.get("kind") != "file"
+            or surface.get("uid") != paths.context_install_uid
+            or surface.get("gid") != paths.context_install_gid
+            or surface.get("mode") != paths.context_launcher_mode
+            or (hashes is not None and surface.get("sha256") != hashes[key])
+        ):
+            raise DoctorError(f"Context generation {key} type, owner, mode, or hash differs")
+        result[key] = surface
+    if "runtime" in names:
+        manifest = generation / "generation-manifest.json"
+        manifest_surface = _surface_snapshot(manifest)
+        if (
+            manifest_surface.get("kind") != "file"
+            or manifest_surface.get("uid") != paths.context_install_uid
+            or manifest_surface.get("gid") != paths.context_install_gid
+            or manifest_surface.get("mode") != 0o444
+        ):
+            raise DoctorError("Context generation manifest type, owner, or mode differs")
+        try:
+            manifest_payload = json.loads(manifest.read_bytes())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DoctorError("Context generation manifest is invalid") from exc
+        canonical_manifest = json.dumps(
+            manifest_payload, sort_keys=True, separators=(",", ":")
+        ).encode() + b"\n"
+        if manifest.read_bytes() != canonical_manifest:
+            raise DoctorError("Context generation manifest is not canonical")
+        if generation.name != "context-" + hashlib.sha256(canonical_manifest).hexdigest():
+            raise DoctorError("Context generation identity does not bind its manifest")
+        if manifest_payload.get("schema") != "tgw-context-generation/v1":
+            raise DoctorError("Context generation manifest schema differs")
+        selected_hashes = manifest_payload.get("selected_hashes")
+        if not isinstance(selected_hashes, dict):
+            raise DoctorError("Context generation selected hashes are missing")
+        if hashes is not None and selected_hashes != dict(hashes):
+            raise DoctorError("Context generation selected parser/module hashes differ")
+        for key in ("launcher", "publisher"):
+            if selected_hashes.get(key) != result[key].get("sha256"):
+                raise DoctorError(f"Context generation manifest {key} hash differs")
+        runtime = generation / "runtime"
+        observed_runtime = runtime.stat(follow_symlinks=False)
+        if runtime.is_symlink() or not stat.S_ISDIR(observed_runtime.st_mode):
+            raise DoctorError("Context generation runtime is not a direct directory")
+        if (
+            observed_runtime.st_uid != paths.context_install_uid
+            or observed_runtime.st_gid != paths.context_install_gid
+            or observed_runtime.st_mode & 0o022
+        ):
+            raise DoctorError("Context generation runtime is not root-owned immutable data")
+        expected_inventory = manifest_payload.get("runtime_inventory")
+        if not isinstance(expected_inventory, list):
+            raise DoctorError("Context generation runtime inventory is missing")
+        observed_inventory = _context_runtime_inventory(runtime)
+        if observed_inventory != expected_inventory:
+            raise DoctorError("Context generation runtime type, owner, mode, or hash differs")
+        result["manifest"] = manifest_surface
+        result["runtime_inventory"] = observed_inventory
+    return result
+
+
+def _validate_all_context_generations(paths: DoctorPaths) -> None:
+    _validate_context_parent(paths.context_generation_root, paths)
+    for entry in paths.context_generation_root.iterdir():
+        if entry.name.startswith(".") or not re.fullmatch(
+            r"context-(?:old-)?[0-9a-f]{64}", entry.name
+        ):
+            raise DoctorError("stale or ambiguous Context generation staging state")
+        _validate_context_generation(entry, paths)
+
+
+def _fsync_context_tree(root: Path) -> None:
+    """Persist every regular file, then every directory bottom-up."""
+    _descriptor_context_tree(root, fsync=True)
+
+
+def _resolved_context_generation(paths: DoctorPaths) -> Path:
+    pointer = paths.context_generation_pointer
+    if not pointer.is_symlink():
+        raise DoctorError("Context entrypoint generation pointer is missing")
+    target = Path(os.readlink(pointer))
+    if target.is_absolute() or len(target.parts) != 2 or target.parts[0] != "generations":
+        raise DoctorError("Context entrypoint generation pointer has an unsafe target")
+    generation = pointer.parent / target
+    _validate_context_generation(generation, paths)
+    return generation
+
+
+def _discard_context_staging(path: Path, paths: DoctorPaths) -> None:
+    """Discard only a recognized, unreferenced transaction staging surface."""
+    if not _lexists(path):
+        return
+    pointer = paths.context_generation_pointer
+    if pointer.is_symlink() and os.readlink(pointer) == path.name:
+        raise DoctorError("Context staging state is still pointer-selected")
+    observed = path.stat(follow_symlinks=False)
+    if path.is_symlink() or observed.st_uid != paths.context_install_uid or observed.st_gid != paths.context_install_gid:
+        raise DoctorError("Context staging state is not trusted-owned direct data")
+    if path.is_dir():
+        descendants = list(path.rglob("*"))
+        for entry in descendants:
+            entry_stat = entry.stat(follow_symlinks=False)
+            if (
+                entry.is_symlink()
+                or entry_stat.st_uid != paths.context_install_uid
+                or entry_stat.st_gid != paths.context_install_gid
+                or not (stat.S_ISDIR(entry_stat.st_mode) or stat.S_ISREG(entry_stat.st_mode))
+            ):
+                raise DoctorError("Context staging descendant is not trusted direct data")
+        for directory in (path, *(entry for entry in descendants if entry.is_dir())):
+            os.chmod(directory, 0o700)
+        shutil.rmtree(path)
+    elif path.is_file():
+        path.unlink()
+    else:
+        raise DoctorError("Context staging state has an unsupported type")
+    _fsync_parent(path)
+
+
+def _context_surface_target(paths: DoctorPaths, name: str) -> str:
+    return os.path.relpath(paths.context_generation_pointer / name, paths.local_bin)
+
+
+def _context_pair(paths: DoctorPaths) -> dict[str, Any]:
+    generation = _resolved_context_generation(paths)
+    result: dict[str, Any] = {"generation": generation, "generation_name": generation.name}
+    for key, surface, name in (("launcher", paths.context_launcher, "tgw-context-mcp"), ("publisher", paths.context_publisher, "tgw-context-publish")):
+        shim = _surface_snapshot(surface)
+        if (
+            shim.get("kind") != "file"
+            or shim.get("raw") != _CONTEXT_DISPATCH_SHIM
+            or shim.get("uid") != paths.context_install_uid
+            or shim.get("gid") != paths.context_install_gid
+            or shim.get("mode") != paths.context_launcher_mode
+        ):
+            raise DoctorError(f"installed Context {key} does not use the audited dispatch shim")
+        expected = generation / name
+        result[key] = _surface_snapshot(expected)
+    return result
+
+
 def check_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
     repair = "sudo -n tgw doctor repair context-launcher"
     try:
         selected = _selected_context_artifacts(paths)
         desired = selected["commit"]
         source = selected["launcher"]
-        installed = _surface_snapshot(paths.context_launcher)
-        if installed["kind"] != "file":
-            raise DoctorError("installed Context launcher is missing or indirect")
-        if installed["sha256"] != selected["hashes"]["launcher"]:
-            raise DoctorError("installed Context launcher differs from selected runtime")
-        if installed["uid"] != paths.context_install_uid or installed["gid"] != paths.context_install_gid or installed["mode"] != paths.context_launcher_mode:
-            raise DoctorError("installed Context launcher owner or mode differs from root:root 0555")
+        pair = _context_pair(paths)
+        installed_records = {}
+        for name in ("launcher", "publisher"):
+            installed = pair[name]
+            if installed["sha256"] != selected["hashes"][name]:
+                raise DoctorError(f"installed Context {name} differs from selected runtime")
+            if installed["uid"] != paths.context_install_uid or installed["gid"] != paths.context_install_gid or installed["mode"] != paths.context_launcher_mode:
+                raise DoctorError(f"installed Context {name} owner or mode differs from root:root 0555")
+            installed_records[name] = installed
+        actor = _operator_actor()
+        snapshot_raw = paths.context_snapshot.read_bytes()
+        snapshot_value = json.loads(snapshot_raw.decode("utf-8"))
+        expected = _validate_snapshot(
+            snapshot_value,
+            snapshot_raw,
+            parser_path=selected["modules"]["current_context_snapshot"],
+        )
+        # Diagnosis must exercise the operator-visible audited shim.  Probing
+        # the generation child directly would leave shim dispatch untested.
+        probe = _probe_context_stdio(paths.context_launcher, actor, expected)
         return _check(
             "context.launcher",
             "PASS",
@@ -467,9 +857,12 @@ def check_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
                 "source": str(source),
                 "installed": str(paths.context_launcher),
                 "sha256": _file_hash(source),
-                "installed_uid": installed["uid"],
-                "installed_gid": installed["gid"],
-                "installed_mode": oct(installed["mode"]),
+                "publisher_source": str(selected["publisher"]),
+                "publisher_installed": str(paths.context_publisher),
+                "publisher_sha256": selected["hashes"]["publisher"],
+                "installed_uid": installed_records["launcher"]["uid"],
+                "installed_gid": installed_records["launcher"]["gid"],
+                "installed_mode": oct(installed_records["launcher"]["mode"]),
                 "runtime_source": str(selected["runtime_source"]),
                 "runtime_modules": {
                     name: {
@@ -479,10 +872,195 @@ def check_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
                     for name, path in selected["modules"].items()
                 },
                 "release_tree": selected["release_tree"],
+                "cold_stdio_probe": probe,
             },
         )
     except Exception as exc:
         return _failed("context.launcher", exc, repair=repair)
+
+
+def _probe_context_stdio(
+    launcher: Path,
+    actor: str,
+    expected: Mapping[str, Any],
+    timeout: float = 10.0,
+    *,
+    staged_snapshot: Path | None = None,
+) -> dict[str, Any]:
+    """Cold-probe the installed launcher through the real MCP stdio protocol."""
+    current = pwd.getpwuid(os.geteuid()).pw_name
+    command = [str(launcher)]
+    pass_fds: tuple[int, ...] = ()
+    snapshot_descriptor = -1
+    child_setup = None
+    if staged_snapshot is not None:
+        if os.geteuid() != 0:
+            raise DoctorError("Context staged cold preflight requires root")
+        snapshot_descriptor = os.open(
+            staged_snapshot, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+        snapshot_state = os.fstat(snapshot_descriptor)
+        if (
+            not stat.S_ISREG(snapshot_state.st_mode)
+            or snapshot_state.st_uid != 0
+            or snapshot_state.st_gid != 0
+            or snapshot_state.st_mode & 0o077
+        ):
+            os.close(snapshot_descriptor)
+            raise DoctorError("Context staged cold preflight snapshot is not root-bound")
+        pass_fds = (snapshot_descriptor,)
+        target = pwd.getpwnam(actor)
+
+        def child_setup() -> None:
+            os.setgroups([])
+            os.setgid(target.pw_gid)
+            os.setuid(target.pw_uid)
+
+    elif actor != current:
+        command = ["sudo", "-n", "-u", actor, str(launcher)]
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "tgw-doctor", "version": "1"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "tgw_context_status", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "tgw_context_current_task", "arguments": {}}},
+    ]
+    payload = "".join(json.dumps(item, separators=(",", ":")) + "\n" for item in requests)
+    try:
+        environment = {
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        if staged_snapshot is not None:
+            environment["TGW_CONTEXT_PREFLIGHT_SNAPSHOT_FD"] = str(snapshot_descriptor)
+        completed = subprocess.run(
+            command, input=payload, text=True, capture_output=True,
+            timeout=timeout, check=False,
+            env=environment,
+            pass_fds=pass_fds,
+            preexec_fn=child_setup,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DoctorError(f"installed Context MCP cold probe timed out after {timeout:g}s and was terminated") from exc
+    finally:
+        if snapshot_descriptor >= 0:
+            os.close(snapshot_descriptor)
+    if completed.returncode:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise DoctorError(f"installed Context MCP cold probe exited {completed.returncode}: {detail or 'no diagnostic output'}")
+    responses: dict[int, dict[str, Any]] = {}
+    try:
+        for line in completed.stdout.splitlines():
+            value = json.loads(line)
+            if not isinstance(value, dict) or value.get("jsonrpc") != "2.0":
+                raise DoctorError("installed Context MCP cold probe returned a non-JSON-RPC 2.0 message")
+            if "id" in value:
+                request_id = value.get("id")
+                if type(request_id) is not int or request_id not in {1, 2, 3, 4} or request_id in responses:
+                    raise DoctorError("installed Context MCP cold probe returned an inexact or duplicate response id")
+                responses[request_id] = value
+    except json.JSONDecodeError as exc:
+        raise DoctorError("installed Context MCP cold probe returned invalid JSON") from exc
+    for request_id, label in ((1, "initialize"), (2, "tools/list"), (3, "tgw_context_status"), (4, "tgw_context_current_task")):
+        response = responses.get(request_id)
+        if not response or "error" in response or "result" not in response:
+            raise DoctorError(f"installed Context MCP cold probe failed at {label}: {response or 'no response'}")
+    if set(responses) != {1, 2, 3, 4}:
+        raise DoctorError("installed Context MCP cold probe response ids differ")
+    initialized = responses[1]["result"]
+    if (
+        not isinstance(initialized, Mapping)
+        or initialized.get("protocolVersion") != "2025-03-26"
+        or not isinstance(initialized.get("capabilities"), Mapping)
+        or not isinstance(initialized.get("serverInfo"), Mapping)
+        or not isinstance(initialized["serverInfo"].get("name"), str)
+        or not isinstance(initialized["serverInfo"].get("version"), str)
+    ):
+        raise DoctorError("installed Context MCP initialize result shape differs")
+    tools = responses[2]["result"].get("tools", [])
+    required = {
+        "tgw_context_status", "tgw_context_current_task", "tgw_context_bundle",
+        "tgw_context_code_graph", "tgw_context_plan_graph", "tgw_context_plan_source",
+        "tgw_context_onboarding", "tgw_context_runbooks",
+    }
+    if not isinstance(tools, list) or {item.get("name") for item in tools if isinstance(item, Mapping)} != required:
+        raise DoctorError("installed Context MCP read-only tool set differs")
+    schema_properties = {
+        "tgw_context_status": set(),
+        "tgw_context_current_task": set(),
+        "tgw_context_bundle": {"task", "limit"},
+        "tgw_context_code_graph": {"operation", "query", "limit"},
+        "tgw_context_plan_graph": {"task", "receiver", "operation", "limit"},
+        "tgw_context_plan_source": {"path", "start_line", "max_lines", "authority"},
+        "tgw_context_onboarding": {"actor"},
+        "tgw_context_runbooks": {"query", "path", "start_line", "max_lines", "limit", "authority"},
+    }
+    schema_required = {
+        "tgw_context_plan_graph": {"task"},
+        "tgw_context_plan_source": {"path"},
+        "tgw_context_onboarding": {"actor"},
+    }
+    for item in tools:
+        schema = item.get("inputSchema") if isinstance(item, Mapping) else None
+        properties = schema.get("properties", {}) if isinstance(schema, Mapping) else None
+        if (
+            not isinstance(item, Mapping)
+            or set(item) - {"name", "description", "inputSchema", "annotations"}
+            or not isinstance(item.get("description"), str)
+            or not isinstance(schema, Mapping)
+            or schema.get("type") != "object"
+            or not isinstance(properties, Mapping)
+            or set(properties) != schema_properties[item["name"]]
+            or set(schema.get("required", [])) != schema_required.get(item["name"], set())
+            or any(
+                not isinstance(value, Mapping)
+                or value.get("type") != ("integer" if name in {"limit", "start_line", "max_lines"} else "string")
+                for name, value in properties.items()
+            )
+        ):
+            raise DoctorError("installed Context MCP tool schema differs")
+    def tool_value(request_id: int, label: str) -> dict[str, Any]:
+        result = responses[request_id]["result"]
+        content = result.get("content", []) if isinstance(result, Mapping) else []
+        if result.get("isError") or not isinstance(content, list):
+            raise DoctorError(f"installed Context MCP {label} returned an MCP error")
+        if any(isinstance(item, Mapping) and item.get("type") == "error" for item in content):
+            raise DoctorError(f"installed Context MCP {label} returned error content")
+        try:
+            text = next(item["text"] for item in content if isinstance(item, Mapping) and item.get("type") == "text")
+            value = json.loads(text)
+        except (StopIteration, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise DoctorError(f"installed Context MCP {label} response is not actionable JSON") from exc
+        if not isinstance(value, dict) or value.get("error") or value.get("ok") is False:
+            raise DoctorError(f"installed Context MCP {label} returned error content")
+        return value
+
+    status = tool_value(3, "status")
+    task = tool_value(4, "current-task")
+    if task.get("actor") != actor or task.get("receiver") != actor:
+        raise DoctorError(f"installed Context MCP cold probe returned the wrong Linux actor (expected {actor})")
+    if status.get("actor") != actor or status.get("generation_status", {}).get("state") != "CURRENT":
+        raise DoctorError("installed Context MCP cold probe status is not CURRENT for the expected actor")
+    status_context = status.get("current_context", {})
+    bindings = (
+        "plan_commit", "source_commit", "source_tree", "snapshot_sha256",
+        "active_capability", "active_treatment",
+    )
+    if any(status_context.get(key) != expected.get(key) for key in bindings):
+        raise DoctorError("installed Context MCP cold probe status bindings differ")
+    task_plan = task.get("plan", {})
+    development = task.get("implementation", {}).get("development_source", {})
+    task_context = task.get("context", {})
+    if (
+        task_plan.get("approved_commit") != expected.get("plan_commit")
+        or development.get("commit") != expected.get("source_commit")
+        or any(task_context.get(key) != expected.get(key) for key in bindings)
+        or task.get("durable_history") != expected.get("task", {}).get("durable_history")
+    ):
+        raise DoctorError("installed Context MCP cold probe current-task bindings differ")
+    return {"actor": actor, "methods": ["initialize", "tools/list", *sorted(required)], "timeout_seconds": timeout, "generation": "CURRENT", "bindings": {key: expected[key] for key in bindings}}
 
 
 def _boot_time() -> float:
@@ -2430,9 +3008,94 @@ def _launcher_surface_exact(
     )
 
 
+def _selected_context_probe_expected(
+    paths: DoctorPaths,
+    selected: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind the live snapshot with the parser from the selected candidate."""
+    snapshot_raw = paths.context_snapshot.read_bytes()
+    try:
+        snapshot_value = json.loads(snapshot_raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DoctorError("current Context snapshot is not valid UTF-8 JSON") from exc
+    return _validate_snapshot(
+        snapshot_value,
+        snapshot_raw,
+        parser_path=selected["modules"]["current_context_snapshot"],
+    )
+
+
+def _rollback_context_generation_pointer(
+    paths: DoctorPaths,
+    selected_generation: Path,
+    selected_pointer: Mapping[str, Any],
+    prior_pointer: Mapping[str, Any],
+) -> None:
+    """CAS-restore the pointer selected before a failed live-shim probe."""
+    if prior_pointer.get("kind") != "symlink":
+        raise DoctorError("post-cutover rollback has no captured prior generation pointer")
+    expected_target = str(Path("generations") / selected_generation.name)
+    if (
+        selected_pointer.get("kind") != "symlink"
+        or selected_pointer.get("target") != expected_target
+        or not _same_link_identity(
+            _surface_snapshot(paths.context_generation_pointer),
+            selected_pointer,
+        )
+    ):
+        raise DoctorError("post-cutover rollback refused a concurrent pointer change")
+    temporary = paths.context_generation_pointer.with_name(
+        "." + paths.context_generation_pointer.name + ".rollback"
+    )
+    if _lexists(temporary):
+        raise DoctorError("post-cutover rollback staging path already exists")
+    temporary.symlink_to(prior_pointer["target"])
+    parent = os.open(
+        paths.context_generation_pointer.parent,
+        os.O_RDONLY | os.O_DIRECTORY,
+    )
+    exchanged = False
+    try:
+        _rename_exchange(parent, temporary.name, paths.context_generation_pointer.name)
+        exchanged = True
+        displaced_state = os.stat(
+            temporary.name,
+            dir_fd=parent,
+            follow_symlinks=False,
+        )
+        displaced = {
+            "kind": "symlink",
+            "target": os.readlink(temporary.name, dir_fd=parent),
+            "uid": displaced_state.st_uid,
+            "gid": displaced_state.st_gid,
+            "mode": stat.S_IMODE(displaced_state.st_mode),
+            "device": displaced_state.st_dev,
+            "inode": displaced_state.st_ino,
+        }
+        if not _same_link_identity(displaced, selected_pointer):
+            _rename_exchange(parent, temporary.name, paths.context_generation_pointer.name)
+            exchanged = False
+            raise DoctorError("post-cutover rollback refused a concurrent pointer change")
+        os.unlink(temporary.name, dir_fd=parent)
+        exchanged = False
+        os.fsync(parent)
+    finally:
+        if not exchanged:
+            try:
+                os.unlink(temporary.name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+        os.close(parent)
+
+
 def _surface_semantics(surface: Mapping[str, Any]) -> dict[str, Any]:
     keys = ("kind", "raw", "target", "uid", "gid", "mode")
     return {key: surface[key] for key in keys if key in surface}
+
+
+def _same_link_identity(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    keys = ("kind", "target", "uid", "gid", "mode", "device", "inode")
+    return all(left.get(key) == right.get(key) for key in keys)
 
 
 def _restore_surface(path: Path, surface: Mapping[str, Any]) -> None:
@@ -2463,72 +3126,370 @@ def _restore_surface(path: Path, surface: Mapping[str, Any]) -> None:
 
 
 def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
-    """Install one root-owned launcher bound to the exact immutable release."""
+    """Migrate old semantics behind shims, then switch the pair exactly once."""
     _require_root()
     selected = _selected_context_artifacts(paths)
     desired = selected["commit"]
-    source = selected["launcher"]
-    expected = source.read_bytes()
     signature = _context_artifact_signature(selected)
-    before = _surface_snapshot(paths.context_launcher)
-    changed = not _launcher_surface_exact(before, expected, paths)
-    installed_snapshot: dict[str, Any] | None = None
-    replacement_attempted = False
+    artifacts = {"launcher": selected["launcher"].read_bytes(), "publisher": selected["publisher"].read_bytes()}
+    generation_name = _context_generation_name(selected)
+    generation = paths.context_generation_root / generation_name
+    surfaces = (
+        ("launcher", paths.context_launcher, "tgw-context-mcp"),
+        ("publisher", paths.context_publisher, "tgw-context-publish"),
+    )
+    before = {key: _surface_snapshot(surface) for key, surface, _name in surfaces}
+    regular = all(
+        item.get("kind") == "file" and item.get("raw") != _CONTEXT_DISPATCH_SHIM
+        for item in before.values()
+    )
+    shims = all(
+        item.get("kind") == "file"
+        and item.get("raw") == _CONTEXT_DISPATCH_SHIM
+        and item.get("uid") == paths.context_install_uid
+        and item.get("gid") == paths.context_install_gid
+        and item.get("mode") == paths.context_launcher_mode
+        for item in before.values()
+    )
+    mixed = {
+        key: item.get("raw") == _CONTEXT_DISPATCH_SHIM
+        for key, item in before.items()
+        if item.get("kind") == "file"
+    }
+    if not regular and not shims and len(mixed) != 2:
+        raise DoctorError("Context entrypoint surfaces are mixed or ambiguous")
+    migration_old_generation: Path | None = None
+    post_cutover_probe_failed = False
+    pointer_switch_unproven = False
     try:
-        selected_before_commit = _selected_context_artifacts(paths)
-        if _context_artifact_signature(selected_before_commit) != signature:
-            raise DoctorError("selected Context runtime changed before repair; no live file was replaced")
-        if _surface_snapshot(paths.context_launcher) != before:
-            raise DoctorError("installed Context launcher changed concurrently; no live file was replaced")
-        if changed:
-            replacement_attempted = True
-            _atomic_bytes(
-                paths.context_launcher,
-                expected,
-                mode=paths.context_launcher_mode,
-                uid=paths.context_install_uid,
-                gid=paths.context_install_gid,
+        if _context_artifact_signature(_selected_context_artifacts(paths)) != signature:
+            raise DoctorError("selected Context runtime changed before repair")
+        paths.context_generation_pointer.parent.mkdir(parents=True, exist_ok=True)
+        paths.context_generation_root.mkdir(parents=True, exist_ok=True)
+        os.chmod(paths.context_generation_pointer.parent, 0o755)
+        os.chmod(paths.context_generation_root, 0o555)
+
+        if not regular and not shims:
+            # A killed first migration can expose one audited shim and one exact
+            # legacy file.  The pointer-selected immutable old generation is the
+            # durable recovery record; accept no other mixed state.
+            old_generation = _resolved_context_generation(paths)
+            old_pair = _validate_context_generation(old_generation, paths)
+            for key, surface, _entrypoint in surfaces:
+                current = before[key]
+                if mixed[key]:
+                    continue
+                if current.get("sha256") != old_pair[key].get("sha256"):
+                    raise DoctorError("mixed Context migration does not match selected legacy generation")
+                _atomic_bytes(
+                    surface,
+                    _CONTEXT_DISPATCH_SHIM,
+                    mode=paths.context_launcher_mode,
+                    uid=paths.context_install_uid,
+                    gid=paths.context_install_gid,
+                )
+            shims = True
+
+        if regular:
+            old_artifacts = {key: before[key]["raw"] for key in ("launcher", "publisher")}
+            old_name = _context_old_generation_name(old_artifacts)
+            old_generation = paths.context_generation_root / old_name
+            migration_old_generation = old_generation
+            os.chmod(paths.context_generation_root, 0o755)
+            _discard_context_staging(
+                paths.context_generation_root / ("." + old_name + ".staging"),
+                paths,
             )
-        installed_snapshot = _surface_snapshot(paths.context_launcher)
-        if not _launcher_surface_exact(installed_snapshot, expected, paths):
-            raise DoctorError("Context launcher atomic replacement did not converge")
-        selected_after = _selected_context_artifacts(paths)
-        if _context_artifact_signature(selected_after) != signature:
-            raise DoctorError("selected Context runtime changed during repair")
-        after_record = {
-            "launcher": _surface_record(installed_snapshot),
-            "runtime_commit": desired,
-            "runtime_source": str(selected["runtime_source"]),
-            "runtime_hashes": selected["hashes"],
-        }
-        receipt = _receipt(
-            paths,
-            "context-launcher",
-            {"launcher": _surface_record(before)},
-            after_record,
-        )
-    except Exception as exc:
-        rollback_errors: list[str] = []
-        rollback_state: str | None = None
-        if changed and replacement_attempted:
+            existing = list(paths.context_generation_root.iterdir())
+            if existing and existing != [old_generation]:
+                raise DoctorError("legacy Context surfaces have ambiguous pre-existing generations")
+            if not old_generation.exists():
+                staging = paths.context_generation_root / ("." + old_name + ".staging")
+                staging.mkdir(mode=0o700)
+                _context_repair_phase("old-generation-created", paths)
+                try:
+                    for key, _surface, entrypoint in surfaces:
+                        _atomic_bytes(staging / entrypoint, old_artifacts[key], mode=paths.context_launcher_mode, uid=paths.context_install_uid, gid=paths.context_install_gid)
+                    _context_repair_phase("old-generation-files", paths)
+                    directory = os.open(staging, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        os.fsync(directory)
+                    finally:
+                        os.close(directory)
+                    _context_repair_phase("old-generation-fsync", paths)
+                    os.chmod(staging, 0o555)
+                    _context_repair_phase("old-generation-chmod", paths)
+                    os.replace(staging, old_generation)
+                    _context_repair_phase("old-generation-rename", paths)
+                    _fsync_parent(old_generation)
+                finally:
+                    if staging.exists():
+                        shutil.rmtree(staging)
+            _validate_context_generation(
+                old_generation,
+                paths,
+                {key: before[key]["sha256"] for key in ("launcher", "publisher")},
+            )
+            if paths.context_generation_pointer.is_symlink():
+                if _resolved_context_generation(paths) != old_generation:
+                    raise DoctorError("legacy Context surfaces have an ambiguous pre-existing pointer")
+            elif _lexists(paths.context_generation_pointer):
+                raise DoctorError("legacy Context surfaces have an ambiguous pre-existing pointer")
+            else:
+                _replace_link(paths.context_generation_pointer, Path("generations") / old_name)
+                _fsync_parent(paths.context_generation_pointer)
+                _context_repair_phase("old-pointer", paths)
+            captured_pointer = _surface_snapshot(paths.context_generation_pointer)
             try:
-                current = _surface_snapshot(paths.context_launcher)
-                if current == before:
-                    rollback_state = "original launcher unchanged"
-                elif installed_snapshot is not None and current != installed_snapshot:
-                    raise DoctorError("launcher changed concurrently after replacement; refused rollback overwrite")
-                elif installed_snapshot is None and not _launcher_surface_exact(current, expected, paths):
-                    raise DoctorError("launcher changed unexpectedly during replacement; refused rollback overwrite")
-                else:
-                    _restore_surface(paths.context_launcher, before)
-                    restored = _surface_snapshot(paths.context_launcher)
-                    if _surface_semantics(restored) != _surface_semantics(before):
-                        raise DoctorError("original launcher surface was not restored exactly")
-                    rollback_state = "original launcher restored"
+                for index, (key, surface, _entrypoint) in enumerate(surfaces, start=1):
+                    if _surface_snapshot(surface) != before[key]:
+                        raise DoctorError("Context surface changed concurrently before shim migration")
+                    _atomic_bytes(surface, _CONTEXT_DISPATCH_SHIM, mode=paths.context_launcher_mode, uid=paths.context_install_uid, gid=paths.context_install_gid)
+                    _context_repair_phase(f"shim-{index}", paths)
+                    if _resolved_context_generation(paths) != old_generation:
+                        raise DoctorError("Context pointer changed during shim migration")
+                for _key, surface, _entrypoint in surfaces:
+                    if _surface_snapshot(surface).get("raw") != _CONTEXT_DISPATCH_SHIM:
+                        raise DoctorError("Context dispatch shim did not converge")
+            except Exception:
+                for key, surface, _entrypoint in surfaces:
+                    current = _surface_snapshot(surface)
+                    if current != before[key] and current.get("raw") != _CONTEXT_DISPATCH_SHIM:
+                        raise DoctorError("Context shim rollback refused a concurrent surface change")
+                    if current != before[key]:
+                        _restore_surface(surface, before[key])
+                if _surface_snapshot(paths.context_generation_pointer) != captured_pointer:
+                    raise DoctorError("Context shim rollback refused a concurrent pointer change")
+                paths.context_generation_pointer.unlink()
+                _fsync_parent(paths.context_generation_pointer)
+                raise
+
+        os.chmod(paths.context_generation_root, 0o755)
+        _discard_context_staging(
+            paths.context_generation_root / ("." + generation_name + ".staging"),
+            paths,
+        )
+        os.chmod(paths.context_generation_root, 0o555)
+        _validate_all_context_generations(paths)
+        captured_pointer = _surface_snapshot(paths.context_generation_pointer)
+        old_generation = _resolved_context_generation(paths)
+        os.chmod(paths.context_generation_root, 0o755)
+        if not generation.exists():
+            temporary = paths.context_generation_root / ("." + generation_name + ".staging")
+            if temporary.exists():
+                raise DoctorError("stale Context generation staging directory requires inspection")
+            temporary.mkdir(mode=0o700)
+            try:
+                for key, _surface, entrypoint in surfaces:
+                    _atomic_bytes(temporary / entrypoint, artifacts[key], mode=paths.context_launcher_mode, uid=paths.context_install_uid, gid=paths.context_install_gid)
+                runtime = temporary / "runtime"
+                shutil.copytree(selected["runtime_source"], runtime)
+                _context_repair_phase("runtime-copy", paths)
+                for entry in (runtime, *runtime.rglob("*")):
+                    if entry.is_symlink():
+                        raise DoctorError("selected Context runtime contains a symlink")
+                    os.chown(entry, paths.context_install_uid, paths.context_install_gid)
+                    os.chmod(entry, 0o555 if entry.is_dir() else 0o444)
+                _atomic_bytes(
+                    temporary / "generation-manifest.json",
+                    _context_generation_manifest(selected),
+                    mode=0o444,
+                    uid=paths.context_install_uid,
+                    gid=paths.context_install_gid,
+                )
+                os.chmod(temporary, 0o555)
+                _fsync_context_tree(temporary)
+                _context_repair_phase("runtime-fsync", paths)
+                os.replace(temporary, generation)
+                _context_repair_phase("generation-rename", paths)
+                directory = os.open(generation, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+                _fsync_parent(generation)
+            finally:
+                if temporary.exists():
+                    shutil.rmtree(temporary)
+        os.chmod(paths.context_generation_root, 0o555)
+        _validate_all_context_generations(paths)
+        _validate_context_generation(generation, paths, selected["hashes"])
+        captured_generation = _descriptor_context_tree(generation)
+        if _surface_snapshot(paths.context_generation_pointer) != captured_pointer:
+            raise DoctorError("Context generation pointer changed concurrently before switch")
+        pointer_tmp = paths.context_generation_pointer.with_name(
+            "." + paths.context_generation_pointer.name + ".new"
+        )
+        if old_generation == generation:
+            pair = _context_pair(paths)
+            for name, expected in artifacts.items():
+                if not _launcher_surface_exact(pair[name], expected, paths):
+                    raise DoctorError(f"Context {name} generation did not converge")
+            if _context_artifact_signature(_selected_context_artifacts(paths)) != signature:
+                raise DoctorError("selected Context runtime changed during repair replay")
+            probe = _probe_context_stdio(
+                paths.context_launcher,
+                _operator_actor(),
+                _selected_context_probe_expected(paths, selected),
+            )
+            retained_displaced_pointer = None
+            if _lexists(pointer_tmp):
+                retained_displaced_pointer = {
+                    "path": str(pointer_tmp),
+                    "reason": (
+                        "retained after installed-shim cold proof; cleanup requires "
+                        "a separately proven pointer identity"
+                    ),
+                    "identity": _surface_snapshot(pointer_tmp),
+                }
+            try:
+                clients = _context_processes(paths)
+                process_error = None
+            except Exception as exc:
+                clients = []
+                process_error = str(exc)
+            affected = [item for item in clients if item["predates_launcher"]]
+            return {
+                "ok": True,
+                "operation": "context-launcher",
+                "changed": False,
+                "generation": generation_name,
+                "runtime_commit": desired,
+                "source": str(selected["launcher"]),
+                "installed": str(paths.context_launcher),
+                "sha256": selected["hashes"]["launcher"],
+                "publisher_source": str(selected["publisher"]),
+                "publisher_installed": str(paths.context_publisher),
+                "publisher_sha256": selected["hashes"]["publisher"],
+                "runtime_source": str(selected["runtime_source"]),
+                "runtime_hashes": selected["hashes"],
+                "receipt": None,
+                "retained_displaced_pointer": retained_displaced_pointer,
+                "post_cutover_cold_stdio_probe": probe,
+                "client_processes_mutated": False,
+                "restart_required": [item["pid"] for item in affected],
+                "restart_scope": "affected parent harness sessions only",
+                "restart_detection_error": process_error,
+            }
+        if pointer_tmp.exists() or pointer_tmp.is_symlink():
+            staged = _surface_snapshot(pointer_tmp)
+            if staged.get("kind") != "symlink":
+                raise DoctorError("stale Context pointer staging state requires inspection")
+            target = Path(staged["target"])
+            if target.is_absolute() or len(target.parts) != 2 or target.parts[0] != "generations":
+                raise DoctorError("stale Context pointer staging target is unsafe")
+            _validate_context_generation(pointer_tmp.parent / target, paths)
+            pointer_tmp.unlink()
+            _fsync_parent(pointer_tmp)
+        pointer_tmp.symlink_to(Path("generations") / generation_name)
+        _context_repair_phase("staged-pointer", paths)
+        staged_pointer = _surface_snapshot(pointer_tmp)
+        if _surface_snapshot(paths.context_generation_pointer) != captured_pointer:
+            pointer_tmp.unlink()
+            raise DoctorError("Context generation pointer changed concurrently during switch")
+        parent = os.open(
+            paths.context_generation_pointer.parent,
+            os.O_RDONLY | os.O_DIRECTORY,
+        )
+        try:
+            # renameat2(RENAME_EXCHANGE) can complete in the kernel and still be
+            # reported as an exception by a wrapper.  Until both pathname
+            # identities prove the exact exchange, broad migration rollback is
+            # unsafe and both pointers must be retained for deterministic replay.
+            pointer_switch_unproven = True
+            _rename_exchange(
+                parent,
+                pointer_tmp.name,
+                paths.context_generation_pointer.name,
+            )
+            _context_repair_phase("exchange", paths)
+            selected_pointer = _surface_snapshot(paths.context_generation_pointer)
+            displaced = _surface_snapshot(pointer_tmp)
+            if not _same_link_identity(selected_pointer, staged_pointer) or not _same_link_identity(
+                displaced, captured_pointer
+            ):
+                raise DoctorError("Context generation pointer CAS observed an unproven concurrent surface")
+            pointer_switch_unproven = False
+            pointer_tmp.unlink()
+            _context_repair_phase("displaced-pointer-unlink", paths)
+            os.fsync(parent)
+            _context_repair_phase("parent-fsync", paths)
+        finally:
+            os.close(parent)
+        if _resolved_context_generation(paths) != generation:
+            raise DoctorError("Context pointer switch did not select the captured generation")
+        _validate_context_generation(generation, paths, selected["hashes"])
+        if _descriptor_context_tree(generation) != captured_generation:
+            raise DoctorError("Context generation changed across pointer CAS")
+        pair = _context_pair(paths)
+        installed = {name: pair[name] for name in ("launcher", "publisher")}
+        for name, expected in artifacts.items():
+            if not _launcher_surface_exact(installed[name], expected, paths):
+                raise DoctorError(f"Context {name} generation did not converge")
+        if _context_artifact_signature(_selected_context_artifacts(paths)) != signature:
+            raise DoctorError("selected Context runtime changed during repair")
+        try:
+            probe = _probe_context_stdio(
+                paths.context_launcher,
+                _operator_actor(),
+                _selected_context_probe_expected(paths, selected),
+            )
+        except Exception as probe_exc:
+            post_cutover_probe_failed = True
+            try:
+                _rollback_context_generation_pointer(
+                    paths,
+                    generation,
+                    selected_pointer,
+                    captured_pointer,
+                )
             except Exception as rollback_exc:
-                rollback_errors.append(str(rollback_exc))
-        suffix = "; rollback errors: " + "; ".join(rollback_errors) if rollback_errors else f"; {rollback_state}" if rollback_state else ""
-        raise DoctorError(f"Context launcher repair failed: {exc}{suffix}") from exc
+                raise DoctorError(
+                    f"installed Context shim cold probe failed: {probe_exc}; "
+                    f"pointer rollback failed: {rollback_exc}"
+                ) from probe_exc
+            raise DoctorError(
+                f"installed Context shim cold probe failed after cutover; "
+                f"prior generation restored: {probe_exc}"
+            ) from probe_exc
+        receipt = _receipt(paths, "context-launcher", {"generation": old_generation.name}, {"generation": generation_name, "runtime_commit": desired, "runtime_hashes": selected["hashes"]})
+    except Exception as exc:
+        if (
+            regular
+            and migration_old_generation is not None
+            and not post_cutover_probe_failed
+            and not pointer_switch_unproven
+        ):
+            try:
+                for key, surface, _entrypoint in surfaces:
+                    current = _surface_snapshot(surface)
+                    if current != before[key] and current.get("raw") != _CONTEXT_DISPATCH_SHIM:
+                        raise DoctorError("Context failure rollback refused a concurrent surface change")
+                    if current != before[key]:
+                        _restore_surface(surface, before[key])
+                pointer = _surface_snapshot(paths.context_generation_pointer)
+                permitted = {
+                    str(Path("generations") / migration_old_generation.name),
+                    str(Path("generations") / generation_name),
+                }
+                if pointer.get("kind") == "symlink":
+                    if pointer.get("target") not in permitted:
+                        raise DoctorError("Context failure rollback refused a concurrent pointer change")
+                    paths.context_generation_pointer.unlink()
+                    _fsync_parent(paths.context_generation_pointer)
+                elif pointer.get("kind") != "missing":
+                    raise DoctorError("Context failure rollback found an ambiguous pointer")
+                os.chmod(paths.context_generation_root, 0o755)
+                for candidate in (generation,):
+                    if candidate.exists():
+                        _validate_context_generation(candidate, paths)
+                        shutil.rmtree(candidate)
+                _fsync_parent(paths.context_generation_root)
+            except Exception as rollback_exc:
+                raise DoctorError(
+                    f"Context launcher repair failed: {exc}; rollback failed: {rollback_exc}"
+                ) from exc
+        raise DoctorError(f"Context launcher repair failed before a proven generation switch: {exc}") from exc
     try:
         clients = _context_processes(paths)
         process_error = None
@@ -2539,25 +3500,38 @@ def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
     return {
         "ok": True,
         "operation": "context-launcher",
-        "changed": changed,
+        "changed": True,
+        "generation": generation_name,
         "runtime_commit": desired,
-        "source": str(source),
+        "source": str(selected["launcher"]),
         "installed": str(paths.context_launcher),
-        "sha256": _file_hash(source),
+        "sha256": selected["hashes"]["launcher"],
+        "publisher_source": str(selected["publisher"]),
+        "publisher_installed": str(paths.context_publisher),
+        "publisher_sha256": selected["hashes"]["publisher"],
         "runtime_source": str(selected["runtime_source"]),
         "runtime_hashes": selected["hashes"],
         "receipt": receipt,
+        "post_cutover_cold_stdio_probe": probe,
         "client_processes_mutated": False,
         "restart_required": [item["pid"] for item in affected],
         "restart_scope": "affected parent harness sessions only",
         "restart_detection_error": process_error,
     }
 
-
 def repair_context(paths: DoctorPaths) -> dict[str, Any]:
     _require_root()
-    _require_trusted_root_program(paths.context_publisher)
-    context_runtime = _require_trusted_context_runtime(paths)
+    selected = _selected_context_artifacts(paths)
+    pair = _context_pair(paths)
+    bound_publisher = pair["generation"] / "tgw-context-publish"
+    _require_trusted_root_program(bound_publisher)
+    installed_publisher = pair["publisher"]
+    if (
+        installed_publisher["kind"] != "file"
+        or installed_publisher["sha256"] != selected["hashes"]["publisher"]
+    ):
+        raise DoctorError("installed Context publisher differs from selected immutable runtime")
+    context_runtime = selected["runtime_source"]
     task_surface = _surface_snapshot(paths.context_task)
     cursor_surface = _surface_snapshot(paths.context_cursor)
     snapshot_surface = _surface_snapshot(paths.context_snapshot)
@@ -2603,7 +3577,7 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
         staged_snapshot.unlink(missing_ok=True)
         result = _run(
             [
-                str(paths.context_publisher),
+                str(bound_publisher),
                 "--task",
                 str(paths.context_task),
                 "--cursor",
@@ -2620,10 +3594,25 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
         )
         if result.returncode:
             raise DoctorError(result.stderr.strip() or "context publisher failed")
+        after_raw = staged_snapshot.read_bytes()
         after = _json(staged_snapshot)
-        _validate_snapshot(after)
-        if after.get("task") != task or after.get("cursor") != cursor:
+        expanded_after = _validate_snapshot(
+            after,
+            after_raw,
+            parser_path=selected["modules"]["current_context_snapshot"],
+        )
+        if expanded_after.get("task") != task or expanded_after.get("cursor") != cursor:
             raise DoctorError("staged context publisher output differs from exact inputs")
+        # Cold-start the exact candidate launcher/runtime against the exact
+        # staged inode before either cursor or live snapshot can be replaced.
+        os.chown(staged_snapshot, paths.context_install_uid, paths.context_install_gid)
+        os.chmod(staged_snapshot, 0o400)
+        staged_probe = _probe_context_stdio(
+            pair["generation"] / "tgw-context-mcp",
+            _operator_actor(),
+            expanded_after,
+            staged_snapshot=staged_snapshot,
+        )
         changed = before["cursor"] != cursor or before["snapshot"] != after
         current_head, current_tree, current_status = _source_identity(paths)
         if current_status or (current_head, current_tree) != (head, tree):
@@ -2654,7 +3643,7 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
                 committed_snapshot = _cas_regular_file(
                     paths.context_snapshot,
                     snapshot_surface,
-                    _json_bytes(after),
+                    after_raw,
                     mode=snapshot_surface["mode"],
                     uid=snapshot_surface["uid"],
                     gid=snapshot_surface["gid"],
@@ -2707,7 +3696,13 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
     finally:
         staged_cursor.unlink(missing_ok=True)
         staged_snapshot.unlink(missing_ok=True)
-    return {"ok": True, "operation": "context", "changed": changed, "receipt": receipt}
+    return {
+        "ok": True,
+        "operation": "context",
+        "changed": changed,
+        "receipt": receipt,
+        "staged_cold_stdio_probe": staged_probe,
+    }
 
 
 def _replace_link(path: Path, target: Path) -> None:

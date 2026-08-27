@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import pwd
@@ -26,10 +27,7 @@ RUNTIME_OWNER_UID = 0
 RUNTIME_OWNER_GID = 0
 SYSTEM_CODE_OWNERS = frozenset({0, 65534})
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
-
-
-def _canonical(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+MAX_CONTEXT_SNAPSHOT_BYTES = 256 * 1024
 
 
 def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -42,14 +40,63 @@ def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
+def _select_preflight_snapshot_descriptor() -> (
+    tuple[int, tuple[int, int, int, int, int]] | None
+):
+    raw = os.environ.pop("TGW_CONTEXT_PREFLIGHT_SNAPSHOT_FD", None)
+    if raw is None:
+        return None
+    if not raw.isascii() or not raw.isdecimal():
+        raise ValueError("Context preflight snapshot descriptor is invalid")
+    descriptor = int(raw)
+    if descriptor < 3:
+        raise ValueError("Context preflight snapshot descriptor is invalid")
+    try:
+        selected = os.fstat(descriptor)
+    except OSError as exc:
+        raise ValueError("Context preflight snapshot descriptor is unavailable") from exc
+    return descriptor, _stat_identity(selected)
+
+
+_PREFLIGHT_SNAPSHOT_SELECTOR = _select_preflight_snapshot_descriptor()
+
+
 def _protected_snapshot_raw() -> bytes:
     """Read one immutable snapshot without importing any TGW runtime code."""
+    if _PREFLIGHT_SNAPSHOT_SELECTOR is not None:
+        descriptor, selected_identity = _PREFLIGHT_SNAPSHOT_SELECTOR
+        try:
+            before = os.fstat(descriptor)
+            if (
+                _stat_identity(before) != selected_identity
+                or not stat.S_ISREG(before.st_mode)
+                or before.st_uid != 0
+                or before.st_gid != 0
+                or before.st_mode & 0o077
+                or before.st_size > MAX_CONTEXT_SNAPSHOT_BYTES
+            ):
+                raise ValueError(
+                    "Context preflight snapshot descriptor is not stable protected root data"
+                )
+            raw = os.pread(descriptor, before.st_size + 1, 0)
+            after = os.fstat(descriptor)
+        except OSError as exc:
+            raise ValueError(
+                "Context preflight snapshot descriptor became unavailable"
+            ) from exc
+        if (
+            _stat_identity(after) != selected_identity
+            or _stat_identity(before) != _stat_identity(after)
+            or len(raw) != after.st_size
+        ):
+            raise ValueError("Context preflight snapshot changed during startup")
+        return raw
     before = CURRENT_CONTEXT.stat(follow_symlinks=False)
     if (
         CURRENT_CONTEXT.is_symlink()
         or not stat.S_ISREG(before.st_mode)
         or before.st_mode & 0o022
-        or before.st_size > 256 * 1024
+        or before.st_size > MAX_CONTEXT_SNAPSHOT_BYTES
     ):
         raise ValueError("current TGW context snapshot is not protected read-only data")
     raw = CURRENT_CONTEXT.read_bytes()
@@ -197,20 +244,16 @@ def _verify_bound_release(
 def _bootstrap_runtime() -> tuple[Path, Path, int, bytes, str, str]:
     raw = _protected_snapshot_raw()
     try:
+        # Bootstrap reads only the immutable source identity.  The selected
+        # runtime owns all schema, hash, canonical and projection parsing.
         value = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("current TGW context snapshot is invalid") from exc
     if (
         not isinstance(value, dict)
         or value.get("schema") != "tgw-current-context-snapshot/v1"
     ):
         raise ValueError("current TGW context snapshot schema is invalid")
-    claimed = value.get("snapshot_sha256")
-    body = dict(value)
-    body.pop("snapshot_sha256", None)
-    observed = "sha256:" + hashlib.sha256(_canonical(body)).hexdigest()
-    if claimed != observed:
-        raise ValueError("current TGW context snapshot hash differs")
     source_commit = value.get("source_commit")
     source_tree = value.get("source_tree")
     if (
@@ -225,7 +268,7 @@ def _bootstrap_runtime() -> tuple[Path, Path, int, bytes, str, str]:
         release, source_commit, source_tree
     )
     record_sha256 = "sha256:" + hashlib.sha256(raw).hexdigest()
-    return release, server_source, release_descriptor, raw, observed, record_sha256
+    return release, server_source, release_descriptor, raw, "", record_sha256
 
 
 (
@@ -237,10 +280,31 @@ def _bootstrap_runtime() -> tuple[Path, Path, int, bytes, str, str]:
     _STARTUP_RECORD_SHA256,
 ) = _bootstrap_runtime()
 
+# Load the parser by its verified descriptor path.  The controller interpreter
+# is only an executable substrate; an editable/site TGW package cannot satisfy
+# this security boundary.
+_snapshot_spec = importlib.util.spec_from_file_location(
+    "_tgw_selected_current_context_snapshot",
+    SERVER_SOURCE / "tgw/current_context_snapshot.py",
+)
+if _snapshot_spec is None or _snapshot_spec.loader is None:
+    raise ValueError("selected Context runtime parser cannot be loaded")
+_snapshot_runtime = importlib.util.module_from_spec(_snapshot_spec)
+_snapshot_spec.loader.exec_module(_snapshot_runtime)
+CurrentContextError = _snapshot_runtime.CurrentContextError
+MAX_SNAPSHOT_BYTES = _snapshot_runtime.MAX_SNAPSHOT_BYTES
+parse_snapshot_bytes = _snapshot_runtime.parse_bytes
+
 sys.path.insert(0, str(SERVER_SOURCE))
 
-from tgw.current_context_snapshot import CurrentContextError  # noqa: E402
-from tgw.current_context_snapshot import parse as parse_snapshot  # noqa: E402
+if MAX_SNAPSHOT_BYTES != MAX_CONTEXT_SNAPSHOT_BYTES:
+    raise ValueError("Context launcher and selected runtime size bounds differ")
+try:
+    _STARTUP_SNAPSHOT_SHA256 = parse_snapshot_bytes(_STARTUP_CONTEXT_RAW)[
+        "snapshot_sha256"
+    ]
+except CurrentContextError as exc:
+    raise ValueError("current TGW context snapshot is invalid") from exc
 
 
 def _harness_actor() -> str:
@@ -255,8 +319,8 @@ def _current_context() -> dict[str, Any]:
     if _protected_snapshot_raw() != _STARTUP_CONTEXT_RAW:
         raise ValueError("TGW Context generation changed; restart this harness session")
     try:
-        value = parse_snapshot(json.loads(_STARTUP_CONTEXT_RAW))
-    except (json.JSONDecodeError, CurrentContextError) as exc:
+        value = parse_snapshot_bytes(_STARTUP_CONTEXT_RAW)
+    except CurrentContextError as exc:
         raise ValueError("current TGW context snapshot is invalid") from exc
     value["record_path"] = str(CURRENT_CONTEXT)
     value["record_sha256"] = _STARTUP_RECORD_SHA256
@@ -269,6 +333,10 @@ def _current_task() -> str:
     value = context["task"]
     result = {
         **value,
+        "durable_recovery_projection": {
+            key: context.get("task_projection", {}).get(key)
+            for key in ("encoding", "sha256")
+        },
         "actor": actor,
         "receiver": actor,
         "context": {

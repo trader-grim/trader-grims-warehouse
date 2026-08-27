@@ -5,20 +5,25 @@ import grp
 import hashlib
 import json
 import os
+import pwd
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterator
+from typing import Any, Iterator
 
 import pytest
 
 from tgw import doctor_cli
+from tgw.current_context_snapshot import publish_bytes
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -117,8 +122,9 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         "systemd/tgw-coding-local-foreman.timer": "[Timer]\nOnBootSec=1s\n",
         "systemd/tgw-coding-local-foreman.service": "[Service]\nType=oneshot\nExecStart=/bin/true\n",
         "scripts/tgw_context_debian_stdio.py": (f"#!/bin/sh\n# runtime snapshot: {snapshot_fixture_path}\nexit 0\n"),
+        "scripts/tgw_context_publish.py": (ROOT / "scripts/tgw_context_publish.py").read_text(),
         "src/tgw/context_mcp_server.py": "# context server fixture\n",
-        "src/tgw/current_context_snapshot.py": "# snapshot fixture\n",
+        "src/tgw/current_context_snapshot.py": (ROOT / "src/tgw/current_context_snapshot.py").read_text(),
         "src/tgw/local_context_runtime.py": "# local runtime fixture\n",
     }
     for relative, content in source_files.items():
@@ -135,6 +141,8 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     tree = _git(repository, "rev-parse", "HEAD^{tree}")
 
     root = tmp_path / "tgw-lib"
+    root.mkdir()
+    root.chmod(0o755)
     runtime_root = root / "coding-runtime"
     release = runtime_root / "releases" / head
     local_bin = root / "bin"
@@ -208,12 +216,14 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     snapshot_path = root / "config/tgw-context-current.json"
     _write_json(task_path, task)
     _write_json(cursor_path, cursor)
-    _write_json(snapshot_path, _snapshot(task, cursor))
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_bytes(publish_bytes(task, cursor))
     launcher = local_bin / "tgw-context-mcp"
     shutil.copyfile(release / "scripts/tgw_context_debian_stdio.py", launcher)
     launcher.chmod(0o555)
     publisher = local_bin / "tgw-context-publish"
-    publisher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    shutil.copyfile(release / "scripts/tgw_context_publish.py", publisher)
+    publisher.chmod(0o555)
     context_runtime_source = root / "context-runtime/src"
     context_module = context_runtime_source / "tgw/current_context_snapshot.py"
     context_module.parent.mkdir(parents=True)
@@ -235,6 +245,8 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         context_cursor=cursor_path,
         context_launcher=launcher,
         context_publisher=publisher,
+        context_generation_root=root / "context-entrypoints/generations",
+        context_generation_pointer=root / "context-entrypoints/current",
         context_runtime_source=context_runtime_source,
         context_catalog=catalog_path,
         receipts=root / "doctor-receipts",
@@ -248,6 +260,23 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         systemd_unit_roots=(tmp_path / "systemd-units",),
         archive_discovery_roots=(tmp_path / "archive-discovery",),
     )
+    generation = paths.context_generation_root / "context-fixture"
+    generation.mkdir(parents=True)
+    shutil.copyfile(launcher, generation / "tgw-context-mcp")
+    shutil.copyfile(publisher, generation / "tgw-context-publish")
+    for entry in generation.iterdir():
+        entry.chmod(0o555)
+    generation.chmod(0o555)
+    paths.context_generation_pointer.parent.mkdir(parents=True, exist_ok=True)
+    paths.context_generation_pointer.parent.chmod(0o755)
+    paths.context_generation_pointer.symlink_to(Path("generations/context-fixture"))
+    paths.context_generation_root.chmod(0o555)
+    launcher.unlink()
+    publisher.unlink()
+    launcher.write_bytes(doctor_cli._CONTEXT_DISPATCH_SHIM)
+    publisher.write_bytes(doctor_cli._CONTEXT_DISPATCH_SHIM)
+    launcher.chmod(0o555)
+    publisher.chmod(0o555)
     return paths, head, tree
 
 
@@ -274,10 +303,189 @@ def test_context_snapshot_detects_cursor_drift_with_exact_repair(tmp_path: Path)
     assert result["operator_action"] == "sudo -n tgw doctor repair context"
 
 
+def test_doctor_selected_parser_has_exact_inline_non_ascii_byte_parity() -> None:
+    task = {
+        "schema": "tgw-current-task/v1",
+        "plan": {"approved_commit": "a" * 40},
+        "implementation": {"development_source": {"commit": "b" * 40, "next_leaf": "leaf"}},
+        "operator_note": "café 東京",
+    }
+    cursor = {
+        "schema": "tgw-plan-execution-cycle-cursor/v1",
+        "plan_commit": "a" * 40,
+        "source_commit": "b" * 40,
+        "source_tree": "c" * 40,
+        "resolved": {"next_treatment": "todo:leaf"},
+    }
+    value = {
+        "schema": "tgw-current-context-snapshot/v1",
+        "plan_commit": "a" * 40,
+        "source_commit": "b" * 40,
+        "source_tree": "c" * 40,
+        "active_capability": "leaf",
+        "active_treatment": "todo:leaf",
+        "task": task,
+        "cursor": cursor,
+    }
+    value["snapshot_sha256"] = "sha256:" + hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    parser = ROOT / "src/tgw/current_context_snapshot.py"
+
+    assert doctor_cli._validate_snapshot(value, raw, parser_path=parser)["task"] == task
+    with pytest.raises(doctor_cli.DoctorError, match="not canonical"):
+        doctor_cli._validate_snapshot(value, json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() + b"\n", parser_path=parser)
+
+
 def test_context_process_match_ignores_parent_shell_command_text() -> None:
     assert doctor_cli._is_context_process(["python3", "/opt/TGW/tgw-lib/bin/tgw-context-mcp"])
     assert doctor_cli._is_context_process(["python3", "-m", "tgw.context_mcp_server"])
     assert not doctor_cli._is_context_process(["bash", "-c", "/opt/TGW/tgw-lib/bin/tgw-context-mcp"])
+
+
+def test_context_cold_probe_uses_real_stdio_protocol_subprocess(tmp_path: Path) -> None:
+    actor = pwd.getpwuid(os.geteuid()).pw_name
+    expected = {
+        "plan_commit": "a" * 40,
+        "source_commit": "b" * 40,
+        "source_tree": "c" * 40,
+        "snapshot_sha256": "sha256:" + "d" * 64,
+        "active_capability": "capability@1",
+        "active_treatment": "treatment@1",
+        "task": {"durable_history": {"receipts": "bound"}},
+    }
+    schema_fields = {
+        "tgw_context_status": (), "tgw_context_current_task": (),
+        "tgw_context_bundle": ("task", "limit"),
+        "tgw_context_code_graph": ("operation", "query", "limit"),
+        "tgw_context_plan_graph": ("task", "receiver", "operation", "limit"),
+        "tgw_context_plan_source": ("path", "start_line", "max_lines", "authority"),
+        "tgw_context_onboarding": ("actor",),
+        "tgw_context_runbooks": ("query", "path", "start_line", "max_lines", "limit", "authority"),
+    }
+    schemas = {
+        name: {
+            "type": "object",
+            "properties": {
+                field: {"type": "integer" if field in {"limit", "start_line", "max_lines"} else "string"}
+                for field in fields
+            },
+            **({"required": [next(iter(fields))]} if name in {"tgw_context_plan_graph", "tgw_context_plan_source", "tgw_context_onboarding"} else {}),
+        }
+        for name, fields in schema_fields.items()
+    }
+    launcher = tmp_path / "tgw-context-mcp"
+    launcher.write_text(
+        "#!" + sys.executable + "\n"
+        "import json,sys\n"
+        "actor=" + repr(actor) + "\n"
+        "for line in sys.stdin:\n"
+        " r=json.loads(line); i=r.get('id'); m=r.get('method')\n"
+        " if i is None: continue\n"
+        " if m=='tools/list': result={'tools':[{'name':n,'description':'read only','inputSchema':s} for n,s in "
+        + repr(sorted(schemas.items())) + "]}\n"
+        " elif m=='tools/call':\n"
+        "  name=r['params']['name']\n"
+        "  if name=='tgw_context_current_task': value={'actor':actor,"
+        "'receiver':actor,'plan':{'approved_commit':'a'*40},"
+        "'implementation':{'development_source':{'commit':'b'*40}},"
+            "'context':{'plan_commit':'a'*40,'source_commit':'b'*40,"
+            "'source_tree':'c'*40,'snapshot_sha256':'sha256:'+'d'*64,'active_capability':'capability@1','active_treatment':'treatment@1'},'durable_history':{'receipts':'bound'}}\n"
+        "  else: value={'ok':True,'actor':actor,"
+        "'generation_status':{'state':'CURRENT'},"
+        "'current_context':{'plan_commit':'a'*40,'source_commit':'b'*40,"
+            "'source_tree':'c'*40,'snapshot_sha256':'sha256:'+'d'*64,'active_capability':'capability@1','active_treatment':'treatment@1'}}\n"
+        "  result={'isError':False,'content':[{'type':'text','text':json.dumps(value)}]}\n"
+        " else: result={'protocolVersion':'2025-03-26','capabilities':{},'serverInfo':{'name':'fixture','version':'1'}}\n"
+        " print(json.dumps({'jsonrpc':'2.0','id':i,'result':result}),flush=True)\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o555)
+
+    result = doctor_cli._probe_context_stdio(launcher, actor, expected, timeout=2)
+
+    assert result["actor"] == actor
+    assert result["methods"] == [
+        "initialize",
+        "tools/list",
+        *sorted(schema_fields),
+    ]
+    assert result["generation"] == "CURRENT"
+
+
+def test_context_generation_descriptor_rejects_hardlinks(tmp_path: Path) -> None:
+    generation = tmp_path / "generation"
+    generation.mkdir()
+    runtime = generation / "runtime.py"
+    runtime.write_text("value = 1\n", encoding="utf-8")
+    os.link(runtime, tmp_path / "external-alias.py")
+
+    with pytest.raises(doctor_cli.DoctorError, match="identity is unsafe"):
+        doctor_cli._descriptor_context_tree(generation)
+
+
+def test_context_generation_descriptor_rejects_path_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generation = tmp_path / "generation"
+    generation.mkdir()
+    runtime = generation / "runtime.py"
+    runtime.write_text("original\n", encoding="utf-8")
+    replacement = tmp_path / "replacement.py"
+    replacement.write_text("replacement\n", encoding="utf-8")
+    real_stat = doctor_cli.os.stat
+    calls = 0
+
+    def racing_stat(path, *args, **kwargs):
+        nonlocal calls
+        if path == "runtime.py" and kwargs.get("dir_fd") is not None:
+            calls += 1
+            if calls == 2:
+                os.replace(replacement, runtime)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "stat", racing_stat)
+    with pytest.raises(doctor_cli.DoctorError, match="descendant changed"):
+        doctor_cli._descriptor_context_tree(generation)
+
+
+@pytest.mark.parametrize("failure", ["status_false", "mcp_error", "binding_mismatch"])
+def test_context_cold_probe_rejects_false_error_and_mismatched_status(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    actor = pwd.getpwuid(os.geteuid()).pw_name
+    expected = {"plan_commit": "a" * 40, "source_commit": "b" * 40, "source_tree": "c" * 40, "snapshot_sha256": "sha256:" + "d" * 64}
+    status = {"ok": failure != "status_false", "actor": actor, "generation_status": {"state": "CURRENT"}, "current_context": dict(expected)}
+    if failure == "binding_mismatch":
+        status["current_context"]["source_tree"] = "e" * 40
+    task = {
+        "actor": actor,
+        "receiver": actor,
+        "plan": {"approved_commit": expected["plan_commit"]},
+        "implementation": {
+            "development_source": {"commit": expected["source_commit"]}
+        },
+        "context": dict(expected),
+    }
+    observed: dict[str, Any] = {}
+
+    def run(command, **kwargs):
+        observed["env"] = kwargs["env"]
+        responses = [
+            {"jsonrpc": "2.0", "id": 1, "result": {}},
+            {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "tgw_context_status"}, {"name": "tgw_context_current_task"}]}},
+            {"jsonrpc": "2.0", "id": 3, "result": {"isError": failure == "mcp_error", "content": [{"type": "text", "text": json.dumps(status)}]}},
+            {"jsonrpc": "2.0", "id": 4, "result": {"isError": False, "content": [{"type": "text", "text": json.dumps(task)}]}},
+        ]
+        return subprocess.CompletedProcess(command, 0, "\n".join(json.dumps(row) for row in responses), "")
+
+    monkeypatch.setenv("TGW_SECRET_MUST_NOT_LEAK", "secret")
+    monkeypatch.setattr(doctor_cli.subprocess, "run", run)
+    with pytest.raises(doctor_cli.DoctorError):
+        doctor_cli._probe_context_stdio(Path("/trusted/launcher"), actor, expected)
+    assert "TGW_SECRET_MUST_NOT_LEAK" not in observed["env"]
+    assert set(observed["env"]) == {"PATH", "LANG", "LC_ALL", "PYTHONDONTWRITEBYTECODE"}
 
 
 def test_root_post_repair_checks_use_the_invoking_operator(
@@ -2125,20 +2333,28 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(tmp
     publisher_env = {}
 
     def run(command, **kwargs):
-        if command[0] == str(paths.context_publisher):
+        if Path(command[0]).name == "tgw-context-publish":
             publisher_env.update(kwargs["env"])
             task_path = Path(command[command.index("--task") + 1])
             cursor_path = Path(command[command.index("--cursor") + 1])
             output_path = Path(command[command.index("--output") + 1])
             task = json.loads(task_path.read_text())
             updated_cursor = json.loads(cursor_path.read_text())
-            _write_json(output_path, _snapshot(task, updated_cursor))
+            output_path.write_bytes(publish_bytes(task, updated_cursor))
             return subprocess.CompletedProcess(command, 0, "", "")
         return original_run(command, **kwargs)
 
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
     monkeypatch.setattr(doctor_cli, "_run", run)
     monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+    probes = []
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda launcher, actor, expected, **kwargs: probes.append(
+            (launcher, actor, expected, kwargs)
+        ) or {"generation": "CURRENT"},
+    )
 
     result = doctor_cli.repair_context(paths)
 
@@ -2156,6 +2372,11 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(tmp
     receipt = json.loads(Path(result["receipt"]).read_text())
     assert receipt["operation"] == "context"
     assert receipt["receipt_sha256"].startswith("sha256:")
+    assert len(probes) == 1
+    assert probes[0][0].parent.name.startswith("context-")
+    assert probes[0][3]["staged_snapshot"].name.startswith(
+        paths.context_snapshot.name + ".doctor-stage."
+    )
 
 
 def test_context_repair_is_semantically_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2165,23 +2386,25 @@ def test_context_repair_is_semantically_idempotent(tmp_path: Path, monkeypatch: 
     original_run = doctor_cli._run
 
     def run(command, **kwargs):
-        if command[0] == str(paths.context_publisher):
+        if Path(command[0]).name == "tgw-context-publish":
             task_path = Path(command[command.index("--task") + 1])
             cursor_path = Path(command[command.index("--cursor") + 1])
             output_path = Path(command[command.index("--output") + 1])
-            _write_json(
-                output_path,
-                _snapshot(
-                    json.loads(task_path.read_text()),
-                    json.loads(cursor_path.read_text()),
-                ),
-            )
+            output_path.write_bytes(publish_bytes(
+                json.loads(task_path.read_text()),
+                json.loads(cursor_path.read_text()),
+            ))
             return subprocess.CompletedProcess(command, 0, "", "")
         return original_run(command, **kwargs)
 
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
     monkeypatch.setattr(doctor_cli, "_run", run)
     monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: {"generation": "CURRENT"},
+    )
 
     result = doctor_cli.repair_context(paths)
 
@@ -2197,7 +2420,7 @@ def test_context_publisher_failure_leaves_live_inputs_unchanged_and_is_receipted
     original_run = doctor_cli._run
 
     def run(command, **kwargs):
-        if command[0] == str(paths.context_publisher):
+        if Path(command[0]).name == "tgw-context-publish":
             return subprocess.CompletedProcess(command, 1, "", "publisher rejected")
         return original_run(command, **kwargs)
 
@@ -2211,6 +2434,61 @@ def test_context_publisher_failure_leaves_live_inputs_unchanged_and_is_receipted
     assert paths.context_cursor.read_bytes() == cursor_before
     assert paths.context_snapshot.read_bytes() == snapshot_before
     assert len(list(paths.receipts.glob("*context-failed.json"))) == 1
+
+
+def test_context_failed_staged_cold_preflight_leaves_all_live_inputs_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    cursor = json.loads(paths.context_cursor.read_text())
+    cursor["source_commit"] = "b" * 40
+    cursor["source_tree"] = "c" * 40
+    _write_json(paths.context_cursor, cursor)
+    live_before = {
+        path: doctor_cli._surface_snapshot(path)
+        for path in (
+            paths.context_task,
+            paths.context_cursor,
+            paths.context_snapshot,
+            paths.context_generation_pointer,
+            paths.context_launcher,
+            paths.context_publisher,
+        )
+    }
+    original_run = doctor_cli._run
+
+    def run(command, **kwargs):
+        if Path(command[0]).name == "tgw-context-publish":
+            task_path = Path(command[command.index("--task") + 1])
+            cursor_path = Path(command[command.index("--cursor") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            output_path.write_bytes(
+                publish_bytes(
+                    json.loads(task_path.read_text()),
+                    json.loads(cursor_path.read_text()),
+                )
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            doctor_cli.DoctorError("candidate is unlaunchable")
+        ),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="unlaunchable"):
+        doctor_cli.repair_context(paths)
+
+    assert all(
+        doctor_cli._surface_snapshot(path) == surface
+        for path, surface in live_before.items()
+    )
 
 
 def test_context_repair_refuses_writable_context_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2262,17 +2540,14 @@ def test_context_repair_preserves_concurrent_snapshot_and_restores_its_cursor(tm
     original_cas = doctor_cli._cas_regular_file
 
     def run(command, **kwargs):
-        if command[0] == str(paths.context_publisher):
+        if Path(command[0]).name == "tgw-context-publish":
             task_path = Path(command[command.index("--task") + 1])
             cursor_path = Path(command[command.index("--cursor") + 1])
             output_path = Path(command[command.index("--output") + 1])
-            _write_json(
-                output_path,
-                _snapshot(
-                    json.loads(task_path.read_text()),
-                    json.loads(cursor_path.read_text()),
-                ),
-            )
+            output_path.write_bytes(publish_bytes(
+                json.loads(task_path.read_text()),
+                json.loads(cursor_path.read_text()),
+            ))
             return subprocess.CompletedProcess(command, 0, "", "")
         return original_run(command, **kwargs)
 
@@ -2290,6 +2565,11 @@ def test_context_repair_preserves_concurrent_snapshot_and_restores_its_cursor(tm
     monkeypatch.setattr(doctor_cli, "_run", run)
     monkeypatch.setattr(doctor_cli, "_cas_regular_file", cas)
     monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: {"generation": "CURRENT"},
+    )
 
     with pytest.raises(doctor_cli.DoctorError, match="concurrent change"):
         doctor_cli.repair_context(paths)
@@ -2310,17 +2590,14 @@ def test_context_repair_never_overwrites_concurrent_cursor_during_rollback(tmp_p
     original_cas = doctor_cli._cas_regular_file
 
     def run(command, **kwargs):
-        if command[0] == str(paths.context_publisher):
+        if Path(command[0]).name == "tgw-context-publish":
             task_path = Path(command[command.index("--task") + 1])
             cursor_path = Path(command[command.index("--cursor") + 1])
             output_path = Path(command[command.index("--output") + 1])
-            _write_json(
-                output_path,
-                _snapshot(
-                    json.loads(task_path.read_text()),
-                    json.loads(cursor_path.read_text()),
-                ),
-            )
+            output_path.write_bytes(publish_bytes(
+                json.loads(task_path.read_text()),
+                json.loads(cursor_path.read_text()),
+            ))
             return subprocess.CompletedProcess(command, 0, "", "")
         return original_run(command, **kwargs)
 
@@ -2344,6 +2621,11 @@ def test_context_repair_never_overwrites_concurrent_cursor_during_rollback(tmp_p
     monkeypatch.setattr(doctor_cli, "_run", run)
     monkeypatch.setattr(doctor_cli, "_cas_regular_file", cas)
     monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: {"generation": "CURRENT"},
+    )
 
     with pytest.raises(doctor_cli.DoctorError, match="refused rollback overwrite"):
         doctor_cli.repair_context(paths)
