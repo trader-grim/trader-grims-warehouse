@@ -3687,7 +3687,13 @@ def test_coding_quiescence_rejects_unknown_stale_initially_active_unit(
         doctor_cli.DoctorError,
         match="pre-existing coding quiescence state fields are unsafe",
     ):
-        with doctor_cli._coding_quiescence(paths):
-            pass
+        doctor_cli._read_quiescence_state(
+            state_path,
+            units=units,
+            marker=marker,
+            dropins=dropins,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
 
     assert state_path.exists()
