@@ -11,12 +11,15 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import fcntl
+import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import psycopg2.extras
 
@@ -39,12 +42,18 @@ from tgw.development.partial_resume import (
     migrate_todo_1747,
     preservation_manifest,
     source_tree,
+    validate_implementation_lineage,
 )
 from tgw.development.plan_binding import parse_plan_binding, validate_plan_binding
 from tgw.development.plan_todo_bridge import bind_leaf
 from tgw.development.plan_todo_source import PlanTodoSourceError
 from tgw.development.plan_todo_source import resolve as resolve_plan_todo
-from tgw.development.treatments import CODEX_IMPLEMENT, CONTROLLER_VERIFY
+from tgw.development.profiles import CODING_READY_FOR_ADMISSION
+from tgw.development.treatments import (
+    CLAUDE_REVIEW,
+    CODEX_IMPLEMENT,
+    CONTROLLER_VERIFY,
+)
 from tgw.development.worktree_lease import exclusive_worktree_lease
 from tgw.pp_workflow_reconcile import PP_REF
 from tgw.pp_workflow_reconcile import reconcile as reconcile_pp_workflow
@@ -58,7 +67,7 @@ DEFAULT_SOLUTION = (
 )
 DEFAULT_TREATMENT = "establish:workflow.condition-derived-convergence@1"
 DEFAULT_PLAN_REPOSITORY = Path("/opt/TGW/library/plans")
-_LOCAL_QUEUES = ("codex-implement", "controller-verify")
+_LOCAL_QUEUES = ("codex-implement", "controller-verify", "claude-review")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _LEGACY_1747_JOBS = (
     ("dfdfd643-312e-46ef-a33c-1542340e9b9c", "partial"),
@@ -257,6 +266,9 @@ def start(
     solution_path: Path | str = DEFAULT_SOLUTION,
     source_commit: str | None = None,
     resume_only: bool = False,
+    lifecycle_job_binding: Mapping[str, Any] | None = None,
+    lifecycle_stage: str | None = None,
+    dispatch_jobs: bool = True,
 ) -> dict[str, Any]:
     """Bind, allocate, evaluate, and dispatch one existing Todo locally."""
     if isinstance(todo_id, str) and todo_id == PP_REF:
@@ -302,11 +314,12 @@ def start(
             # Resumed bindings need the same deduplicating Foreman tick as new
             # rows; the Foreman alone decides whether a job already exists.
             bound_ids = {item["todo_id"] for item in materialized}
-            foreman = tick(
+            foreman = TickResult(dispatched=0) if not dispatch_jobs else tick(
                 ForemanConfig(
                     coding_config=dict(coding),
                     treatments=(CODEX_IMPLEMENT, CONTROLLER_VERIFY),
                     receipt_backed_conditions=frozenset({"tested", "linted"}),
+                    lifecycle_bindings={},
                 ),
                 todo_ids=bound_ids,
             )
@@ -427,12 +440,29 @@ def start(
             raise CodingCLIError(
                 f"Todo {todo_id} is {resume_state['state']}; preserved at {manifest} and not dispatched"
             )
-    result = TickResult(dispatched=0) if resume_noop else tick(
+    result = TickResult(dispatched=0) if resume_noop or not dispatch_jobs else tick(
         ForemanConfig(
             coding_config=dict(coding),
             treatments=(CODEX_IMPLEMENT, CONTROLLER_VERIFY),
             receipt_backed_conditions=frozenset({"tested", "linted"}),
             resume_bindings=resume_bindings,
+            lifecycle_bindings=(
+                {todo_id: dict(lifecycle_job_binding)}
+                if lifecycle_job_binding is not None
+                else {}
+            ),
+            lifecycle_rebind=(
+                {
+                    todo_id: {
+                        "implementation": "codex-implement",
+                        "controller": "controller-verify",
+                        "review": "claude-review",
+                    }[lifecycle_stage]
+                }
+                if lifecycle_job_binding is not None
+                and lifecycle_stage in {"implementation", "controller", "review"}
+                else {}
+            ),
         ),
         todo_ids={todo_id},
     )
@@ -483,13 +513,57 @@ def resume(
     source_commit: str | None = None,
 ) -> dict[str, Any]:
     """Resume exactly one already-proven partial implementation."""
-    return start(
-        todo_id,
+    identifier = _todo_id(todo_id)
+    config = _initialize(config_path)
+    lifecycle_root = config["coding"].get("lifecycle_root")
+    record = (
+        LifecycleStore(lifecycle_root).find(identifier)
+        if lifecycle_root is not None
+        else None
+    )
+    result = start(
+        identifier,
         config_path=config_path,
         solution_path=solution_path,
         source_commit=source_commit,
         resume_only=True,
+        lifecycle_job_binding=(
+            coding_lifecycle.job_binding(record) if record is not None else None
+        ),
+        lifecycle_stage="implementation" if record is not None else None,
     )
+    if record is None:
+        return result
+    store = LifecycleStore(lifecycle_root)
+    reopened = coding_lifecycle.request_resume(
+        store,
+        record["root_id"],
+        receipt={
+            "schema": "tgw-local-coding-lifecycle-resume/v1",
+            "root_id": record["root_id"],
+            "binding_hash": record["binding"]["binding_hash"],
+            "todo_id": identifier,
+            "job_ids": sorted(str(row["job_id"]) for row in result.get("jobs", [])),
+            "coding_state": result.get("coding_state"),
+        },
+    )
+    pid = coding_lifecycle.spawn(reopened["root_id"], config_path=config_path)
+    return {
+        **result,
+        "lifecycle_root_id": reopened["root_id"],
+        "lifecycle_state": reopened["state"],
+        "supervisor_pid": pid,
+    }
+
+
+def _plan_binding_for_todo(identifier: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    item = todo.todo_get(identifier)
+    if item is None:
+        raise CodingCLIError(f"Todo {identifier} does not exist")
+    binding = parse_plan_binding(item.get("status_note"), todo_id=identifier)
+    if binding is None:
+        raise CodingCLIError(f"Todo {identifier} has no exact Plan/Todo binding")
+    return item, validate_plan_binding(binding, todo_id=identifier)
 
 
 def lifecycle_start(
@@ -500,28 +574,289 @@ def lifecycle_start(
     source_commit: str | None = None,
 ) -> dict[str, Any]:
     """Create/reuse one durable root and return before coding work begins."""
-    config = load_config(config_path)
-    require_coder_account()
+    if target == PP_REF:
+        raise CodingCLIError(
+            "PP lifecycle requires a composite multi-leaf execution-card binding; "
+            "the current Plan/Todo card schema exposes only leaf bindings"
+        )
+    identifier = _todo_id(target)
+    config = _initialize(config_path)
     solution = __import__(
         "tgw.development.local_workflow", fromlist=["load_solution"]
     ).load_solution(solution_path)
     runtime = _pp_runtime_binding(config, source_commit)
-    value: int | str = target if target == PP_REF else _todo_id(target)
     store = LifecycleStore(config["coding"]["lifecycle_root"])
+    prior = store.find(identifier)
+    if prior is not None:
+        if (
+            prior["binding"]["source_commit"] != runtime["selected_commit"]
+            or prior["binding"]["source_tree"] != runtime["selected_tree"]
+        ):
+            prior = coding_lifecycle.report_stale_source(
+                store,
+                prior["root_id"],
+                source_commit=runtime["selected_commit"],
+                source_tree=runtime["selected_tree"],
+            )
+        pid = None
+        if prior["state"] not in coding_lifecycle.TERMINAL:
+            pid = coding_lifecycle.spawn(prior["root_id"], config_path=config_path)
+        return {
+            "schema": "tgw-local-coding-lifecycle-start/v1",
+            "ok": prior["state"] != "REMEDIATION_REQUIRED",
+            "root_id": prior["root_id"],
+            "target": str(identifier),
+            "state": prior["state"],
+            "binding_hash": prior["binding"]["binding_hash"],
+            "supervisor_pid": pid,
+            "returns_immediately": True,
+            "dependencies": prior["boundaries"],
+            **({"failure": prior["failure"]} if prior.get("failure") else {}),
+        }
+    if todo.todo_get(identifier) is None:
+        projection = resolve_plan_todo(
+            identifier,
+            repository=config.get("plan_repository_root", DEFAULT_PLAN_REPOSITORY),
+            approved_commit=solution["plan_commit"],
+        )
+        todo.todo_import_projection(projection)
+    # Bind/allocate before journaling because the complete approved card
+    # includes the exact worktree identity.  Job dispatch remains disabled;
+    # only the detached supervisor receives the lifecycle fence.
+    start(
+        identifier,
+        config_path=config_path,
+        solution_path=solution_path,
+        source_commit=runtime["selected_commit"],
+        dispatch_jobs=False,
+    )
+    _item, plan = _plan_binding_for_todo(identifier)
+    if (
+        plan["plan_commit"] != solution["plan_commit"]
+        or plan["solution_hash"] != solution["solution_hash"]
+        or plan["source_commit"] != runtime["selected_commit"]
+    ):
+        raise CodingCLIError("Todo lifecycle Plan/solution/source binding is stale")
+    binding = coding_lifecycle.build_binding(
+        target=identifier,
+        plan_binding=plan,
+        source_tree=runtime["selected_tree"],
+    )
     record = coding_lifecycle.create(
-        store, target=value, plan_commit=solution["plan_commit"],
-        solution_hash=solution["solution_hash"],
-        source_commit=runtime["selected_commit"], source_tree=runtime["selected_tree"],
+        store,
+        target=identifier,
+        binding=binding,
     )
     pid = None
     if record["state"] not in coding_lifecycle.TERMINAL:
         pid = coding_lifecycle.spawn(record["root_id"], config_path=config_path)
     return {
         "schema": "tgw-local-coding-lifecycle-start/v1", "ok": True,
-        "root_id": record["root_id"], "target": str(value), "state": record["state"],
+        "root_id": record["root_id"], "target": str(identifier), "state": record["state"],
+        "binding_hash": record["binding"]["binding_hash"],
         "supervisor_pid": pid, "returns_immediately": True,
         "dependencies": record["boundaries"],
     }
+
+
+def _stage(
+    record: Mapping[str, Any], stage: str, outcome: str, *,
+    receipt: Mapping[str, Any] | None = None,
+    reason: str | None = None,
+    job_ids: list[str] | tuple[str, ...] = (),
+) -> dict[str, Any]:
+    return coding_lifecycle.stage_result(
+        record,
+        stage,
+        outcome,
+        receipt=receipt,
+        reason=reason,
+        job_ids=job_ids,
+    )
+
+
+def _receipt_file(path: Path) -> tuple[dict[str, Any], str]:
+    descriptor = -1
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise CodingCLIError(f"coding receipt {path.name} is not an immutable regular file")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            raw = stream.read()
+        value = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CodingCLIError(f"coding receipt {path.name} is unavailable or malformed") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not isinstance(value, dict):
+        raise CodingCLIError(f"coding receipt {path.name} is not an object")
+    return value, "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _bound_jobs(record: Mapping[str, Any], queue_name: str) -> list[dict[str, Any]]:
+    identifier = int(record["target"])
+    expected_job_binding = coding_lifecycle.job_binding(record)
+    expected_plan = record["binding"]["plan_todo_binding"]
+    result = []
+    for row in _jobs(identifier, limit=250):
+        if row.get("queue_name") != queue_name:
+            continue
+        payload = row.get("payload_json") or row.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        observed = payload.get("coding_lifecycle")
+        if isinstance(observed, Mapping) and observed.get("root_id") == record["root_id"]:
+            coding_lifecycle.validate_job_binding(record, observed)
+            if payload.get("plan_binding") != expected_plan:
+                raise CodingCLIError(
+                    f"{queue_name} job {row['job_id']} has stale Plan/Todo binding"
+                )
+            result.append(row)
+        elif observed == expected_job_binding:
+            # Kept for clarity: exact values necessarily enter the branch above.
+            result.append(row)
+    return result
+
+
+def _queue_evidence(
+    record: Mapping[str, Any], *, stage: str, queue_name: str,
+    receipt_name: str, dispatch: Any,
+) -> dict[str, Any]:
+    rows = _bound_jobs(record, queue_name)
+    dispatch_result = None
+    if not rows:
+        dispatch_result = dispatch()
+        rows = _bound_jobs(record, queue_name)
+    ids = [str(row["job_id"]) for row in rows]
+    active = [
+        row for row in rows
+        if row.get("state") in {"queued", "leased", "running", "retry_wait"}
+    ]
+    terminal = [row for row in rows if row.get("state") in {
+        "succeeded", "failed", "dead_letter", "cancelled"
+    }]
+    refused = (
+        isinstance(dispatch_result, Mapping)
+        and dispatch_result.get("ok") is False
+    ) or (
+        isinstance(dispatch_result, TickResult)
+        and (
+            dispatch_result.errors > 0
+            or dispatch_result.refused_plan_binding > 0
+        )
+    )
+    if not rows and refused:
+        return _stage(
+            record,
+            stage,
+            "remediation",
+            reason=f"{queue_name} exact typed dispatch was refused",
+        )
+    if len(rows) > 1:
+        return _stage(
+            record, stage, "remediation",
+            reason=f"duplicate {queue_name} jobs exist for the exact lifecycle root",
+            job_ids=ids,
+        )
+    if active or not terminal:
+        return _stage(
+            record, stage, "waiting",
+            reason=f"{queue_name} exact job is pending",
+            job_ids=ids,
+        )
+    row = terminal[0]
+    if row.get("state") != "succeeded":
+        return _stage(
+            record, stage, "failed",
+            reason=f"{queue_name} exact job ended {row.get('state')}",
+            job_ids=ids,
+        )
+    payload = row.get("payload_json") or row.get("payload")
+    durable_result = payload.get("result") if isinstance(payload, Mapping) else None
+    if not isinstance(durable_result, Mapping):
+        return _stage(
+            record, stage, "remediation",
+            reason=f"{queue_name} succeeded without a durable result",
+            job_ids=ids,
+        )
+    worktree = Path(record["binding"]["worktree"])
+    file_receipt, file_sha256 = _receipt_file(worktree / receipt_name)
+    if dict(durable_result) != file_receipt:
+        return _stage(
+            record, stage, "remediation",
+            reason=f"{queue_name} queue result and immutable receipt differ",
+            job_ids=ids,
+        )
+    coding_lifecycle.validate_job_binding(
+        record, file_receipt.get("coding_lifecycle")
+    )
+    if (
+        file_receipt.get("status") != "PASS"
+        or file_receipt.get("outcome") != "satisfied"
+        or file_receipt.get("treatment_id") != queue_name
+        or file_receipt.get("plan_binding")
+        != record["binding"]["plan_todo_binding"]
+    ):
+        return _stage(
+            record, stage, "remediation",
+            reason=f"{queue_name} receipt is stale or contradictory",
+            job_ids=ids,
+        )
+    if stage == "review":
+        candidate_receipt = record["effects"]["candidate"]["receipt"]
+        coding_lifecycle.validate_candidate_job_binding(
+            file_receipt.get("coding_candidate"),
+            lifecycle_binding=coding_lifecycle.job_binding(record),
+            commit=candidate_receipt["commit"],
+            tree=candidate_receipt["tree"],
+        )
+    evidence = {
+        "schema": "tgw-local-coding-queue-evidence/v1",
+        "root_id": record["root_id"],
+        "binding_hash": record["binding"]["binding_hash"],
+        "job_id": str(row["job_id"]),
+        "queue_name": queue_name,
+        "job_state": "succeeded",
+        "attempt_count": row.get("attempt_count"),
+        "receipt_file": str(worktree / receipt_name),
+        "receipt_file_sha256": file_sha256,
+        "result": file_receipt,
+    }
+    return _stage(record, stage, "satisfied", receipt=evidence, job_ids=ids)
+
+
+def _doctor_receipt(
+    root: Path, *, operation: str, predicate: Any,
+) -> dict[str, Any] | None:
+    if not root.is_dir() or root.is_symlink():
+        return None
+    for path in sorted(root.glob(f"*-{operation}.json"), reverse=True):
+        try:
+            value, file_sha256 = _receipt_file(path)
+        except CodingCLIError:
+            continue
+        unsigned = dict(value)
+        claimed = unsigned.pop("receipt_sha256", None)
+        canonical_hash = "sha256:" + hashlib.sha256(
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if (
+            value.get("schema") == "tgw-local-doctor-repair-receipt/v1"
+            and value.get("operation") == operation
+            and value.get("error") is None
+            and claimed == canonical_hash
+            and predicate(value)
+        ):
+            return {
+                "path": str(path),
+                "file_sha256": file_sha256,
+                "receipt_sha256": claimed,
+                "receipt": value,
+            }
+    return None
 
 
 def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dict[str, Any]:
@@ -530,127 +865,361 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
     store = LifecycleStore(config["coding"]["lifecycle_root"])
 
     def implementation(record: dict[str, Any]) -> dict[str, Any]:
-        target = record["binding"]["target"]
-        if target != PP_REF:
-            rows = _jobs(int(target), limit=100)
-            implementations = [row for row in rows if row.get("queue_name") == "codex-implement"]
-            active = [row for row in implementations if row.get("state") in {"queued", "leased", "running"}]
-            failed = [row for row in implementations if row.get("state") in {"failed", "dead_letter", "cancelled"}]
-            succeeded = [row for row in implementations if row.get("state") == "succeeded"]
-            if active:
-                return {"outcome": "waiting", "reason": "implementation active",
-                        "job_ids": [str(row["job_id"]) for row in implementations]}
-            if failed and not succeeded:
-                return {"outcome": "failed", "reason": "implementation job failed",
-                        "job_ids": [str(row["job_id"]) for row in implementations]}
-            if succeeded:
-                return {"outcome": "satisfied", "effect_key": "implementation",
-                        "receipt": _durable_json(succeeded[0]),
-                        "job_ids": [str(row["job_id"]) for row in implementations]}
-        result = start(
-            target if target == PP_REF else int(target), config_path=config_path,
-            source_commit=record["binding"]["source_commit"],
+        return _queue_evidence(
+            record,
+            stage="implementation",
+            queue_name="codex-implement",
+            receipt_name="implementation-receipt.json",
+            dispatch=lambda: start(
+                int(record["target"]),
+                config_path=config_path,
+                source_commit=record["binding"]["source_commit"],
+                lifecycle_job_binding=coding_lifecycle.job_binding(record),
+                lifecycle_stage="implementation",
+            ),
         )
-        job_ids = [str(row["job_id"]) for row in result.get("jobs", [])]
-        if not result.get("ok"):
-            state = result.get("coding_state", {}).get("state")
-            return {"outcome": "resumable_partial" if state == "RESUMABLE_PARTIAL" else "failed",
-                    "reason": state or "implementation dispatch failed", "job_ids": job_ids,
-                    "receipt": result}
-        return {"outcome": "waiting", "reason": "implementation job dispatched",
-                "job_ids": job_ids, "receipt": result}
 
-    # The recurring Foreman/job completion event invokes this same function again.
-    # Until the remaining stage adapters are configured, it closes with an exact
-    # remediation state instead of inventing review or installation evidence.
     def controller(record: dict[str, Any]) -> dict[str, Any]:
-        target = record["binding"]["target"]
-        if target == PP_REF:
-            return {"outcome": "remediation", "reason": "PP lifecycle leaf consolidation pending"}
-        # Re-evaluate through the sole Foreman; this is replay-safe and creates no
-        # second controller job when one already exists.
-        start(int(target), config_path=config_path,
-              source_commit=record["binding"]["source_commit"])
-        rows = [row for row in _jobs(int(target), limit=100)
-                if row.get("queue_name") == "controller-verify"]
-        if any(row.get("state") in {"failed", "dead_letter", "cancelled"} for row in rows):
-            return {"outcome": "failed", "reason": "controller verification failed",
-                    "job_ids": [str(row["job_id"]) for row in rows]}
-        passed = next((row for row in rows if row.get("state") == "succeeded"), None)
-        if passed is None:
-            return {"outcome": "waiting", "reason": "controller verification pending",
-                    "job_ids": [str(row["job_id"]) for row in rows]}
-        return {"outcome": "satisfied", "effect_key": "controller",
-                "receipt": _durable_json(passed),
-                "job_ids": [str(row["job_id"]) for row in rows]}
+        result = _queue_evidence(
+            record,
+            stage="controller",
+            queue_name="controller-verify",
+            receipt_name="controller-harness-receipt.json",
+            dispatch=lambda: start(
+                int(record["target"]),
+                config_path=config_path,
+                source_commit=record["binding"]["source_commit"],
+                lifecycle_job_binding=coding_lifecycle.job_binding(record),
+                lifecycle_stage="controller",
+            ),
+        )
+        if result.get("outcome") == "satisfied":
+            implementation = record.get("effects", {}).get("implementation", {})
+            recovered = [
+                item
+                for item in (
+                    implementation.get("receipt", {})
+                    .get("result", {})
+                    .get("artifacts", [])
+                )
+                if isinstance(item, Mapping)
+                and item.get("kind") == "recovered_attempt"
+            ]
+            expected_attempt = (
+                recovered[0].get("attempt_hash") if len(recovered) == 1 else None
+            )
+            observed_attempt = result["receipt"]["result"].get(
+                "implementation_attempt_hash"
+            )
+            # The worker already validates lineage; the lifecycle also binds
+            # the controller to the implementation stage's exact attempt when
+            # that identity is present in the implementation receipt.
+            if expected_attempt is not None and observed_attempt != expected_attempt:
+                return _stage(
+                    record,
+                    "controller",
+                    "remediation",
+                    reason="controller receipt binds another implementation attempt",
+                    job_ids=result.get("job_ids", []),
+                )
+        return result
 
     def candidate(record: dict[str, Any]) -> dict[str, Any]:
-        target = record["binding"]["target"]
-        if target == PP_REF:
-            return {"outcome": "remediation", "reason": "PP has no single closed candidate"}
-        item = todo.todo_get(int(target))
-        binding = parse_plan_binding((item or {}).get("status_note"), todo_id=int(target))
-        if binding is None:
-            return {"outcome": "remediation", "reason": "candidate Plan binding is absent"}
-        if any(binding.get(key) != record["binding"].get(key) for key in
-               ("plan_commit", "solution_hash", "source_commit")):
-            return {"outcome": "remediation", "reason": "candidate Plan/source binding is stale"}
-        worktree = Path(binding["worktree"])
+        target = int(record["target"])
+        item, binding = _plan_binding_for_todo(target)
+        if binding != record["binding"]["plan_todo_binding"]:
+            return _stage(
+                record, "candidate", "remediation",
+                reason="candidate Plan/source/card binding is stale",
+            )
+        worktree = Path(record["binding"]["worktree"])
+        implementation_receipt, implementation_sha256 = _receipt_file(
+            worktree / "implementation-receipt.json"
+        )
         expected = {
-            "todo_id": int(target), "plan_commit": binding["plan_commit"],
+            "todo_id": target, "plan_commit": binding["plan_commit"],
             "solution_hash": binding["solution_hash"], "source_commit": binding["source_commit"],
             "source_tree": record["binding"]["source_tree"],
-            "actor": (item or {}).get("agent") or "codex", "worktree": str(worktree),
+            "actor": item.get("agent") or "codex", "worktree": str(worktree),
             "treatment_id": "codex-implement", "treatment_version": "1",
         }
         observed = classify(worktree, expected)
         if observed["state"] != "CLOSED_CANDIDATE":
             outcome = "resumable_partial" if observed["state"] == "RESUMABLE_PARTIAL" else "remediation"
-            return {"outcome": outcome, "reason": f"candidate is {observed['state']}",
-                    "receipt": observed}
+            return _stage(
+                record,
+                "candidate",
+                outcome,
+                reason=f"candidate is {observed['state']}",
+                receipt=observed,
+            )
         source = observed["source"]
-        return {
-            "outcome": "satisfied", "effect_key": "candidate",
-            "receipt": {"worktree": str(worktree), "commit": source["head"],
-                        "tree": source["tree"], "classification": observed["state"]},
-        }
+        try:
+            latest = validate_implementation_lineage(
+                worktree,
+                base_commit=binding["source_commit"],
+                candidate_commit=source["head"],
+                candidate_tree=source["tree"],
+                receipt=implementation_receipt,
+                expected=expected,
+            )
+        except ValueError as exc:
+            return _stage(
+                record, "candidate", "remediation",
+                reason=f"candidate implementation lineage is stale: {exc}",
+            )
+        return _stage(
+            record,
+            "candidate",
+            "satisfied",
+            receipt={
+                "schema": "tgw-local-coding-candidate-evidence/v1",
+                "root_id": record["root_id"],
+                "binding_hash": record["binding"]["binding_hash"],
+                "worktree": str(worktree),
+                "commit": source["head"],
+                "tree": source["tree"],
+                "classification": observed["state"],
+                "implementation_attempt_hash": latest["attempt_hash"],
+                "implementation_receipt_sha256": implementation_sha256,
+            },
+        )
 
-    def adapter(stage: str):
-        """Invoke a Plan-materialized local adapter with a replay-stable JSON card."""
-        def run(record: dict[str, Any]) -> dict[str, Any]:
-            commands = config["coding"].get("lifecycle_commands", {})
-            command = commands.get(stage)
-            if not isinstance(command, list) or not command or not all(
-                    isinstance(part, str) and part for part in command):
-                return {"outcome": "remediation",
-                        "reason": f"local lifecycle adapter {stage} is not materialized"}
-            card = {
-                "schema": "tgw-local-coding-lifecycle-stage-card/v1",
-                "root_id": record["root_id"], "stage": stage,
-                "idempotency_key": coding_lifecycle.stage_idempotency_key(record, stage),
-                "binding": record["binding"], "candidate": record["effects"].get("candidate"),
-                "prior_effects": record["effects"], "boundaries": record["boundaries"],
-            }
-            try:
-                completed = subprocess.run(
-                    command, input=json.dumps(card, sort_keys=True), text=True,
-                    capture_output=True, timeout=float(config["coding"].get("timeout_s", 1800)),
-                    check=False, env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"},
+    def review(record: dict[str, Any]) -> dict[str, Any]:
+        command = config["coding"].get("commands", {}).get("claude-review")
+        allowed = config["coding"].get("allowed_runners", [])
+        if (
+            not isinstance(command, list)
+            or not command
+            or command[0] not in allowed
+        ):
+            return _stage(
+                record,
+                "review",
+                "remediation",
+                reason=(
+                    "independent review queue exists but no allowed typed review "
+                    "runner is installed; zero review claim"
+                ),
+            )
+
+        def dispatch() -> TickResult:
+            return tick(
+                ForemanConfig(
+                    coding_config=dict(config["coding"]),
+                    goal_profile=CODING_READY_FOR_ADMISSION,
+                    treatments=(CLAUDE_REVIEW,),
+                    receipt_backed_conditions=frozenset(
+                        {"tested", "linted", "controller_verified"}
+                    ),
+                    lifecycle_bindings={
+                        int(record["target"]): coding_lifecycle.job_binding(record)
+                    },
+                    lifecycle_rebind={
+                        int(record["target"]): "claude-review"
+                    },
+                ),
+                todo_ids={int(record["target"])},
+            )
+
+        return _queue_evidence(
+            record,
+            stage="review",
+            queue_name="claude-review",
+            receipt_name="review-receipt.json",
+            dispatch=dispatch,
+        )
+
+    def integration(record: dict[str, Any]) -> dict[str, Any]:
+        candidate_receipt = record["effects"]["candidate"]["receipt"]
+        candidate_commit = candidate_receipt["commit"]
+        candidate_tree = candidate_receipt["tree"]
+        repository = Path(config["coding"]["repository_root"])
+        local = __import__("tgw.development.local_workflow", fromlist=["_git"])
+        lock = store._open_lock(record["root_id"], ".integration.lock")
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            current = local._git(repository, "rev-parse", "HEAD")
+            current_tree = local._git(repository, "rev-parse", "HEAD^{tree}")
+            if current == candidate_commit and current_tree == candidate_tree:
+                mode = "already-integrated"
+            else:
+                if current != record["binding"]["source_commit"]:
+                    return _stage(
+                        record, "integration", "remediation",
+                        reason="canonical source advanced outside the exact lifecycle root",
+                    )
+                if local._git(repository, "status", "--porcelain=v1"):
+                    return _stage(
+                        record, "integration", "remediation",
+                        reason="canonical source is dirty; exact fast-forward refused",
+                    )
+                ancestry = subprocess.run(
+                    [
+                        "git", "-c", f"safe.directory={repository.resolve()}",
+                        "merge-base", "--is-ancestor", current, candidate_commit,
+                    ],
+                    cwd=repository,
+                    check=False,
+                    capture_output=True,
                 )
-                result = json.loads(completed.stdout)
-            except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-                return {"outcome": "failed", "reason": f"{stage} adapter failed: {exc}"}
-            if not isinstance(result, dict):
-                return {"outcome": "failed", "reason": f"{stage} adapter returned no receipt"}
-            if completed.returncode != 0 and result.get("outcome") not in {
-                    "failed", "remediation", "publication_unavailable"}:
-                return {"outcome": "failed", "reason": f"{stage} adapter exited {completed.returncode}"}
-            return result
-        return run
+                if ancestry.returncode != 0:
+                    return _stage(
+                        record, "integration", "remediation",
+                        reason="reviewed candidate is not a canonical fast-forward",
+                    )
+                completed = subprocess.run(
+                    [
+                        "git", "-c", f"safe.directory={repository.resolve()}",
+                        "merge", "--ff-only", candidate_commit,
+                    ],
+                    cwd=repository,
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+                if completed.returncode != 0:
+                    return _stage(
+                        record, "integration", "remediation",
+                        reason=f"exact fast-forward failed: {completed.stderr[-300:]}",
+                    )
+                mode = "fast-forwarded"
+            observed_commit = local._git(repository, "rev-parse", "HEAD")
+            observed_tree = local._git(repository, "rev-parse", "HEAD^{tree}")
+            if (observed_commit, observed_tree) != (candidate_commit, candidate_tree):
+                return _stage(
+                    record, "integration", "remediation",
+                    reason="canonical source differs after integration",
+                )
+            return _stage(
+                record,
+                "integration",
+                "satisfied",
+                receipt={
+                    "schema": "tgw-local-coding-integration/v1",
+                    "root_id": record["root_id"],
+                    "binding_hash": record["binding"]["binding_hash"],
+                    "review_receipt_hash": record["effects"]["review"]["receipt_hash"],
+                    "controller_receipt_hash": record["effects"]["controller"]["receipt_hash"],
+                    "base_commit": record["binding"]["source_commit"],
+                    "candidate_commit": candidate_commit,
+                    "candidate_tree": candidate_tree,
+                    "mode": mode,
+                },
+            )
+        finally:
+            lock.close()
+
+    def materialization(record: dict[str, Any]) -> dict[str, Any]:
+        candidate_receipt = record["effects"]["candidate"]["receipt"]
+        evidence = _doctor_receipt(
+            Path(config["coding"]["doctor_receipt_root"]),
+            operation="runtime-materialization",
+            predicate=lambda value: value.get("actor") == "root"
+            and value.get("after", {}).get("verified") is True
+            and value.get("after", {}).get("commit") == candidate_receipt["commit"]
+            and value.get("after", {}).get("tree") == candidate_receipt["tree"],
+        )
+        if evidence is None:
+            return _stage(
+                record,
+                "materialization",
+                "waiting",
+                reason=(
+                    "awaiting root-owned Doctor runtime-materialization receipt; "
+                    "ordinary tgw-coders supervision has no authority to create it"
+                ),
+            )
+        return _stage(record, "materialization", "satisfied", receipt=evidence)
+
+    def live_verification(record: dict[str, Any]) -> dict[str, Any]:
+        candidate_receipt = record["effects"]["candidate"]["receipt"]
+        evidence = _doctor_receipt(
+            Path(config["coding"]["doctor_receipt_root"]),
+            operation="runtime",
+            predicate=lambda value: value.get("actor") == "root"
+            and value.get("after", {}).get("release_tree", {}).get("verified") is True
+            and value.get("after", {}).get("release_tree", {}).get("commit")
+            == candidate_receipt["commit"]
+            and value.get("after", {}).get("release_tree", {}).get("tree")
+            == candidate_receipt["tree"],
+        )
+        if evidence is None:
+            return _stage(
+                record,
+                "live_verification",
+                "waiting",
+                reason="awaiting exact root-owned Doctor runtime selection/readback receipt",
+            )
+        return _stage(record, "live_verification", "satisfied", receipt=evidence)
+
+    def terminal_publication(record: dict[str, Any]) -> dict[str, Any]:
+        candidate_receipt = record["effects"]["candidate"]["receipt"]
+        evidence = _doctor_receipt(
+            Path(config["coding"]["doctor_receipt_root"]),
+            operation="context",
+            predicate=lambda value: value.get("actor") == "root"
+            and value.get("after", {}).get("snapshot", {}).get("plan_commit")
+            == record["binding"]["plan_commit"]
+            and value.get("after", {}).get("snapshot", {}).get("source_commit")
+            == candidate_receipt["commit"]
+            and value.get("after", {}).get("snapshot", {}).get("source_tree")
+            == candidate_receipt["tree"],
+        )
+        if evidence is None:
+            return _stage(
+                record,
+                "terminal_publication",
+                "publication_unavailable",
+                reason=(
+                    "Context publication unavailable; exact terminal Doctor receipt "
+                    "will be retried without a limit"
+                ),
+            )
+        return _stage(record, "terminal_publication", "satisfied", receipt=evidence)
+
+    def operator_notification(record: dict[str, Any]) -> dict[str, Any]:
+        return _stage(
+            record,
+            "operator_notification",
+            "satisfied",
+            receipt={
+                "schema": "tgw-local-coding-operator-notification/v1",
+                "root_id": record["root_id"],
+                "binding_hash": record["binding"]["binding_hash"],
+                "candidate_receipt_hash": record["effects"]["candidate"]["receipt_hash"],
+                "live_verification_receipt_hash": record["effects"]["live_verification"]["receipt_hash"],
+                "context_publication_pending": record["publication"]["pending"],
+                "readback_command": f"tgw coding readback {record['root_id']}",
+                "accept_command": f"tgw coding accept {record['root_id']}",
+                "reject_command": f"tgw coding reject {record['root_id']}",
+            },
+        )
+
+    def operator_readback(record: dict[str, Any]) -> dict[str, Any]:
+        readback = record.get("operator", {}).get("readback")
+        if not isinstance(readback, Mapping):
+            return _stage(
+                record,
+                "operator_readback",
+                "waiting",
+                reason="operator notification is durable; explicit readback is pending",
+            )
+        return _stage(
+            record, "operator_readback", "satisfied", receipt=dict(readback)
+        )
 
     return coding_lifecycle.advance(store, identity, {
-        "implementation": implementation, "controller": controller, "candidate": candidate,
-        **{stage: adapter(stage) for stage in coding_lifecycle.STAGES[3:]},
+        "implementation": implementation,
+        "controller": controller,
+        "candidate": candidate,
+        "review": review,
+        "integration": integration,
+        "materialization": materialization,
+        "live_verification": live_verification,
+        "terminal_publication": terminal_publication,
+        "operator_notification": operator_notification,
+        "operator_readback": operator_readback,
     })
 
 
@@ -662,24 +1231,67 @@ def lifecycle_status(identity: int | str, *, config_path: Path | str = DEFAULT_C
         raise CodingCLIError(f"coding lifecycle {identity} does not exist")
     target = record["binding"]["target"]
     jobs = [] if target == PP_REF else _jobs(int(target), limit=100)
-    stages = record.get("stages", {})
+    effects = record.get("effects", {})
+
+    def receipt(stage: str) -> Any:
+        evidence = effects.get(stage)
+        return evidence.get("receipt") if isinstance(evidence, Mapping) else None
+
+    candidate_evidence = receipt("candidate") or {}
     return {
         **record,
         "schema": "tgw-local-coding-lifecycle-status/v1",
         "todo_or_pp": target,
         "jobs": jobs,
-        "worktree": (record.get("effects", {}).get("candidate") or {}).get("worktree"),
-        "candidate_commit": (record.get("effects", {}).get("candidate") or {}).get("commit"),
-        "candidate_tree": (record.get("effects", {}).get("candidate") or {}).get("tree"),
-        "tests": (record.get("effects", {}).get("implementation") or {}).get("payload_json"),
-        "controller_receipt": record.get("effects", {}).get("controller"),
-        "independent_review": record.get("effects", {}).get("review"),
-        "integration": record.get("effects", {}).get("integration"),
-        "materialization": record.get("effects", {}).get("materialization"),
-        "live_verification": record.get("effects", {}).get("live_verification"),
+        "worktree": candidate_evidence.get("worktree") or record["binding"]["worktree"],
+        "candidate_commit": candidate_evidence.get("commit"),
+        "candidate_tree": candidate_evidence.get("tree"),
+        "implementation": receipt("implementation"),
+        "tests": (receipt("implementation") or {}).get("result"),
+        "controller_receipt": receipt("controller"),
+        "independent_review": receipt("review"),
+        "integration": receipt("integration"),
+        "materialization": receipt("materialization"),
+        "live_verification": receipt("live_verification"),
         "context_publication": record.get("publication"),
-        "operator_notification": stages.get("operator_notification"),
-        "operator_acceptance": record.get("operator_acceptance", "PENDING"),
+        "operator_notification": receipt("operator_notification"),
+        "operator_readback": record.get("operator", {}).get("readback"),
+        "operator_acceptance": record.get("operator", {}).get(
+            "acceptance", "PENDING"
+        ),
+    }
+
+
+def operator_action(
+    identity: str,
+    *,
+    decision: str | None,
+    config_path: Path | str = DEFAULT_CONFIG,
+) -> dict[str, Any]:
+    """Record the narrow explicit readback/accept/reject lifecycle transition."""
+
+    config = _initialize(config_path)
+    store = LifecycleStore(config["coding"]["lifecycle_root"])
+    actor = require_coder_account()
+    record = coding_lifecycle.record_operator_readback(
+        store,
+        identity,
+        actor=actor,
+        decision=decision,
+    )
+    pid = None
+    if record["state"] not in coding_lifecycle.TERMINAL:
+        pid = coding_lifecycle.spawn(identity, config_path=config_path)
+    return {
+        "schema": "tgw-local-coding-operator-action/v1",
+        "ok": True,
+        "root_id": identity,
+        "actor": actor,
+        "decision": decision,
+        "readback": record["operator"]["readback"],
+        "acceptance": record["operator"]["acceptance"],
+        "state": record["state"],
+        "supervisor_pid": pid,
     }
 
 
@@ -848,15 +1460,36 @@ def run(args: argparse.Namespace) -> int:
             if not target:
                 raise CodingCLIError("stop requires a coding job ID")
             result = stop(target, config_path=config_path)
+        elif args.coding_op in {"readback", "accept", "reject"}:
+            if not target or not target.startswith("coding:"):
+                raise CodingCLIError(
+                    f"{args.coding_op} requires an exact coding lifecycle root"
+                )
+            result = operator_action(
+                target,
+                decision={
+                    "readback": None,
+                    "accept": "accept",
+                    "reject": "reject",
+                }[args.coding_op],
+                config_path=config_path,
+            )
         else:
             raise CodingCLIError(f"unknown coding operation: {args.coding_op}")
         print(json.dumps(result, sort_keys=True, default=_json_default))
         return 0 if result.get("ok", True) else 1
     except (
         CodingCLIError, LocalCodingWorkflowError, PlanTodoSourceError,
-        OSError, ValueError,
+        coding_lifecycle.LifecycleError, OSError, ValueError,
     ) as exc:
-        print(f"tgw coding: {exc}", file=__import__("sys").stderr)
+        print(json.dumps({
+            "schema": "tgw-local-coding-error/v1",
+            "ok": False,
+            "operation": getattr(args, "coding_op", None),
+            "target": _target(args),
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }, sort_keys=True))
         return 1
 
 
@@ -880,6 +1513,12 @@ def parser() -> argparse.ArgumentParser:
     log_parser.add_argument("coding_target", metavar="JOB_ID")
     stop_parser = commands.add_parser("stop", help="cancel one active coding job")
     stop_parser.add_argument("coding_target", metavar="JOB_ID")
+    for operation in ("readback", "accept", "reject"):
+        action = commands.add_parser(
+            operation,
+            help=f"record explicit operator {operation} for one lifecycle",
+        )
+        action.add_argument("coding_target", metavar="ROOT")
     access = commands.add_parser("access-status", help="prove the local Unix/group binding")
     access.add_argument("coding_target", metavar="TODO_ID", nargs="?")
     return root

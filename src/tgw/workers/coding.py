@@ -616,6 +616,34 @@ class CodingWorker(QueueWorker):
             raise HardFailure("coding job has no object_generation")
         worktree = self._validated_worktree(payload)
         plan_binding = self._validated_plan_binding(payload, worktree)
+        lifecycle_binding = payload.get("coding_lifecycle")
+        if lifecycle_binding is not None:
+            if plan_binding is None:
+                raise HardFailure("coding lifecycle job requires an exact Plan binding")
+            try:
+                from tgw.development.coding_lifecycle import (
+                    LifecycleError,
+                    validate_job_binding_payload,
+                )
+
+                validate_job_binding_payload(
+                    lifecycle_binding,
+                    plan_binding=plan_binding,
+                )
+                if treatment_id == "claude-review":
+                    from tgw.development.coding_lifecycle import (
+                        validate_candidate_job_binding,
+                    )
+
+                    candidate = source_fingerprint(worktree)
+                    validate_candidate_job_binding(
+                        payload.get("coding_candidate"),
+                        lifecycle_binding=lifecycle_binding,
+                        commit=candidate["head"],
+                        tree=candidate["tree"],
+                    )
+            except (LifecycleError, TypeError, ValueError) as exc:
+                raise HardFailure(str(exc)) from exc
 
         lineage_bound_treatment = (
             treatment_id in {"codex-implement", "controller-verify"}
@@ -738,6 +766,16 @@ class CodingWorker(QueueWorker):
                     "artifacts": artifacts,
                     "receipt_schema_id": "receipt/tgw-development/v1",
                     "plan_binding": plan_binding,
+                    **(
+                        {"coding_lifecycle": dict(payload["coding_lifecycle"])}
+                        if payload.get("coding_lifecycle") is not None
+                        else {}
+                    ),
+                    **(
+                        {"coding_candidate": dict(payload["coding_candidate"])}
+                        if payload.get("coding_candidate") is not None
+                        else {}
+                    ),
                 }
                 self._persist_success_receipt(job, receipt_path_for_treatment(worktree, treatment_id), receipt)
                 return receipt
@@ -802,6 +840,16 @@ class CodingWorker(QueueWorker):
                 "artifacts": [{"kind": "mechanical_failure", "detail": str(exc)}],
                 "receipt_schema_id": "receipt/tgw-development/v1",
                 **({"plan_binding": plan_binding} if plan_binding else {}),
+                **(
+                    {"coding_lifecycle": dict(payload["coding_lifecycle"])}
+                    if payload.get("coding_lifecycle") is not None
+                    else {}
+                ),
+                **(
+                    {"coding_candidate": dict(payload["coding_candidate"])}
+                    if payload.get("coding_candidate") is not None
+                    else {}
+                ),
             }
             if attempt_binding is not None:
                 append_attempt(worktree, make_attempt(attempt_binding, worktree, outcome=OUTCOME_FAILED, predecessor=predecessor, artifacts=receipt["artifacts"]))
@@ -822,6 +870,16 @@ class CodingWorker(QueueWorker):
             **(
                 {"implementation_attempt_hash": payload.get("implementation_attempt_hash")}
                 if treatment_id == "controller-verify"
+                else {}
+            ),
+            **(
+                {"coding_lifecycle": dict(payload["coding_lifecycle"])}
+                if payload.get("coding_lifecycle") is not None
+                else {}
+            ),
+            **(
+                {"coding_candidate": dict(payload["coding_candidate"])}
+                if payload.get("coding_candidate") is not None
                 else {}
             ),
         }

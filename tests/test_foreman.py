@@ -27,7 +27,7 @@ from tgw.development.foreman import (
 )
 from tgw.development.plan_binding import execution_root_hash
 from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
-from tgw.development.treatments import CODING_TREATMENTS
+from tgw.development.treatments import CODEX_IMPLEMENT, CODING_TREATMENTS
 from tgw.workflow_kernel.contracts import (
     EvidenceAssertion,
     EvidenceReference,
@@ -1273,6 +1273,63 @@ def test_tick_routes_post_implementation_treatments_by_identity():
             assert enqueue.call_args.kwargs["dedupe_key"].endswith(
                 ":implementation:" + "a" * 64
             )
+
+
+def test_lifecycle_rebind_dispatches_new_fenced_recovery_for_closed_candidate():
+    """Historical receipts cannot advance a root; the typed worker re-emits one."""
+
+    selected = _todo(1915, "/tmp/selected")
+    snapshot = _snapshot(object_id=selected.worktree, assertions=_all_satisfied())
+    enqueue = MagicMock(return_value="lifecycle-recovery-job")
+    lifecycle = {
+        "job_binding_hash": "sha256:" + "9" * 64,
+        "root_id": "coding:" + "8" * 64,
+    }
+    with (
+        patch(
+            "tgw.development.foreman.validated_coding_worktree",
+            return_value=__import__("pathlib").Path(selected.worktree),
+        ),
+        patch(
+            "tgw.development.foreman.classify",
+            return_value={"state": "CLOSED_CANDIDATE"},
+        ),
+        patch(
+            "tgw.development.foreman.build_coding_snapshot",
+            return_value=snapshot,
+        ),
+        patch(
+            "tgw.development.foreman.evaluate",
+            return_value=_graph(object_id=selected.worktree, eligible=()),
+        ),
+        patch(
+            "tgw.development.foreman.exclusive_worktree_lease",
+            return_value=nullcontext(),
+        ),
+        patch("tgw.development.foreman.source_tree", return_value="d" * 40),
+    ):
+        result = tick(
+            ForemanConfig(
+                coding_config={"worktree_root": "/tmp"},
+                treatments=(CODEX_IMPLEMENT,),
+                lifecycle_bindings={1915: lifecycle},
+                lifecycle_rebind={1915: "codex-implement"},
+            ),
+            todo_ids={1915},
+            fetch_todos=lambda: [selected],
+            check_active_fn=lambda _: False,
+            check_terminal_fn=lambda _: False,
+            check_worktree_active_fn=lambda _: False,
+            enqueue_fn=enqueue,
+        )
+
+    assert result.dispatched == 1
+    payload = enqueue.call_args.kwargs["payload"]
+    assert payload["coding_lifecycle"] == lifecycle
+    assert payload["treatment_id"] == "codex-implement"
+    assert enqueue.call_args.kwargs["dedupe_key"].endswith(
+        ":lifecycle:" + "9" * 64
+    )
 
 
 def test_real_evaluator_dispatches_stitch_after_review_and_verification():

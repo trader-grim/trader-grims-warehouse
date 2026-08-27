@@ -22,6 +22,7 @@ from tgw.development.partial_resume import (
     classify,
     history,
     preservation_manifest,
+    source_fingerprint,
     source_tree,
 )
 from tgw.development.plan_binding import (
@@ -92,6 +93,14 @@ class ForemanConfig:
     # Populated only by the owner-commanded CLI start path, under the worktree
     # lease. Timer ticks retain the empty default and suppress every dirty tree.
     resume_bindings: dict[int, dict[str, str]] = field(default_factory=dict)
+    # Exact lifecycle identity supplied by the durable supervisor or recovered
+    # by the recurring Foreman.  Jobs without this value are historical and can
+    # never satisfy a lifecycle stage.
+    lifecycle_bindings: dict[int, dict[str, Any]] = field(default_factory=dict)
+    # An exact root at its implementation stage may need a new fenced recovery
+    # receipt for an already-closed candidate.  This never means reimplement:
+    # the existing typed worker validates/re-emits the immutable lineage.
+    lifecycle_rebind: dict[int, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -655,8 +664,29 @@ def tick(
             result = replace(result, errors=result.errors + 1)
             continue
 
+        eligible_dispositions = list(graph.eligible_treatments)
+        rebind_treatment = cfg.lifecycle_rebind.get(todo.todo_id)
+        if (
+            rebind_treatment is not None
+            and resume_state["state"] == "CLOSED_CANDIDATE"
+            and not any(
+                item.treatment_id == rebind_treatment
+                for item in eligible_dispositions
+            )
+            and any(
+                item.identity == rebind_treatment for item in cfg.treatments
+            )
+        ):
+            eligible_dispositions.append(
+                TreatmentDisposition(
+                    rebind_treatment,
+                    "1",
+                    ("exact lifecycle recovery receipt required",),
+                )
+            )
+
         # If no eligible treatments, record waiting reason.
-        if not graph.eligible_treatments:
+        if not eligible_dispositions:
             if graph.waiting_treatments:
                 log.info(
                     "todo %d (%s): all %d treatments waiting: %s",
@@ -679,7 +709,7 @@ def tick(
             result = replace(result, skipped_conflict=result.skipped_conflict + 1)
             continue
 
-        for disposition in graph.eligible_treatments:
+        for disposition in eligible_dispositions:
             # Recurring/timer ticks are continuation-only.  Exact Todo scope is
             # supplied by owner-commanded coding start and PP materialization;
             # its absence must never discover and initiate old open work.  A
@@ -718,6 +748,22 @@ def tick(
                 dedupe_key = _controller_dedupe_key(
                     dedupe_key, implementation_attempt_hash
                 )
+            lifecycle_binding = cfg.lifecycle_bindings.get(todo.todo_id)
+            if lifecycle_binding is not None:
+                lifecycle_hash = lifecycle_binding.get("job_binding_hash")
+                if not isinstance(lifecycle_hash, str) or not re.fullmatch(
+                    r"sha256:[0-9a-f]{64}", lifecycle_hash
+                ):
+                    result = replace(result, errors=result.errors + 1)
+                    log.error(
+                        "todo %d has malformed coding lifecycle binding",
+                        todo.todo_id,
+                    )
+                    continue
+                # Terminal rows from an older lifecycle binding must not own
+                # a newly reconciled root.  Conversely, every replay of this
+                # exact root remains queue-idempotent.
+                dedupe_key = f"{dedupe_key}:lifecycle:{lifecycle_hash[7:]}"
             if _has_active_job(dedupe_key, check_active_fn):
                 result = replace(result, skipped_active=result.skipped_active + 1)
                 continue
@@ -760,7 +806,26 @@ def tick(
                 "todo_agent": chosen.todo.agent,
                 "worktree": chosen.todo.worktree,
                 **({"plan_binding": chosen.todo.plan_binding} if chosen.todo.plan_binding is not None else {}),
+                **(
+                    {"coding_lifecycle": cfg.lifecycle_bindings[chosen.todo.todo_id]}
+                    if chosen.todo.todo_id in cfg.lifecycle_bindings
+                    else {}
+                ),
             }
+            if (
+                chosen.disposition.treatment_id == "claude-review"
+                and chosen.todo.todo_id in cfg.lifecycle_bindings
+            ):
+                lifecycle = __import__(
+                    "tgw.development.coding_lifecycle",
+                    fromlist=["candidate_job_binding"],
+                )
+                candidate = source_fingerprint(Path(chosen.todo.worktree))
+                payload_extra["coding_candidate"] = lifecycle.candidate_job_binding(
+                    cfg.lifecycle_bindings[chosen.todo.todo_id],
+                    commit=candidate["head"],
+                    tree=candidate["tree"],
+                )
             disposition = chosen.disposition
             if disposition.treatment_id == "codex-implement":
                 if not chosen.todo.body.strip():

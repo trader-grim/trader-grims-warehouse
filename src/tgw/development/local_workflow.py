@@ -66,6 +66,8 @@ def load_config(path: Path | str = DEFAULT_CONFIG) -> dict[str, Any]:
     worktrees = Path(str(coding.get("worktree_root", "")))
     commands = coding.get("commands")
     allowed = coding.get("allowed_runners")
+    lifecycle_root = coding.get("lifecycle_root")
+    lifecycle_stages = coding.get("lifecycle_stages")
     if (
         not repository.is_absolute()
         or not worktrees.is_absolute()
@@ -74,6 +76,27 @@ def load_config(path: Path | str = DEFAULT_CONFIG) -> dict[str, Any]:
         or not all(isinstance(item, str) and Path(item).is_absolute() for item in allowed)
     ):
         raise LocalCodingWorkflowError("local coding paths or runners are invalid")
+    if "lifecycle_commands" in coding:
+        raise LocalCodingWorkflowError(
+            "generic coding lifecycle commands are forbidden"
+        )
+    if lifecycle_root is not None:
+        from tgw.development.coding_lifecycle import TYPED_STAGE_IMPLEMENTATIONS
+
+        if (
+            not isinstance(lifecycle_root, str)
+            or not Path(lifecycle_root).is_absolute()
+            or lifecycle_stages != TYPED_STAGE_IMPLEMENTATIONS
+        ):
+            raise LocalCodingWorkflowError(
+                "coding lifecycle requires the complete typed stage registry"
+            )
+        for name in ("doctor_receipt_root", "runtime_root"):
+            value_path = coding.get(name)
+            if not isinstance(value_path, str) or not Path(value_path).is_absolute():
+                raise LocalCodingWorkflowError(
+                    f"coding lifecycle {name} is invalid"
+                )
     return dict(value)
 
 
@@ -229,11 +252,39 @@ def foreman_command(args: argparse.Namespace) -> dict[str, Any]:
     require_coder_account()
     todo.init(config["postgres_dsn"])
     state_machine.init(config["postgres_dsn"])
+    lifecycle = None
+    lifecycle_store = None
+    lifecycle_bindings: dict[int, dict[str, Any]] = {}
+    lifecycle_rebind: dict[int, str] = {}
+    if config["coding"].get("lifecycle_root"):
+        lifecycle = __import__(
+            "tgw.development.coding_lifecycle",
+            fromlist=["LifecycleStore", "job_binding"],
+        )
+        lifecycle_store = lifecycle.LifecycleStore(
+            config["coding"]["lifecycle_root"]
+        )
+        for record in lifecycle_store.records():
+            target = record.get("target")
+            if isinstance(target, str) and target.isdigit():
+                lifecycle_bindings[int(target)] = lifecycle.job_binding(record)
+                treatment = {
+                    "implementation": "codex-implement",
+                    "controller": "controller-verify",
+                    "review": "claude-review",
+                }.get(record.get("stage"))
+                if (
+                    treatment is not None
+                    and record.get("state") not in lifecycle.TERMINAL
+                ):
+                    lifecycle_rebind[int(target)] = treatment
     result = tick(
         ForemanConfig(
             coding_config=dict(config["coding"]),
             treatments=_LOCAL_TREATMENTS,
             receipt_backed_conditions=frozenset({"tested", "linted"}),
+            lifecycle_bindings=lifecycle_bindings,
+            lifecycle_rebind=lifecycle_rebind,
         ),
         limit=args.limit,
     )
@@ -241,12 +292,9 @@ def foreman_command(args: argparse.Namespace) -> dict[str, Any]:
     # This does not dispatch work itself: each child must win its root's
     # supervisor lock and reconstructs exclusively from durable records.
     recovered: list[dict[str, Any]] = []
-    if config["coding"].get("lifecycle_root"):
-        lifecycle = __import__(
-            "tgw.development.coding_lifecycle", fromlist=["LifecycleStore", "spawn_pending"]
-        )
+    if lifecycle is not None and lifecycle_store is not None:
         recovered = lifecycle.spawn_pending(
-            lifecycle.LifecycleStore(config["coding"]["lifecycle_root"]),
+            lifecycle_store,
             config_path=args.config,
         )
     return {**dataclasses.asdict(result), "lifecycle_supervisors": recovered}

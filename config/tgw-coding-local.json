@@ -7,6 +7,20 @@
   },
   "coding": {
     "lifecycle_root": "/opt/TGW/var/tgw-coders/coding-lifecycles",
+    "lifecycle_stages": {
+      "implementation": "coding-queue:codex-implement/v1",
+      "controller": "coding-queue:controller-verify/v1",
+      "candidate": "coding-lineage:closed-candidate/v1",
+      "review": "coding-queue:claude-review/v1",
+      "integration": "coding-git:fast-forward/v1",
+      "materialization": "doctor-receipt:runtime-materialization/v1",
+      "live_verification": "doctor-receipt:runtime/v1",
+      "terminal_publication": "current-task-receipt:context/v1",
+      "operator_notification": "lifecycle-journal:notification/v1",
+      "operator_readback": "lifecycle-journal:explicit-readback/v1"
+    },
+    "doctor_receipt_root": "/opt/TGW/tgw-lib/doctor-receipts",
+    "runtime_root": "/opt/TGW/tgw-lib/coding-runtime",
     "repository_root": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
     "worktree_root": "/opt/TGW/var/worktrees",
     "preservation_archive_root": "/opt/TGW/var/tgw-coders/coding-preservation",
