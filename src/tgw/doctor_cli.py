@@ -3880,15 +3880,19 @@ def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
 def repair_context(paths: DoctorPaths) -> dict[str, Any]:
     _require_root()
     selected = _selected_context_artifacts(paths)
-    pair = _context_pair(paths)
-    bound_publisher = pair["generation"] / "tgw-context-publish"
-    _require_trusted_root_program(bound_publisher)
-    installed_publisher = pair["publisher"]
-    if (
-        installed_publisher["kind"] != "file"
-        or installed_publisher["sha256"] != selected["hashes"]["publisher"]
-    ):
-        raise DoctorError("installed Context publisher differs from selected immutable runtime")
+    # Context publication is the convergence bootstrap: the live generation may
+    # legitimately still contain the predecessor publisher/launcher.  Bind both
+    # halves of preflight directly to the selected root-owned immutable release;
+    # context-launcher repair may switch the live generation only after this
+    # transaction has made its snapshot CURRENT.
+    selected_publisher = selected["publisher"]
+    selected_launcher = selected["launcher"]
+    _require_trusted_root_program(
+        selected_publisher, paths.trusted_release_owners
+    )
+    _require_trusted_root_program(
+        selected_launcher, paths.trusted_release_owners
+    )
     context_runtime = selected["runtime_source"]
     task_surface = _surface_snapshot(paths.context_task)
     cursor_surface = _surface_snapshot(paths.context_cursor)
@@ -3935,7 +3939,7 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
         staged_snapshot.unlink(missing_ok=True)
         result = _run(
             [
-                str(bound_publisher),
+                str(selected_publisher),
                 "--task",
                 str(paths.context_task),
                 "--cursor",
@@ -3966,7 +3970,7 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
         os.chown(staged_snapshot, paths.context_install_uid, paths.context_install_gid)
         os.chmod(staged_snapshot, 0o400)
         staged_probe = _probe_context_stdio(
-            pair["generation"] / "tgw-context-mcp",
+            selected_launcher,
             _operator_actor(),
             expanded_after,
             staged_snapshot=staged_snapshot,

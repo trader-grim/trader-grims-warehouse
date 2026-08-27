@@ -2903,15 +2903,24 @@ def test_atomic_bytes_applies_exact_descriptor_metadata(tmp_path: Path) -> None:
 
 def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, head, tree = _fixture(tmp_path)
+    stale_publisher = paths.context_generation_pointer.resolve() / "tgw-context-publish"
+    stale_publisher.chmod(0o755)
+    stale_publisher.write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
+    stale_publisher.chmod(0o555)
+    selected_publisher = (
+        paths.runtime_root / "releases" / head / "scripts/tgw_context_publish.py"
+    )
     cursor = json.loads(paths.context_cursor.read_text())
     cursor["source_commit"] = "b" * 40
     cursor["source_tree"] = "c" * 40
     _write_json(paths.context_cursor, cursor)
     original_run = doctor_cli._run
     publisher_env = {}
+    invoked_publishers = []
 
     def run(command, **kwargs):
-        if Path(command[0]).name == "tgw-context-publish":
+        if Path(command[0]).name in {"tgw-context-publish", "tgw_context_publish.py"}:
+            invoked_publishers.append(Path(command[0]))
             publisher_env.update(kwargs["env"])
             task_path = Path(command[command.index("--task") + 1])
             cursor_path = Path(command[command.index("--cursor") + 1])
@@ -2941,6 +2950,8 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(tmp
     assert result["changed"] is True
     assert repaired["source_commit"] == head
     assert repaired["source_tree"] == tree
+    assert invoked_publishers == [selected_publisher]
+    assert invoked_publishers[0] != stale_publisher
     assert publisher_env == {
         "LANG": "C.UTF-8",
         "PATH": "/usr/bin:/bin",
@@ -2951,7 +2962,9 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(tmp
     assert receipt["operation"] == "context"
     assert receipt["receipt_sha256"].startswith("sha256:")
     assert len(probes) == 1
-    assert probes[0][0].parent.name.startswith("context-")
+    assert probes[0][0] == (
+        paths.runtime_root / "releases" / head / "scripts/tgw_context_debian_stdio.py"
+    )
     assert probes[0][3]["staged_snapshot"].name.startswith(
         paths.context_snapshot.name + ".doctor-stage."
     )
@@ -2964,7 +2977,7 @@ def test_context_repair_is_semantically_idempotent(tmp_path: Path, monkeypatch: 
     original_run = doctor_cli._run
 
     def run(command, **kwargs):
-        if Path(command[0]).name == "tgw-context-publish":
+        if Path(command[0]).name in {"tgw-context-publish", "tgw_context_publish.py"}:
             task_path = Path(command[command.index("--task") + 1])
             cursor_path = Path(command[command.index("--cursor") + 1])
             output_path = Path(command[command.index("--output") + 1])
@@ -2998,7 +3011,7 @@ def test_context_publisher_failure_leaves_live_inputs_unchanged_and_is_receipted
     original_run = doctor_cli._run
 
     def run(command, **kwargs):
-        if Path(command[0]).name == "tgw-context-publish":
+        if Path(command[0]).name in {"tgw-context-publish", "tgw_context_publish.py"}:
             return subprocess.CompletedProcess(command, 1, "", "publisher rejected")
         return original_run(command, **kwargs)
 
@@ -3036,7 +3049,7 @@ def test_context_failed_staged_cold_preflight_leaves_all_live_inputs_unchanged(
     original_run = doctor_cli._run
 
     def run(command, **kwargs):
-        if Path(command[0]).name == "tgw-context-publish":
+        if Path(command[0]).name in {"tgw-context-publish", "tgw_context_publish.py"}:
             task_path = Path(command[command.index("--task") + 1])
             cursor_path = Path(command[command.index("--cursor") + 1])
             output_path = Path(command[command.index("--output") + 1])
@@ -3063,6 +3076,71 @@ def test_context_failed_staged_cold_preflight_leaves_all_live_inputs_unchanged(
     with pytest.raises(doctor_cli.DoctorError, match="unlaunchable"):
         doctor_cli.repair_context(paths)
 
+    assert all(
+        doctor_cli._surface_snapshot(path) == surface
+        for path, surface in live_before.items()
+    )
+
+
+def test_context_repair_bootstraps_past_stale_installed_publisher_and_failed_preflight_is_non_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, head, _tree = _fixture(tmp_path)
+    selected_release = paths.runtime_root / "releases" / head
+    selected_publisher = selected_release / "scripts/tgw_context_publish.py"
+    selected_launcher = selected_release / "scripts/tgw_context_debian_stdio.py"
+    live_generation = paths.context_generation_pointer.resolve()
+    stale_publisher = live_generation / "tgw-context-publish"
+    stale_publisher.chmod(0o755)
+    stale_publisher.write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
+    stale_publisher.chmod(0o555)
+    cursor = json.loads(paths.context_cursor.read_text())
+    cursor["source_commit"] = "b" * 40
+    cursor["source_tree"] = "c" * 40
+    _write_json(paths.context_cursor, cursor)
+    live_before = {
+        path: doctor_cli._surface_snapshot(path)
+        for path in (
+            paths.context_snapshot,
+            paths.context_generation_pointer,
+            paths.context_launcher,
+            paths.context_publisher,
+        )
+    }
+    invoked: list[Path] = []
+    original_run = doctor_cli._run
+
+    def run(command, **kwargs):
+        if Path(command[0]).name == "tgw_context_publish.py":
+            invoked.append(Path(command[0]))
+            task_path = Path(command[command.index("--task") + 1])
+            cursor_path = Path(command[command.index("--cursor") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            output_path.write_bytes(
+                publish_bytes(
+                    json.loads(task_path.read_text()),
+                    json.loads(cursor_path.read_text()),
+                )
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+
+    def fail_selected_preflight(launcher, _actor, _expected, **kwargs):
+        assert launcher == selected_launcher
+        assert kwargs["staged_snapshot"] != paths.context_snapshot
+        raise doctor_cli.DoctorError("selected runtime preflight failed")
+
+    monkeypatch.setattr(doctor_cli, "_probe_context_stdio", fail_selected_preflight)
+
+    with pytest.raises(doctor_cli.DoctorError, match="selected runtime preflight failed"):
+        doctor_cli.repair_context(paths)
+
+    assert invoked == [selected_publisher]
+    assert invoked[0] != stale_publisher
     assert all(
         doctor_cli._surface_snapshot(path) == surface
         for path, surface in live_before.items()
@@ -3118,7 +3196,7 @@ def test_context_repair_preserves_concurrent_snapshot_and_restores_its_cursor(tm
     original_cas = doctor_cli._cas_regular_file
 
     def run(command, **kwargs):
-        if Path(command[0]).name == "tgw-context-publish":
+        if Path(command[0]).name in {"tgw-context-publish", "tgw_context_publish.py"}:
             task_path = Path(command[command.index("--task") + 1])
             cursor_path = Path(command[command.index("--cursor") + 1])
             output_path = Path(command[command.index("--output") + 1])
@@ -3168,7 +3246,7 @@ def test_context_repair_never_overwrites_concurrent_cursor_during_rollback(tmp_p
     original_cas = doctor_cli._cas_regular_file
 
     def run(command, **kwargs):
-        if Path(command[0]).name == "tgw-context-publish":
+        if Path(command[0]).name in {"tgw-context-publish", "tgw_context_publish.py"}:
             task_path = Path(command[command.index("--task") + 1])
             cursor_path = Path(command[command.index("--cursor") + 1])
             output_path = Path(command[command.index("--output") + 1])
