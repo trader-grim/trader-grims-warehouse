@@ -6,6 +6,7 @@
     "lease_seconds": 2100
   },
   "coding": {
+    "lifecycle_root": "/opt/TGW/var/tgw-coders/coding-lifecycles",
     "repository_root": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
     "worktree_root": "/opt/TGW/var/worktrees",
     "preservation_archive_root": "/opt/TGW/var/tgw-coders/coding-preservation",

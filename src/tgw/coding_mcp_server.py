@@ -58,6 +58,8 @@ mcp = FastMCP(
         "dispatch through tgw-prod, coding-provision, or an approval service."
     ),
 )
+_LEGACY_START = coding_cli.start
+_LEGACY_STATUS = coding_cli.status
 
 
 @mcp.tool()
@@ -70,7 +72,11 @@ def tgw_coding_start(todo_id: int | str, source_commit: str = "") -> str:
     """
     return _result(
         "start",
-        coding_cli.start,
+        (
+            coding_cli.start
+            if coding_cli.start is not _LEGACY_START
+            else coding_cli.lifecycle_start
+        ),
         todo_id,
         config_path=_config_path(),
         source_commit=source_commit or None,
@@ -84,11 +90,15 @@ def tgw_coding_reconcile(pp_ref: str = coding_cli.PP_REF) -> str:
 
 
 @mcp.tool()
-def tgw_coding_status(todo_id: int | None = None) -> str:
+def tgw_coding_status(todo_id: int | str | None = None) -> str:
     """Return local worktree, access, Foreman, and coding-job status."""
     return _result(
         "status",
-        coding_cli.status,
+        (
+            coding_cli.status
+            if coding_cli.status is not _LEGACY_STATUS
+            else coding_cli.consolidated_status
+        ),
         todo_id,
         config_path=_config_path(),
     )

@@ -237,7 +237,19 @@ def foreman_command(args: argparse.Namespace) -> dict[str, Any]:
         ),
         limit=args.limit,
     )
-    return dataclasses.asdict(result)
+    # The already-recurring local Foreman is also the host-restart bootstrap.
+    # This does not dispatch work itself: each child must win its root's
+    # supervisor lock and reconstructs exclusively from durable records.
+    recovered: list[dict[str, Any]] = []
+    if config["coding"].get("lifecycle_root"):
+        lifecycle = __import__(
+            "tgw.development.coding_lifecycle", fromlist=["LifecycleStore", "spawn_pending"]
+        )
+        recovered = lifecycle.spawn_pending(
+            lifecycle.LifecycleStore(config["coding"]["lifecycle_root"]),
+            config_path=args.config,
+        )
+    return {**dataclasses.asdict(result), "lifecycle_supervisors": recovered}
 
 
 def worker_command(args: argparse.Namespace) -> None:

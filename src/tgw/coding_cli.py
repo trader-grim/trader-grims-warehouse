@@ -13,6 +13,7 @@ import dataclasses
 import fcntl
 import json
 import re
+import subprocess
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ from typing import Any
 import psycopg2.extras
 
 from tgw import todo
+from tgw.development import coding_lifecycle
+from tgw.development.coding_lifecycle import LifecycleStore
 from tgw.development.foreman import ForemanConfig, TickResult, tick
 from tgw.development.local_workflow import (
     DEFAULT_CONFIG,
@@ -75,6 +78,11 @@ def _json_default(value: Any) -> str:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     return str(value)
+
+
+def _durable_json(value: Any) -> Any:
+    """Normalize database timestamps and UUIDs before journaling a receipt."""
+    return json.loads(json.dumps(value, sort_keys=True, default=_json_default))
 
 
 def _initialize(config_path: Path | str) -> dict[str, Any]:
@@ -484,6 +492,214 @@ def resume(
     )
 
 
+def lifecycle_start(
+    target: int | str,
+    *,
+    config_path: Path | str = DEFAULT_CONFIG,
+    solution_path: Path | str = DEFAULT_SOLUTION,
+    source_commit: str | None = None,
+) -> dict[str, Any]:
+    """Create/reuse one durable root and return before coding work begins."""
+    config = load_config(config_path)
+    require_coder_account()
+    solution = __import__(
+        "tgw.development.local_workflow", fromlist=["load_solution"]
+    ).load_solution(solution_path)
+    runtime = _pp_runtime_binding(config, source_commit)
+    value: int | str = target if target == PP_REF else _todo_id(target)
+    store = LifecycleStore(config["coding"]["lifecycle_root"])
+    record = coding_lifecycle.create(
+        store, target=value, plan_commit=solution["plan_commit"],
+        solution_hash=solution["solution_hash"],
+        source_commit=runtime["selected_commit"], source_tree=runtime["selected_tree"],
+    )
+    pid = None
+    if record["state"] not in coding_lifecycle.TERMINAL:
+        pid = coding_lifecycle.spawn(record["root_id"], config_path=config_path)
+    return {
+        "schema": "tgw-local-coding-lifecycle-start/v1", "ok": True,
+        "root_id": record["root_id"], "target": str(value), "state": record["state"],
+        "supervisor_pid": pid, "returns_immediately": True,
+        "dependencies": record["boundaries"],
+    }
+
+
+def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dict[str, Any]:
+    """Resume the existing local dispatcher under the durable root journal."""
+    config = _initialize(config_path)
+    store = LifecycleStore(config["coding"]["lifecycle_root"])
+
+    def implementation(record: dict[str, Any]) -> dict[str, Any]:
+        target = record["binding"]["target"]
+        if target != PP_REF:
+            rows = _jobs(int(target), limit=100)
+            implementations = [row for row in rows if row.get("queue_name") == "codex-implement"]
+            active = [row for row in implementations if row.get("state") in {"queued", "leased", "running"}]
+            failed = [row for row in implementations if row.get("state") in {"failed", "dead_letter", "cancelled"}]
+            succeeded = [row for row in implementations if row.get("state") == "succeeded"]
+            if active:
+                return {"outcome": "waiting", "reason": "implementation active",
+                        "job_ids": [str(row["job_id"]) for row in implementations]}
+            if failed and not succeeded:
+                return {"outcome": "failed", "reason": "implementation job failed",
+                        "job_ids": [str(row["job_id"]) for row in implementations]}
+            if succeeded:
+                return {"outcome": "satisfied", "effect_key": "implementation",
+                        "receipt": _durable_json(succeeded[0]),
+                        "job_ids": [str(row["job_id"]) for row in implementations]}
+        result = start(
+            target if target == PP_REF else int(target), config_path=config_path,
+            source_commit=record["binding"]["source_commit"],
+        )
+        job_ids = [str(row["job_id"]) for row in result.get("jobs", [])]
+        if not result.get("ok"):
+            state = result.get("coding_state", {}).get("state")
+            return {"outcome": "resumable_partial" if state == "RESUMABLE_PARTIAL" else "failed",
+                    "reason": state or "implementation dispatch failed", "job_ids": job_ids,
+                    "receipt": result}
+        return {"outcome": "waiting", "reason": "implementation job dispatched",
+                "job_ids": job_ids, "receipt": result}
+
+    # The recurring Foreman/job completion event invokes this same function again.
+    # Until the remaining stage adapters are configured, it closes with an exact
+    # remediation state instead of inventing review or installation evidence.
+    def controller(record: dict[str, Any]) -> dict[str, Any]:
+        target = record["binding"]["target"]
+        if target == PP_REF:
+            return {"outcome": "remediation", "reason": "PP lifecycle leaf consolidation pending"}
+        # Re-evaluate through the sole Foreman; this is replay-safe and creates no
+        # second controller job when one already exists.
+        start(int(target), config_path=config_path,
+              source_commit=record["binding"]["source_commit"])
+        rows = [row for row in _jobs(int(target), limit=100)
+                if row.get("queue_name") == "controller-verify"]
+        if any(row.get("state") in {"failed", "dead_letter", "cancelled"} for row in rows):
+            return {"outcome": "failed", "reason": "controller verification failed",
+                    "job_ids": [str(row["job_id"]) for row in rows]}
+        passed = next((row for row in rows if row.get("state") == "succeeded"), None)
+        if passed is None:
+            return {"outcome": "waiting", "reason": "controller verification pending",
+                    "job_ids": [str(row["job_id"]) for row in rows]}
+        return {"outcome": "satisfied", "effect_key": "controller",
+                "receipt": _durable_json(passed),
+                "job_ids": [str(row["job_id"]) for row in rows]}
+
+    def candidate(record: dict[str, Any]) -> dict[str, Any]:
+        target = record["binding"]["target"]
+        if target == PP_REF:
+            return {"outcome": "remediation", "reason": "PP has no single closed candidate"}
+        item = todo.todo_get(int(target))
+        binding = parse_plan_binding((item or {}).get("status_note"), todo_id=int(target))
+        if binding is None:
+            return {"outcome": "remediation", "reason": "candidate Plan binding is absent"}
+        if any(binding.get(key) != record["binding"].get(key) for key in
+               ("plan_commit", "solution_hash", "source_commit")):
+            return {"outcome": "remediation", "reason": "candidate Plan/source binding is stale"}
+        worktree = Path(binding["worktree"])
+        expected = {
+            "todo_id": int(target), "plan_commit": binding["plan_commit"],
+            "solution_hash": binding["solution_hash"], "source_commit": binding["source_commit"],
+            "source_tree": record["binding"]["source_tree"],
+            "actor": (item or {}).get("agent") or "codex", "worktree": str(worktree),
+            "treatment_id": "codex-implement", "treatment_version": "1",
+        }
+        observed = classify(worktree, expected)
+        if observed["state"] != "CLOSED_CANDIDATE":
+            outcome = "resumable_partial" if observed["state"] == "RESUMABLE_PARTIAL" else "remediation"
+            return {"outcome": outcome, "reason": f"candidate is {observed['state']}",
+                    "receipt": observed}
+        source = observed["source"]
+        return {
+            "outcome": "satisfied", "effect_key": "candidate",
+            "receipt": {"worktree": str(worktree), "commit": source["head"],
+                        "tree": source["tree"], "classification": observed["state"]},
+        }
+
+    def adapter(stage: str):
+        """Invoke a Plan-materialized local adapter with a replay-stable JSON card."""
+        def run(record: dict[str, Any]) -> dict[str, Any]:
+            commands = config["coding"].get("lifecycle_commands", {})
+            command = commands.get(stage)
+            if not isinstance(command, list) or not command or not all(
+                    isinstance(part, str) and part for part in command):
+                return {"outcome": "remediation",
+                        "reason": f"local lifecycle adapter {stage} is not materialized"}
+            card = {
+                "schema": "tgw-local-coding-lifecycle-stage-card/v1",
+                "root_id": record["root_id"], "stage": stage,
+                "idempotency_key": coding_lifecycle.stage_idempotency_key(record, stage),
+                "binding": record["binding"], "candidate": record["effects"].get("candidate"),
+                "prior_effects": record["effects"], "boundaries": record["boundaries"],
+            }
+            try:
+                completed = subprocess.run(
+                    command, input=json.dumps(card, sort_keys=True), text=True,
+                    capture_output=True, timeout=float(config["coding"].get("timeout_s", 1800)),
+                    check=False, env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"},
+                )
+                result = json.loads(completed.stdout)
+            except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+                return {"outcome": "failed", "reason": f"{stage} adapter failed: {exc}"}
+            if not isinstance(result, dict):
+                return {"outcome": "failed", "reason": f"{stage} adapter returned no receipt"}
+            if completed.returncode != 0 and result.get("outcome") not in {
+                    "failed", "remediation", "publication_unavailable"}:
+                return {"outcome": "failed", "reason": f"{stage} adapter exited {completed.returncode}"}
+            return result
+        return run
+
+    return coding_lifecycle.advance(store, identity, {
+        "implementation": implementation, "controller": controller, "candidate": candidate,
+        **{stage: adapter(stage) for stage in coding_lifecycle.STAGES[3:]},
+    })
+
+
+def lifecycle_status(identity: int | str, *, config_path: Path | str = DEFAULT_CONFIG) -> dict[str, Any]:
+    config = _initialize(config_path)
+    store = LifecycleStore(config["coding"]["lifecycle_root"])
+    record = store.get(identity) if isinstance(identity, str) and identity.startswith("coding:") else store.find(identity)
+    if record is None:
+        raise CodingCLIError(f"coding lifecycle {identity} does not exist")
+    target = record["binding"]["target"]
+    jobs = [] if target == PP_REF else _jobs(int(target), limit=100)
+    stages = record.get("stages", {})
+    return {
+        **record,
+        "schema": "tgw-local-coding-lifecycle-status/v1",
+        "todo_or_pp": target,
+        "jobs": jobs,
+        "worktree": (record.get("effects", {}).get("candidate") or {}).get("worktree"),
+        "candidate_commit": (record.get("effects", {}).get("candidate") or {}).get("commit"),
+        "candidate_tree": (record.get("effects", {}).get("candidate") or {}).get("tree"),
+        "tests": (record.get("effects", {}).get("implementation") or {}).get("payload_json"),
+        "controller_receipt": record.get("effects", {}).get("controller"),
+        "independent_review": record.get("effects", {}).get("review"),
+        "integration": record.get("effects", {}).get("integration"),
+        "materialization": record.get("effects", {}).get("materialization"),
+        "live_verification": record.get("effects", {}).get("live_verification"),
+        "context_publication": record.get("publication"),
+        "operator_notification": stages.get("operator_notification"),
+        "operator_acceptance": record.get("operator_acceptance", "PENDING"),
+    }
+
+
+def consolidated_status(target: int | str | None = None, *,
+                        config_path: Path | str = DEFAULT_CONFIG) -> dict[str, Any]:
+    """Prefer the durable lifecycle projection, retaining legacy status fallback."""
+    if target is None:
+        return status(None, config_path=config_path)
+    if isinstance(target, str) and target.startswith("coding:"):
+        return lifecycle_status(target, config_path=config_path)
+    config = load_config(config_path)
+    lifecycle_root = config["coding"].get("lifecycle_root")
+    record = LifecycleStore(lifecycle_root).find(target) if lifecycle_root else None
+    if record is not None:
+        return lifecycle_status(record["root_id"], config_path=config_path)
+    if target == PP_REF:
+        return reconcile(PP_REF, config_path=config_path)
+    return status(_todo_id(target), config_path=config_path)
+
+
 def status(
     todo_id: int | None = None,
     *,
@@ -609,7 +825,7 @@ def run(args: argparse.Namespace) -> int:
         target = _target(args)
         if args.coding_op == "start":
             value = target or getattr(args, "todo_id", None)
-            result = start(
+            result = lifecycle_start(
                 value if value == PP_REF else _todo_id(value),
                 config_path=config_path,
                 source_commit=getattr(args, "source_commit", None),
@@ -621,8 +837,7 @@ def run(args: argparse.Namespace) -> int:
                 source_commit=getattr(args, "source_commit", None),
             )
         elif args.coding_op in {"status", "access-status"}:
-            result = (reconcile(target, config_path=config_path) if target == PP_REF else status(
-                _todo_id(target) if target is not None else None, config_path=config_path))
+            result = consolidated_status(target, config_path=config_path)
         elif args.coding_op == "reconcile":
             result = reconcile(target or PP_REF, config_path=config_path)
         elif args.coding_op == "log":
@@ -658,7 +873,7 @@ def parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("coding_target", metavar="TODO_ID")
     resume_parser.add_argument("--source-commit")
     status_parser = commands.add_parser("status", help="show local coding jobs")
-    status_parser.add_argument("coding_target", metavar="TODO_ID|PP_REF", nargs="?")
+    status_parser.add_argument("coding_target", metavar="ROOT|TODO_ID|PP_REF", nargs="?")
     reconcile_parser = commands.add_parser("reconcile", help="read-only PP reconciliation")
     reconcile_parser.add_argument("coding_target", metavar="PP_REF", nargs="?", default=PP_REF)
     log_parser = commands.add_parser("log", help="show one durable coding job")
