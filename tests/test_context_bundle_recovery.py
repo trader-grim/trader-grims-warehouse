@@ -1250,7 +1250,11 @@ def test_context_launcher_failed_live_shim_probe_restores_pointer_and_is_receipt
         doctor_cli,
         "_probe_context_stdio",
         lambda launcher, *_args, **_kwargs: (_ for _ in ()).throw(
-            doctor_cli.DoctorError(f"installed shim rejected: {launcher}")
+            doctor_cli.DoctorError(
+                "installed Context MCP cold probe timed out after "
+                f"{doctor_cli._CONTEXT_COLD_PROBE_BUDGET_SECONDS:g}s and was "
+                f"terminated: {launcher}"
+            )
         ),
     )
 

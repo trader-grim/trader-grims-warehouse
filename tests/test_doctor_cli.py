@@ -482,7 +482,9 @@ def test_context_process_match_ignores_parent_shell_command_text() -> None:
     assert not doctor_cli._is_context_process(["bash", "-c", "/opt/TGW/tgw-lib/bin/tgw-context-mcp"])
 
 
-def test_context_cold_probe_uses_real_stdio_protocol_subprocess(tmp_path: Path) -> None:
+def test_context_cold_probe_response_after_ten_seconds_within_budget_passes(
+    tmp_path: Path,
+) -> None:
     actor = pwd.getpwuid(os.geteuid()).pw_name
     expected = {
         "plan_commit": "a" * 40,
@@ -516,7 +518,8 @@ def test_context_cold_probe_uses_real_stdio_protocol_subprocess(tmp_path: Path) 
     launcher = tmp_path / "tgw-context-mcp"
     launcher.write_text(
         "#!" + sys.executable + "\n"
-        "import json,sys\n"
+        "import json,sys,time\n"
+        "time.sleep(10.1)\n"
         "actor=" + repr(actor) + "\n"
         "for line in sys.stdin:\n"
         " r=json.loads(line); i=r.get('id'); m=r.get('method')\n"
@@ -541,7 +544,7 @@ def test_context_cold_probe_uses_real_stdio_protocol_subprocess(tmp_path: Path) 
     )
     launcher.chmod(0o555)
 
-    result = doctor_cli._probe_context_stdio(launcher, actor, expected, timeout=2)
+    result = doctor_cli._probe_context_stdio(launcher, actor, expected)
 
     assert result["actor"] == actor
     assert result["methods"] == [
@@ -550,6 +553,28 @@ def test_context_cold_probe_uses_real_stdio_protocol_subprocess(tmp_path: Path) 
         *sorted(schema_fields),
     ]
     assert result["generation"] == "CURRENT"
+    assert result["timeout_seconds"] == doctor_cli._CONTEXT_COLD_PROBE_BUDGET_SECONDS
+
+
+def test_context_cold_probe_response_beyond_budget_is_terminated(tmp_path: Path) -> None:
+    launcher = tmp_path / "tgw-context-mcp"
+    launcher.write_text(
+        "#!" + sys.executable + "\n"
+        "import time\n"
+        f"time.sleep({doctor_cli._CONTEXT_COLD_PROBE_BUDGET_SECONDS + 1})\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o555)
+
+    with pytest.raises(
+        doctor_cli.DoctorError,
+        match=r"timed out after 15s and was terminated",
+    ):
+        doctor_cli._probe_context_stdio(
+            launcher,
+            pwd.getpwuid(os.geteuid()).pw_name,
+            {},
+        )
 
 
 def test_context_generation_descriptor_rejects_hardlinks(tmp_path: Path) -> None:

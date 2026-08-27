@@ -42,6 +42,7 @@ _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _LOOSE_OBJECT_DIRECTORY = re.compile(r"[0-9a-f]{2}\Z")
 _LOOSE_OBJECT_NAME = re.compile(r"[0-9a-f]{38}\Z")
 _STATES = {"PASS", "WARN", "FAIL", "UNKNOWN", "RESTART_REQUIRED"}
+_CONTEXT_COLD_PROBE_BUDGET_SECONDS = 15.0
 _FORBIDDEN_CODING_DEPENDENCIES = (
     "tgw-prod",
     "ssh",
@@ -915,7 +916,7 @@ def _probe_context_stdio(
     launcher: Path,
     actor: str,
     expected: Mapping[str, Any],
-    timeout: float = 10.0,
+    timeout: float = _CONTEXT_COLD_PROBE_BUDGET_SECONDS,
     *,
     staged_snapshot: Path | None = None,
 ) -> dict[str, Any]:
