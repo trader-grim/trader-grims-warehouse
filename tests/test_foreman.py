@@ -947,6 +947,149 @@ def test_recurring_tick_never_implements_untouched_open_or_stale_todos():
     enqueue.assert_not_called()
 
 
+@pytest.mark.parametrize("state", ["RESUMABLE_PARTIAL", "UNSAFE_DIRTY", "STALE_RECEIPT"])
+def test_repeated_recurring_scan_is_inode_and_metadata_clean_for_non_runnable_tree(
+    tmp_path, state
+):
+    """A timer running for another Unix actor only observes dirty state."""
+    worktree = tmp_path / "todo-worktree"
+    worktree.mkdir(mode=0o750)
+    candidate = worktree / "candidate.txt"
+    candidate.write_bytes(b"candidate bytes\n")
+    candidate.chmod(0o640)
+    receipt = worktree / "implementation-receipt.json"
+    receipt.write_bytes(b'{"stale":true}\n')
+    receipt.chmod(0o600)
+    todo = TodoRecord(
+        todo_id=1906,
+        agent="claude",
+        priority=1,
+        body=f"worktree: {worktree}",
+        worktree=str(worktree),
+        plan_binding=_plan_binding(1906, str(worktree)),
+    )
+
+    def filesystem_identity():
+        return {
+            path.relative_to(worktree).as_posix(): (
+                path.lstat().st_ino,
+                path.lstat().st_uid,
+                path.lstat().st_gid,
+                path.lstat().st_mode,
+                path.lstat().st_size,
+                path.read_bytes() if path.is_file() else None,
+            )
+            for path in (worktree, *sorted(worktree.rglob("*")))
+        }
+
+    classification = {"state": state}
+    if state == "RESUMABLE_PARTIAL":
+        classification.update(
+            resume_of="sha256:" + "1" * 64,
+            fingerprint="sha256:" + "2" * 64,
+        )
+    before = filesystem_identity()
+    with (
+        patch("tgw.development.foreman.classify", return_value=classification),
+        patch("tgw.development.foreman.source_tree", return_value="d" * 40),
+        patch("tgw.development.foreman.exclusive_worktree_lease", return_value=nullcontext()),
+        patch("tgw.development.foreman.preservation_manifest") as preserve,
+        patch("tgw.development.foreman.build_coding_snapshot") as build,
+    ):
+        first = tick(
+            ForemanConfig(coding_config={"worktree_root": str(tmp_path)}),
+            fetch_todos=lambda: [todo],
+            check_active_fn=lambda _: False,
+            check_worktree_active_fn=lambda _: False,
+        )
+        second = tick(
+            ForemanConfig(coding_config={"worktree_root": str(tmp_path)}),
+            fetch_todos=lambda: [todo],
+            check_active_fn=lambda _: False,
+            check_worktree_active_fn=lambda _: False,
+        )
+
+    assert first.skipped_terminal == second.skipped_terminal == 1
+    preserve.assert_not_called()
+    build.assert_not_called()
+    assert filesystem_identity() == before
+
+
+@pytest.mark.parametrize("state", ["RESUMABLE_PARTIAL", "UNSAFE_DIRTY", "STALE_RECEIPT"])
+def test_explicit_start_preserves_non_runnable_worktree(tmp_path, state):
+    worktree = tmp_path / "todo-worktree"
+    worktree.mkdir()
+    todo = _todo(1907, str(worktree), f"worktree: {worktree}")
+    classification = {"state": state}
+    with (
+        patch("tgw.development.foreman.classify", return_value=classification),
+        patch("tgw.development.foreman.source_tree", return_value="d" * 40),
+        patch("tgw.development.foreman.exclusive_worktree_lease", return_value=nullcontext()),
+        patch("tgw.development.foreman.preservation_manifest") as preserve,
+    ):
+        result = tick(
+            ForemanConfig(coding_config={"worktree_root": str(tmp_path)}),
+            todo_ids={todo.todo_id},
+            fetch_todos=lambda: [todo],
+            check_active_fn=lambda _: False,
+            check_worktree_active_fn=lambda _: False,
+        )
+
+    assert result.skipped_terminal == 1
+    preserve.assert_called_once()
+
+
+def test_recurring_exact_owner_bound_resume_dispatches_without_preservation(tmp_path):
+    worktree = tmp_path / "todo-worktree"
+    worktree.mkdir()
+    todo = _todo(1907, str(worktree), f"worktree: {worktree}")
+    resume_of = "sha256:" + "1" * 64
+    fingerprint = "sha256:" + "2" * 64
+    authority = {
+        "resume_of": resume_of,
+        "resume_fingerprint": fingerprint,
+    }
+    disposition = TreatmentDisposition("codex-implement", "1", ("implemented=false",))
+    enqueue = MagicMock(return_value="resume-job")
+    with (
+        patch(
+            "tgw.development.foreman.classify",
+            return_value={
+                "state": "RESUMABLE_PARTIAL",
+                "resume_of": resume_of,
+                "fingerprint": fingerprint,
+            },
+        ),
+        patch("tgw.development.foreman.source_tree", return_value="d" * 40),
+        patch("tgw.development.foreman.exclusive_worktree_lease", return_value=nullcontext()),
+        patch("tgw.development.foreman.preservation_manifest") as preserve,
+        patch(
+            "tgw.development.foreman.build_coding_snapshot",
+            return_value=_snapshot(object_id=str(worktree), assertions=_implemented()),
+        ),
+        patch(
+            "tgw.development.foreman.evaluate",
+            return_value=_graph(object_id=str(worktree), eligible=(disposition,)),
+        ),
+    ):
+        result = tick(
+            ForemanConfig(
+                coding_config={"worktree_root": str(tmp_path)},
+                resume_bindings={todo.todo_id: authority},
+            ),
+            fetch_todos=lambda: [todo],
+            check_active_fn=lambda _: False,
+            check_worktree_active_fn=lambda _: False,
+            check_terminal_fn=lambda _: False,
+            enqueue_fn=enqueue,
+        )
+
+    assert result.dispatched == 1
+    preserve.assert_not_called()
+    assert enqueue.call_args.kwargs["payload"]["resume_of"] == resume_of
+    assert enqueue.call_args.kwargs["payload"]["resume_fingerprint"] == fingerprint
+
+
 def test_explicit_tick_implements_only_the_exact_todo():
     """An explicit coding start retains implementation dispatch and exact scope."""
     first = _todo(1744, "/tmp/old")

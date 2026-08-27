@@ -579,6 +579,19 @@ def tick(
                         and authority.get("resume_of") == resume_state.get("resume_of")
                         and authority.get("resume_fingerprint") == resume_state.get("fingerprint")
                     )
+                    non_runnable = (
+                        authority is not None
+                        or resume_state["state"]
+                        not in {"ABANDONED_CLEAN", "CLOSED_CANDIDATE"}
+                    )
+                    # Timer discovery is observational only.  Preservation is
+                    # an owner-commanded start/resume effect and must never be
+                    # triggered merely by encountering a non-runnable tree.
+                    if todo_ids is None and non_runnable and not exact_resume:
+                        result = replace(
+                            result, skipped_terminal=result.skipped_terminal + 1
+                        )
+                        continue
                     if authority is not None and not exact_resume:
                         preservation_manifest(worktree, resume_state, expected_attempt)
                         result = replace(
@@ -669,8 +682,18 @@ def tick(
         for disposition in graph.eligible_treatments:
             # Recurring/timer ticks are continuation-only.  Exact Todo scope is
             # supplied by owner-commanded coding start and PP materialization;
-            # its absence must never discover and initiate old open work.
-            if todo_ids is None and disposition.treatment_id != "controller-verify":
+            # its absence must never discover and initiate old open work.  A
+            # resume binding is itself exact owner authority and survived the
+            # classifier above only when it matches this partial attempt.
+            authority = cfg.resume_bindings.get(todo.todo_id)
+            if (
+                todo_ids is None
+                and disposition.treatment_id != "controller-verify"
+                and not (
+                    disposition.treatment_id == "codex-implement"
+                    and authority is not None
+                )
+            ):
                 continue
             implementation_attempt_hash = None
             dedupe_key = treatment_dedupe_key(
@@ -679,7 +702,6 @@ def tick(
                 entity_id=canonical_todo.worktree,
                 object_generation=graph.object_generation,
             )
-            authority = cfg.resume_bindings.get(todo.todo_id)
             if disposition.treatment_id == "codex-implement" and authority is not None:
                 dedupe_key = _resume_dedupe_key(dedupe_key, authority)
             elif disposition.treatment_id == "controller-verify":
