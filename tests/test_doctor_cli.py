@@ -518,6 +518,15 @@ def test_context_cold_probe_keeps_stdin_open_until_eof_sensitive_fourth_response
         }
         for name, fields in schema_fields.items()
     }
+    output_schemas = {
+        name: {
+            "properties": {"result": {"title": "Result", "type": "string"}},
+            "required": ["result"],
+            "title": f"{name}Output",
+            "type": "object",
+        }
+        for name in schema_fields
+    }
     launcher = tmp_path / "tgw-context-mcp"
     launcher.write_text(
         "#!" + sys.executable + "\n"
@@ -527,8 +536,8 @@ def test_context_cold_probe_keeps_stdin_open_until_eof_sensitive_fourth_response
         "for line in sys.stdin:\n"
         " r=json.loads(line); i=r.get('id'); m=r.get('method')\n"
         " if i is None: continue\n"
-        " if m=='tools/list': result={'tools':[{'name':n,'description':'read only','inputSchema':s} for n,s in "
-        + repr(sorted(schemas.items())) + "]}\n"
+        " if m=='tools/list': result={'tools':[{'name':n,'description':'read only','inputSchema':s,'outputSchema':o} for (n,s),(_,o) in zip("
+        + repr(sorted(schemas.items())) + "," + repr(sorted(output_schemas.items())) + ")]}\n"
         " elif m=='tools/call':\n"
         "  name=r['params']['name']\n"
         "  if name=='tgw_context_current_task':\n"
@@ -937,8 +946,18 @@ def test_context_generation_descriptor_rejects_path_replacement(
         doctor_cli._descriptor_context_tree(generation)
 
 
-@pytest.mark.parametrize("failure", ["status_false", "mcp_error", "binding_mismatch"])
-def test_context_cold_probe_rejects_false_error_and_mismatched_status(
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "status_false",
+        "mcp_error",
+        "binding_mismatch",
+        "output_schema_missing",
+        "output_schema_malformed",
+        "output_schema_unexpected",
+    ],
+)
+def test_context_cold_probe_rejects_false_error_mismatch_and_output_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     actor = pwd.getpwuid(os.geteuid()).pw_name
@@ -988,9 +1007,25 @@ def test_context_cold_probe_rejects_false_error_and_mismatched_status(
             "tgw_context_onboarding",
         }:
             schema["required"] = [fields[0]]
-        tools.append(
-            {"name": name, "description": "read only", "inputSchema": schema}
-        )
+        tools.append({
+            "name": name,
+            "description": "read only",
+            "inputSchema": schema,
+            "outputSchema": {
+                "properties": {
+                    "result": {"title": "Result", "type": "string"}
+                },
+                "required": ["result"],
+                "title": f"{name}Output",
+                "type": "object",
+            },
+        })
+    if failure == "output_schema_missing":
+        del tools[0]["outputSchema"]
+    elif failure == "output_schema_malformed":
+        tools[0]["outputSchema"]["properties"]["result"]["type"] = "integer"
+    elif failure == "output_schema_unexpected":
+        tools[0]["outputSchema"]["properties"]["extra"] = {"type": "string"}
     responses = [
         {"jsonrpc": "2.0", "id": 1, "result": {
             "protocolVersion": "2025-03-26",
@@ -1004,7 +1039,7 @@ def test_context_cold_probe_rejects_false_error_and_mismatched_status(
     environment_record = tmp_path / "environment.json"
     launcher = tmp_path / "launcher"
     launcher.write_text(
-        "#!" + sys.executable + "\n"
+        "#!" + str(Path("/proc/self/exe").resolve()) + "\n"
         "import json,os,sys\n"
         f"open({str(environment_record)!r},'w').write(json.dumps(dict(os.environ)))\n"
         f"responses={responses!r}\n"
@@ -1020,6 +1055,9 @@ def test_context_cold_probe_rejects_false_error_and_mismatched_status(
         "status_false": "status returned error content",
         "mcp_error": "status returned an MCP error",
         "binding_mismatch": "status bindings differ",
+        "output_schema_missing": "tool schema differs",
+        "output_schema_malformed": "tool schema differs",
+        "output_schema_unexpected": "tool schema differs",
     }[failure]
     with pytest.raises(doctor_cli.DoctorError, match=expected_error):
         doctor_cli._probe_context_stdio(launcher, actor, expected)

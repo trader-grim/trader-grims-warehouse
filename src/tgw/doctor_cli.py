@@ -1345,10 +1345,20 @@ def _probe_context_stdio_process(
     }
     for item in tools:
         schema = item.get("inputSchema") if isinstance(item, Mapping) else None
+        output_schema = (
+            item.get("outputSchema") if isinstance(item, Mapping) else None
+        )
         properties = schema.get("properties", {}) if isinstance(schema, Mapping) else None
+        output_properties = (
+            output_schema.get("properties", {})
+            if isinstance(output_schema, Mapping)
+            else None
+        )
         if (
             not isinstance(item, Mapping)
-            or set(item) - {"name", "description", "inputSchema", "annotations"}
+            or set(item) - {
+                "name", "description", "inputSchema", "outputSchema", "annotations"
+            }
             or not isinstance(item.get("description"), str)
             or not isinstance(schema, Mapping)
             or schema.get("type") != "object"
@@ -1360,6 +1370,13 @@ def _probe_context_stdio_process(
                 or value.get("type") != ("integer" if name in {"limit", "start_line", "max_lines"} else "string")
                 for name, value in properties.items()
             )
+            or not isinstance(output_schema, Mapping)
+            or output_schema.get("type") != "object"
+            or not isinstance(output_properties, Mapping)
+            or set(output_properties) != {"result"}
+            or set(output_schema.get("required", [])) != {"result"}
+            or not isinstance(output_properties["result"], Mapping)
+            or output_properties["result"].get("type") != "string"
         ):
             raise DoctorError("installed Context MCP tool schema differs")
     def tool_value(request_id: int, label: str) -> dict[str, Any]:
