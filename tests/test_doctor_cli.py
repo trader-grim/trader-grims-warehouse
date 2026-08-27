@@ -406,39 +406,71 @@ def test_doctor_real_99416_legacy_parser_accepts_canonical_non_ascii(
 
 
 @pytest.mark.parametrize(
-    "mutate",
+    ("mutate", "error"),
     [
-        lambda raw: b" " + raw,
-        lambda raw: raw[:-1] + b" \n",
-        lambda raw: raw[:-1],
-        lambda raw: b"{malformed}\n",
-        lambda raw: raw + b"{}\n",
-        lambda raw: b"x" * (256 * 1024 + 1),
+        (lambda raw: b" " + raw, "wire format is invalid"),
+        (lambda raw: raw[:-1] + b" \n", "wire format is invalid"),
+        (lambda raw: raw[:-1], "wire format is invalid"),
+        (lambda _raw: b"{malformed}\n", "snapshot is invalid"),
+        (lambda raw: raw + b"{}\n", "snapshot is invalid"),
+        (lambda _raw: b"x" * (256 * 1024 + 1), "wire format is invalid"),
+        (
+            lambda raw: json.dumps(
+                json.loads(raw),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode() + b"\n",
+            "wire format is invalid",
+        ),
     ],
-    ids=["leading", "trailing", "missing-lf", "malformed", "extra-stream", "oversized"],
+    ids=[
+        "leading", "trailing", "missing-lf", "malformed", "extra-stream",
+        "oversized", "alternate-non-ascii-escaping",
+    ],
 )
 def test_doctor_real_99416_legacy_parser_rejects_invalid_wire(
-    tmp_path: Path, mutate: Any
+    tmp_path: Path, mutate: Any, error: str
 ) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     value = _legacy_fixture_value(paths)
+    value["task"]["operator_note"] = "café 東京"
+    body = dict(value)
+    body.pop("snapshot_sha256")
+    value["snapshot_sha256"] = "sha256:" + hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        .encode()
+    ).hexdigest()
     raw = json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode() + b"\n"
-    with pytest.raises(doctor_cli.DoctorError):
+    with pytest.raises(doctor_cli.DoctorError, match=error):
         doctor_cli._validate_snapshot(
             value, mutate(raw), parser_path=_real_99416_legacy_parser(tmp_path)
         )
 
 
-@pytest.mark.parametrize("suffix", ["\nparse_bytes = parse\n", "\nMAX_SNAPSHOT_BYTES = 262144\n"])
-def test_doctor_rejects_hybrid_real_99416_legacy_api(
-    tmp_path: Path, suffix: str
+@pytest.mark.parametrize(
+    ("suffix", "error"),
+    [
+        ("\nparse_bytes = None\n", "parser API is invalid"),
+        ("\nparse_bytes = parse\n", "parser API is invalid"),
+        ("\nparse_bytes = parse\nMAX_SNAPSHOT_BYTES = 1\n", "size bounds differ"),
+        ("\ndel parse\n", "parser API is invalid"),
+        ("\nparse = None\n", "parser API is invalid"),
+    ],
+    ids=[
+        "non-callable-parse-bytes", "parse-bytes-without-maximum",
+        "wrong-maximum", "missing-legacy-parse", "non-callable-legacy-parse",
+    ],
+)
+def test_doctor_rejects_invalid_real_99416_parser_api_shape(
+    tmp_path: Path, suffix: str, error: str
 ) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     value = _legacy_fixture_value(paths)
     raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-    with pytest.raises(doctor_cli.DoctorError, match="parser API is invalid"):
+    with pytest.raises(doctor_cli.DoctorError, match=error):
         doctor_cli._validate_snapshot(
             value, raw, parser_path=_real_99416_legacy_parser(tmp_path, suffix)
         )

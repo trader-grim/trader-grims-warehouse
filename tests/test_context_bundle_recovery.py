@@ -431,6 +431,7 @@ def _launcher_module(
     module.__file__ = str(LAUNCHER)
     exec(compile(source, str(LAUNCHER), "exec"), module.__dict__)
     module._test_snapshot = snapshot
+    module._test_snapshot_raw = _canonical(snapshot) + b"\n"
     module._test_preflight_raw = preflight_raw
     module._test_preflight_snapshot = (
         parse_context_bytes(preflight_raw) if preflight_raw else snapshot
@@ -752,15 +753,35 @@ def test_launcher_rejects_an_invalid_preflight_descriptor_at_import(
         _launcher_module(tmp_path, monkeypatch)
 
 
-def test_launcher_cold_starts_with_exact_real_99416_legacy_api_non_ascii(
+def _bootstrapped_real_99416_legacy_launcher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+) -> ModuleType:
     module = _launcher_module(
         tmp_path,
         monkeypatch,
         legacy_parser_api="",
         snapshot_task_updates={"operator_note": "café 東京"},
     )
+    expected_parser = subprocess.run(
+        ["git", "show", "99416bfb:src/tgw/current_context_snapshot.py"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout
+    assert module.SERVER_SOURCE.joinpath(
+        "tgw/current_context_snapshot.py"
+    ).read_bytes() == expected_parser
+    assert module.RUNTIME_RELEASE.stat().st_mode & 0o222 == 0
+    assert module._selected_snapshot_parser(module._test_snapshot_raw)["task"] == (
+        module._test_snapshot["task"]
+    )
+    return module
+
+
+def test_launcher_cold_starts_with_exact_real_99416_legacy_api_non_ascii(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _bootstrapped_real_99416_legacy_launcher(tmp_path, monkeypatch)
     assert module._current_context()["task"]["operator_note"] == "café 東京"
     assert module._current_context()["snapshot_sha256"] == module._test_snapshot[
         "snapshot_sha256"
@@ -768,36 +789,64 @@ def test_launcher_cold_starts_with_exact_real_99416_legacy_api_non_ascii(
 
 
 @pytest.mark.parametrize(
-    "raw",
+    ("mutate", "error"),
     [
-        b' {"schema":"tgw-current-context-snapshot/v1"}\n',
-        b'{"schema":"tgw-current-context-snapshot/v1"} \n',
-        b'{"schema":"tgw-current-context-snapshot/v1"}',
-        b'{malformed}\n',
-        b'{}\n{}\n',
-        b'x' * (256 * 1024 + 1),
+        (lambda raw: b" " + raw, "wire format is invalid"),
+        (lambda raw: raw[:-1] + b" \n", "wire format is invalid"),
+        (lambda raw: raw[:-1], "wire format is invalid"),
+        (lambda _raw: b"{malformed}\n", "snapshot is invalid"),
+        (lambda raw: raw + b"{}\n", "snapshot is invalid"),
+        (lambda _raw: b"x" * (256 * 1024 + 1), "wire format is invalid"),
+        (
+            lambda raw: json.dumps(
+                json.loads(raw),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode() + b"\n",
+            "wire format is invalid",
+        ),
     ],
-    ids=["leading", "trailing", "missing-lf", "malformed", "extra-stream", "oversized"],
+    ids=[
+        "leading", "trailing", "missing-lf", "malformed", "extra-stream",
+        "oversized", "alternate-non-ascii-escaping",
+    ],
 )
-def test_launcher_real_99416_legacy_api_rejects_noncanonical_wire(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: bytes
+def test_launcher_selected_real_99416_legacy_branch_rejects_noncanonical_wire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutate: Any, error: str
 ) -> None:
-    with pytest.raises((ValueError, CurrentContextError)):
-        _launcher_module(
-            tmp_path, monkeypatch, legacy_parser_api="", snapshot_raw=raw
-        )
+    module = _bootstrapped_real_99416_legacy_launcher(tmp_path, monkeypatch)
+    with pytest.raises(module.CurrentContextError, match=error):
+        module._selected_snapshot_parser(mutate(module._test_snapshot_raw))
 
 
 @pytest.mark.parametrize(
-    "api_suffix",
-    ["\nparse_bytes = parse\n", "\nMAX_SNAPSHOT_BYTES = 262144\n"],
-    ids=["parse-bytes-hybrid", "maximum-hybrid"],
+    ("mutation", "error"),
+    [
+        (lambda parser: setattr(parser, "parse_bytes", None), "parser API is invalid"),
+        (lambda parser: setattr(parser, "parse_bytes", parser.parse), "parser API is invalid"),
+        (
+            lambda parser: (
+                setattr(parser, "parse_bytes", parser.parse),
+                setattr(parser, "MAX_SNAPSHOT_BYTES", 1),
+            ),
+            "size bounds differ",
+        ),
+        (lambda parser: delattr(parser, "parse"), "parser API is invalid"),
+        (lambda parser: setattr(parser, "parse", None), "parser API is invalid"),
+    ],
+    ids=[
+        "non-callable-parse-bytes", "parse-bytes-without-maximum",
+        "wrong-maximum", "missing-legacy-parse", "non-callable-legacy-parse",
+    ],
 )
-def test_launcher_rejects_hybrid_real_99416_legacy_api(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, api_suffix: str
+def test_launcher_selected_parser_rejects_invalid_api_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: Any, error: str
 ) -> None:
-    with pytest.raises(ValueError, match="parser API is invalid"):
-        _launcher_module(tmp_path, monkeypatch, legacy_parser_api=api_suffix)
+    module = _bootstrapped_real_99416_legacy_launcher(tmp_path, monkeypatch)
+    mutation(module._snapshot_runtime)
+    with pytest.raises(ValueError, match=error):
+        module._selected_snapshot_parser(module._test_snapshot_raw)
 
 
 def test_differing_staged_snapshot_binds_status_and_task_through_cold_launcher(
