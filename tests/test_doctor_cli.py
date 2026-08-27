@@ -280,6 +280,22 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     return paths, head, tree
 
 
+def test_context_managed_parents_allow_a_non_install_group(tmp_path: Path) -> None:
+    managed_root = tmp_path / "tgw-lib"
+    generations = managed_root / "context-entrypoints/generations"
+    generations.mkdir(parents=True)
+    for directory in (managed_root, generations.parent, generations):
+        directory.chmod(0o755)
+    paths = doctor_cli.DoctorPaths(
+        context_generation_root=generations,
+        context_generation_pointer=generations.parent / "current",
+        context_install_uid=os.getuid(),
+        context_install_gid=os.getgid() + 1,
+    )
+
+    doctor_cli._validate_context_parent(generations, paths)
+
+
 def test_context_snapshot_binds_task_cursor_and_canonical_source(tmp_path: Path) -> None:
     paths, head, tree = _fixture(tmp_path)
 

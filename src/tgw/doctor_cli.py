@@ -645,7 +645,6 @@ def _validate_context_parent(path: Path, paths: DoctorPaths) -> None:
             raise DoctorError(f"Context entrypoint parent is not a direct directory: {current}")
         if (
             observed.st_uid != paths.context_install_uid
-            or observed.st_gid != paths.context_install_gid
             or observed.st_mode & 0o022
         ):
             raise DoctorError(f"Context entrypoint parent is not trusted immutable data: {current}")
