@@ -1,7 +1,16 @@
 #!/opt/TGW/.venvs/controller/bin/python3
 """Launch the shared read-only TGW context MCP on the Debian development host."""
 
+# ruff: noqa: E402 -- bytecode policy intentionally precedes remaining imports.
+
 from __future__ import annotations
+
+import sys
+
+# The launcher and every server import share an immutable release tree.  Keep
+# that tree intrinsically read-only even after verification and even when the
+# interpreter was started with -I (which ignores PYTHON environment controls).
+sys.dont_write_bytecode = True
 
 import hashlib
 import importlib.util
@@ -12,7 +21,6 @@ import re
 import socket
 import stat
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any

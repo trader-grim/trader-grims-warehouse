@@ -96,6 +96,24 @@ def _legacy_canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
+def _tree_identity(root: Path) -> dict[str, tuple[Any, ...]]:
+    """Capture bytes and all immutable-release identity/metadata dimensions."""
+    result: dict[str, tuple[Any, ...]] = {}
+    for path in (root, *sorted(root.rglob("*"))):
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        observed = path.stat(follow_symlinks=False)
+        raw = path.read_bytes() if stat.S_ISREG(observed.st_mode) else None
+        result[relative] = (
+            stat.S_IFMT(observed.st_mode),
+            stat.S_IMODE(observed.st_mode),
+            observed.st_uid,
+            observed.st_gid,
+            observed.st_ino,
+            raw,
+        )
+    return result
+
+
 def _snapshot(
     source_commit: str = "b" * 40, source_tree: str = "c" * 40
 ) -> dict[str, Any]:
@@ -232,6 +250,43 @@ def test_real_publisher_isolated_bootstrap_rejects_cwd_and_pythonpath_shadowing(
         pytest.skip("root-only publisher success path requires root")
     assert completed.returncode == 0, completed.stderr
     assert output.read_bytes() == publish_bytes(legacy["task"], legacy["cursor"])
+
+
+def test_real_isolated_publisher_repeatedly_preserves_immutable_release(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    scripts = release / "scripts"
+    package = release / "src/tgw"
+    scripts.mkdir(parents=True)
+    package.mkdir(parents=True)
+    publisher = scripts / "tgw_context_publish.py"
+    shutil.copyfile(ROOT / "scripts/tgw_context_publish.py", publisher)
+    shutil.copyfile(ROOT / "src/tgw/current_context_snapshot.py", package / "current_context_snapshot.py")
+    publisher.chmod(0o555)
+    for path in (release, scripts, release / "src", package):
+        path.chmod(0o555)
+
+    legacy = _snapshot()
+    task = tmp_path / "task.json"
+    cursor = tmp_path / "cursor.json"
+    task.write_bytes(_canonical(legacy["task"]))
+    cursor.write_bytes(_canonical(legacy["cursor"]))
+    before = _tree_identity(release)
+    assert not any(part == "__pycache__" or Path(part).suffix == ".pyc" for part in before)
+
+    for index in range(2):
+        output = tmp_path / f"snapshot-{index}.json"
+        completed = subprocess.run(
+            [str(publisher), "--task", str(task), "--cursor", str(cursor), "--output", str(output)],
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+        )
+        if os.geteuid() != 0:
+            assert "must run as root" in completed.stderr
+            pytest.skip("root-only publisher success path requires root")
+        assert completed.returncode == 0, completed.stderr
+        assert output.read_bytes() == publish_bytes(legacy["task"], legacy["cursor"])
+        assert _tree_identity(release) == before
 
 
 def test_publisher_retains_interpreter_zip_stdlib_and_dynload_before_runtime() -> None:
@@ -1099,25 +1154,38 @@ def test_differing_staged_snapshot_binds_status_and_task_through_cold_launcher(
         },
     ]
     payload = "".join(json.dumps(request) + "\n" for request in requests)
+    release_before = _tree_identity(module.RUNTIME_RELEASE)
+    assert not any(
+        "__pycache__" in relative.split("/") or relative.endswith(".pyc")
+        for relative in release_before
+    )
+    starts: list[subprocess.CompletedProcess[str]] = []
     try:
-        completed = subprocess.run(
-            [str(launcher)],
-            input=payload,
-            text=True,
-            capture_output=True,
-            check=False,
-            env={
-                "PATH": "/usr/bin:/bin",
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "TGW_CONTEXT_PREFLIGHT_SNAPSHOT_FD": str(descriptor),
-            },
-            pass_fds=(descriptor,),
-            timeout=10,
-        )
+        for _index in range(2):
+            starts.append(
+                subprocess.run(
+                    [str(launcher)],
+                    input=payload,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env={
+                        "PATH": "/usr/bin:/bin",
+                        "TGW_CONTEXT_PREFLIGHT_SNAPSHOT_FD": str(descriptor),
+                    },
+                    pass_fds=(descriptor,),
+                    timeout=10,
+                )
+            )
+            assert _tree_identity(module.RUNTIME_RELEASE) == release_before
     finally:
         os.close(descriptor)
         os.close(module._RUNTIME_RELEASE_DESCRIPTOR)
+    first, completed = starts
+    assert first.returncode == 0, first.stderr
     assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == first.stdout
+    assert completed.stderr == first.stderr
     responses = {
         response["id"]: response
         for response in map(json.loads, completed.stdout.splitlines())

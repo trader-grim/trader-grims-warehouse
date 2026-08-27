@@ -3,11 +3,19 @@
 exec /opt/TGW/.venvs/controller/bin/python3 -I -S "$0" "$@"
 ":"""
 
+# ruff: noqa: E402 -- bytecode policy intentionally precedes remaining imports.
+
+import sys
+
+# This entrypoint executes from immutable release trees.  Isolated mode ignores
+# PYTHON* environment variables, so bytecode suppression must be interpreter
+# state established before any release module can be imported.
+sys.dont_write_bytecode = True
+
 import argparse
 import importlib.util
 import json
 import os
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any
